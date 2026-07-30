@@ -1531,6 +1531,8 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
         roots.extend(c.super_args.iter().copied());
         for sc in &c.secondary_ctors {
             roots.extend(sc.body);
+            roots.extend(sc.defaults.iter().flatten().copied());
+            roots.extend(sc.delegate_prelude.iter().copied());
             roots.extend(sc.delegate_args.iter().copied());
         }
         for en in &c.enum_entries {
@@ -1782,6 +1784,8 @@ fn emit_pass(
             roots.extend(c.super_args.iter().copied());
             for sc in &c.secondary_ctors {
                 roots.extend(sc.body);
+                roots.extend(sc.defaults.iter().flatten().copied());
+                roots.extend(sc.delegate_prelude.iter().copied());
                 roots.extend(sc.delegate_args.iter().copied());
             }
             for en in &c.enum_entries {
@@ -2171,6 +2175,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
             roots.extend(c.super_args.iter().copied());
             for sc in &c.secondary_ctors {
                 roots.extend(sc.body);
+                roots.extend(sc.delegate_prelude.iter().copied());
                 roots.extend(sc.delegate_args.iter().copied());
             }
             for en in &c.enum_entries {
@@ -2299,6 +2304,7 @@ fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env: &EmitEnv) 
         open_locals: Vec::new(),
         block_depth: 0,
         record_locals: false,
+        this_uninitialized: false,
     };
     let mut code = CodeBuilder::new(0);
     let mut any_init = false;
@@ -2337,7 +2343,7 @@ fn emit_class(
         return emit_enum_class(ir, c, facade, env, opts);
     }
     if let Some(iface) = &c.annotation_impl_of {
-        return emit_annotation_impl_class(c, &iface.render(), opts);
+        return emit_annotation_impl_class(ir, c, &iface.render(), facade, env, opts);
     }
     if c.is_annotation {
         return emit_annotation_class(c, opts, class_meta);
@@ -2561,6 +2567,7 @@ fn emit_class(
                 open_locals: Vec::new(),
                 block_depth: 0,
                 record_locals: false,
+                this_uninitialized: true,
             };
             e.slots.insert(0, (0, Ty::obj(&fq_name)));
             let mut s = 1u16;
@@ -2628,6 +2635,7 @@ fn emit_class(
                 &method_descriptor(&super_param_tys, Ty::Unit),
             );
             ctor.invokespecial(super_init, aw, 0);
+            e.this_uninitialized = false;
             // Store this class's own primary-constructor parameter fields: each `val`/`var` param's arg is
             // stored to its field (the property fields are `fields[0..]` in declaration order among params);
             // a plain param is skipped (it stays a local for the initializer body). `is_field` flags come
@@ -2812,6 +2820,7 @@ fn emit_class(
                 open_locals: Vec::new(),
                 block_depth: 0,
                 record_locals: false,
+                this_uninitialized: true,
             };
             e.slots.insert(0, (0, Ty::obj(&fq_name)));
             let mut s = 1u16;
@@ -2819,59 +2828,28 @@ fn emit_class(
                 e.slots.insert(vi as u32 + 1, (s, *t));
                 s += slot_words(*t);
             }
-            // Delegation target: `this(…)` → an own `<init>(target_params)`; `super(…)` → the base
-            // `<init>(super_params)`. `this` is loaded first, so spill any branchy arg to a temp before.
+            // The checker selected the exact delegation descriptor; lowering only materialized operands.
             use crate::ir::CtorDelegateTarget;
-            let (target_class, target_jvm_tys): (String, Vec<Ty>) = match &sc.delegate {
-                // `this(…)` targets an own `<init>` — the primary OR a sibling secondary. A delegation
-                // to the PRIMARY uses its LIVE signature `param_tys` (already rewritten by any IR→IR
-                // pass, e.g. value-class erasure of a value-class-typed ctor param); a sibling target
-                // uses the lower-time `target_params` (the sibling's own `<init>` descriptor).
-                CtorDelegateTarget::This {
-                    target_params,
-                    to_primary,
-                } => (
-                    fq_name.clone(),
-                    if *to_primary {
-                        param_tys.clone()
-                    } else {
-                        jvm_tys(target_params)
-                    },
-                ),
-                // `super(…)` targets the base `<init>`, whose signature is read LIVE from the base
-                // class's (post-transform) ctor — mirrors the primary path, so any IR→IR pass that
-                // rewrote the base ctor's parameter types (e.g. value-class erasure) is reflected here.
-                // A base with no primary constructor exposes only SECONDARY `<init>`s; pick the one
-                // whose parameter count matches this `super(...)`'s arguments (the lowering already
-                // validated a unique match).
-                CtorDelegateTarget::Super => {
-                    let owner = crate::jvm::jvm_class_map::to_jvm_internal(&superclass).to_string();
-                    let tys: Vec<Ty> = if owner == "java/lang/Object" {
-                        Vec::new()
-                    } else if let Some(base) =
-                        ir.classes.iter().find(|sc| sc.fq_name_matches(&superclass))
-                    {
-                        let argc = sc.delegate_args.len();
-                        let mut cands: Vec<Vec<Ty>> = Vec::new();
-                        if base.has_primary_ctor {
-                            cands.push(class_ctor_jvm_tys(base));
-                        }
-                        for bsc in &base.secondary_ctors {
-                            cands.push(jvm_tys(&bsc.params));
-                        }
-                        let unique: Vec<&Vec<Ty>> =
-                            cands.iter().filter(|p| p.len() == argc).collect();
-                        if unique.len() == 1 {
-                            unique[0].clone()
-                        } else {
-                            class_ctor_jvm_tys(base)
-                        }
-                    } else {
-                        Vec::new()
-                    };
-                    (owner, tys)
-                }
-            };
+            let (target_class, mut target_jvm_tys, default_masks): (String, Vec<Ty>, &[i32]) =
+                match &sc.delegate {
+                    CtorDelegateTarget::This {
+                        target_params,
+                        default_masks,
+                        ..
+                    } => (fq_name.clone(), jvm_tys(target_params), default_masks),
+                    CtorDelegateTarget::Super {
+                        owner,
+                        target_params,
+                        default_masks,
+                    } => {
+                        let owner =
+                            crate::jvm::jvm_class_map::to_jvm_internal(&owner.render()).to_string();
+                        (owner, jvm_tys(target_params), default_masks)
+                    }
+                };
+            for &statement in &sc.delegate_prelude {
+                e.emit(statement, &mut sctor);
+            }
             let dargs = sc.delegate_args.clone();
             if dargs.iter().any(|&a| e.records_frame(a)) {
                 let temps = e.spill_to_temps(&dargs, &mut sctor);
@@ -2888,17 +2866,25 @@ fn emit_class(
                     e.emit_value(a, &mut sctor);
                 }
             }
+            if !default_masks.is_empty() {
+                for &mask in default_masks {
+                    sctor.push_int(mask, e.cw);
+                    target_jvm_tys.push(Ty::Int);
+                }
+                sctor.aconst_null();
+                target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
+            }
             // A cross-class delegation target (`super(…)` to a base) whose primary ctor takes a value-class
             // param has a PRIVATE primary — reach it through the `(…args, DefaultConstructorMarker)`
             // accessor. A same-class `this(…)` to the own private primary stays direct (accessible).
-            let mut target_jvm_tys = target_jvm_tys;
             let target_sealed = target_class != fq_name
                 && e.ir
                     .classes
                     .iter()
                     .any(|o| o.fq_name_matches(&target_class) && o.is_sealed);
-            if (target_class != fq_name && e.ir.has_value_param_ctor(&target_class))
-                || target_sealed
+            if default_masks.is_empty()
+                && ((target_class != fq_name && e.ir.has_value_param_ctor(&target_class))
+                    || target_sealed)
             {
                 sctor.aconst_null();
                 target_jvm_tys.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
@@ -2910,6 +2896,7 @@ fn emit_class(
                 &method_descriptor(&target_jvm_tys, Ty::Unit),
             );
             sctor.invokespecial(delegate_init, aw, 0);
+            e.this_uninitialized = false;
             if let Some(body) = sc.body {
                 e.emit(body, &mut sctor);
                 sec_diverges = e.diverges(body);
@@ -2931,6 +2918,17 @@ fn emit_class(
             &method_descriptor(&sc_param_tys, Ty::Unit),
             &sctor,
         );
+        if sc.defaults.iter().any(Option::is_some) {
+            emit_ctor_default_stub(
+                ir,
+                &fq_name,
+                facade,
+                &sc_param_tys,
+                &sc.defaults,
+                &mut cw,
+                env,
+            );
+        }
         if c.is_sealed {
             emit_ctor_marker_accessor(&fq_name, &sc_param_tys, &mut cw);
         }
@@ -2969,6 +2967,7 @@ fn emit_class(
                 open_locals: Vec::new(),
                 block_depth: 0,
                 record_locals: false,
+                this_uninitialized: false,
             };
             let mut clinit = CodeBuilder::new(0);
             if let Some(comp_fq) = c.companion_class() {
@@ -3219,6 +3218,7 @@ fn emit_enum_entry_subclass(
             open_locals: Vec::new(),
             block_depth: 0,
             record_locals: false,
+            this_uninitialized: false,
         };
         e.slots.insert(0, (0, Ty::obj(&fq_name))); // `this`
         e.emit(init_body, &mut ctor);
@@ -4357,7 +4357,14 @@ fn java_string_hash(s: &str) -> i32 {
 /// contract — private final fields, a constructor, per-member accessors (`x()`/`s()`), `annotationType()`,
 /// and content-correct `equals`/`hashCode`/`toString` (arrays via `java.util.Arrays`, `float`/`double` via
 /// their wrappers' `equals`/`hashCode` for NaN/`-0.0` semantics). `c.fields` are the members in order.
-fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str, opts: &EmitOptions) -> Vec<u8> {
+fn emit_annotation_impl_class(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    iface: &str,
+    facade: &str,
+    env: &EmitEnv,
+    opts: &EmitOptions,
+) -> Vec<u8> {
     let fq = c.fq_name();
     let members: Vec<(String, Ty)> = c
         .fields
@@ -4395,6 +4402,14 @@ fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str, opts: &EmitOp
         );
         ctor.ret_void();
         finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, 1 + params_words);
+        // A default on any annotation member (`annotation class C(val i: Int = 1)`) → the same synthetic
+        // `<init>(members…, int mask, DefaultConstructorMarker)` overload an ordinary class gets. The impl
+        // class is what `C()` actually constructs, so without it a call omitting a default targets a
+        // constructor nothing emits (`NoSuchMethodError`). kotlinc emits it on the impl class too.
+        if let Some(defaults) = ir.class_ctor_defaults(&fq) {
+            let param_tys: Vec<Ty> = members.iter().map(|(_, jt)| *jt).collect();
+            emit_ctor_default_stub(ir, &fq, facade, &param_tys, defaults, &mut cw, env);
+        }
     }
 
     // Per-member accessor `x()T`: return this.x.
@@ -4798,6 +4813,7 @@ fn emit_interface_class(
             open_locals: Vec::new(),
             block_depth: 0,
             record_locals: false,
+            this_uninitialized: false,
         };
         let mut clinit = CodeBuilder::new(0);
         if let Some(comp_fq) = c.companion_class() {
@@ -5034,6 +5050,7 @@ fn emit_enum_class(
             open_locals: Vec::new(),
             block_depth: 0,
             record_locals: false,
+            this_uninitialized: false,
         };
         e.slots.insert(0, (0, Ty::obj(&fq)));
         let mut s = 3u16;
@@ -5102,6 +5119,7 @@ fn emit_enum_class(
             open_locals: Vec::new(),
             block_depth: 0,
             record_locals: false,
+            this_uninitialized: false,
         };
         let mut clinit = CodeBuilder::new(0);
         // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
@@ -5396,6 +5414,7 @@ fn emit_method_inner(
         open_locals: Vec::new(),
         block_depth: 0,
         record_locals: false,
+        this_uninitialized: false,
     };
     // Suspend lowering does not preserve source-local expression IDs.
     e.record_locals = ir.fn_decl_lines.contains_key(&fid) && !ir.suspend_funs.contains(&fid);
@@ -5891,6 +5910,7 @@ fn emit_default_stub(
         open_locals: Vec::new(),
         block_depth: 0,
         record_locals: false,
+        this_uninitialized: false,
     };
     // value 0 = self; values 1..=n = the real params; then mask + marker (not value-indexed).
     e.slots.insert(0, (0, owner_ty));
@@ -6101,6 +6121,7 @@ fn emit_facade_default_stub(
         open_locals: Vec::new(),
         block_depth: 0,
         record_locals: false,
+        this_uninitialized: false,
     };
     // No `self`: value-index `i` = the i-th real parameter (the static layout the defaults were lowered
     // with); then mask + marker (not value-indexed).
@@ -6196,6 +6217,7 @@ fn emit_ctor_default_stub(
         open_locals: Vec::new(),
         block_depth: 0,
         record_locals: false,
+        this_uninitialized: true,
     };
     let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
     // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
@@ -6359,6 +6381,8 @@ struct Emitter<'a> {
     block_depth: usize,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
+    /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
+    this_uninitialized: bool,
 }
 
 fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
@@ -6707,6 +6731,9 @@ impl<'a> Emitter<'a> {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
             }
+        }
+        if self.this_uninitialized && !raw.is_empty() {
+            raw[0] = VerifType::UninitializedThis;
         }
         raw
     }
@@ -7155,6 +7182,9 @@ impl<'a> Emitter<'a> {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
             }
+        }
+        if self.this_uninitialized && !raw.is_empty() {
+            raw[0] = VerifType::UninitializedThis;
         }
         let mut out = Vec::new();
         let mut i = 0;
@@ -8551,9 +8581,86 @@ impl<'a> Emitter<'a> {
             IrExpr::Vararg {
                 array_type,
                 elements,
+                spreads,
             } => {
                 let et = array_jvm_element(array_type);
                 let elements = elements.clone();
+                let spreads = spreads.clone();
+                if spreads.len() != elements.len() {
+                    self.run.emit_bail.set(true);
+                    return;
+                }
+                if spreads.iter().any(|&spread| spread) {
+                    if et.is_jvm_scalar() {
+                        let Some((builder, add_desc, array_desc)) = primitive_spread_builder(et)
+                        else {
+                            self.run.emit_bail.set(true);
+                            return;
+                        };
+                        let class = self.cw.class_ref(builder);
+                        code.new_obj(class);
+                        code.dup();
+                        code.push_int(elements.len() as i32, self.cw);
+                        let init = self.cw.methodref(builder, "<init>", "(I)V");
+                        code.invokespecial(init, 1, 0);
+                        for (index, &element) in elements.iter().enumerate() {
+                            code.dup();
+                            self.emit_value(element, code);
+                            if spreads.get(index).copied().unwrap_or(false) {
+                                let add_spread = self.cw.methodref(
+                                    "kotlin/jvm/internal/PrimitiveSpreadBuilder",
+                                    "addSpread",
+                                    "(Ljava/lang/Object;)V",
+                                );
+                                code.invokevirtual(add_spread, 1, 0);
+                            } else {
+                                let add = self.cw.methodref(builder, "add", add_desc);
+                                code.invokevirtual(add, slot_words(et) as i32, 0);
+                            }
+                        }
+                        let to_array =
+                            self.cw
+                                .methodref(builder, "toArray", &format!("(){array_desc}"));
+                        code.invokevirtual(to_array, 0, 1);
+                    } else {
+                        let builder = "kotlin/jvm/internal/SpreadBuilder";
+                        let class = self.cw.class_ref(builder);
+                        code.new_obj(class);
+                        code.dup();
+                        code.push_int(elements.len() as i32, self.cw);
+                        let init = self.cw.methodref(builder, "<init>", "(I)V");
+                        code.invokespecial(init, 1, 0);
+                        let box_elem = boxed_prim_of(et);
+                        for (index, &element) in elements.iter().enumerate() {
+                            code.dup();
+                            self.emit_value(element, code);
+                            let method = if spreads.get(index).copied().unwrap_or(false) {
+                                self.cw
+                                    .methodref(builder, "addSpread", "(Ljava/lang/Object;)V")
+                            } else {
+                                if let Some(primitive) = box_elem {
+                                    box_prim_free(self.cw, code, primitive);
+                                }
+                                self.cw.methodref(builder, "add", "(Ljava/lang/Object;)V")
+                            };
+                            code.invokevirtual(method, 1, 0);
+                        }
+                        code.push_int(0, self.cw);
+                        let element_class = self.cw.class_ref(&ref_internal(et.non_null()));
+                        code.anewarray(element_class);
+                        let to_array = self.cw.methodref(
+                            builder,
+                            "toArray",
+                            "([Ljava/lang/Object;)[Ljava/lang/Object;",
+                        );
+                        code.invokevirtual(to_array, 1, 1);
+                        let array_class = self
+                            .cw
+                            .class_ref(&type_descriptor(ir_ty_to_jvm(array_type)));
+                        code.checkcast(array_class);
+                    }
+                    return;
+                }
                 code.push_int(elements.len() as i32, self.cw);
                 if et.is_jvm_scalar() {
                     code.newarray(prim_newarray_atype(et));
@@ -10213,6 +10320,9 @@ impl<'a> Emitter<'a> {
                 raw[slot as usize] = self.verif_single(ty);
             }
         }
+        if self.this_uninitialized && !raw.is_empty() {
+            raw[0] = VerifType::UninitializedThis;
+        }
         let mut out = Vec::new();
         let mut i = 0;
         while i < raw.len() {
@@ -10864,6 +10974,20 @@ fn array_jvm_element(array_type: &Ty) -> Ty {
     ir_ty_to_jvm(array_type)
         .array_elem()
         .unwrap_or_else(|| Ty::obj("java/lang/Object"))
+}
+
+fn primitive_spread_builder(element: Ty) -> Option<(&'static str, &'static str, &'static str)> {
+    Some(match element {
+        Ty::Boolean => ("kotlin/jvm/internal/BooleanSpreadBuilder", "(Z)V", "[Z"),
+        Ty::Char => ("kotlin/jvm/internal/CharSpreadBuilder", "(C)V", "[C"),
+        Ty::Byte => ("kotlin/jvm/internal/ByteSpreadBuilder", "(B)V", "[B"),
+        Ty::Short => ("kotlin/jvm/internal/ShortSpreadBuilder", "(S)V", "[S"),
+        Ty::Int | Ty::UInt => ("kotlin/jvm/internal/IntSpreadBuilder", "(I)V", "[I"),
+        Ty::Long | Ty::ULong => ("kotlin/jvm/internal/LongSpreadBuilder", "(J)V", "[J"),
+        Ty::Float => ("kotlin/jvm/internal/FloatSpreadBuilder", "(F)V", "[F"),
+        Ty::Double => ("kotlin/jvm/internal/DoubleSpreadBuilder", "(D)V", "[D"),
+        _ => return None,
+    })
 }
 
 /// Swap the operands of a comparison operator (`a < b` ≡ `b > a`) — used to normalize `0 <op> x` into
