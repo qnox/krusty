@@ -22832,9 +22832,10 @@ impl<'a> Checker<'a> {
         name: &str,
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         // A Kotlin override of a Java-supertype getter keeps the Java synthetic property but
-        // REFINES its type (`UClass.getMethods(): Array<UMethod>` over `PsiClass.getMethods():
-        // PsiMethod[]`): remember the most-derived SOURCE override's return before the walk
-        // crosses into the classpath, and stamp it on the resolved Java accessor.
+        // REFINES its type (`RefinedCatalog.getEntries(): Array<RefinedEntry>` over
+        // `JavaCatalog.getEntries(): BaseEntry[]`). Remember the most-derived SOURCE override's
+        // return before the walk crosses into the classpath, then stamp it on the resolved Java
+        // accessor. The rule is structural; no declaring-class or method name is privileged.
         let getter_names = self.syms.libraries.physical_property_getter_names(name);
         let mut source_override_ret: Option<Ty> = None;
         let mut work = vec![receiver];

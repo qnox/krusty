@@ -374,6 +374,7 @@ impl LibraryCallable {
             inline: InlineKind::None,
             default_call: false,
             vararg_elem: None,
+            vararg_index: None,
             signature: None,
             origin: Origin::Library,
             source_receiver: None,
@@ -464,6 +465,11 @@ pub struct LibraryCallable {
     /// element to that type before boxing (an integer literal in `listOf<Long>(3)` becomes a boxed
     /// `Long`, not `Integer`), since the JVM array element is erased to `Object`.
     pub vararg_elem: Option<Ty>,
+    /// Source-level value-parameter slot occupied by [`Self::vararg_elem`], excluding an extension
+    /// receiver. This must travel with the selected callable: a generic `vararg T` can specialize
+    /// logically to `String` while its physical slot remains `Object[]`, so lowering cannot safely
+    /// rediscover the slot by comparing element types. `None` for a non-element-form call.
+    pub vararg_index: Option<usize>,
     /// The callee's generic `Signature` (an opaque backend token), kept so an arg-binding SELECTOR can
     /// recover the substituted return (`fold`'s `R` from the initial value, `let`'s `R` from the lambda)
     /// when picking this overload out of a [`FunctionSet`]. `None` when the callable has no generic

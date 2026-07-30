@@ -534,12 +534,12 @@ impl SymbolSource for SourceFallbackPlatform {
         }
         let mut platform_properties = self.platform.property_members(recv, name);
         // A Kotlin override of a Java-supertype getter keeps the Java synthetic property but
-        // REFINES its type: `UClass.getMethods(): Array<UMethod>` overrides
-        // `PsiClass.getMethods(): PsiMethod[]`, and `uClass.methods` reads as `Array<UMethod>`.
-        // The platform walk resolves the JAVA declaration (the source override is invisible to
-        // it), so rewrite each member property with the most-derived SOURCE override's return
-        // type. Only an EXISTING platform property is refined — a pure-Kotlin `getX()` still
-        // creates no synthetic property (kotlinc parity).
+        // REFINES its type: `RefinedCatalog.getEntries(): Array<RefinedEntry>` overrides
+        // `JavaCatalog.getEntries(): BaseEntry[]`. The platform walk resolves the JAVA
+        // declaration (the source override is invisible to it), so rewrite each member property
+        // with the most-derived SOURCE override's return type. Only an EXISTING platform property
+        // is refined — a pure-Kotlin `getX()` still creates no synthetic property (kotlinc
+        // parity). The lookup is structural and does not recognize any concrete API name.
         if platform_properties
             .overloads
             .iter()

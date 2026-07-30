@@ -28,3 +28,22 @@ fn char_vararg_element_call_packs_and_defaults() {
         None => eprintln!("skip"),
     }
 }
+
+#[test]
+fn generic_vararg_element_call_uses_the_declared_slot_before_defaults() {
+    // The selected element type is `String`, while the generic vararg's physical JVM slot is
+    // `Object[]`. The lowerer must use the resolver-recorded vararg position, not rediscover the
+    // slot by comparing those deliberately different element representations.
+    let lib = "package fixture\n\
+               fun <T> List<T>.render(vararg values: T, separator: String = \":\"): String =\n\
+               \u{20} values.joinToString(separator)\n";
+    let main = "import fixture.render\n\
+                fun box(): String {\n\
+                \u{20} val text = listOf(\"seed\").render(\"left\", \"right\")\n\
+                \u{20} if (text != \"left:right\") return \"text: \" + text\n\
+                \u{20} val numbers = listOf(0).render(1, 2)\n\
+                \u{20} return if (numbers == \"1:2\") \"OK\" else \"numbers: \" + numbers\n\
+                }\n";
+
+    common::expect_box_ok_against("generic_vararg_element_default", lib, main);
+}

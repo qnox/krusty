@@ -909,25 +909,42 @@ fn vararg_parameter_shape(
     args: &[Ty],
     fits: impl Fn(usize, &Ty, &Ty) -> bool,
 ) -> Option<Vec<Ty>> {
-    let (last, fixed) = params.split_last()?;
-    let element = last.array_elem()?;
-    if args.len() == params.len() && args.last() == Some(last) {
+    let vararg_index = params.len().checked_sub(1)?;
+    vararg_parameter_shape_at(params, args, vararg_index, &[], fits)
+}
+
+/// Expand positional element-form arguments at an explicitly declared vararg slot. Parameters
+/// after a non-final vararg cannot consume positional arguments in Kotlin; they must be named or
+/// defaulted, so this type-only selector admits the shape only when every trailing parameter has
+/// a default. The returned shape is parallel to the provided arguments for specificity ranking.
+fn vararg_parameter_shape_at(
+    params: &[Ty],
+    args: &[Ty],
+    vararg_index: usize,
+    param_defaults: &[bool],
+    fits: impl Fn(usize, &Ty, &Ty) -> bool,
+) -> Option<Vec<Ty>> {
+    let array = *params.get(vararg_index)?;
+    let element = array.array_elem()?;
+    if args.len() == vararg_index + 1 && args.get(vararg_index) == Some(&array) {
         return None;
     }
-    if args.len() < fixed.len()
-        || !fixed
+    if args.len() < vararg_index
+        || params[..vararg_index]
             .iter()
             .zip(args)
             .enumerate()
-            .all(|(i, (param, arg))| fits(i, param, arg))
-        || !args[fixed.len()..]
+            .any(|(position, (parameter, argument))| !fits(position, parameter, argument))
+        || (vararg_index + 1..params.len())
+            .any(|position| !param_defaults.get(position).copied().unwrap_or(false))
+        || args[vararg_index..]
             .iter()
             .enumerate()
-            .all(|(i, arg)| fits(fixed.len() + i, &element, arg))
+            .any(|(offset, argument)| !fits(vararg_index + offset, &element, argument))
     {
         return None;
     }
-    let mut expanded = fixed.to_vec();
+    let mut expanded = params[..vararg_index].to_vec();
     expanded.resize(args.len(), element);
     Some(expanded)
 }
@@ -1084,10 +1101,16 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.clone().filter_map(|member| {
-            omitted_parameter_shape(&logical(member), args, |i, param, arg| {
-                fits(i, param, arg) || adapts(param, arg, i)
-            })
-            .map(|shape| (shape, member))
+            let params = logical(member);
+            (args.len()..params.len())
+                .all(|position| member.call_sig.param_has_default(position))
+                .then(|| {
+                    omitted_parameter_shape(&params, args, |i, param, arg| {
+                        fits(i, param, arg) || adapts(param, arg, i)
+                    })
+                    .map(|shape| (shape, member))
+                })
+                .flatten()
         }),
         |_, left, right| resolution_subtype(lib, src, left, right),
     ) {
@@ -1097,9 +1120,15 @@ fn best_companion_overload<'a>(
     }
     match unique_most_specific(
         named.filter_map(|member| {
-            vararg_parameter_shape(&logical(member), args, |i, param, arg| {
-                fits(i, param, arg) || adapts(param, arg, i)
-            })
+            let params = logical(member);
+            let vararg_index = member.call_sig.vararg_index?;
+            vararg_parameter_shape_at(
+                &params,
+                args,
+                vararg_index,
+                &member.call_sig.param_defaults,
+                |i, param, arg| fits(i, param, arg) || adapts(param, arg, i),
+            )
             .map(|shape| (shape, member))
         }),
         |_, left, right| resolution_subtype(lib, src, left, right),
@@ -1169,6 +1198,7 @@ fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> Lib
         ret,
         default_call,
         vararg_elem: None,
+        vararg_index: None,
         ..c.clone()
     }
 }
@@ -2220,6 +2250,7 @@ impl<'a> SymbolResolver<'a> {
             physical_ret: *ret,
             default_call: false,
             vararg_elem,
+            vararg_index: vararg_elem.and(o.call_sig.vararg_index),
             ..c.clone()
         })
     }
@@ -2247,21 +2278,23 @@ impl<'a> SymbolResolver<'a> {
         // below sees what is actually emitted. `f(charArray)` passes the array THROUGH and is untouched.
         let spread = o
             .call_sig
-            .vararg
-            .then(|| vparams.len().checked_sub(1))
-            .flatten()
-            .filter(|&fixed| {
-                vparams[fixed].array_elem().is_some()
-                    && args.len() >= fixed
-                    && !(args.len() == vparams.len() && args.last() == vparams.last())
-            })
-            .map(|fixed| {
-                let mut spread = args[..fixed].to_vec();
-                spread.push(vparams[fixed]);
-                (spread, vparams[fixed].array_elem().unwrap())
+            .vararg_index
+            .filter(|&slot| args.len() > slot)
+            .and_then(|slot| {
+                let array = *vparams.get(slot)?;
+                let element = array.array_elem()?;
+                // Positional arguments beginning at a non-final vararg all belong to that
+                // vararg; later parameters can only be supplied by name. Preserve an array
+                // argument only for the already-normalized spread/pass-through shape.
+                if args.len() == slot + 1 && args.get(slot) == Some(&array) {
+                    return None;
+                }
+                let mut physical = args[..slot].to_vec();
+                physical.push(array);
+                Some((physical, slot, element))
             });
-        let spread_elem = spread.as_ref().map(|(_, elem)| *elem);
-        let args: &[Ty] = spread.as_ref().map_or(args, |(a, _)| a.as_slice());
+        let spread_slot = spread.as_ref().map(|(_, slot, elem)| (*slot, *elem));
+        let args: &[Ty] = spread.as_ref().map_or(args, |(a, _, _)| a.as_slice());
         if vparams.len() == args.len() {
             let c = &o.callable;
             let semantic = o.semantic_signature();
@@ -2284,7 +2317,10 @@ impl<'a> SymbolResolver<'a> {
             // Array<out T>?)`), and packing one of those wraps the caller's array in a fresh 1-element
             // array — a silent miscompile the box corpus caught as `collectionLiterals/array.kt`.
             let mut c = callable_with_return(c, ret_ty2, false);
-            c.vararg_elem = spread_elem;
+            if let Some((slot, element)) = spread_slot {
+                c.vararg_elem = Some(element);
+                c.vararg_index = Some(slot);
+            }
             return Some(c);
         }
         // Defaulted call — omitted trailing/middle params. Bind the return with default-aware alignment.
@@ -2313,20 +2349,24 @@ impl<'a> SymbolResolver<'a> {
             // An element-form vararg call reaching the `$default` (`split('.')`): tell the
             // lowerer which element type to PACK before the mask machinery — without it the
             // loose element lowers straight into the array slot (a VerifyError).
-            if let Some(elem) = (!o.flags.suspend)
-                .then_some(o.call_sig.vararg_index)
-                .flatten()
-                .and_then(|index| vparams.get(index))
-                .and_then(|param| param.array_elem())
-            {
-                if args
-                    .get(o.call_sig.vararg_index.unwrap_or_default())
-                    .copied()
-                    != vparams
-                        .get(o.call_sig.vararg_index.unwrap_or_default())
-                        .copied()
+            if let Some((index, elem)) = spread_slot.or_else(|| {
+                (!o.flags.suspend)
+                    .then_some(o.call_sig.vararg_index)
+                    .flatten()
+                    .and_then(|index| {
+                        vparams
+                            .get(index)
+                            .and_then(|param| param.array_elem())
+                            .map(|element| (index, element))
+                    })
+            }) {
+                // `spread_slot` already normalized the selector's arguments to the physical
+                // array shape, so its equality here is expected. The fallback comparison covers
+                // older providers that expose the vararg flag without the normalized shape.
+                if spread_slot.is_some() || args.get(index).copied() != vparams.get(index).copied()
                 {
                     c.vararg_elem = Some(elem);
+                    c.vararg_index = Some(index);
                 }
             }
             return Some(c);
@@ -4834,6 +4874,7 @@ mod tests {
             inline: InlineKind::None,
             default_call: true,
             vararg_elem: None,
+            vararg_index: None,
             signature: None,
             origin: Origin::Library,
             source_receiver: None,
@@ -5112,8 +5153,14 @@ mod tests {
         let member =
             |params| LibraryMember::new("make".to_string(), params, Ty::Unit, String::new());
 
-        let default_broad = member(vec![Ty::obj("demo/Base"), Ty::String]);
-        let default_specific = member(vec![Ty::obj("demo/Mid"), Ty::String]);
+        let with_trailing_default = |mut member: LibraryMember| {
+            member.call_sig.required = 1;
+            member.call_sig.param_names = vec!["value".into(), "label".into()];
+            member.call_sig.param_defaults = vec![false, true];
+            member
+        };
+        let default_broad = with_trailing_default(member(vec![Ty::obj("demo/Base"), Ty::String]));
+        let default_specific = with_trailing_default(member(vec![Ty::obj("demo/Mid"), Ty::String]));
         let selected = best_companion_overload(
             &source,
             &source,
@@ -5125,8 +5172,15 @@ mod tests {
         .expect("the defaulted source-supertype overload should resolve");
         assert_eq!(selected.params[0], Ty::obj("demo/Mid"));
 
-        let vararg_broad = member(vec![Ty::array(Ty::obj("demo/Base"))]);
-        let vararg_specific = member(vec![Ty::array(Ty::obj("demo/Mid"))]);
+        let as_vararg = |mut member: LibraryMember| {
+            member.call_sig.vararg = true;
+            member.call_sig.vararg_index = Some(0);
+            member.call_sig.param_names = vec!["values".into()];
+            member.call_sig.param_defaults = vec![false];
+            member
+        };
+        let vararg_broad = as_vararg(member(vec![Ty::array(Ty::obj("demo/Base"))]));
+        let vararg_specific = as_vararg(member(vec![Ty::array(Ty::obj("demo/Mid"))]));
         let selected = best_companion_overload(
             &source,
             &source,
@@ -5137,6 +5191,20 @@ mod tests {
         )
         .expect("the vararg source-supertype overload should resolve");
         assert_eq!(selected.params[0], Ty::array(Ty::obj("demo/Mid")));
+
+        let ordinary = member(vec![Ty::obj("demo/Base"), Ty::String]);
+        assert!(
+            best_companion_overload(
+                &source,
+                &source,
+                [&ordinary].into_iter(),
+                "make",
+                CallArgs::new(&[Ty::obj("demo/Leaf")], &[], &[]),
+                &[],
+            )
+            .is_none(),
+            "an unmarked trailing parameter is required"
+        );
     }
 
     #[test]

@@ -319,8 +319,9 @@ impl Resolver<'_> {
             } else {
                 None
             };
-            // Interface fields are implicitly public static final (JLS §9.3) — the
-            // `PsiModifier.STATIC` / `CommonClassNames.*` constant-holder pattern.
+            // Interface fields are implicitly public static final (JLS §9.3). Stamping the
+            // semantic JVM flags here keeps every constant-holder interface on the same path;
+            // callers never need to recognize a particular holder or field name.
             let acc = (*acc & !STUB_DEFAULT)
                 | if d.is_interface() {
                     ACC_PUBLIC | ACC_STATIC | ACC_FINAL
@@ -864,16 +865,16 @@ mod tests {
     fn interface_nested_types_are_implicitly_public() {
         // JLS §9.5: member types of an interface are implicitly public even without a modifier.
         let out = stubs(
-            "public interface Notifications { final class Bus { public static void go() {} } }",
+            "public interface Registry { final class Handler { public static void go() {} } }",
             &["java/lang/Object"],
         )
         .expect("interface with nested class");
-        let bus = out
+        let handler = out
             .iter()
-            .find(|(name, _)| name == "Notifications$Bus")
+            .find(|(name, _)| name == "Registry$Handler")
             .map(|(_, bytes)| parse_class(bytes).expect("parse"))
-            .expect("Bus stub");
-        assert!(bus.is_public(), "interface member types are public");
+            .expect("Handler stub");
+        assert!(handler.is_public(), "interface member types are public");
     }
 
     #[test]
@@ -899,8 +900,8 @@ mod tests {
 
     #[test]
     fn interface_fields_are_implicitly_public_static_final() {
-        // JLS §9.3: every interface field is public static final — the constant-holder
-        // pattern (`interface PsiModifier { String STATIC = "static"; }`).
+        // JLS §9.3: every interface field is public static final. Generic fixture names keep
+        // this test tied to the language rule instead of any downstream API.
         let out = stubs(
             "public interface Mods { String STATIC = \"static\"; int LEVEL = 3; }",
             &["java/lang/Object", "java/lang/String"],

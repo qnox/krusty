@@ -1104,10 +1104,10 @@ mod tests {
         ]));
         classpath.prepare_for_source_analysis();
         let java_sources = [
-            (String::new(), "package p; public class PsiM {}".into()),
+            (String::new(), "package p; public class BaseEntry {}".into()),
             (
                 String::new(),
-                "package p; public interface PsiCls { PsiM[] getMethods(); }".into(),
+                "package p; public interface JavaCatalog { BaseEntry[] getEntries(); }".into(),
             ),
         ];
         let stubs = krusty::jvm::java_stub::stub_classes(
@@ -1122,25 +1122,26 @@ mod tests {
         .expect("Java stubs");
         classpath.set_stub_overlay(stubs);
 
-        // The Kotlin override refines the Java synthetic property: `x.methods` must read as
-        // `Array<UMethod2>` (the override's return), not the Java base's `PsiM[]` — otherwise
-        // the element member `javaPsi` fails to resolve.
+        // The Kotlin override refines the Java synthetic property: `x.entries` must read as
+        // `Array<RefinedEntry>` (the override's return), not the Java base's `BaseEntry[]`.
+        // Neutral fixture names make the test prove the structural getter rule, independent of
+        // any downstream API that originally exposed the bug.
         let support = "package u4\n\
-                       import p.PsiCls\n\
-                       import p.PsiM\n\
-                       interface UMethod2 : PsiM {\n\
-                       \u{20} val javaPsi: String\n\
+                       import p.JavaCatalog\n\
+                       import p.BaseEntry\n\
+                       interface RefinedEntry : BaseEntry {\n\
+                       \u{20} val marker: String\n\
                        }\n\
-                       interface UClass2 : PsiCls {\n\
-                       \u{20} override fun getMethods(): Array<UMethod2>\n\
+                       interface RefinedCatalog : JavaCatalog {\n\
+                       \u{20} override fun getEntries(): Array<RefinedEntry>\n\
                        }";
         let source = "package a\n\
-                      import u4.UClass2\n\
-                      import u4.UMethod2\n\
-                      fun pred(m: UMethod2): Boolean = true\n\
-                      fun f(u: UClass2?): String? {\n\
+                      import u4.RefinedCatalog\n\
+                      import u4.RefinedEntry\n\
+                      fun pred(m: RefinedEntry): Boolean = true\n\
+                      fun f(u: RefinedCatalog?): String? {\n\
                       \u{20} val x = u ?: return null\n\
-                      \u{20} x.methods.find(::pred)?.javaPsi?.let { return it }\n\
+                      \u{20} x.entries.find(::pred)?.marker?.let { return it }\n\
                       \u{20} return null\n\
                       }";
         let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
@@ -1169,14 +1170,14 @@ mod tests {
         let java_sources = [
             (
                 String::new(),
-                "package p; public class Notification { public Notification(String a) {} }".into(),
+                "package p; public class Event { public Event(String a) {} }".into(),
             ),
             (
                 String::new(),
-                // `Bus` carries no explicit modifier: interface members are implicitly public.
-                "package p; public interface Notifications {\n\
-                 \u{20} final class Bus {\n\
-                 \u{20}\u{20} public static void notify(Notification n) {}\n\
+                // `Handler` carries no explicit modifier: interface members are implicitly public.
+                "package p; public interface Registry {\n\
+                 \u{20} final class Handler {\n\
+                 \u{20}\u{20} public static void publish(Event n) {}\n\
                  \u{20} }\n\
                  }"
                 .into(),
@@ -1195,10 +1196,10 @@ mod tests {
         classpath.set_stub_overlay(stubs);
 
         let source = "package a\n\
-                      import p.Notification\n\
-                      import p.Notifications\n\
+                      import p.Event\n\
+                      import p.Registry\n\
                       fun go() {\n\
-                      \u{20} Notifications.Bus.notify(Notification(\"x\"))\n\
+                      \u{20} Registry.Handler.publish(Event(\"x\"))\n\
                       }";
         let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
         let analysis = analyze_source_set(&[source], platform);
@@ -1300,9 +1301,9 @@ mod tests {
         .expect("Java stubs");
         classpath.set_stub_overlay(stubs);
 
-        // The DumpUastTreeActionByEach shape: an anonymous object extending a DECLARATION-ONLY
-        // Kotlin class whose own base is the Java parameter type — the argument reaches
-        // `accept(Visitor)` only through the module-side supertype walk.
+        // An anonymous object extending a DECLARATION-ONLY Kotlin class whose own base is the
+        // Java parameter type reaches `accept(Visitor)` only through the module-side supertype
+        // walk. The generic fixture records the inheritance shape without retaining provenance.
         let main = "package a\n\
                     import p.File\n\
                     import dep.Printing\n\
@@ -1498,9 +1499,9 @@ mod tests {
         .expect("Java stubs");
         classpath.set_stub_overlay(stubs);
 
-        // Three SAM-conversion shapes from intellij-community:
-        // a zero-parameter lambda on an IMPLICIT receiver (inside .apply {}), an explicit call,
-        // and a static member whose SAM is a nested interface.
+        // Three production-style SAM-conversion shapes: a zero-parameter lambda on an IMPLICIT
+        // receiver (inside .apply {}), an explicit call, and a static member whose SAM is a
+        // nested interface. All names are local fixtures; only the call shapes are significant.
         let source = "package a\n\
                       import p.Builder\n\
                       import p.Button\n\
@@ -1558,9 +1559,9 @@ mod tests {
         .expect("Java stubs");
         classpath.set_stub_overlay(stubs);
 
-        // The FactoryMap.create<PsiFile, Array<DependencyRule>> shape: explicit call type
-        // arguments must bind K/V so the lambda parameter types and the returned Map do —
-        // without them `s` erases to Any and `m["x"]` to Any.
+        // Explicit call type arguments must bind K/V so both the lambda parameter and returned
+        // Map specialize; without them `s` erases to Any and `m["x"]` to Any. The assertion is
+        // intentionally expressed only with generic fixture types.
         let source = "package a\n\
                       import p.Maps\n\
                       fun go(): Int {\n\
@@ -1610,8 +1611,8 @@ mod tests {
         .expect("Java stubs");
         classpath.set_stub_overlay(stubs);
 
-        // Kotlin's decapitalize-smart getter mapping: `getID()` reads as `id`,
-        // `getURLPath()` as `urlPath` (the `language.id` shape across intellij-community).
+        // Kotlin's decapitalize-smart getter mapping: `getID()` reads as `id` and
+        // `getURLPath()` as `urlPath`, regardless of the declaring API.
         let source = "package a\n\
                       fun use(l: p.Language): String = l.id + l.urlPath";
         let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
