@@ -3504,6 +3504,16 @@ pub fn lower_file_at_reporting(
                     // Only register when EVERY default lowered — a partial set would emit a stub that fills
                     // some slots with a zero placeholder (a miscompile); bail to the no-stub status quo.
                     if all_ok {
+                        // An `annotation class` is constructed through its synthetic IMPL class
+                        // (`…$annotationImpl`), which carries the same constructor — so the default
+                        // overload must be registered for the impl too, or a call omitting a default
+                        // targets an `<init>(…, int, DefaultConstructorMarker)` nothing emits.
+                        if c.is_annotation() {
+                            lo.ir.insert_class_ctor_defaults(
+                                &format!("{internal}$annotationImpl"),
+                                defaults.clone(),
+                            );
+                        }
                         lo.ir.insert_class_ctor_defaults(&internal, defaults);
                     }
                 }

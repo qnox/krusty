@@ -2343,7 +2343,7 @@ fn emit_class(
         return emit_enum_class(ir, c, facade, env, opts);
     }
     if let Some(iface) = &c.annotation_impl_of {
-        return emit_annotation_impl_class(c, &iface.render(), opts);
+        return emit_annotation_impl_class(ir, c, &iface.render(), facade, env, opts);
     }
     if c.is_annotation {
         return emit_annotation_class(c, opts, class_meta);
@@ -4357,7 +4357,14 @@ fn java_string_hash(s: &str) -> i32 {
 /// contract — private final fields, a constructor, per-member accessors (`x()`/`s()`), `annotationType()`,
 /// and content-correct `equals`/`hashCode`/`toString` (arrays via `java.util.Arrays`, `float`/`double` via
 /// their wrappers' `equals`/`hashCode` for NaN/`-0.0` semantics). `c.fields` are the members in order.
-fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str, opts: &EmitOptions) -> Vec<u8> {
+fn emit_annotation_impl_class(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    iface: &str,
+    facade: &str,
+    env: &EmitEnv,
+    opts: &EmitOptions,
+) -> Vec<u8> {
     let fq = c.fq_name();
     let members: Vec<(String, Ty)> = c
         .fields
@@ -4395,6 +4402,14 @@ fn emit_annotation_impl_class(c: &crate::ir::IrClass, iface: &str, opts: &EmitOp
         );
         ctor.ret_void();
         finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, 1 + params_words);
+        // A default on any annotation member (`annotation class C(val i: Int = 1)`) → the same synthetic
+        // `<init>(members…, int mask, DefaultConstructorMarker)` overload an ordinary class gets. The impl
+        // class is what `C()` actually constructs, so without it a call omitting a default targets a
+        // constructor nothing emits (`NoSuchMethodError`). kotlinc emits it on the impl class too.
+        if let Some(defaults) = ir.class_ctor_defaults(&fq) {
+            let param_tys: Vec<Ty> = members.iter().map(|(_, jt)| *jt).collect();
+            emit_ctor_default_stub(ir, &fq, facade, &param_tys, defaults, &mut cw, env);
+        }
     }
 
     // Per-member accessor `x()T`: return this.x.
