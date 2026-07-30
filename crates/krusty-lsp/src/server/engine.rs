@@ -1,6 +1,6 @@
 //! Analysis worker for the LSP request loop.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
@@ -13,6 +13,12 @@ use super::implementation::{
 use crate::compiler_analysis::LibraryRef;
 
 const MAX_PENDING_WATCHED_FILES: usize = 1024;
+/// The longest an interactive command can be made to wait: one chunk of index work. Sized to sit
+/// inside a single worker source-set round trip.
+const MAX_INDEX_CHUNK_FILES: usize = 32;
+/// Ceiling on files awaiting indexing, so a pathological workspace cannot grow the queue without
+/// bound. Reaching it drops the excess; the sweep re-offers those files on its next pass.
+const MAX_QUEUED_INDEX_FILES: usize = 200_000;
 
 /// Index levels, ordered strictly behind interactive work and behind each other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +167,7 @@ struct CommandState {
     pending: VecDeque<EngineCommand>,
     neighborhood: VecDeque<IndexJob>,
     sweep: VecDeque<IndexJob>,
+    queued: HashSet<String>,
     disconnected: bool,
 }
 
@@ -225,10 +232,26 @@ impl CommandState {
             EngineCommand::Materialize(job) => {
                 self.pending.push_back(EngineCommand::Materialize(job));
             }
-            EngineCommand::Index(job) => match job.priority {
-                IndexPriority::Neighborhood => self.neighborhood.push_back(job),
-                IndexPriority::Sweep => self.sweep.push_back(job),
-            },
+            EngineCommand::Index(job) => {
+                let priority = job.priority;
+                let mut chunk = Vec::with_capacity(MAX_INDEX_CHUNK_FILES.min(job.uris.len()));
+                for uri in job.uris {
+                    if self.queued.len() >= MAX_QUEUED_INDEX_FILES {
+                        break;
+                    }
+                    if !self.queued.insert(uri.clone()) {
+                        continue;
+                    }
+                    chunk.push(uri);
+                    if chunk.len() == MAX_INDEX_CHUNK_FILES {
+                        self.push_index_chunk(priority, std::mem::take(&mut chunk));
+                        chunk.reserve(MAX_INDEX_CHUNK_FILES);
+                    }
+                }
+                if !chunk.is_empty() {
+                    self.push_index_chunk(priority, chunk);
+                }
+            }
             EngineCommand::SetWorkspaceRoot(root) => {
                 let analysis = self
                     .pending
@@ -291,9 +314,28 @@ impl CommandState {
             return Some(command);
         }
         if let Some(job) = self.neighborhood.pop_front() {
+            self.release(&job.uris);
             return Some(EngineCommand::Index(job));
         }
-        self.sweep.pop_front().map(EngineCommand::Index)
+        let job = self.sweep.pop_front()?;
+        self.release(&job.uris);
+        Some(EngineCommand::Index(job))
+    }
+
+    fn push_index_chunk(&mut self, priority: IndexPriority, uris: Vec<String>) {
+        let job = IndexJob { priority, uris };
+        match priority {
+            IndexPriority::Neighborhood => self.neighborhood.push_back(job),
+            IndexPriority::Sweep => self.sweep.push_back(job),
+        }
+    }
+
+    /// A chunk that has been handed out no longer blocks its files from being queued again, so a
+    /// file that changes while indexing is re-offered rather than silently skipped.
+    fn release(&mut self, uris: &[String]) {
+        for uri in uris {
+            self.queued.remove(uri);
+        }
     }
 
     fn queued_index_chunks(&self, priority: IndexPriority) -> usize {
@@ -1278,5 +1320,88 @@ mod tests {
 
         assert_eq!(state.queued_index_chunks(IndexPriority::Sweep), 3);
         assert_eq!(state.queued_index_chunks(IndexPriority::Neighborhood), 1);
+    }
+    #[test]
+    fn a_large_index_job_is_split_into_bounded_chunks() {
+        let mut state = CommandState::default();
+        let uris: Vec<String> = (0..(MAX_INDEX_CHUNK_FILES * 2 + 1))
+            .map(|index| format!("file:///w/F{index}.kt"))
+            .collect();
+        let total = uris.len();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris,
+        }));
+
+        assert_eq!(state.queued_index_chunks(IndexPriority::Sweep), 3);
+        let mut seen = 0;
+        while let Some(EngineCommand::Index(job)) = state.take() {
+            assert!(
+                job.uris.len() <= MAX_INDEX_CHUNK_FILES,
+                "no chunk may exceed the bound that caps interactive latency"
+            );
+            seen += job.uris.len();
+        }
+        assert_eq!(seen, total);
+    }
+
+    #[test]
+    fn a_file_already_queued_is_not_queued_again() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/A.kt".into(), "file:///w/B.kt".into()],
+        }));
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/B.kt".into(), "file:///w/C.kt".into()],
+        }));
+
+        let mut queued = Vec::new();
+        while let Some(EngineCommand::Index(job)) = state.take() {
+            queued.extend(job.uris);
+        }
+        queued.sort();
+        assert_eq!(
+            queued,
+            vec!["file:///w/A.kt", "file:///w/B.kt", "file:///w/C.kt"]
+        );
+    }
+
+    #[test]
+    fn taking_a_chunk_releases_its_files_for_requeueing() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/A.kt".into()],
+        }));
+        assert!(matches!(state.take(), Some(EngineCommand::Index(_))));
+
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/A.kt".into()],
+        }));
+        let Some(EngineCommand::Index(job)) = state.take() else {
+            panic!("a file that finished indexing must be requeueable when it changes");
+        };
+        assert_eq!(job.uris, vec!["file:///w/A.kt".to_string()]);
+    }
+
+    #[test]
+    fn the_index_queue_stops_growing_at_its_bound() {
+        let mut state = CommandState::default();
+        let uris: Vec<String> = (0..(MAX_QUEUED_INDEX_FILES + 10))
+            .map(|index| format!("file:///w/F{index}.kt"))
+            .collect();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris,
+        }));
+
+        let mut queued = 0;
+        while let Some(EngineCommand::Index(job)) = state.take() {
+            queued += job.uris.len();
+        }
+        assert_eq!(queued, MAX_QUEUED_INDEX_FILES);
     }
 }
