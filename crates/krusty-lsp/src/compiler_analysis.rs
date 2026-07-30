@@ -932,4 +932,757 @@ mod tests {
             analysis.files[0].diagnostics
         );
     }
+
+    #[test]
+    fn source_set_resolves_inherited_java_getter_as_property() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [
+            (
+                String::new(),
+                "package p; public interface Named { String getName(); }".into(),
+            ),
+            (
+                String::new(),
+                "package p; public interface Item extends Named {}".into(),
+            ),
+        ];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        let source = "package a\nfun use(x: p.Item): String = x.name";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_narrows_safe_call_root_after_elvis_return() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [(
+            String::new(),
+            "package p; public class Clazz { public String getJavaPsi() { return \"\"; } \
+             public int getSize() { return 0; } }"
+                .into(),
+        )];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // `u?.javaPsi ?: return` proves the safe-call ROOT `u` non-null: the plain
+        // `u.size` afterwards must not report a nullable-receiver error.
+        let source = "package a\n\
+                      fun f(u: p.Clazz?): Int {\n\
+                      \u{20} val j = u?.javaPsi ?: return 0\n\
+                      \u{20} println(j)\n\
+                      \u{20} return u.size\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_narrows_after_else_if_return_chain() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+
+        // The asQualifiedPath shape: an `if (this is A) return …; else if (this !is B)
+        // return …` head proves `this is B` for the rest of the body, so the narrowed
+        // receiver flows into the local function call and the when-arm recursion.
+        let source = "package a\n\
+                      interface Expr\n\
+                      interface Ref : Expr\n\
+                      interface Qualified : Ref {\n\
+                      \u{20} val receiver: Expr\n\
+                      \u{20} val selector: Expr\n\
+                      }\n\
+                      interface SimpleName : Ref {\n\
+                      \u{20} val identifier: String\n\
+                      }\n\
+                      fun Expr.path(): List<String>? {\n\
+                      \u{20} if (this is SimpleName) {\n\
+                      \u{20}\u{20} return listOf(this.identifier)\n\
+                      \u{20} }\n\
+                      \u{20} else if (this !is Qualified) {\n\
+                      \u{20}\u{20} return null\n\
+                      \u{20} }\n\
+                      \u{20} var error = false\n\
+                      \u{20} val list = mutableListOf<String>()\n\
+                      \u{20} fun add(expr: Qualified) {\n\
+                      \u{20}\u{20} val receiver = expr.receiver\n\
+                      \u{20}\u{20} val selector = expr.selector as? SimpleName ?: run { error = true; return }\n\
+                      \u{20}\u{20} when (receiver) {\n\
+                      \u{20}\u{20}\u{20} is Qualified -> add(receiver)\n\
+                      \u{20}\u{20}\u{20} is SimpleName -> list += receiver.identifier\n\
+                      \u{20}\u{20}\u{20} else -> {\n\
+                      \u{20}\u{20}\u{20}\u{20} error = true\n\
+                      \u{20}\u{20}\u{20}\u{20} return\n\
+                      \u{20}\u{20}\u{20} }\n\
+                      \u{20}\u{20} }\n\
+                      \u{20}\u{20} list += selector.identifier\n\
+                      \u{20} }\n\
+                      \u{20} add(this)\n\
+                      \u{20} return if (error) null else list\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_refines_java_getter_property_via_kotlin_override() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [
+            (String::new(), "package p; public class BaseEntry {}".into()),
+            (
+                String::new(),
+                "package p; public interface JavaCatalog { BaseEntry[] getEntries(); }".into(),
+            ),
+        ];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // The Kotlin override refines the Java synthetic property: `x.entries` must read as
+        // `Array<RefinedEntry>` (the override's return), not the Java base's `BaseEntry[]`.
+        // Neutral fixture names make the test prove the structural getter rule, independent of
+        // any downstream API that originally exposed the bug.
+        let support = "package u4\n\
+                       import p.JavaCatalog\n\
+                       import p.BaseEntry\n\
+                       interface RefinedEntry : BaseEntry {\n\
+                       \u{20} val marker: String\n\
+                       }\n\
+                       interface RefinedCatalog : JavaCatalog {\n\
+                       \u{20} override fun getEntries(): Array<RefinedEntry>\n\
+                       }";
+        let source = "package a\n\
+                      import u4.RefinedCatalog\n\
+                      import u4.RefinedEntry\n\
+                      fun pred(m: RefinedEntry): Boolean = true\n\
+                      fun f(u: RefinedCatalog?): String? {\n\
+                      \u{20} val x = u ?: return null\n\
+                      \u{20} x.entries.find(::pred)?.marker?.let { return it }\n\
+                      \u{20} return null\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source, support], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_resolves_interface_nested_class_static_call() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [
+            (
+                String::new(),
+                "package p; public class Event { public Event(String a) {} }".into(),
+            ),
+            (
+                String::new(),
+                // `Handler` carries no explicit modifier: interface members are implicitly public.
+                "package p; public interface Registry {\n\
+                 \u{20} final class Handler {\n\
+                 \u{20}\u{20} public static void publish(Event n) {}\n\
+                 \u{20} }\n\
+                 }"
+                .into(),
+            ),
+        ];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        let source = "package a\n\
+                      import p.Event\n\
+                      import p.Registry\n\
+                      fun go() {\n\
+                      \u{20} Registry.Handler.publish(Event(\"x\"))\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_binds_generic_return_from_generic_static_field() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [
+            (String::new(), "package p; public class Key<T> {}".into()),
+            (
+                String::new(),
+                // The field's descriptor erases to raw `Key`; only its `Signature` carries
+                // `Key<String>`, which the call below needs to bind `T`.
+                "package p; public class Keys { public static final Key<String> NAME = null; }"
+                    .into(),
+            ),
+            (
+                String::new(),
+                "package p; public class Ctx { public <T> T get(Key<T> key) { return null; } }"
+                    .into(),
+            ),
+        ];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        let source = "package a\n\
+                      fun use(c: p.Ctx): Int {\n\
+                      \u{20} val v = c.get(p.Keys.NAME) ?: return 0\n\
+                      \u{20} return v.length\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_passes_module_subclass_to_java_member_parameter() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [
+            (
+                String::new(),
+                "package p; public abstract class Visitor {}".into(),
+            ),
+            (
+                String::new(),
+                "package p; public interface File { void accept(Visitor v); }".into(),
+            ),
+        ];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // An anonymous object extending a DECLARATION-ONLY Kotlin class whose own base is the
+        // Java parameter type reaches `accept(Visitor)` only through the module-side supertype
+        // walk. The generic fixture records the inheritance shape without retaining provenance.
+        let main = "package a\n\
+                    import p.File\n\
+                    import dep.Printing\n\
+                    fun go(file: File): String = object : Printing({ true }) {\n\
+                    \u{20} override fun render(s: String): CharSequence? = s\n\
+                    }.also { file.accept(it) }.result";
+        let dep = "package dep\n\
+                   import p.Visitor\n\
+                   abstract class Printing(val filter: (String) -> Boolean) : Visitor() {\n\
+                   \u{20} val result: String = \"\"\n\
+                   \u{20} abstract fun render(s: String): CharSequence?\n\
+                   }";
+        let inputs = [
+            krusty::source::SourceInput::kotlin(main),
+            krusty::source::SourceInput::kotlin(dep),
+        ];
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let mut diags = krusty::diag::DiagSink::new();
+        krusty::frontend::analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            platform,
+            &krusty::features::LangFeatures::new(),
+            &mut diags,
+        );
+
+        let file0: Vec<_> = diags.diags.iter().filter(|d| d.file == 0).collect();
+        assert!(file0.is_empty(), "{file0:?}");
+    }
+
+    #[test]
+    fn source_set_passes_module_subclass_to_java_constructor_parameter() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [
+            (
+                String::new(),
+                "package p; public abstract class Visitor {}".into(),
+            ),
+            (
+                String::new(),
+                "package p; public class Holder { public Holder(Visitor v) {} }".into(),
+            ),
+        ];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // The constructor twin of the member-argument case: the argument's path to the Java
+        // parameter type runs through a MODULE-declared subclass, so `Holder(V())` resolves only
+        // if constructor applicability admits the module-side supertype walk.
+        let source = "package a\n\
+                      import p.Holder\n\
+                      import p.Visitor\n\
+                      class V : Visitor()\n\
+                      fun go(): Holder = Holder(V())";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_spreads_kotlin_vararg_into_java_vararg_member() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [
+            (String::new(), "package p; public interface Fix {}".into()),
+            (String::new(), "package p; public interface Fix {}".into()),
+            (
+                String::new(),
+                "package p; public class Holder {\n\
+                 \u{20} public void reg(String s, Fix... fixes) {}\n\
+                 }"
+                .into(),
+            ),
+        ];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // The registerUProblem shape: a Kotlin vararg forwarded with a spread into a Java
+        // vararg member, plus an element-style call — both need the stub's ACC_VARARGS.
+        let source = "package a\n\
+                      import p.Fix\n\
+                      import p.Holder\n\
+                      fun Holder.forward(s: String, vararg fixes: Fix) {\n\
+                      \u{20} reg(s, *fixes)\n\
+                      }\n\
+                      fun direct(h: Holder, f: Fix) {\n\
+                      \u{20} h.reg(\"x\", f)\n\
+                      \u{20} h.reg(\"y\")\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_converts_sam_lambdas_on_implicit_receivers_and_nested_interfaces() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [
+            (
+                String::new(),
+                "package p; public interface Listener { void actionPerformed(Event e); }".into(),
+            ),
+            (String::new(), "package p; public class Event {}".into()),
+            (String::new(), "package p; public class Place {}".into()),
+            (String::new(), "package p; public class Dep {}".into()),
+            (
+                String::new(),
+                "package p; public class Button {\n\
+                 \u{20} public void addActionListener(Listener l) {}\n\
+                 }"
+                .into(),
+            ),
+            (
+                String::new(),
+                // `Proc` is a MEMBER type referenced from its own class body — enclosing-chain
+                // resolution, not package scope — and the SAM of a static trailing lambda.
+                "package p; public class Builder {\n\
+                 \u{20} public static void analyze(String f, Proc p) {}\n\
+                 \u{20} public static void analyze(String f, Proc p, Opts o) {}\n\
+                 \u{20} public interface Proc { void process(Place a, Dep b); }\n\
+                 \u{20} public static class Opts {}\n\
+                 }"
+                .into(),
+            ),
+        ];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // Three production-style SAM-conversion shapes: a zero-parameter lambda on an IMPLICIT
+        // receiver (inside .apply {}), an explicit call, and a static member whose SAM is a
+        // nested interface. All names are local fixtures; only the call shapes are significant.
+        let source = "package a\n\
+                      import p.Builder\n\
+                      import p.Button\n\
+                      fun direct(b: Button) {\n\
+                      \u{20} b.addActionListener { e -> println(e) }\n\
+                      }\n\
+                      fun inApply(): Button = Button().apply {\n\
+                      \u{20} addActionListener {\n\
+                      \u{20}\u{20} println(this)\n\
+                      \u{20} }\n\
+                      }\n\
+                      fun stat() {\n\
+                      \u{20} Builder.analyze(\"f\") { place, dep -> println(place) }\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_binds_explicit_type_args_on_generic_static_sam_call() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [(
+            String::new(),
+            "package p; import java.util.Map; import java.util.function.Function;\n\
+             public final class Maps {\n\
+             \u{20} public static <K, V> Map<K, V> create(Function<? super K, ? extends V> f) { return null; }\n\
+             }"
+            .into(),
+        )];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // Explicit call type arguments must bind K/V so both the lambda parameter and returned
+        // Map specialize; without them `s` erases to Any and `m["x"]` to Any. The assertion is
+        // intentionally expressed only with generic fixture types.
+        let source = "package a\n\
+                      import p.Maps\n\
+                      fun go(): Int {\n\
+                      \u{20} val m = Maps.create<String, Int> { s -> s.length }\n\
+                      \u{20} return m[\"x\"] ?: 0\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_maps_all_caps_java_getters_to_properties() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [(
+            String::new(),
+            "package p; public class Language {\n\
+             \u{20} public String getID() { return null; }\n\
+             \u{20} public String getURLPath() { return null; }\n\
+             }"
+            .into(),
+        )];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // Kotlin's decapitalize-smart getter mapping: `getID()` reads as `id` and
+        // `getURLPath()` as `urlPath`, regardless of the declaring API.
+        let source = "package a\n\
+                      fun use(l: p.Language): String = l.id + l.urlPath";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
+    fn source_set_resolves_java_setter_backed_property_write() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [(
+            String::new(),
+            "package p; public class Presentation {\n\
+             \u{20} public boolean isEnabledAndVisible() { return false; }\n\
+             \u{20} public void setEnabledAndVisible(boolean v) {}\n\
+             \u{20} public String getText() { return null; }\n\
+             \u{20} public void setText(String t) {}\n\
+             \u{20} public int getRank() { return 0; }\n\
+             }"
+            .into(),
+        )];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        classpath.set_stub_overlay(stubs);
+
+        // `isX`/`setX` and `getX`/`setX` pairs are writable synthetic properties; a getter-only
+        // `rank` stays read-only ('val' cannot be reassigned).
+        let source = "package a\n\
+                      fun use(x: p.Presentation) {\n\
+                      \u{20} x.isEnabledAndVisible = true\n\
+                      \u{20} x.text = \"t\"\n\
+                      }\n\
+                      fun bad(x: p.Presentation) {\n\
+                      \u{20} x.rank = 1\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        let messages: Vec<&str> = analysis.files[0]
+            .diagnostics
+            .iter()
+            .map(|d| d.msg.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            vec!["'val' cannot be reassigned."],
+            "writable pairs must check clean; getter-only stays val"
+        );
+    }
 }

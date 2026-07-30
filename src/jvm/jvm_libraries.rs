@@ -2878,6 +2878,31 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         PLATFORM_DEFAULT_IMPORT_PACKAGES
     }
 
+    fn physical_property_getter_names(&self, property: &str) -> Vec<String> {
+        let mut candidates: Vec<String> = self
+            .physical_property_getter_name(property)
+            .into_iter()
+            .collect();
+        // Kotlin maps `getID()` → `id` and `getURLPath()` → `urlPath` (decapitalize-smart:
+        // a LEADING UPPERCASE RUN lowercases as a block). Invert that: re-uppercase the
+        // property's leading lowercase run for the all-caps getter spelling.
+        let run = property
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase())
+            .count();
+        if run > 1 || (run == property.len() && run >= 1) || (run == 1 && property.len() == 1) {
+            let smart = format!(
+                "get{}{}",
+                property[..run].to_ascii_uppercase(),
+                &property[run..]
+            );
+            if !candidates.contains(&smart) {
+                candidates.push(smart);
+            }
+        }
+        candidates
+    }
+
     fn physical_property_getter_name(&self, property: &str) -> Option<String> {
         let getter = property_getter_name(property);
         (getter != property).then_some(getter)
