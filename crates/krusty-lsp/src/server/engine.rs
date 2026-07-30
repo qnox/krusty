@@ -159,6 +159,8 @@ struct CommandQueue {
 #[derive(Default)]
 struct CommandState {
     pending: VecDeque<EngineCommand>,
+    neighborhood: VecDeque<IndexJob>,
+    sweep: VecDeque<IndexJob>,
     disconnected: bool,
 }
 
@@ -223,9 +225,10 @@ impl CommandState {
             EngineCommand::Materialize(job) => {
                 self.pending.push_back(EngineCommand::Materialize(job));
             }
-            EngineCommand::Index(job) => {
-                self.pending.push_back(EngineCommand::Index(job));
-            }
+            EngineCommand::Index(job) => match job.priority {
+                IndexPriority::Neighborhood => self.neighborhood.push_back(job),
+                IndexPriority::Sweep => self.sweep.push_back(job),
+            },
             EngineCommand::SetWorkspaceRoot(root) => {
                 let analysis = self
                     .pending
@@ -279,6 +282,29 @@ impl CommandState {
                 }
             }
         }
+    }
+
+    /// Interactive work first, then the neighbourhood, then the sweep. The levels are the
+    /// priority, so there is no comparator and no heap.
+    fn take(&mut self) -> Option<EngineCommand> {
+        if let Some(command) = self.pending.pop_front() {
+            return Some(command);
+        }
+        if let Some(job) = self.neighborhood.pop_front() {
+            return Some(EngineCommand::Index(job));
+        }
+        self.sweep.pop_front().map(EngineCommand::Index)
+    }
+
+    fn queued_index_chunks(&self, priority: IndexPriority) -> usize {
+        match priority {
+            IndexPriority::Neighborhood => self.neighborhood.len(),
+            IndexPriority::Sweep => self.sweep.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.neighborhood.is_empty() && self.sweep.is_empty()
     }
 
     fn compact_project_changes(&mut self) {
@@ -343,8 +369,12 @@ impl CommandState {
 }
 
 impl CommandReceiver {
-    fn queued_index_chunks(&self, _priority: IndexPriority) -> usize {
-        0
+    fn queued_index_chunks(&self, priority: IndexPriority) -> usize {
+        self.queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .queued_index_chunks(priority)
     }
 
     fn recv(&self, timeout: Option<Duration>) -> CommandReceive {
@@ -355,7 +385,7 @@ impl CommandReceiver {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         loop {
-            if let Some(command) = state.pending.pop_front() {
+            if let Some(command) = state.take() {
                 return CommandReceive::Command(command);
             }
             if state.disconnected {
@@ -372,7 +402,7 @@ impl CommandReceiver {
                     .wait_timeout(state, remaining)
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 state = next;
-                if result.timed_out() && state.pending.is_empty() {
+                if result.timed_out() && state.is_empty() {
                     return CommandReceive::Timeout;
                 }
             } else {
@@ -1189,5 +1219,64 @@ mod tests {
         assert_eq!(batch.files[0].text_hash, 7);
         assert_eq!(batch.remaining, 0);
         engine.join();
+    }
+    #[test]
+    fn interactive_commands_are_served_before_queued_index_chunks() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/Swept.kt".into()],
+        }));
+        state.enqueue(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///w/Open.kt".into(), String::new(), 1)],
+            open_uris: vec!["file:///w/Open.kt".into()],
+        }));
+
+        assert!(
+            matches!(state.take(), Some(EngineCommand::Analyze(_))),
+            "an open document must never wait behind a sweep chunk"
+        );
+        assert!(matches!(state.take(), Some(EngineCommand::Index(_))));
+        assert!(state.take().is_none());
+    }
+
+    #[test]
+    fn neighborhood_chunks_are_served_before_sweep_chunks() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/Far.kt".into()],
+        }));
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Neighborhood,
+            uris: vec!["file:///w/Near.kt".into()],
+        }));
+
+        let Some(EngineCommand::Index(first)) = state.take() else {
+            panic!("expected an index chunk");
+        };
+        assert_eq!(first.priority, IndexPriority::Neighborhood);
+        let Some(EngineCommand::Index(second)) = state.take() else {
+            panic!("expected an index chunk");
+        };
+        assert_eq!(second.priority, IndexPriority::Sweep);
+    }
+
+    #[test]
+    fn queued_index_chunks_counts_only_the_same_priority() {
+        let mut state = CommandState::default();
+        for index in 0..3 {
+            state.enqueue(EngineCommand::Index(IndexJob {
+                priority: IndexPriority::Sweep,
+                uris: vec![format!("file:///w/S{index}.kt")],
+            }));
+        }
+        state.enqueue(EngineCommand::Index(IndexJob {
+            priority: IndexPriority::Neighborhood,
+            uris: vec!["file:///w/N.kt".into()],
+        }));
+
+        assert_eq!(state.queued_index_chunks(IndexPriority::Sweep), 3);
+        assert_eq!(state.queued_index_chunks(IndexPriority::Neighborhood), 1);
     }
 }
