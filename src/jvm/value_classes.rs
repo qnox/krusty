@@ -588,7 +588,7 @@ pub fn lower_value_classes(
                 collect_reachable_scoped(&ir.exprs, &ir.inline_only_fns, root, &mut reach);
                 for id in reach {
                     if let IrExpr::Variable { index, ty, .. } = &ir.exprs[id as usize] {
-                        m.insert(*index, ty.clone());
+                        m.insert(*index, *ty);
                     }
                 }
             }
@@ -4685,7 +4685,7 @@ fn body_slot_map(exprs: &[IrExpr], root: ExprId, params: &[Ty]) -> HashMap<u32, 
     collect_reachable(exprs, root, &mut reach);
     for id in reach {
         if let IrExpr::Variable { index, ty, .. } = &exprs[id as usize] {
-            slots.insert(*index, ty.clone());
+            slots.insert(*index, *ty);
         }
     }
     slots
@@ -4699,7 +4699,7 @@ fn secondary_ctor_slot_map(
     let mut slots: HashMap<u32, Ty> = params
         .iter()
         .enumerate()
-        .map(|(index, ty)| (1 + index as u32, ty.clone()))
+        .map(|(index, ty)| (1 + index as u32, *ty))
         .collect();
     let mut reach = HashSet::new();
     for root in constructor
@@ -4714,7 +4714,7 @@ fn secondary_ctor_slot_map(
     }
     for id in reach {
         if let IrExpr::Variable { index, ty, .. } = &exprs[id as usize] {
-            slots.insert(*index, ty.clone());
+            slots.insert(*index, *ty);
         }
     }
     slots

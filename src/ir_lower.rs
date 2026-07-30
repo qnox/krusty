@@ -5612,14 +5612,17 @@ impl<'a> Lower<'a> {
     fn lower_resolved_source_constructor(
         &mut self,
         args: &[AstExprId],
-        params: &[Ty],
-        argument_slots: &[usize],
-        argument_types: &[Ty],
-        omitted: &[usize],
-        vararg: Option<usize>,
-        default_masks: &[i32],
-        value_class: bool,
+        plan: ResolvedSourceConstructorPlan<'_>,
     ) -> Option<(Vec<u32>, Vec<u32>, Vec<Ty>)> {
+        let ResolvedSourceConstructorPlan {
+            params,
+            argument_slots,
+            argument_types,
+            omitted,
+            vararg,
+            default_masks,
+            value_class,
+        } = plan;
         if args.len() != argument_slots.len() || args.len() != argument_types.len() {
             return None;
         }
@@ -6486,8 +6489,10 @@ impl<'a> Lower<'a> {
                     );
                     let mut default_params = vec![Ty::obj_name(*owner)];
                     default_params.extend(params.iter().map(|&ty| self.vc_erase_ty(ty)));
-                    default_params
-                        .extend(std::iter::repeat(Ty::Int).take(default_mask_count(params.len())));
+                    default_params.extend(std::iter::repeat_n(
+                        Ty::Int,
+                        default_mask_count(params.len()),
+                    ));
                     default_params.push(Ty::obj("java/lang/Object"));
                     let descriptor = self
                         .runtime
@@ -6929,55 +6934,6 @@ impl<'a> Lower<'a> {
                 }
             })
             .unwrap_or_default()
-    }
-
-    fn super_ctor_candidates(&self, internal: &str) -> Vec<(Vec<Ty>, Vec<String>)> {
-        let Some(sid) = self.super_class(internal).map(|sup| sup.id) else {
-            return Vec::new();
-        };
-        let sup = &self.ir.classes[sid as usize];
-        let Some(class) = self.afile.decls.iter().find_map(|declaration| {
-            let Decl::Class(class) = self.afile.decl(*declaration) else {
-                return None;
-            };
-            (class_internal(self.afile, &class.name) == sup.fq_name.render()).then_some(class)
-        }) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        if sup.has_primary_ctor {
-            let params = if sup.ctor_args.is_empty() {
-                let n = sup.ctor_param_count as usize;
-                sup.fields[..n].iter().map(|f| f.ty.clone()).collect()
-            } else {
-                sup.ctor_args.iter().map(|a| a.ty).collect()
-            };
-            out.push((
-                params,
-                class
-                    .props
-                    .iter()
-                    .map(|parameter| parameter.name.clone())
-                    .collect(),
-            ));
-        }
-        for constructor in &class.secondary_ctors {
-            out.push((
-                constructor
-                    .params
-                    .iter()
-                    .map(|parameter| {
-                        ty_to_ir(ty_of(self.afile, &parameter.ty, &*self.syms.libraries))
-                    })
-                    .collect(),
-                constructor
-                    .params
-                    .iter()
-                    .map(|parameter| parameter.name.clone())
-                    .collect(),
-            ));
-        }
-        out
     }
 
     fn super_class(&self, internal: &str) -> Option<&ClassInfo> {
@@ -7555,13 +7511,15 @@ impl<'a> Lower<'a> {
                 let (mut lowered, prelude, mut invoke_params) = self
                     .lower_resolved_source_constructor(
                         args,
-                        &params,
-                        &argument_slots,
-                        &argument_types,
-                        &omitted,
-                        vararg,
-                        &default_masks,
-                        value_class,
+                        ResolvedSourceConstructorPlan {
+                            params: &params,
+                            argument_slots: &argument_slots,
+                            argument_types: &argument_types,
+                            omitted: &omitted,
+                            vararg,
+                            default_masks: &default_masks,
+                            value_class,
+                        },
                     )?;
                 if value_param_primary {
                     lowered.push(self.emit_const(IrConst::Null));
@@ -22293,13 +22251,15 @@ impl<'a> Lower<'a> {
                             let (lowered, prelude, invoke_params) = self
                                 .lower_resolved_source_constructor(
                                     &args,
-                                    &params,
-                                    &argument_slots,
-                                    &argument_types,
-                                    &omitted,
-                                    vararg,
-                                    &default_masks,
-                                    value_class,
+                                    ResolvedSourceConstructorPlan {
+                                        params: &params,
+                                        argument_slots: &argument_slots,
+                                        argument_types: &argument_types,
+                                        omitted: &omitted,
+                                        vararg,
+                                        default_masks: &default_masks,
+                                        value_class,
+                                    },
                                 )?;
                             let exact_params =
                                 (!primary || !default_masks.is_empty() || value_class)
@@ -25102,6 +25062,20 @@ fn body_has_exit(file: &ast::File, e: AstExprId, with_return: bool) -> bool {
 /// representation on a value class's underlying nullability.
 fn mark_nullable(t: Ty) -> Ty {
     Ty::nullable(t)
+}
+
+/// How the checker resolved a SOURCE constructor call: the parameter list, where each argument goes,
+/// which slots were omitted, the vararg position, the `$default` masks, and whether the class is a value
+/// class. Grouped so the lowering entry point stays under the argument-count lint — both call sites read
+/// these straight off one `resolved_constructor` record.
+struct ResolvedSourceConstructorPlan<'a> {
+    params: &'a [Ty],
+    argument_slots: &'a [usize],
+    argument_types: &'a [Ty],
+    omitted: &'a [usize],
+    vararg: Option<usize>,
+    default_masks: &'a [i32],
+    value_class: bool,
 }
 
 pub(crate) fn ty_to_ir(t: Ty) -> Ty {

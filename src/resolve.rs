@@ -9168,6 +9168,7 @@ fn make_checker<'a>(
         local_decl_types: HashMap::new(),
         resolved_call_type_args: HashMap::new(),
         narrowed_this_member: HashMap::new(),
+        pending_unknown_named_arg: HashMap::new(),
         resolved_calls: HashMap::new(),
         resolved_source_calls: HashMap::new(),
         source_extension_properties: HashMap::new(),
@@ -10044,13 +10045,15 @@ fn check_file_at_impl_mode(
                             let candidates =
                                 c.this_ctor_delegation_candidates(cl, sc_index, &primary_params);
                             c.select_ctor_delegation(
-                                d,
-                                sc_index,
-                                sc.span,
-                                "this",
+                                CtorDelegationSite {
+                                    class: d,
+                                    secondary: sc_index,
+                                    span: sc.span,
+                                    label: "this",
+                                    value_class: cl.is_value,
+                                },
                                 delegation,
                                 candidates,
-                                cl.is_value,
                             );
                         }
                         CtorDelegation::Super(delegation) => {
@@ -10059,13 +10062,15 @@ fn check_file_at_impl_mode(
                             }
                             let candidates = c.super_ctor_delegation_candidates(cl);
                             c.select_ctor_delegation(
-                                d,
-                                sc_index,
-                                sc.span,
-                                "super",
+                                CtorDelegationSite {
+                                    class: d,
+                                    secondary: sc_index,
+                                    span: sc.span,
+                                    label: "super",
+                                    value_class: cl.is_value,
+                                },
                                 delegation,
                                 candidates,
-                                cl.is_value,
                             );
                         }
                         CtorDelegation::None if !cl.has_primary_ctor => {
@@ -10075,13 +10080,15 @@ fn check_file_at_impl_mode(
                             };
                             let candidates = c.super_ctor_delegation_candidates(cl);
                             c.select_ctor_delegation(
-                                d,
-                                sc_index,
-                                sc.span,
-                                "super",
+                                CtorDelegationSite {
+                                    class: d,
+                                    secondary: sc_index,
+                                    span: sc.span,
+                                    label: "super",
+                                    value_class: cl.is_value,
+                                },
                                 &arguments,
                                 candidates,
-                                cl.is_value,
                             );
                         }
                         CtorDelegation::None => {}
@@ -10869,6 +10876,30 @@ struct MemberExtensionCall<'a> {
     trailing_lambda: bool,
 }
 
+/// Which secondary constructor's delegation is being resolved, and how to report it: the `this`/`super`
+/// label and span identify the clause, `value_class` selects the value-class rules. Grouped so the entry
+/// point stays under the argument-count lint.
+struct CtorDelegationSite<'a> {
+    class: DeclId,
+    secondary: usize,
+    span: Span,
+    label: &'a str,
+    value_class: bool,
+}
+
+/// The arguments of a member-EXTENSION call, grouped so the resolution entry point stays under the
+/// argument-count lint. Mirrors [`MemberExtensionCall`], but carries fully-known argument types: the
+/// lambda-planning path works from PARTIAL types, this one runs after they are settled.
+struct MemberExtensionFunctionCall<'a> {
+    extension_receiver: Ty,
+    name: &'a str,
+    args: &'a [ExprId],
+    arg_tys: &'a [Ty],
+    arg_names: Option<&'a [Option<String>]>,
+    explicit_type_args: &'a [Ty],
+    trailing_lambda: bool,
+}
+
 #[derive(Clone, Copy)]
 struct MemberExtensionPriority {
     dispatch_rank: usize,
@@ -10967,6 +10998,12 @@ struct Checker<'a> {
     local_decl_types: HashMap<StmtId, Ty>,
     resolved_call_type_args: HashMap<ExprId, Vec<Option<Ty>>>,
     narrowed_this_member: HashMap<ExprId, TypeName>,
+    /// An UNKNOWN named argument found while mapping a classpath MEMBER call, kept until the call
+    /// finishes resolving. A member whose parameter names do not include the label may still lose to
+    /// an EXTENSION that does (`pick(value = 1)` where only `String.pick(value)` has it), so the error
+    /// cannot be reported at the point it is found; but it must not be dropped either, or the
+    /// positional fallback binds `known(z = 1)` as `known(1)` and the wrong name compiles silently.
+    pending_unknown_named_arg: HashMap<ExprId, (String, Span)>,
     /// Calls resolved during checking, keyed by the `Expr::Call` `ExprId` (moved into
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
@@ -13483,7 +13520,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-            } else {
+            } else if !self.report_pending_unknown_named_arg(call) {
                 self.diags.error(
                     self.call_callee_name_span(call),
                     INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
@@ -13532,13 +13569,30 @@ impl<'a> Checker<'a> {
             return Err(());
         }
         if !failures.is_empty() {
-            self.diags.error(
-                self.call_callee_name_span(call),
-                INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-            );
+            if !self.report_pending_unknown_named_arg(call) {
+                self.diags.error(
+                    self.call_callee_name_span(call),
+                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+                );
+            }
             return Err(());
         }
         Ok(None)
+    }
+
+    /// Emit the deferred "no parameter with name 'x' found." for `call` if a classpath MEMBER candidate
+    /// rejected that label earlier, and report whether it fired. A specific rejected label is strictly
+    /// more useful than the generic overload list, and it is the diagnostic every OTHER call origin
+    /// (top-level, extension, constructor) already produces for the same mistake — so whichever path
+    /// ends up failing the call should say the same thing.
+    fn report_pending_unknown_named_arg(&mut self, call: ExprId) -> bool {
+        match self.pending_unknown_named_arg.remove(&call) {
+            Some((message, span)) => {
+                self.diags.error(span, message);
+                true
+            }
+            None => false,
+        }
     }
 
     fn source_function_decl(
@@ -14786,14 +14840,17 @@ impl<'a> Checker<'a> {
 
     fn select_ctor_delegation(
         &mut self,
-        class: DeclId,
-        secondary: usize,
-        span: Span,
-        label: &str,
+        site: CtorDelegationSite<'_>,
         arguments: &CtorDelegationCall,
         candidates: Vec<CtorDelegationCandidate>,
-        value_class: bool,
     ) {
+        let CtorDelegationSite {
+            class,
+            secondary,
+            span,
+            label,
+            value_class,
+        } = site;
         let mut matches = candidates
             .iter()
             .filter_map(|candidate| self.match_ctor_delegation_candidate(arguments, candidate))
@@ -16481,55 +16538,6 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn report_constructor_arity(
-        &mut self,
-        call: ExprId,
-        class_name: &str,
-        params: &[Ty],
-        param_names: &[(String, bool)],
-        args: &[ExprId],
-    ) {
-        let got = args.len();
-        let span = self.arity_diagnostic_span(call, args, params.len());
-        if got < params.len() {
-            if let Some((parameter, _)) = param_names
-                .get(got..)
-                .and_then(|remaining| remaining.iter().find(|(_, has_default)| !*has_default))
-            {
-                let editor_span = self.call_callee_name_span(call);
-                self.diags.error_with_editor_span(
-                    span,
-                    editor_span,
-                    format!("no value passed for parameter '{parameter}'."),
-                );
-                return;
-            }
-        }
-        if got > params.len() && param_names.len() == params.len() {
-            let params = param_names
-                .iter()
-                .zip(params)
-                .map(|((parameter, has_default), ty)| {
-                    let default = if *has_default { " = ..." } else { "" };
-                    format!("{parameter}: {}{default}", ty.source_name())
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.diags.error(
-                span,
-                format!("too many arguments for 'constructor({params}): {class_name}'."),
-            );
-            return;
-        }
-        self.diags.error(
-            span,
-            format!(
-                "constructor '{class_name}' expects {} args, got {got}",
-                params.len()
-            ),
-        );
-    }
-
     /// Check call arguments against a parameter list. For a `vararg`, the fixed parameters match
     /// positionally and every trailing argument matches the vararg array's ELEMENT type (`f(vararg s:
     /// T)` accepts `f(a, b)` with `a, b: T`); a single array argument is also accepted (a spread). For a
@@ -17272,15 +17280,15 @@ impl<'a> Checker<'a> {
             arg_names.as_deref(),
         );
         let member_extension_plan = method_sig.is_none().then(|| {
-            self.member_extension_lambda_param_types(
-                receiver,
+            self.member_extension_lambda_param_types(MemberExtensionCall {
+                extension_receiver: receiver,
                 name,
                 args,
-                &partial,
-                arg_names.as_deref(),
+                partial_arg_tys: &partial,
+                arg_names: arg_names.as_deref(),
                 explicit_type_args,
-                self.file.call_has_trailing_lambda.contains(&call.0),
-            )
+                trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+            })
         });
         let member_extension_plan = member_extension_plan.flatten();
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
@@ -18783,15 +18791,18 @@ impl<'a> Checker<'a> {
                                         .is_some()
                                     });
                                 let applicable_member_extension = self
-                                    .member_extension_function(
-                                        recv,
-                                        &name,
-                                        a,
-                                        &arg_tys,
-                                        arg_names.as_deref(),
-                                        &type_args,
-                                        self.file.call_has_trailing_lambda.contains(&e.0),
-                                    )
+                                    .member_extension_function(MemberExtensionFunctionCall {
+                                        extension_receiver: recv,
+                                        name: &name,
+                                        args: a,
+                                        arg_tys: &arg_tys,
+                                        arg_names: arg_names.as_deref(),
+                                        explicit_type_args: &type_args,
+                                        trailing_lambda: self
+                                            .file
+                                            .call_has_trailing_lambda
+                                            .contains(&e.0),
+                                    })
                                     .is_ok_and(|candidate| candidate.is_some());
                                 (applicable_module_member || !applicable_member_extension)
                                     .then(|| {
@@ -21378,10 +21389,12 @@ impl<'a> Checker<'a> {
             return self
                 .record_extension_call_with_slots(call, name, receiver, args, type_args)
                 .or_else(|| {
-                    self.diags.error(
-                        self.call_callee_name_span(call),
-                        "none of the following candidates is applicable:".to_string(),
-                    );
+                    if !self.report_pending_unknown_named_arg(call) {
+                        self.diags.error(
+                            self.call_callee_name_span(call),
+                            INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+                        );
+                    }
                     Some(Ty::Error)
                 });
         }
@@ -21576,10 +21589,10 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-            } else {
+            } else if !self.report_pending_unknown_named_arg(call) {
                 self.diags.error(
                     self.call_callee_name_span(call),
-                    "none of the following candidates is applicable:".to_string(),
+                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
                 );
             }
             return Some(Ty::Error);
@@ -21790,8 +21803,15 @@ impl<'a> Checker<'a> {
         name: &str,
         span: Span,
     ) -> Result<Option<DestructureComponentTarget>, ()> {
-        let candidate = match self.member_extension_function(recv, name, &[], &[], None, &[], false)
-        {
+        let candidate = match self.member_extension_function(MemberExtensionFunctionCall {
+            extension_receiver: recv,
+            name,
+            args: &[],
+            arg_tys: &[],
+            arg_names: None,
+            explicit_type_args: &[],
+            trailing_lambda: false,
+        }) {
             Ok(Some(candidate)) => candidate,
             Ok(None) => return Ok(None),
             Err(()) => {
@@ -23205,14 +23225,17 @@ impl<'a> Checker<'a> {
 
     fn member_extension_lambda_param_types(
         &self,
-        extension_receiver: Ty,
-        name: &str,
-        args: &[ExprId],
-        partial_arg_tys: &[Option<Ty>],
-        arg_names: Option<&[Option<String>]>,
-        explicit_type_args: &[Ty],
-        trailing_lambda: bool,
+        call: MemberExtensionCall<'_>,
     ) -> Option<MemberExtensionLambdaPlan> {
+        let MemberExtensionCall {
+            extension_receiver,
+            name,
+            args,
+            partial_arg_tys,
+            arg_names,
+            explicit_type_args,
+            trailing_lambda,
+        } = call;
         let mut plans = Vec::new();
         for shape in self.member_extension_function_shapes(extension_receiver, name) {
             let Some(instantiated) = self.instantiate_member_extension(
@@ -23269,14 +23292,17 @@ impl<'a> Checker<'a> {
 
     fn member_extension_function(
         &self,
-        extension_receiver: Ty,
-        name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        arg_names: Option<&[Option<String>]>,
-        explicit_type_args: &[Ty],
-        trailing_lambda: bool,
+        call: MemberExtensionFunctionCall<'_>,
     ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
+        let MemberExtensionFunctionCall {
+            extension_receiver,
+            name,
+            args,
+            arg_tys,
+            arg_names,
+            explicit_type_args,
+            trailing_lambda,
+        } = call;
         let mut candidates = Vec::new();
         let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
         for shape in self.member_extension_function_shapes(extension_receiver, name) {
@@ -23345,15 +23371,15 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|argument| self.resolve_ty(argument))
             .collect::<Vec<_>>();
-        match self.member_extension_function(
+        match self.member_extension_function(MemberExtensionFunctionCall {
             extension_receiver,
             name,
             args,
             arg_tys,
-            arg_names.as_deref(),
-            &explicit_type_args,
-            self.file.call_has_trailing_lambda.contains(&call.0),
-        ) {
+            arg_names: arg_names.as_deref(),
+            explicit_type_args: &explicit_type_args,
+            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+        }) {
             Ok(Some(candidate)) => {
                 for &(parameter, source) in &candidate.argument_parameters {
                     let (Some(&expected), Some(&actual)) =
@@ -23838,6 +23864,50 @@ impl<'a> Checker<'a> {
         }
         if candidates.is_empty() {
             if named_call {
+                // Every candidate rejected the labels. An UNKNOWN name is worth remembering: no member
+                // owns it, but an EXTENSION still might, so returning `NoMatch` here is right — dropping
+                // the error is not. Without it the positional fallback downstream binds `known(z = 1)` as
+                // `known(1)` and an unknown parameter name compiles silently.
+                if let Some((name, argument)) = mapping_errors
+                    .iter()
+                    .find_map(|(failure, _)| {
+                        failure.errors.iter().find_map(|error| match error {
+                            crate::libraries::CallArgMappingError::NoParameterNamed {
+                                name,
+                                argument,
+                            } => Some((name.clone(), *argument)),
+                            _ => None,
+                        })
+                    })
+                    .filter(|_| {
+                        mapping_errors.iter().all(|(failure, _)| {
+                            failure.errors.iter().any(|error| {
+                                matches!(
+                                    error,
+                                    crate::libraries::CallArgMappingError::NoParameterNamed { .. }
+                                )
+                            })
+                        })
+                    })
+                {
+                    let span = self
+                        .file
+                        .call_arg_name_spans
+                        .get(&call.0)
+                        .and_then(|spans| spans.get(argument).copied().flatten())
+                        .unwrap_or_else(|| self.span(args[argument.min(args.len() - 1)]));
+                    self.pending_unknown_named_arg.insert(
+                        call,
+                        (
+                            crate::libraries::CallArgMappingError::NoParameterNamed {
+                                name,
+                                argument,
+                            }
+                            .to_string(),
+                            span,
+                        ),
+                    );
+                }
                 return ClasspathMemberSlotCall::NoMatch;
             }
             let unanimous = mapping_errors
@@ -23872,10 +23942,12 @@ impl<'a> Checker<'a> {
                 return ClasspathMemberSlotCall::Rejected;
             }
             if !mapping_errors.is_empty() {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    "none of the following candidates is applicable:".to_string(),
-                );
+                if !self.report_pending_unknown_named_arg(call) {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+                    );
+                }
                 return ClasspathMemberSlotCall::Rejected;
             }
         }
@@ -25613,15 +25685,15 @@ impl<'a> Checker<'a> {
                     .collect::<Vec<_>>();
                 let member_ext_lambda_plan: Option<MemberExtensionLambdaPlan> =
                     ext_lambda_partial.as_ref().and_then(|partial| {
-                        self.member_extension_lambda_param_types(
-                            rt,
-                            &name,
+                        self.member_extension_lambda_param_types(MemberExtensionCall {
+                            extension_receiver: rt,
+                            name: &name,
                             args,
-                            partial,
-                            arg_names.as_deref(),
-                            &member_extension_type_args,
-                            self.file.call_has_trailing_lambda.contains(&call.0),
-                        )
+                            partial_arg_tys: partial,
+                            arg_names: arg_names.as_deref(),
+                            explicit_type_args: &member_extension_type_args,
+                            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+                        })
                     });
                 let ext_lambda_shape = if member_ext_lambda_plan.is_none() {
                     ext_lambda_partial
@@ -25856,7 +25928,11 @@ impl<'a> Checker<'a> {
                     }
                     ClasspathMemberSlotCall::NoMatch => {}
                 }
-                if rt == Ty::String {
+                // A rejected LABEL must not be re-bound positionally. `known(z = 1)` against
+                // `known(x)` would otherwise resolve as `known(1)` here and the unknown name would
+                // compile silently — the deferred error below is what makes it a diagnostic.
+                let unknown_named_arg = self.pending_unknown_named_arg.contains_key(&call);
+                if rt == Ty::String && !unknown_named_arg {
                     if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
@@ -25888,7 +25964,7 @@ impl<'a> Checker<'a> {
                 ) {
                     return Ty::Int;
                 }
-                if module_members.is_empty() {
+                if module_members.is_empty() && !unknown_named_arg {
                     if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
@@ -26018,9 +26094,16 @@ impl<'a> Checker<'a> {
                     return ret;
                 }
                 if arg_names.is_some() {
+                    // A specific rejected LABEL beats the generic overload list: report the same
+                    // "no parameter with name 'z' found." the top-level, extension and constructor
+                    // origins report, pointed at the label itself. Deferred to here so an extension
+                    // owning that name still had its chance above.
+                    if self.report_pending_unknown_named_arg(call) {
+                        return Ty::Error;
+                    }
                     self.diags.error(
                         self.call_callee_name_span(call),
-                        "none of the following candidates is applicable:".to_string(),
+                        INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
                     );
                     return Ty::Error;
                 }
@@ -27127,15 +27210,18 @@ impl<'a> Checker<'a> {
                     self.implicit_receiver_types()
                         .into_iter()
                         .find_map(|receiver| {
-                            self.member_extension_lambda_param_types(
-                                receiver,
-                                &fname,
+                            self.member_extension_lambda_param_types(MemberExtensionCall {
+                                extension_receiver: receiver,
+                                name: &fname,
                                 args,
-                                this_member_partial.as_deref().unwrap_or_default(),
-                                arg_names.as_deref(),
-                                &explicit_type_args,
-                                self.file.call_has_trailing_lambda.contains(&call.0),
-                            )
+                                partial_arg_tys: this_member_partial.as_deref().unwrap_or_default(),
+                                arg_names: arg_names.as_deref(),
+                                explicit_type_args: &explicit_type_args,
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                            })
                         })
                 } else {
                     None
