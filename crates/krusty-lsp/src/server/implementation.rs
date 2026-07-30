@@ -36,6 +36,10 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 4;
 const MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE: usize = 32;
+/// How long shutdown waits for the analysis thread to notice the disconnect before
+/// abandoning it. Without a bound, one wedged analysis keeps the process — and its
+/// worker child — alive indefinitely after the client is gone.
+const ENGINE_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const MAX_OPEN_DOCUMENTS: usize = 256;
 const MAX_OPEN_SOURCE_BYTES: usize = MAX_RETAINED_ANALYSIS_BYTES;
 const MAX_CONTENT_CHANGES: usize = 256;
@@ -3726,10 +3730,17 @@ where
     }
     let mut engine = service.backend.into_engine();
     engine.disconnect();
-    while !engine.is_finished() {
+    let deadline = Instant::now() + ENGINE_SHUTDOWN_GRACE;
+    while !engine.is_finished() && Instant::now() < deadline {
         let _ = incoming.recv_timeout(Duration::from_millis(50));
     }
-    engine.join();
+    if engine.is_finished() {
+        engine.join();
+    } else {
+        // The analysis thread is wedged. Leave it detached and let process teardown
+        // reap it; blocking here would strand the server after the client is gone.
+        engine.abandon();
+    }
     outcome
 }
 

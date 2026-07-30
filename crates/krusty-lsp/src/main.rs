@@ -11,6 +11,7 @@ use krusty_lsp::{
     ProjectSources, ProjectSync, ProviderKind, RefreshOutcome, SystemEnvironment,
 };
 
+const ORPHAN_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
 const WORKER_RECONFIGURE_RETRY_MAX_MS: u64 = 30_000;
 const MAX_RETAINED_SUPPORT_DOCUMENTS: usize = 32 * 1024;
@@ -101,6 +102,27 @@ fn parse_cache_command(args: &[String]) -> Result<(bool, Option<PathBuf>), Strin
     Ok((all, root))
 }
 
+/// Terminate the worker once its server is gone.
+///
+/// The worker normally stops when the server closes its stdin, but a worker busy in
+/// analysis never reaches the next read and would survive as an orphan burning a core.
+/// Watching for reparenting catches that case without touching the analysis path.
+#[cfg(unix)]
+fn exit_when_orphaned() {
+    use std::os::unix::process::parent_id;
+
+    let server = parent_id();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(ORPHAN_CHECK_INTERVAL);
+        if parent_id() != server {
+            std::process::exit(0);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn exit_when_orphaned() {}
+
 fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("cache") {
@@ -117,6 +139,7 @@ fn main() {
         std::process::exit(2);
     });
     if worker_mode {
+        exit_when_orphaned();
         let stdin = io::stdin();
         let stdout = io::stdout();
         if let Err(error) = krusty_lsp::run_analysis_worker(
