@@ -4333,6 +4333,28 @@ pub(crate) fn best_by_args<'a>(
     let specificity =
         |_: usize, left: Ty, right: Ty| parameter_at_least_as_specific(lib, left, right, false);
 
+    // Exact arity, judged by ASSIGNABILITY, before the erased pass below. `erased_fits` admits a
+    // `kotlin/Any` parameter for any argument but nothing else that is merely assignable, so with
+    // `pick(value: Any)` and `pick(value: CharSequence)` in scope it dropped the CharSequence overload
+    // and selected the widest one — the opposite of Kotlin's most-specific rule. Judging by
+    // assignability first lets both compete and specificity decide; when only the `Any` overload fits,
+    // this pass finds nothing and the erased pass answers exactly as before.
+    match source_aware_most_specific(
+        cands.iter().filter_map(|(candidate, params)| {
+            fixed_parameter_shape(params, args, |position, param, arg| {
+                fits(position, param, arg)
+            })
+            .map(|shape| (shape, *candidate))
+        }),
+        specificity,
+    ) {
+        CandidateSelection::Selected(candidate) => {
+            return CandidateSelection::Selected(candidate);
+        }
+        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+        CandidateSelection::None => {}
+    }
+
     match source_aware_most_specific(
         cands.iter().filter_map(|(candidate, params)| {
             fixed_parameter_shape(params, args, |position, param, arg| {
