@@ -706,21 +706,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                     &self.options,
                 );
                 if self.options.dev() {
-                    // The retained URIs are parallel to `inputs`: a document outside this group had
-                    // its text blanked by `project_group_inputs`, so it gets an empty URI and can
-                    // never be selected as a dump target through this payload.
-                    let retained_uris = documents
-                        .iter()
-                        .enumerate()
-                        .map(|(index, (uri, _))| {
-                            if group.document_indices.contains(&index) {
-                                (*uri).to_string()
-                            } else {
-                                String::new()
-                            }
-                        })
-                        .chain(group.support_documents.iter().map(|(uri, _)| uri.clone()))
-                        .collect::<Vec<_>>();
+                    let retained_uris = project_group_uris(documents, &group);
                     let retained_sources = inputs
                         .iter()
                         .map(|input| input.text.to_string())
@@ -1065,26 +1051,58 @@ fn open_documents_from_modules<'a>(
         .collect()
 }
 
-fn project_group_inputs<'a>(
-    documents: &[(&'a str, &'a str)],
+/// The group's worker slots in wire order, each paired with the URI it may be dumped under.
+///
+/// One traversal so the source inputs and the dump URIs cannot drift apart: a slot's URI is empty
+/// exactly when that slot is not a primary document of this group, and a dump of an empty URI is
+/// never offered. Two kinds of slot are deliberately blank:
+///
+/// - open documents belonging to another group, whose text this group blanks out anyway; and
+/// - the support tail, which carries friend and dependency sources — including *open* files from
+///   another module. Those are analyzed here under this group's classpath and language arguments,
+///   not their own module's, so dumping one would render unresolved types and feature errors for a
+///   file the editor shows as clean.
+///
+/// The URI is a borrowed `&str` rather than an owned `String` because this traversal is on the
+/// analysis hot path; only the dev-mode dump path pays for copies.
+fn project_group_slots<'a>(
+    documents: &'a [(&'a str, &'a str)],
     group: &'a ProjectAnalysisGroup,
-) -> Vec<krusty::source::SourceInput<'a>> {
+) -> impl Iterator<Item = (&'a str, krusty::source::SourceInput<'a>)> + 'a {
     documents
         .iter()
         .enumerate()
-        .map(|(index, (uri, source))| {
-            krusty::source::SourceInput::new(
-                source_kind_from_uri(uri),
-                if group.document_indices.contains(&index) {
-                    source
-                } else {
-                    ""
-                },
+        .map(move |(index, (uri, source))| {
+            let in_group = group.document_indices.contains(&index);
+            (
+                if in_group { *uri } else { "" },
+                krusty::source::SourceInput::new(
+                    source_kind_from_uri(uri),
+                    if in_group { source } else { "" },
+                ),
             )
         })
         .chain(group.support_documents.iter().map(|(uri, source)| {
-            krusty::source::SourceInput::new(source_kind_from_uri(uri), source)
+            (
+                "",
+                krusty::source::SourceInput::new(source_kind_from_uri(uri), source),
+            )
         }))
+}
+
+fn project_group_inputs<'a>(
+    documents: &'a [(&'a str, &'a str)],
+    group: &'a ProjectAnalysisGroup,
+) -> Vec<krusty::source::SourceInput<'a>> {
+    project_group_slots(documents, group)
+        .map(|(_, input)| input)
+        .collect()
+}
+
+/// Dump URIs parallel to `project_group_inputs`, blank wherever the slot is not dumpable.
+fn project_group_uris(documents: &[(&str, &str)], group: &ProjectAnalysisGroup) -> Vec<String> {
+    project_group_slots(documents, group)
+        .map(|(uri, _)| uri.to_string())
         .collect()
 }
 
@@ -1611,6 +1629,126 @@ mod tests {
         assert!(!is_java_source_path(Path::new(
             "src/main/kotlin/p/Widget.kt"
         )));
+    }
+
+    /// A two-module fixture whose consumer group carries a support tail holding the *open*
+    /// dependency file, modelled on `project_analysis_groups_preserve_global_slots`.
+    fn consumer_group_fixture() -> (String, String, ProjectAnalysisGroup) {
+        let dependency_uri = url::Url::from_file_path("/workspace/dependency/src/First.kt")
+            .unwrap()
+            .to_string();
+        let consumer_uri = url::Url::from_file_path("/workspace/consumer/src/Second.kt")
+            .unwrap()
+            .to_string();
+        let group = ProjectAnalysisGroup {
+            module_index: Some(1),
+            document_indices: vec![2],
+            support_documents: vec![
+                (
+                    "file:///consumer-support.kt".into(),
+                    "fun helper() {}".into(),
+                ),
+                // Spliced in by `open_documents_from_modules`, so it carries the open text verbatim.
+                (dependency_uri.clone(), "fun dependency() {}".into()),
+            ],
+            inferred_support_count: 1,
+            java_sources: Vec::new(),
+            navigation_file_remaps: vec![(3, 4), (4, 0)],
+        };
+        (dependency_uri, consumer_uri, group)
+    }
+
+    #[test]
+    fn dump_uris_stay_parallel_to_the_group_inputs() {
+        let (dependency_uri, consumer_uri, group) = consumer_group_fixture();
+        let unowned_uri = url::Url::from_file_path("/workspace/other/Third.kt")
+            .unwrap()
+            .to_string();
+        let documents = [
+            (dependency_uri.as_str(), "fun dependency() {}"),
+            (unowned_uri.as_str(), "fun unowned() {}"),
+            (consumer_uri.as_str(), "fun consumer() {}"),
+        ];
+
+        let inputs = project_group_inputs(&documents, &group);
+        let uris = project_group_uris(&documents, &group);
+
+        assert_eq!(
+            uris.len(),
+            inputs.len(),
+            "a dump index is an index into the worker's own slots"
+        );
+        // Every dumpable slot must hold the text of the URI it claims, whatever order the traversal
+        // emits slots in.
+        for (slot, uri) in uris.iter().enumerate() {
+            if uri.is_empty() {
+                continue;
+            }
+            let expected = documents
+                .iter()
+                .find(|(open_uri, _)| open_uri == uri)
+                .unwrap_or_else(|| panic!("slot {slot} names an unknown document {uri}"))
+                .1;
+            assert_eq!(
+                inputs[slot].text, expected,
+                "slot {slot} does not hold the source of {uri}"
+            );
+        }
+        assert_eq!(
+            uris[2], consumer_uri,
+            "the group's own document is dumpable"
+        );
+        assert_eq!(uris[0], "", "another group's document has no source here");
+        assert_eq!(uris[1], "", "another group's document has no source here");
+    }
+
+    #[test]
+    fn support_documents_are_not_dumpable_under_another_modules_configuration() {
+        let (dependency_uri, consumer_uri, group) = consumer_group_fixture();
+        let unowned_uri = url::Url::from_file_path("/workspace/other/Third.kt")
+            .unwrap()
+            .to_string();
+        let documents = [
+            (dependency_uri.as_str(), "fun dependency() {}"),
+            (unowned_uri.as_str(), "fun unowned() {}"),
+            (consumer_uri.as_str(), "fun consumer() {}"),
+        ];
+        let inputs = project_group_inputs(&documents, &group);
+        let uris = project_group_uris(&documents, &group);
+        let sources = inputs
+            .iter()
+            .map(|input| input.text.to_string())
+            .collect::<Vec<_>>();
+        let kinds = inputs.iter().map(|input| input.kind).collect::<Vec<_>>();
+
+        // The dependency file is open and its real text sits in this group's support tail, but it is
+        // analyzed here under the consumer module's classpath and language arguments.
+        assert_eq!(sources[4], documents[0].1);
+        assert_eq!(uris[3], "", "support slots are never dumpable");
+        assert_eq!(uris[4], "", "support slots are never dumpable");
+
+        let mut retained = RetainedAnalysis::default();
+        retained.record(
+            true,
+            &AnalysisPayload {
+                sources: &sources,
+                source_kinds: &kinds,
+                uris: &uris,
+                result_count: documents.len(),
+                inferred_count: documents.len() + group.inferred_support_count,
+                java_sources: &[],
+                language_arguments: &["-Xcontext-parameters".to_string()],
+                classpath: None,
+            },
+        );
+
+        assert_eq!(
+            retained.index_of(&dependency_uri),
+            None,
+            "a file that is only support for another module must not be dumped under this \
+             module's configuration"
+        );
+        assert_eq!(retained.index_of(&consumer_uri), Some(2));
     }
 
     #[test]
