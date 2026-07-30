@@ -1048,6 +1048,7 @@ mod tests {
                 visibility: Visibility::Protected,
                 getter_name: "getState".into(),
                 setter_name: Some("setState".into()),
+                setter_visibility: Some(Visibility::Protected),
                 context_params: Vec::new(),
             },
         );

@@ -338,6 +338,117 @@ fn cross_file_class_construct_and_property_read() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Cross-file is a declaration-location detail, not a semantic property kind. This inspects the IR
+/// before any target pass so a regression cannot hide behind equivalent JVM bytecode: reads and writes
+/// of a sibling-file property must use the same `PropertyRead`/`PropertyWrite` nodes as same-file and
+/// classpath properties, never an early `getX`/`setX` call manufactured by common lowering.
+#[test]
+fn cross_file_member_properties_keep_semantic_ir() {
+    use krusty::diag::DiagSink;
+    use krusty::frontend::{check_file_at, collect_signatures};
+    use krusty::ir::{Callee, IrExpr};
+
+    let sources = [
+        "@JvmInline value class Label(val text: String)\n\
+         class Counter(var value: Int, val label: Label)\n",
+        "fun update(counter: Counter): Int {\n\
+         \x20 val before = counter.value\n\
+         \x20 counter.value = before + 1\n\
+         \x20 return counter.value\n\
+         }\n\
+         fun label(counter: Counter): String = counter.label.text\n",
+    ];
+    let mut diagnostics = DiagSink::new();
+    let files: Vec<_> = sources
+        .iter()
+        .map(|source| {
+            let tokens = krusty::lexer::lex(source, &mut diagnostics);
+            krusty::parser::parse(source, &tokens, &mut diagnostics)
+        })
+        .collect();
+    assert!(
+        !diagnostics.has_errors(),
+        "fixture should parse cleanly: {:?}",
+        diagnostics.diags
+    );
+
+    let mut symbols = collect_signatures(&files, &mut diagnostics);
+    let info = check_file_at(&files[1], 1, &mut symbols, &mut diagnostics);
+    assert!(
+        !diagnostics.has_errors(),
+        "fixture should resolve cleanly: {:?}",
+        diagnostics.diags
+    );
+    let ir = krusty::ir_lower::lower_file_at(
+        &files[1],
+        1,
+        &info,
+        &symbols,
+        &krusty::libraries::EmptySymbolSource,
+    )
+    .expect("cross-file property fixture should lower");
+
+    let reads = ir
+        .exprs
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression,
+                IrExpr::PropertyRead { owner, name, .. }
+                    if owner.matches("Counter") && name == "value"
+            )
+        })
+        .count();
+    let writes = ir
+        .exprs
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression,
+                IrExpr::PropertyWrite { owner, name, .. }
+                    if owner.matches("Counter") && name == "value"
+            )
+        })
+        .count();
+    assert_eq!(reads, 2, "both sibling-property reads must stay semantic");
+    assert_eq!(writes, 1, "the sibling-property write must stay semantic");
+    assert!(
+        ir.exprs.iter().any(|expression| {
+            matches!(
+                expression,
+                IrExpr::PropertyRead { owner, name, .. }
+                    if owner.matches("Counter") && name == "label"
+            )
+        }),
+        "a sibling value-class-typed property must stay semantic"
+    );
+    assert!(
+        ir.exprs.iter().any(|expression| {
+            matches!(
+                expression,
+                IrExpr::PropertyRead { owner, name, .. }
+                    if owner.matches("Label") && name == "text"
+            )
+        }),
+        "a value class's sole property must reach the JVM value-class pass as a semantic read"
+    );
+
+    assert!(
+        !ir.exprs.iter().any(|expression| {
+            matches!(
+                expression,
+                IrExpr::Call {
+                    callee: Callee::Virtual { owner, name, .. },
+                    ..
+                } if (owner.matches("Counter")
+                    && matches!(name.as_str(), "getValue" | "setValue" | "getLabel"))
+                    || (owner.matches("Label") && name == "getText")
+            )
+        }),
+        "common lowering must not encode a JVM accessor merely because the declaration is in another file"
+    );
+}
+
 /// A destructuring declaration `val (a, b) = c` where `c`'s class — with `operator fun componentN` —
 /// is defined in ANOTHER file of the same compilation. The componentN calls must resolve cross-file
 /// (`Virtual`), like an ordinary cross-file instance call.
@@ -657,8 +768,9 @@ fn ctor_omitted_non_const_default_uses_init_default() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// Cross-file value-class property read: mangled getter, erased return type, identity read of `.value`.
-/// A green run under `-Xverify:all` proves correct compilation.
+/// Cross-file value-class property access: mangled getter/setter, erased value descriptor, and identity
+/// read of `.value`. A green run under `-Xverify:all` proves both semantic operations were realized with
+/// the physical JVM type rather than the boxed Kotlin type retained in common IR.
 #[test]
 fn cross_file_value_class_property_read_uses_mangled_getter() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
@@ -679,14 +791,14 @@ fn cross_file_value_class_property_read_uses_mangled_getter() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("Domain.kt"),
-        "package demo\n@JvmInline value class Id(val value: String)\nclass Holder(val id: Id)\nfun make(): Holder = Holder(Id(\"OK\"))\n",
+        "package demo\n@JvmInline value class Id(val value: String)\nclass Holder(var id: Id)\nfun make(): Holder = Holder(Id(\"OK\"))\nfun next(): Id = Id(\"NEXT\")\n",
     )
     .unwrap();
-    // The read (`h.id` mangled getter → erased underlying, then `.value` identity) is in ANOTHER file
-    // from the value class and its holder; `make()` keeps the construction same-file (a separate shape).
+    // The reads and write are in ANOTHER file from the value class and its holder. `make()`/`next()` keep
+    // construction same-file so this fixture isolates property realization at the module boundary.
     fs::write(
         dir.join("Read.kt"),
-        "package demo\nfun box(): String = make().id.value\n",
+        "package demo\nfun box(): String {\n  val h = make()\n  if (h.id.value != \"OK\") return \"read\"\n  h.id = next()\n  return h.id.value\n}\n",
     )
     .unwrap();
     let kc = Command::new(&krusty)
@@ -719,7 +831,7 @@ fn cross_file_value_class_property_read_uses_mangled_getter() {
         .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&r.stdout).trim(),
-        "OK",
+        "NEXT",
         "stderr={}",
         String::from_utf8_lossy(&r.stderr)
     );

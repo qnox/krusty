@@ -958,6 +958,7 @@ pub fn lower_file_at_reporting(
                     .collect(),
                 type_params: c.type_params.clone(),
                 supertypes: vec![],
+                properties: Vec::new(),
                 fields: ir_fields,
                 ctor_param_count,
                 // All primary-ctor params in declaration order; `is_field` = it's a `val`/`var` property.
@@ -1317,6 +1318,23 @@ pub fn lower_file_at_reporting(
                     dispatch_receiver: Some(type_name(&internal)),
                     param_checks: vec![],
                 });
+                // A computed property stores nothing; its getter body is source-written Kotlin.
+                lo.ir.classes[id as usize]
+                    .properties
+                    .push(crate::ir::IrProperty {
+                        name: p.name.clone(),
+                        ty,
+                        backing_field: None,
+                        is_var: p.is_var,
+                        is_open: p.is_open,
+                        is_private: false,
+                        setter_is_private: false,
+                        getter: Some(fid),
+                        setter: None,
+                        getter_jvm_name: None,
+                        setter_jvm_name: None,
+                        needs_access_bridge: false,
+                    });
                 methods.entry(gname).or_default().push((mi, fid, ty));
                 method_fids.push(fid);
             }
@@ -1346,6 +1364,27 @@ pub fn lower_file_at_reporting(
                 if p.is_open {
                     lo.ir.open_methods.insert(fid);
                 }
+                // A delegated property stores the delegate, not a value; its accessors are bodies the
+                // front end builds from `getValue`/`setValue` calls.
+                lo.ir.classes[id as usize]
+                    .properties
+                    .push(crate::ir::IrProperty {
+                        name: p.name.clone(),
+                        ty: prop_ty,
+                        backing_field: None,
+                        is_var: p.is_var,
+                        is_open: p.is_open,
+                        is_private: false,
+                        setter_is_private: p
+                            .setter
+                            .as_ref()
+                            .is_some_and(|setter| setter.is_private),
+                        getter: Some(fid),
+                        setter: None,
+                        getter_jvm_name: None,
+                        setter_jvm_name: None,
+                        needs_access_bridge: false,
+                    });
                 methods.entry(gname).or_default().push((mi, fid, prop_ty));
                 method_fids.push(fid);
                 if p.is_var {
@@ -1360,6 +1399,14 @@ pub fn lower_file_at_reporting(
                         dispatch_receiver: Some(type_name(&internal)),
                         param_checks: vec![],
                     });
+                    if let Some(prop) = lo.ir.classes[id as usize]
+                        .properties
+                        .iter_mut()
+                        .rev()
+                        .find(|pr| pr.name == p.name)
+                    {
+                        prop.setter = Some(fid);
+                    }
                     if p.is_open {
                         lo.ir.open_methods.insert(fid);
                     }
@@ -1400,6 +1447,26 @@ pub fn lower_file_at_reporting(
                             }
                         }
                     }
+                    // An abstract/interface property: a declaration with no storage and no body.
+                    lo.ir.classes[id as usize]
+                        .properties
+                        .push(crate::ir::IrProperty {
+                            name: p.name.clone(),
+                            ty,
+                            backing_field: None,
+                            is_var: p.is_var,
+                            is_open: p.is_open,
+                            is_private: false,
+                            setter_is_private: p
+                                .setter
+                                .as_ref()
+                                .is_some_and(|setter| setter.is_private),
+                            getter: None,
+                            setter: None,
+                            getter_jvm_name: None,
+                            setter_jvm_name: None,
+                            needs_access_bridge: false,
+                        });
                     let gname = property_getter_name(&p.name);
                     if !methods.contains_key(&gname) {
                         let mi = method_fids.len() as u32;
@@ -1486,9 +1553,7 @@ pub fn lower_file_at_reporting(
                 for (pi, (pname, is_var, is_private, property_ty)) in field_props.iter().enumerate()
                 {
                     let fidx = pi + field_offset;
-                    if *is_private && !c.is_value && !has_companion {
-                        continue;
-                    }
+                    let private_no_accessor = *is_private && !c.is_value && !has_companion;
                     let fty = fields[fidx].1;
                     // Use the class field's IrType (carries declared `?` via `mark_nullable`), not the
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the
@@ -1503,6 +1568,49 @@ pub fn lower_file_at_reporting(
                         .iter()
                         .find(|pp| pp.name == *pname)
                         .is_some_and(|pp| pp.is_open);
+                    // A property that WRITES its own accessor over a backing field (`val x = init get() =
+                    // field`) has source-written bodies, so its accessors must never be bypassed.
+                    let prop_custom_accessor = c
+                        .body_props
+                        .iter()
+                        .any(|pp| pp.name == *pname && is_field_accessor_prop(pp));
+                    // The DECLARATION, recorded alongside the accessors still synthesized below: a
+                    // plain backing-field property has no source-written accessor body at all.
+                    lo.ir.classes[id as usize]
+                        .properties
+                        .push(crate::ir::IrProperty {
+                            name: pname.clone(),
+                            ty: *property_ty,
+                            backing_field: Some(fidx as u32),
+                            is_var: *is_var,
+                            is_open: prop_open,
+                            is_private: *is_private,
+                            setter_is_private: c.body_props.iter().any(|property| {
+                                property.name == *pname
+                                    && property
+                                        .setter
+                                        .as_ref()
+                                        .is_some_and(|setter| setter.is_private)
+                            }),
+                            getter: None,
+                            setter: None,
+                            getter_jvm_name: None,
+                            setter_jvm_name: None,
+                            needs_access_bridge: false,
+                        });
+                    let prop_record = lo.ir.classes[id as usize].properties.len() - 1;
+                    // kotlinc emits NO accessor for a private property — in-class reads go straight to
+                    // the backing field. The DECLARATION is recorded above regardless, so a use from
+                    // outside the class can see there is nothing to call.
+                    if private_no_accessor {
+                        continue;
+                    }
+                    // A property with NO source-written accessor needs none from the language lowering:
+                    // its `getX`/`setX` are a target realization of the declaration recorded above, and
+                    // the backend synthesizes them.
+                    if !prop_custom_accessor {
+                        continue;
+                    }
                     let gname = property_getter_name(pname);
                     if !methods.contains_key(&gname) {
                         // A plain field read; if the field is `lateinit` the backend's `GetField`
@@ -1544,6 +1652,9 @@ pub fn lower_file_at_reporting(
                             .entry(gname)
                             .or_default()
                             .push((mi, fid, *property_ty));
+                        if prop_custom_accessor {
+                            lo.ir.classes[id as usize].properties[prop_record].getter = Some(fid);
+                        }
                         method_fids.push(fid);
                     }
                     if *is_var {
@@ -1596,6 +1707,10 @@ pub fn lower_file_at_reporting(
                                         supers: Vec::new(),
                                     },
                                 );
+                            }
+                            if prop_custom_accessor {
+                                lo.ir.classes[id as usize].properties[prop_record].setter =
+                                    Some(fid);
                             }
                             methods.entry(sname).or_default().push((mi, fid, Ty::Unit));
                             method_fids.push(fid);
@@ -1798,6 +1913,7 @@ pub fn lower_file_at_reporting(
                     type_param_bounds: vec![],
                     type_params: Vec::new(),
                     supertypes: vec![],
+                    properties: Vec::new(),
                     fields: vec![],
                     ctor_param_count: 0,
                     ctor_args: vec![],
@@ -2816,18 +2932,33 @@ pub fn lower_file_at_reporting(
                         for (name, erased_params, erased_ret, default, logical_params) in
                             obligations
                         {
-                            let Some(impl_fid) = lo.resolve_bridge_method(
+                            let impl_fid = lo.resolve_bridge_method(
                                 internal_name,
                                 &name,
                                 &erased_params,
                                 erased_ret,
                                 default == Some(false),
-                            ) else {
+                            );
+                            // A property accessor is not an IR method — the backend synthesizes it — so
+                            // the DECLARATION is the implementation this obligation is satisfied by.
+                            let impl_sig = match impl_fid {
+                                Some(fid) => {
+                                    let f = &lo.ir.functions[fid as usize];
+                                    Some((f.params.clone(), f.ret, f.dispatch_receiver))
+                                }
+                                None => accessor_property_name(&name).and_then(|prop| {
+                                    let (declaring, ty, _) =
+                                        lo.declared_property(internal_name, &prop)?;
+                                    Some(if name.starts_with("set") {
+                                        (vec![ty], Ty::Unit, Some(declaring))
+                                    } else {
+                                        (Vec::new(), ty, Some(declaring))
+                                    })
+                                }),
+                            };
+                            let Some((concrete_params, concrete_ret, impl_owner)) = impl_sig else {
                                 continue;
                             };
-                            let implementation = &lo.ir.functions[impl_fid as usize];
-                            let concrete_params = implementation.params.clone();
-                            let concrete_ret = implementation.ret;
                             let concrete_erased_params = concrete_params
                                 .iter()
                                 .copied()
@@ -2838,8 +2969,7 @@ pub fn lower_file_at_reporting(
                             {
                                 continue;
                             }
-                            let inherited_target =
-                                implementation.dispatch_receiver != Some(internal_name);
+                            let inherited_target = impl_owner != Some(internal_name);
                             let inherited_signature_matches = inherited_target
                                 && erased_params.len() == concrete_params.len()
                                 && erased_params.iter().zip(&concrete_params).all(
@@ -2881,7 +3011,7 @@ pub fn lower_file_at_reporting(
                             {
                                 continue;
                             }
-                            if lo.ir.suspend_funs.contains(&impl_fid) {
+                            if impl_fid.is_some_and(|fid| lo.ir.suspend_funs.contains(&fid)) {
                                 return None;
                             }
                             if seen.insert((name.clone(), erased_params.clone(), erased_ret)) {
@@ -3074,7 +3204,14 @@ pub fn lower_file_at_reporting(
                 // Computed body-property getter bodies → `getX()` methods on the class.
                 for p in c.body_props.iter().filter(|p| is_computed_prop(p)) {
                     let gname = property_getter_name(&p.name);
-                    let (_, fid, _) = lo.class_info(&internal)?.methods[&gname][0];
+                    let Some(&(_, fid, _)) = lo
+                        .class_info(&internal)?
+                        .methods
+                        .get(&gname)
+                        .and_then(|o| o.first())
+                    else {
+                        continue;
+                    };
                     lo.scope.clear();
                     lo.boxed_elem.clear();
                     lo.next_value = 0;
@@ -3102,7 +3239,14 @@ pub fn lower_file_at_reporting(
                         .clone();
                     if let Some(getter) = p.getter.clone() {
                         let gname = property_getter_name(&p.name);
-                        let (_, fid, _) = lo.class_info(&internal)?.methods[&gname][0];
+                        let Some(&(_, fid, _)) = lo
+                            .class_info(&internal)?
+                            .methods
+                            .get(&gname)
+                            .and_then(|o| o.first())
+                        else {
+                            continue;
+                        };
                         lo.scope.clear();
                         lo.boxed_elem.clear();
                         lo.next_value = 0;
@@ -3122,7 +3266,14 @@ pub fn lower_file_at_reporting(
                             p.setter.as_ref().filter(|s| s.body.is_some()).cloned()
                         {
                             let sname = property_setter_name(&p.name);
-                            let (_, fid, _) = lo.class_info(&internal)?.methods[&sname][0];
+                            let Some(&(_, fid, _)) = lo
+                                .class_info(&internal)?
+                                .methods
+                                .get(&sname)
+                                .and_then(|o| o.first())
+                            else {
+                                continue;
+                            };
                             let pty = body_prop_ty(file, info, p, &*syms.libraries);
                             lo.scope.clear();
                             lo.boxed_elem.clear();
@@ -3160,7 +3311,14 @@ pub fn lower_file_at_reporting(
                         .expect("delegate field") as u32;
                     // Build a fresh `PropertyReference1Impl(A::class, "x", "getX()<ret>", 0)`.
                     let gname = property_getter_name(&p.name);
-                    let (_, get_fid, prop_ty) = lo.class_info(&internal)?.methods[&gname][0];
+                    let Some(&(_, get_fid, prop_ty)) = lo
+                        .class_info(&internal)?
+                        .methods
+                        .get(&gname)
+                        .and_then(|o| o.first())
+                    else {
+                        continue;
+                    };
                     let prop_sig = lo.property_reference_signature(&gname, prop_ty)?;
                     let propref_impl = lo.property_reference_impl(1, false)?;
                     let make_propref = |lo: &mut Lower| {
@@ -3208,7 +3366,14 @@ pub fn lower_file_at_reporting(
                     // setX(value): this.x$delegate.setValue(this, propref, value)
                     if p.is_var {
                         let sname = property_setter_name(&p.name);
-                        let (_, set_fid, _) = lo.class_info(&internal)?.methods[&sname][0];
+                        let Some(&(_, set_fid, _)) = lo
+                            .class_info(&internal)?
+                            .methods
+                            .get(&sname)
+                            .and_then(|o| o.first())
+                        else {
+                            continue;
+                        };
                         let sv = lo.syms.method_of_name(delegate_internal, "setValue")?;
                         let sv_desc = lo.runtime.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.emit_get_value(0);
@@ -4064,6 +4229,7 @@ pub fn lower_file_at_reporting(
                             type_param_bounds: vec![],
                             type_params: Vec::new(),
                             supertypes: vec![],
+                            properties: Vec::new(),
                             fields: prop_fields
                                 .iter()
                                 .zip(eprops.iter())
@@ -5026,6 +5192,20 @@ fn body_prop_ir_ty(
     } else {
         ir
     }
+}
+
+/// The property an accessor name denotes (`getFoo`/`setFoo` → `foo`), or `None` when the name is not
+/// accessor-shaped — the inverse of [`crate::names::property_getter_name`].
+fn accessor_property_name(name: &str) -> Option<String> {
+    let rest = name
+        .strip_prefix("get")
+        .or_else(|| name.strip_prefix("set"))?;
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    if !first.is_uppercase() {
+        return None;
+    }
+    Some(first.to_lowercase().collect::<String>() + chars.as_str())
 }
 
 fn is_computed_prop(p: &ast::PropDecl) -> bool {
@@ -6310,15 +6490,18 @@ impl<'a> Lower<'a> {
                     !c.static_props.contains_key(name)
                         && !c.static_methods.contains_key(&property_getter_name(name))
                 });
+                // Whether the class DECLARES this property — asked of the declaration, not of the
+                // accessors a target would emit for it.
+                let declares_property = self.class_info(&internal).is_some_and(|ci| {
+                    self.ir.classes[ci.id as usize]
+                        .properties
+                        .iter()
+                        .any(|p| p.name == name)
+                });
                 self.syms.class_scope_fully_visible(&internal)
                     && companion_free
                     && self.syms.prop_of(&internal, name).is_none()
-                    && self
-                        .resolve_method(&internal, &property_getter_name(name))
-                        .is_none()
-                    && self
-                        .resolve_method(&internal, &property_setter_name(name))
-                        .is_none()
+                    && !declares_property
             })
     }
 
@@ -8850,6 +9033,7 @@ impl<'a> Lower<'a> {
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],
+            properties: Vec::new(),
             fields: ir_fields,
             ctor_param_count: 0,
             ctor_args,
@@ -9257,14 +9441,7 @@ impl<'a> Lower<'a> {
                     .fields
                     .iter()
                     .position(|(n, _)| n == delegate || n == &synth_name)? as u32;
-            self.forward_iface_methods(
-                file,
-                iface_name,
-                delegate_idx,
-                class_id,
-                internal,
-                is_synth,
-            )?;
+            self.forward_iface_methods(file, iface_name, delegate_idx, class_id, internal)?;
         }
         // Expression delegates (`: I by Impl()`) always use a synthesized `$$delegate_e<j>` field.
         for (j, (iface_name, _e)) in c.delegation_exprs.iter().enumerate() {
@@ -9274,16 +9451,16 @@ impl<'a> Lower<'a> {
                 .fields
                 .iter()
                 .position(|(n, _)| n == &synth_name)? as u32;
-            self.forward_iface_methods(file, iface_name, delegate_idx, class_id, internal, true)?;
+            self.forward_iface_methods(file, iface_name, delegate_idx, class_id, internal)?;
         }
         Some(())
     }
 
     /// Synthesize, on `internal`, a forwarding method for each of interface `iface_name`'s methods that
-    /// calls it on the delegate field at `delegate_idx` (`fun m(args) = this.<field>.m(args)`). When
-    /// the delegate is synthesized (a non-`val` param or an expression — not a `val`-param field), bail
-    /// (skip the file) on a PROPERTY interface (`getX`/`setX` would go un-forwarded → `AbstractMethodError`)
-    /// or a GENERIC one (`A<Long, Int>` needs substituted-type bridges a raw forward mis-coerces).
+    /// calls it on the delegate field at `delegate_idx` (`fun m(args) = this.<field>.m(args)`).
+    /// Properties are declarations rather than functions in the semantic symbol table, so their getter
+    /// and setter forwarders are collected explicitly alongside ordinary methods. A GENERIC interface
+    /// whose primitive instantiation needs substituted bridges is rejected by the caller.
     fn forward_iface_methods(
         &mut self,
         file: &ast::File,
@@ -9291,30 +9468,24 @@ impl<'a> Lower<'a> {
         delegate_idx: u32,
         class_id: ClassId,
         internal: &str,
-        is_synth: bool,
     ) -> Option<()> {
-        // A synthesized-field delegation to a PROPERTY interface (`getX`/`setX`) would go un-forwarded
-        // (an `AbstractMethodError`) — skip. A generic interface instantiated with REFERENCE type
-        // arguments (`A<String> by a`) forwards correctly at the erased (`Object`) level; only a PRIMITIVE
-        // instantiation needs bridges, and that is rejected at the delegation site.
         let iface_internal = self
             .syms
             .class_names
             .get(iface_name)
             .map(TypeName::render)
             .unwrap_or_else(|| class_internal(file, iface_name));
-        let iface_sig = self
-            .syms
-            .class_by_internal(&iface_internal)
-            .or_else(|| self.syms.classes.get(iface_name));
-        if is_synth && iface_sig.is_some_and(|s| !s.props.is_empty()) {
-            return None;
-        }
         // Collect the delegated interface's methods AND those inherited from its super-interfaces
         // (`interface Second : First` → forward `First`'s methods too): a `: Second by s` class must
-        // implement every method Second exposes, not just the ones Second declares directly. Walk the
-        // module-`ClassSig` super-interface graph breadth-first, deduping by name + parameter types.
+        // implement every callable Second exposes, not just the ones Second declares directly. Walk the
+        // module-`ClassSig` super-interface graph breadth-first, deduping methods by signature and
+        // properties by source name. The property entry retains its declaring owner because an inherited
+        // accessor must dispatch against the interface that actually declares that JVM method.
         let mut methods: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
+        // Retain only the declaration facts lowering consumes. In particular, do not carry the
+        // resolver's `DeclaredPropertySig` across this boundary: `ir_lower` depends on the semantic
+        // symbol handoff, not the resolver implementation that originally populated it.
+        let mut properties: Vec<(TypeName, String, String, Option<String>, Ty)> = Vec::new();
         let mut seen_ifaces: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
         let mut queue = vec![existing_type_name(&iface_internal)
             .or_else(|| self.syms.classes.get(iface_name).map(|c| c.internal_name()))?];
@@ -9331,6 +9502,20 @@ impl<'a> Lower<'a> {
                     if !methods.iter().any(|(on, op, _)| on == n && *op == s.params) {
                         methods.push((n.clone(), s.params.clone(), s.ret));
                     }
+                }
+            }
+            for (name, property) in &cs.declared_props {
+                if !properties
+                    .iter()
+                    .any(|(_, inherited_name, _, _, _)| inherited_name == name)
+                {
+                    properties.push((
+                        cur,
+                        name.clone(),
+                        property.getter_name.clone(),
+                        property.setter_name.clone(),
+                        property.ty,
+                    ));
                 }
             }
             // Super-interfaces (and any base) are stored by internal name; the module table is keyed by
@@ -9363,6 +9548,50 @@ impl<'a> Lower<'a> {
                 self.emit_block(vec![ret_stmt], None)
             };
             self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
+        }
+        for (owner, _name, getter_name, setter_name, property_ty) in properties {
+            let field = self.this_field(class_id, delegate_idx);
+            let getter = self.emit_virtual_call(
+                owner,
+                getter_name.clone(),
+                self.runtime.method_descriptor(&[], property_ty)?,
+                true,
+                field,
+                vec![],
+            );
+            let returned = self.emit_return(Some(getter));
+            let body = self.emit_block(vec![returned], None);
+            self.add_synth_method(
+                internal,
+                class_id,
+                &getter_name,
+                vec![],
+                property_ty,
+                body,
+                false,
+            );
+            if let Some(setter_name) = setter_name {
+                let field = self.this_field(class_id, delegate_idx);
+                let value = self.emit_get_value(1);
+                let setter = self.emit_virtual_call(
+                    owner,
+                    setter_name.clone(),
+                    self.runtime.method_descriptor(&[property_ty], Ty::Unit)?,
+                    true,
+                    field,
+                    vec![value],
+                );
+                let body = self.emit_block(vec![setter], None);
+                self.add_synth_method(
+                    internal,
+                    class_id,
+                    &setter_name,
+                    vec![ty_to_ir(property_ty)],
+                    Ty::Unit,
+                    body,
+                    false,
+                );
+            }
         }
         Some(())
     }
@@ -9812,10 +10041,11 @@ impl<'a> Lower<'a> {
         let (receiver, receiver_ty) = self.lookup("this")?;
         let receiver = self.emit_get_value(receiver);
         if let Some(internal) = receiver_ty.non_null().obj_internal() {
-            if let Some((class, index, _, _)) =
-                self.resolve_method_name(internal, &property_getter_name(name))
+            // A property read on the extension's dispatch receiver — named, not realized, here.
+            if let Some(read) =
+                self.lower_field_read_on(receiver, &internal.render(), name, expression, None)
             {
-                return Some(self.emit_method_call(class, index, receiver, vec![]));
+                return Some(read);
             }
         }
         self.lower_member_read_on(receiver, receiver_ty, name, expression)
@@ -10888,6 +11118,38 @@ impl<'a> Lower<'a> {
         self.resolve_field_name(existing_type_name(internal)?, name)
     }
 
+    /// The property `name` DECLARED by `internal` or by one of its superclasses — the declaring owner,
+    /// its type, and whether it is private. Walks the same chain a field lookup does, because a property
+    /// is inherited exactly like the storage behind it.
+    fn declared_property(&self, internal: TypeName, name: &str) -> Option<(TypeName, Ty, bool)> {
+        let mut cur = Some(internal);
+        while let Some(ci_name) = cur {
+            let ci = self.class_info_name(ci_name)?;
+            if let Some(p) = self.ir.classes[ci.id as usize]
+                .properties
+                .iter()
+                .find(|p| p.name == name)
+            {
+                return Some((ci_name, p.ty, p.is_private));
+            }
+            cur = ci.super_internal;
+        }
+        None
+    }
+
+    /// Target-neutral declaration shape for a semantic property owner. Same-file classes are already in
+    /// the IR; sibling-file classes come from the module signature table. Keeping this one query prevents
+    /// each read/write lowering path from inventing its own file/module classification.
+    fn property_owner_is_interface(&self, owner: TypeName) -> bool {
+        self.class_info_name(owner)
+            .and_then(|class| self.ir.classes.get(class.id as usize))
+            .is_some_and(|class| class.is_interface)
+            || self
+                .syms
+                .class_by_type_name(owner)
+                .is_some_and(|class| class.is_interface())
+    }
+
     fn resolve_field_name(&self, internal: TypeName, name: &str) -> Option<(ClassId, u32, Ty)> {
         let mut cur = Some(internal);
         while let Some(ci_name) = cur {
@@ -11327,6 +11589,7 @@ impl<'a> Lower<'a> {
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],
+            properties: Vec::new(),
             fields: vec![],
             ctor_param_count: 0,
             ctor_args: vec![],
@@ -11445,6 +11708,7 @@ impl<'a> Lower<'a> {
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],
+            properties: Vec::new(),
             fields: vec![],
             ctor_param_count: 0,
             ctor_args: vec![],
@@ -11749,6 +12013,7 @@ impl<'a> Lower<'a> {
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],
+            properties: Vec::new(),
             fields: vec![],
             ctor_param_count: 0,
             ctor_args: vec![],
@@ -12402,6 +12667,7 @@ impl<'a> Lower<'a> {
             type_param_bounds: vec![],
             type_params: Vec::new(),
             supertypes: vec![],
+            properties: Vec::new(),
             fields: vec![],
             ctor_param_count: 0,
             ctor_args: vec![],
@@ -13882,6 +14148,86 @@ impl<'a> Lower<'a> {
     /// the receiver is `checkcast`'d to the owner so `getfield` verifies. `None` when `name` isn't a
     /// backing field. Shared by the `.` (Expr::Member) and `?.` (Expr::SafeCall) member-read paths so they
     /// don't re-implement the resolve→getter/GetField→coerce sequence independently.
+    /// Read a property `owner` DECLARES, on an already-lowered receiver. One place for the rules every
+    /// caller used to repeat: a private property has no accessor at all, so from outside its class the
+    /// read has no legal form and this path declines; anything else names the property and lets the
+    /// backend pick the realization from the declaration.
+    /// Record that a PRIVATE property is reached from outside its declaring class, so the backend exposes
+    /// a synthetic accessor for it. See [`crate::ir::IrProperty::needs_access_bridge`].
+    fn mark_property_access_bridge(&mut self, declaring: TypeName, name: &str) {
+        let Some(class) = self.class_info_name(declaring).map(|ci| ci.id) else {
+            return;
+        };
+        if let Some(p) = self.ir.classes[class as usize]
+            .properties
+            .iter_mut()
+            .find(|p| p.name == name)
+        {
+            p.needs_access_bridge = true;
+        }
+    }
+
+    fn lower_declared_property_read(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        e: AstExprId,
+    ) -> Option<u32> {
+        // A class whose declarations are not tracked yet (an enum entry's body, an anonymous object)
+        // still has the backing field; read that.
+        let (declaring, ty, is_private) = match self.declared_property(owner, name) {
+            Some((declaring, ty, is_private)) => (declaring, ty, is_private),
+            None => (
+                owner,
+                self.resolve_field_name(owner, name).map(|(_, _, t)| t)?,
+                false,
+            ),
+        };
+        // Reaching a PRIVATE property from outside its class is legal in Kotlin — an `inline` body is
+        // spliced into its caller — so the read stands and the declaring class exposes a synthetic
+        // accessor for it. Declining here would silently turn the `inline` call into an ordinary one,
+        // which is a different program.
+        if is_private && !self.can_access_source_private(owner) {
+            self.mark_property_access_bridge(declaring, name);
+        }
+        let read = self.ir.add_expr(IrExpr::PropertyRead {
+            receiver,
+            owner,
+            name: name.to_string(),
+            ty,
+            interface: self.property_owner_is_interface(owner),
+            operation: None,
+        });
+        Some(self.coerce_generic_read(read, e, ty))
+    }
+
+    /// [`Self::lower_declared_property_read`] with the property's type supplied by the caller (an
+    /// `inc`/`dec` already computed it) and no site coercion.
+    fn lower_declared_property_read_ty(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        ty: Ty,
+    ) -> Option<u32> {
+        let (declaring, private) = match self.declared_property(owner, name) {
+            Some((declaring, _, is_private)) => (declaring, is_private),
+            None => (owner, self.resolve_field_name(owner, name).map(|_| false)?),
+        };
+        if private && !self.can_access_source_private(owner) {
+            self.mark_property_access_bridge(declaring, name);
+        }
+        Some(self.ir.add_expr(IrExpr::PropertyRead {
+            receiver,
+            owner,
+            name: name.to_string(),
+            ty,
+            interface: self.property_owner_is_interface(owner),
+            operation: None,
+        }))
+    }
+
     fn lower_field_read_on(
         &mut self,
         recv: u32,
@@ -13890,24 +14236,45 @@ impl<'a> Lower<'a> {
         e: AstExprId,
         recv_slot_ty: Option<Ty>,
     ) -> Option<u32> {
-        let (class, idx, pty) = self.resolve_field(recv_internal, name)?;
-        let owner_internal = self.ir.classes[class as usize].fq_name_id();
-        if !self.can_access_source_private(owner_internal) {
-            if let Some((mclass, mindex, _, _)) =
-                self.resolve_method(recv_internal, &property_getter_name(name))
-            {
-                let read = self.emit_method_call(mclass, mindex, recv, vec![]);
-                return Some(self.coerce_generic_read(read, e, pty));
+        // Any property this class DECLARES, not only one with a backing field: a computed or delegated
+        // property stores nothing, but reading it is the same operation and the backend realizes it the
+        // same way (through the accessor it declares).
+        let (class, pty) = match self.resolve_field(recv_internal, name) {
+            Some((class, _idx, pty)) => (class, pty),
+            None => {
+                let class = self.class_info(recv_internal)?.id;
+                let declared = self.ir.classes[class as usize]
+                    .properties
+                    .iter()
+                    .find(|p| p.name == name)?;
+                (class, declared.ty)
             }
-        }
-        // Smartcast: if the receiver's slot type isn't the owning class, checkcast it so `getfield` is
-        // valid (an erased generic / `Any?` local narrowed by `is`).
-        let recv = if recv_slot_ty.is_some_and(|t| t != Ty::obj_name(owner_internal)) {
-            self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj_name(owner_internal)))
-        } else {
-            recv
         };
-        let read = self.emit_get_field(recv, class, idx);
+        let owner_internal = self.ir.classes[class as usize].fq_name_id();
+        // Smartcast: a receiver slot wider than the owning class (an erased generic / `Any?` narrowed by
+        // `is`) is narrowed to the owner. That is about the RECEIVER's type, not about how the property is
+        // read, so it stays here.
+        // A value class has no runtime type of its own — its values ARE the erased underlying — so there
+        // is nothing to narrow to.
+        let owner_is_value = self.ir.classes[class as usize].is_value;
+        let recv =
+            if !owner_is_value && recv_slot_ty.is_some_and(|t| t != Ty::obj_name(owner_internal)) {
+                self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj_name(owner_internal)))
+            } else {
+                recv
+            };
+        // The read itself is a property read like any other: a direct load of the backing field (legal
+        // only inside the declaring class) or the accessor is the backend's choice, not this one. The node
+        // carries the property's DECLARED type; substituting it to the type this site sees (a generic
+        // property read through a concrete receiver) is the same coercion every other read gets.
+        let read = self.ir.add_expr(IrExpr::PropertyRead {
+            receiver: recv,
+            owner: owner_internal,
+            name: name.to_string(),
+            ty: pty,
+            interface: self.property_owner_is_interface(owner_internal),
+            operation: None,
+        });
         Some(self.coerce_generic_read(read, e, pty))
     }
 
@@ -13973,27 +14340,13 @@ impl<'a> Lower<'a> {
             }
             ReceiverFnValueOrigin::DispatchProperty(owner) => {
                 let receiver = self.receiver_fn_dispatch_value(owner)?;
-                if self
-                    .syms
-                    .class_by_type_name(owner)
-                    .is_some_and(|class| class.is_interface())
-                {
-                    let (class, index, _, _) =
-                        self.resolve_method_name(owner, &property_getter_name(name))?;
-                    return Some(self.emit_method_call(class, index, receiver, vec![]));
-                }
-                if let Some((class, index, _)) = self.resolve_field_name(owner, name) {
-                    if self.can_access_source_private(owner)
-                        && !self
-                            .field_accessor_props
-                            .contains(&(owner, name.to_string()))
-                    {
-                        return Some(self.emit_get_field(receiver, class, index));
-                    }
-                }
-                let (class, index, _, _) =
-                    self.resolve_method_name(owner, &property_getter_name(name))?;
-                Some(self.emit_method_call(class, index, receiver, vec![]))
+                // A synthesized class (an anonymous object capturing a receiver lambda) has no tracked
+                // declaration; its captured field carries the type.
+                let ty = self
+                    .declared_property(owner, name)
+                    .map(|(_, ty, _)| ty)
+                    .or_else(|| self.resolve_field_name(owner, name).map(|(_, _, ty)| ty))?;
+                self.lower_declared_property_read_ty(receiver, owner, name, ty)
             }
             ReceiverFnValueOrigin::TopLevelProperty => {
                 if let Some(&(getter, _)) = self.computed_props.get(name) {
@@ -14053,20 +14406,8 @@ impl<'a> Lower<'a> {
         for (value, ty) in receivers {
             let recv = self.emit_get_value(value);
             if let Some(internal) = ty.obj_internal() {
-                if let Some((class, index, _, _)) =
-                    self.resolve_method_name(internal, &property_getter_name(name))
-                {
-                    return Some(self.emit_method_call(class, index, recv, vec![]));
-                }
-                if let Some((class, index, field_ty)) = self.resolve_field_name(internal, name) {
-                    let owner = self.ir.classes[class as usize].fq_name();
-                    if !existing_type_name(&owner)
-                        .is_some_and(|owner| self.can_access_source_private(owner))
-                    {
-                        return None;
-                    }
-                    let read = self.emit_get_field(recv, class, index);
-                    return Some(self.coerce_generic_read(read, e, field_ty));
+                if let Some(read) = self.lower_declared_property_read(recv, internal, name, e) {
+                    return Some(read);
                 }
             }
             if let Some(read) = self.lower_member_read_on(recv, ty, name, e) {
@@ -14082,46 +14423,6 @@ impl<'a> Lower<'a> {
         // site) is a valid reference at runtime — the getter dispatches the same, and krusty does not
         // enforce null-safety. Without this a `foo().bar` on a `Foo?`-typed result resolves no member.
         let rt = rt.non_null();
-        // A property on a class defined in ANOTHER file → its public `getX()` accessor (the backing
-        // field is private). Resolved from the sibling class's `ClassSig`.
-        if let Ty::Obj(i, _) = rt {
-            if self.class_of(rt).is_none() {
-                if let Some((owner, ret_ty, is_iface)) = self
-                    .syms
-                    .class_by_type_name(i)
-                    .filter(|cs| cs.value_field.is_none())
-                    .and_then(|cs| {
-                        cs.props
-                            .iter()
-                            .find_map(|(n, t, _)| (n == name).then_some((i, *t, cs.is_interface())))
-                    })
-                {
-                    return Some(self.emit_call(
-                        Callee::Virtual {
-                            owner,
-                            name: property_getter_name(name),
-                            descriptor: String::new(),
-                            params: Some((vec![], ty_to_ir(ret_ty))),
-                            interface: is_iface,
-                        },
-                        Some(recv),
-                        vec![],
-                    ));
-                }
-            }
-        }
-        // Reading a value class's sole underlying field on a cross-file receiver is the identity
-        // in the erased representation (the receiver IS the unboxed underlying).
-        if let Ty::Obj(i, _) = rt {
-            if self
-                .syms
-                .class_by_type_name(i)
-                .and_then(|cs| cs.value_field.as_ref())
-                .is_some_and(|(fname, _)| fname == name)
-            {
-                return Some(recv);
-            }
-        }
         // A Kotlin property is a zero-arg member. Resolve the semantic property name through the
         // library source first; mapped builtins supply their physical owner/name/descriptor there.
         let internal = match rt {
@@ -14129,6 +14430,23 @@ impl<'a> Lower<'a> {
             Ty::Obj(i, _) => i,
             _ => return None,
         };
+        // The checker resolved `recv.name` to a member property and said so. Lowering names that property;
+        // how the target reads it (a field, an instance accessor, a receiverless one) is the backend's
+        // decision, made from the owner's declaration. Without the record the read resolved to something
+        // else, and the caller's other paths handle it.
+        let ty = self.info.ty(e);
+        if let Some(ExprLowering::MemberPropertyRead { owner, interface }) =
+            self.info.expr_lowers.get(&e)
+        {
+            return Some(self.ir.add_expr(IrExpr::PropertyRead {
+                receiver: recv,
+                owner: *owner,
+                name: name.to_string(),
+                ty,
+                interface: *interface,
+                operation: None,
+            }));
+        }
         let resolved = self.info.resolved_member(e).cloned().map(|r| {
             let m = r.member;
             let physical_ret = m.physical_ret;
@@ -16390,16 +16708,23 @@ impl<'a> Lower<'a> {
                     let (this_v, this_ty) = self.lookup("this")?;
                     let recv = self.emit_get_value(this_v);
                     {
-                        let internal = this_ty.obj_internal()?.to_string();
-                        let (sclass, sindex, sfid, _) =
-                            self.resolve_method(&internal, &property_setter_name(&name))?;
-                        let pty = self.ir.functions[sfid as usize]
-                            .params
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| ty_to_ir(Ty::obj("kotlin/Any")));
-                        let val = self.lower_arg(value, &pty)?;
-                        Some(self.emit_method_call(sclass, sindex, recv, vec![Some(val)]))
+                        // A property write on the implicit receiver — named, not realized, here. A
+                        // private property has no setter to call, so this path declines.
+                        let owner = this_ty.obj_internal()?;
+                        let (_, pty, is_private) = self.declared_property(owner, &name)?;
+                        if is_private && !self.can_access_source_private(owner) {
+                            return None;
+                        }
+                        let val = self.lower_arg(value, &ty_to_ir(pty))?;
+                        Some(self.ir.add_expr(IrExpr::PropertyWrite {
+                            receiver: recv,
+                            owner,
+                            name: name.clone(),
+                            value: val,
+                            ty: pty,
+                            interface: self.property_owner_is_interface(owner),
+                            operation: None,
+                        }))
                     }
                 }
             }
@@ -16473,14 +16798,11 @@ impl<'a> Lower<'a> {
                                 .map(|i| (ci.id, i as u32))
                         })
                     });
+                    let _ = own;
+                    let owner_tn = type_name(&internal);
                     let recv = self.emit_get_value(this_v);
-                    let cur_val = if let Some((class, idx)) = own {
-                        self.emit_get_field(recv, class, idx)
-                    } else {
-                        let (gclass, gindex, _, _) =
-                            self.resolve_method(&internal, &property_getter_name(&name))?;
-                        self.emit_method_call(gclass, gindex, recv, vec![])
-                    };
+                    let cur_val =
+                        self.lower_declared_property_read_ty(recv, owner_tn, &name, fty)?;
                     let nv = self.lower_incdec_updated_value(
                         IncDecSite::Statement(s),
                         cur_val,
@@ -16488,13 +16810,15 @@ impl<'a> Lower<'a> {
                         dec,
                     )?;
                     let recv2 = self.emit_get_value(this_v);
-                    return Some(if let Some((class, idx)) = own {
-                        self.emit_set_field(recv2, class, idx, nv)
-                    } else {
-                        let (sclass, sindex, _, _) =
-                            self.resolve_method(&internal, &property_setter_name(&name))?;
-                        self.emit_method_call(sclass, sindex, recv2, vec![Some(nv)])
-                    });
+                    return Some(self.ir.add_expr(IrExpr::PropertyWrite {
+                        receiver: recv2,
+                        owner: owner_tn,
+                        name: name.clone(),
+                        value: nv,
+                        ty: fty,
+                        interface: self.property_owner_is_interface(owner_tn),
+                        operation: None,
+                    }));
                 }
                 let (v, ty) = self.lookup(&name)?;
                 // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()`.
@@ -17342,90 +17666,71 @@ impl<'a> Lower<'a> {
             ));
         }
         let rt = self.info.ty(receiver);
-        // A property write on a `var` of a class defined in ANOTHER file → its `setX(v)` accessor
-        // (the backing field is private). A cross-file `val` write bails.
-        if self.class_of(rt).is_none() {
-            if let Ty::Obj(i, _) = &rt {
-                if let Some((owner, pty, is_var, interface)) = self
-                    .syms
-                    .class_by_type_name(*i)
-                    .filter(|cs| cs.value_field.is_none())
-                    .and_then(|cs| {
-                        cs.props.iter().find_map(|(n, t, v)| {
-                            (n.as_str() == name).then_some((*i, *t, *v, cs.is_interface()))
-                        })
-                    })
-                {
-                    if !is_var {
-                        return None;
-                    }
-                    let r = self.expr(receiver)?;
-                    let v = self.lower_arg(value, &ty_to_ir(pty))?;
-                    return Some(self.emit_call(
-                        Callee::Virtual {
-                            owner,
-                            name: property_setter_name(name),
-                            descriptor: String::new(),
-                            params: Some((vec![ty_to_ir(pty)], Ty::Unit)),
-                            interface,
-                        },
-                        Some(r),
-                        vec![v],
-                    ));
-                }
-            }
-        }
-        // A `var` member of a CLASSPATH type → its setter resolved by real `@Metadata` name
-        // (mirrors the getter read in `lower_member_read_on`). The setter `LibraryCallable`
-        // carries the owner/descriptor for the `invokevirtual`; its parameter type coerces the
-        // value (`Int` literal into a `Long` setter).
-        if self.class_of(rt).is_none() {
-            if let Ty::Obj(_, _) = &rt {
-                if let Some(setter) = self.info.property_setter(stmt).cloned() {
-                    let pty = setter
-                        .params
-                        .first()
-                        .map(|t| ty_to_ir(*t))
-                        .unwrap_or_else(|| ty_to_ir(self.info.ty(value)));
-                    let setter_owner = setter.owner_type();
-                    let is_iface = self.library_type_is_interface(setter_owner);
-                    let r = self.expr(receiver)?;
-                    let v = self.lower_arg(value, &pty)?;
-                    return Some(self.emit_virtual_call(
-                        setter_owner,
-                        setter.name,
-                        setter.descriptor,
-                        is_iface,
-                        r,
-                        vec![v],
-                    ));
-                }
-            }
-        }
-        let owner_internal = self.class_of(rt)?.internal();
-        // The backing field is private; a write from outside the declaring class goes through
-        // the public `setX()` accessor (matching kotlinc). Inside the class, write directly.
-        if !existing_type_name(&owner_internal)
-            .is_some_and(|owner| self.can_access_source_private(owner))
+        // The checker resolved `recv.name = value` to a member property and said so. Lowering names that
+        // property; the store form — a field store, an instance setter, a receiverless one — is the
+        // backend's decision, made from the owner's declaration. Mirrors the read in
+        // `lower_member_read_on`.
+        if let Some(StmtLowering::MemberPropertyWrite {
+            owner,
+            ty,
+            interface,
+        }) = self.info.stmt_lowers.get(&stmt).cloned()
         {
-            if let Some((mclass, mindex, mfid, _)) =
-                self.resolve_method(&owner_internal, &property_setter_name(name))
-            {
-                let pty = self.ir.functions[mfid as usize].params[0].clone();
-                let r = self.expr(receiver)?;
-                let v = self.lower_arg(value, &pty)?;
-                return Some(self.emit_method_call(mclass, mindex, r, vec![Some(v)]));
+            let r = self.expr(receiver)?;
+            let v = self.lower_arg(value, &ty_to_ir(ty))?;
+            return Some(self.ir.add_expr(IrExpr::PropertyWrite {
+                receiver: r,
+                owner,
+                name: name.to_string(),
+                value: v,
+                ty,
+                interface,
+                operation: None,
+            }));
+        }
+        // A property of a class THIS compilation declares. Same rule as everywhere else: name the
+        // property, and let the backend decide whether the store is a direct field write (legal only
+        // inside the declaring class, where the backing field is reachable) or the `setX()` accessor.
+        let owner_internal = self.class_of(rt)?.internal();
+        let owner = type_name(&owner_internal);
+        // The property's type comes from its backing field, or — for a property that has none (a custom
+        // setter, a delegated `x$delegate`) — from the setter it declares. Neither means this is not a
+        // property of the class, and the caller's other paths apply.
+        // A private property written from outside its class needs the synthetic setter, same as a read.
+        if let Some((declaring, _, true)) = self.declared_property(type_name(&owner_internal), name)
+        {
+            if !self.can_access_source_private(declaring) {
+                self.mark_property_access_bridge(declaring, name);
             }
         }
-        let (class, idx, field_ty) = {
-            let ci = self.class_of(rt)?;
-            let idx = ci.fields.iter().position(|(fn_, _)| fn_.as_str() == name)? as u32;
-            (ci.id, idx, ty_to_ir(ci.fields[idx as usize].1))
-        };
+        let prop_ty = self
+            .class_of(rt)
+            .and_then(|ci| {
+                ci.fields
+                    .iter()
+                    .find(|(fname, _)| fname.as_str() == name)
+                    .map(|(_, t)| *t)
+            })
+            .or_else(|| {
+                let class = self.class_of(rt)?.id;
+                self.ir.classes[class as usize]
+                    .properties
+                    .iter()
+                    .find(|p| p.name == name)
+                    .map(|p| p.ty)
+            })?;
         let r = self.expr(receiver)?;
-        // Coerce the value to the field's type (e.g. `Int` literal into a `Long` field).
-        let v = self.lower_arg(value, &field_ty)?;
-        Some(self.emit_set_field(r, class, idx, v))
+        // Coerce the value to the property's type (e.g. `Int` literal into a `Long` property).
+        let v = self.lower_arg(value, &ty_to_ir(prop_ty))?;
+        Some(self.ir.add_expr(IrExpr::PropertyWrite {
+            receiver: r,
+            owner,
+            name: name.to_string(),
+            value: v,
+            ty: prop_ty,
+            interface: self.property_owner_is_interface(owner),
+            operation: None,
+        }))
     }
 
     /// Whether `receiver.name = value` is a compound assignment (`receiver.name op= …`): the parser
@@ -18563,24 +18868,14 @@ impl<'a> Lower<'a> {
         let nullc = self.emit_const(IrConst::Null);
         let cond = self.emit_primitive_bin_op(IrBinOp::Ne, get1, nullc);
         let recv2 = self.emit_get_value(v);
-        let member = if let Some((fclass, idx, _)) = self.resolve_field(&internal, name) {
-            let owner_internal = self.ir.classes[fclass as usize].fq_name();
-            if !existing_type_name(&owner_internal)
-                .is_some_and(|owner| self.can_access_source_private(owner))
-            {
-                if let Some((mclass, mindex, _, _)) =
-                    self.resolve_method(&internal, &property_getter_name(name))
-                {
-                    self.emit_method_call(mclass, mindex, recv2, vec![])
-                } else {
-                    self.emit_get_field(recv2, fclass, idx)
-                }
+        // The same property read as anywhere else — `lower_field_read_on` names the property and leaves
+        // the field-vs-accessor choice to the backend, so this path does not repeat it.
+        let member =
+            if let Some(read) = self.lower_field_read_on(recv2, &internal, name, source, None) {
+                read
             } else {
-                self.emit_get_field(recv2, fclass, idx)
-            }
-        } else {
-            self.lower_member_read_on(recv2, recv_ty, name, source)?
-        };
+                self.lower_member_read_on(recv2, recv_ty, name, source)?
+            };
         Some((var, cond, member))
     }
 
@@ -19885,10 +20180,13 @@ impl<'a> Lower<'a> {
                         // different class), so read through the property getter — a direct `getfield`
                         // would be an `IllegalAccessError`. Fall back to a direct field read only when
                         // there is no getter (a public/platform field).
-                        if let Some((class, index, _, _)) =
-                            self.resolve_method_name(bi, &property_getter_name(&n))
+                        // The narrowed receiver's property read — the backend picks the accessor (this
+                        // is a DIFFERENT class, so its backing field is unreachable) from the owner's
+                        // declaration, as everywhere else.
+                        if let Some(read) =
+                            self.lower_field_read_on(cast, &bi.render(), &n, e, None)
                         {
-                            return Some(self.emit_method_call(class, index, cast, vec![]));
+                            return Some(read);
                         }
                         if let Some(ResolvedCall::Member(resolved)) =
                             self.info.resolved_calls.get(&e).cloned()
@@ -19930,12 +20228,9 @@ impl<'a> Lower<'a> {
                                     .map(|i| (ci.id, i as u32))
                             })
                         };
-                        if let Some((class, idx)) = field {
-                            self.emit_get_field(recv, class, idx)
-                        } else if let Some((class, index, _, _)) =
-                            self.resolve_method_name(cur, &property_getter_name(&n))
-                        {
-                            self.emit_method_call(class, index, recv, vec![])
+                        let _ = field;
+                        if let Some(read) = self.lower_declared_property_read(recv, cur, &n, e) {
+                            read
                         } else {
                             // An inner class reads an enclosing member through `this$0` (its field 0).
                             let cur_id = self.class_info_name(cur)?.id;
@@ -19958,10 +20253,9 @@ impl<'a> Lower<'a> {
                             } else {
                                 self.emit_get_field(recv, cur_id, 0)
                             };
-                            // The outer backing field is private — read it through its synthesized getter.
-                            let (class, index, _, _) =
-                                self.resolve_method(&outer, &property_getter_name(&n))?;
-                            self.emit_method_call(class, index, this0, vec![])
+                            // The outer property, read from the inner class — a different class, so the
+                            // backend takes its accessor.
+                            self.lower_field_read_on(this0, &outer, &n, e, None)?
                         }
                     } else {
                         // An extension/receiver-lambda implicit receiver: `fun A.f() = n` (or
@@ -19971,14 +20265,10 @@ impl<'a> Lower<'a> {
                         // collection accessor, …) — the same path a qualified `this.n` read takes.
                         let internal = this_ty.obj_internal();
                         if let Some(internal) = internal {
-                            if let Some((class, index, _, _)) =
-                                self.resolve_method_name(internal, &property_getter_name(&n))
+                            if let Some(read) =
+                                self.lower_field_read_on(recv, &internal.render(), &n, e, None)
                             {
-                                self.emit_method_call(class, index, recv, vec![])
-                            } else if let Some((fclass, idx, _)) =
-                                self.resolve_field_name(internal, &n)
-                            {
-                                self.emit_get_field(recv, fclass, idx)
+                                read
                             } else {
                                 self.lower_member_read_on(recv, this_ty, &n, e)?
                             }
@@ -20178,18 +20468,10 @@ impl<'a> Lower<'a> {
                         Expr::Name(n) => self.lookup(n).map(|(_, t)| t),
                         _ => None,
                     };
-                    if let Some(read) =
-                        self.lower_field_read_on(recv, &recv_internal, &name, e, slot_ty)
-                    {
-                        read
-                    } else if let Some((class, index, _, _)) =
-                        self.resolve_method(&recv_internal, &property_getter_name(&name))
-                    {
-                        // A computed property → `recv.getX()`.
-                        self.emit_method_call(class, index, recv, vec![])
-                    } else {
-                        return None;
-                    }
+                    // Every property this class declares — backing-field, computed or delegated — goes
+                    // through the shared helper, which names the property and leaves the realization to
+                    // the backend.
+                    self.lower_field_read_on(recv, &recv_internal, &name, e, slot_ty)?
                 } else {
                     // A property read on a builtin/library/another-file receiver (`s.length`,
                     // `list.size`, a sibling class's `getX()`): resolved generically through the shared
