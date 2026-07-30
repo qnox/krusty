@@ -21,6 +21,10 @@ const MAX_INDEX_CHUNK_FILES: usize = 32;
 const MAX_QUEUED_INDEX_FILES: usize = 200_000;
 
 /// Index levels, ordered strictly behind interactive work and behind each other.
+///
+/// Only the tests construct these so far: this change builds the queueing, and the workspace
+/// source enumeration that feeds it is the next one. The allow goes away with that producer.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndexPriority {
     /// Files in modules that hold an open document, or that depend on one.
@@ -35,6 +39,8 @@ pub struct IndexJob {
     pub uris: Vec<String>,
 }
 
+/// See [`IndexPriority`] for why this is not read outside the tests yet.
+#[allow(dead_code)]
 pub struct IndexBatch {
     pub priority: IndexPriority,
     pub files: Vec<IndexedFile>,
@@ -91,6 +97,8 @@ pub(crate) enum EngineEvent {
     Project(ProjectFeedback),
     ReanalyzeRequested,
     AnalysisComplete(AnalysisBatch),
+    /// See [`IndexPriority`]: the service drops these until the store that consumes them lands.
+    #[allow(dead_code)]
     IndexProgress(IndexBatch),
     Materialized(MaterializeResult),
     Status(ServerStatus),
