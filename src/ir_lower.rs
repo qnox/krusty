@@ -9482,8 +9482,10 @@ impl<'a> Lower<'a> {
         // properties by source name. The property entry retains its declaring owner because an inherited
         // accessor must dispatch against the interface that actually declares that JVM method.
         let mut methods: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
-        let mut properties: Vec<(TypeName, String, crate::resolve::DeclaredPropertySig)> =
-            Vec::new();
+        // Retain only the declaration facts lowering consumes. In particular, do not carry the
+        // resolver's `DeclaredPropertySig` across this boundary: `ir_lower` depends on the semantic
+        // symbol handoff, not the resolver implementation that originally populated it.
+        let mut properties: Vec<(TypeName, String, String, Option<String>, Ty)> = Vec::new();
         let mut seen_ifaces: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
         let mut queue = vec![existing_type_name(&iface_internal)
             .or_else(|| self.syms.classes.get(iface_name).map(|c| c.internal_name()))?];
@@ -9505,9 +9507,15 @@ impl<'a> Lower<'a> {
             for (name, property) in &cs.declared_props {
                 if !properties
                     .iter()
-                    .any(|(_, inherited_name, _)| inherited_name == name)
+                    .any(|(_, inherited_name, _, _, _)| inherited_name == name)
                 {
-                    properties.push((cur, name.clone(), property.clone()));
+                    properties.push((
+                        cur,
+                        name.clone(),
+                        property.getter_name.clone(),
+                        property.setter_name.clone(),
+                        property.ty,
+                    ));
                 }
             }
             // Super-interfaces (and any base) are stored by internal name; the module table is keyed by
@@ -9541,12 +9549,12 @@ impl<'a> Lower<'a> {
             };
             self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
         }
-        for (owner, _name, property) in properties {
+        for (owner, _name, getter_name, setter_name, property_ty) in properties {
             let field = self.this_field(class_id, delegate_idx);
             let getter = self.emit_virtual_call(
                 owner,
-                property.getter_name.clone(),
-                self.runtime.method_descriptor(&[], property.ty)?,
+                getter_name.clone(),
+                self.runtime.method_descriptor(&[], property_ty)?,
                 true,
                 field,
                 vec![],
@@ -9556,19 +9564,19 @@ impl<'a> Lower<'a> {
             self.add_synth_method(
                 internal,
                 class_id,
-                &property.getter_name,
+                &getter_name,
                 vec![],
-                property.ty,
+                property_ty,
                 body,
                 false,
             );
-            if let Some(setter_name) = property.setter_name {
+            if let Some(setter_name) = setter_name {
                 let field = self.this_field(class_id, delegate_idx);
                 let value = self.emit_get_value(1);
                 let setter = self.emit_virtual_call(
                     owner,
                     setter_name.clone(),
-                    self.runtime.method_descriptor(&[property.ty], Ty::Unit)?,
+                    self.runtime.method_descriptor(&[property_ty], Ty::Unit)?,
                     true,
                     field,
                     vec![value],
@@ -9578,7 +9586,7 @@ impl<'a> Lower<'a> {
                     internal,
                     class_id,
                     &setter_name,
-                    vec![ty_to_ir(property.ty)],
+                    vec![ty_to_ir(property_ty)],
                     Ty::Unit,
                     body,
                     false,
