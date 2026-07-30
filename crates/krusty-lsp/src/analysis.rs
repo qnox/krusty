@@ -184,17 +184,19 @@ impl WorkspaceSymbolBudget {
         package: &str,
         new_package: bool,
     ) -> bool {
+        let name_cost = if new_name {
+            workspace_symbol_string_wire_cost(name)
+        } else {
+            0
+        };
+        let package_cost = if new_package {
+            workspace_symbol_string_wire_cost(package)
+        } else {
+            0
+        };
         let bytes = WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES
-            .saturating_add(
-                new_name
-                    .then(|| workspace_symbol_string_wire_cost(name))
-                    .unwrap_or(0),
-            )
-            .saturating_add(
-                new_package
-                    .then(|| workspace_symbol_string_wire_cost(package))
-                    .unwrap_or(0),
-            );
+            .saturating_add(name_cost)
+            .saturating_add(package_cost);
         self.reserve(bytes)
     }
 
