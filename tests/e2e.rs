@@ -138,6 +138,8 @@ mod classpath_ctor_vs_same_named_function_e2e;
 mod classpath_data_copy_e2e;
 #[path = "classpath_default_args_e2e.rs"]
 mod classpath_default_args_e2e;
+#[path = "classpath_default_vararg_call_e2e.rs"]
+mod classpath_default_vararg_call_e2e;
 #[path = "classpath_enum_regex_vc_e2e.rs"]
 mod classpath_enum_regex_vc_e2e;
 #[path = "classpath_function_reference_e2e.rs"]

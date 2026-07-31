@@ -1932,6 +1932,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cannot supply a final vararg and reads
   `passing value as a vararg is allowed only inside a parenthesized argument list.`; normal overload
   selection still takes precedence.
+- **A `vararg` parameter is always omittable in default-argument resolution.** Kotlin metadata never
+  sets `declares_default_value` on a `vararg` — it is implicitly omittable — so
+  `CallSig::has_known_required_param` skips the vararg slot (mirroring the call-arg slot mapper).
+  Without this, a classpath function with BOTH a defaulted parameter and a `vararg` (mockk's
+  `mockk(name: String? = null, …, vararg moreInterfaces: KClass<*>, …)`) rejected its own `$default`
+  candidate on a call omitting both, reporting `unresolved function 'mockk'`
+  (`classpath_default_vararg_call_e2e`). Known gap: the named-array form `f(more = arrayOf(x))` with
+  an omitted default before the vararg still fails to map.
   Calling an ordinary member or a concrete non-null extension through a nullable receiver reports
   `only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T?'.`
   at the unsafe `.`. A nullable-receiver extension remains callable through ordinary dot syntax and
