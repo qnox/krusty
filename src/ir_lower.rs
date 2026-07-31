@@ -22204,7 +22204,10 @@ impl<'a> Lower<'a> {
             }
             // A user-defined `inline fun foo(...)` — expand it here (kotlinc's inliner): bind its
             // value parameters to the evaluated arguments, register its lambda arguments, and
-            // lower its body so a lambda capturing a mutable local works (no closure).
+            // lower its body so a lambda capturing a mutable local works (no closure). When the
+            // splice declines (the fn lives in a SIBLING file — its body isn't available here),
+            // fall through to the ordinary dispatch: the cross-file path emits a static call to
+            // the sibling facade, which emits inline fns as real methods (kotlinc's shape).
             if self.lookup(&fname).is_none() {
                 if let Some(target) = self
                     .info
@@ -22213,14 +22216,16 @@ impl<'a> Lower<'a> {
                     .cloned()
                 {
                     let target_name = target.name.clone();
-                    return self.lower_inline_fn_call(
+                    if let Some(r) = self.lower_inline_fn_call(
                         &target_name,
                         &args,
                         e.0,
                         None,
                         Some(&target),
                         None,
-                    );
+                    ) {
+                        return Some(r);
+                    }
                 }
             }
             // SAM conversion `Pred { lambda }`: constructor syntax for a functional interface.
@@ -23319,6 +23324,10 @@ impl<'a> Lower<'a> {
             // Inner-class construction `outerInstance.Inner(args)` → `new Outer$Inner(outer,
             // args)`: the checker typed the call as the inner class (whose first field is the
             // synthetic `this$0`), so pass the receiver as the leading constructor argument.
+            // `this0_outer` must be Some — a NESTED (non-inner) class has no `this$0`, and a bare
+            // CLASSIFIER receiver (`Outer.Inner(…)`) has no object type to compare, so the
+            // equality would pass vacuously and steal the nested-class construction below
+            // whenever the argument count coincidentally fits (`S.E(x)` with an omitted default).
             if let Some(class_id) = self
                 .info
                 .ty(e)
@@ -23336,6 +23345,7 @@ impl<'a> Lower<'a> {
                         _ => None,
                     };
                     c.fq_name().ends_with(&format!("${name}"))
+                        && this0_outer.is_some()
                         && this0_outer == self.info.ty(receiver).obj_internal()
                 })
             {

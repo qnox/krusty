@@ -26667,6 +26667,87 @@ impl<'a> Checker<'a> {
                 // Nested-class construction `Outer.Inner(args)`.
                 if let Some(qname) = self.same_file_nested_class_qname(receiver, &name) {
                     if let Some(cls) = self.syms.classes.get(&qname).cloned() {
+                        // Route through the general source-constructor selection (defaults,
+                        // varargs, secondaries, generic inference) so an omitted default records
+                        // the same `ResolvedConstructor::Source` the lowerer's default-filling
+                        // consumes — exactly like an unqualified `Inner(args)` construction.
+                        if let Some(declaration) =
+                            self.source_class_decl_by_internal(cls.internal_name())
+                        {
+                            let arg_tys = self.arg_tys(args);
+                            let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
+                            let arguments = CtorDelegationCall {
+                                args: args.to_vec(),
+                                names,
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                            };
+                            let candidates = self.source_constructor_candidates(&declaration, &cls);
+                            if let Some(selected) =
+                                self.select_source_constructor(&arguments, &candidates)
+                            {
+                                for (index, (&argument, &expected)) in
+                                    args.iter().zip(&selected.argument_types).enumerate()
+                                {
+                                    let constraint = selected
+                                        .argument_slots
+                                        .get(index)
+                                        .and_then(|&slot| selected.parameter_constraints.get(slot))
+                                        .copied()
+                                        .unwrap_or_default();
+                                    if constraint == ConstructorParameterConstraint::Concrete {
+                                        self.expect_assignable(
+                                            expected,
+                                            self.expr_types[argument.0 as usize],
+                                            self.span(argument),
+                                            "constructor argument",
+                                        );
+                                    }
+                                }
+                                let primary = matches!(
+                                    &selected.target,
+                                    ResolvedCtorDelegationTarget::ThisPrimary { .. }
+                                );
+                                let params = selected.target.params().to_vec();
+                                let inferred = if primary && selected.vararg.is_none() {
+                                    let mut slots = vec![None; params.len()];
+                                    for (&argument, &slot) in
+                                        args.iter().zip(&selected.argument_slots)
+                                    {
+                                        slots[slot] = Some(argument);
+                                    }
+                                    self.expect_source_constructor_args(
+                                        call,
+                                        &cls,
+                                        &params,
+                                        args,
+                                        &arg_tys,
+                                        Some(&slots),
+                                    )
+                                } else {
+                                    Vec::new()
+                                };
+                                self.resolved_constructors.insert(
+                                    call,
+                                    ResolvedConstructor::Source {
+                                        primary,
+                                        params,
+                                        argument_slots: selected.argument_slots,
+                                        argument_types: selected.argument_types,
+                                        omitted: selected.omitted,
+                                        vararg: selected.vararg,
+                                        default_masks: selected.default_masks,
+                                    },
+                                );
+                                return self.ctor_result_name_with_inferred(
+                                    call,
+                                    cls.internal_name(),
+                                    inferred,
+                                );
+                            }
+                        }
                         if arg_names.is_some()
                             || self.file.call_has_trailing_lambda.contains(&call.0)
                         {
@@ -26702,7 +26783,16 @@ impl<'a> Checker<'a> {
                             }
                         }
                         let arg_tys = self.arg_tys(args);
-                        let params = if cls.ctor_params.len() == arg_tys.len() {
+                        // A trailing parameter with a default may be omitted positionally (the
+                        // default fills at the call site, like a top-level constructor call).
+                        let required = cls
+                            .ctor_param_names
+                            .iter()
+                            .rposition(|(_, has_default)| !has_default)
+                            .map_or(0, |i| i + 1);
+                        let params = if arg_tys.len() >= required
+                            && arg_tys.len() <= cls.ctor_params.len()
+                        {
                             Some(cls.ctor_params.clone())
                         } else {
                             cls.secondary_ctors
@@ -26752,7 +26842,15 @@ impl<'a> Checker<'a> {
                         let qualified = format!("{outer}.{name}");
                         if let Some(cls) = self.syms.classes.get(&qualified).cloned() {
                             let arg_tys = self.arg_tys(args);
-                            if cls.ctor_params.len() != arg_tys.len() {
+                            // A trailing parameter with a default may be omitted positionally
+                            // (`S.E(Exception())` — the default fills at the call site, exactly
+                            // like a top-level constructor call).
+                            let required = cls
+                                .ctor_param_names
+                                .iter()
+                                .rposition(|(_, has_default)| !has_default)
+                                .map_or(0, |i| i + 1);
+                            if arg_tys.len() < required || arg_tys.len() > cls.ctor_params.len() {
                                 self.diags.error(
                                     span,
                                     format!(
