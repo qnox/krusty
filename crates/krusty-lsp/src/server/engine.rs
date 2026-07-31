@@ -239,6 +239,10 @@ struct CommandState {
     queued: HashMap<String, QueuedIndexEntry>,
     queued_bytes: usize,
     index_admission_truncated: bool,
+    /// Files handed out, and files enumerated, since the sweep began. Progress reports the pair so
+    /// a large workspace shows movement instead of a constant chunk size.
+    indexed_done: usize,
+    indexed_total: usize,
     generation: u64,
     disconnected: bool,
 }
@@ -354,6 +358,9 @@ impl CommandState {
                                     stale_sweep_copy: false,
                                 },
                             );
+                            // Count admitted work, not queue copies. Promotion adds a higher-priority
+                            // copy and leaves the sweep copy stale, but the URI is still processed once.
+                            self.indexed_total = self.indexed_total.saturating_add(1);
                         }
                     }
                     chunk.push(uri);
@@ -437,6 +444,7 @@ impl CommandState {
                 // Every URI in the chunk was promoted to a higher level; it is a stale duplicate.
                 continue;
             };
+            self.indexed_done = self.indexed_done.saturating_add(job.uris.len());
             return Some(EngineCommand::Index(job));
         }
     }
@@ -477,12 +485,30 @@ impl CommandState {
     }
 
     fn indexing_outstanding(&self) -> bool {
-        !self.neighborhood.is_empty() || !self.sweep.is_empty()
+        // `queued` is the ownership authority. Priority promotion deliberately leaves a stale sweep
+        // copy in its deque; counting raw chunks would keep the progress token open after the promoted
+        // URI had finished, even though `take` will discard that stale copy without producing work.
+        !self.queued.is_empty()
+    }
+
+    /// `(files handed out, files seen)` for this sweep. Reset once nothing is queued, so the next
+    /// sweep counts from zero rather than continuing a stale total.
+    fn indexing_progress(&mut self) -> (usize, usize) {
+        if !self.indexing_outstanding() {
+            let done = self.indexed_done;
+            let total = self.indexed_total;
+            self.indexed_done = 0;
+            self.indexed_total = 0;
+            return (done, total);
+        }
+        (self.indexed_done, self.indexed_total)
     }
 
     /// Work queued against the previous model must never run against its replacement.
     fn replace_index_generation(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
+        self.indexed_done = 0;
+        self.indexed_total = 0;
         self.neighborhood.clear();
         self.sweep.clear();
         self.queued.clear();
@@ -579,6 +605,14 @@ impl CommandReceiver {
         if !state.disconnected {
             state.enqueue(command);
         }
+    }
+
+    fn indexing_progress(&self) -> (usize, usize) {
+        self.queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .indexing_progress()
     }
 
     fn interactive_pending(&self) -> bool {
@@ -772,7 +806,6 @@ fn run<A: Analysis>(
 ) {
     update_admission(&admission, analyze.document_admission());
     let mut last_ready = analyze.analysis_ready();
-    let mut indexing = false;
     let mut submitted_sweep_generation = None;
     let _ = events.send(Incoming::Engine(EngineEvent::ReadyState(last_ready)));
     // Reconfiguration and analysis must remain ordered on this thread.
@@ -788,21 +821,18 @@ fn run<A: Analysis>(
             Some(EngineCommand::Analyze(job)) => {
                 Some(format!("Analyzing {} files", job.documents.len()))
             }
-            Some(EngineCommand::Index(job)) if !indexing => {
-                indexing = true;
-                Some(format!("Indexing {} files", job.uris.len()))
+            Some(EngineCommand::Index(_)) => {
+                let (done, total) = commands.indexing_progress();
+                // Report the operation, not the chunk: "Indexing 32 files" never moved on a large
+                // workspace, so it was impossible to tell a running sweep from a finished one.
+                Some(format!("Indexing workspace: {done} of {total} files"))
             }
-            Some(EngineCommand::Index(_)) => None,
             _ => None,
         };
         if let Some(message) = working {
             if send_status(&events, ServerStatus::Working(message)).is_err() {
                 break;
             }
-        } else if !matches!(command, Some(EngineCommand::Index(_))) {
-            // Any other command ends with Ready, which closes the shared progress token. Clearing
-            // the latch here means the next chunk re-announces instead of indexing silently.
-            indexing = false;
         }
         match command {
             None => {
@@ -949,11 +979,10 @@ fn run<A: Analysis>(
                 }
                 // Progress spans the whole sweep: reporting Ready per chunk would open and close a
                 // token thousands of times over a large workspace.
-                if !outstanding {
-                    indexing = false;
-                    if send_status(&events, ServerStatus::Ready).is_err() {
-                        break;
-                    }
+                // Ready only when the sweep is done, so the progress token spans the whole
+                // operation and each chunk updates its message instead of reopening it.
+                if !outstanding && send_status(&events, ServerStatus::Ready).is_err() {
+                    break;
                 }
             }
             Some(EngineCommand::ProjectChange {
@@ -1911,7 +1940,67 @@ mod tests {
         assert_eq!(
             statuses,
             vec![
-                ServerStatus::Working("Indexing 2 files".to_string()),
+                ServerStatus::Working("Indexing workspace: 2 of 2 files".to_string()),
+                ServerStatus::Ready,
+            ]
+        );
+        engine.join();
+    }
+
+    #[test]
+    fn multiple_index_chunks_report_monotonic_operation_progress() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn index_workspace_files(&mut self, uris: &[&str]) -> IndexOutcome {
+                IndexOutcome {
+                    files: uris
+                        .iter()
+                        .map(|uri| IndexedFile {
+                            uri: (*uri).to_string(),
+                            diagnostics: Vec::new(),
+                            text_hash: 0,
+                            text: String::new(),
+                        })
+                        .collect(),
+                    conclusive: true,
+                }
+            }
+        }
+
+        let file_count = MAX_INDEX_CHUNK_FILES + 1;
+        let (tx, rx) = sync_channel(16);
+        let engine = AnalysisEngine::spawn(Mock, tx);
+        engine.submit(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Sweep,
+            uris: (0..file_count)
+                .map(|index| format!("file:///w/F{index}.kt"))
+                .collect(),
+        }));
+
+        let mut statuses = Vec::new();
+        while statuses.len() < 3 {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Incoming::Engine(EngineEvent::Status(status))) => statuses.push(status),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            statuses,
+            vec![
+                ServerStatus::Working(format!(
+                    "Indexing workspace: {MAX_INDEX_CHUNK_FILES} of {file_count} files"
+                )),
+                ServerStatus::Working(format!(
+                    "Indexing workspace: {file_count} of {file_count} files"
+                )),
                 ServerStatus::Ready,
             ]
         );
@@ -1978,6 +2067,15 @@ mod tests {
         };
         assert_eq!(first.priority, IndexPriority::Neighborhood);
         assert_eq!(first.uris, vec!["file:///w/A.kt".to_string()]);
+        assert!(
+            !state.indexing_outstanding(),
+            "a stale sweep copy must not keep the operation marked as active"
+        );
+        assert_eq!(
+            state.indexing_progress(),
+            (1, 1),
+            "promotion changes priority, not the amount of admitted work"
+        );
         assert!(
             state.take().is_none(),
             "the superseded sweep entry must not be indexed a second time"
