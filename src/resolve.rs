@@ -11884,6 +11884,71 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// The member-call last-resort diagnostic, with the rejected overloads LISTED: the bare
+    /// "none of the following candidates is applicable:" prefix said nothing about WHICH members
+    /// rejected `recv.name(args)` — an empty list reads as a compiler bug, not a verdict. Render
+    /// each discarded overload (source declarations via `source_callable_display`, classpath
+    /// members from their resolved signature), deduped and bounded by the shared caps.
+    fn inapplicable_member_candidates_message(
+        &self,
+        name: &str,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> String {
+        let prefix = INAPPLICABLE_OVERLOAD_PREFIX;
+        let mut message = String::from(prefix);
+        let mut seen = std::collections::HashSet::new();
+        for candidate in candidates {
+            if seen.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
+                break;
+            }
+            let display = self.source_callable_display(candidate).unwrap_or_else(|| {
+                // An extension's `callable.params` prepends the receiver while `call_sig` does
+                // not; skip it so names and types stay parallel.
+                let (params, receiver) = match candidate.kind {
+                    crate::libraries::FnKind::Extension => (
+                        &candidate.callable.params[1.min(candidate.callable.params.len())..],
+                        candidate.receiver,
+                    ),
+                    _ => (candidate.callable.params.as_slice(), None),
+                };
+                let parameters =
+                    Self::callable_ref_parameters(params, &candidate.call_sig.param_names);
+                let suspend = if candidate.callable.suspend {
+                    "suspend "
+                } else {
+                    ""
+                };
+                match receiver {
+                    Some(receiver) => format!(
+                        "{suspend}fun {}.{name}({parameters}): {}",
+                        receiver.source_name(),
+                        candidate.callable.ret.source_name()
+                    ),
+                    None => format!(
+                        "{suspend}fun {name}({parameters}): {}",
+                        candidate.callable.ret.source_name()
+                    ),
+                }
+            });
+            if seen.contains(&display) {
+                continue;
+            }
+            let separator = if message.len() == prefix.len() {
+                "\n\n"
+            } else {
+                "\n"
+            };
+            // The message only grows, so one over-cap display means every later one is too.
+            if message.len() + separator.len() + display.len() > MAX_OVERLOAD_DIAGNOSTIC_BYTES {
+                break;
+            }
+            message.push_str(separator);
+            message.push_str(&display);
+            seen.insert(display);
+        }
+        message
+    }
+
     fn toplevel_source_ref_candidate(
         name: &str,
         function: &crate::libraries::FunctionInfo,
@@ -17753,7 +17818,11 @@ impl<'a> Checker<'a> {
             Expr::Lambda { params, .. } if !params.is_empty() => {
                 Some(Ty::fun(vec![Ty::Error; params.len()], Ty::Error))
             }
-            Expr::Lambda { body, .. } if self.file.expr_uses_name(*body, "it") => {
+            // An `it` already bound by an ENCLOSING lambda (or a local) is captured, not a new
+            // implicit parameter: `s?.let { log.warn { "k=$it" } }` passes a `Function0`.
+            Expr::Lambda { body, .. }
+                if self.file.expr_uses_name(*body, "it") && self.lookup("it").is_none() =>
+            {
                 Some(Ty::fun(vec![Ty::Error], Ty::Error))
             }
             Expr::Lambda { .. } => Some(Ty::Error),
@@ -18849,7 +18918,12 @@ impl<'a> Checker<'a> {
             // parameters but a body referencing `it`, bind the implicit single parameter.
             let bind_names: Vec<String> = if !params.is_empty() {
                 params.clone()
-            } else if self.file.expr_uses_name(body, "it") {
+            } else if self.file.expr_uses_name(body, "it") && self.lookup("it").is_none() {
+                // The body mentions `it` and no enclosing scope provides one: bind the implicit
+                // single parameter. When `it` IS already in scope (an enclosing lambda's implicit
+                // parameter or a local), the reference is a capture — binding a fresh `it` here
+                // would both shadow it and inflate the arity, so `log.warn { "k=$it" }` inside
+                // `s?.let { … }` stopped matching `warn(Function0)`.
                 vec!["it".to_string()]
             } else {
                 vec![]
@@ -27505,17 +27579,17 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                 }
-                let has_inapplicable_candidate = self
+                let inapplicable_candidates = self
                     .resolver()
                     .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                     .map(crate::symbol_resolver::Symbol::overloads)
-                    .is_some_and(|overloads| !overloads.is_empty());
+                    .unwrap_or_default();
                 self.diags.error(
                     self.call_callee_name_span(call),
-                    if has_inapplicable_candidate {
-                        INAPPLICABLE_OVERLOAD_PREFIX.to_string()
-                    } else {
+                    if inapplicable_candidates.is_empty() {
                         format!("unresolved reference '{name}'.")
+                    } else {
+                        self.inapplicable_member_candidates_message(&name, &inapplicable_candidates)
                     },
                 );
                 Ty::Error
@@ -33089,6 +33163,41 @@ fun box(): String {
                 .iter()
                 .map(|diagnostic| &diagnostic.msg)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn inapplicable_member_call_lists_the_rejected_overloads() {
+        // The member-call last-resort diagnostic must NAME the overloads that rejected the call —
+        // the bare prefix alone reads as a compiler bug, not a verdict (the kotlin-logging
+        // `log.warn { … }` false positive surfaced with an empty list).
+        let source = "fun f(): String = \"\".choose(\"x\")\n";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        let message = diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .find(|msg| msg.starts_with("none of the following candidates is applicable:"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the inapplicable member call should report its candidates: {:?}",
+                    diagnostics
+                        .diags
+                        .iter()
+                        .map(|diagnostic| &diagnostic.msg)
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            message.contains("fun choose(a: Boolean): String")
+                && message.contains("fun choose(a: Int): String"),
+            "every rejected overload should be listed, got: {message:?}"
         );
     }
 

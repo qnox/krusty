@@ -44,6 +44,32 @@ fn classpath_object_member_imported_unqualified() {
     }
 }
 
+/// A trailing lambda that captures the ENCLOSING lambda's implicit `it` — the real kotlin-logging
+/// `org.kcOrgId?.let { … log.warn { "kcOrgId=$it" } }` shape. The overload set mirrors `KLogger.warn`
+/// (several `Function0`/String overloads): resolving it probes the lambda's arity, and the textual
+/// "body mentions `it` ⇒ arity 1" guess must not fire when `it` is already bound by `let` — it made
+/// every `Function0` overload inapplicable ("none of the following candidates is applicable:").
+#[test]
+fn classpath_overloaded_member_trailing_lambda_captures_enclosing_it() {
+    const OVERLOAD_LIB: &str = "package lib\n\
+         class KLogger {\n\
+           fun warn(msg: () -> Any?) { msg() }\n\
+           fun warn(t: Throwable?, msg: () -> Any?) { msg() }\n\
+           fun warn(msg: String?) {}\n\
+           fun warn(t: Throwable?, msg: String?) {}\n\
+         }\n\
+         object KotlinLogging { fun logger(block: () -> Unit): KLogger = KLogger() }\n";
+    let main = "import lib.KotlinLogging.logger\n\
+        private val log = logger {}\n\
+        fun box(): String {\n\n        \x20 val s: String? = \"v\"\n\
+        \x20 s?.let { log.warn { \"k=$it\" } }\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    if let Some(out) = common::run_box_against("objmember_it", OVERLOAD_LIB, main) {
+        assert_eq!(out.trim(), "OK", "box() = {out:?}");
+    }
+}
+
 /// A top-level `val` with a name DISTINCT from the imported member (`val log = logger {}`) — the pure
 /// signature-phase inference path, with no property/import name collision to disambiguate.
 #[test]
