@@ -568,6 +568,7 @@ pub fn facade_package_metadata(
             // Resolve the contract's source type references once, against this module: a type
             // parameter stays a `Type.type_parameter` reference; a class becomes its internal
             // name. Unresolvable references stay `Source` (the emitter degrades them to `Any`).
+            context_count: sig.context_count,
             contract: sig.contract.as_ref().map(|c| {
                 // Source-level class name → JVM internal name: a module class first, then the
                 // known imports (same lookup as the checker's, kept local for module layering).

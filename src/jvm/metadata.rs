@@ -749,6 +749,10 @@ struct ParsedFunction {
     /// Raw `TypeTable` message body (`Function.type_table`, field 30) — contract expressions may
     /// reference their `is_instance_type` by id into this table instead of inlining the `Type`.
     type_table_body: Option<Vec<u8>>,
+    /// `Function.context_parameter` (field 13) entries — the LEADING context parameters
+    /// (`context(a: A, b: B) fun f(…)`), excluded from the source value-parameter arity.
+    /// Per entry: whether its type is nullable (drives context-source matching at call sites).
+    context_params_nullable: Vec<bool>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -775,6 +779,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut annotation_bodies: Vec<Vec<u8>> = Vec::new();
     let mut contract_body: Option<Vec<u8>> = None;
     let mut type_table_body: Option<Vec<u8>> = None;
+    let mut context_params_nullable: Vec<bool> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -788,6 +793,26 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 // references index into it.
                 let n = pb.varint()? as usize;
                 type_table_body = Some(pb.bytes(n)?.to_vec());
+            }
+            (13, 2) => {
+                // Function.context_parameter (repeated `ValueParameter`) — leading context
+                // parameters, NOT part of the source arity. `ValueParameter.type` = 3 (inline
+                // `Type`) carries the nullability.
+                let n = pb.varint()? as usize;
+                let vb = pb.bytes(n)?;
+                let mut vp = Pb { b: vb, i: 0 };
+                let mut nullable = false;
+                while !vp.at_end() {
+                    let vt = vp.varint()?;
+                    match (vt >> 3, vt & 7) {
+                        (3, 2) => {
+                            let tn = vp.varint()? as usize;
+                            nullable = parse_type_nullable(vp.bytes(tn)?);
+                        }
+                        (_, w) => vp.skip(w)?,
+                    }
+                }
+                context_params_nullable.push(nullable);
             }
             (12, 2) => {
                 // Function.annotation (repeated `Annotation`) — decoded downstream (needs the string table).
@@ -900,6 +925,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         annotation_bodies,
         contract_body,
         type_table_body,
+        context_params_nullable,
     })
 }
 
@@ -1576,6 +1602,11 @@ pub struct MetaFn {
     /// contract IR — the effects the checker applies at call sites (`returns(…) implies …`,
     /// `callsInPlace`). `None` when the function declares no contract.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
+    /// Number of LEADING context parameters (`context(a: A) fun f()`), excluded from the source
+    /// arity — a caller supplies them implicitly from the enclosing context, not positionally.
+    pub context_count: usize,
+    /// Per context parameter: whether its declared type is nullable.
+    pub context_params_nullable: Vec<bool>,
 }
 
 impl MetaFn {
@@ -1964,6 +1995,8 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                         value_params,
                         generic_sig,
                         contract,
+                        context_count: pf.context_params_nullable.len(),
+                        context_params_nullable: pf.context_params_nullable.clone(),
                     });
                 }
             }

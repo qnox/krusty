@@ -6838,6 +6838,22 @@ impl<'a> Parser<'a> {
             {
                 self.parse_anon_object(span)
             }
+            // A suspending lambda literal `suspend { … }` (in value position): the `suspend`
+            // modifier marks the following lambda — recorded in a side-table so the checker types
+            // it as a `suspend (…) -> …` function type and the lowerer builds a SuspendLambda
+            // state machine for it (otherwise it misparses as a call to a fn named `suspend`).
+            TokenKind::Ident
+                if self.text() == "suspend"
+                    && self
+                        .t
+                        .get(self.i + 1)
+                        .is_some_and(|t| t.kind == TokenKind::LBrace) =>
+            {
+                self.bump(); // 'suspend'
+                let lambda = self.parse_lambda();
+                self.file.suspend_lambdas.insert(lambda.0);
+                lambda
+            }
             TokenKind::Ident => {
                 let mut n = self.text().to_string();
                 self.bump();

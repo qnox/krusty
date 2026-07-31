@@ -728,6 +728,8 @@ pub struct MetadataCallFacts {
     pub is_operator: bool,
     /// The callable's declared contract, decoded from `@Metadata` (`None` when it has none).
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
+    /// Leading context parameters (supplied implicitly by the caller, not positionally).
+    pub context_count: usize,
 }
 
 impl MetadataCallFacts {
@@ -738,6 +740,7 @@ impl MetadataCallFacts {
             ret: ReturnInfo::default(),
             is_operator: false,
             contract: None,
+            context_count: 0,
         }
     }
 }
@@ -955,7 +958,11 @@ impl BuiltinsFile {
 /// the `Object` descriptor, `plusAssign(elements: Iterable)` the `Iterable` one).
 fn meta_callable_aligns(f: &super::metadata::MetaFn, desc_params: &[Ty]) -> Option<(usize, usize)> {
     let off = f.is_extension() as usize;
-    let end = off + f.value_params.len();
+    // Context parameters sit between the (extension) receiver and the value parameters in the
+    // JVM descriptor; metadata keeps them out of `value_parameter` (field 13 instead), so the
+    // aligned descriptor span is receiver + context + value params.
+    let ctx = f.context_count;
+    let end = off + ctx + f.value_params.len();
     if end > desc_params.len() {
         return None;
     }
@@ -968,7 +975,7 @@ fn meta_callable_aligns(f: &super::metadata::MetaFn, desc_params: &[Ty]) -> Opti
         || !f
             .value_params
             .iter()
-            .zip(&desc_params[off..end])
+            .zip(&desc_params[off + ctx..end])
             .all(|(m, d)| meta_param_compat(m.ty, d))
     {
         return None;
@@ -976,7 +983,7 @@ fn meta_callable_aligns(f: &super::metadata::MetaFn, desc_params: &[Ty]) -> Opti
     let exact = f
         .value_params
         .iter()
-        .zip(&desc_params[off..end])
+        .zip(&desc_params[off + ctx..end])
         .filter(|(m, d)| meta_param_exact(m.ty, d))
         .count();
     Some((end, exact))
@@ -1610,7 +1617,8 @@ impl Classpath {
         };
         let logical_param_count = end.saturating_sub(usize::from(extension));
         let leading_params = logical_param_count.saturating_sub(c.value_params.len());
-        call_sig.platform_nullable_params = std::iter::repeat_n(false, leading_params)
+        call_sig.platform_nullable_params = (0..leading_params)
+            .map(|i| c.context_params_nullable.get(i).copied().unwrap_or(false))
             .chain(c.value_params.iter().map(|p| p.nullable()))
             .collect();
         MetadataCallFacts {
@@ -1619,6 +1627,7 @@ impl Classpath {
             ret: metadata_return_info(c.ret_class, c.ret_nullable()),
             is_operator: c.is_operator(),
             contract: c.contract.clone(),
+            context_count: c.context_count,
         }
     }
 
@@ -1637,6 +1646,7 @@ impl Classpath {
             ret: metadata_return_info(function.ret_class, function.ret_nullable()),
             is_operator: function.is_operator(),
             contract: function.contract.clone(),
+            context_count: function.context_count,
         })
     }
 
@@ -4193,6 +4203,8 @@ mod fq_tests {
                 ret,
             }),
             contract: None,
+            context_count: 0,
+            context_params_nullable: Vec::new(),
         };
 
         let narrow = [

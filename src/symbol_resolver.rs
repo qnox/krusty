@@ -2112,7 +2112,10 @@ impl<'a> SymbolResolver<'a> {
                     &arg_tys,
                     o.call_sig.vararg,
                 );
-                (o, params, o.callable.ret)
+                // Leading CONTEXT parameters are supplied implicitly by the caller, never
+                // positionally — matching and arity checks see only the value parameters.
+                let value_params = params[o.context_count.min(params.len())..].to_vec();
+                (o, value_params, o.callable.ret)
             })
             .collect();
         let fits = |p: &Ty, a: &CallArgKind| self.arg_fits_or_subtype(p, &a.ty());
@@ -2264,7 +2267,15 @@ impl<'a> SymbolResolver<'a> {
             c.inline
         );
         Some(LibraryCallable {
-            params: params.clone(),
+            // A function with leading CONTEXT parameters emits the FULL parameter list (context
+            // included) so the lowerer can prepend the implicit context sources; the matched
+            // `params` were value-only for arity purposes. Without context, the matched list is
+            // the full list (platform-nullability applied).
+            params: if o.context_count > 0 {
+                c.params.clone()
+            } else {
+                params.clone()
+            },
             ret: ret_ty,
             physical_ret: *ret,
             default_call: false,
@@ -4979,6 +4990,7 @@ mod tests {
             signature: None,
             origin: Origin::Library,
             source_receiver: None,
+            context_count: 0,
             contract: None,
             generic_sig: None,
         };

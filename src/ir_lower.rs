@@ -8394,6 +8394,16 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_lambda(&mut self, e: AstExprId, params: &[String], body: AstExprId) -> Option<u32> {
+        // A `suspend { … }` literal (parser-marked): build the `SuspendLambda` state machine
+        // instead of a plain `FunctionN` closure (which `lower_lambda_sam` would bail on).
+        if self.afile.suspend_lambdas.contains(&e.0) {
+            let Ty::Fun(sig) = self.info.ty(e) else {
+                return None;
+            };
+            let value_params: Vec<Ty> = sig.params.to_vec();
+            let bind_names = ast::lambda_params_or_implicit(params, value_params.len())?;
+            return self.lower_suspend_lambda(body, &value_params, bind_names);
+        }
         self.lower_lambda_sam(e, params, body, None)
     }
 

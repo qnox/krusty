@@ -510,6 +510,7 @@ fn fn_info(
         origin,
         // Representation lowering needs the declaration receiver before erasure.
         source_receiver,
+        context_count: sig.context_count,
         contract: sig.contract.clone(),
         generic_sig: sig.generic_sig.clone().map(Box::new),
     };
@@ -551,6 +552,7 @@ fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> L
         signature: None,
         origin: Origin::Module { facade: owner },
         source_receiver: None,
+        context_count: 0,
         contract: None,
         generic_sig: None,
     }

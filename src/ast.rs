@@ -1192,6 +1192,10 @@ pub struct File {
     /// a LOCAL return (from the anonymous function itself), so the lowerer must compile its body's
     /// `return` as the closure method's own return rather than a non-local return of the enclosing fn.
     pub anon_fun_lambdas: std::collections::HashSet<u32>,
+    /// `ExprId.0` of each lambda literal carrying the `suspend` modifier (`suspend { … }`). The
+    /// checker types it as a `suspend (…) -> …` function type; the lowerer builds a
+    /// `SuspendLambda` state machine for it instead of a plain `FunctionN` closure.
+    pub suspend_lambdas: std::collections::HashSet<u32>,
     /// NAME-BASED destructuring: for a `Stmt::Destructure` whose entries bind by property NAME
     /// (`val (number = pCProp, text = pCVarProp) = src`), maps the statement's id to the source
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
@@ -1316,6 +1320,7 @@ impl File {
         self.anonymous_object_classes = Default::default();
         self.lambda_param_types = Default::default();
         self.anon_fun_lambdas = Default::default();
+        self.suspend_lambdas = Default::default();
         self.destructure_source_props = Default::default();
         self.base_arg_names = Default::default();
         self.anon_fun_ret = Default::default();

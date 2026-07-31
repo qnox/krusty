@@ -8606,6 +8606,9 @@ pub struct ResolvedModuleTopLevelCall {
     pub param_default_values: Vec<Option<CtorDefaultValue>>,
     pub ret_is_tparam: bool,
     pub projected_return_hazard: bool,
+    /// The callee's declared contract (from same-module source or classpath `@Metadata`) — the
+    /// effects the checker applies at this call site.
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
 #[derive(Clone, Debug)]
@@ -13263,8 +13266,12 @@ impl<'a> Checker<'a> {
                 c.contract.clone()
             }
             Some(ResolvedCall::ModuleTopLevel(c)) => c
-                .source_decl
-                .and_then(|d| self.source_contracts.get(&d).cloned()),
+                .contract
+                .clone()
+                .or_else(|| {
+                    c.source_decl
+                        .and_then(|d| self.source_contracts.get(&d).cloned())
+                }),
             Some(ResolvedCall::ModuleExtension { name, .. }) => self
                 .source_contracts
                 .iter()
@@ -13293,18 +13300,36 @@ impl<'a> Checker<'a> {
     }
 
     /// The name of a STABLE binding passed as a contract argument, when it is one (`x`, `this`).
+    /// The name of a STABLE binding a contract parameter refers to at this call site: the
+    /// positional argument expression for `Param(i)`, the receiver expression for `Receiver` —
+    /// or, for a leading CONTEXT parameter (supplied implicitly), the context SOURCE the checker
+    /// resolved (`with("O") { validate1() }` → `this`).
     fn contract_stable_arg_name(
         &self,
         call: ExprId,
         param: crate::contracts::ParamRef,
     ) -> Option<String> {
-        match self
-            .contract_arg_expr(call, param)
-            .map(|e| self.file.expr(e))
+        if let Some(name) =
+            self.contract_arg_expr(call, param)
+                .and_then(|e| match self.file.expr(e) {
+                    Expr::Name(n) => Some(n.clone()),
+                    _ => None,
+                })
         {
-            Some(Expr::Name(n)) => Some(n.clone()),
-            _ => None,
+            return Some(name);
         }
+        // A leading context parameter: its "argument" is the implicit context source — recorded
+        // on the resolved module target for module calls, in the context-args map for classpath
+        // calls.
+        if let crate::contracts::ParamRef::Param(i) = param {
+            if let Some(sources) = self.context_args.get(&call) {
+                return sources.get(i).cloned();
+            }
+            if let Some(ResolvedCall::ModuleTopLevel(c)) = self.resolved_calls.get(&call) {
+                return c.context_args.get(i).cloned();
+            }
+        }
+        None
     }
 
     /// Map a contract conclusion onto the call's actual arguments, producing `(name, Ty)`
@@ -14053,6 +14078,7 @@ impl<'a> Checker<'a> {
                 param_default_values,
                 ret_is_tparam,
                 projected_return_hazard,
+                contract: selected.callable.contract.clone(),
             })),
         );
     }
@@ -19446,7 +19472,14 @@ impl<'a> Checker<'a> {
                 .get(&e.0)
                 .map(|r| self.resolve_ty(r))
                 .unwrap_or(bret);
-            Ty::fun(fun_params, ret)
+            // A `suspend { … }` literal (the parser marked it) is a suspend function type —
+            // `suspend () -> Unit` erases to `Function1` at runtime (trailing `Continuation`),
+            // exactly like a declared `suspend (…) -> …` type.
+            if self.file.suspend_lambdas.contains(&e.0) {
+                Ty::fun_suspend(fun_params, ret)
+            } else {
+                Ty::fun(fun_params, ret)
+            }
         };
         self.set(e, t)
     }
@@ -30309,6 +30342,18 @@ impl<'a> Checker<'a> {
                             .and_then(crate::symbol_resolver::Symbol::top_level_call),
                     };
                     if let Some(mut c) = resolved {
+                        // A classpath function with leading CONTEXT parameters: resolve each one
+                        // to an in-scope source (`this` or a local) and record the sources for
+                        // the lowerer (it prepends them to the emitted arguments). Without a
+                        // source for every context parameter the call is not applicable here.
+                        if c.context_count > 0 && c.context_count <= c.params.len() {
+                            let Some(sources) =
+                                self.resolve_context_args(&c.params[..c.context_count])
+                            else {
+                                return Ty::Error;
+                            };
+                            self.context_args.insert(call, sources);
+                        }
                         if matches!(c.origin, Origin::Module { .. }) && c.owner.matches("") {
                             if let Some(owner) = self.syms.fn_facades.get(&c.name).copied() {
                                 c.owner = owner;

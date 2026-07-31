@@ -54,3 +54,33 @@ fn deserialized_contract_smart_casts_with_call_site_type_args() {
         "OK"
     );
 }
+
+const CONTEXT_LIB: &str = "import kotlin.contracts.ExperimentalContracts\n\
+import kotlin.contracts.contract\n\
+@OptIn(ExperimentalContracts::class)\n\
+context(a: String?)\n\
+fun validate1() {\n\
+    contract { returns() implies (a != null) }\n\
+    a!!\n\
+}\n";
+
+#[test]
+fn context_parameter_contract_round_trip_cross_module() {
+    // Mirrors contracts/contractOnContextParameter.kt: a context-parameter function's contract
+    // (`returns() implies (a != null)`) rides `@Metadata` (`Function.context_parameter` = 13 +
+    // `contract` = 32); the caller's implicit context source (`with(…)`'s `this`) smart-casts.
+    const MAIN: &str = "fun box(): String {\n\
+        return with(\"O\" as String?) {\n\
+            validate1()\n\
+            this\n\
+        } + \"K\"\n\
+    }\n";
+    let jdk = common::jdk_modules().expect("jdk");
+    let sl = common::stdlib_jar().expect("stdlib");
+    let lo = common::compile_lib("ctx_p", CONTEXT_LIB).expect("lib compiles");
+    let out = common::compile_and_run_box(MAIN, "Main", &[lo, sl, jdk.clone()], Some(&jdk));
+    assert_eq!(
+        out.expect("context contract smart cast compiles + runs"),
+        "OK"
+    );
+}

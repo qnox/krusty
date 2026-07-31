@@ -42,6 +42,11 @@ pub struct FnMeta {
     /// The function's decoded contract, emitted as `Function.contract` (field 32) so a separate
     /// compilation applies its effects at call sites. `None` when the function declares none.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
+    /// Number of LEADING entries in `params` that are context parameters (`context(a: A) fun f()`).
+    /// kotlinc lowers them to leading value parameters; in metadata they ride
+    /// `Function.context_parameter` (field 13) so a caller fills them implicitly from the
+    /// enclosing context instead of positionally.
+    pub context_count: usize,
 }
 
 /// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
@@ -378,7 +383,13 @@ fn function_pb(st: &mut StringTable, f: &FnMeta) -> Pb {
             None => type_pb_generic(st, *pty, &tps),
         };
         vp.field_message(3, &ty); // ValueParameter.type = 3
-        p.repeated_message(6, &vp); // Function.value_parameter = 6
+        if i < f.context_count {
+            // Leading context parameters → Function.context_parameter = 13 (filled implicitly
+            // by callers), NOT the positional value_parameter list.
+            p.repeated_message(13, &vp);
+        } else {
+            p.repeated_message(6, &vp); // Function.value_parameter = 6
+        }
     }
     // The declared contract (Function.contract = 32) — `returns(…) implies …` / `callsInPlace`
     // effects a separate compilation applies at call sites.
@@ -502,6 +513,7 @@ mod tests {
                 contract: None,
                 inline: false,
                 type_params: Vec::new(),
+                context_count: 0,
             }],
             &[],
         );
@@ -581,6 +593,7 @@ mod tests {
                 inline: true,
                 type_params: vec![("T".into(), false), ("R".into(), true)],
                 contract: Some(std::sync::Arc::new(contract.clone())),
+                context_count: 0,
             }],
             &[],
         );
@@ -611,6 +624,7 @@ mod tests {
                 contract: None,
                 inline: false,
                 type_params: Vec::new(),
+                context_count: 0,
             }],
             &[],
         );
