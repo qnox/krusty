@@ -19372,6 +19372,21 @@ impl<'a> Lower<'a> {
                 }
                 self.lower_invoke(e, receiver, &params, kind, &args)?
             }
+            // An invoke-operator call through a MEMBER EXTENSION whose callee is an arbitrary
+            // expression (`"test" { … }` in a spec lambda): the callee value is the extension
+            // receiver; the checker recorded the selected callable. Name/Member callees have
+            // their own dispatch paths.
+            Expr::Call { callee, args }
+                if !matches!(self.afile.expr(callee), Expr::Name(_) | Expr::Member { .. })
+                    && matches!(
+                        self.info.resolved_calls.get(&e),
+                        Some(ResolvedCall::ModuleMemberExtension { .. })
+                    ) =>
+            {
+                let target = self.info.resolved_calls.get(&e).cloned()?;
+                let extension = self.expr(callee)?;
+                self.lower_module_member_extension_call(extension, &target, &args, e)?
+            }
             Expr::Call { .. }
                 if matches!(
                     self.info.expr_lowers.get(&e),

@@ -10317,7 +10317,22 @@ fn check_file_at_impl_mode(
                     c.declare(&p.name, ty, p.is_var);
                 }
                 // Base class constructor args are evaluated before the body and may reference ctor params.
-                let base_arg_tys: Vec<Ty> = cl.base_args.iter().map(|&arg| c.expr(arg)).collect();
+                // A LAMBDA arg is typed against the selected super ctor's parameter type (a receiver
+                // lambda's `this` scope comes from that expected type), so it is deferred here and
+                // checked below once the ctor is resolved; anything else is typed up front.
+                let file = c.file;
+                let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
+                let base_arg_tys: Vec<Ty> = cl
+                    .base_args
+                    .iter()
+                    .map(|&arg| {
+                        if is_lambda(arg) {
+                            Ty::Error
+                        } else {
+                            c.expr(arg)
+                        }
+                    })
+                    .collect();
                 // Resolve which base constructor `super(args)` targets — uniformly for a same-file,
                 // module, or classpath base via the symbol source — and record its parameter types so
                 // the lowerer emits `super(args)` against them instead of re-resolving the constructor.
@@ -10327,11 +10342,30 @@ fn check_file_at_impl_mode(
                         .syms
                         .class_by_internal(&internal)
                         .and_then(ClassSig::super_internal_name);
-                    if let Some(base_int) = base_internal {
-                        if let Some(params) =
-                            c.resolve_super_ctor_params_name(base_int, &base_arg_tys)
-                        {
-                            c.super_ctor_params.insert(internal, params);
+                    let params = base_internal.and_then(|base_int| {
+                        c.resolve_super_ctor_params_name(base_int, &cl.base_args, &base_arg_tys)
+                    });
+                    if let Some(params) = params {
+                        // The lambda's implicit label is the base class's simple name (`return@Spec`).
+                        let label = base_internal.map(|base| {
+                            base.render()
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or_default()
+                                .to_string()
+                        });
+                        for (&arg, &expected) in cl.base_args.iter().zip(params.iter()) {
+                            if is_lambda(arg) {
+                                c.check_argument_expected(arg, expected, false, label.as_deref());
+                            }
+                        }
+                        c.super_ctor_params.insert(internal, params);
+                    } else {
+                        // No unique ctor match: type the deferred lambda args without an expected type.
+                        for &arg in &cl.base_args {
+                            if is_lambda(arg) {
+                                c.expr(arg);
+                            }
                         }
                     }
                 }
@@ -11084,6 +11118,9 @@ struct MemberExtensionFunctionCall<'a> {
     arg_names: Option<&'a [Option<String>]>,
     explicit_type_args: &'a [Ty],
     trailing_lambda: bool,
+    /// The `invoke` CONVENTION (`recv(args)`) admits only `operator` candidates; an explicit
+    /// `recv.invoke(args)` admits any.
+    operator_only: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -14246,6 +14283,18 @@ impl<'a> Checker<'a> {
                             member: Some(Box::new(m)),
                         },
                     )
+                } else if let Some(ret) = self.check_member_extension_function_call_mode(
+                    call,
+                    receiver_ty,
+                    CALLABLE_INVOKE_OPERATOR,
+                    args,
+                    arg_tys,
+                    true,
+                ) {
+                    // A member EXTENSION `operator fun Recv.invoke(...)` on an implicit receiver
+                    // (the kotest-style `"test" { … }` inside a receiver lambda): the selected
+                    // callable is recorded, and the lowerer emits it as a member-extension call.
+                    return Some(ret);
                 } else {
                     let fi = self
                         .resolver()
@@ -14690,18 +14739,28 @@ impl<'a> Checker<'a> {
     fn resolve_super_ctor_params_name(
         &self,
         base_internal: TypeName,
+        args: &[ExprId],
         arg_tys: &[Ty],
     ) -> Option<Vec<Ty>> {
         let lt = self.resolved_type_name(base_internal)?;
         // EXACT (nullability-insensitive) type match — a loose reference→reference assignability can't
         // tell `RuntimeException(String)` from `RuntimeException(Throwable)` for a `String` argument.
+        // A lambda argument's type depends on the parameter it lands in (a receiver lambda's `this`
+        // comes from the expected type), so it is matched STRUCTURALLY against a function-typed
+        // parameter and re-checked against it by the caller.
         let mut matches = lt.constructors.iter().filter(|ctor| {
             ctor.params.len() == arg_tys.len()
                 && ctor
                     .params
                     .iter()
-                    .zip(arg_tys)
-                    .all(|(&p, &a)| p.non_null() == a.non_null())
+                    .zip(args.iter().zip(arg_tys))
+                    .all(|(&p, (&arg, &a))| {
+                        if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
+                            matches!(p.non_null(), Ty::Fun(_))
+                        } else {
+                            p.non_null() == a.non_null()
+                        }
+                    })
         });
         let first = matches.next()?;
         if matches.next().is_some() {
@@ -19642,6 +19701,7 @@ impl<'a> Checker<'a> {
                                         .file
                                         .call_has_trailing_lambda
                                         .contains(&e.0),
+                                    operator_only: false,
                                 })
                                 .is_ok_and(|candidate| candidate.is_some());
                             (applicable_module_member || !applicable_member_extension)
@@ -22681,6 +22741,7 @@ impl<'a> Checker<'a> {
             arg_names: None,
             explicit_type_args: &[],
             trailing_lambda: false,
+            operator_only: false,
         }) {
             Ok(Some(candidate)) => candidate,
             Ok(None) => return Ok(None),
@@ -24200,6 +24261,7 @@ impl<'a> Checker<'a> {
             arg_names,
             explicit_type_args,
             trailing_lambda,
+            operator_only,
         } = call;
         let mut candidates = Vec::new();
         let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
@@ -24234,6 +24296,9 @@ impl<'a> Checker<'a> {
                 owner: shape.owner,
             });
         }
+        if operator_only {
+            candidates.retain(|candidate| candidate.is_operator);
+        }
         let mut maximal =
             self.maximal_member_extensions(&candidates, |candidate| candidate.priority);
         if maximal.is_empty() {
@@ -24259,6 +24324,25 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         arg_tys: &[Ty],
     ) -> Option<Ty> {
+        self.check_member_extension_function_call_mode(
+            call,
+            extension_receiver,
+            name,
+            args,
+            arg_tys,
+            false,
+        )
+    }
+
+    fn check_member_extension_function_call_mode(
+        &mut self,
+        call: ExprId,
+        extension_receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        operator_only: bool,
+    ) -> Option<Ty> {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         let explicit_type_args = self
             .file
@@ -24277,6 +24361,7 @@ impl<'a> Checker<'a> {
             arg_names: arg_names.as_deref(),
             explicit_type_args: &explicit_type_args,
             trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+            operator_only,
         }) {
             Ok(Some(candidate)) => {
                 for &(parameter, source) in &candidate.argument_parameters {

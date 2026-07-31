@@ -2603,6 +2603,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CharSequence.get`. Tests: `tests/for_destructuring_components_e2e.rs`,
   `tests/collection_special_member_stub_e2e.rs`.
 
+- **The invoke CONVENTION admits a member EXTENSION `operator fun Recv.invoke`, and a supertype-
+  constructor lambda argument is typed against the selected ctor's parameter.** The kotest shape
+  `class A : StringSpec({ "test" { … } })` failed twice over: **(a)** a lambda in class-header base
+  args was typed with no expected type, so the receiver scope (`StringSpecScope`) never entered the
+  implicit-receiver stack — base-arg lambdas are now deferred, the super ctor is selected with a
+  lambda arg matched STRUCTURALLY against any function-typed parameter, and the lambda is then
+  checked against the selected parameter's `Scope.() -> Unit` type like a call-site argument;
+  **(b)** `record_invoke` only considered member `invoke` and top-level extension `invoke`, never a
+  member extension — it now tries `check_member_extension_function_call` restricted to `operator`
+  candidates (a non-`operator fun Recv.invoke` stays rejected by call syntax) between the two, and
+  the lowerer emits the recorded `ModuleMemberExtension` for a call whose callee is an arbitrary
+  expression (the literal `"test"`). Tests:
+  `invoke_operator_extension_e2e::member_extension_invoke_in_super_ctor_receiver_lambda` (runs),
+  `…::member_extension_invoke_in_with_receiver_lambda` (runs, no ctor lambda involved),
+  `…::non_operator_member_extension_invoke_not_used_by_call_syntax`.
+
 - **Reference range expressions and bound-aware classpath generics.** A standalone `a..b` over
   reference operands resolves through the ordinary `rangeTo` operator path after primitive range
   handling. Classpath generic signatures preserve declared bounds for receiver matching and JVM

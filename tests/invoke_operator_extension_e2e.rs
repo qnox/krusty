@@ -24,3 +24,74 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("user-type invoke extension"), "OK");
 }
+
+#[test]
+fn member_extension_invoke_in_super_ctor_receiver_lambda() {
+    const SRC: &str = r#"
+        class SpecScope {
+            val seen = mutableListOf<String>()
+            operator fun String.invoke(body: () -> Unit) {
+                seen.add(this)
+                body()
+            }
+        }
+        open class Spec(val init: SpecScope.() -> Unit)
+        class A : Spec({
+            "test" {
+            }
+        })
+        fun box(): String {
+            val a = A()
+            val scope = SpecScope()
+            a.init(scope)
+            return if (scope.seen == listOf("test")) "OK" else "fail"
+        }
+    "#;
+    assert_eq!(run(SRC).expect("member extension invoke"), "OK");
+}
+
+#[test]
+fn member_extension_invoke_in_with_receiver_lambda() {
+    const SRC: &str = r#"
+        class SpecScope {
+            val seen = mutableListOf<String>()
+            operator fun String.invoke(body: () -> Unit) {
+                seen.add(this)
+                body()
+            }
+        }
+        fun box(): String {
+            val scope = SpecScope()
+            with(scope) {
+                "test" {
+                }
+            }
+            return if (scope.seen == listOf("test")) "OK" else "fail"
+        }
+    "#;
+    assert_eq!(run(SRC).expect("with-receiver invoke"), "OK");
+}
+
+#[test]
+fn non_operator_member_extension_invoke_not_used_by_call_syntax() {
+    const SRC: &str = r#"
+        class SpecScope {
+            fun String.invoke() {
+            }
+        }
+        open class Spec(init: SpecScope.() -> Unit)
+        class A : Spec({
+            "test"()
+        })
+    "#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SRC) else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("expression is not callable")),
+        "expected 'expression is not callable', got: {diagnostics:?}"
+    );
+}
