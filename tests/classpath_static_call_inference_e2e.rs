@@ -101,34 +101,34 @@ fn class_literal_binds_nested_java_generic_returns() {
     };
     let java = [
         (
-            "Authentication.java".into(),
+            "Record.java".into(),
             r#"
                 package fixtures;
                 import java.util.Map;
-                public interface Authentication {
-                    String getName();
-                    Map<String, Object> getAttributes();
+                public interface Record {
+                    String getLabel();
+                    Map<String, Object> getData();
                 }
             "#
             .into(),
         ),
         (
-            "Request.java".into(),
+            "Store.java".into(),
             r#"
                 package fixtures;
                 import java.util.Map;
                 import java.util.Optional;
-                public final class Request {
-                    public <T> Optional<T> getAttribute(String key, Class<T> type) {
-                        Authentication auth = new Authentication() {
-                            public String getName() { return "alice"; }
-                            public Map<String, Object> getAttributes() {
-                                return Map.of("iss", "issuer");
+                public final class Store {
+                    public <T> Optional<T> getValue(String key, Class<T> type) {
+                        Record record = new Record() {
+                            public String getLabel() { return "sample"; }
+                            public Map<String, Object> getData() {
+                                return Map.of("code", "value");
                             }
                         };
-                        return Optional.of(type.cast(auth));
+                        return Optional.of(type.cast(record));
                     }
-                    public Optional<Object> anyAttribute() {
+                    public Optional<Object> anyValue() {
                         return Optional.of("value");
                     }
                 }
@@ -142,25 +142,25 @@ fn class_literal_binds_nested_java_generic_returns() {
     let root = library.parent().map(std::path::Path::to_path_buf);
     let classpath = vec![library, stdlib];
     let source = r#"
-        import fixtures.Authentication
-        import fixtures.Request
+        import fixtures.Record
+        import fixtures.Store
 
-        val topAuth =
-            Request()
-                .getAttribute("auth", Authentication::class.java)
+        val topRecord =
+            Store()
+                .getValue("record", Record::class.java)
                 .orElse(null)
 
         fun box(): String {
-            val auth =
-                Request()
-                    .getAttribute("auth", Authentication::class.java)
+            val record =
+                Store()
+                    .getValue("record", Record::class.java)
                     .orElse(null)
 
-            if (auth != null) {
-                if (auth.name != "alice") return "name"
-                if (auth.attributes["iss"] != "issuer") return "attributes"
+            if (record != null) {
+                if (record.label != "sample") return "label"
+                if (record.data["code"] != "value") return "data"
             }
-            if (topAuth?.name != "alice") return "top-level"
+            if (topRecord?.label != "sample") return "top-level"
             return "OK"
         }
     "#;
@@ -173,11 +173,11 @@ fn class_literal_binds_nested_java_generic_returns() {
         });
     let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
     let invalid_source = r#"
-        import fixtures.Request
+        import fixtures.Store
 
         fun bad(): Int =
-            Request()
-                .anyAttribute()
+            Store()
+                .anyValue()
                 .orElse("fallback")
                 .length
     "#;

@@ -564,6 +564,8 @@ impl<'a> Pb<'a> {
 /// `IS_INLINE` is bit 10 of `Function.flags` (hasAnnotations·1 + Visibility·3 + Modality·2 +
 /// MemberKind·2 + isOperator·1 + isInfix·1 → isInline).
 const IS_INLINE_BIT: u64 = 1 << 10;
+/// `IS_OPERATOR` immediately follows the 2-bit member-kind field in Kotlin metadata's function flags.
+const IS_OPERATOR_BIT: u64 = 1 << 8;
 
 /// Parse a `JvmMethodSignature` (extension body) → `(name string id, desc string id)`.
 fn parse_jvm_signature(body: &[u8]) -> Option<(u64, u64)> {
@@ -706,10 +708,12 @@ struct ParsedValueParam {
 }
 
 /// A decoded `Function` message: whether it's `inline`, whether it's `suspend`, its name string id, its
-/// explicit JVM `(name id, desc id)` signature (if present), and its return type's class_name id.
+/// explicit JVM `(name id, desc id)` signature (if present), its operator flag, and its return type's
+/// class_name id.
 struct ParsedFunction {
     is_inline: bool,
     is_suspend: bool,
+    is_operator: bool,
     visibility: crate::types::Visibility,
     name_id: u64,
     jvm_sig: Option<(u64, u64)>,
@@ -859,6 +863,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     Some(ParsedFunction {
         is_inline: flags & IS_INLINE_BIT != 0,
         is_suspend: flags & IS_SUSPEND_BIT != 0,
+        is_operator: flags & IS_OPERATOR_BIT != 0,
         visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
         name_id,
         jvm_sig,
@@ -1204,6 +1209,7 @@ impl MfnFlags {
     const IS_SUSPEND: u8 = 1 << 1;
     const IS_EXTENSION: u8 = 1 << 2;
     const RET_NULLABLE: u8 = 1 << 3;
+    const IS_OPERATOR: u8 = 1 << 4;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -1235,13 +1241,18 @@ impl MfnFlags {
     pub const fn with_ret_nullable(self, on: bool) -> Self {
         self.with(Self::RET_NULLABLE, on)
     }
+    #[inline]
+    pub const fn with_is_operator(self, on: bool) -> Self {
+        self.with(Self::IS_OPERATOR, on)
+    }
 }
 
 /// A function decoded from a `Class`/`Package` `@Metadata` message — the *metadata-truth* signature
 /// kotlinc resolves against (`JvmProtoBufUtil.getJvmMethodSignature`): the Kotlin name, the JVM method
 /// name + descriptor (from the `method_signature` extension when present), Kotlin visibility/`inline`/
-/// `suspend`, and the extension-receiver class. For an `inline` function the bytecode is `private`/
-/// synthetic, so these flags differ from the access flags — metadata is primary, bytecode is fallback.
+/// `suspend`/`operator`, and the extension-receiver class. For an `inline` function the bytecode is
+/// `private`/synthetic, so these flags differ from the access flags — metadata is primary, bytecode is
+/// fallback.
 #[derive(Clone, Debug)]
 pub struct MetaFn {
     pub kotlin_name: String,
@@ -1250,7 +1261,8 @@ pub struct MetaFn {
     /// caller may then fall back to a bytecode method of the same name, or compute it from proto types).
     pub jvm_desc: Option<&'static str>,
     pub visibility: crate::types::Visibility,
-    /// Bit-packed `is_inline`/`is_suspend`/`is_extension`/`ret_nullable` (read via the accessors below).
+    /// Bit-packed `is_inline`/`is_suspend`/`is_extension`/`is_operator`/`ret_nullable` (read via the
+    /// accessors below).
     /// `is_extension` — whether this is an EXTENSION (a receiver of any kind, class or
     /// type parameter) vs a true top-level function; lets the classpath ext index avoid mis-indexing a
     /// top-level generic as an extension on its first parameter's type. `ret_nullable` — whether the
@@ -1287,6 +1299,10 @@ impl MetaFn {
     #[inline]
     pub fn is_extension(&self) -> bool {
         self.flags.has(MfnFlags::IS_EXTENSION)
+    }
+    #[inline]
+    pub fn is_operator(&self) -> bool {
+        self.flags.has(MfnFlags::IS_OPERATOR)
     }
     #[inline]
     pub fn ret_nullable(&self) -> bool {
@@ -1614,7 +1630,8 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                             .with_is_inline(pf.is_inline)
                             .with_is_suspend(pf.is_suspend)
                             .with_is_extension(pf.has_receiver)
-                            .with_ret_nullable(pf.ret_nullable),
+                            .with_ret_nullable(pf.ret_nullable)
+                            .with_is_operator(pf.is_operator),
                         receiver_class: receiver_class.map(|s| type_name(&s)),
                         ret_class: ret_class.map(|s| type_name(&s)),
                         value_params,
@@ -2803,12 +2820,22 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        decode_properties, parse_receiver_type_gsig, parse_type_alias, parse_type_gsig,
-        parse_type_gsig_node, primary_erasure_bounds, read_kotlin_module, MetaCtx,
+        decode_properties, parse_function, parse_receiver_type_gsig, parse_type_alias,
+        parse_type_gsig, parse_type_gsig_node, primary_erasure_bounds, read_kotlin_module, MetaCtx,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
     use std::collections::HashMap;
+
+    #[test]
+    fn function_operator_flag_uses_kotlin_metadata_bit_eight() {
+        // Function.flags is field 9 (tag 0x48). The protobuf default public/final flags are 6;
+        // adding IS_OPERATOR (1 << 8) yields 262, encoded as the varint 0x86 0x02.
+        let operator = parse_function(&[0x48, 0x86, 0x02]).expect("function message");
+        let ordinary = parse_function(&[]).expect("default function message");
+        assert!(operator.is_operator);
+        assert!(!ordinary.is_operator);
+    }
 
     #[test]
     fn nested_generic_signature_preserves_nullable_type_parameters() {
