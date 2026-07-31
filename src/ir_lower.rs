@@ -2124,7 +2124,10 @@ fn lower_file_at_reporting_impl(
     // Pass 1b: register callable top-level and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
-            if f.is_inline() && !f.has_callable_inline_extension_body() {
+            if f.is_inline()
+                && !f.has_callable_inline_extension_body()
+                && !syms.inline_fn_facade_emittable(file, file_index, d, f)
+            {
                 continue;
             }
             if let Some(recv_ref) = &f.receiver {
@@ -2394,7 +2397,10 @@ fn lower_file_at_reporting_impl(
     // Pass 2: lower bodies.
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) if f.is_inline() && !f.has_callable_inline_extension_body() => {}
+            Decl::Fun(f)
+                if f.is_inline()
+                    && !f.has_callable_inline_extension_body()
+                    && !syms.inline_fn_facade_emittable(file, file_index, d, f) => {}
             Decl::Fun(f) => {
                 lo.set_bail("deep:fun");
                 lo.scope.clear();
@@ -7170,6 +7176,81 @@ impl<'a> Lower<'a> {
     /// through the module source rather than touching `syms.funs` directly.
     fn module_declares(&self, name: &str) -> bool {
         crate::module_symbols::ModuleSymbols::new(self.syms).declares_top_level(name)
+    }
+
+    /// Whether argument `e` of a CROSS-FILE `inline fun` call is unsafe to pass to a real
+    /// `invokestatic` (a closure, not a splice): a callable reference (adapted/bound-reference
+    /// lowering assumes splicing), or a lambda that
+    /// 1. contains a NON-LOCAL `return` targeting the enclosing function (legal only when the
+    ///    callee is spliced; a `return@<callee>` is the lambda's own implicit label — local), or
+    /// 2. ASSIGNS a local of the enclosing function (`x = …` / `x++`) — the checker analysed the
+    ///    lambda's captures for splicing, so a closure would mutate a COPY, silently.
+    ///
+    /// Writes to top-level/member properties compile to real field accesses in a closure — safe.
+    fn cross_file_inline_arg_unsafe(&self, e: AstExprId, fname: &str) -> bool {
+        fn visit_expr(
+            file: &ast::File,
+            e: AstExprId,
+            fname: &str,
+            assigned: &std::cell::RefCell<Vec<String>>,
+        ) -> bool {
+            match file.expr(e) {
+                Expr::Return { label, .. } if label.as_deref() != Some(fname) => {
+                    return true;
+                }
+                Expr::IncDec { target, .. } => {
+                    if let Expr::Name(n) = file.expr(*target) {
+                        assigned.borrow_mut().push(n.clone());
+                    }
+                }
+                _ => {}
+            }
+            file.any_child_expr(
+                e,
+                &mut |child| visit_expr(file, child, fname, assigned),
+                &mut |stmt| visit_stmt(file, stmt, fname, assigned),
+            )
+        }
+        fn visit_stmt(
+            file: &ast::File,
+            s: ast::StmtId,
+            fname: &str,
+            assigned: &std::cell::RefCell<Vec<String>>,
+        ) -> bool {
+            match file.stmt(s) {
+                Stmt::Return(_, label) if label.as_deref() != Some(fname) => {
+                    return true;
+                }
+                Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } => {
+                    assigned.borrow_mut().push(name.clone());
+                }
+                _ => {}
+            }
+            file.any_child_stmt(s, &mut |child| visit_expr(file, child, fname, assigned))
+        }
+        match self.afile.expr(e) {
+            Expr::CallableRef { .. } => true,
+            // An anonymous-function argument is only ever lowered splice-style (a standalone
+            // closure of one mis-emits its return); a function-typed VARIABLE argument aliases a
+            // lambda whose capture/reassignment analysis assumed splicing — both stay rejected.
+            Expr::Lambda { .. } if self.afile.anon_fun_lambdas.contains(&e.0) => true,
+            // A name bound to an ENCLOSING inline call's lambda parameter (`inner(block)`) is a
+            // splice-registered lambda passed as a value — it has no closure value at all, so it
+            // must reject rather than bind a same-named module-level symbol (or mis-lower).
+            Expr::Name(n) if self.inline_lambdas.iter().any(|lambda| lambda.name == *n) => true,
+            Expr::Name(n) => self
+                .lookup(n)
+                .is_some_and(|(_, ty)| matches!(ty.non_null(), Ty::Fun(_))),
+            Expr::Lambda { body, .. } => {
+                let assigned: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+                if visit_expr(self.afile, *body, fname, &assigned) {
+                    return true;
+                }
+                let assigned = assigned.take();
+                assigned.iter().any(|name| self.lookup(name).is_some())
+            }
+            _ => false,
+        }
     }
     fn fresh_value(&mut self) -> u32 {
         let v = self.next_value;
@@ -22189,15 +22270,44 @@ impl<'a> Lower<'a> {
                     .filter(|target| target.inline.can_inline())
                     .cloned()
                 {
-                    let target_name = target.name.clone();
-                    return self.lower_inline_fn_call(
-                        &target_name,
-                        &args,
-                        e.0,
-                        None,
-                        Some(&target),
-                        None,
-                    );
+                    // Same-file inline call: splice the body, exactly kotlinc's inliner. A
+                    // CROSS-FILE inline target has no AST here to splice — fall THROUGH to the
+                    // cross-file module-call path below, which emits a plain `invokestatic`
+                    // against the callee's facade static (lowered + emitted for any
+                    // `inline_fn_facade_emittable` function; unregistered callees bail there).
+                    if target.source_file == Some(self.file_index) {
+                        let target_name = target.name.clone();
+                        return self.lower_inline_fn_call(
+                            &target_name,
+                            &args,
+                            e.0,
+                            None,
+                            Some(&target),
+                            None,
+                        );
+                    }
+                    // A CROSS-FILE inline call has no AST here to splice. Fall through to the
+                    // cross-file module-call path below ONLY when the callee was emitted as a
+                    // facade static (`inline_fn_facade_emittable`, registered in
+                    // `fn_facades_by_decl`). Anything else must BAIL here — the generic dispatch
+                    // below would reinterpret the unresolved call (e.g. as a constructor of its
+                    // result type) and miscompile. A non-local `return` in a lambda argument is
+                    // legal ONLY when the callee is spliced — a real closure has no lowering for
+                    // it — so that bails here too rather than linking a broken body.
+                    let emitted =
+                        target
+                            .source_file
+                            .zip(target.source_decl)
+                            .is_some_and(|(file, decl)| {
+                                self.syms.fn_facades_by_decl.contains_key(&(file, decl.0))
+                            });
+                    if !emitted
+                        || args
+                            .iter()
+                            .any(|&arg| self.cross_file_inline_arg_unsafe(arg, &target.name))
+                    {
+                        return None;
+                    }
                 }
             }
             // SAM conversion `Pred { lambda }`: constructor syntax for a functional interface.

@@ -280,13 +280,18 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
         let facade = file_class_name(stem, file.package.as_deref());
         for &d in &file.decls {
             match file.decl(d) {
-                Decl::Fun(f) if !f.is_inline() || f.has_callable_inline_extension_body() => fns
-                    .push((
+                Decl::Fun(f)
+                    if !f.is_inline()
+                        || f.has_callable_inline_extension_body()
+                        || syms.inline_fn_facade_emittable(file, i as u32, d, f) =>
+                {
+                    fns.push((
                         i as u32,
                         d.0,
                         f.receiver.is_none().then(|| f.name.clone()),
                         facade.clone(),
-                    )),
+                    ))
+                }
                 Decl::Property(p) if p.receiver.is_none() => {
                     props.push((p.name.clone(), facade.clone()))
                 }

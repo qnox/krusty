@@ -174,7 +174,11 @@ fn first_error_blocks(
         let facade = file_class_name(&blocks[i].0, file.package.as_deref());
         for &decl in &file.decls {
             match file.decl(decl) {
-                krusty::ast::Decl::Fun(f) if f.receiver.is_none() && !f.is_inline() => {
+                krusty::ast::Decl::Fun(f)
+                    if f.receiver.is_none()
+                        && (!f.is_inline()
+                            || syms.inline_fn_facade_emittable(file, i as u32, decl, f)) =>
+                {
                     let facade_name = krusty::types::type_name(&facade);
                     syms.fn_facades_by_decl
                         .insert((i as u32, decl.0), facade_name);

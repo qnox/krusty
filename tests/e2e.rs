@@ -256,6 +256,8 @@ mod coroutine_intrinsics_e2e;
 mod cross_file_companion_fun_e2e;
 #[path = "cross_file_ctor_default_e2e.rs"]
 mod cross_file_ctor_default_e2e;
+#[path = "cross_file_inline_call_e2e.rs"]
+mod cross_file_inline_call_e2e;
 #[path = "cross_file_operator_e2e.rs"]
 mod cross_file_operator_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
