@@ -84,6 +84,7 @@ fn fq_source_supertype() {
 
 #[test]
 fn fq_source_typealias_target() {
+    // Regression guard: this position already resolved pre-fix (via alias expansion).
     assert_accepted(
         "typealias target",
         "package pkg2\ntypealias Alias = pkg1.Cls\nfun viaAlias(a: Alias): Int = a.n\n",
@@ -100,8 +101,108 @@ fn fq_source_nested_class_receiver() {
 
 #[test]
 fn fq_source_is_check() {
+    // Regression guard: this position already resolved pre-fix (the checker's own fallback).
     assert_accepted(
         "is check",
         "package pkg2\nfun check(x: Any): Boolean = x is pkg1.Cls\n",
+    );
+}
+
+#[test]
+fn fq_source_unresolved_path_still_errors() {
+    let diagnostics = common::front_end_diagnostics_files(
+        &[DECLS, "package pkg2\nfun pkg1.Nope.fn() {}\n"],
+        &[],
+        None,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.contains("unresolved reference 'pkg1.Nope'")),
+        "expected an unresolved-reference diagnostic, got: {diagnostics:?}"
+    );
+}
+
+/// A class named `Cls` exists in BOTH `pkg1` (member `n`) and `pkg3` (member `other`):
+/// `pkg1.Cls` must bind the named package's declaration, not just any same-named class.
+/// Asserted via TYPE IDENTITY (a mismatched return type errors both ways) rather than member
+/// access — member lookup on same-named cross-package classes is a separate pre-existing bug.
+const OTHER_CLS: &str = "package pkg3\nclass Cls(val other: Int)\n";
+
+#[test]
+fn fq_source_binds_the_named_package() {
+    let diagnostics = common::front_end_diagnostics_files(
+        &[
+            DECLS,
+            OTHER_CLS,
+            "package pkg2\nfun f(c: pkg1.Cls): pkg1.Cls = c\n",
+        ],
+        &[],
+        None,
+    );
+    assert!(diagnostics.is_empty(), "identity return: {diagnostics:?}");
+    for (from, to) in [("pkg1", "pkg3"), ("pkg3", "pkg1")] {
+        let diagnostics = common::front_end_diagnostics_files(
+            &[
+                DECLS,
+                OTHER_CLS,
+                &format!("package pkg2\nfun f(c: {from}.Cls): {to}.Cls = c\n"),
+            ],
+            &[],
+            None,
+        );
+        assert!(
+            diagnostics.iter().any(|d| d.contains("type mismatch")),
+            "expected a type mismatch returning {from}.Cls as {to}.Cls, got: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn fq_source_nested_classifier_shadows_package_path() {
+    // kotlinc resolves a dotted path classifier-first: a root-package class `pkg1` with a nested
+    // `Cls` shadows package `pkg1`'s `Cls` for the reference `pkg1.Cls` in a root-package file.
+    let pkg = "package pkg1\nclass Cls(val fromPkg: Int)\n";
+    let nested = "class pkg1 { class Cls(val fromNested: Int) }\n";
+    let diagnostics = common::front_end_diagnostics_files(
+        &[pkg, nested, "fun f(c: pkg1.Cls): Int = c.fromPkg\n"],
+        &[],
+        None,
+    );
+    assert!(
+        diagnostics.iter().any(|d| d.contains("fromPkg")),
+        "expected `fromPkg` (package path) to be unresolved — the nested classifier shadows it, \
+         got: {diagnostics:?}"
+    );
+    let diagnostics = common::front_end_diagnostics_files(
+        &[pkg, nested, "fun f(c: pkg1.Cls): Int = c.fromNested\n"],
+        &[],
+        None,
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "nested classifier member: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn fq_source_typerefs_compile_and_run() {
+    // FQ param + return types across packages, exercised end-to-end on the JVM. (A cross-package
+    // extension DECLARATION would be the ideal vehicle, but the IR backend rejects those today —
+    // a pre-existing limitation, unrelated to FQ name resolution.)
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            (
+                "pkg1/Cls",
+                "package pkg1\nclass Cls(val n: Int)\nfun Cls.doubled(): Int = n * 2\n",
+            ),
+            (
+                "pkg2/Use",
+                "package pkg2\nimport pkg1.Cls\nimport pkg1.doubled\n\
+                 fun shrink(c: pkg1.Cls): pkg1.Cls = Cls(c.n / 2)\n\
+                 fun box(): String = if (shrink(Cls(42)).doubled() == 42) \"OK\" else \"fail\"\n",
+            ),
+        ],
+        "fq_typerefs",
     );
 }

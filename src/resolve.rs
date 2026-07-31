@@ -3420,14 +3420,20 @@ fn source_classifier_from_path(
     path: &str,
     declarations: &std::collections::HashSet<String>,
 ) -> Option<TypeName> {
-    let mut candidate = path.to_string();
-    loop {
+    // kotlinc resolves a dotted path classifier-first — an in-scope type shadows a package path —
+    // so try the nested (`$`) forms before the plain package path: `a$b$c`, `a/b$c`, then `a/b/c`.
+    let separators = path.bytes().filter(|&byte| byte == b'/').count();
+    for nested in (0..=separators).rev() {
+        let mut candidate = path.to_string();
+        for _ in 0..nested {
+            let separator = candidate.rfind('/')?;
+            candidate.replace_range(separator..=separator, "$");
+        }
         if declarations.contains(&candidate) {
             return Some(type_name(&candidate));
         }
-        let separator = candidate.rfind('/')?;
-        candidate.replace_range(separator..=separator, "$");
     }
+    None
 }
 
 fn type_ref_formal_occurrences(
@@ -3600,12 +3606,13 @@ fn collect_signatures_with_cp_impl(
                     .or_else(|| {
                         // A dotted name may be the fully-qualified path of a SOURCE class in this
                         // module (`pkg1.Cls`, `pkg1.Outer.Inner`) — source shadows the classpath.
-                        // Supertypes arrive already internalized (`pkg1/Cls`), so accept '/' too.
-                        (name.contains('.') || name.contains('/'))
-                            .then(|| {
-                                source_classifier_from_path(&name.replace('.', "/"), &user_defined)
-                            })
-                            .flatten()
+                        // Some positions (supertypes, delegation specs) arrive already
+                        // internalized (`pkg1/Cls`), so accept '/' too.
+                        if name.contains('.') || name.contains('/') {
+                            source_classifier_from_path(&name.replace('.', "/"), &user_defined)
+                        } else {
+                            None
+                        }
                     })
                     .or_else(|| {
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
