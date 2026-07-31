@@ -12270,7 +12270,12 @@ impl<'a> Checker<'a> {
                     .get(&(source_file, source_declaration))
                     .copied()
                     .or(match selected.callable.origin {
-                        crate::libraries::Origin::Module { facade } => Some(facade),
+                        // An EMPTY facade is the "unrecorded" fallback, not a real class — for a
+                        // sibling-file function it means the target is not emitted anywhere
+                        // (a non-callable inline fn), so the reference cannot lower: decline.
+                        crate::libraries::Origin::Module { facade } => {
+                            Some(facade).filter(|f| !f.render().is_empty())
+                        }
                         _ => None,
                     })?,
             )

@@ -8397,6 +8397,24 @@ impl<'a> Lower<'a> {
         // A `suspend { … }` literal (parser-marked): build the `SuspendLambda` state machine
         // instead of a plain `FunctionN` closure (which `lower_lambda_sam` would bail on).
         if self.afile.suspend_lambdas.contains(&e.0) {
+            // Conservative v1 gate: a body with MEMBER accesses (`c.bar()`, `c.x`) hits latent
+            // suspend+delegation/state-machine gaps (silent resume loss) — bail (skip the file)
+            // rather than miscompile. Bare calls (incl. suspend function PARAMETERS, the
+            // `runBlocking`/`contract` shape) are supported.
+            fn has_member_access(lo: &Lower, e: AstExprId) -> bool {
+                if matches!(lo.afile.expr(e), Expr::Member { .. }) {
+                    return true;
+                }
+                lo.afile
+                    .any_child_expr(e, &mut |c| has_member_access(lo, c), &mut |s| {
+                        lo.afile
+                            .any_child_stmt(s, &mut |c| has_member_access(lo, c))
+                    })
+            }
+            let has_member_call = has_member_access(self, body);
+            if has_member_call {
+                return None;
+            }
             let Ty::Fun(sig) = self.info.ty(e) else {
                 return None;
             };
@@ -9707,6 +9725,25 @@ impl<'a> Lower<'a> {
         );
         // The hash of the (known non-null) field value `v`.
         let hash_of = |s: &mut Self, v: u32| -> Option<u32> {
+            // A value-class field (stdlib unsigned or classpath): kotlinc calls the mangled STATIC
+            // `hashCode-impl(<underlying>)` on the unboxed value — a virtual `hashCode()` would
+            // dispatch on the primitive underlying and fail verification (the value-classes pass
+            // only rewrites calls on value classes declared in THIS file).
+            if let Some(internal) = t.non_null().kotlin_class_internal() {
+                if let Some(under) = s.syms.libraries.value_underlying_name(internal) {
+                    let erased = s.vc_erase_ty(under);
+                    let udesc = s.runtime.type_descriptor(erased)?;
+                    let owner = internal.render();
+                    s.ir.set_data_hashcode_owner(&class_internal, &field_name, owner.clone());
+                    return Some(s.emit_static_call(
+                        owner,
+                        "hashCode-impl".to_string(),
+                        format!("({udesc})I"),
+                        InlineKind::None,
+                        vec![v],
+                    ));
+                }
+            }
             if is_prim {
                 return if guarded {
                     // The field is BOXED (`Int?`): kotlinc dispatches `Object.hashCode()` — the
@@ -11893,6 +11930,10 @@ impl<'a> Lower<'a> {
         vararg_tail: bool,
         target_vararg: bool,
     ) -> Option<u32> {
+        // A cross-file target whose facade never resolved (a sibling-file function krusty does
+        // not emit — e.g. a non-callable inline fn) would produce a call to `<"">.name` and a
+        // class format error at load time. Bail (skip the file) instead.
+        let owner = owner.filter(|f| !f.render().is_empty());
         let name = target.name.as_str();
         let target_params = target.params.as_slice();
         let (n, m) = (adapted_params.len(), target_params.len());
@@ -22214,10 +22255,7 @@ impl<'a> Lower<'a> {
             }
             // A user-defined `inline fun foo(...)` — expand it here (kotlinc's inliner): bind its
             // value parameters to the evaluated arguments, register its lambda arguments, and
-            // lower its body so a lambda capturing a mutable local works (no closure). When the
-            // splice declines (the fn lives in a SIBLING file — its body isn't available here),
-            // fall through to the ordinary dispatch: the cross-file path emits a static call to
-            // the sibling facade, which emits inline fns as real methods (kotlinc's shape).
+            // lower its body so a lambda capturing a mutable local works (no closure).
             if self.lookup(&fname).is_none() {
                 if let Some(target) = self
                     .info
@@ -22226,16 +22264,14 @@ impl<'a> Lower<'a> {
                     .cloned()
                 {
                     let target_name = target.name.clone();
-                    if let Some(r) = self.lower_inline_fn_call(
+                    return self.lower_inline_fn_call(
                         &target_name,
                         &args,
                         e.0,
                         None,
                         Some(&target),
                         None,
-                    ) {
-                        return Some(r);
-                    }
+                    );
                 }
             }
             // SAM conversion `Pred { lambda }`: constructor syntax for a functional interface.
