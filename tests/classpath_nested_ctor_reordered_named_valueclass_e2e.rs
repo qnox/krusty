@@ -6,8 +6,8 @@
 //! the plain constructor (never the value-class synthetic) and fell back to positional erased-type
 //! matching — which silently worked only when the erased parameter types were permutation-invariant
 //! (all the same), so an asymmetric mix (`Reg, AId, Int`) written out of order failed to resolve.
-//! Production hit: a catalog service (`Outer.Nested(id=…,
-//! providerId=…, config=…, ownerId=…)`). Needs the JVM toolchain + kotlin-stdlib + real kotlinc.
+//! The fixture uses only synthetic type and parameter names. Needs the JVM toolchain + kotlin-stdlib
+//! + real kotlinc.
 use super::common;
 
 const LIB: &str = "package lib\n\

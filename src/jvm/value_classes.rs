@@ -2824,8 +2824,8 @@ pub fn lower_value_classes(
             if let Some(body) = ir.functions[fid].body {
                 // A nullable value-class return `X?` has the BOXED descriptor `LX;`, so a tail that is an
                 // UNBOXED `X` value must be boxed — not only the syntactic `constructor-impl`/`unbox-impl`
-                // forms `box_tail` handled, but also a value-class field read (`h.itemId`) or a
-                // call returning the unboxed underlying (`byDep(): X`) flowing in via nullable widening.
+                // forms `box_tail` handled, but also a value-class field read (`holder.item`) or a
+                // call returning the unboxed underlying (`make(): X`) flowing in via nullable widening.
                 // `box_nullable_vc_tail` boxes exactly the tails whose representation IS an unboxed `X`
                 // (leaving `null`, already-boxed, and unrelated values — e.g. a suspend continuation's
                 // `kotlin/Result` resume value that shares the boxed descriptor — untouched).

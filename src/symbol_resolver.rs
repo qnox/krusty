@@ -2055,6 +2055,7 @@ impl<'a> SymbolResolver<'a> {
         recv: Ty,
         name: &str,
         args: &[CallArgKind],
+        type_args: &[Ty],
         current_source_file: Option<u32>,
     ) -> Option<FunctionInfo> {
         select_overload(
@@ -2062,7 +2063,7 @@ impl<'a> SymbolResolver<'a> {
             recv,
             name,
             args,
-            &[],
+            type_args,
             FnKind::Extension,
             ExtCtx {
                 allow_must_inline: true,

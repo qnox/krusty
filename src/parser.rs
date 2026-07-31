@@ -8029,13 +8029,13 @@ mod tests {
         // to the next declaration — NOT mis-token keyword-by-keyword and drift into / swallow the
         // sibling declaration (the reported `unresolved reference 'private'/'suspend'` cascade).
         let mut d = DiagSink::new();
-        let src = "init { }\nfun f() = 1\nclass ServiceRegistry(val n: String)\n";
+        let src = "init { }\nfun f() = 1\nclass Sibling(val n: String)\n";
         let toks = lex(src, &mut d);
         let file = parse(src, &toks, &mut d);
         let sibling_survives = file
             .decls
             .iter()
-            .any(|&id| matches!(file.decl(id), Decl::Class(c) if c.name == "ServiceRegistry"));
+            .any(|&id| matches!(file.decl(id), Decl::Class(c) if c.name == "Sibling"));
         assert!(sibling_survives, "recovery swallowed the sibling class");
         let errors = d
             .diags

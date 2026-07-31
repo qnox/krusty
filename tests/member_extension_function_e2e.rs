@@ -350,6 +350,139 @@ fn member_extension_function_resolution() {
 }
 
 #[test]
+fn arity_inapplicable_member_falls_through_to_reified_extension() {
+    const SOURCE: &str = r#"
+        interface Catalog {
+            fun <T> load(type: kotlin.reflect.KClass<*>): T? = null
+            fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+        }
+        inline fun <reified T : Any> Catalog.loadAll(): List<T> = loadAll(T::class)
+
+        class Entry
+
+        fun entries(catalog: Catalog): List<Entry> = catalog.loadAll<Entry>()
+    "#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+        return;
+    };
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn arity_inapplicable_member_falls_through_to_reified_extension_implicit_receiver() {
+    const SOURCE: &str = r#"
+        interface Catalog {
+            fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+        }
+        inline fun <reified T : Any> Catalog.loadAll(): List<T> = loadAll(T::class)
+
+        class Entry
+
+        fun entries(catalog: Catalog): List<Entry> =
+            with(catalog) { loadAll<Entry>() }
+    "#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+        return;
+    };
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn arity_inapplicable_member_still_errors_when_source_extension_inapplicable() {
+    const SOURCE: &str = r#"
+        interface Catalog {
+            fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+        }
+        fun Catalog.loadAll(extra: Int): List<String> = emptyList()
+
+        class Entry
+
+        fun entries(catalog: Catalog): List<Entry> = catalog.loadAll<Entry>()
+    "#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("value passed for parameter 'type'")),
+        "expected member arity diagnostic, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn arity_inapplicable_member_reified_extension_run() {
+    const SOURCE: &str = r#"
+        interface Catalog {
+            fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T>
+        }
+        inline fun <reified T : Any> Catalog.loadAll(): List<T> = loadAll(T::class)
+
+        class Entry
+
+        class CatalogImpl : Catalog {
+            override fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> =
+                if (type == Entry::class) listOf(Entry() as T) else emptyList()
+        }
+
+        fun box(): String {
+            val entries = CatalogImpl().loadAll<Entry>()
+            if (entries.size != 1) return "size"
+            if (entries[0] !is Entry) return "type"
+            return "OK"
+        }
+    "#;
+
+    common::expect_box_ok_with_stdlib(SOURCE, "S");
+}
+
+#[test]
+fn arity_inapplicable_member_falls_through_to_sibling_module_extension() {
+    // Keep the source-file boundary out of the resolution rule: the same federated extension selector
+    // must see a sibling declaration exactly as it sees a same-file declaration.
+    const MODEL: &str = "package sample\n\
+class Registry {\n\
+    fun pick(value: String): String = value\n\
+}\n";
+    const EXTENSION: &str = "package sample\n\
+fun Registry.pick(): String = \"OK\"\n";
+    const MAIN: &str = "package sample\n\
+fun box(): String = Registry().pick()\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Model.kt", MODEL),
+            ("Extension.kt", EXTENSION),
+            ("Main.kt", MAIN),
+        ],
+        "member_arity_sibling_extension",
+    );
+}
+
+#[test]
+fn arity_inapplicable_member_falls_through_to_classpath_extension() {
+    // The selected extension's origin changes how lowering emits it, not whether it is applicable.
+    // Compiling the declaration into a dependency pins classpath and module behavior to one selector.
+    const LIBRARY: &str = "package dependency\n\
+class Registry {\n\
+    fun pick(value: String): String = value\n\
+}\n\
+fun Registry.pick(): String = \"OK\"\n";
+    const MAIN: &str = "import dependency.Registry\n\
+import dependency.pick\n\
+fun box(): String = Registry().pick()\n";
+    common::expect_box_ok_against("member_arity_classpath_extension", LIBRARY, MAIN);
+}
+
+#[test]
 fn safe_call_ordinary_member_keeps_precedence_over_member_extension() {
     const SOURCE: &str = r#"
         class Entry {
