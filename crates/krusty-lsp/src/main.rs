@@ -13,6 +13,8 @@ use krusty_lsp::{
     SystemEnvironment,
 };
 
+#[cfg(unix)]
+const ORPHAN_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
 const WORKER_RECONFIGURE_RETRY_MAX_MS: u64 = 30_000;
 const MAX_RETAINED_SUPPORT_DOCUMENTS: usize = 32 * 1024;
@@ -103,22 +105,67 @@ fn parse_cache_command(args: &[String]) -> Result<(bool, Option<PathBuf>), Strin
     Ok((all, root))
 }
 
+/// Remove the private worker-mode marker and the spawning server's PID from an argument vector.
+///
+/// The PID is positional and mandatory because this is an internal exec protocol, not a user-facing
+/// option. Keeping it next to the marker also prevents either value from reaching `LspOptions`.
+fn take_worker_parent(arguments: &mut Vec<String>) -> Result<Option<u32>, String> {
+    let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--analysis-worker")
+    else {
+        return Ok(None);
+    };
+    arguments.remove(index);
+    let parent = arguments
+        .get(index)
+        .ok_or_else(|| "--analysis-worker requires the server PID".to_string())?
+        .parse::<u32>()
+        .map_err(|_| "--analysis-worker server PID must be an unsigned integer".to_string())?;
+    arguments.remove(index);
+    Ok(Some(parent))
+}
+
+/// Terminate the worker once its server is gone.
+///
+/// The worker normally stops when the server closes its stdin, but a worker busy in
+/// analysis never reaches the next read and would survive as an orphan burning a core.
+/// Watching for reparenting catches that case without touching the analysis path. The
+/// expected PID comes from the spawning server, closing the race where the server exits
+/// before the worker can sample its current parent.
+#[cfg(unix)]
+fn exit_when_orphaned(server: u32) {
+    use std::os::unix::process::parent_id;
+
+    std::thread::spawn(move || loop {
+        // Check before sleeping so a worker whose server died during exec exits promptly instead
+        // of adopting the reaper as its baseline or doing unnecessary compiler initialization.
+        if parent_id() != server {
+            std::process::exit(0);
+        }
+        std::thread::sleep(ORPHAN_CHECK_INTERVAL);
+    });
+}
+
+#[cfg(not(unix))]
+fn exit_when_orphaned(_server: u32) {}
+
 fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("cache") {
         run_cache_command(&arguments[1..]);
         return;
     }
-    let worker_mode = arguments
-        .iter()
-        .position(|argument| argument == "--analysis-worker")
-        .map(|index| arguments.remove(index))
-        .is_some();
+    let worker_parent = take_worker_parent(&mut arguments).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: {error}");
+        std::process::exit(2);
+    });
     let options = LspOptions::parse(arguments.clone()).unwrap_or_else(|error| {
         eprintln!("krusty-lsp: {error}");
         std::process::exit(2);
     });
-    if worker_mode {
+    if let Some(server) = worker_parent {
+        exit_when_orphaned(server);
         let stdin = io::stdin();
         let stdout = io::stdout();
         if let Err(error) = krusty_lsp::run_analysis_worker(
@@ -378,7 +425,17 @@ struct WorkerHost {
     clock: Instant,
     root: Option<PathBuf>,
     jdk_warning_shown: bool,
+    /// Set when the source inventory hit its per-root limit, so the shortfall is reported rather
+    /// than looking like a fully indexed workspace.
+    truncated_inventory: bool,
+    /// One model generation's URI inventory. Both priority tiers derive from this snapshot; walking
+    /// every source root once for the neighbourhood and again for the sweep doubled cold indexing
+    /// work, while rebuilding it after every keystroke could block the interactive engine thread.
+    workspace_inventory: Option<Vec<String>>,
     project_sources: ProjectSources,
+    /// Background chunks use the same module/source-set algorithm but a separate discovery cache,
+    /// so hours of indexing cannot evict the open document's hot support-source inventory.
+    index_project_sources: ProjectSources,
     analysis_cache: Vec<CachedProjectAnalysis>,
     analysis_pending: bool,
     platform_classpath: Vec<PathBuf>,
@@ -406,7 +463,10 @@ impl WorkerHost {
             clock: Instant::now(),
             root: None,
             jdk_warning_shown: false,
+            truncated_inventory: false,
+            workspace_inventory: None,
             project_sources: ProjectSources::default(),
+            index_project_sources: ProjectSources::default(),
             analysis_cache: Vec::new(),
             analysis_pending: false,
             platform_classpath,
@@ -421,6 +481,41 @@ impl WorkerHost {
         self.clock.elapsed().as_millis() as u64
     }
 
+    fn ensure_workspace_inventory(&mut self) {
+        if self.workspace_inventory.is_some() {
+            return;
+        }
+        let Some(model) = self
+            .sync
+            .as_ref()
+            .and_then(ProjectSync::snapshot)
+            .map(|snapshot| snapshot.model())
+        else {
+            self.workspace_inventory = Some(Vec::new());
+            return;
+        };
+        let (sources, mut truncated) = krusty_lsp::project::workspace_sources(model);
+        let mut retained_bytes = 0usize;
+        let mut uris = Vec::new();
+        for path in sources {
+            let Some(uri) = krusty_lsp::uri::path_to_file_uri(&path) else {
+                continue;
+            };
+            let uri_bytes = krusty_lsp::workspace_index_uri_bytes(&uri);
+            if uris.len() >= krusty_lsp::MAX_WORKSPACE_INDEX_FILES
+                || uri_bytes
+                    > krusty_lsp::MAX_WORKSPACE_INDEX_URI_BYTES.saturating_sub(retained_bytes)
+            {
+                truncated = true;
+                break;
+            }
+            retained_bytes = retained_bytes.saturating_add(uri_bytes);
+            uris.push(uri);
+        }
+        self.truncated_inventory |= truncated;
+        self.workspace_inventory = Some(uris);
+    }
+
     fn configure(&mut self) -> ProjectFeedback {
         let previous_snapshot = self.sync.as_ref().and_then(ProjectSync::snapshot).cloned();
         let Some(sync) = self.sync.as_mut() else {
@@ -430,7 +525,10 @@ impl WorkerHost {
             RefreshOutcome::Unchanged => ProjectFeedback::default(),
             RefreshOutcome::Updated => {
                 self.project_sources.invalidate();
+                self.index_project_sources.invalidate();
                 self.analysis_cache.clear();
+                self.workspace_inventory = None;
+                self.truncated_inventory = false;
                 let (classpath, jdk_home) = Self::launch_from(sync, &self.options, &self.runner);
                 let mut language_features = sync.project_language_features();
                 self.options.apply_language_features(&mut language_features);
@@ -572,7 +670,114 @@ impl WorkerHost {
     }
 }
 
+/// Bytes one index chunk may read. Mirrors the open-document budget in spirit: a count of files is
+/// not a memory bound.
+const MAX_INDEX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
 impl krusty_lsp::Analysis for WorkerHost {
+    fn index_workspace_files(&mut self, uris: &[&str]) -> krusty_lsp::IndexOutcome {
+        let mut budget = MAX_INDEX_CHUNK_BYTES;
+        let readable: Vec<(String, String)> = uris
+            .iter()
+            .filter_map(|uri| {
+                let path = krusty_lsp::uri::file_uri_to_path(uri)?;
+                // Reject a known-oversized file before allocating its contents. Rechecking the
+                // actual string length after the read handles a file that grows between metadata
+                // and read without charging an inaccurate size.
+                let metadata_bytes = usize::try_from(std::fs::metadata(&path).ok()?.len()).ok()?;
+                if metadata_bytes > budget {
+                    return None;
+                }
+                let text = std::fs::read_to_string(path).ok()?;
+                // The open-document path is byte-bounded; indexing has to be too, or a generated
+                // multi-hundred-megabyte source would sit in memory twice per chunk.
+                budget = budget.checked_sub(text.len())?;
+                Some(((*uri).to_string(), text))
+            })
+            .collect();
+        if readable.is_empty() {
+            // No worker call was needed, but every URI was conclusively absent, unreadable, or
+            // outside the read budget. Treating this as infrastructure failure would make a
+            // one-file deletion retain stale diagnostics forever.
+            return krusty_lsp::IndexOutcome {
+                files: Vec::new(),
+                conclusive: true,
+            };
+        }
+        let documents: Vec<(&str, &str)> = readable
+            .iter()
+            .map(|(uri, text)| (uri.as_str(), text.as_str()))
+            .collect();
+        let indexed_uris: Vec<&str> = documents.iter().map(|(uri, _)| *uri).collect();
+        // Use the same module grouping, source visibility, language flags, and classpath selection
+        // as interactive analysis. A raw `analyze(&texts)` call loses every one of those origins
+        // and publishes false unresolved-reference diagnostics for otherwise valid workspace files.
+        //
+        // Indexing still must not evict or populate the interactive cache. Temporarily replacing
+        // that cache lets the shared project-analysis path stay the single semantic implementation
+        // while keeping background chunks invisible to the next keystroke's hot state.
+        let interactive_cache = std::mem::take(&mut self.analysis_cache);
+        std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
+        let (analyses, _support) = self.analyze_open_documents(&documents, &indexed_uris);
+        std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
+        self.analysis_cache = interactive_cache;
+        // A short result means the worker did not answer; report it as inconclusive so the store
+        // keeps what it already has rather than treating the gap as deletions.
+        let conclusive = analyses.len() == readable.len();
+        let files = analyses
+            .into_iter()
+            .zip(readable)
+            .map(|(analysis, (uri, text))| krusty_lsp::IndexedFile {
+                uri,
+                diagnostics: analysis.diagnostics,
+                text_hash: krusty_lsp::workspace_text_hash(&text),
+                text,
+            })
+            .collect();
+        krusty_lsp::IndexOutcome { files, conclusive }
+    }
+
+    fn neighborhood_index_candidates(&mut self, open_uris: &[&str]) -> Vec<String> {
+        self.ensure_workspace_inventory();
+        let Some(snapshot) = self.sync.as_ref().and_then(ProjectSync::snapshot) else {
+            return Vec::new();
+        };
+        let model = snapshot.model();
+        let open_modules: std::collections::HashSet<usize> = open_uris
+            .iter()
+            .filter_map(|uri| krusty_lsp::uri::file_uri_to_path(uri))
+            .filter_map(|path| model.module_index_for_source(&path))
+            .collect();
+        if open_modules.is_empty() {
+            return Vec::new();
+        }
+        self.workspace_inventory
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|uri| {
+                let Some(path) = krusty_lsp::uri::file_uri_to_path(uri) else {
+                    return false;
+                };
+                model
+                    .module_index_for_source(&path)
+                    .is_some_and(|module| open_modules.contains(&module))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Candidates come from the project model's own source inventory. Walking the tree separately
+    /// here would be a second, divergent definition of what counts as a workspace source.
+    fn workspace_index_candidates(&mut self) -> Vec<String> {
+        self.ensure_workspace_inventory();
+        self.workspace_inventory.clone().unwrap_or_default()
+    }
+
+    fn workspace_index_incomplete(&self) -> bool {
+        self.truncated_inventory
+    }
+
     fn document_admission(&self) -> krusty_lsp::DocumentAdmission {
         self.sync
             .as_ref()
@@ -955,7 +1160,10 @@ impl krusty_lsp::Analysis for WorkerHost {
         self.root = Some(root);
         self.sync = Some(ProjectSync::new(provider));
         self.project_sources.invalidate();
+        self.index_project_sources.invalidate();
         self.analysis_cache.clear();
+        self.workspace_inventory = None;
+        self.truncated_inventory = false;
         let mut feedback = self.configure();
         feedback
             .logs
@@ -1013,6 +1221,7 @@ impl krusty_lsp::Analysis for WorkerHost {
         });
         if is_project_source {
             self.project_sources.invalidate();
+            self.index_project_sources.invalidate();
             true
         } else {
             self.note_project_change();
@@ -1365,6 +1574,23 @@ mod tests {
         );
         assert!(parse_cache_command(&args(&["clean", "-deps-cache-dir"])).is_err());
         assert!(parse_cache_command(&args(&["clean", "--unknown"])).is_err());
+    }
+
+    #[test]
+    fn worker_parent_protocol_is_required_and_removed_before_option_parsing() {
+        let mut arguments = vec![
+            "-classpath".to_string(),
+            "/project/classes".to_string(),
+            "--analysis-worker".to_string(),
+            "42".to_string(),
+        ];
+        assert_eq!(take_worker_parent(&mut arguments).unwrap(), Some(42));
+        assert_eq!(arguments, ["-classpath", "/project/classes"]);
+
+        let mut missing = vec!["--analysis-worker".to_string()];
+        assert!(take_worker_parent(&mut missing).is_err());
+        let mut invalid = vec!["--analysis-worker".to_string(), "parent".to_string()];
+        assert!(take_worker_parent(&mut invalid).is_err());
     }
 
     #[test]

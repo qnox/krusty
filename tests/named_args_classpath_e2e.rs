@@ -273,6 +273,24 @@ fn named_args_to_classpath_extension_fn_reorder_and_run() {
 }
 
 #[test]
+fn named_classpath_extension_accepts_a_module_subclass_argument() {
+    // Named extension selection and positional extension selection must consult the same composite
+    // source graph. The extension and its parameter base type live on the classpath, but the actual
+    // argument's subclass exists only in the module being compiled; a classpath-only applicability
+    // check would therefore reject the labelled form even though Kotlin assignment accepts it.
+    common::expect_box_ok_against(
+        "named_extension_module_subclass",
+        "package library\n\
+         open class Parent(val text: String)\n\
+         fun String.join(value: Parent): String = this + value.text\n",
+        "import library.Parent\n\
+         import library.join\n\
+         class Child(text: String) : Parent(text)\n\
+         fun box(): String = \"O\".join(value = Child(\"K\"))\n",
+    );
+}
+
+#[test]
 fn named_args_to_classpath_extension_fn_omitted_default_uses_slots() {
     let Some(java_home) = env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME")) else {
         eprintln!("skipping: set JAVA_HOME");

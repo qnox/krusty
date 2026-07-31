@@ -168,6 +168,7 @@ mod tests {
             "trace",
             "trace_compiler",
             "types",
+            "wide_stack",
         ];
         for path in rust_files_under("src/jvm") {
             if path.ends_with("java_stub.rs") {
@@ -236,6 +237,7 @@ mod tests {
                 "synthetics",
                 "trace_compiler",
                 "types",
+                "wide_stack",
             ],
         );
     }
