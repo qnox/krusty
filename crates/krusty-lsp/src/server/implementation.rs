@@ -18,14 +18,15 @@ use serde_json::{json, Value};
 
 use super::super::{
     CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex,
-    HoverIndex, LibraryDefinitionIndex, MaterializedDefinition, SemanticTokenIndex,
-    SemanticTokenRange, SignatureHelpIndex, WorkspaceSymbolIndex, MAX_RETAINED_ANALYSIS_BYTES,
-    SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
+    HoverIndex, IndexOutcome, IndexedFile, LibraryDefinitionIndex, MaterializedDefinition,
+    SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex, WorkspaceSymbolIndex,
+    MAX_RETAINED_ANALYSIS_BYTES, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
+use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
 use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
-    AnalysisBatch, AnalysisEngine, AnalysisJob, EngineBackend, EngineEvent, MaterializeJob,
-    MaterializeResult,
+    AnalysisBatch, AnalysisEngine, AnalysisJob, EngineBackend, EngineEvent, IndexBatch,
+    MaterializeJob, MaterializeResult,
 };
 use crate::server::status::StatusReporter;
 use crate::uri::{file_uri_to_path, path_to_file_uri};
@@ -36,6 +37,10 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 4;
 const MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE: usize = 32;
+/// How long shutdown waits for the analysis thread to notice the disconnect before
+/// abandoning it. Without a bound, one wedged analysis keeps the process — and its
+/// worker child — alive indefinitely after the client is gone.
+const ENGINE_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const MAX_OPEN_DOCUMENTS: usize = 256;
 const MAX_OPEN_SOURCE_BYTES: usize = MAX_RETAINED_ANALYSIS_BYTES;
 const MAX_CONTENT_CHANGES: usize = 256;
@@ -50,15 +55,17 @@ const MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const DIAGNOSTIC_WIRE_FIXED_BYTES: usize = 256;
 const MAX_PENDING_ANALYSIS_REQUEST_BYTES: usize = 256 * 1024;
 const BOUNDED_EXACT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WORKSPACE_DIAGNOSTIC_REPORTS: usize = 32 * 1024;
 const MAX_RENAME_IDENTIFIER_BYTES: usize = 1024;
 const MAX_RENAME_SPELLINGS: usize = 8;
 pub(super) const MAX_RENAME_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const RENAME_DOCUMENT_WIRE_FIXED_BYTES: usize = 128;
 const RENAME_EDIT_WIRE_FIXED_BYTES: usize = 192;
 const MAX_FORMATTING_RESULT_BYTES: usize = BOUNDED_EXACT_RESPONSE_BYTES;
-const DIAGNOSTIC_WARNING_BIT: u32 = 1 << 31;
-const DIAGNOSTIC_INSPECTION_BIT: u32 = 1 << 30;
-const DIAGNOSTIC_MESSAGE_MASK: u32 = !(DIAGNOSTIC_WARNING_BIT | DIAGNOSTIC_INSPECTION_BIT);
+pub(super) const DIAGNOSTIC_WARNING_BIT: u32 = 1 << 31;
+pub(super) const DIAGNOSTIC_INSPECTION_BIT: u32 = 1 << 30;
+pub(super) const DIAGNOSTIC_MESSAGE_MASK: u32 =
+    !(DIAGNOSTIC_WARNING_BIT | DIAGNOSTIC_INSPECTION_BIT);
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
 const MAX_BATCH_DURATION: Duration = Duration::from_millis(500);
 const ANALYSIS_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -211,6 +218,28 @@ impl DocumentAdmission {
 pub trait Analysis {
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis>;
 
+    /// Index workspace files that are not open. Required rather than defaulted: a silently empty
+    /// default let the whole background path look wired while producing nothing.
+    fn index_workspace_files(&mut self, uris: &[&str]) -> IndexOutcome;
+
+    /// Workspace sources sharing a module with one of the open documents. These are the files a
+    /// change to the open set is most likely to affect, so they index ahead of the sweep.
+    fn neighborhood_index_candidates(&mut self, _open_uris: &[&str]) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Every workspace source that is a candidate for background indexing, as file URIs. Reuses
+    /// the project model's own source inventory rather than walking the tree a second time.
+    fn workspace_index_candidates(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Whether the current model's inventory was truncated. Kept separate from the URI vector so
+    /// queueing stays allocation-focused while the engine can report incomplete workspace coverage.
+    fn workspace_index_incomplete(&self) -> bool {
+        false
+    }
+
     fn document_admission(&self) -> DocumentAdmission {
         DocumentAdmission::default()
     }
@@ -276,7 +305,55 @@ pub trait Analysis {
 /// URI-aware analysis for open Kotlin and Java documents.
 pub struct DocumentAnalyzer;
 
+/// FNV-1a over the file text. Only ever compared against another hash this process produced, so a
+/// non-cryptographic hash is the right trade.
+pub fn workspace_text_hash(text: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
 impl Analysis for DocumentAnalyzer {
+    fn index_workspace_files(&mut self, uris: &[&str]) -> IndexOutcome {
+        let readable: Vec<(String, String)> = uris
+            .iter()
+            .filter_map(|uri| {
+                let path = url::Url::parse(uri).ok()?.to_file_path().ok()?;
+                let text = std::fs::read_to_string(path).ok()?;
+                Some(((*uri).to_string(), text))
+            })
+            .collect();
+        if readable.is_empty() {
+            // This standalone host has no infrastructure that can be pending: an empty read set is
+            // a conclusive set of tombstones, not a failed analysis attempt.
+            return IndexOutcome {
+                files: Vec::new(),
+                conclusive: true,
+            };
+        }
+        let documents: Vec<(&str, &str)> = readable
+            .iter()
+            .map(|(uri, text)| (uri.as_str(), text.as_str()))
+            .collect();
+        let open: Vec<&str> = documents.iter().map(|(uri, _)| *uri).collect();
+        let (analyses, _support) = self.analyze_open_documents(&documents, &open);
+        let conclusive = analyses.len() == readable.len();
+        let files = analyses
+            .into_iter()
+            .zip(readable)
+            .map(|(analysis, (uri, text))| IndexedFile {
+                uri,
+                diagnostics: analysis.diagnostics,
+                text_hash: workspace_text_hash(&text),
+                text,
+            })
+            .collect();
+        IndexOutcome { files, conclusive }
+    }
+
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
         crate::analysis::analyze_for_lsp(sources)
     }
@@ -297,6 +374,12 @@ impl<F> Analysis for F
 where
     F: FnMut(&[&str]) -> Vec<DocumentAnalysis>,
 {
+    /// A bare closure analyses open documents only; workspace indexing needs the project model,
+    /// which a closure does not carry.
+    fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+        IndexOutcome::default()
+    }
+
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
         self(sources)
     }
@@ -610,6 +693,28 @@ impl DiagnosticIndex {
         DiagnosticIndex::default().result_id()
     }
 
+    /// Entries are already resolved and messages already interned, so this is a copy rather than
+    /// another position-resolution pass.
+    fn from_workspace(found: &WorkspaceDiagnostics<'_>) -> DiagnosticIndex {
+        let mut messages = Vec::new();
+        let mut remapped = HashMap::<u32, u32>::new();
+        let entries = found
+            .entries
+            .iter()
+            .map(|entry| {
+                let stored = entry[4] & DIAGNOSTIC_MESSAGE_MASK;
+                let next = u32::try_from(messages.len()).unwrap_or(DIAGNOSTIC_MESSAGE_MASK);
+                let local = *remapped.entry(stored).or_insert_with(|| {
+                    messages.push(found.messages[stored as usize].clone());
+                    next
+                });
+                let flags = entry[4] & !DIAGNOSTIC_MESSAGE_MASK;
+                [entry[0], entry[1], entry[2], entry[3], flags | local]
+            })
+            .collect();
+        DiagnosticIndex { entries, messages }
+    }
+
     fn encode(&self) -> Vec<Value> {
         self.entries
             .iter()
@@ -644,7 +749,7 @@ fn json_string_wire_bytes(value: &str) -> usize {
     })
 }
 
-fn resolve_diagnostic_positions(
+pub(super) fn resolve_diagnostic_positions(
     text: &str,
     pending: &[PendingDiagnosticEntry],
 ) -> Vec<DiagnosticEntry> {
@@ -794,6 +899,7 @@ pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
     workspace_symbols: WorkspaceSymbolIndex,
+    workspace_diagnostics: WorkspaceDiagnosticStore,
     backend: B,
     analysis_dirty: bool,
     analysis_retry_at: Option<Instant>,
@@ -832,6 +938,7 @@ where
             documents: HashMap::new(),
             source_set: Vec::new(),
             workspace_symbols: WorkspaceSymbolIndex::default(),
+            workspace_diagnostics: WorkspaceDiagnosticStore::default(),
             backend,
             analysis_dirty: false,
             analysis_retry_at: None,
@@ -1111,6 +1218,39 @@ where
         messages
     }
 
+    pub(crate) fn apply_index_batch(&mut self, batch: IndexBatch) -> Vec<Value> {
+        let outcome = self.workspace_diagnostics.merge(
+            batch.generation,
+            &batch.attempted,
+            batch.conclusive,
+            batch.files,
+            resolve_diagnostic_positions,
+        );
+        if !outcome.accepted {
+            return Vec::new();
+        }
+        let mut messages = Vec::new();
+        if outcome.newly_truncated {
+            messages.push(log_message(
+                "krusty: workspace diagnostic retention reached its memory limit; results are incomplete"
+                    .to_string(),
+            ));
+        }
+        // Files the sweep touched may now have different diagnostics, and a pull-based client has
+        // no other way to hear about a file it is not actively pulling.
+        if outcome.changed {
+            messages.extend(self.diagnostic_refresh());
+        }
+        messages
+    }
+
+    pub(crate) fn reset_workspace_index(&mut self, generation: u64) -> Vec<Value> {
+        self.workspace_diagnostics.reset_to(generation);
+        // Clearing old-model results is itself a diagnostic change. Pull clients must be told even
+        // when the replacement model produces no files or its first analysis is still pending.
+        self.diagnostic_refresh().into_iter().collect()
+    }
+
     fn schedule_analysis_retry(&mut self, uris: &[String]) {
         self.source_set.clear();
         self.workspace_symbols = WorkspaceSymbolIndex::default();
@@ -1257,7 +1397,7 @@ where
                             "foldingRangeProvider": true,
                             "diagnosticProvider": {
                                 "interFileDependencies": true,
-                                "workspaceDiagnostics": false,
+                                "workspaceDiagnostics": true,
                                 "workDoneProgress": false,
                             },
                             "completionProvider": {
@@ -1323,6 +1463,7 @@ where
             "textDocument/formatting" => self.formatting(id, params),
             "textDocument/foldingRange" => self.folding_ranges(id, params),
             "textDocument/diagnostic" => self.pull_diagnostics(id, params),
+            "workspace/diagnostic" => self.workspace_diagnostic(id, params),
             "textDocument/completion" => self.completion(id, params),
             "textDocument/signatureHelp" => self.signature_help(id, params),
             "completionItem/resolve" => self.resolve_completion(id, params),
@@ -2358,9 +2499,21 @@ where
         let uri = params.text_document.uri;
         let previous_result_id = params.previous_result_id;
         if !self.document_waits_for_analysis(&uri) {
+            // An open buffer is newer than whatever the sweep read from disk, so it always wins.
+            if let Some(open) = self.documents.get(&uri) {
+                return Dispatch::messages(vec![diagnostic_report(
+                    id,
+                    Some(&open.diagnostics),
+                    previous_result_id.as_deref(),
+                )]);
+            }
+            let indexed = self
+                .workspace_diagnostics
+                .diagnostics(&uri)
+                .map(|found| DiagnosticIndex::from_workspace(&found));
             return Dispatch::messages(vec![diagnostic_report(
                 id,
-                self.documents.get(&uri).map(|open| &open.diagnostics),
+                indexed.as_ref(),
                 previous_result_id.as_deref(),
             )]);
         }
@@ -2420,6 +2573,105 @@ where
                 retained_bytes,
             });
         Dispatch::messages(messages)
+    }
+
+    /// Report every file the sweep has indexed. Without this the retained diagnostics are
+    /// unreachable: a client only pulls `textDocument/diagnostic` for documents it has open, and
+    /// those are always answered from the open buffer.
+    fn workspace_diagnostic(&mut self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<WorkspaceDiagnosticParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        if params.previous_result_ids.len() > MAX_WORKSPACE_DIAGNOSTIC_REPORTS {
+            return Dispatch::messages(vec![diagnostic_server_cancelled(
+                id,
+                "workspace diagnostic prior-result set exceeds the response limit",
+                false,
+            )]);
+        }
+        let previous: HashMap<String, String> = params
+            .previous_result_ids
+            .into_iter()
+            .map(|previous| (previous.uri, previous.value))
+            .collect();
+        // Include prior client state even when the file disappeared: omitting that URI would leave
+        // its old diagnostics installed forever. Open buffers also belong here and are authoritative
+        // over the sweep, just as they are for textDocument/diagnostic.
+        let mut uris = self.workspace_diagnostics.indexed_uris();
+        uris.extend(self.documents.keys().cloned());
+        uris.extend(previous.keys().cloned());
+        uris.sort_unstable();
+        uris.dedup();
+        if uris.len() > MAX_WORKSPACE_DIAGNOSTIC_REPORTS {
+            return Dispatch::messages(vec![diagnostic_server_cancelled(
+                id,
+                "workspace diagnostic report exceeds the bounded non-streaming response limit",
+                false,
+            )]);
+        }
+
+        let mut items = Vec::new();
+        let mut item_wire_bytes = 2usize;
+        for uri in uris {
+            let workspace_index;
+            let empty_index;
+            let index = if let Some(open) = self.documents.get(&uri) {
+                &open.diagnostics
+            } else if let Some(found) = self.workspace_diagnostics.diagnostics(&uri) {
+                workspace_index = DiagnosticIndex::from_workspace(&found);
+                &workspace_index
+            } else {
+                empty_index = DiagnosticIndex::default();
+                &empty_index
+            };
+            let result_id = index.result_id();
+            let item = if previous.get(&uri).map(String::as_str) == Some(result_id.as_str()) {
+                json!({
+                    "kind": "unchanged",
+                    "uri": uri,
+                    "version": Value::Null,
+                    "resultId": result_id,
+                })
+            } else {
+                json!({
+                "kind": "full",
+                "uri": uri,
+                    "version": Value::Null,
+                    "resultId": result_id,
+                "items": index.encode(),
+                })
+            };
+            let Ok(encoded) = serde_json::to_vec(&item) else {
+                return Dispatch::messages(vec![rpc_error(
+                    id,
+                    -32603,
+                    "workspace diagnostic serialization failed",
+                )]);
+            };
+            item_wire_bytes = item_wire_bytes
+                .saturating_add(encoded.len())
+                .saturating_add(1);
+            if item_wire_bytes > BOUNDED_EXACT_RESPONSE_BYTES {
+                return Dispatch::messages(vec![diagnostic_server_cancelled(
+                    id,
+                    "workspace diagnostic report exceeds the bounded non-streaming response limit",
+                    false,
+                )]);
+            }
+            items.push(item);
+        }
+        let response = rpc_result(id.clone(), json!({"items": items}));
+        if !serialized_value_fits(&response, MAX_MESSAGE_BYTES) {
+            return Dispatch::messages(vec![diagnostic_server_cancelled(
+                id,
+                "workspace diagnostic response exceeds the protocol message limit",
+                false,
+            )]);
+        }
+        Dispatch::messages(vec![response])
     }
 
     fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
@@ -2541,6 +2793,19 @@ struct DocumentDiagnosticParams {
     text_document: TextDocumentIdentifier,
     #[serde(default)]
     previous_result_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceDiagnosticParams {
+    #[serde(default)]
+    previous_result_ids: Vec<WorkspacePreviousResultId>,
+}
+
+#[derive(Deserialize)]
+struct WorkspacePreviousResultId {
+    uri: String,
+    value: String,
 }
 
 #[derive(Deserialize)]
@@ -3114,7 +3379,7 @@ fn publish_diagnostics(uri: &str, version: Option<i64>, diagnostics: &Diagnostic
 /// the same message lowercase. Do this only at the protocol boundary so compiler diagnostics remain
 /// byte-for-byte compatible with kotlinc. Current Kotlin diagnostic prefixes are ASCII; mutating that
 /// byte in place avoids another allocation in the analysis-to-wire path.
-fn lsp_diagnostic_message(mut message: String) -> String {
+pub(super) fn lsp_diagnostic_message(mut message: String) -> String {
     if let Some(first_byte) = message.get_mut(..1) {
         first_byte.make_ascii_uppercase();
     }
@@ -3548,6 +3813,18 @@ where
                 service.mark_analysis_dirty();
             }
         }
+        EngineEvent::IndexProgress(batch) => {
+            for message in service.apply_index_batch(batch) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
+        EngineEvent::IndexReset(generation) => {
+            for message in service.reset_workspace_index(generation) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
         EngineEvent::WatchedGlobs(globs) => {
             if globs.is_empty() {
                 return Ok(());
@@ -3724,13 +4001,46 @@ where
             let _ = write_framed(writer, &encoded);
         }
     }
-    let mut engine = service.backend.into_engine();
-    engine.disconnect();
-    while !engine.is_finished() {
-        let _ = incoming.recv_timeout(Duration::from_millis(50));
-    }
-    engine.join();
+    let _ = shutdown_engine(
+        service.backend.into_engine(),
+        &incoming,
+        ENGINE_SHUTDOWN_GRACE,
+    );
     outcome
+}
+
+/// Disconnect the analysis command queue and wait at most `grace` for its thread to unwind.
+///
+/// Returning whether the thread joined makes the exceptional detach path directly testable without
+/// baking the production two-second budget into a unit test. While waiting, drain engine events: the
+/// engine uses a bounded event channel and could otherwise be finished with analysis but blocked trying
+/// to publish its last result. Once the deadline expires, dropping the join handle deliberately detaches
+/// the thread so the server's main thread can return and process teardown can reclaim it.
+fn shutdown_engine(
+    mut engine: AnalysisEngine,
+    incoming: &Receiver<Incoming>,
+    grace: Duration,
+) -> bool {
+    engine.disconnect();
+    let deadline = Instant::now()
+        .checked_add(grace)
+        .unwrap_or_else(Instant::now);
+    while !engine.is_finished() {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        // Do not overshoot a short test budget by the production polling interval.
+        let _ = incoming.recv_timeout(remaining.min(Duration::from_millis(50)));
+    }
+    if engine.is_finished() {
+        engine.join();
+        true
+    } else {
+        // The analysis thread is wedged. Leave it detached and let process teardown
+        // reap it; blocking here would strand the server after the client is gone.
+        engine.abandon();
+        false
+    }
 }
 
 fn maintenance_preempts_input(input_dispatches: usize, due: Option<Duration>) -> bool {
@@ -4157,6 +4467,9 @@ mod tests {
             _flag: DropFlag,
         }
         impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 sources.iter().map(|_| DocumentAnalysis::empty()).collect()
             }
@@ -4187,6 +4500,9 @@ mod tests {
     fn shutdown_ends_open_status() {
         struct Mock;
         impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 sources.iter().map(|_| DocumentAnalysis::empty()).collect()
             }
@@ -4234,6 +4550,9 @@ mod tests {
             _flag: DropFlag,
         }
         impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 sources.iter().map(|_| DocumentAnalysis::empty()).collect()
             }
@@ -4273,6 +4592,73 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_abandons_analysis_that_exceeds_its_grace_period() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::{channel, sync_channel};
+        use std::sync::Arc;
+
+        struct BlockingAnalysis {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+            completed: Arc<AtomicBool>,
+        }
+        impl Analysis for BlockingAnalysis {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                // This fixture isolates shutdown while an interactive analysis is blocked; it has
+                // no project model and therefore no legitimate workspace-index producer.
+                IndexOutcome::default()
+            }
+
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                let _ = self.entered.send(());
+                let _ = self.release.recv();
+                self.completed.store(true, Ordering::SeqCst);
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let analysis = BlockingAnalysis {
+            entered: entered_tx,
+            release: release_rx,
+            completed: completed.clone(),
+        };
+        let (events, incoming) = sync_channel(INPUT_QUEUE_CAPACITY);
+        let engine = AnalysisEngine::spawn(analysis, events);
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///blocked.kt".into(), "fun blocked() {}".into(), 1)],
+            open_uris: vec!["file:///blocked.kt".into()],
+        }));
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("analysis entered its blocking section");
+
+        let started = Instant::now();
+        assert!(
+            !shutdown_engine(engine, &incoming, Duration::from_millis(20)),
+            "a still-running analysis must take the detach path"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "shutdown exceeded its bounded grace period"
+        );
+
+        // Detachment must not corrupt the engine's own unwind path. Release the synthetic block and
+        // wait for it to finish before the test drops its channels, keeping this regression leak-free.
+        release_tx.send(()).expect("release detached analysis");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !completed.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "detached analysis did not unwind after its blocker was released"
+        );
+    }
+
+    #[test]
     fn request_is_answered_while_analysis_is_in_flight() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc::{channel, sync_channel};
@@ -4284,6 +4670,9 @@ mod tests {
             completed: Arc<AtomicBool>,
         }
         impl Analysis for BlockingAnalysis {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 let _ = self.entered.send(());
                 let _ = self.release.recv_timeout(Duration::from_secs(5));
@@ -5883,5 +6272,276 @@ mod tests {
         });
         assert!(client_supports_work_done_progress(&params));
         assert!(!client_supports_work_done_progress(&json!({})));
+    }
+    #[test]
+    fn a_pull_for_an_unopened_file_answers_from_the_workspace_index() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec!["file:///w/Swept.kt".to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: "file:///w/Swept.kt".to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(4, 9),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "swept boom".to_string(),
+                    file: 0,
+                }],
+                text_hash: 3,
+                text: "val broken = 1\n".to_string(),
+            }],
+        });
+
+        let report = service.pull_diagnostics(
+            Some(json!(1)),
+            json!({"textDocument": {"uri": "file:///w/Swept.kt"}}),
+        );
+        let items = &report.messages[0]["result"]["items"];
+        assert_eq!(items.as_array().map(Vec::len), Some(1));
+        assert_eq!(items[0]["message"], "Swept boom");
+        assert_eq!(items[0]["range"]["start"]["line"], 0);
+        assert_eq!(
+            items[0]["range"]["start"]["character"], 4,
+            "byte spans must be resolved to UTF-16 columns while the text is still in hand"
+        );
+    }
+
+    #[test]
+    fn an_attempted_file_that_produced_no_result_loses_its_retained_diagnostics() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///w/Gone.kt".to_string();
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.clone()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: uri.clone(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "will be deleted".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x\n".to_string(),
+            }],
+        });
+
+        // The file is deleted, so the next sweep attempts it and produces nothing for it.
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.clone()],
+            conclusive: true,
+            files: Vec::new(),
+        });
+
+        let report =
+            service.pull_diagnostics(Some(json!(2)), json!({"textDocument": {"uri": uri}}));
+        assert_eq!(
+            report.messages[0]["result"]["items"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "a deleted file must not keep reporting diagnostics forever"
+        );
+    }
+
+    #[test]
+    fn an_index_batch_from_a_replaced_model_is_rejected() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.apply_index_batch(IndexBatch {
+            generation: 4,
+            attempted: vec!["file:///new/A.kt".to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: "file:///new/A.kt".to_string(),
+                diagnostics: Vec::new(),
+                text_hash: 1,
+                text: String::new(),
+            }],
+        });
+        service.apply_index_batch(IndexBatch {
+            generation: 1,
+            attempted: vec!["file:///new/A.kt".to_string()],
+            conclusive: true,
+            files: Vec::new(),
+        });
+
+        assert!(
+            service
+                .workspace_diagnostics
+                .diagnostics("file:///new/A.kt")
+                .is_some(),
+            "a late batch from a replaced model must not delete data the current model produced"
+        );
+    }
+
+    #[test]
+    fn a_model_reset_clears_retained_diagnostics_before_the_replacement_sweep() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///old/Model.kt";
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: uri.to_string(),
+                diagnostics: Vec::new(),
+                text_hash: 1,
+                text: String::new(),
+            }],
+        });
+
+        let _refresh = service.reset_workspace_index(1);
+
+        assert!(
+            service.workspace_diagnostics.diagnostics(uri).is_none(),
+            "old-model results must disappear when the model changes, not when its first new batch arrives"
+        );
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            conclusive: true,
+            files: Vec::new(),
+        });
+        assert!(
+            service.workspace_diagnostics.diagnostics(uri).is_none(),
+            "a late old-generation batch must not repopulate the cleared store"
+        );
+    }
+
+    #[test]
+    fn workspace_report_honors_prior_ids_and_clears_disappeared_files() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let indexed_uri = "file:///w/Indexed.kt";
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![indexed_uri.to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: indexed_uri.to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "indexed".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x".to_string(),
+            }],
+        });
+        let first = service.workspace_diagnostic(Some(json!(1)), json!({}));
+        let prior = first.messages[0]["result"]["items"][0]["resultId"]
+            .as_str()
+            .expect("workspace result id")
+            .to_string();
+
+        let second = service.workspace_diagnostic(
+            Some(json!(2)),
+            json!({
+                "previousResultIds": [
+                    {"uri": indexed_uri, "value": prior},
+                    {"uri": "file:///w/Deleted.kt", "value": "stale"},
+                ]
+            }),
+        );
+        let items = second.messages[0]["result"]["items"]
+            .as_array()
+            .expect("workspace diagnostic items");
+        let indexed = items
+            .iter()
+            .find(|item| item["uri"] == indexed_uri)
+            .expect("indexed report");
+        assert_eq!(indexed["kind"], "unchanged");
+        assert_eq!(indexed["version"], Value::Null);
+        let deleted = items
+            .iter()
+            .find(|item| item["uri"] == "file:///w/Deleted.kt")
+            .expect("deleted-file tombstone");
+        assert_eq!(deleted["kind"], "full");
+        assert_eq!(deleted["items"], json!([]));
+        assert_eq!(deleted["version"], Value::Null);
+        assert!(
+            serialized_value_fits(&second.messages[0], MAX_MESSAGE_BYTES),
+            "workspace diagnostic response must respect the framed protocol limit"
+        );
+    }
+
+    #[test]
+    fn workspace_report_uses_the_open_buffer_over_retained_disk_results() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///w/Open.kt";
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: uri.to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "stale disk diagnostic".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x".to_string(),
+            }],
+        });
+        service.open_document_for_test(uri, "val current = 1", 1);
+
+        let report = service.workspace_diagnostic(Some(json!(1)), json!({}));
+        let item = &report.messages[0]["result"]["items"][0];
+        assert_eq!(item["uri"], uri);
+        assert_eq!(
+            item["items"],
+            json!([]),
+            "the current open buffer must win over an older sweep snapshot"
+        );
     }
 }

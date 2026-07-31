@@ -976,8 +976,47 @@ pub struct SecondaryCtor {
 #[derive(Clone, Debug)]
 pub enum CtorDelegation {
     None,
-    This(Vec<ExprId>),
-    Super(Vec<ExprId>),
+    This(CtorDelegationCall),
+    Super(CtorDelegationCall),
+}
+
+#[derive(Clone, Debug)]
+pub struct CtorDelegationCall {
+    pub args: Vec<ExprId>,
+    pub names: Vec<Option<String>>,
+    /// Whether the last argument was written as a SYNTACTIC trailing lambda (`f(1) {}`). A `this(…)` /
+    /// `super(…)` delegation can never have one; a constructor CALL can, and the distinction decides
+    /// whether that argument may fill a `vararg` slot.
+    pub trailing_lambda: bool,
+}
+
+/// A class with NO primary constructor names its base class WITHOUT parentheses — `class D : Base {
+/// constructor(): super(…) }` — because the base arguments come from each secondary `super(…)`. The
+/// parser parks every parenless supertype in `supertypes` and promotes only the ones naming a class
+/// declared in the SAME FILE (`fixup_parenless_base_classes`); it cannot see another source file or
+/// a classpath, where a base class and an interface look identical. Semantic callers pass one
+/// origin-neutral `is_base_class` query and get back the supertype that is really the base.
+pub fn parenless_base_supertype(
+    class: &ClassDecl,
+    mut is_base_class: impl FnMut(&str) -> bool,
+) -> Option<&str> {
+    if class.has_primary_ctor || class.base_class.is_some() {
+        return None;
+    }
+    let delegates_to_super = class.secondary_ctors.iter().any(|constructor| {
+        matches!(
+            constructor.delegation,
+            CtorDelegation::Super(_) | CtorDelegation::None
+        )
+    });
+    if !delegates_to_super {
+        return None;
+    }
+    class
+        .supertypes
+        .iter()
+        .map(|supertype| supertype.name.as_str())
+        .find(|name| is_base_class(name))
 }
 
 /// A primary-constructor init step (source-ordered): a body-property initializer or an `init` block.

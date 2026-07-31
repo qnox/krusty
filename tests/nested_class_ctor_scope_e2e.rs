@@ -91,6 +91,47 @@ fn named_arguments_on_a_sibling_nested_ctor_from_an_ordinary_member() {
     );
 }
 
+/// The generic resolution seam must preserve LEXICAL precedence too: the nested `Inner<T>` shadows a
+/// same-named top-level class, its explicit `Long` argument supplies constructor context for the integer
+/// literal, and the omitted named-call slot uses the nested class's default. This guards against falling
+/// back to written-name metadata in lowering, which would select the top-level declaration or no
+/// declaration instead of the class identity already selected by the checker.
+#[test]
+fn a_generic_sibling_nested_ctor_uses_resolved_class_identity() {
+    const SRC: &str = "data class Inner(val wrong: String)\n\
+    class Outer {\n\
+    \x20   data class Inner<T>(val value: T, val marker: String = \"OK\")\n\
+    \x20   companion object {\n\
+    \x20       fun build(): Inner<Long> = Inner<Long>(value = 1)\n\
+    \x20   }\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   val built = Outer.build()\n\
+    \x20   return if (built.value == 1L) built.marker else \"FAIL\"\n\
+    }\n";
+    assert_eq!(
+        run(SRC).expect("generic sibling nested constructor uses its resolved class identity"),
+        "OK"
+    );
+}
+
+/// Replacing the old "any source class" admission branch with semantic classifier resolution must
+/// not narrow existing SOURCE behavior to primary constructors only. Source candidate selection owns
+/// every secondary constructor's parameter names, so a class without a primary constructor still maps
+/// a reordered named call before lowering.
+#[test]
+fn semantic_named_call_admission_preserves_secondary_constructors() {
+    const SRC: &str = "class Built {\n\
+    \x20   val text: String\n\
+    \x20   constructor(first: Int, second: String) { text = first.toString() + second }\n\
+    }\n\
+    fun box(): String = Built(second = \"K\", first = 1).text\n";
+    assert_eq!(
+        run(SRC).expect("source secondary constructor keeps semantic named-argument mapping"),
+        "1K"
+    );
+}
+
 /// A named argument that REORDERS, so source order cannot pass for parameter order.
 #[test]
 fn a_reordering_named_argument_on_a_sibling_nested_ctor() {

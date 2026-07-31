@@ -491,6 +491,35 @@ fn safe_call_member_extensions_run() {
 }
 
 #[test]
+fn named_member_extension_trailing_lambda_selects_before_lowering() {
+    const SOURCE: &str = r#"
+        class Item
+
+        class Registry {
+            private fun Item.render(value: Int, block: (Int) -> String): String =
+                block(value)
+
+            private fun Item.render(value: String, block: (String) -> String): String =
+                block(value)
+
+            fun direct(item: Item): String =
+                item.render(value = 3) { "i$it" }
+
+            fun safe(item: Item?): String =
+                item?.render(value = "x") { "s$it" } ?: "none"
+        }
+
+        fun box(): String {
+            val registry = Registry()
+            return registry.direct(Item()) + "/" + registry.safe(Item())
+        }
+    "#;
+
+    let result = common::compile_and_run_with_stdlib(SOURCE, "S");
+    assert_eq!(result.as_deref(), Some("i3/sx"));
+}
+
+#[test]
 fn member_extension_dispatch_and_erasure_run() {
     const SOURCE: &str = r#"
         open class Base {
