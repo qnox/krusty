@@ -2702,10 +2702,19 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<LibraryCallable> {
         for o in fs.top_level() {
             let c = &o.callable;
-            let params = &c.params;
             if !c.inline.must_inline() {
                 continue;
             }
+            // The JVM descriptor can't express Kotlin nullability: `fun <T : Any>
+            // requireNotNull(value: T?)` decodes `params = [Any]`, the parameter nullability living
+            // in `platform_nullable_params`. Apply it exactly like the public path in
+            // `pick_top_level`, or a `String?` argument is checked against `Any`.
+            let params = apply_platform_call_parameter_nullability(
+                c.params.clone(),
+                &o.call_sig.platform_nullable_params,
+                args,
+                o.call_sig.vararg,
+            );
             if params.len() != args.len()
                 || !params
                     .iter()
@@ -2718,16 +2727,53 @@ impl<'a> SymbolResolver<'a> {
                 .generic_sig
                 .as_ref()
                 .map(|gsig| {
-                    bind_gsig_return(
-                        gsig,
-                        type_args,
-                        gsig.params.iter().copied().zip(args.iter().copied()),
-                        expected,
-                    )
+                    // A platform-nullable parameter whose gsig shape is a bare `T` bounded only by
+                    // non-nullable bounds (Kotlin `T?` with `T : Any`) binds from the argument's
+                    // NON-NULL form: `requireNotNull(String?)` binds `T = String`, so the `T`
+                    // return is non-null. Binding verbatim would put `String?` into a `T : Any`
+                    // slot and type the return `String?`.
+                    // INVARIANT: `args` are in DECLARED parameter order and arity-checked above
+                    // (`params.len() != args.len()`), so the positional zip against `gsig.params`
+                    // / `platform_nullable_params` is aligned. Holds because named-argument calls
+                    // into the classpath are rejected upstream and defaulted calls resolve through
+                    // `resolve_top_level_default_callable` instead — if either changes, this zip
+                    // must be re-keyed to parameter indices first.
+                    let actuals = gsig
+                        .params
+                        .iter()
+                        .copied()
+                        .zip(args.iter().copied())
+                        .enumerate()
+                        .map(|(i, (shape, actual))| {
+                            let binds_non_null = o
+                                .call_sig
+                                .platform_nullable_params
+                                .get(i)
+                                .copied()
+                                .unwrap_or(false)
+                                && matches!(shape, Ty::TyParam(name, bound)
+                                if !bound.is_nullable()
+                                    && gsig.formals.iter().zip(&gsig.formal_bounds).any(
+                                        |(f, bounds)| f.as_str() == name
+                                            && bounds.iter().all(|b| !b.is_nullable()),
+                                    ));
+                            (
+                                shape,
+                                if binds_non_null {
+                                    actual.non_null()
+                                } else {
+                                    actual
+                                },
+                            )
+                        });
+                    bind_gsig_return(gsig, type_args, actuals, expected)
                 })
                 .unwrap_or(c.ret);
             let logical_ret = o.ret.apply(recovered);
             let mut callable = callable_with_return(c, logical_ret, false);
+            // Params are CALL-SITE-specific (platform nullability depends on this call's args) —
+            // parity with the `pick_top_level` public path, which applies the same adjustment.
+            callable.params = params;
             callable.inline = InlineKind::MustInline;
             return Some(callable);
         }
