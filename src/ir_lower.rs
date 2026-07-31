@@ -151,7 +151,24 @@ pub fn lower_file_at(
 }
 
 /// [`lower_file_at`] with a caller-owned `bail` sink (see [`lower_file_reporting`]).
+///
+/// Ensures enough same-thread stack for the `expr_depth` bound (500), so the depth guard — not the
+/// calling thread's stack — limits expression nesting without moving non-`Send` compiler state
+/// (see [`crate::wide_stack`]).
 pub fn lower_file_at_reporting(
+    file: &ast::File,
+    file_index: u32,
+    info: &FrontendTypeInfo,
+    syms: &FrontendSymbols,
+    runtime: &dyn TargetRuntime,
+    bail: &std::cell::RefCell<String>,
+) -> Option<IrFile> {
+    crate::wide_stack::on_wide_stack(move || {
+        lower_file_at_reporting_impl(file, file_index, info, syms, runtime, bail)
+    })
+}
+
+fn lower_file_at_reporting_impl(
     file: &ast::File,
     file_index: u32,
     info: &FrontendTypeInfo,

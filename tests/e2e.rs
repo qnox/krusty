@@ -266,6 +266,8 @@ mod data_object_e2e;
 mod dataclass_hash_and_sam_e2e;
 #[path = "decl_body_on_next_line_e2e.rs"]
 mod decl_body_on_next_line_e2e;
+#[path = "deep_expression_nesting_check.rs"]
+mod deep_expression_nesting_check;
 #[path = "deep_expression_nesting_check_e2e.rs"]
 mod deep_expression_nesting_check_e2e;
 #[path = "deep_nested_type_e2e.rs"]
