@@ -29847,11 +29847,18 @@ impl<'a> Checker<'a> {
             }
         }
         // Two values of DIFFERENT reference classes join to their common supertype, which krusty
-        // approximates as `Any` (`java/lang/Object`) — the universal upper bound. The emitter writes
-        // `Object` for the merge-point frame so each branch's (more specific) value verifies against it.
-        // `String`/`Array`/`Fun` are references too, so this also covers `if (c) "s" else SomeObj()`.
+        // approximates as `Any` (`java/lang/Object`) — the universal upper bound. Preserve nullability
+        // when either input is nullable: `String?` and `Marker` join to `Any?`, never the unsound `Any`.
+        // The emitter writes `Object` for the merge-point frame so each branch's (more specific) value
+        // verifies against it. `String`/`Array`/`Fun` are references too, so this also covers
+        // `if (c) "s" else SomeObj()`.
         if a.is_reference() && b.is_reference() {
-            return Ty::obj("kotlin/Any");
+            let any = Ty::obj("kotlin/Any");
+            return if a.is_nullable() || b.is_nullable() {
+                Ty::nullable(any)
+            } else {
+                any
+            };
         }
         self.diags.error(
             span,

@@ -71,3 +71,26 @@ fun box(): String =\n\
     if (parseOrNull<Color>(\"GREEN\") == Color.GREEN && parseOrNull<Color>(\"zz\") == null) \"OK\" else \"FAIL\"\n";
     common::expect_box_ok_with_stdlib(src, "EnumValueOfExprBodyTry");
 }
+
+#[test]
+fn unrelated_reified_parameter_does_not_erase_primitive_return_slot() {
+    // Merely declaring a reified parameter must not erase a separate generic return. `U` is
+    // specialized to `Int` by the existing inline-call path, so both the parameter and return slots
+    // remain primitive; treating every return from a reified function as erased would instead mix an
+    // `Int` body value with an `Object` result slot and fail JVM frame verification.
+    let src = "inline fun <reified T, U> keep(value: U): U = value\n\
+fun box(): String = if (keep<String, Int>(42) == 42) \"OK\" else \"FAIL\"\n";
+    common::expect_box_ok_with_stdlib(src, "UnrelatedReifiedPrimitiveReturn");
+}
+
+#[test]
+fn unrelated_member_reified_parameter_does_not_erase_primitive_return_slot() {
+    // Member-call resolution already carries the call-site-specialized `U` return (`Int`). Keep the
+    // regression separate from the top-level path so the reified-return guard cannot accidentally
+    // depend on which source-call lookup supplied the signature.
+    let src = "class Host {\n\
+    inline fun <reified T, U> keep(value: U): U = value\n\
+}\n\
+fun box(): String = if (Host().keep<String, Int>(42) == 42) \"OK\" else \"FAIL\"\n";
+    common::expect_box_ok_with_stdlib(src, "UnrelatedMemberReifiedPrimitiveReturn");
+}

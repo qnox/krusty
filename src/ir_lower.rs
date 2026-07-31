@@ -18522,31 +18522,54 @@ impl<'a> Lower<'a> {
         // SPECIALIZED to the concrete argument types (`foo(1){…}: T` → `Int`), not the erased declared
         // `sig_ret` (`Object`). Using the specialized type keeps the slot, the `return` coercions, and
         // the downstream use (`foo(…) != 1`) consistent — no primitive-into-Object-slot VerifyError.
-        // A REIFIED type parameter is checked inside the body against its erased bound (`T : Enum<T>`
-        // is `Enum` there), while `sig_ret`/the specialized call type carry the CALL-SITE substitution
-        // (`Color`). Every value a `return` in the body produces is physically the erased type, so when
-        // they differ the result slot must be typed by the erased (body-view) return — otherwise a
-        // `return <T-valued expr>` stores e.g. an `Enum` into a `Color`-framed slot (VerifyError). The
-        // expansion's output is coerced back to the call-site type once, at the end of this function
-        // (the `checkcast` kotlinc emits after a reified call).
-        let body_ret = f
-            .ret
-            .as_ref()
-            .map_or(Ty::Unit, |t| ty_of(self.afile, t, &*self.syms.libraries));
-        let reified_ret_erasure = !f.reified_type_params.is_empty()
-            && body_ret != Ty::Unit
-            && body_ret.non_null() != sig_ret.non_null();
+        // When the DECLARED return is itself a REIFIED parameter, the body is checked against that
+        // parameter's erased bound (`T : Enum<T>` is physically `Enum`) while the call expression has
+        // the call-site substitution (`Color`). Scope this rule to that exact declaration shape: the
+        // mere presence of an unrelated reified parameter must not erase a separate generic/primitive
+        // return. A constructed return such as `List<T>` also keeps `List` as its physical slot type and
+        // needs no special handling here.
+        //
+        // Resolve the declaration-side erasure from the parameter's explicit bound, falling back to
+        // `Any` for an unbounded parameter, then reapply the return annotation's nullability. Every
+        // `return` in the expanded body writes that erased representation. If it differs from the
+        // specialized call type, the expansion is cast/unboxed once at the boundary below.
+        let specialized_ret = self.info.ty(AstExprId(call_id));
+        let reified_body_ret = f.ret.as_ref().and_then(|ret| {
+            f.reified_type_params.contains(&ret.name).then(|| {
+                let erased = f
+                    .type_param_bounds
+                    .iter()
+                    .find_map(|(name, bound)| {
+                        (name == &ret.name).then(|| {
+                            // Use the lowerer's ordinary classifier resolver first so an imported,
+                            // module, or classpath bound keeps the same internal identity selected
+                            // everywhere else. The syntax-only fallback retains primitive bounds.
+                            self.ty_ref(bound)
+                                .unwrap_or_else(|| ty_of(self.afile, bound, &*self.syms.libraries))
+                        })
+                    })
+                    .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+                if ret.nullable() {
+                    Ty::nullable(erased.non_null())
+                } else if ret.definitely_non_null() {
+                    erased.non_null()
+                } else {
+                    erased
+                }
+            })
+        });
+        let reified_ret_erasure = reified_body_ret
+            .is_some_and(|body_ret| body_ret.non_null() != specialized_ret.non_null());
         let ret_ty = {
-            let specialized = self.info.ty(AstExprId(call_id));
             // Only a NON-nullable, concrete specialization is a valid slot type: a nullable primitive
             // (`Int?`) has no unboxed slot form, so keep the erased `sig_ret` (a boxed reference) there.
             if reified_ret_erasure {
-                ty_to_ir(body_ret)
-            } else if specialized != Ty::Error
-                && specialized != Ty::Unit
-                && specialized == specialized.non_null()
+                ty_to_ir(reified_body_ret.expect("reified erasure was just established"))
+            } else if specialized_ret != Ty::Error
+                && specialized_ret != Ty::Unit
+                && specialized_ret == specialized_ret.non_null()
             {
-                ty_to_ir(specialized)
+                ty_to_ir(specialized_ret)
             } else {
                 ty_to_ir(sig_ret)
             }
@@ -18645,7 +18668,12 @@ impl<'a> Lower<'a> {
         // call whose substituted return is more specific than the erased bound.
         out.map(|out| {
             if reified_ret_erasure {
-                self.coerce_erased_call_result(AstExprId(call_id), out, &body_ret, true)
+                self.coerce_erased_call_result(
+                    AstExprId(call_id),
+                    out,
+                    &reified_body_ret.expect("reified erasure was just established"),
+                    true,
+                )
             } else {
                 out
             }

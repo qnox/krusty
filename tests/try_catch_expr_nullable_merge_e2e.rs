@@ -7,6 +7,16 @@
 
 use super::common;
 
+fn diagnostics(src: &str) -> Option<Vec<String>> {
+    let stdlib = common::stdlib_jar()?;
+    let jdk = common::jdk_modules();
+    Some(common::front_end_diagnostics(
+        src,
+        &[stdlib],
+        jdk.as_deref(),
+    ))
+}
+
 #[test]
 fn try_catch_expr_merges_value_and_null_to_nullable() {
     // Block-body `return try { v } catch { null }` — the exact shape of a safe-conversion helper.
@@ -64,6 +74,42 @@ fun box(): String {\n\
     return \"OK\"\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "TryExprAnyMerge");
+}
+
+#[test]
+fn try_catch_distinct_references_preserve_nullable_join() {
+    // A full reference join must retain nullability when either input is nullable. Returning the
+    // result as non-null `Any` would let a possible `null` escape a source-level non-null contract.
+    const SRC: &str = "class Marker\n\
+fun pick(value: String?, fail: Boolean): Any? = try {\n\
+    if (fail) throw RuntimeException(\"x\") else value\n\
+} catch (e: RuntimeException) {\n\
+    Marker()\n\
+}\n\
+fun box(): String = if (pick(null, false) == null && pick(null, true) is Marker) \"OK\" else \"FAIL\"\n";
+    common::expect_box_ok_with_stdlib(SRC, "TryExprNullableAnyMerge");
+}
+
+#[test]
+fn try_catch_nullable_distinct_references_reject_non_null_return() {
+    // This is the static half of the nullable-`Any` regression above. The expression can produce
+    // `null`, so a declared non-null `Any` return must be rejected rather than accepting a latent
+    // source-contract violation that only appears at runtime.
+    const SRC: &str = "class Marker\n\
+fun pick(value: String?, fail: Boolean): Any = try {\n\
+    if (fail) throw RuntimeException(\"x\") else value\n\
+} catch (e: RuntimeException) {\n\
+    Marker()\n\
+}\n";
+    let Some(messages) = diagnostics(SRC) else {
+        return;
+    };
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("return type mismatch")),
+        "expected nullable try result to be rejected as non-null Any, got {messages:?}"
+    );
 }
 
 #[test]
