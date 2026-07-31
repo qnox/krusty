@@ -16287,6 +16287,25 @@ impl<'a> Checker<'a> {
         tt.is_reference().then_some(tt)
     }
 
+    /// The non-null form of a stable nullable binding.
+    ///
+    /// Parameters/`val`s and `this` are safe to narrow because their value cannot change between the
+    /// proof and use; a mutable local is deliberately excluded. All flow and contract smart-cast paths
+    /// share this gate so `this`, `var`, and nullable handling cannot drift by condition shape.
+    fn stable_nullable_binding(&self, name: &str) -> Option<Ty> {
+        let ty = if name == "this" {
+            self.this_ty
+        } else {
+            self.lookup(name)
+                .filter(|local| !local.is_var)
+                .map(|local| local.ty)
+        };
+        match ty {
+            Some(Ty::Nullable(inner)) => Some(*inner),
+            _ => None,
+        }
+    }
+
     fn smartcast_binding(&self, cond: ExprId, for_else: bool) -> Option<(String, Ty)> {
         // `x != null` (then-branch) / `x == null` (else-branch) narrows `T?` to `T`. Only a stable
         // `val`/parameter narrows soundly.
@@ -16317,16 +16336,8 @@ impl<'a> Checker<'a> {
                         _ => None,
                     };
                     if let Some(n) = name {
-                        // `this != null` inside a nullable-prim-receiver extension (`fun Int?.f()`):
-                        // the receiver is immutable, so it narrows like a `val`. Its type lives in
-                        // `this_ty` — `this` has no scope entry until a narrowing declares one.
-                        let stable_ty = if n == "this" {
-                            self.this_ty
-                        } else {
-                            self.lookup(&n).filter(|l| !l.is_var).map(|l| l.ty)
-                        };
-                        if let Some(Ty::Nullable(inner)) = stable_ty {
-                            return Some((n, *inner));
+                        if let Some(non_null) = self.stable_nullable_binding(&n) {
+                            return Some((n, non_null));
                         }
                     }
                 }
@@ -16435,16 +16446,8 @@ impl<'a> Checker<'a> {
         let Expr::Name(n) = self.file.expr(*receiver).clone() else {
             return None;
         };
-        let stable_ty = if n == "this" {
-            self.this_ty
-        } else {
-            self.lookup(&n).filter(|l| !l.is_var).map(|l| l.ty)
-        };
-        if let Some(Ty::Nullable(inner)) = stable_ty {
-            Some((n, *inner))
-        } else {
-            None
-        }
+        self.stable_nullable_binding(&n)
+            .map(|non_null| (n, non_null))
     }
 
     fn collect_condition_narrowings(&self, cond: ExprId, truth: bool, out: &mut Vec<(String, Ty)>) {
@@ -20507,14 +20510,9 @@ impl<'a> Checker<'a> {
                                 && self.is_resolved_stdlib_precondition_call(ie, &fname)
                             {
                                 if let Expr::Name(n) = self.file.expr(args[0]).clone() {
-                                    let stable_ty = if n == "this" {
-                                        self.this_ty
-                                    } else {
-                                        self.lookup(&n).filter(|l| !l.is_var).map(|l| l.ty)
-                                    };
-                                    if let Some(Ty::Nullable(inner)) = stable_ty {
-                                        if self.narrowing_is_supported(&n, *inner, false) {
-                                            self.declare(&n, *inner, false);
+                                    if let Some(non_null) = self.stable_nullable_binding(&n) {
+                                        if self.narrowing_is_supported(&n, non_null, false) {
+                                            self.declare(&n, non_null, false);
                                         }
                                     }
                                 }
