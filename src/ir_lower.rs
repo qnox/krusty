@@ -15156,7 +15156,10 @@ impl<'a> Lower<'a> {
                 ..
             } = &target
             {
-                if *receiver != this_ty {
+                // Compare CLASS IDENTITY, not the full `Ty`: the checker records the receiver of
+                // a generic class's member as `Box<T>` (type-parameter argument) while the
+                // lowerer's `this` is the erased `Box` — same receiver slot, same dispatch.
+                if receiver.non_null().obj_internal() != this_ty.non_null().obj_internal() {
                     return None;
                 }
                 if target_name != name {
@@ -16581,6 +16584,7 @@ impl<'a> Lower<'a> {
                                 source_file: None,
                                 source_receiver: None,
                                 package: String::new(),
+                                contract: None,
                             },
                             *ret,
                         )
@@ -18201,6 +18205,15 @@ impl<'a> Lower<'a> {
                 if tparams.contains(recv_ref.name.as_str()) {
                     tbinds.entry(recv_ref.name.clone()).or_insert(rt);
                 }
+                // A generic-CLASS receiver (`<T, R> Recv<T, R>.foo`): bind each type-parameter type
+                // argument to the actual receiver's type arguments (`Recv<Any, String>` → T=Any,
+                // R=String). This is the ONLY binding source for a (reified) parameter that appears
+                // nowhere in the value parameters.
+                for (tref, actual) in recv_ref.targs.iter().zip(rt.type_args().iter()) {
+                    if tparams.contains(tref.name.as_str()) {
+                        tbinds.entry(tref.name.clone()).or_insert(*actual);
+                    }
+                }
             }
         }
         let member_param_shapes = member.as_ref().and_then(|member| {
@@ -18232,7 +18245,12 @@ impl<'a> Lower<'a> {
                             explicit
                                 .and_then(|types| types.get(i))
                                 .and_then(|ty| self.resolve_reified_type_ref(ty))
-                        });
+                        })
+                        // A reified parameter the call never names (inferred, not explicit): fall
+                        // back to the splice's own inference — the receiver's type arguments and
+                        // the value arguments already bound above (`Refinement<Any, String>`
+                        // binds `R = String` for `validate(x)`).
+                        .or_else(|| tbinds.get(tp).copied());
                     let Some(actual) = actual else {
                         self.inline_active.truncate(active_depth);
                         return None;

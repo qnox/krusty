@@ -11,6 +11,57 @@ pub struct Contract {
     pub effects: Vec<Effect>,
 }
 
+impl Contract {
+    /// A copy with every `ConditionType::Source` mapped through `resolve` to a semantic type
+    /// (metadata emission resolves source references once, against the declaring module).
+    /// References `resolve` declines stay `Source` — consumers skip or degrade them.
+    pub fn with_resolved_types(
+        &self,
+        resolve: &mut dyn FnMut(&TypeRef) -> Option<crate::types::Ty>,
+    ) -> Contract {
+        fn map(
+            c: &Condition,
+            resolve: &mut dyn FnMut(&TypeRef) -> Option<crate::types::Ty>,
+        ) -> Condition {
+            match c {
+                Condition::IsType { param, ty, negated } => Condition::IsType {
+                    param: *param,
+                    ty: match ty {
+                        ConditionType::Source(r) => resolve(r)
+                            .map(ConditionType::Metadata)
+                            .unwrap_or_else(|| ConditionType::Source(r.clone())),
+                        m => m.clone(),
+                    },
+                    negated: *negated,
+                },
+                Condition::And(l, r) => {
+                    Condition::And(Box::new(map(l, resolve)), Box::new(map(r, resolve)))
+                }
+                Condition::Or(l, r) => {
+                    Condition::Or(Box::new(map(l, resolve)), Box::new(map(r, resolve)))
+                }
+                c => c.clone(),
+            }
+        }
+        Contract {
+            effects: self
+                .effects
+                .iter()
+                .map(|e| match e {
+                    Effect::ConditionalReturns {
+                        returns,
+                        conclusion,
+                    } => Effect::ConditionalReturns {
+                        returns: *returns,
+                        conclusion: map(conclusion, resolve),
+                    },
+                    e => e.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     /// `returns()`, `returnsNotNull()`, `returns(true|false|null)` — an unconditional effect.

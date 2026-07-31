@@ -459,14 +459,15 @@ impl Backend for JvmBackend {
     }
 }
 
-/// The facade's `@kotlin.Metadata` (`k = 2`, file facade), recording every NON-INLINE top-level
-/// function — plain and EXTENSION, suspend included — with its LOGICAL source signature. The physical
-/// descriptor alone cannot express an extension's receiver (it is just the first JVM parameter) or a
-/// suspend fn's source shape (the CPS form appends a `Continuation`), so a SEPARATE compilation
-/// reading this facade from the classpath needs the metadata to resolve those calls — kotlinc always
-/// writes it. Inline functions stay unrecorded: the builder carries no `IS_INLINE` flag yet, and
-/// advertising an inline fn as a plain callable would mis-resolve it. `None` when the file declares
-/// no recordable top-level function (the facade is emitted bare, as before).
+/// The facade's `@kotlin.Metadata` (`k = 2`, file facade), recording every top-level function —
+/// plain and EXTENSION, suspend and INLINE included — with its LOGICAL source signature. The physical
+/// descriptor alone cannot express an extension's receiver (it is just the first JVM parameter), a
+/// suspend fn's source shape (the CPS form appends a `Continuation`), or an inline fn's contract and
+/// reified type parameters, so a SEPARATE compilation reading this facade from the classpath needs
+/// the metadata to resolve those calls — kotlinc always writes it. An inline fn carries the
+/// `IS_INLINE` flag, its type-parameter table (with `reified`), its erased `JvmMethodSignature`,
+/// and its decoded contract (`Function.contract`, field 32). `None` when the file declares no
+/// recordable top-level function (the facade is emitted bare, as before).
 pub fn facade_package_metadata(
     file: &File,
     file_index: u32,
@@ -475,9 +476,6 @@ pub fn facade_package_metadata(
     let mut metas: Vec<crate::metadata::builder::FnMeta> = Vec::new();
     for &d in &file.decls {
         let Decl::Fun(f) = file.decl(d) else { continue };
-        if f.is_inline() {
-            continue;
-        }
         // The decl's collected signature: a plain fn under `funs[name]`, an extension under
         // `ext_funs[name][semantic receiver]` — matched by source decl id so overloads can't mix.
         let (sig, receiver) = if f.receiver.is_some() {
@@ -500,6 +498,10 @@ pub fn facade_package_metadata(
             };
             (sig, None)
         };
+        // The DECLARED receiver for the metadata record (`Refinement<T, R>`, type-parameter
+        // arguments included) — the family key is erased (`Refinement`), and a reader unifying a
+        // generic call's receiver against it binds the type parameters (`R = String`).
+        let receiver = receiver.map(|recv| sig.source_receiver.unwrap_or(recv));
         let params: Vec<_> = sig
             .param_names
             .iter()
@@ -524,9 +526,11 @@ pub fn facade_package_metadata(
             })
             .collect();
         // A `suspend fun`'s PHYSICAL method appends a `Continuation` and erases the return; record
-        // the emit handle so a reader aligns the logical signature with the CPS method. A normal
-        // fn's method is name + logical descriptor — recoverable without a recorded handle.
-        let jvm_desc = f.is_suspend().then(|| {
+        // the emit handle so a reader aligns the logical signature with the CPS method. An inline
+        // fn needs the handle too: its erased descriptor (receiver + erased params + erased return)
+        // maps the metadata function to its bytecode method. A normal fn's method is name +
+        // logical descriptor — recoverable without a recorded handle.
+        let jvm_desc = (f.is_suspend() || f.is_inline()).then(|| {
             let mut p = String::new();
             if let Some(r) = receiver {
                 p.push_str(&crate::jvm::names::type_descriptor(r));
@@ -534,7 +538,17 @@ pub fn facade_package_metadata(
             for t in &sig.params {
                 p.push_str(&crate::jvm::names::type_descriptor(*t));
             }
-            format!("({p}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;")
+            let ret_desc = if f.is_suspend() {
+                "Ljava/lang/Object;"
+            } else {
+                &crate::jvm::names::type_descriptor(sig.ret)
+            };
+            let cont = if f.is_suspend() {
+                "Lkotlin/coroutines/Continuation;"
+            } else {
+                ""
+            };
+            format!("({p}{cont}){ret_desc}")
         });
         metas.push(crate::metadata::builder::FnMeta {
             name: f.name.clone(),
@@ -545,6 +559,40 @@ pub fn facade_package_metadata(
             param_defaults: sig.param_defaults.clone(),
             suspend: f.is_suspend(),
             jvm_desc,
+            inline: f.is_inline(),
+            type_params: f
+                .type_params
+                .iter()
+                .map(|tp| (tp.clone(), f.reified_type_params.contains(tp)))
+                .collect(),
+            // Resolve the contract's source type references once, against this module: a type
+            // parameter stays a `Type.type_parameter` reference; a class becomes its internal
+            // name. Unresolvable references stay `Source` (the emitter degrades them to `Any`).
+            contract: sig.contract.as_ref().map(|c| {
+                // Source-level class name → JVM internal name: a module class first, then the
+                // known imports (same lookup as the checker's, kept local for module layering).
+                let resolve_class = |n: &str| {
+                    syms.classes
+                        .get(n)
+                        .map(|c| crate::types::type_name(&c.internal()))
+                        .or_else(|| syms.class_names.get(n))
+                };
+                std::sync::Arc::new(c.with_resolved_types(&mut |tref| {
+                    if f.type_params.iter().any(|tp| tp == &tref.name) {
+                        Some(Ty::ty_param(
+                            &tref.name,
+                            Ty::nullable(Ty::obj("kotlin/Any")),
+                        ))
+                    } else {
+                        let ty = Ty::obj_name(resolve_class(&tref.name)?);
+                        Some(if tref.nullable() {
+                            Ty::nullable(ty)
+                        } else {
+                            ty
+                        })
+                    }
+                }))
+            }),
         });
     }
     // Extension PROPERTIES (`val String.doubled`): the accessor is a static `getName(Recv)` whose

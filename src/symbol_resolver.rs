@@ -4980,6 +4980,7 @@ mod tests {
             origin: Origin::Library,
             source_receiver: None,
             contract: None,
+            generic_sig: None,
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),

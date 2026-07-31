@@ -662,9 +662,13 @@ pub struct FunDecl {
 
 impl FunDecl {
     pub(crate) fn has_callable_inline_extension_body(&self) -> bool {
+        // Emit the inline fn as a REAL (static) method too, like kotlinc does — a separate
+        // compilation can then resolve and splice it. Type parameters (incl. `reified`) are fine:
+        // the emitted body is erased, callers splice with call-site bindings. (A reified fn whose
+        // BODY uses the parameter would need kotlinc's reifiedOperationMarker to fault direct
+        // calls — not modeled; krusty callers always splice or bail.)
         self.is_inline()
             && self.receiver.is_some()
-            && self.type_params.is_empty()
             && self.params.iter().all(|parameter| {
                 parameter.ty.name != "<fun>"
                     && parameter.ty.fun_params.is_empty()

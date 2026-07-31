@@ -270,6 +270,7 @@ impl<'a> ModuleSymbols<'a> {
                 source_file: None,
                 source_receiver: None,
                 package: String::new(),
+                contract: None,
             })
             .collect::<Vec<_>>();
         let i = pick_overload(&params, arg_tys)?;
@@ -509,7 +510,8 @@ fn fn_info(
         origin,
         // Representation lowering needs the declaration receiver before erasure.
         source_receiver,
-        contract: None,
+        contract: sig.contract.clone(),
+        generic_sig: sig.generic_sig.clone().map(Box::new),
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -550,6 +552,7 @@ fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> L
         origin: Origin::Module { facade: owner },
         source_receiver: None,
         contract: None,
+        generic_sig: None,
     }
 }
 
@@ -851,6 +854,7 @@ mod tests {
             source_file: None,
             source_receiver: None,
             package: String::new(),
+            contract: None,
         }
     }
 

@@ -248,6 +248,10 @@ pub struct Signature {
     pub source_receiver: Option<Ty>,
     /// Declaring package in internal slash form (`pkg/sub`) for source top-level declarations.
     pub package: String,
+    /// The function's decoded `contract { … }`, when it declares one. Filled by the checker
+    /// (which confirms the intrinsic identity) after checking, so cross-file call sites and the
+    /// `@Metadata` emitter see the same effects the checker's call-site application uses.
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
 /// The minimum arity of an ADAPTED callable reference to a signature — the parameters a reference must
@@ -3937,6 +3941,7 @@ fn collect_signatures_with_cp_impl(
                             .as_deref()
                             .map(|p| p.replace('.', "/"))
                             .unwrap_or_default(),
+                        contract: None,
                     };
                     let package = sig.package.clone();
                     if let Some(recv_ref) = &f.receiver {
@@ -4992,6 +4997,7 @@ fn collect_signatures_with_cp_impl(
                                     source_file: None,
                                     source_receiver: None,
                                     package: String::new(),
+                                    contract: None,
                                 }],
                             );
                         }
@@ -5018,6 +5024,7 @@ fn collect_signatures_with_cp_impl(
                                 source_file: None,
                                 source_receiver: None,
                                 package: String::new(),
+                                contract: None,
                             }],
                         );
                     }
@@ -5181,6 +5188,7 @@ fn collect_signatures_with_cp_impl(
                                 source_file: None,
                                 source_receiver: None,
                                 package: String::new(),
+                                contract: None,
                             },
                         );
                     }
@@ -7899,6 +7907,7 @@ fn member_signature(
         source_file: Some(source_file),
         source_receiver: None,
         package: String::new(),
+        contract: None,
     }
 }
 
@@ -10850,12 +10859,34 @@ fn check_file_at_impl_mode(
         context_args,
         super_ctor_params,
         discovered_anonymous_captures,
+        source_contracts,
         ..
     } = c;
     if !capture_discovery {
         for (internal, params) in super_ctor_params {
             if let Some(cs) = syms.class_by_internal_mut(&internal) {
                 cs.super_ctor_params = params;
+            }
+        }
+        // The decoded source contracts: patch them into the signature table so cross-file call
+        // sites and the `@Metadata` emitter read the same effects (the checker decoded them from
+        // the current file's top-level functions during checking).
+        for (decl, contract) in source_contracts {
+            if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
+                sigs.iter_mut()
+                    .find(|s| s.source_file == Some(file_index) && s.source_decl == Some(decl))
+            }) {
+                sig.contract = Some(contract.clone());
+            }
+            for families in syms.ext_funs.values_mut() {
+                for overloads in families.values_mut() {
+                    if let Some(sig) = overloads
+                        .iter_mut()
+                        .find(|s| s.source_file == Some(file_index) && s.source_decl == Some(decl))
+                    {
+                        sig.contract = Some(contract.clone());
+                    }
+                }
             }
         }
         for ((file, decl), ret) in inferred_fun_rets {
@@ -11720,6 +11751,7 @@ impl<'a> Checker<'a> {
             source_file: Some(file),
             source_receiver: selected.receiver,
             package: String::new(),
+            contract: None,
         };
         Some((selected, signature))
     }
@@ -13319,6 +13351,25 @@ impl<'a> Checker<'a> {
                     out.push((n, tt));
                 }
             }
+            Condition::IsType {
+                param,
+                ty: ConditionType::Metadata(ty),
+                negated: false,
+            } => {
+                // A contract decoded from `@Metadata`: the is-type is already semantic but may
+                // mention the callee's type parameters (`value is R`) — substitute them with the
+                // call's bindings (`Refinement<Any, String>.validate` → `String`).
+                let Some(n) = self.contract_stable_arg_name(call, *param) else {
+                    return;
+                };
+                if matches!(self.lookup(&n), Some(l) if l.is_var) {
+                    return;
+                }
+                let tt = self.subst_contract_metadata_ty(call, *ty);
+                if tt != Ty::Error && tt.is_reference() && !tt.is_ty_param() {
+                    out.push((n, tt));
+                }
+            }
             Condition::BoolParam(param) => {
                 if let Some(arg) = self.contract_arg_expr(call, *param) {
                     self.collect_condition_narrowings(arg, true, out);
@@ -13329,6 +13380,68 @@ impl<'a> Checker<'a> {
                 self.conclusion_narrowings(call, r, out);
             }
             _ => {}
+        }
+    }
+
+    /// Substitute the callee's type parameters in a metadata-decoded contract type with the
+    /// call's bindings: the checker's recorded type arguments first, then the receiver's type
+    /// arguments unified against the declared receiver's type-parameter arguments (from the
+    /// callable's metadata generic signature — `Refinement<Any, String>` against
+    /// `Refinement<T, R>` binds `R = String`). Unbound parameters erase through `ty_subst`
+    /// (to `Any`, a harmless no-narrow).
+    fn subst_contract_metadata_ty(&self, call: ExprId, ty: Ty) -> Ty {
+        if !ty.is_ty_param() && ty.type_args().iter().all(|a| !a.is_ty_param()) {
+            return ty;
+        }
+        let c = match self.resolved_calls.get(&call) {
+            Some(ResolvedCall::TopLevel(c)) | Some(ResolvedCall::Extension(c)) => c,
+            _ => return ty,
+        };
+        let gsig = c.generic_sig.as_ref();
+        let formals: Vec<String> = gsig
+            .map(|g| g.formals.clone())
+            .or_else(|| {
+                c.signature
+                    .as_deref()
+                    .map(|s| self.syms.libraries.signature_formal_names(s))
+            })
+            .unwrap_or_default();
+        if formals.is_empty() {
+            return ty;
+        }
+        let mut binds: std::collections::HashMap<String, Ty> = std::collections::HashMap::new();
+        if let Some(targs) = self.resolved_call_type_args.get(&call) {
+            for (name, t) in formals.iter().zip(targs.iter()) {
+                if let Some(t) = t {
+                    binds.insert(name.clone(), *t);
+                }
+            }
+        }
+        if binds.is_empty() {
+            let recv = self
+                .contract_arg_expr(call, crate::contracts::ParamRef::Receiver)
+                .map(|e| self.expr_types[e.0 as usize]);
+            if let Some(Ty::Obj(_, actual_args)) = recv.map(|t| t.non_null()) {
+                // Unify the DECLARED receiver's type-parameter arguments with the actual
+                // receiver's type arguments (`Refinement<T, R>` on `Refinement<Any, String>`).
+                if let Some(Ty::Obj(_, declared_args)) = gsig.and_then(|g| g.receiver) {
+                    for (d, a) in declared_args.iter().zip(actual_args.iter()) {
+                        if let Some(name) = d.ty_param_name() {
+                            binds.entry(name.to_string()).or_insert(*a);
+                        }
+                    }
+                } else if formals.len() == actual_args.len() {
+                    // No declared receiver shape: pair the formals positionally (exact count).
+                    for (name, t) in formals.iter().zip(actual_args.iter()) {
+                        binds.insert(name.clone(), *t);
+                    }
+                }
+            }
+        }
+        if binds.is_empty() {
+            ty
+        } else {
+            crate::symbol_resolver::ty_subst(ty, &binds)
         }
     }
 
@@ -31526,6 +31639,7 @@ impl<'a> Checker<'a> {
             source_file: None,
             source_receiver: None,
             package: String::new(),
+            contract: None,
         };
 
         // Register in current local-funs frame and in the TypeInfo maps.

@@ -248,6 +248,8 @@ mod context_parameters_e2e;
 mod contract_calls_in_place_e2e;
 #[path = "contract_erasure_e2e.rs"]
 mod contract_erasure_e2e;
+#[path = "contract_metadata_roundtrip_e2e.rs"]
+mod contract_metadata_roundtrip_e2e;
 #[path = "contract_smartcast_e2e.rs"]
 mod contract_smartcast_e2e;
 #[path = "contract_user_e2e.rs"]

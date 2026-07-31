@@ -379,6 +379,7 @@ impl LibraryCallable {
             origin: Origin::Library,
             source_receiver: None,
             contract: None,
+            generic_sig: None,
         }
     }
 
@@ -489,6 +490,12 @@ pub struct LibraryCallable {
     /// The callable's declared contract, decoded from `@Metadata` — the effects the checker applies
     /// at call sites (`returns(…) implies …`, `callsInPlace`). `None` when it declares none.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
+    /// The metadata-primary generic signature (formal type parameters + receiver/param/return
+    /// nodes), when the callable came from `@Metadata` with one. The checker reads this to bind a
+    /// contract's type-parameter conclusions (`value is R`) at the call site — the JVM `Signature`
+    /// in [`Self::signature`] is absent on krusty-emitted classes. Boxed: this struct rides the
+    /// `ResolvedCall` enum, whose variant size must stay flat.
+    pub generic_sig: Option<Box<GenericSig>>,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member

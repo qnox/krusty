@@ -133,6 +133,9 @@ fn parse_type_gsig_node(
             (3, 0) => nullable = pb.varint()? != 0,
             (6, 0) => class_id = Some(pb.varint()?),
             (8, 0) => tp_id = Some(pb.varint()?),
+            // `Type.type_parameter` = 7 per `metadata.proto` (the id of the type parameter);
+            // field 8 above is `flexible_upper_bound_id`, historically also treated as one.
+            (7, 0) => tp_id = Some(pb.varint()?),
             (9, 0) => tpn_id = Some(pb.varint()?),
             (2, 2) => {
                 // Type.argument — `Argument.type` = field 2 (an inline `Type`); a `*` projection has none.
@@ -743,6 +746,9 @@ struct ParsedFunction {
     /// Raw `Contract` message body (`Function.contract`, field 32) — the function's declared
     /// `contract { … }` effects, decoded downstream where the string table is available.
     contract_body: Option<Vec<u8>>,
+    /// Raw `TypeTable` message body (`Function.type_table`, field 30) — contract expressions may
+    /// reference their `is_instance_type` by id into this table instead of inlining the `Type`.
+    type_table_body: Option<Vec<u8>>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -768,6 +774,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut receiver_body: Option<Vec<u8>> = None;
     let mut annotation_bodies: Vec<Vec<u8>> = Vec::new();
     let mut contract_body: Option<Vec<u8>> = None;
+    let mut type_table_body: Option<Vec<u8>> = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -775,6 +782,12 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 // Function.contract (`Contract` message) — the declared contract's effects.
                 let n = pb.varint()? as usize;
                 contract_body = Some(pb.bytes(n)?.to_vec());
+            }
+            (30, 2) => {
+                // Function.type_table (`TypeTable` message) — contract `is_instance_type_id`
+                // references index into it.
+                let n = pb.varint()? as usize;
+                type_table_body = Some(pb.bytes(n)?.to_vec());
             }
             (12, 2) => {
                 // Function.annotation (repeated `Annotation`) — decoded downstream (needs the string table).
@@ -886,6 +899,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         receiver_body,
         annotation_bodies,
         contract_body,
+        type_table_body,
     })
 }
 
@@ -913,6 +927,7 @@ fn decode_contract(
     records: &[Rec],
     d2: &[String],
     tparams: &HashMap<u64, String>,
+    type_table: Option<&[u8]>,
 ) -> Option<crate::contracts::Contract> {
     let mut pb = Pb { b: body, i: 0 };
     let mut effects = Vec::new();
@@ -921,7 +936,13 @@ fn decode_contract(
         match (tag >> 3, tag & 7) {
             (1, 2) => {
                 let n = pb.varint()? as usize;
-                effects.push(decode_effect(pb.bytes(n)?, records, d2, tparams)?);
+                effects.push(decode_effect(
+                    pb.bytes(n)?,
+                    records,
+                    d2,
+                    tparams,
+                    type_table,
+                )?);
             }
             (_, w) => pb.skip(w)?,
         }
@@ -934,6 +955,7 @@ fn decode_effect(
     records: &[Rec],
     d2: &[String],
     tparams: &HashMap<u64, String>,
+    type_table: Option<&[u8]>,
 ) -> Option<crate::contracts::Effect> {
     use crate::contracts::{Effect, InvocationKind};
     let mut pb = Pb { b: body, i: 0 };
@@ -985,7 +1007,7 @@ fn decode_effect(
             if let Effect::Returns(returns) = base {
                 return Some(Effect::ConditionalReturns {
                     returns,
-                    conclusion: decode_expression(&cb, records, d2, tparams)?,
+                    conclusion: decode_expression(&cb, records, d2, tparams, type_table)?,
                 });
             }
         }
@@ -1051,6 +1073,7 @@ fn decode_expression(
     records: &[Rec],
     d2: &[String],
     tparams: &HashMap<u64, String>,
+    type_table: Option<&[u8]>,
 ) -> Option<crate::contracts::Condition> {
     use crate::contracts::{Condition, ConditionType};
     let mut pb = Pb { b: body, i: 0 };
@@ -1058,6 +1081,7 @@ fn decode_expression(
     let mut vpr = None;
     let mut constant = None;
     let mut instance_body = None;
+    let mut instance_id = None;
     let mut ands: Vec<Condition> = Vec::new();
     let mut ors: Vec<Condition> = Vec::new();
     while !pb.at_end() {
@@ -1070,13 +1094,26 @@ fn decode_expression(
                 let n = pb.varint()? as usize;
                 instance_body = Some(pb.bytes(n)?.to_vec());
             }
+            (5, 0) => instance_id = Some(pb.varint()?),
             (6, 2) => {
                 let n = pb.varint()? as usize;
-                ands.push(decode_expression(pb.bytes(n)?, records, d2, tparams)?);
+                ands.push(decode_expression(
+                    pb.bytes(n)?,
+                    records,
+                    d2,
+                    tparams,
+                    type_table,
+                )?);
             }
             (7, 2) => {
                 let n = pb.varint()? as usize;
-                ors.push(decode_expression(pb.bytes(n)?, records, d2, tparams)?);
+                ors.push(decode_expression(
+                    pb.bytes(n)?,
+                    records,
+                    d2,
+                    tparams,
+                    type_table,
+                )?);
             }
             (_, w) => pb.skip(w)?,
         }
@@ -1089,10 +1126,24 @@ fn decode_expression(
             param: param_ref(vpr?),
             negated,
         })
-    } else if let Some(tb) = instance_body {
+    } else if instance_body.is_some() || instance_id.is_some() {
+        // `is_instance_type` may INLINE the `Type` (field 4) or reference the function's
+        // `TypeTable` by id (field 5) — kotlinc writes the table form.
+        let (tb, table_nullable) = match (instance_body, instance_id) {
+            (Some(tb), _) => (tb, false),
+            (None, Some(id)) => {
+                let (tb, nullable) = type_table_entry(type_table?, id as usize)?;
+                (tb.to_vec(), nullable)
+            }
+            _ => return None,
+        };
+        let mut ty = parse_type_gsig(&tb, records, d2, tparams)?;
+        if table_nullable {
+            ty = Ty::nullable(ty);
+        }
         Some(Condition::IsType {
             param: param_ref(vpr?),
-            ty: ConditionType::Metadata(parse_type_gsig(&tb, records, d2, tparams)?),
+            ty: ConditionType::Metadata(ty),
             negated,
         })
     } else {
@@ -1771,6 +1822,30 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
+    // The containing message's `TypeTable` (Package.type_table / Class.type_table = 30): contract
+    // `is_instance_type_id` references index into it. kotlinc appends the table AFTER the
+    // functions, so pre-scan for it before the main decode loop (which decodes contracts inline).
+    let mut type_table_body: Option<Vec<u8>> = None;
+    {
+        let mut scan = Pb { b: ctx.msg, i: 0 };
+        while !scan.at_end() {
+            let Some(tag) = scan.varint() else { break };
+            match (tag >> 3, tag & 7) {
+                (30, 2) => {
+                    let Some(len) = scan.varint() else { break };
+                    let Some(b) = scan.bytes(len as usize) else {
+                        break;
+                    };
+                    type_table_body = Some(b.to_vec());
+                }
+                (_, w) => {
+                    if scan.skip(w).is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
     let mut pb = Pb { b: ctx.msg, i: 0 };
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -1869,7 +1944,9 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                         let tparams = type_parameter_context(&[], &pf.type_params, records, d2)
                             .map(|c| c.names)
                             .unwrap_or_default();
-                        decode_contract(body, records, d2, &tparams).map(std::sync::Arc::new)
+                        // Function-level table wins if present; the container's otherwise.
+                        let table = pf.type_table_body.as_deref().or(type_table_body.as_deref());
+                        decode_contract(body, records, d2, &tparams, table).map(std::sync::Arc::new)
                     });
                     out.push(MetaFn {
                         kotlin_name,
