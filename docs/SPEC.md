@@ -2352,10 +2352,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   miscompile). A malformed/unhandled reified marker cleanly SKIPS the whole splice (never miscompiles).
   (`build775_ee1_reified_vc_ext_e2e`)
 
-- **An ARITY-inapplicable same-named member does not hide an applicable EXTENSION.** For
-  `registry.getServices<Deployer>()` where `ServiceRegistry` declares `fun <T> getServices(type:
-  KClass<*>)` and the same module declares `inline fun <reified T : Any> ServiceRegistry.getServices():
-  List<T>`, kotlinc resolves the extension because member precedence applies only to applicable
+- **An ARITY-inapplicable same-named member does not hide an applicable EXTENSION.** For a synthetic
+  `catalog.loadAll<Entry>()` example where `Catalog` declares `fun <T> loadAll(type: KClass<*>)` and
+  the same module declares `inline fun <reified T : Any> Catalog.loadAll(): List<T>`, kotlinc resolves
+  the extension because member precedence applies only to applicable
   candidates. The classpath-member slot-mapping path now asks the federated extension overload selector
   whether the exact call can fall through before it reports a member mapping/type error. That single
   applicability query covers same-file, sibling-module, and classpath extensions with the call's labels,

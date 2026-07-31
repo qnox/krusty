@@ -352,15 +352,15 @@ fn member_extension_function_resolution() {
 #[test]
 fn arity_inapplicable_member_falls_through_to_reified_extension() {
     const SOURCE: &str = r#"
-        interface ServiceRegistry {
-            fun <T> getService(type: kotlin.reflect.KClass<*>): T? = null
-            fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+        interface Catalog {
+            fun <T> load(type: kotlin.reflect.KClass<*>): T? = null
+            fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
         }
-        inline fun <reified T : Any> ServiceRegistry.getServices(): List<T> = getServices(T::class)
+        inline fun <reified T : Any> Catalog.loadAll(): List<T> = loadAll(T::class)
 
-        class Deployer
+        class Entry
 
-        fun services(registry: ServiceRegistry): List<Deployer> = registry.getServices<Deployer>()
+        fun entries(catalog: Catalog): List<Entry> = catalog.loadAll<Entry>()
     "#;
 
     let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
@@ -375,15 +375,15 @@ fn arity_inapplicable_member_falls_through_to_reified_extension() {
 #[test]
 fn arity_inapplicable_member_falls_through_to_reified_extension_implicit_receiver() {
     const SOURCE: &str = r#"
-        interface ServiceRegistry {
-            fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+        interface Catalog {
+            fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
         }
-        inline fun <reified T : Any> ServiceRegistry.getServices(): List<T> = getServices(T::class)
+        inline fun <reified T : Any> Catalog.loadAll(): List<T> = loadAll(T::class)
 
-        class Deployer
+        class Entry
 
-        fun services(registry: ServiceRegistry): List<Deployer> =
-            with(registry) { getServices<Deployer>() }
+        fun entries(catalog: Catalog): List<Entry> =
+            with(catalog) { loadAll<Entry>() }
     "#;
 
     let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
@@ -398,14 +398,14 @@ fn arity_inapplicable_member_falls_through_to_reified_extension_implicit_receive
 #[test]
 fn arity_inapplicable_member_still_errors_when_source_extension_inapplicable() {
     const SOURCE: &str = r#"
-        interface ServiceRegistry {
-            fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+        interface Catalog {
+            fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
         }
-        fun ServiceRegistry.getServices(extra: Int): List<String> = emptyList()
+        fun Catalog.loadAll(extra: Int): List<String> = emptyList()
 
-        class Deployer
+        class Entry
 
-        fun services(registry: ServiceRegistry): List<Deployer> = registry.getServices<Deployer>()
+        fun entries(catalog: Catalog): List<Entry> = catalog.loadAll<Entry>()
     "#;
 
     let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
@@ -422,22 +422,22 @@ fn arity_inapplicable_member_still_errors_when_source_extension_inapplicable() {
 #[test]
 fn arity_inapplicable_member_reified_extension_run() {
     const SOURCE: &str = r#"
-        interface ServiceRegistry {
-            fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T>
+        interface Catalog {
+            fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T>
         }
-        inline fun <reified T : Any> ServiceRegistry.getServices(): List<T> = getServices(T::class)
+        inline fun <reified T : Any> Catalog.loadAll(): List<T> = loadAll(T::class)
 
-        class Deployer
+        class Entry
 
-        class Registry : ServiceRegistry {
-            override fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T> =
-                if (type == Deployer::class) listOf(Deployer() as T) else emptyList()
+        class CatalogImpl : Catalog {
+            override fun <T> loadAll(type: kotlin.reflect.KClass<*>): List<T> =
+                if (type == Entry::class) listOf(Entry() as T) else emptyList()
         }
 
         fun box(): String {
-            val services = Registry().getServices<Deployer>()
-            if (services.size != 1) return "size"
-            if (services[0] !is Deployer) return "type"
+            val entries = CatalogImpl().loadAll<Entry>()
+            if (entries.size != 1) return "size"
+            if (entries[0] !is Entry) return "type"
             return "OK"
         }
     "#;
