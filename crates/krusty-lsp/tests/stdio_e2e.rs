@@ -1229,10 +1229,24 @@ fn stdio_server_offers_the_dev_dump_code_action_for_a_rootless_document() {
     let uri = "file:///dev-dump/Main.kt";
     let mut server = ServerProcess::start(&["--dev"]);
     let initialize = server.request(1, "initialize", json!({}));
+    let capabilities = &initialize["result"]["capabilities"];
     assert_eq!(
-        initialize["result"]["capabilities"]["codeActionProvider"],
+        capabilities["codeActionProvider"],
         json!(true),
         "dev mode must advertise the code action capability: {initialize}"
+    );
+    // Advertising the provider is not sufficient. Zed discards a returned code action whose
+    // `command` is missing from `executeCommandProvider.commands` before the action reaches the
+    // menu, and reports nothing — the user sees "no code actions available" from a server that
+    // answered correctly. The command itself is handled by the editor and never sent back here.
+    let advertised = capabilities["executeCommandProvider"]["commands"]
+        .as_array()
+        .expect("dev mode must advertise the executeCommandProvider commands");
+    assert!(
+        advertised
+            .iter()
+            .any(|command| command == "editor.action.goToLocations"),
+        "the action's command must be advertised or the editor drops the action: {initialize}"
     );
     server.notify("initialized", json!({}));
     server.notify(
@@ -1296,6 +1310,12 @@ fn stdio_server_offers_no_code_actions_without_dev_mode() {
             .get("codeActionProvider")
             .is_none(),
         "a non-dev server must not advertise the capability: {initialize}"
+    );
+    assert!(
+        initialize["result"]["capabilities"]
+            .get("executeCommandProvider")
+            .is_none(),
+        "a non-dev server must not advertise dump commands either: {initialize}"
     );
     server.notify("initialized", json!({}));
     server.notify(

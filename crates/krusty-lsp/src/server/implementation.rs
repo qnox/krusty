@@ -1470,8 +1470,12 @@ where
                     "textDocumentSync": 2
                 });
                 // Advertised only under `--dev`; an ordinary session must not offer the action.
+                // Both entries are required: without `executeCommandProvider` the editor discards
+                // the action instead of showing it, so advertising the provider alone is not enough.
                 if self.dev {
                     capabilities["codeActionProvider"] = json!(true);
+                    capabilities["executeCommandProvider"] =
+                        json!({"commands": DUMP_ACTION_COMMANDS});
                 }
                 Dispatch::messages(vec![rpc_result(
                     id,
@@ -2863,6 +2867,19 @@ struct TextDocumentIdentifier {
 
 const DUMP_ACTION_TITLE: &str = "krusty (dev): dump AST + checker + IR";
 
+/// The command the dump action carries. The editor handles it itself — it never reaches this server
+/// as `workspace/executeCommand` — but it must still be advertised, see [`DUMP_ACTION_COMMANDS`].
+const DUMP_ACTION_COMMAND: &str = "editor.action.goToLocations";
+
+/// Commands advertised in `executeCommandProvider` under `--dev`.
+///
+/// Advertising is not optional even though the editor never sends the command back. Zed drops any
+/// returned code action whose `command` is absent from this list, before the action reaches the
+/// menu and without reporting anything: the user sees "no code actions available" from a server
+/// that answered correctly. (`crates/project/src/lsp_command.rs`, where `available_commands` comes
+/// from the server's own `execute_command_provider` and defaults to empty.)
+const DUMP_ACTION_COMMANDS: [&str; 1] = [DUMP_ACTION_COMMAND];
+
 /// The code-action response for a finished dump: one navigation action, or an empty list when the
 /// document had no dump to open.
 ///
@@ -2882,7 +2899,7 @@ fn dump_code_actions(id: Value, uri: &str, position: Position, dump: Option<Dump
             "kind": "source",
             "command": {
                 "title": DUMP_ACTION_TITLE,
-                "command": "editor.action.goToLocations",
+                "command": DUMP_ACTION_COMMAND,
                 "arguments": [uri, position, [location]],
             }
         }]),
