@@ -265,6 +265,30 @@ fn source_private_nested_classifier_uses_lexical_owner_visibility() {
 }
 
 #[test]
+fn fq_source_import_nested_shadows_package_path() {
+    // The nested-first order also governs EXPLICIT imports: `import pkg1.Cls` binds the root
+    // class `pkg1`'s nested `Cls` over package `pkg1`'s `Cls`. Asserted via TYPE IDENTITY: the
+    // return type `pkg1.Cls` also resolves nested-first, so this only typechecks when the import
+    // bound the same (nested) class. (Member access would trip the pre-existing
+    // same-simple-name member-lookup confusion instead.)
+    let pkg = "package pkg1\nclass Cls(val fromPkg: Int)\n";
+    let nested = "class pkg1 { class Cls(val fromNested: Int) }\n";
+    let diagnostics = common::front_end_diagnostics_files(
+        &[
+            pkg,
+            nested,
+            "import pkg1.Cls\nfun f(c: Cls): pkg1.Cls = c\n",
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "import should bind the nested classifier: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn fq_source_typerefs_compile_and_run() {
     // FQ param + return types across packages, exercised end-to-end on the JVM. (A cross-package
     // extension DECLARATION would be the ideal vehicle, but the IR backend rejects those today —
