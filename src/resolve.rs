@@ -11971,6 +11971,74 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// The member-call last-resort diagnostic, with the rejected overloads LISTED: the bare
+    /// "none of the following candidates is applicable:" prefix said nothing about WHICH members
+    /// rejected `recv.name(args)` — an empty list reads as a compiler bug, not a verdict. Render
+    /// each discarded overload (source declarations via `source_callable_display`, classpath
+    /// members from their resolved signature), then sort and deduplicate the displays before
+    /// applying the shared count/byte caps. Sorting makes the result independent of candidate
+    /// discovery order; trying every retained display lets a short signature fit even when an
+    /// earlier long signature does not.
+    fn inapplicable_member_candidates_message(
+        &self,
+        name: &str,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> String {
+        let prefix = INAPPLICABLE_OVERLOAD_PREFIX;
+        let mut displays = candidates
+            .iter()
+            .map(|candidate| {
+                self.source_callable_display(candidate).unwrap_or_else(|| {
+                    // An extension's `callable.params` prepends the receiver while `call_sig` does
+                    // not; skip it so names and types stay parallel.
+                    let (params, receiver) = match candidate.kind {
+                        crate::libraries::FnKind::Extension => (
+                            &candidate.callable.params[1.min(candidate.callable.params.len())..],
+                            candidate.receiver,
+                        ),
+                        _ => (candidate.callable.params.as_slice(), None),
+                    };
+                    let parameters =
+                        Self::callable_ref_parameters(params, &candidate.call_sig.param_names);
+                    let suspend = if candidate.callable.suspend {
+                        "suspend "
+                    } else {
+                        ""
+                    };
+                    match receiver {
+                        Some(receiver) => format!(
+                            "{suspend}fun {}.{name}({parameters}): {}",
+                            receiver.source_name(),
+                            candidate.callable.ret.source_name()
+                        ),
+                        None => format!(
+                            "{suspend}fun {name}({parameters}): {}",
+                            candidate.callable.ret.source_name()
+                        ),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        displays.sort_unstable();
+        displays.dedup();
+        displays.truncate(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
+
+        let mut message = String::from(prefix);
+        for display in displays {
+            let separator = if message.len() == prefix.len() {
+                "\n\n"
+            } else {
+                "\n"
+            };
+            if message.len() + separator.len() + display.len() > MAX_OVERLOAD_DIAGNOSTIC_BYTES {
+                continue;
+            }
+            message.push_str(separator);
+            message.push_str(&display);
+        }
+        message
+    }
+
     fn toplevel_source_ref_candidate(
         name: &str,
         function: &crate::libraries::FunctionInfo,
@@ -17909,12 +17977,21 @@ impl<'a> Checker<'a> {
             Expr::Lambda { params, .. } if !params.is_empty() => {
                 Some(Ty::fun(vec![Ty::Error; params.len()], Ty::Error))
             }
-            Expr::Lambda { body, .. } if self.file.expr_uses_name(*body, "it") => {
+            Expr::Lambda { body, .. } if self.untyped_lambda_binds_implicit_it(*body) => {
                 Some(Ty::fun(vec![Ty::Error], Ty::Error))
             }
             Expr::Lambda { .. } => Some(Ty::Error),
             _ => None,
         }
+    }
+
+    /// Whether an UNTYPED lambda that omits its parameter list must synthesize Kotlin's implicit `it`.
+    ///
+    /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
+    /// exists, the inner lambda CAPTURES that value and remains `Function0`. Keep this decision in one
+    /// helper because both overload probing and fallback lambda typing must infer the same arity.
+    fn untyped_lambda_binds_implicit_it(&self, body: ExprId) -> bool {
+        self.file.expr_uses_name(body, "it") && self.lookup("it").is_none()
     }
 
     fn classpath_sam_param_types(
@@ -19005,7 +19082,7 @@ impl<'a> Checker<'a> {
             // parameters but a body referencing `it`, bind the implicit single parameter.
             let bind_names: Vec<String> = if !params.is_empty() {
                 params.clone()
-            } else if self.file.expr_uses_name(body, "it") {
+            } else if self.untyped_lambda_binds_implicit_it(body) {
                 vec!["it".to_string()]
             } else {
                 vec![]
@@ -26653,8 +26730,8 @@ impl<'a> Checker<'a> {
                 }
                 // Java static call: `ClassName.method(args)` where ClassName is an imported class
                 // (not a local/param) resolvable on the classpath. A top-level PROPERTY of the same name
-                // shadows the type/import in value position (`private val logger = logger {}; logger.info()`
-                // — `logger` is the KLogger value, not the imported `logger` symbol), so skip the static
+                // shadows the type/import in value position (`private val sink = sink {}; sink.read()`
+                // — `sink` is the EventSink value, not the imported `sink` symbol), so skip the static
                 // path and let the receiver resolve as that property value below.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(&cls) {
@@ -27775,17 +27852,17 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                 }
-                let has_inapplicable_candidate = self
+                let inapplicable_candidates = self
                     .resolver()
                     .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                     .map(crate::symbol_resolver::Symbol::overloads)
-                    .is_some_and(|overloads| !overloads.is_empty());
+                    .unwrap_or_default();
                 self.diags.error(
                     self.call_callee_name_span(call),
-                    if has_inapplicable_candidate {
-                        INAPPLICABLE_OVERLOAD_PREFIX.to_string()
-                    } else {
+                    if inapplicable_candidates.is_empty() {
                         format!("unresolved reference '{name}'.")
+                    } else {
+                        self.inapplicable_member_candidates_message(&name, &inapplicable_candidates)
                     },
                 );
                 Ty::Error
@@ -29927,7 +30004,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // An unqualified call to a MEMBER function of a classpath `object` imported through
-                // `import Obj.member` (`private val logger = logger {}`, kotlin-logging's idiom). The
+                // `import Obj.member` (`private val sink = sink {}`). The
                 // positional import stores `Obj/member`; if the owner is an object with a matching member,
                 // Kotlin dispatches on the singleton — record the object so LOWERING emits
                 // `getstatic Obj.INSTANCE; invokevirtual`. Args (including a trailing lambda) were typed
@@ -32709,8 +32786,8 @@ fun box(): String {
                     vec![false, false],
                 )],
                 "choose" => vec![
-                    member(vec![Ty::Boolean], "(Z)Ljava/lang/String;", vec![false]),
                     member(vec![Ty::Int], "(I)Ljava/lang/String;", vec![false]),
+                    member(vec![Ty::Boolean], "(Z)Ljava/lang/String;", vec![false]),
                 ],
                 "tie" => vec![
                     member(vec![Ty::Long], "(J)Ljava/lang/String;", vec![false]),
@@ -33359,6 +33436,45 @@ fun box(): String {
                 .iter()
                 .map(|diagnostic| &diagnostic.msg)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn inapplicable_member_call_lists_the_rejected_overloads() {
+        // The member-call last-resort diagnostic must NAME the overloads that rejected the call —
+        // the bare prefix alone reads as a compiler bug, not a verdict (the captured-`it`
+        // `sink.emit { … }` false positive surfaced with an empty list).
+        let source = "fun f(): String = \"\".choose(\"x\")\n";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        let message = diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .find(|msg| msg.starts_with("none of the following candidates is applicable:"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the inapplicable member call should report its candidates: {:?}",
+                    diagnostics
+                        .diags
+                        .iter()
+                        .map(|diagnostic| &diagnostic.msg)
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            message.contains("fun choose(a: Boolean): String")
+                && message.contains("fun choose(a: Int): String"),
+            "every rejected overload should be listed, got: {message:?}"
+        );
+        assert!(
+            message.find("Boolean").unwrap() < message.find("Int").unwrap(),
+            "candidate diagnostics must be sorted independently of provider order: {message:?}"
         );
     }
 

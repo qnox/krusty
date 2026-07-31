@@ -457,6 +457,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
   `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
   (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
+- **Implicit `it` in an untyped lambda is lexical, not textual.** When no expected function type has
+  established the lambda's parameters, a parameterless lambda synthesizes `it` only if its body uses
+  that name and no enclosing scope already binds it. Thus `outer?.let { sink.emit { "$it" } }` passes a
+  `Function0` to `emit` and captures the outer `it`; likewise, `{ it }` captures a local named `it`.
+  Typed lambdas still receive and shadow with their expected `Function1` parameter. Overload probing and
+  fallback lambda typing share this decision so they cannot infer different arities
+  (`tests/classpath_object_member_import_e2e.rs`,
+  `tests/nested_lambda_capture_e2e.rs::untyped_lambda_captures_local_named_it`).
 - **Mutable capture**: a local `var` written by a non-inlined lambda (a closure) needs a shared mutable
   cell so writes are visible to the enclosing scope and vice versa. The lowerer computes this per body by
   checking whether a lambda captures a `var` from an outer local scope; the JVM realization currently
