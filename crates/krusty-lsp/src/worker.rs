@@ -69,6 +69,9 @@ enum OwnedWorkerRequest {
     Materialize {
         materialize: OwnedMaterializeRequest,
     },
+    Dump {
+        dump: OwnedDumpRequest,
+    },
     Analyze(OwnedAnalysisRequest),
 }
 
@@ -83,6 +86,78 @@ struct MaterializeResponse {
     text: String,
     lo: u32,
     hi: u32,
+}
+
+/// A dump request as the worker receives it: an analysis payload plus which of its files to render.
+#[derive(Deserialize)]
+struct OwnedDumpRequest {
+    analysis: OwnedAnalysisRequest,
+    target: usize,
+    label: String,
+    cache_key: String,
+    cache_root: PathBuf,
+}
+
+/// A dump request as the supervisor sends it, borrowing the retained source texts.
+#[derive(Serialize)]
+struct DumpRequest<'a> {
+    analysis: AnalysisRequest<'a>,
+    target: usize,
+    label: &'a str,
+    cache_key: &'a str,
+    cache_root: &'a Path,
+}
+
+/// The tagged wrapper that routes a `DumpRequest` to the worker's dump arm.
+///
+/// A typed envelope rather than `serde_json::json!`: the macro builds a fully owned `Value` copy of
+/// every source text before a byte reaches the bounded writer, and its internal `unwrap` would turn
+/// a non-UTF-8 `cache_root` — legal on Linux and macOS — into a panic in the supervisor process.
+#[derive(Serialize)]
+struct DumpEnvelope<'a> {
+    dump: &'a DumpRequest<'a>,
+}
+
+/// Everything a dump needs from the session that produced the retained analysis payload.
+///
+/// The fields mirror `analyze_inputs_prefix_with_config`, because a dump is only trustworthy if the
+/// worker re-analyzes under exactly the configuration the editor's own analysis used: a per-module
+/// classpath, that module's language arguments, and the group's Java sources all change what
+/// resolves. A dump that silently analyzes against the launch classpath would report unresolved
+/// types for a file the editor shows as clean.
+pub struct DumpTarget<'a> {
+    /// Retained source texts, in the order the session analyzed them.
+    pub sources: &'a [String],
+    /// Kinds parallel to `sources`. Empty means every source is Kotlin.
+    pub source_kinds: &'a [SourceKind],
+    /// Index into `sources` of the file to render.
+    pub target: usize,
+    /// Workspace-relative presentation label shown in the dump heading.
+    pub label: &'a str,
+    /// Full document identity used only as opaque input to the cache digest. It is deliberately
+    /// separate from `label`: same-named files outside the workspace must not overwrite each other,
+    /// and the URI must never be copied into a readable cache filename.
+    pub cache_key: &'a str,
+    pub cache_root: &'a Path,
+    /// The checked and inference prefixes the session used.
+    pub result_count: usize,
+    pub inferred_count: usize,
+    /// Java texts the analysis stubs onto the classpath.
+    pub java_sources: &'a [String],
+    /// Per-module language CLI arguments; `None` keeps the worker's session features.
+    pub language_arguments: Option<&'a [String]>,
+    /// Per-module classpath; `None` keeps the worker's launch classpath.
+    pub classpath: Option<&'a [PathBuf]>,
+}
+
+/// Where the worker wrote a rendered dump.
+///
+/// Only the path crosses the channel: a dump document carries every AST node, typed expression, and
+/// IR instruction of a file, which would put the response at risk of the worker frame cap and then
+/// the LSP message cap.
+#[derive(Deserialize, Serialize)]
+pub struct DumpResponse {
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -310,6 +385,58 @@ fn encode_materialize_request(reference: &LibraryRef, use_sources: bool) -> io::
     Ok(request.bytes)
 }
 
+/// Encode a dump request, carrying the module configuration through unchanged.
+///
+/// `session_features` applies only when the target names no language arguments of its own, mirroring
+/// `analyze_inputs_prefix` (session features) versus `analyze_inputs_prefix_with_config` (the
+/// module's own arguments).
+fn encode_dump_request(
+    target: &DumpTarget<'_>,
+    session_features: &LangFeatures,
+) -> io::Result<Vec<u8>> {
+    let sources = target
+        .sources
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let source_kinds = target
+        .source_kinds
+        .iter()
+        .map(|kind| kind.wire_code())
+        .collect::<Vec<_>>();
+    let features = match target.language_arguments {
+        Some(arguments) => {
+            let mut features = LangFeatures::new();
+            for argument in arguments {
+                features.apply_cli_arg(argument);
+            }
+            features
+        }
+        None => session_features.clone(),
+    };
+    let mut language_features = features.iter().collect::<Vec<_>>();
+    language_features.sort_unstable();
+    let request = DumpRequest {
+        analysis: AnalysisRequest {
+            sources: &sources,
+            source_kinds: &source_kinds,
+            result_count: target.result_count,
+            inferred_count: target.inferred_count,
+            language_features: &language_features,
+            java_sources: target.java_sources,
+            classpath: target.classpath,
+        },
+        target: target.target,
+        label: target.label,
+        cache_key: target.cache_key,
+        cache_root: target.cache_root,
+    };
+    let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
+    serde_json::to_writer(&mut encoded, &DumpEnvelope { dump: &request })
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    Ok(encoded.bytes)
+}
+
 fn framed_read_receiver<R>(
     mut reader: R,
     max_bytes: usize,
@@ -468,6 +595,12 @@ impl WorkerProcess {
         let response = self.read_response()?;
         serde_json::from_slice(&response).map_err(json_io)
     }
+
+    fn dump(&mut self, request: &[u8]) -> io::Result<Option<DumpResponse>> {
+        write_framed(&mut self.stdin, request)?;
+        let response = self.read_response()?;
+        serde_json::from_slice(&response).map_err(json_io)
+    }
 }
 
 impl Drop for WorkerProcess {
@@ -605,6 +738,16 @@ impl AnalysisWorker {
             .map(|response| {
                 response.map(|response| (response.text, Span::new(response.lo, response.hi)))
             })
+    }
+
+    /// Render the dump for `target.sources[target.target]` in the worker and return where it landed.
+    ///
+    /// The whole `DumpTarget` is replayed: the prefixes keep the dump's view of the source set equal
+    /// to the session's, and the module classpath, language arguments, and Java sources keep its
+    /// view of what resolves equal too.
+    pub fn dump(&mut self, target: &DumpTarget<'_>) -> io::Result<Option<DumpResponse>> {
+        let request = encode_dump_request(target, &self.language_features)?;
+        self.request(|process| process.dump(&request))
     }
 
     fn request<T>(
@@ -749,6 +892,13 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 write_framed(writer, &encoded.bytes)?;
                 continue;
             }
+            OwnedWorkerRequest::Dump { dump } => {
+                let response = render_dump_request(&default_classpath, dump);
+                let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
+                serde_json::to_writer(&mut encoded, &response).map_err(json_io)?;
+                write_framed(writer, &encoded.bytes)?;
+                continue;
+            }
         };
         let inferred_count = request.inferred_count.unwrap_or(request.sources.len());
         if request.result_count > inferred_count || inferred_count > request.sources.len() {
@@ -807,30 +957,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                 classpath
             },
         );
-        let stub_overlay_set = if !request.java_sources.is_empty() {
-            let java: Vec<(String, String)> = request
-                .java_sources
-                .iter()
-                .map(|source| (String::new(), source.clone()))
-                .collect();
-            let resolve = |cand: &str| {
-                classpath
-                    .find_name(krusty::types::type_name(cand))
-                    .is_some()
-            };
-            if let Some(stubs) = krusty::jvm::java_stub::stub_classes(
-                &java,
-                krusty::jvm::java_stub::StubMode::Lenient,
-                &resolve,
-            ) {
-                classpath.set_stub_overlay(stubs);
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let stub_overlay_set = set_java_stub_overlay(&classpath, &request.java_sources);
         let platform = Box::new(JvmLibraries::new(classpath.clone()));
         let source_set = compiler_analysis::analyze_source_inputs_prefix_with_features(
             &inputs,
@@ -916,6 +1043,153 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
         write_framed(writer, &response)?;
     }
     Ok(())
+}
+
+/// Stub `java_sources` onto `classpath` so Kotlin sources resolve Java declarations that no compiled
+/// class covers. Returns whether an overlay was installed, so the caller knows to clear it.
+fn set_java_stub_overlay(classpath: &Classpath, java_sources: &[String]) -> bool {
+    if java_sources.is_empty() {
+        return false;
+    }
+    let java: Vec<(String, String)> = java_sources
+        .iter()
+        .map(|source| (String::new(), source.clone()))
+        .collect();
+    let resolve = |cand: &str| {
+        classpath
+            .find_name(krusty::types::type_name(cand))
+            .is_some()
+    };
+    match krusty::jvm::java_stub::stub_classes(
+        &java,
+        krusty::jvm::java_stub::StubMode::Lenient,
+        &resolve,
+    ) {
+        Some(stubs) => {
+            classpath.set_stub_overlay(stubs);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Analyze the payload, lower the target file, and store the rendered dump.
+///
+/// Returns `None` when the request cannot be interpreted or the dump cannot be written. Lowering
+/// failures are not among those cases: the bail reason is the most valuable line in the document, so
+/// it is rendered into the IR section instead of discarding the dump.
+fn render_dump_request(
+    default_classpath: &Rc<Classpath>,
+    request: OwnedDumpRequest,
+) -> Option<DumpResponse> {
+    let sources = request.analysis.sources;
+    if request.target >= sources.len() {
+        return None;
+    }
+    // Kinds decode exactly as they do for analysis. Parsing a `.java` or `.kts` document as Kotlin
+    // would put a garbage AST's declarations into the symbol table the dumped file is checked
+    // against, so a set of kinds that cannot be trusted refuses the dump rather than guessing.
+    let kinds = if request.analysis.source_kinds.is_empty() {
+        vec![SourceKind::Kotlin; sources.len()]
+    } else if request.analysis.source_kinds.len() == sources.len() {
+        request
+            .analysis
+            .source_kinds
+            .iter()
+            .map(|code| SourceKind::from_wire_code(*code))
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        return None;
+    };
+    let inputs = sources
+        .iter()
+        .zip(&kinds)
+        .map(|(source, kind)| SourceInput::new(*kind, source))
+        .collect::<Vec<_>>();
+
+    let mut features = LangFeatures::new();
+    for feature in &request.analysis.language_features {
+        features.enable(feature);
+    }
+    let classpath = request.analysis.classpath.as_ref().map_or_else(
+        || default_classpath.clone(),
+        |entries| {
+            let classpath = Rc::new(Classpath::new(entries.clone()));
+            classpath.prepare_for_source_analysis();
+            classpath
+        },
+    );
+    // Replay the prefix the session analyzed, widened when needed so the dumped file is always
+    // checked — an unchecked target would render neither types nor IR.
+    let result_count = request
+        .analysis
+        .result_count
+        .max(request.target + 1)
+        .min(sources.len());
+    let inferred_count = request
+        .analysis
+        .inferred_count
+        .unwrap_or(sources.len())
+        .max(result_count)
+        .min(sources.len());
+    let stub_overlay_set = set_java_stub_overlay(&classpath, &request.analysis.java_sources);
+    let platform = Box::new(JvmLibraries::new(classpath.clone()));
+    let analysis = compiler_analysis::analyze_source_inputs_prefix_with_features(
+        &inputs,
+        result_count,
+        inferred_count,
+        platform,
+        &features,
+    );
+    // A second handle over the same `Rc<Classpath>`: the semantic platform was moved into the
+    // analysis as a `Box<dyn SemanticPlatform>`, which cannot be re-borrowed as a `TargetRuntime`.
+    let runtime = JvmLibraries::new(classpath.clone());
+    let response = render_analyzed_dump(
+        &analysis,
+        &sources[request.target],
+        request.target,
+        &request.label,
+        &request.cache_key,
+        &request.cache_root,
+        &runtime,
+    );
+    if stub_overlay_set {
+        classpath.clear_stub_overlay();
+    }
+    response
+}
+
+/// Render the analyzed target file's document and store it under `cache_root`.
+///
+/// Everything the document needs — including driving the lowering that fills its IR section — is
+/// the dump renderer's own business; the worker only picks the file out of its analysis and decides
+/// where the result is written.
+fn render_analyzed_dump(
+    analysis: &compiler_analysis::SourceSetAnalysis,
+    source: &str,
+    target: usize,
+    label: &str,
+    cache_key: &str,
+    cache_root: &Path,
+    runtime: &JvmLibraries,
+) -> Option<DumpResponse> {
+    let file_analysis = analysis.files.get(target)?;
+    let text = krusty::dump::render_file_dump_with_limit(
+        &krusty::dump::FileDumpInput {
+            label,
+            source,
+            file: &file_analysis.file,
+            file_index: target,
+            info: file_analysis.types.as_ref(),
+            symbols: &analysis.symbols,
+            runtime,
+            diagnostics: &file_analysis.diagnostics,
+        },
+        crate::dump_cache::MAX_DUMP_BYTES,
+    );
+
+    let path = crate::dump_cache::store(cache_root, cache_key, &text).ok()?;
+    Some(DumpResponse { path })
 }
 
 fn json_io(error: serde_json::Error) -> io::Error {
@@ -1034,6 +1308,22 @@ mod tests {
             "worker emitted an unexpected trailing frame"
         );
         serde_json::from_slice(&response).unwrap()
+    }
+
+    /// The dump path from a worker run that served exactly one dump request.
+    fn read_dump_path(output: Vec<u8>) -> PathBuf {
+        let mut output = Cursor::new(output);
+        assert_eq!(
+            read_framed(&mut output, WORKER_READY.len())
+                .unwrap()
+                .as_deref(),
+            Some(WORKER_READY)
+        );
+        let body = read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+            .unwrap()
+            .expect("worker dump response");
+        let response: Option<DumpResponse> = serde_json::from_slice(&body).unwrap();
+        response.expect("dump produced").path
     }
 
     fn navigation_saturation_response(
@@ -1341,6 +1631,298 @@ mod tests {
             "value"
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn worker_protocol_dumps_a_target_file_to_a_markdown_path() {
+        let root = std::env::temp_dir().join(format!("krusty-worker-dump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let request = serde_json::json!({
+            "dump": {
+                "analysis": {
+                    "sources": ["fun box(): String = \"OK\"\n"],
+                    "result_count": 1,
+                },
+                "target": 0,
+                "label": "src/Main.kt",
+                "cache_key": "file:///workspace/src/Main.kt",
+                "cache_root": root,
+            }
+        });
+        let mut input = Vec::new();
+        write_framed(&mut input, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let path = read_dump_path(output);
+
+        assert!(path.starts_with(&root), "{path:?}");
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("md"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# krusty dump — src/Main.kt"), "{text}");
+        assert!(text.contains("## AST"), "{text}");
+        assert!(text.contains("## Checker"), "{text}");
+        assert!(text.contains("## IR"), "{text}");
+        assert!(
+            !text.contains("<file not checked>"),
+            "the dumped file must carry its checker result: {text}"
+        );
+        assert!(
+            !text.contains("not lowered:"),
+            "the dumped file must carry lowered IR: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn request_shapes_route_to_their_own_untagged_variants() {
+        // The untagged enum resolves by field shape in declaration order, so adding a variant can
+        // silently capture another shape's payload. Every shape is pinned here.
+        let analyze = br#"{"sources":["fun answer(): Int = 42"],"result_count":1}"#;
+        assert!(
+            matches!(
+                serde_json::from_slice::<OwnedWorkerRequest>(analyze).unwrap(),
+                OwnedWorkerRequest::Analyze(_)
+            ),
+            "a bare analysis payload must still reach the analyze arm"
+        );
+
+        let materialize = serde_json::to_vec(&serde_json::json!({
+            "materialize": {
+                "reference": { "fqn": "sample/Widget", "member_name": "value", "member_desc": "" },
+                "use_sources": true,
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<OwnedWorkerRequest>(&materialize).unwrap(),
+            OwnedWorkerRequest::Materialize { .. }
+        ));
+
+        let dump = serde_json::to_vec(&serde_json::json!({
+            "dump": {
+                "analysis": { "sources": ["fun answer(): Int = 42"], "result_count": 1 },
+                "target": 0,
+                "label": "src/Main.kt",
+                "cache_key": "file:///workspace/src/Main.kt",
+                "cache_root": "/tmp/krusty",
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<OwnedWorkerRequest>(&dump).unwrap(),
+            OwnedWorkerRequest::Dump { .. }
+        ));
+    }
+
+    #[test]
+    fn dump_requests_carry_the_module_configuration_to_the_worker() {
+        let sources = vec![
+            "fun use(w: p.Widget) {}".to_string(),
+            "package p; public class Widget {}".to_string(),
+        ];
+        let java_sources = vec!["package p; public class Widget {}".to_string()];
+        let classpath = vec![PathBuf::from("module.jar")];
+        let language_arguments = vec!["-Xname-based-destructuring".to_string()];
+        let mut session = LangFeatures::new();
+        session.enable("ContextParameters");
+        let target = DumpTarget {
+            sources: &sources,
+            source_kinds: &[SourceKind::Kotlin, SourceKind::Java],
+            target: 0,
+            label: "src/Main.kt",
+            cache_key: "file:///workspace/src/Main.kt",
+            cache_root: Path::new("/tmp/krusty"),
+            result_count: 1,
+            inferred_count: 2,
+            java_sources: &java_sources,
+            language_arguments: Some(&language_arguments),
+            classpath: Some(&classpath),
+        };
+
+        let encoded = encode_dump_request(&target, &session).unwrap();
+
+        let OwnedWorkerRequest::Dump { dump } =
+            serde_json::from_slice::<OwnedWorkerRequest>(&encoded).unwrap()
+        else {
+            panic!("an encoded dump request must reach the dump arm");
+        };
+        assert_eq!(dump.target, 0);
+        assert_eq!(dump.label, "src/Main.kt");
+        assert_eq!(dump.cache_key, "file:///workspace/src/Main.kt");
+        assert_eq!(dump.cache_root, PathBuf::from("/tmp/krusty"));
+        assert_eq!(dump.analysis.sources, sources);
+        assert_eq!(
+            dump.analysis.source_kinds,
+            vec![SourceKind::Kotlin.wire_code(), SourceKind::Java.wire_code()],
+            "a dump must not reinterpret a Java document as Kotlin"
+        );
+        assert_eq!(dump.analysis.java_sources, java_sources);
+        assert_eq!(dump.analysis.classpath.as_deref(), Some(&classpath[..]));
+        assert_eq!(dump.analysis.result_count, 1);
+        assert_eq!(dump.analysis.inferred_count, Some(2));
+        assert_eq!(
+            dump.analysis.language_features,
+            vec![
+                "MultiDollarInterpolation".to_string(),
+                "NameBasedDestructuring".to_string(),
+            ],
+            "the module's own language arguments must reach the worker, and must replace the \
+             session features exactly as analyze_inputs_prefix_with_config does"
+        );
+    }
+
+    #[test]
+    fn dump_requests_fall_back_to_the_session_language_features() {
+        let sources = vec!["fun answer(): Int = 42".to_string()];
+        let mut session = LangFeatures::new();
+        session.enable("ContextParameters");
+        let target = DumpTarget {
+            sources: &sources,
+            source_kinds: &[SourceKind::Kotlin],
+            target: 0,
+            label: "src/Main.kt",
+            cache_key: "file:///workspace/src/Main.kt",
+            cache_root: Path::new("/tmp/krusty"),
+            result_count: 1,
+            inferred_count: 1,
+            java_sources: &[],
+            language_arguments: None,
+            classpath: None,
+        };
+
+        let encoded = encode_dump_request(&target, &session).unwrap();
+
+        let OwnedWorkerRequest::Dump { dump } =
+            serde_json::from_slice::<OwnedWorkerRequest>(&encoded).unwrap()
+        else {
+            panic!("an encoded dump request must reach the dump arm");
+        };
+        assert_eq!(
+            dump.analysis.language_features,
+            vec![
+                "ContextParameters".to_string(),
+                "MultiDollarInterpolation".to_string(),
+            ]
+        );
+        assert_eq!(dump.analysis.classpath, None);
+    }
+
+    #[test]
+    fn worker_protocol_dumps_a_script_target_under_its_own_source_kind() {
+        let root =
+            std::env::temp_dir().join(format!("krusty-worker-dump-script-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Top-level statements parse only under the script kind; ignoring the kinds would put parse
+        // diagnostics in the Checker section for a file the editor reports as clean.
+        let request = serde_json::json!({
+            "dump": {
+                "analysis": {
+                    "sources": ["fun render(value: String): String = value\nrender(\"sample\")"],
+                    "source_kinds": [SourceKind::KotlinScript.wire_code()],
+                    "result_count": 1,
+                },
+                "target": 0,
+                "label": "build.gradle.kts",
+                "cache_key": "file:///workspace/build.gradle.kts",
+                "cache_root": root,
+            }
+        });
+        let mut input = Vec::new();
+        write_framed(&mut input, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let text = std::fs::read_to_string(read_dump_path(output)).unwrap();
+        assert!(text.contains("# krusty dump — build.gradle.kts"), "{text}");
+        assert!(
+            text.contains("no diagnostics"),
+            "a script target must be parsed as a script: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worker_protocol_dumps_the_lowering_bail_reason() {
+        let root =
+            std::env::temp_dir().join(format!("krusty-worker-dump-bail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // An interface property with a custom getter is checked fine but gates IR lowering.
+        let source = "interface Named {\n    val label: String\n        get() = \"value\"\n}\n\
+                      fun box(): String = \"OK\"\n";
+        let request = serde_json::json!({
+            "dump": {
+                "analysis": { "sources": [source], "result_count": 1 },
+                "target": 0,
+                "label": "src/Named.kt",
+                "cache_key": "file:///workspace/src/Named.kt",
+                "cache_root": root,
+            }
+        });
+        let mut input = Vec::new();
+        write_framed(&mut input, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let text = std::fs::read_to_string(read_dump_path(output)).unwrap();
+        assert!(
+            text.contains("not lowered: gate:interface"),
+            "the bail reason must survive into the document: {text}"
+        );
+        assert!(
+            text.contains("no diagnostics"),
+            "a lowering bail is not a checker error: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worker_protocol_reports_no_dump_for_a_target_outside_the_source_set() {
+        let root =
+            std::env::temp_dir().join(format!("krusty-worker-dump-range-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let request = serde_json::json!({
+            "dump": {
+                "analysis": {
+                    "sources": ["fun answer(): Int = 42\n"],
+                    "result_count": 1,
+                },
+                "target": 4,
+                "label": "src/Main.kt",
+                "cache_key": "file:///workspace/src/Main.kt",
+                "cache_root": root,
+            }
+        });
+        let mut input = Vec::new();
+        write_framed(&mut input, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let mut output = Cursor::new(output);
+        assert_eq!(
+            read_framed(&mut output, WORKER_READY.len())
+                .unwrap()
+                .as_deref(),
+            Some(WORKER_READY)
+        );
+        let body = read_framed(&mut output, MAX_WORKER_MESSAGE_BYTES)
+            .unwrap()
+            .expect("worker dump response");
+        let response: Option<DumpResponse> = serde_json::from_slice(&body).unwrap();
+
+        assert!(response.is_none(), "out-of-range target must not dump");
+        assert!(!root.exists(), "a rejected dump must not write anything");
     }
 
     #[test]

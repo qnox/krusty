@@ -18,6 +18,8 @@ mod xml;
 
 #[cfg(test)]
 mod testing;
+#[cfg(test)]
+pub(crate) use testing::TempTree;
 
 pub use bsp::{discover as discover_bsp, BspConnection, BspProvider};
 pub use detect::{detect, find_build_root};

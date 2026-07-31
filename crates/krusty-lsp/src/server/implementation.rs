@@ -25,8 +25,8 @@ use super::super::{
 use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
 use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
-    AnalysisBatch, AnalysisEngine, AnalysisJob, EngineBackend, EngineEvent, IndexBatch,
-    MaterializeJob, MaterializeResult,
+    AnalysisBatch, AnalysisEngine, AnalysisJob, DumpJob, DumpOutcome, DumpResult, EngineBackend,
+    EngineEvent, IndexBatch, MaterializeJob, MaterializeResult,
 };
 use crate::server::status::StatusReporter;
 use crate::uri::{file_uri_to_path, path_to_file_uri};
@@ -54,6 +54,9 @@ const MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const DIAGNOSTIC_WIRE_FIXED_BYTES: usize = 256;
 const MAX_PENDING_ANALYSIS_REQUEST_BYTES: usize = 256 * 1024;
+/// Same bound as `MAX_PENDING_MATERIALIZATIONS`: a held-down keybinding must not grow the map of
+/// dumps waiting on the analysis thread without limit.
+const MAX_PENDING_DUMPS: usize = 128;
 const BOUNDED_EXACT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKSPACE_DIAGNOSTIC_REPORTS: usize = 32 * 1024;
 const MAX_RENAME_IDENTIFIER_BYTES: usize = 1024;
@@ -264,6 +267,13 @@ pub trait Analysis {
         None
     }
 
+    /// Render the dev-mode AST/checker/IR dump for `uri` and report where it was written. `None`
+    /// when dev mode is off, the document was not part of the retained analysis payload, or
+    /// rendering failed.
+    fn dump(&mut self, _uri: &str) -> Option<DumpResult> {
+        None
+    }
+
     fn analysis_ready(&self) -> bool {
         true
     }
@@ -397,6 +407,17 @@ pub trait AnalysisBackend {
             definition: None,
         })
     }
+    /// Render the dev-mode dump for `job.uri`.
+    ///
+    /// Mirrors [`AnalysisBackend::materialize`]: `Some` answers the request now, `None` means the
+    /// backend will publish an [`EngineEvent::Dumped`] carrying the same token later. The default
+    /// answers immediately with nothing to open.
+    fn dump(&mut self, job: DumpJob) -> Option<DumpOutcome> {
+        Some(DumpOutcome {
+            token: job.token,
+            dump: None,
+        })
+    }
     fn set_workspace_root(&mut self, root: Option<PathBuf>) -> Option<ProjectFeedback>;
     fn watched_globs(&mut self) -> Vec<String>;
     fn note_project_change(&mut self);
@@ -456,6 +477,14 @@ impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
         Some(MaterializeResult {
             token: job.token,
             definition,
+        })
+    }
+
+    fn dump(&mut self, job: DumpJob) -> Option<DumpOutcome> {
+        let dump = self.0.dump(&job.uri);
+        Some(DumpOutcome {
+            token: job.token,
+            dump,
         })
     }
 
@@ -920,7 +949,20 @@ pub struct LspService<B> {
     pending_analysis_request_bytes: usize,
     next_materialize_token: u64,
     pending_materializations: HashMap<u64, Value>,
+    next_dump_token: u64,
+    pending_dumps: HashMap<u64, PendingDump>,
+    dev: bool,
     status: StatusReporter,
+}
+
+/// A `textDocument/codeAction` request waiting for the analysis thread to write its dump.
+///
+/// The originating URI and position are kept because the client-side navigation command needs them
+/// in its argument list, and the request that carried them is long gone by the time the dump lands.
+struct PendingDump {
+    id: Value,
+    uri: String,
+    position: Position,
 }
 
 impl<A: Analysis> LspService<InlineBackend<A>> {
@@ -959,8 +1001,18 @@ where
             pending_analysis_request_bytes: 0,
             next_materialize_token: 0,
             pending_materializations: HashMap::new(),
+            next_dump_token: 0,
+            pending_dumps: HashMap::new(),
+            dev: false,
             status: StatusReporter::default(),
         }
+    }
+
+    /// Turn on the developer surfaces — currently the dump code action and the capability that
+    /// advertises it. Off by default, so an ordinary session is unchanged.
+    pub fn with_dev(mut self, dev: bool) -> Self {
+        self.dev = dev;
+        self
     }
 
     pub fn open_document_count(&self) -> usize {
@@ -1378,48 +1430,53 @@ where
                 self.client_refreshes_diagnostics = client_supports_diagnostic_refresh(&params);
                 self.pending_init_feedback =
                     self.backend.set_workspace_root(workspace_root(&params));
+                let mut capabilities = json!({
+                    "hoverProvider": true,
+                    "definitionProvider": true,
+                    "typeDefinitionProvider": true,
+                    "implementationProvider": true,
+                    "referencesProvider": true,
+                    "renameProvider": true,
+                    "documentSymbolProvider": true,
+                    "workspaceSymbolProvider": {
+                        "resolveProvider": false,
+                        "workDoneProgress": true,
+                    },
+                    "documentFormattingProvider": true,
+                    "foldingRangeProvider": true,
+                    "diagnosticProvider": {
+                        "interFileDependencies": true,
+                        "workspaceDiagnostics": true,
+                        "workDoneProgress": false,
+                    },
+                    "completionProvider": {
+                        "resolveProvider": true,
+                        "triggerCharacters": ["."],
+                    },
+                    "signatureHelpProvider": {
+                        "triggerCharacters": ["(", ","],
+                        "retriggerCharacters": [","],
+                        "workDoneProgress": false,
+                    },
+                    "positionEncoding": "utf-16",
+                    "semanticTokensProvider": {
+                        "legend": {
+                            "tokenTypes": SEMANTIC_TOKEN_TYPES,
+                            "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS,
+                        },
+                        "full": true,
+                        "range": true,
+                    },
+                    "textDocumentSync": 2
+                });
+                // Advertised only under `--dev`; an ordinary session must not offer the action.
+                if self.dev {
+                    capabilities["codeActionProvider"] = json!(true);
+                }
                 Dispatch::messages(vec![rpc_result(
                     id,
                     json!({
-                        "capabilities": {
-                            "hoverProvider": true,
-                            "definitionProvider": true,
-                            "typeDefinitionProvider": true,
-                            "implementationProvider": true,
-                            "referencesProvider": true,
-                            "renameProvider": true,
-                            "documentSymbolProvider": true,
-                            "workspaceSymbolProvider": {
-                                "resolveProvider": false,
-                                "workDoneProgress": true,
-                            },
-                            "documentFormattingProvider": true,
-                            "foldingRangeProvider": true,
-                            "diagnosticProvider": {
-                                "interFileDependencies": true,
-                                "workspaceDiagnostics": true,
-                                "workDoneProgress": false,
-                            },
-                            "completionProvider": {
-                                "resolveProvider": true,
-                                "triggerCharacters": ["."],
-                            },
-                            "signatureHelpProvider": {
-                                "triggerCharacters": ["(", ","],
-                                "retriggerCharacters": [","],
-                                "workDoneProgress": false,
-                            },
-                            "positionEncoding": "utf-16",
-                            "semanticTokensProvider": {
-                                "legend": {
-                                    "tokenTypes": SEMANTIC_TOKEN_TYPES,
-                                    "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS,
-                                },
-                                "full": true,
-                                "range": true,
-                            },
-                            "textDocumentSync": 2
-                        },
+                        "capabilities": capabilities,
                         "serverInfo": {
                             "name": "krusty-lsp",
                             "version": SERVER_VERSION
@@ -1454,6 +1511,7 @@ where
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
             "textDocument/hover" => self.hover(id, params),
             "textDocument/definition" => self.definition(id, params),
+            "textDocument/codeAction" => self.code_action(id, params),
             "textDocument/typeDefinition" => self.type_definition(id, params),
             "textDocument/implementation" => self.implementation(id, params),
             "textDocument/references" => self.references(id, params),
@@ -2085,6 +2143,53 @@ where
     fn complete_materialization(&mut self, result: MaterializeResult) -> Option<Value> {
         let id = self.pending_materializations.remove(&result.token)?;
         Some(self.materialize_response(id, result))
+    }
+
+    /// Dev-mode only: a single action whose command the client handles by navigating to the dump
+    /// file the analysis thread wrote.
+    ///
+    /// The dump is produced on that thread, so the answer usually arrives later; the request id is
+    /// parked here and resolved by [`LspService::complete_dump`].
+    fn code_action(&mut self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        if !self.dev {
+            return Dispatch::messages(vec![rpc_result(id, Value::Array(Vec::new()))]);
+        }
+        let Ok(params) = serde_json::from_value::<CodeActionParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        if self.pending_dumps.len() >= MAX_PENDING_DUMPS {
+            return Dispatch::messages(vec![rpc_error(id, -32000, "too many pending dumps")]);
+        }
+        let token = self.next_dump_token;
+        self.next_dump_token = self.next_dump_token.wrapping_add(1);
+        let uri = params.text_document.uri;
+        let position = params.range.start;
+        match self.backend.dump(DumpJob {
+            token,
+            uri: uri.clone(),
+        }) {
+            Some(outcome) => {
+                Dispatch::messages(vec![dump_code_actions(id, &uri, position, outcome.dump)])
+            }
+            None => {
+                self.pending_dumps
+                    .insert(token, PendingDump { id, uri, position });
+                Dispatch::none()
+            }
+        }
+    }
+
+    fn complete_dump(&mut self, outcome: DumpOutcome) -> Option<Value> {
+        let pending = self.pending_dumps.remove(&outcome.token)?;
+        Some(dump_code_actions(
+            pending.id,
+            &pending.uri,
+            pending.position,
+            outcome.dump,
+        ))
     }
 
     fn type_definition(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -2756,6 +2861,34 @@ struct TextDocumentIdentifier {
     uri: String,
 }
 
+const DUMP_ACTION_TITLE: &str = "krusty (dev): dump AST + checker + IR";
+
+/// The code-action response for a finished dump: one navigation action, or an empty list when the
+/// document had no dump to open.
+///
+/// The `arguments` array must carry three elements. Zed reads `arguments[2]` as the location list
+/// and ignores the first two, but returns early when fewer than three are present — which turns the
+/// action into a silent no-op with no error anywhere.
+fn dump_code_actions(id: Value, uri: &str, position: Position, dump: Option<DumpResult>) -> Value {
+    let Some(dump_uri) = dump.and_then(|dump| path_to_file_uri(&dump.path)) else {
+        return rpc_result(id, Value::Array(Vec::new()));
+    };
+    let zero = json!({"line": 0, "character": 0});
+    let location = json!({"uri": dump_uri, "range": {"start": zero, "end": zero}});
+    rpc_result(
+        id,
+        json!([{
+            "title": DUMP_ACTION_TITLE,
+            "kind": "source",
+            "command": {
+                "title": DUMP_ACTION_TITLE,
+                "command": "editor.action.goToLocations",
+                "arguments": [uri, position, [location]],
+            }
+        }]),
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DocumentSymbolParams {
@@ -2819,6 +2952,13 @@ struct DidCloseParams {
 struct TextDocumentPositionParams {
     text_document: TextDocumentIdentifier,
     position: Position,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeActionParams {
+    text_document: TextDocumentIdentifier,
+    range: Range,
 }
 
 #[derive(Deserialize)]
@@ -3866,6 +4006,12 @@ where
                 write_framed(writer, &encoded)?;
             }
         }
+        EngineEvent::Dumped(outcome) => {
+            if let Some(message) = service.complete_dump(outcome) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
     }
     Ok(())
 }
@@ -3905,7 +4051,9 @@ where
     Ok(None)
 }
 
-pub fn run_stdio_connection_async<A>(analyze: A) -> io::Result<i32>
+/// `dev` turns on the developer surfaces; it must be the same flag the analysis host was built
+/// with, because the capability is advertised here while the dump is produced there.
+pub fn run_stdio_connection_async<A>(analyze: A, dev: bool) -> io::Result<i32>
 where
     A: Analysis + Send + 'static,
 {
@@ -3934,7 +4082,7 @@ where
     let backend = EngineBackend::new(engine, false);
     let stdout = io::stdout();
     let mut writer = stdout.lock();
-    let service = LspService::with_backend(backend);
+    let service = LspService::with_backend(backend).with_dev(dev);
     run_async_loop(service, &mut writer, incoming)
 }
 
@@ -4449,6 +4597,171 @@ mod tests {
             ],
             "create, then begin/report/end in order: {messages:?}"
         );
+    }
+
+    fn dump_code_action_request(id: i64, uri: &str, line: u32, character: u32) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": line, "character": character},
+                    "end": {"line": line, "character": character}
+                },
+                "context": {"diagnostics": []}
+            }
+        })
+    }
+
+    fn drain_engine(engine: AnalysisEngine, incoming: &Receiver<Incoming>) {
+        let mut engine = engine;
+        engine.disconnect();
+        while !engine.is_finished() {
+            let _ = incoming.recv_timeout(Duration::from_millis(50));
+        }
+        engine.join();
+    }
+
+    /// The production server runs on `EngineBackend`, which answers a dump only after the analysis
+    /// thread has written it. A code action that works solely through an inline stub would be dead
+    /// in the real editor, so the whole deferred round trip is exercised here.
+    #[test]
+    fn dev_mode_code_action_is_answered_through_the_engine_backend() {
+        use std::sync::mpsc::sync_channel;
+
+        struct DumpHost;
+        impl Analysis for DumpHost {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
+
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn dump(&mut self, uri: &str) -> Option<DumpResult> {
+                (uri == "file:///w/Main.kt").then(|| DumpResult {
+                    path: PathBuf::from("/cache/dumps/Main.kt.krusty.md"),
+                })
+            }
+        }
+
+        let (sender, incoming) = sync_channel::<Incoming>(INPUT_QUEUE_CAPACITY);
+        let engine = AnalysisEngine::spawn(DumpHost, sender.clone());
+        let mut service = LspService::with_backend(EngineBackend::new(engine, true)).with_dev(true);
+        service.force_initialized_for_test();
+
+        let mut pending = VecDeque::new();
+        let mut out: Vec<u8> = Vec::new();
+
+        let ready = incoming.recv().expect("engine startup ready-state");
+        step_async(&mut service, &mut out, &incoming, &mut pending, ready).unwrap();
+
+        step_async(
+            &mut service,
+            &mut out,
+            &incoming,
+            &mut pending,
+            Incoming::Message(dump_code_action_request(7, "file:///w/Main.kt", 2, 1)),
+        )
+        .unwrap();
+        assert!(
+            decode_messages(&out)
+                .iter()
+                .all(|message| message["id"] != 7),
+            "the engine backend must answer the dump asynchronously"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let response = loop {
+            if let Some(message) = decode_messages(&out)
+                .into_iter()
+                .find(|message| message["id"] == 7)
+            {
+                break message;
+            }
+            assert!(Instant::now() < deadline, "no dump response arrived");
+            let event = match pending.pop_front() {
+                Some(event) => Some(event),
+                None => incoming.recv_timeout(Duration::from_millis(100)).ok(),
+            };
+            if let Some(event) = event {
+                step_async(&mut service, &mut out, &incoming, &mut pending, event).unwrap();
+            }
+        };
+
+        let actions = response["result"].as_array().expect("array result");
+        assert_eq!(actions.len(), 1, "{response}");
+        assert_eq!(actions[0]["kind"], "source");
+        let command = &actions[0]["command"];
+        assert_eq!(command["command"], "editor.action.goToLocations");
+        let arguments = command["arguments"].as_array().expect("arguments array");
+        assert_eq!(
+            arguments.len(),
+            3,
+            "Zed drops the command when arguments.len() < 3"
+        );
+        assert_eq!(arguments[0], "file:///w/Main.kt");
+        assert_eq!(arguments[1], json!({"line": 2, "character": 1}));
+        assert_eq!(
+            arguments[2][0]["uri"],
+            "file:///cache/dumps/Main.kt.krusty.md"
+        );
+
+        drain_engine(service.backend.into_engine(), &incoming);
+    }
+
+    /// Holding down the keybinding must not grow the pending map without bound.
+    #[test]
+    fn pending_dumps_are_bounded() {
+        use std::sync::mpsc::sync_channel;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
+
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let (sender, incoming) = sync_channel::<Incoming>(INPUT_QUEUE_CAPACITY);
+        let engine = AnalysisEngine::spawn(Mock, sender.clone());
+        let mut service = LspService::with_backend(EngineBackend::new(engine, true)).with_dev(true);
+        service.force_initialized_for_test();
+
+        for id in 0..MAX_PENDING_DUMPS {
+            let dispatch = service.handle(dump_code_action_request(
+                id as i64,
+                "file:///w/Main.kt",
+                0,
+                0,
+            ));
+            assert!(
+                dispatch.messages.is_empty(),
+                "request {id} must wait for the analysis thread"
+            );
+        }
+        assert_eq!(service.pending_dumps.len(), MAX_PENDING_DUMPS);
+
+        let dispatch = service.handle(dump_code_action_request(
+            MAX_PENDING_DUMPS as i64,
+            "file:///w/Main.kt",
+            0,
+            0,
+        ));
+        assert_eq!(dispatch.messages.len(), 1);
+        assert_eq!(dispatch.messages[0]["error"]["code"], -32000);
+        assert_eq!(
+            service.pending_dumps.len(),
+            MAX_PENDING_DUMPS,
+            "a rejected dump must not be retained"
+        );
+
+        drain_engine(service.backend.into_engine(), &incoming);
     }
 
     #[test]
@@ -6131,8 +6444,8 @@ mod tests {
     #[test]
     fn a_file_uri_decodes_percent_escapes_and_drops_the_scheme() {
         assert_eq!(
-            file_uri_to_path("file:///home/qnox/pro%20ject"),
-            Some(PathBuf::from("/home/qnox/pro ject"))
+            file_uri_to_path("file:///workspace/pro%20ject"),
+            Some(PathBuf::from("/workspace/pro ject"))
         );
     }
 

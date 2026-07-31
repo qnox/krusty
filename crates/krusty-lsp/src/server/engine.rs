@@ -101,11 +101,37 @@ pub struct MaterializeResult {
     pub definition: Option<MaterializedDefinition>,
 }
 
+/// Where a dev-mode dump was written.
+///
+/// Only the path travels: the rendered document carries every AST node, typed expression, and IR
+/// instruction of a file, so the code action navigates to it rather than inlining it into a
+/// response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DumpResult {
+    pub path: std::path::PathBuf,
+}
+
+/// A dump request on its way to the analysis thread. `token` correlates it with the LSP request id
+/// the session parked while waiting.
+#[derive(Debug)]
+pub struct DumpJob {
+    pub token: u64,
+    pub uri: String,
+}
+
+pub struct DumpOutcome {
+    pub token: u64,
+    /// `None` when the document is not dumpable — dev mode is off, the document was not part of the
+    /// retained analysis payload, or rendering failed.
+    pub dump: Option<DumpResult>,
+}
+
 #[derive(Debug)]
 pub(crate) enum EngineCommand {
     SetWorkspaceRoot(Option<std::path::PathBuf>),
     Analyze(AnalysisJob),
     Materialize(MaterializeJob),
+    Dump(DumpJob),
     Index(IndexJob),
     ProjectChange {
         refresh: bool,
@@ -126,6 +152,7 @@ pub(crate) enum EngineEvent {
     IndexReset(u64),
     IndexProgress(IndexBatch),
     Materialized(MaterializeResult),
+    Dumped(DumpOutcome),
     Status(ServerStatus),
 }
 
@@ -276,6 +303,15 @@ impl CommandState {
             }
             EngineCommand::Materialize(job) => {
                 self.pending.push_back(EngineCommand::Materialize(job));
+            }
+            // Appended in arrival order, which is the whole guarantee: a dump does NOT wait for a
+            // fresher analysis. `Analyze` coalescing drops the pending job and pushes its
+            // replacement at the back, so an edit arriving after this dump is analyzed after it.
+            // A dump therefore replays whatever payload the last completed pass retained, which can
+            // predate the buffer on screen; the source hash in the document's header is what tells
+            // the reader which text it was rendered from.
+            EngineCommand::Dump(job) => {
+                self.pending.push_back(EngineCommand::Dump(job));
             }
             EngineCommand::Index(job) => {
                 let priority = job.priority;
@@ -675,6 +711,11 @@ impl AnalysisBackend for EngineBackend {
         None
     }
 
+    fn dump(&mut self, job: DumpJob) -> Option<DumpOutcome> {
+        self.engine.submit(EngineCommand::Dump(job));
+        None
+    }
+
     fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) -> Option<ProjectFeedback> {
         self.engine.submit(EngineCommand::SetWorkspaceRoot(root));
         None
@@ -879,6 +920,18 @@ fn run<A: Analysis>(
                     break;
                 }
             }
+            Some(EngineCommand::Dump(job)) => {
+                let dump = analyze.dump(&job.uri);
+                if events
+                    .send(Incoming::Engine(EngineEvent::Dumped(DumpOutcome {
+                        token: job.token,
+                        dump,
+                    })))
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Some(EngineCommand::Index(job)) => {
                 let uris: Vec<&str> = job.uris.iter().map(String::as_str).collect();
                 let outcome = analyze.index_workspace_files(&uris);
@@ -1058,6 +1111,31 @@ mod tests {
         assert!(matches!(
             state.pending.pop_front(),
             Some(EngineCommand::ProjectChange { .. })
+        ));
+        assert!(matches!(
+            state.pending.pop_front(),
+            Some(EngineCommand::Analyze(_))
+        ));
+    }
+
+    #[test]
+    fn a_queued_dump_is_not_reordered_behind_a_later_analysis() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Dump(DumpJob {
+            token: 0,
+            uri: "file:///a.kt".into(),
+        }));
+        state.enqueue(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2)],
+            open_uris: Vec::new(),
+        }));
+
+        // The dump runs first, so it replays the payload the previous pass retained rather than the
+        // edit still queued behind it. Nothing in the queue makes a dump current; only the source
+        // hash in the rendered header says which text it saw.
+        assert!(matches!(
+            state.pending.pop_front(),
+            Some(EngineCommand::Dump(_))
         ));
         assert!(matches!(
             state.pending.pop_front(),

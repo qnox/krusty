@@ -2,7 +2,7 @@ mod engine;
 mod implementation;
 mod status;
 mod workspace_index;
-pub use engine::{AnalysisBatch, AnalysisJob};
+pub use engine::{AnalysisBatch, AnalysisJob, DumpResult};
 pub use implementation::*;
 
 #[cfg(test)]
@@ -3118,6 +3118,147 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// An analysis host that can dump exactly one document, mirroring the real session's rule that
+    /// only the most recently analyzed group is dumpable.
+    struct DumpHost {
+        dumpable: &'static str,
+    }
+
+    impl Analysis for DumpHost {
+        fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+            IndexOutcome::default()
+        }
+
+        fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+            sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+        }
+
+        fn dump(&mut self, uri: &str) -> Option<DumpResult> {
+            (uri == self.dumpable).then(|| DumpResult {
+                path: std::path::PathBuf::from("/cache/dumps/Main.kt.krusty.md"),
+            })
+        }
+    }
+
+    fn dump_server(dumpable: &'static str, dev: bool) -> LspService<InlineBackend<DumpHost>> {
+        let mut server = LspService::new(DumpHost { dumpable }).with_dev(dev);
+        server.handle(request(1, "initialize", json!({})));
+        server.handle(notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": "file:///w/Main.kt",
+                    "languageId": "kotlin",
+                    "version": 1,
+                    "text": "fun box(): String = \"OK\"\n"
+                }
+            }),
+        ));
+        server
+    }
+
+    fn code_action_request(uri: &str) -> Value {
+        request(
+            2,
+            "textDocument/codeAction",
+            json!({
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": 0, "character": 4},
+                    "end": {"line": 0, "character": 7}
+                },
+                "context": {"diagnostics": []}
+            }),
+        )
+    }
+
+    #[test]
+    fn dev_mode_code_action_navigates_to_the_written_dump() {
+        let mut server = dump_server("file:///w/Main.kt", true);
+
+        let response = server.handle(code_action_request("file:///w/Main.kt"));
+
+        let message = &response.messages[0];
+        let actions = message["result"].as_array().expect("array result");
+        assert_eq!(actions.len(), 1, "{message}");
+        let action = &actions[0];
+        assert_eq!(action["kind"], "source");
+        assert!(
+            action["title"].as_str().unwrap().contains("dump"),
+            "{action}"
+        );
+
+        let command = &action["command"];
+        assert_eq!(command["command"], "editor.action.goToLocations");
+        let arguments = command["arguments"].as_array().expect("arguments array");
+        assert_eq!(
+            arguments.len(),
+            3,
+            "Zed drops the command when arguments.len() < 3"
+        );
+        assert_eq!(arguments[0], "file:///w/Main.kt");
+        assert_eq!(arguments[1], json!({"line": 0, "character": 4}));
+        let locations = arguments[2].as_array().expect("locations array");
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0]["uri"], "file:///cache/dumps/Main.kt.krusty.md");
+        assert_eq!(
+            locations[0]["range"],
+            json!({
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 0}
+            })
+        );
+    }
+
+    #[test]
+    fn a_document_without_a_dump_yields_an_empty_action_list() {
+        let mut server = dump_server("file:///w/Other.kt", true);
+
+        let response = server.handle(code_action_request("file:///w/Main.kt"));
+
+        let message = &response.messages[0];
+        assert_eq!(message["result"], json!([]), "{message}");
+        assert!(message.get("error").is_none(), "{message}");
+    }
+
+    #[test]
+    fn code_actions_are_empty_outside_dev_mode() {
+        let mut server = dump_server("file:///w/Main.kt", false);
+
+        let response = server.handle(code_action_request("file:///w/Main.kt"));
+
+        let message = &response.messages[0];
+        assert_eq!(message["result"], json!([]), "{message}");
+    }
+
+    #[test]
+    fn code_actions_are_not_advertised_outside_dev_mode() {
+        let mut server = LspService::new(DumpHost {
+            dumpable: "file:///w/Main.kt",
+        });
+        let response = server.handle(request(1, "initialize", json!({})));
+        let capabilities = &response.messages[0]["result"]["capabilities"];
+        assert!(
+            capabilities.get("codeActionProvider").is_none(),
+            "{capabilities}"
+        );
+    }
+
+    #[test]
+    fn dev_mode_advertises_the_code_action_capability() {
+        let mut server = LspService::new(DumpHost {
+            dumpable: "file:///w/Main.kt",
+        })
+        .with_dev(true);
+        let response = server.handle(request(1, "initialize", json!({})));
+        let capabilities = &response.messages[0]["result"]["capabilities"];
+        assert_eq!(capabilities["codeActionProvider"], true);
+        assert_eq!(
+            capabilities["hoverProvider"], true,
+            "dev mode must keep every ordinary capability: {capabilities}"
+        );
     }
 
     #[test]
