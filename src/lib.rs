@@ -12,14 +12,17 @@ pub use dhat;
 
 pub mod assignable;
 pub mod ast;
+pub mod ast_print;
 pub mod backend;
 pub mod compiler;
 pub mod conformance;
 pub mod diag;
+pub mod dump;
 pub mod features;
 pub mod frontend;
 pub mod ir;
 pub mod ir_lower;
+pub mod ir_print;
 pub mod java_source;
 pub mod js;
 pub mod jvm;
@@ -42,6 +45,7 @@ pub mod token;
 pub mod toolchain;
 pub mod trace;
 pub mod types;
+mod wide_stack;
 
 #[cfg(test)]
 mod architecture;

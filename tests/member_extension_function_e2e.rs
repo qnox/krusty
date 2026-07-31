@@ -446,6 +446,43 @@ fn arity_inapplicable_member_reified_extension_run() {
 }
 
 #[test]
+fn arity_inapplicable_member_falls_through_to_sibling_module_extension() {
+    // Keep the source-file boundary out of the resolution rule: the same federated extension selector
+    // must see a sibling declaration exactly as it sees a same-file declaration.
+    const MODEL: &str = "package sample\n\
+class Registry {\n\
+    fun pick(value: String): String = value\n\
+}\n";
+    const EXTENSION: &str = "package sample\n\
+fun Registry.pick(): String = \"OK\"\n";
+    const MAIN: &str = "package sample\n\
+fun box(): String = Registry().pick()\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Model.kt", MODEL),
+            ("Extension.kt", EXTENSION),
+            ("Main.kt", MAIN),
+        ],
+        "member_arity_sibling_extension",
+    );
+}
+
+#[test]
+fn arity_inapplicable_member_falls_through_to_classpath_extension() {
+    // The selected extension's origin changes how lowering emits it, not whether it is applicable.
+    // Compiling the declaration into a dependency pins classpath and module behavior to one selector.
+    const LIBRARY: &str = "package dependency\n\
+class Registry {\n\
+    fun pick(value: String): String = value\n\
+}\n\
+fun Registry.pick(): String = \"OK\"\n";
+    const MAIN: &str = "import dependency.Registry\n\
+import dependency.pick\n\
+fun box(): String = Registry().pick()\n";
+    common::expect_box_ok_against("member_arity_classpath_extension", LIBRARY, MAIN);
+}
+
+#[test]
 fn safe_call_ordinary_member_keeps_precedence_over_member_extension() {
     const SOURCE: &str = r#"
         class Entry {
@@ -584,6 +621,35 @@ fn safe_call_member_extensions_run() {
     "##;
 
     common::expect_box_ok_with_stdlib(SOURCE, "S");
+}
+
+#[test]
+fn named_member_extension_trailing_lambda_selects_before_lowering() {
+    const SOURCE: &str = r#"
+        class Item
+
+        class Registry {
+            private fun Item.render(value: Int, block: (Int) -> String): String =
+                block(value)
+
+            private fun Item.render(value: String, block: (String) -> String): String =
+                block(value)
+
+            fun direct(item: Item): String =
+                item.render(value = 3) { "i$it" }
+
+            fun safe(item: Item?): String =
+                item?.render(value = "x") { "s$it" } ?: "none"
+        }
+
+        fun box(): String {
+            val registry = Registry()
+            return registry.direct(Item()) + "/" + registry.safe(Item())
+        }
+    "#;
+
+    let result = common::compile_and_run_with_stdlib(SOURCE, "S");
+    assert_eq!(result.as_deref(), Some("i3/sx"));
 }
 
 #[test]

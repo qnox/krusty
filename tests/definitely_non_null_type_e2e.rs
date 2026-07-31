@@ -255,6 +255,47 @@ fn repeated_constructor_constraints_can_meet_at_semantic_upper_bound() {
 }
 
 #[test]
+fn generic_function_constructor_still_requires_a_function_argument() {
+    // The return component `T` is inferred from the argument, but that must not erase the enclosing
+    // function contract. In particular, bypassing the whole `(Int) -> T` parameter because it mentions
+    // `T` would admit an arbitrary object and defer a verifier/runtime failure to the generated call.
+    let source = "class C<T>(val transform: (Int) -> T)\n\
+        fun bad() { C<String>(\"not a function\") }\n";
+    let diagnostics = diagnostics(source);
+    if diagnostics
+        .iter()
+        .any(|message| message == "<skip: no stdlib>")
+    {
+        return;
+    }
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| { message.contains("type mismatch") || message.contains("candidate") }),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn concrete_secondary_beats_an_incompatible_generic_function_primary() {
+    // The primary mentions `T`, but its concrete outer shape is still a function. It must not enter
+    // overload competition for a String argument and make the valid String secondary ambiguous.
+    const SOURCE: &str = "class Constant<T>(val value: T) : (Int) -> T {\n\
+        \x20 override fun invoke(index: Int): T = value\n\
+        }\n\
+        class C<T>(val transform: (Int) -> T) {\n\
+        \x20 constructor(value: String) : this(Constant(value) as (Int) -> T)\n\
+        }\n\
+        fun box(): String = C<String>(\"OK\").transform(0)\n";
+    let front_end = diagnostics(SOURCE);
+    assert!(front_end.is_empty(), "{front_end:?}");
+    assert_eq!(
+        run(SOURCE).expect("generic function primary versus concrete secondary"),
+        "OK"
+    );
+}
+
+#[test]
 fn contravariant_constructor_function_input_does_not_widen_binding() {
     let source = "class C<T : CharSequence>(val value: T, val consume: (T) -> Unit)\n\
         fun f() = C(\"x\", { _: Any -> })\n";
@@ -381,4 +422,20 @@ fn inferred_nullable_constructor_type_is_retained_for_member_reads() {
             "{source}: {diagnostics:?}"
         );
     }
+}
+
+#[test]
+fn dnn_cast_throws_npe_on_null() {
+    // `t as (T & Any)` on an unbounded (nullable-bound) `T` null-checks like kotlinc: `null` throws
+    // NullPointerException, a non-null value passes through. (The Kotlin box-corpus case
+    // `casts/castToDefinitelyNotNullType.kt`.)
+    const SRC: &str = "fun <T> test(t: T) = t as (T & Any)\n\
+        fun box(): String =\n\
+        \x20 try {\n\
+        \x20   test<Any?>(null)\n\
+        \x20   \"FAIL: expected NPE\"\n\
+        \x20 } catch (ex: NullPointerException) {\n\
+        \x20   test(\"OK\")\n\
+        \x20 }\n";
+    assert_eq!(run(SRC).expect("dnn cast NPE"), "OK");
 }

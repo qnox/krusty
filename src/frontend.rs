@@ -21,8 +21,8 @@ pub(crate) use crate::resolve::{
     ClassNames, CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget, ExprLowering,
     FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
     ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall, ResolvedConstructor,
-    ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature,
-    StmtLowering,
+    ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall, ResolvedMember,
+    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
 };
 use crate::source::{SourceInput, SourceKind};
 
@@ -1447,6 +1447,100 @@ mod tests {
             .diags
             .iter()
             .any(|diagnostic| diagnostic.msg.contains("'Visible'")));
+    }
+
+    #[test]
+    fn declaration_only_extension_calls_resolve_and_type() {
+        // An imported extension from a DECLARATION-ONLY dependency file (beyond the inferred
+        // prefix): its `Signature` lives in the fallback table behind the platform seam, not in
+        // the checked prefix's symbol table, and the call must still resolve — including an
+        // omitted defaulted parameter — and type as the declared return, not `Unit`.
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import dependency.render\n\
+                 import dependency.tag\n\
+                 class C {\n\
+                 \u{20} fun go(): Int {\n\
+                 \u{20}\u{20} val r = build()\n\
+                 \u{20}\u{20} if (r == null) { return 0 }\n\
+                 \u{20}\u{20} return r.length\n\
+                 \u{20} }\n\
+                 \u{20} fun build() = \"x\".tag()?.render()\n\
+                 }",
+            ),
+            SourceInput::kotlin(
+                "package dependency\n\
+                 fun String?.tag(): String? = this\n\
+                 fun String.render(prefix: (String) -> String = { it }): String = prefix(this)",
+            ),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(
+            diagnostics.diags.iter().all(|d| d.file != 0),
+            "{:?}",
+            diagnostics.diags
+        );
+    }
+
+    #[test]
+    fn modifier_prefixed_local_functions_parse_in_bodies() {
+        // `tailrec fun`/`suspend fun` LOCAL declarations are statements in any body, not just
+        // scripts — the soft-keyword prefix must not parse as an expression name.
+        let inputs = [SourceInput::kotlin(
+            "fun outer(n: Int): Int {\n\
+             \u{20} tailrec fun down(k: Int): Int = if (k <= 0) 0 else down(k - 1)\n\
+             \u{20} return down(n)\n\
+             }",
+        )];
+        let mut diagnostics = DiagSink::new();
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    }
+
+    #[test]
+    fn local_suspend_functions_are_rejected_cleanly() {
+        // A local `suspend fun` has no CPS lowering for `Stmt::LocalFun` — one clear
+        // diagnostic, never a mis-parsed soft keyword or a backend ICE.
+        let inputs = [SourceInput::kotlin(
+            "fun outer() {\n\
+             \u{20} suspend fun inner() {}\n\
+             \u{20} println(\"x\")\n\
+             }",
+        )];
+        let mut diagnostics = DiagSink::new();
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert!(
+            diagnostics.diags.iter().any(|d| d
+                .msg
+                .contains("local 'suspend' functions are not supported")),
+            "{:?}",
+            diagnostics.diags
+        );
     }
 
     #[test]

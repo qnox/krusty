@@ -171,18 +171,21 @@ fn non_literal_int_does_not_match_long_parameter() {
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
-    let diagnostics = common::front_end_diagnostics(
-        "import fixtures.NumericApi\nfun f(value: Int): String = NumericApi.onlyLong(value)\n",
-        &[java_classes],
-        Some(&jdk),
-    );
+    for expression in ["value", "1 / 0", "2_000_000_000 + 2_000_000_000"] {
+        let source = format!(
+            "import fixtures.NumericApi\n\
+             fun f(value: Int): String = NumericApi.onlyLong({expression})\n"
+        );
+        let diagnostics =
+            common::front_end_diagnostics(&source, std::slice::from_ref(&java_classes), Some(&jdk));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("unresolved Java static")),
+            "{expression}: {diagnostics:?}"
+        );
+    }
     let _ = std::fs::remove_dir_all(temp_root);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("unresolved Java static")),
-        "{diagnostics:?}"
-    );
 }
 
 #[test]
@@ -409,6 +412,8 @@ fn top_level_library_calls_use_literal_origin_after_argument_mapping() {
             fun pick(value: Int): String = "int"
             fun pick(value: Long): String = "long"
             fun onlyLong(value: Long): String = value.toString()
+            fun inferred(value: Long): Long = value
+            fun inferred(value: String): String = value
         "#,
     ) else {
         return;
@@ -416,14 +421,18 @@ fn top_level_library_calls_use_literal_origin_after_argument_mapping() {
     let root = library.parent().map(std::path::Path::to_path_buf);
     let classpath = vec![library, stdlib];
     let source = r#"
+        import fixtures.inferred
         import fixtures.mixed
         import fixtures.onlyLong
         import fixtures.pick
+
+        private val inferredLong = inferred(4)
 
         fun box(): String {
             if (mixed(second = 2, first = 1) != "1:2") return "mixed"
             if (pick(1) != "int") return "pick"
             if (onlyLong(-3) != "-3") return "long"
+            if (inferredLong != 4L) return "inferred"
             return "OK"
         }
     "#;

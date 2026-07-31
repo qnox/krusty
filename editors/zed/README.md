@@ -109,3 +109,39 @@ lifetime.
 
 Diagnostics, hover, completion (with resolve), semantic highlighting, full-document sync. Requests
 Zed sends for other features (go-to-definition, rename, formatting) are not implemented.
+
+## Developer dump
+
+With dev mode on, `cmd-.` on a Kotlin file offers **krusty (dev): dump AST + checker + IR**, which
+opens a Markdown buffer holding the file's parsed arenas, its diagnostics and inferred expression
+types, and its lowered IR — or the reason lowering bailed. The dump path is stable per source file,
+so a buffer left open in a split refreshes in place each time the action runs. A document is
+re-rendered only once the file has been analyzed again, so repeated requests — including the code
+action refreshes a client issues on every cursor settle — reuse the file already written.
+
+Dump documents contain source identifiers and literals. Their cache filenames are therefore opaque
+SHA-256 digests of the full document URI rather than readable workspace paths; on Unix, the dump
+directory and files are restricted to the current user. Rendering stops at 64 MiB and appends a
+truncation marker; the store retains at most 64 files / 256 MiB, evicting the oldest entries. These
+limits are independent of the dependency-source cache limits because dumps and dependency stubs have
+different privacy and lifetime rules.
+
+Dev mode is off by default. Turn it on in Zed settings:
+
+```json
+{ "lsp": { "krusty-lsp": { "binary": { "arguments": ["--dev"] } } } }
+```
+
+The dump is a debugging view of internal compiler structures. Its format tracks those structures and
+is not stable.
+
+Known limitations:
+
+- Only a module's own primary documents are dumpable. A file the latest analysis pass saw purely as
+  support for a different module is not: dumping it under that module's classpath and language
+  arguments would describe a compilation the editor never performed. Files from several open modules
+  are each retained under their own module up to the shared 64 MiB replay-input budget; later groups
+  are left undumpable rather than multiplying repeated dependency source sets without a bound.
+- A dump requested while an edit is still being analyzed can replay pre-edit state. The `source
+  hash` in the document's header identifies the text it was rendered from, so a stale dump is
+  recognizable even when the edit preserved the file's length.

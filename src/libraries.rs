@@ -227,6 +227,15 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Platform spelling for a physical zero-arg getter when Kotlin property metadata is unavailable.
     /// Common resolution asks for a semantic property name first; this hook is a fallback owned by the
     /// target because JVM uses JavaBean-style `getX`/`isX` while other targets need not.
+    /// Every plausible physical getter spelling for `property`, most-conventional first
+    /// (`id` → `getId`, `getID`; `urlPath` → `getUrlPath`, `getURLPath`) — the inverse of
+    /// Kotlin's decapitalize-smart getter-to-property mapping.
+    fn physical_property_getter_names(&self, property: &str) -> Vec<String> {
+        self.physical_property_getter_name(property)
+            .into_iter()
+            .collect()
+    }
+
     fn physical_property_getter_name(&self, _property: &str) -> Option<String> {
         None
     }
@@ -365,6 +374,7 @@ impl LibraryCallable {
             inline: InlineKind::None,
             default_call: false,
             vararg_elem: None,
+            vararg_index: None,
             signature: None,
             origin: Origin::Library,
             source_receiver: None,
@@ -455,6 +465,11 @@ pub struct LibraryCallable {
     /// element to that type before boxing (an integer literal in `listOf<Long>(3)` becomes a boxed
     /// `Long`, not `Integer`), since the JVM array element is erased to `Object`.
     pub vararg_elem: Option<Ty>,
+    /// Source-level value-parameter slot occupied by [`Self::vararg_elem`], excluding an extension
+    /// receiver. This must travel with the selected callable: a generic `vararg T` can specialize
+    /// logically to `String` while its physical slot remains `Object[]`, so lowering cannot safely
+    /// rediscover the slot by comparing element types. `None` for a non-element-form call.
+    pub vararg_index: Option<usize>,
     /// The callee's generic `Signature` (an opaque backend token), kept so an arg-binding SELECTOR can
     /// recover the substituted return (`fold`'s `R` from the initial value, `let`'s `R` from the lambda)
     /// when picking this overload out of a [`FunctionSet`]. `None` when the callable has no generic

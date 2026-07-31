@@ -63,6 +63,14 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - `Property`: `f2 = name`, `f3 = return_type` (`Type`), `f11 = flags` (emitted as **1798** only for a
   `var`; `val` ⇒ 0, omitted), `f100 = JvmPropertySignature` `{f1 = field (empty ⇒ derived backing
   field), f3 = getter JvmMethodSignature, f4 = setter (var only)}`.
+- The accessors named by `JvmPropertySignature` are a REALIZATION, not a declaration. Kotlin has no
+  accessors: `Dispatchers.IO` is a property, and `getIO` exists only in the class file. So a consumer must
+  not make resolving a property read depend on finding a method — `@JvmStatic` on a property of an
+  `object`/companion leaves the metadata shape identical (still an ordinary member `Property`) while
+  kotlinc emits `getX`/`setX` as JVM **statics** of that class, which are not instance members and never
+  will be found that way. krusty reads this table only in the backend
+  (`Classpath::property_read_access`), where it also picks up a `@JvmName` or value-class-mangled
+  spelling and the `ACC_STATIC` bit that says the accessor takes no receiver.
 - A property's return `Type` may instead be referenced by `return_type_id` (`f9`). Its nullable flag
   lives on that metadata `Type`, not in the getter's JVM descriptor or generic `Signature`; classpath
   decoding therefore retains it separately when specializing a generic extension-property result.

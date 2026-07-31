@@ -504,6 +504,7 @@ fn fn_info(
         inline: InlineKind::from_flags(sig.is_inline(), false),
         default_call: false,
         vararg_elem: None,
+        vararg_index: None,
         signature: None,
         origin,
         // Representation lowering needs the declaration receiver before erasure.
@@ -542,6 +543,7 @@ fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> L
         inline: InlineKind::None,
         default_call: false,
         vararg_elem: None,
+        vararg_index: None,
         signature: None,
         origin: Origin::Module { facade: owner },
         source_receiver: None,
@@ -1046,6 +1048,7 @@ mod tests {
                 visibility: Visibility::Protected,
                 getter_name: "getState".into(),
                 setter_name: Some("setState".into()),
+                setter_visibility: Some(Visibility::Protected),
                 context_params: Vec::new(),
             },
         );
