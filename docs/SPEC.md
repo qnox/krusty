@@ -1574,7 +1574,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lowering evaluates the expression before applying the call-boundary coercion; overflow and division
   by zero therefore remain ordinary, non-adaptable `Int` expressions instead of being miscompiled.
   This also lets the lightweight signature inferer used during property signature collection infer
-  properties initialized by JDK static factories or imported top-level overloads. Tests:
+  properties initialized by JDK static factories or imported top-level overloads. The same inferer
+  preserves EXPLICIT call type arguments (`val servers = mutableMapOf<String, JsonObject>()`):
+  they bind the callee's type parameters directly, so the return-agreement probe — which resolves
+  without them and erased `K`/`V` to `Any`, recording `MutableMap<Any, Any>` for any non-local
+  property — is skipped for a call that carries them, and the generic path binds them instead
+  (`call_targs_property_inference_e2e`). Tests:
   `classpath_jdk_static_e2e::top_level_library_calls_use_literal_origin_after_argument_mapping`,
   `classpath_jdk_static_e2e::jdk_static_call_return_type_inferred_for_private_property`.
 

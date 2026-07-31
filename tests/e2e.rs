@@ -94,6 +94,8 @@ mod build840_nn1_suspend_inline_withlock_e2e;
 mod builtin_intrinsics_coverage_e2e;
 #[path = "bytecode_parity_e2e.rs"]
 mod bytecode_parity_e2e;
+#[path = "call_targs_property_inference_e2e.rs"]
+mod call_targs_property_inference_e2e;
 #[path = "callable_ref_e2e.rs"]
 mod callable_ref_e2e;
 #[path = "callable_ref_equality_e2e.rs"]
