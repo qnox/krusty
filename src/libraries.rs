@@ -747,7 +747,11 @@ impl CallSig {
     }
 
     pub fn has_known_required_param(&self, mut range: std::ops::Range<usize>) -> bool {
-        !self.param_defaults.is_empty() && range.any(|i| !self.param_has_default(i))
+        // A vararg slot is never required: it may always be empty (matching the slot mapper's
+        // `vararg == Some(parameter_index)` rule in `map_call_args`), even though metadata never
+        // sets its `declares_default_value` flag.
+        !self.param_defaults.is_empty()
+            && range.any(|i| !self.param_has_default(i) && self.vararg_index != Some(i))
     }
 
     pub fn param_has_default(&self, idx: usize) -> bool {
