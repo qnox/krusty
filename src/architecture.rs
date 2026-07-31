@@ -30,6 +30,33 @@ mod tests {
     }
 
     #[test]
+    fn dump_printers_depend_only_on_their_data_contracts() {
+        assert_allowed_crate_modules("src/ast_print.rs", &["ast", "diag"]);
+        assert_allowed_crate_modules("src/ir_print.rs", &["ir"]);
+    }
+
+    #[test]
+    fn dump_assembly_is_the_only_dump_layer_that_drives_lowering() {
+        // The flat printers are pure presentation. The assembly facade is the deliberate boundary
+        // that may combine checked frontend data with common IR lowering; keeping the allowance
+        // here prevents future editor-specific code or backend emission from leaking into dumps.
+        assert_allowed_crate_modules(
+            "src/dump.rs",
+            &[
+                "ast",
+                "ast_print",
+                "diag",
+                "frontend",
+                "ir",
+                "ir_lower",
+                "ir_print",
+                "name_tree",
+                "runtime",
+            ],
+        );
+    }
+
+    #[test]
     fn backend_contract_uses_only_frontend_handoff_dependencies() {
         assert_allowed_crate_modules("src/backend.rs", &["diag", "frontend"]);
     }

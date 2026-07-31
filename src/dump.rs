@@ -8,7 +8,9 @@ use crate::diag::Diagnostic;
 use crate::frontend::{FrontendSymbols, FrontendTypeInfo};
 use crate::ir::IrFile;
 use crate::runtime::TargetRuntime;
-use std::fmt::Write as _;
+use std::fmt;
+
+const TRUNCATION_NOTICE: &str = "\n\n[dump truncated: output limit reached]\n";
 
 /// Everything one dump needs. `ir` carries the lowered file, or the bail reason explaining why
 /// lowering did not produce one.
@@ -45,6 +47,15 @@ pub struct FileDumpInput<'a> {
 /// an unchecked file, a reported bail, and a silent `None` all have to become one displayable
 /// reason, and that mapping is a property of the document, not of whoever asked for it.
 pub fn render_file_dump(input: &FileDumpInput<'_>) -> String {
+    render_file_dump_with_limit(input, usize::MAX)
+}
+
+/// Lower the checked file and render at most `max_bytes` of UTF-8 dump text.
+///
+/// The limit is enforced while each AST/checker/IR item is formatted, not after an unbounded
+/// intermediate `String` has already been built. The LSP uses this form because source size alone
+/// does not bound debug expansion: a long resolved type name may be repeated for many expressions.
+pub fn render_file_dump_with_limit(input: &FileDumpInput<'_>, max_bytes: usize) -> String {
     let bail = std::cell::RefCell::new(String::new());
     let lowered = input.info.and_then(|info| {
         crate::ir_lower::lower_file_at_reporting(
@@ -64,72 +75,139 @@ pub fn render_file_dump(input: &FileDumpInput<'_>) -> String {
         None => Err(bail_reason.as_str()),
     };
 
-    render_dump(&DumpInput {
-        label: input.label,
-        source: input.source,
-        file: input.file,
-        info: input.info,
-        diagnostics: input.diagnostics,
-        ir,
-    })
+    render_dump_with_limit(
+        &DumpInput {
+            label: input.label,
+            source: input.source,
+            file: input.file,
+            info: input.info,
+            diagnostics: input.diagnostics,
+            ir,
+        },
+        max_bytes,
+    )
 }
 
 /// Render the dump document.
 pub fn render_dump(input: &DumpInput<'_>) -> String {
-    let mut out = String::new();
-    let _ = writeln!(out, "# krusty dump — {}", input.label);
-    let _ = writeln!(out, "\nsource bytes: {}", input.source.len());
-    let _ = writeln!(out, "source hash: {:016x}", source_hash(input.source));
+    render_dump_with_limit(input, usize::MAX)
+}
 
-    let _ = writeln!(out, "\n## AST\n");
-    let _ = writeln!(out, "```");
-    out.push_str(&crate::ast_print::render_file(input.file));
-    let _ = writeln!(out, "```");
+/// Render a dump while bounding the output allocation and formatting work.
+pub fn render_dump_with_limit(input: &DumpInput<'_>, max_bytes: usize) -> String {
+    let mut out = BoundedText::new(max_bytes);
+    let _ = write_dump(&mut out, input);
+    out.finish()
+}
 
-    let _ = writeln!(out, "\n## Checker\n");
-    let _ = writeln!(out, "```");
+fn write_dump(out: &mut impl fmt::Write, input: &DumpInput<'_>) -> fmt::Result {
+    writeln!(out, "# krusty dump — {}", input.label)?;
+    writeln!(out, "\nsource bytes: {}", input.source.len())?;
+    writeln!(out, "source hash: {:016x}", source_hash(input.source))?;
+
+    writeln!(out, "\n## AST\n")?;
+    writeln!(out, "```")?;
+    crate::ast_print::write_file(out, input.file)?;
+    writeln!(out, "```")?;
+
+    writeln!(out, "\n## Checker\n")?;
+    writeln!(out, "```")?;
     if input.diagnostics.is_empty() {
-        let _ = writeln!(out, "no diagnostics");
+        writeln!(out, "no diagnostics")?;
     } else {
         for diagnostic in input.diagnostics {
             let span = diagnostic.editor_span.unwrap_or(diagnostic.span);
             let (line, column) = line_column(input.source, span.lo as usize);
-            let _ = writeln!(
+            writeln!(
                 out,
                 "{line}:{column} {} {}",
                 severity_label(diagnostic.severity),
                 diagnostic.msg
-            );
+            )?;
         }
     }
     match input.info {
         Some(info) => {
-            let _ = writeln!(out, "\ntyped expressions ({})", info.expr_types.len());
+            writeln!(out, "\ntyped expressions ({})", info.expr_types.len())?;
             for (id, ty) in info.expr_types.iter().enumerate() {
                 let span = match input.file.expr_spans.get(id) {
                     Some(span) => format!("{}..{}", span.lo, span.hi),
                     None => "?..?".to_string(),
                 };
-                let _ = writeln!(out, "  [{id}] {span} {ty:?}");
+                writeln!(out, "  [{id}] {span} {ty:?}")?;
             }
         }
         None => {
-            let _ = writeln!(out, "\ntyped expressions: <file not checked>");
+            writeln!(out, "\ntyped expressions: <file not checked>")?;
         }
     }
-    let _ = writeln!(out, "```");
+    writeln!(out, "```")?;
 
-    let _ = writeln!(out, "\n## IR\n");
-    let _ = writeln!(out, "```");
+    writeln!(out, "\n## IR\n")?;
+    writeln!(out, "```")?;
     match input.ir {
-        Ok(ir) => out.push_str(&crate::ir_print::render_ir_file(ir)),
+        Ok(ir) => crate::ir_print::write_ir_file(out, ir)?,
         Err(reason) => {
-            let _ = writeln!(out, "not lowered: {reason}");
+            writeln!(out, "not lowered: {reason}")?;
         }
     }
-    let _ = writeln!(out, "```");
+    writeln!(out, "```")?;
+    Ok(())
+}
 
-    out
+/// A `fmt::Write` sink that reserves room for a deterministic truncation marker.
+///
+/// Returning `fmt::Error` on the first over-limit write makes the caller's `?` stop the active
+/// printer loop. `finish` appends the marker directly through the reserved tail, so even a partial
+/// formatted item always yields valid UTF-8 no larger than the requested bound.
+struct BoundedText {
+    text: String,
+    content_limit: usize,
+    max_bytes: usize,
+    truncated: bool,
+}
+
+impl BoundedText {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            text: String::new(),
+            content_limit: max_bytes.saturating_sub(TRUNCATION_NOTICE.len()),
+            max_bytes,
+            truncated: false,
+        }
+    }
+
+    fn finish(mut self) -> String {
+        if self.truncated {
+            let remaining = self.max_bytes.saturating_sub(self.text.len());
+            let mut end = remaining.min(TRUNCATION_NOTICE.len());
+            while !TRUNCATION_NOTICE.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.text.push_str(&TRUNCATION_NOTICE[..end]);
+        }
+        self.text
+    }
+}
+
+impl fmt::Write for BoundedText {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if self.truncated {
+            return Err(fmt::Error);
+        }
+        let remaining = self.content_limit.saturating_sub(self.text.len());
+        if text.len() <= remaining {
+            self.text.push_str(text);
+            return Ok(());
+        }
+        let mut end = remaining.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.text.push_str(&text[..end]);
+        self.truncated = true;
+        Err(fmt::Error)
+    }
 }
 
 /// Stable, non-cryptographic digest of the text the document was rendered from.
@@ -337,6 +415,33 @@ mod tests {
         });
 
         assert!(text.contains("2:12 error type mismatch"), "{text}");
+    }
+
+    #[test]
+    fn bounded_rendering_stops_during_an_arena_and_marks_the_document() {
+        let source = format!("fun box() {{\n{}\n}}\n", "println(1)\n".repeat(100));
+        let mut diags = DiagSink::new();
+        let files = [parse_source_with_detected_features(&source, &mut diags)];
+        let limit = 512;
+
+        let text = render_dump_with_limit(
+            &DumpInput {
+                label: "src/First.kt",
+                source: &source,
+                file: &files[0],
+                info: None,
+                diagnostics: &[],
+                ir: Err("not reached"),
+            },
+            limit,
+        );
+
+        assert!(text.len() <= limit, "{} > {limit}", text.len());
+        assert!(text.ends_with(TRUNCATION_NOTICE), "{text}");
+        assert!(
+            !text.contains("not reached"),
+            "the renderer must stop formatting later sections after the sink is full"
+        );
     }
 
     #[test]

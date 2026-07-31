@@ -4,44 +4,52 @@
 //! rather than rebuilt into a tree. Declarations print first so the arena listing has context.
 
 use crate::ir::IrFile;
-use std::fmt::Write as _;
+use std::fmt;
 
 /// Render an `IrFile`'s declarations and expression arena as text.
 pub fn render_ir_file(ir: &IrFile) -> String {
     let mut out = String::new();
-    let _ = writeln!(
+    write_ir_file(&mut out, ir).expect("writing to a String cannot fail");
+    out
+}
+
+/// Write an `IrFile`'s declarations and expression arena to `out`.
+///
+/// The fallible sink is shared with the bounded whole-document renderer. Propagating an exhausted
+/// sink out of each loop prevents a truncated dump from paying to format the rest of a large IR.
+pub fn write_ir_file(out: &mut impl fmt::Write, ir: &IrFile) -> fmt::Result {
+    writeln!(
         out,
         "package: {}",
         ir.package.as_deref().unwrap_or("<none>")
-    );
-    let _ = writeln!(out, "source_line_count: {}", ir.source_line_count);
+    )?;
+    writeln!(out, "source_line_count: {}", ir.source_line_count)?;
 
-    let _ = writeln!(out, "\nfunctions ({})", ir.functions.len());
+    writeln!(out, "\nfunctions ({})", ir.functions.len())?;
     for (id, function) in ir.functions.iter().enumerate() {
-        let _ = writeln!(out, "  [{id}] {function:?}");
+        writeln!(out, "  [{id}] {function:?}")?;
     }
 
-    let _ = writeln!(out, "\nclasses ({})", ir.classes.len());
+    writeln!(out, "\nclasses ({})", ir.classes.len())?;
     for (id, class) in ir.classes.iter().enumerate() {
-        let _ = writeln!(out, "  [{id}] {class:?}");
+        writeln!(out, "  [{id}] {class:?}")?;
     }
 
-    let _ = writeln!(out, "\nstatics ({})", ir.statics.len());
+    writeln!(out, "\nstatics ({})", ir.statics.len())?;
     for (id, static_property) in ir.statics.iter().enumerate() {
-        let _ = writeln!(out, "  [{id}] {static_property:?}");
+        writeln!(out, "  [{id}] {static_property:?}")?;
     }
 
-    let _ = writeln!(out, "\nexprs ({})", ir.exprs.len());
+    writeln!(out, "\nexprs ({})", ir.exprs.len())?;
     for (id, expr) in ir.exprs.iter().enumerate() {
         let key = id as u32;
         let line = match ir.expr_source_lines.get(&key) {
             Some(line) => format!("line={line}"),
             None => "line=?".to_string(),
         };
-        let _ = writeln!(out, "  [{id}] {line} {expr:?}");
+        writeln!(out, "  [{id}] {line} {expr:?}")?;
     }
-
-    out
+    Ok(())
 }
 
 #[cfg(test)]

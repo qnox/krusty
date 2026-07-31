@@ -7,49 +7,58 @@
 
 use crate::ast::File;
 use crate::diag::Span;
-use std::fmt::Write as _;
+use std::fmt;
 
 /// Render every arena of `file` as text.
 pub fn render_file(file: &File) -> String {
     let mut out = String::new();
-    let _ = writeln!(
+    write_file(&mut out, file).expect("writing to a String cannot fail");
+    out
+}
+
+/// Write every arena of `file` to `out`.
+///
+/// Keeping the sink generic lets the LSP use the exact same printer with a bounded writer. Returning
+/// the first formatting error is load-bearing: once that writer reaches its limit, the arena loops
+/// stop immediately instead of continuing to format every remaining node into discarded text.
+pub fn write_file(out: &mut impl fmt::Write, file: &File) -> fmt::Result {
+    writeln!(
         out,
         "package: {}",
         file.package.as_deref().unwrap_or("<none>")
-    );
-    let _ = writeln!(out, "is_script: {}", file.is_script);
-    let _ = writeln!(out, "source_line_count: {}", file.source_line_count);
+    )?;
+    writeln!(out, "is_script: {}", file.is_script)?;
+    writeln!(out, "source_line_count: {}", file.source_line_count)?;
     if !file.imports.is_empty() {
-        let _ = writeln!(out, "imports: {:?}", file.imports);
+        writeln!(out, "imports: {:?}", file.imports)?;
     }
     if !file.import_aliases.is_empty() {
-        let _ = writeln!(out, "import_aliases: {:?}", file.import_aliases);
+        writeln!(out, "import_aliases: {:?}", file.import_aliases)?;
     }
-    let _ = writeln!(out, "decls: {:?}", file.decls);
+    writeln!(out, "decls: {:?}", file.decls)?;
     if !file.expect_decls.is_empty() {
-        let _ = writeln!(out, "expect_decls: {:?}", file.expect_decls);
+        writeln!(out, "expect_decls: {:?}", file.expect_decls)?;
     }
 
-    let _ = writeln!(out, "\ndecl_arena ({})", file.decl_arena.len());
+    writeln!(out, "\ndecl_arena ({})", file.decl_arena.len())?;
     for (id, decl) in file.decl_arena.iter().enumerate() {
-        let _ = writeln!(out, "  [{id}] {decl:?}");
+        writeln!(out, "  [{id}] {decl:?}")?;
     }
 
-    let _ = writeln!(out, "\nexpr_arena ({})", file.expr_arena.len());
+    writeln!(out, "\nexpr_arena ({})", file.expr_arena.len())?;
     for (id, expr) in file.expr_arena.iter().enumerate() {
         let span = slot(&file.expr_spans, id);
         let line = slot_line(&file.expr_lines, id);
-        let _ = writeln!(out, "  [{id}] {span} {line} {expr:?}");
+        writeln!(out, "  [{id}] {span} {line} {expr:?}")?;
     }
 
-    let _ = writeln!(out, "\nstmt_arena ({})", file.stmt_arena.len());
+    writeln!(out, "\nstmt_arena ({})", file.stmt_arena.len())?;
     for (id, stmt) in file.stmt_arena.iter().enumerate() {
         let span = slot(&file.stmt_spans, id);
         let line = slot_line(&file.stmt_lines, id);
-        let _ = writeln!(out, "  [{id}] {span} {line} {stmt:?}");
+        writeln!(out, "  [{id}] {span} {line} {stmt:?}")?;
     }
-
-    out
+    Ok(())
 }
 
 /// `lo..hi` for a parallel span vector, or `?..?` when the slot is absent.

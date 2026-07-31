@@ -94,6 +94,7 @@ struct OwnedDumpRequest {
     analysis: OwnedAnalysisRequest,
     target: usize,
     label: String,
+    cache_key: String,
     cache_root: PathBuf,
 }
 
@@ -103,6 +104,7 @@ struct DumpRequest<'a> {
     analysis: AnalysisRequest<'a>,
     target: usize,
     label: &'a str,
+    cache_key: &'a str,
     cache_root: &'a Path,
 }
 
@@ -130,8 +132,12 @@ pub struct DumpTarget<'a> {
     pub source_kinds: &'a [SourceKind],
     /// Index into `sources` of the file to render.
     pub target: usize,
-    /// Workspace-relative label: the dump heading and the `dump_cache` key.
+    /// Workspace-relative presentation label shown in the dump heading.
     pub label: &'a str,
+    /// Full document identity used only as opaque input to the cache digest. It is deliberately
+    /// separate from `label`: same-named files outside the workspace must not overwrite each other,
+    /// and the URI must never be copied into a readable cache filename.
+    pub cache_key: &'a str,
     pub cache_root: &'a Path,
     /// The checked and inference prefixes the session used.
     pub result_count: usize,
@@ -422,6 +428,7 @@ fn encode_dump_request(
         },
         target: target.target,
         label: target.label,
+        cache_key: target.cache_key,
         cache_root: target.cache_root,
     };
     let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
@@ -1142,6 +1149,7 @@ fn render_dump_request(
         &sources[request.target],
         request.target,
         &request.label,
+        &request.cache_key,
         &request.cache_root,
         &runtime,
     );
@@ -1161,22 +1169,26 @@ fn render_analyzed_dump(
     source: &str,
     target: usize,
     label: &str,
+    cache_key: &str,
     cache_root: &Path,
     runtime: &JvmLibraries,
 ) -> Option<DumpResponse> {
     let file_analysis = analysis.files.get(target)?;
-    let text = krusty::dump::render_file_dump(&krusty::dump::FileDumpInput {
-        label,
-        source,
-        file: &file_analysis.file,
-        file_index: target,
-        info: file_analysis.types.as_ref(),
-        symbols: &analysis.symbols,
-        runtime,
-        diagnostics: &file_analysis.diagnostics,
-    });
+    let text = krusty::dump::render_file_dump_with_limit(
+        &krusty::dump::FileDumpInput {
+            label,
+            source,
+            file: &file_analysis.file,
+            file_index: target,
+            info: file_analysis.types.as_ref(),
+            symbols: &analysis.symbols,
+            runtime,
+            diagnostics: &file_analysis.diagnostics,
+        },
+        crate::dump_cache::MAX_DUMP_BYTES,
+    );
 
-    let path = crate::dump_cache::store(cache_root, label, &text).ok()?;
+    let path = crate::dump_cache::store(cache_root, cache_key, &text).ok()?;
     Some(DumpResponse { path })
 }
 
@@ -1634,6 +1646,7 @@ mod tests {
                 },
                 "target": 0,
                 "label": "src/Main.kt",
+                "cache_key": "file:///workspace/src/Main.kt",
                 "cache_root": root,
             }
         });
@@ -1694,6 +1707,7 @@ mod tests {
                 "analysis": { "sources": ["fun answer(): Int = 42"], "result_count": 1 },
                 "target": 0,
                 "label": "src/Main.kt",
+                "cache_key": "file:///workspace/src/Main.kt",
                 "cache_root": "/tmp/krusty",
             }
         }))
@@ -1720,6 +1734,7 @@ mod tests {
             source_kinds: &[SourceKind::Kotlin, SourceKind::Java],
             target: 0,
             label: "src/Main.kt",
+            cache_key: "file:///workspace/src/Main.kt",
             cache_root: Path::new("/tmp/krusty"),
             result_count: 1,
             inferred_count: 2,
@@ -1737,6 +1752,7 @@ mod tests {
         };
         assert_eq!(dump.target, 0);
         assert_eq!(dump.label, "src/Main.kt");
+        assert_eq!(dump.cache_key, "file:///workspace/src/Main.kt");
         assert_eq!(dump.cache_root, PathBuf::from("/tmp/krusty"));
         assert_eq!(dump.analysis.sources, sources);
         assert_eq!(
@@ -1769,6 +1785,7 @@ mod tests {
             source_kinds: &[SourceKind::Kotlin],
             target: 0,
             label: "src/Main.kt",
+            cache_key: "file:///workspace/src/Main.kt",
             cache_root: Path::new("/tmp/krusty"),
             result_count: 1,
             inferred_count: 1,
@@ -1811,6 +1828,7 @@ mod tests {
                 },
                 "target": 0,
                 "label": "build.gradle.kts",
+                "cache_key": "file:///workspace/build.gradle.kts",
                 "cache_root": root,
             }
         });
@@ -1844,6 +1862,7 @@ mod tests {
                 "analysis": { "sources": [source], "result_count": 1 },
                 "target": 0,
                 "label": "src/Named.kt",
+                "cache_key": "file:///workspace/src/Named.kt",
                 "cache_root": root,
             }
         });
@@ -1880,6 +1899,7 @@ mod tests {
                 },
                 "target": 4,
                 "label": "src/Main.kt",
+                "cache_key": "file:///workspace/src/Main.kt",
                 "cache_root": root,
             }
         });

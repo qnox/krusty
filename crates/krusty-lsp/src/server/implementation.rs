@@ -6444,8 +6444,8 @@ mod tests {
     #[test]
     fn a_file_uri_decodes_percent_escapes_and_drops_the_scheme() {
         assert_eq!(
-            file_uri_to_path("file:///home/qnox/pro%20ject"),
-            Some(PathBuf::from("/home/qnox/pro ject"))
+            file_uri_to_path("file:///workspace/pro%20ject"),
+            Some(PathBuf::from("/workspace/pro ject"))
         );
     }
 

@@ -18,6 +18,10 @@ const ORPHAN_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
 const WORKER_RECONFIGURE_RETRY_MAX_MS: u64 = 30_000;
 const MAX_RETAINED_SUPPORT_DOCUMENTS: usize = 32 * 1024;
+/// Dev-mode replay inputs are full compiler source sets, unlike the compact query snapshots kept by
+/// normal LSP sessions. Reuse the supervisor's global retained-analysis ceiling so a many-module
+/// workspace cannot multiply the same open texts into an unbounded second in-memory workspace.
+const MAX_RETAINED_DUMP_INPUT_BYTES: usize = krusty_lsp::MAX_RETAINED_ANALYSIS_BYTES;
 
 fn is_java_source_path(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("java")
@@ -266,6 +270,34 @@ fn retained_group_fingerprint(payload: &AnalysisPayload<'_>) -> u64 {
     fingerprint.finish()
 }
 
+/// Heap bytes that cloning `payload` into a [`RetainedGroup`] is expected to own.
+///
+/// Count vector elements as well as their variable data: a workspace can contain thousands of
+/// empty strings or classpath entries, so summing string lengths alone is not a memory bound. Vec
+/// headers and scalar fields live in `RetainedGroup` itself and are covered by its struct size.
+fn retained_payload_bytes(payload: &AnalysisPayload<'_>) -> usize {
+    fn strings(values: &[String]) -> usize {
+        std::mem::size_of_val(values).saturating_add(
+            values
+                .iter()
+                .fold(0usize, |bytes, value| bytes.saturating_add(value.len())),
+        )
+    }
+    fn paths(values: &[PathBuf]) -> usize {
+        std::mem::size_of_val(values).saturating_add(values.iter().fold(0usize, |bytes, value| {
+            bytes.saturating_add(value.as_os_str().as_encoded_bytes().len())
+        }))
+    }
+
+    std::mem::size_of::<RetainedGroup>()
+        .saturating_add(strings(payload.sources))
+        .saturating_add(std::mem::size_of_val(payload.source_kinds))
+        .saturating_add(strings(payload.uris))
+        .saturating_add(strings(payload.java_sources))
+        .saturating_add(strings(payload.language_arguments))
+        .saturating_add(payload.classpath.map_or(0, paths))
+}
+
 impl RetainedGroup {
     /// Replay this group as a dump of slot `target`.
     ///
@@ -276,6 +308,7 @@ impl RetainedGroup {
         &'a self,
         target: usize,
         label: &'a str,
+        cache_key: &'a str,
         cache_root: &'a Path,
     ) -> DumpTarget<'a> {
         DumpTarget {
@@ -283,6 +316,7 @@ impl RetainedGroup {
             source_kinds: &self.source_kinds,
             target,
             label,
+            cache_key,
             cache_root,
             result_count: self.result_count,
             inferred_count: self.inferred_count,
@@ -296,13 +330,15 @@ impl RetainedGroup {
 /// Every group the latest analysis pass covered, kept only under `--dev` so a dump request can
 /// replay exactly the source set and configuration the session analyzed.
 ///
-/// One entry per group, not one entry in total: a pass walks every group, and a single retained
-/// payload would leave every module but the last one permanently undumpable. Superseded passes are
-/// dropped wholesale, never accumulated, so the retained bytes stay close to what the session
-/// already holds in its open documents.
+/// One entry per admitted group, not one entry in total: a pass walks every group, and a single
+/// retained payload would leave every module but the last one permanently undumpable. Groups are
+/// admitted in traversal order up to one global byte budget. This matters because each group may
+/// repeat open and support texts from its dependencies; merely dropping superseded passes does not
+/// bound that multiplication within one many-module pass.
 #[derive(Default)]
 struct RetainedAnalysis {
     groups: Vec<RetainedGroup>,
+    retained_bytes: usize,
 }
 
 impl RetainedAnalysis {
@@ -310,6 +346,7 @@ impl RetainedAnalysis {
     /// ever recorded, so this clears an empty vector and allocates nothing.
     fn begin_pass(&mut self) {
         self.groups.clear();
+        self.retained_bytes = 0;
     }
 
     /// Retain one group's payload, or retain nothing at all when dev mode is off.
@@ -317,9 +354,24 @@ impl RetainedAnalysis {
     /// Callers additionally skip building the payload outside dev mode — copying every source text
     /// on each keystroke is the cost this gate exists to avoid — but the check lives here so
     /// retention cannot be reached another way.
-    fn record(&mut self, dev: bool, payload: &AnalysisPayload<'_>) {
+    fn record(&mut self, dev: bool, payload: &AnalysisPayload<'_>) -> bool {
+        self.record_with_budget(dev, payload, MAX_RETAINED_DUMP_INPUT_BYTES)
+    }
+
+    /// Budget-parameterized implementation so the invariant can be tested with tiny fixtures
+    /// instead of allocating tens of MiB in a unit test.
+    fn record_with_budget(
+        &mut self,
+        dev: bool,
+        payload: &AnalysisPayload<'_>,
+        max_bytes: usize,
+    ) -> bool {
         if !dev {
-            return;
+            return false;
+        }
+        let retained_bytes = retained_payload_bytes(payload);
+        if retained_bytes > max_bytes.saturating_sub(self.retained_bytes) {
+            return false;
         }
         self.groups.push(RetainedGroup {
             sources: payload.sources.to_vec(),
@@ -332,6 +384,8 @@ impl RetainedAnalysis {
             classpath: payload.classpath.map(<[PathBuf]>::to_vec),
             fingerprint: retained_group_fingerprint(payload),
         });
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        true
     }
 
     /// The retained group and slot holding `uri`, if the latest pass covered it.
@@ -402,19 +456,47 @@ impl RenderedDumps {
     }
 }
 
-/// Workspace-relative path for a document URI, falling back to the file name, then the URI itself.
+/// Workspace-relative presentation label for a document URI.
 ///
-/// This is both the dump's heading and its `dump_cache` key, so it stays stable across runs.
+/// The cache key is the full URI and is hashed separately. A non-file label keeps only its scheme
+/// and last path component, so a query string carrying editor/session data is never copied into the
+/// dump body merely to provide a heading.
 fn workspace_relative_label(root: Option<&Path>, uri: &str) -> String {
-    let Some(path) = krusty_lsp::uri::file_uri_to_path(uri) else {
-        return uri.to_string();
+    let label = if let Some(path) = krusty_lsp::uri::file_uri_to_path(uri) {
+        if let Some(relative) = root.and_then(|root| path.strip_prefix(root).ok()) {
+            relative.to_string_lossy().into_owned()
+        } else {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<external file>".to_string())
+        }
+    } else if let Ok(uri) = url::Url::parse(uri) {
+        let component = uri
+            .path()
+            .rsplit('/')
+            .find(|component| !component.is_empty());
+        component.map_or_else(
+            || format!("{}:<document>", uri.scheme()),
+            |component| format!("{}:{component}", uri.scheme()),
+        )
+    } else {
+        "<document>".to_string()
     };
-    if let Some(relative) = root.and_then(|root| path.strip_prefix(root).ok()) {
-        return relative.to_string_lossy().into_owned();
+    bounded_dump_label(label)
+}
+
+fn bounded_dump_label(mut label: String) -> String {
+    const MAX_LABEL_BYTES: usize = 1024;
+    if label.len() <= MAX_LABEL_BYTES {
+        return label;
     }
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| uri.to_string())
+    let mut end = MAX_LABEL_BYTES;
+    while !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    label.truncate(end);
+    label.push('…');
+    label
 }
 
 struct WorkerHost {
@@ -852,7 +934,11 @@ impl krusty_lsp::Analysis for WorkerHost {
             });
         let response = self
             .worker
-            .dump(&group.dump_target(slot, &label, &cache_root))
+            // `label` is presentation text; the full URI is the stable document identity. Keeping
+            // those roles separate prevents two same-named files outside the workspace from
+            // sharing a cache entry, while `dump_cache` hashes the URI so it never reaches disk as
+            // readable path or class-name text.
+            .dump(&group.dump_target(slot, &label, uri, &cache_root))
             .ok()
             .flatten()?;
         self.rendered_dumps.record(uri, fingerprint, &response.path);
@@ -1164,6 +1250,11 @@ impl krusty_lsp::Analysis for WorkerHost {
         self.analysis_cache.clear();
         self.workspace_inventory = None;
         self.truncated_inventory = false;
+        // A root change can change both a module configuration and the workspace-relative heading.
+        // Do not reuse a retained payload or rendered path until the replacement analysis pass has
+        // established both under the new root.
+        self.retained.begin_pass();
+        self.rendered_dumps.entries.clear();
         let mut feedback = self.configure();
         feedback
             .logs
@@ -2155,6 +2246,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retained_dump_groups_share_one_global_byte_budget() {
+        let mut retained = RetainedAnalysis::default();
+        let source = vec!["body".to_string()];
+        let kinds = vec![SourceKind::Kotlin];
+        let first_uri = vec!["file:///first/First.kt".to_string()];
+        let second_uri = vec!["file:///second/Second.kt".to_string()];
+        fn payload<'a>(
+            source: &'a [String],
+            kinds: &'a [SourceKind],
+            uris: &'a [String],
+        ) -> AnalysisPayload<'a> {
+            AnalysisPayload {
+                sources: source,
+                source_kinds: kinds,
+                uris,
+                result_count: 1,
+                inferred_count: 1,
+                java_sources: &[],
+                language_arguments: &[],
+                classpath: None,
+            }
+        }
+        let first_group = retained_payload_bytes(&payload(&source, &kinds, &first_uri));
+        let one_group = first_group.max(retained_payload_bytes(&payload(
+            &source,
+            &kinds,
+            &second_uri,
+        )));
+
+        assert!(retained.record_with_budget(
+            true,
+            &payload(&source, &kinds, &first_uri),
+            one_group
+        ));
+        assert!(
+            !retained.record_with_budget(true, &payload(&source, &kinds, &second_uri), one_group),
+            "a second module must not multiply retained source sets past the pass-wide budget"
+        );
+        assert_eq!(retained.groups.len(), 1);
+        assert_eq!(retained.retained_bytes, first_group);
+
+        retained.begin_pass();
+        assert_eq!(retained.retained_bytes, 0);
+        assert!(
+            retained.record_with_budget(true, &payload(&source, &kinds, &second_uri), one_group),
+            "a superseding pass must receive a fresh budget"
+        );
+    }
+
     /// A pass that serves a group from the analysis cache still leaves that group's files dumpable.
     ///
     /// Structural rather than behavioural: reaching the cache-hit arm needs a live worker process
@@ -2360,7 +2501,8 @@ mod tests {
             .locate("file:///w/Main.kt")
             .expect("the analyzed target must be retained");
         let cache_root = Path::new("/cache");
-        let target = group.dump_target(slot, "Main.kt", cache_root);
+        let cache_key = "file:///w/Main.kt";
+        let target = group.dump_target(slot, "Main.kt", cache_key, cache_root);
 
         assert_eq!(target.target, 0);
         assert_eq!(target.sources, sources);
@@ -2385,6 +2527,7 @@ mod tests {
             "without the module classpath the dump falls back to the launch -cp"
         );
         assert_eq!(target.label, "Main.kt");
+        assert_eq!(target.cache_key, cache_key);
         assert_eq!(target.cache_root, cache_root);
     }
 
@@ -2408,6 +2551,16 @@ mod tests {
         assert_eq!(
             workspace_relative_label(Some(root), "untitled:Untitled-1"),
             "untitled:Untitled-1"
+        );
+        assert_eq!(
+            workspace_relative_label(Some(root), "editor:/virtual/Scratch.kt?session=opaque"),
+            "editor:Scratch.kt",
+            "URI query data must not become presentation text in a persisted dump"
+        );
+        let long = format!("editor:/{}", "x".repeat(4_096));
+        assert!(
+            workspace_relative_label(Some(root), &long).len() <= 1_027,
+            "an untrusted virtual URI must not create an unbounded heading"
         );
     }
 }
