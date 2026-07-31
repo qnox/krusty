@@ -1524,17 +1524,31 @@ impl<'a> SymbolResolver<'a> {
         {
             return true;
         }
-        if self
-            .module
-            .is_some_and(|module| module.classifier_visibility(internal).is_some())
-        {
-            return true;
-        }
         if self.access_package.is_some_and(|package| {
             self.src
                 .classifier_accessible_from_package(internal, package)
         }) {
             return true;
+        }
+        // A private nested classifier is a private member of its enclosing classifier, not a
+        // file-private top-level declaration. Module lookup therefore needs the lexical owner stack:
+        // code in `Outer` (or one of its nested classes) may name `Outer$Hidden`, while another class
+        // in the same file may not. The module source handles the separate top-level-private rule.
+        if visibility == Some(crate::types::Visibility::Private)
+            && self
+                .module
+                .is_some_and(|module| module.classifier_visibility(internal).is_some())
+        {
+            let rendered = internal.render();
+            if self.lexical_classes.iter().copied().any(|owner| {
+                let owner = owner.render();
+                rendered == owner
+                    || rendered
+                        .strip_prefix(&owner)
+                        .is_some_and(|suffix| suffix.starts_with('$'))
+            }) {
+                return true;
+            }
         }
         let rendered = internal.render();
         let Some(simple) = rendered.rsplit_once('$').map(|(_, simple)| simple) else {
