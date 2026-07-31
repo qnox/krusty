@@ -1,10 +1,10 @@
 //! `list.map { … }` / `list.flatMap { … }` whose LAMBDA BODY calls a suspend function. A stdlib
 //! collection HOF lowers its lambda to a `FunctionN` impl that cannot suspend, so krusty inlines it into
 //! an accumulating loop (kotlinc's own inline expansion) — the suspension then lives in an ordinary
-//! for-loop the coroutine pass models. Also covers `list.addAll(repo.get())` inside a `for` (a suspend
-//! call buried in a call argument, hoisted to a temp). Production hit: a deployment-options
-//! service (`getServices<T>(id).flatMap { it.getDeployables(session) }`,
-//! nested `for { options.addAll(deployer.getDeploymentOptions(x)) }`).
+//! for-loop the coroutine pass models. Also covers `list.addAll(source.items())` inside a `for` (a
+//! suspend call buried in a call argument, hoisted to a temp). The synthetic fixtures exercise both
+//! `sources.flatMap { it.items() }` and nested `for { values.addAll(source.items()) }` shapes without
+//! retaining names from an originating application.
 //! Needs the JVM toolchain + kotlin-stdlib + coroutines + real kotlinc; skips otherwise.
 use super::common;
 
