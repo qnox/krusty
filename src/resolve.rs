@@ -11256,6 +11256,21 @@ enum ClasspathMemberSlotCall {
     NoMatch,
 }
 
+type SelectedExtensionSlotCall = (
+    crate::libraries::FunctionInfo,
+    Vec<Ty>,
+    Vec<Option<ExprId>>,
+    Option<crate::libraries::LibraryCallable>,
+    Vec<Ty>,
+);
+
+struct ExtensionSlotSelection {
+    selected: Option<SelectedExtensionSlotCall>,
+    mapped: Vec<(crate::libraries::FunctionInfo, Vec<Ty>, Vec<Option<ExprId>>)>,
+    mapping_errors: Vec<(CallArgMappingFailure, crate::libraries::FunctionInfo)>,
+    ambiguous: bool,
+}
+
 /// Record a type-parameter → type binding, tracking a CONFLICT when the same parameter is bound to two
 /// different types across binding sites (a plain-value arg and a lambda return, or two lambda returns).
 /// The first binding is kept in `binds` (for the selection paths); `conflicted` names the ambiguous
@@ -11543,9 +11558,13 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[CallArgKind],
     ) -> Option<(crate::libraries::FunctionInfo, Signature)> {
-        let selected =
-            self.resolver()
-                .resolve_extension_info(receiver, name, args, Some(self.file_index))?;
+        let selected = self.resolver().resolve_extension_info(
+            receiver,
+            name,
+            args,
+            &[],
+            Some(self.file_index),
+        )?;
         let (file, declaration) = selected.source_key?;
         if let Some((_, signature)) = self
             .syms
@@ -22129,6 +22148,198 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// Select a labelled extension call without recording a call or diagnostic.
+    ///
+    /// This is the single exact selector shared by the ordinary extension fallback and by the earlier
+    /// member-precedence gate. Keeping the probe read-only matters: an inapplicable extension must not
+    /// suppress the more authoritative member diagnostic, while an applicable or ambiguous extension
+    /// must get to the ordinary fallback where its resolution/diagnostic is recorded once.
+    fn select_extension_call_with_slots(
+        &self,
+        call: ExprId,
+        name: &str,
+        receiver: Ty,
+        args: &[ExprId],
+        type_args: &[Ty],
+    ) -> Option<ExtensionSlotSelection> {
+        let names = self
+            .file
+            .call_arg_names
+            .get(&call.0)
+            .cloned()
+            .filter(|names| names.iter().any(Option::is_some))?;
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let overloads = self
+            .resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default();
+        let fs = crate::libraries::FunctionSet { overloads };
+        let source = self.fed_source();
+        let ranked = crate::symbol_resolver::ranked_extension_overloads_by_recv(
+            &source,
+            receiver,
+            &fs,
+            true,
+            Some(self.file_index),
+        );
+        let mut mapping_errors = Vec::new();
+        let mut mapped = Vec::new();
+        let mut selected = None;
+        // The highest-scoring candidate that MAPPED, kept in case the argument-based selection below
+        // declines to pick any. It answers "which overload fits the labels best", which is what this
+        // resolution did before the ranked/bounds-aware selection was added, and a call that maps
+        // cleanly must not be reported as inapplicable just because the newer selection abstained —
+        // that regressed every NAMED call to a context function (`combine(a = "O", b = "K")` on
+        // `context(c: C) fun combine(…)`) while the positional form kept working.
+        let mut best_mapped: Option<(usize, SelectedExtensionSlotCall)> = None;
+        let mut ambiguous = false;
+        let mut start = 0;
+        while start < ranked.len() {
+            let rank = ranked[start].0;
+            let end = ranked[start..]
+                .iter()
+                .position(|(candidate_rank, _, _)| *candidate_rank != rank)
+                .map_or(ranked.len(), |offset| start + offset);
+            let mut candidates = Vec::new();
+            for (_, _, candidate) in &ranked[start..end] {
+                if !candidate.call_sig.has_param_names() {
+                    continue;
+                }
+                let params = candidate.extension_value_params().to_vec();
+                // Align the signature's LABELS with its value parameters. `extension_value_params`
+                // drops the leading receiver/context slots, but `call_sig` still names them, so the
+                // labels were off by one: `combine(a = "O", b = "K")` on
+                // `context(c: C) fun combine(a: String, b: String)` mapped `a`/`b` past the `c` slot,
+                // left a required parameter unfilled, and reported "none of the following candidates
+                // is applicable:" — for every named form, while the positional call worked. Deriving
+                // the count from the two lists keeps them in step however the receiver is modelled.
+                let leading = candidate
+                    .call_sig
+                    .param_names
+                    .len()
+                    .saturating_sub(params.len());
+                let value_signature = call_sig_without_context(&candidate.call_sig, leading);
+                let slots = match map_call_sig_args_with_trailing(
+                    args,
+                    Some(&names),
+                    &value_signature,
+                    trailing_lambda,
+                ) {
+                    Ok(slots) => slots,
+                    Err(error) => {
+                        mapping_errors.push((error, (**candidate).clone()));
+                        continue;
+                    }
+                };
+                let slot_tys = slots
+                    .iter()
+                    .map(|slot| slot.map(|arg| self.expr_types[arg.0 as usize]))
+                    .collect::<Vec<_>>();
+                let resolver = self.resolver();
+                if !resolver.extension_slots_admit_bounds(receiver, type_args, candidate, &slot_tys)
+                {
+                    continue;
+                }
+                let callable = resolver.build_extension_callable_for_slots(
+                    name, receiver, type_args, candidate, &slot_tys,
+                );
+                let resolved_params = callable
+                    .as_ref()
+                    .and_then(|callable| callable.params.get(1..))
+                    .filter(|resolved| resolved.len() == params.len())
+                    .unwrap_or(&params);
+                let resolved_params = resolved_params.to_vec();
+                let selection_params = args
+                    .iter()
+                    .map(|argument| {
+                        let slot = slots
+                            .iter()
+                            .position(|candidate| candidate.as_ref() == Some(argument))
+                            .or(candidate.call_sig.vararg_index)?;
+                        let parameter = *resolved_params.get(slot)?;
+                        let actual = self.expr_types[argument.0 as usize];
+                        if candidate.call_sig.vararg_index == Some(slot)
+                            && !self.file.is_spread_arg(*argument)
+                            && actual != parameter
+                        {
+                            parameter.array_elem()
+                        } else {
+                            Some(parameter)
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>();
+                mapped.push((
+                    (**candidate).clone(),
+                    resolved_params.clone(),
+                    slots.clone(),
+                ));
+                if let Some(selection_params) = selection_params {
+                    candidates.push((
+                        (**candidate).clone(),
+                        resolved_params,
+                        slots,
+                        callable,
+                        selection_params,
+                    ));
+                }
+            }
+            let ranked_candidates = candidates
+                .iter()
+                .map(|(candidate, _, _, _, params)| (candidate, params.clone()))
+                .collect::<Vec<_>>();
+            // Specificity must see the same composite source graph as every other overload path.
+            // A named classpath extension can take a module-declared subclass; consulting only the
+            // JVM platform here would make the labelled form reject a call that the positional form
+            // accepts, and would reintroduce an origin-specific module/classpath branch.
+            let source = self.fed_source();
+            let arg_kinds = self.checked_call_arg_kinds(args);
+            match crate::symbol_resolver::best_by_args(
+                &*self.syms.libraries,
+                &source,
+                &ranked_candidates,
+                &arg_kinds,
+            ) {
+                crate::symbol_resolver::CandidateSelection::Selected(best) => {
+                    let index = candidates
+                        .iter()
+                        .position(|(candidate, ..)| std::ptr::eq(candidate, best))?;
+                    selected = Some(candidates.swap_remove(index));
+                    break;
+                }
+                crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                    ambiguous = true;
+                    break;
+                }
+                crate::symbol_resolver::CandidateSelection::None => {
+                    // Only when this rank holds a SINGLE candidate. With more than one, choosing by
+                    // slot score would answer a question the specificity selection just declined to
+                    // answer, and score cannot tell `pick(value: Any)` from
+                    // `pick(value: CharSequence)` — it would silently take whichever came first.
+                    if let [entry] = candidates.as_slice() {
+                        let score = self.call_slot_score(&entry.1, &entry.2).unwrap_or(0);
+                        if best_mapped.as_ref().is_none_or(|(best, _)| score > *best) {
+                            best_mapped = Some((score, entry.clone()));
+                        }
+                    }
+                }
+            }
+            start = end;
+        }
+        let selected = selected.or_else(|| best_mapped.map(|(_, entry)| entry));
+        Some(ExtensionSlotSelection {
+            selected,
+            mapped,
+            mapping_errors,
+            ambiguous,
+        })
+    }
+
     fn record_extension_call_with_slots(
         &mut self,
         call: ExprId,
@@ -22137,180 +22348,12 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         type_args: &[Ty],
     ) -> Option<Ty> {
-        let names = self
-            .file
-            .call_arg_names
-            .get(&call.0)
-            .cloned()
-            .filter(|ns| ns.iter().any(Option::is_some))?;
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let (selected, mut mapped, mut mapping_errors, ambiguous) = {
-            let overloads = self
-                .resolver()
-                .resolve_symbol(
-                    crate::symbol_resolver::SymRecv::Value(receiver),
-                    name,
-                    &[],
-                    &[],
-                )
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .unwrap_or_default();
-            let fs = crate::libraries::FunctionSet { overloads };
-            let source = self.fed_source();
-            let ranked = crate::symbol_resolver::ranked_extension_overloads_by_recv(
-                &source,
-                receiver,
-                &fs,
-                true,
-                Some(self.file_index),
-            );
-            let mut mapping_errors = Vec::new();
-            let mut mapped = Vec::new();
-            let mut selected = None;
-            // The highest-scoring candidate that MAPPED, kept in case the argument-based selection below
-            // declines to pick any. It answers "which overload fits the labels best", which is what this
-            // resolution did before the ranked/bounds-aware selection was added, and a call that maps
-            // cleanly must not be reported as inapplicable just because the newer selection abstained —
-            // that regressed every NAMED call to a context function (`combine(a = "O", b = "K")` on
-            // `context(c: C) fun combine(…)`) while the positional form kept working.
-            let mut best_mapped: Option<(usize, _)> = None;
-            let mut ambiguous = false;
-            let mut start = 0;
-            while start < ranked.len() {
-                let rank = ranked[start].0;
-                let end = ranked[start..]
-                    .iter()
-                    .position(|(candidate_rank, _, _)| *candidate_rank != rank)
-                    .map_or(ranked.len(), |offset| start + offset);
-                let mut candidates = Vec::new();
-                for (_, _, candidate) in &ranked[start..end] {
-                    if !candidate.call_sig.has_param_names() {
-                        continue;
-                    }
-                    let params = candidate.extension_value_params().to_vec();
-                    // Align the signature's LABELS with its value parameters. `extension_value_params`
-                    // drops the leading receiver/context slots, but `call_sig` still names them, so the
-                    // labels were off by one: `combine(a = "O", b = "K")` on
-                    // `context(c: C) fun combine(a: String, b: String)` mapped `a`/`b` past the `c` slot,
-                    // left a required parameter unfilled, and reported "none of the following candidates
-                    // is applicable:" — for every named form, while the positional call worked. Deriving
-                    // the count from the two lists keeps them in step however the receiver is modelled.
-                    let leading = candidate
-                        .call_sig
-                        .param_names
-                        .len()
-                        .saturating_sub(params.len());
-                    let value_signature = call_sig_without_context(&candidate.call_sig, leading);
-                    let slots = match map_call_sig_args_with_trailing(
-                        args,
-                        Some(&names),
-                        &value_signature,
-                        trailing_lambda,
-                    ) {
-                        Ok(slots) => slots,
-                        Err(error) => {
-                            mapping_errors.push((error, (**candidate).clone()));
-                            continue;
-                        }
-                    };
-                    let slot_tys = slots
-                        .iter()
-                        .map(|slot| slot.map(|arg| self.expr_types[arg.0 as usize]))
-                        .collect::<Vec<_>>();
-                    let resolver = self.resolver();
-                    if !resolver
-                        .extension_slots_admit_bounds(receiver, type_args, candidate, &slot_tys)
-                    {
-                        continue;
-                    }
-                    let callable = resolver.build_extension_callable_for_slots(
-                        name, receiver, type_args, candidate, &slot_tys,
-                    );
-                    let resolved_params = callable
-                        .as_ref()
-                        .and_then(|callable| callable.params.get(1..))
-                        .filter(|resolved| resolved.len() == params.len())
-                        .unwrap_or(&params);
-                    let resolved_params = resolved_params.to_vec();
-                    let selection_params = args
-                        .iter()
-                        .map(|argument| {
-                            let slot = slots
-                                .iter()
-                                .position(|candidate| candidate.as_ref() == Some(argument))
-                                .or(candidate.call_sig.vararg_index)?;
-                            let parameter = *resolved_params.get(slot)?;
-                            let actual = self.expr_types[argument.0 as usize];
-                            if candidate.call_sig.vararg_index == Some(slot)
-                                && !self.file.is_spread_arg(*argument)
-                                && actual != parameter
-                            {
-                                parameter.array_elem()
-                            } else {
-                                Some(parameter)
-                            }
-                        })
-                        .collect::<Option<Vec<_>>>();
-                    mapped.push((
-                        (**candidate).clone(),
-                        resolved_params.clone(),
-                        slots.clone(),
-                    ));
-                    if let Some(selection_params) = selection_params {
-                        candidates.push((
-                            (**candidate).clone(),
-                            resolved_params,
-                            slots,
-                            callable,
-                            selection_params,
-                        ));
-                    }
-                }
-                let ranked_candidates = candidates
-                    .iter()
-                    .map(|(candidate, _, _, _, params)| (candidate, params.clone()))
-                    .collect::<Vec<_>>();
-                // Specificity must see the same composite source graph as every other overload path.
-                // A named classpath extension can take a module-declared subclass; consulting only the
-                // JVM platform here would make the labelled form reject a call that the positional form
-                // accepts, and would reintroduce an origin-specific module/classpath branch.
-                let source = self.fed_source();
-                let arg_kinds = self.checked_call_arg_kinds(args);
-                match crate::symbol_resolver::best_by_args(
-                    &*self.syms.libraries,
-                    &source,
-                    &ranked_candidates,
-                    &arg_kinds,
-                ) {
-                    crate::symbol_resolver::CandidateSelection::Selected(best) => {
-                        let index = candidates
-                            .iter()
-                            .position(|(candidate, ..)| std::ptr::eq(candidate, best))?;
-                        selected = Some(candidates.swap_remove(index));
-                        break;
-                    }
-                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        ambiguous = true;
-                        break;
-                    }
-                    crate::symbol_resolver::CandidateSelection::None => {
-                        // Only when this rank holds a SINGLE candidate. With more than one, choosing by
-                        // slot score would answer a question the specificity selection just declined to
-                        // answer, and score cannot tell `pick(value: Any)` from `pick(value: CharSequence)`
-                        // — it would silently take whichever came first.
-                        if let [entry] = candidates.as_slice() {
-                            let score = self.call_slot_score(&entry.1, &entry.2).unwrap_or(0);
-                            if best_mapped.as_ref().is_none_or(|(best, _)| score > *best) {
-                                best_mapped = Some((score, entry.clone()));
-                            }
-                        }
-                    }
-                }
-                start = end;
-            }
-            let selected = selected.or_else(|| best_mapped.map(|(_, entry)| entry));
-            (selected, mapped, mapping_errors, ambiguous)
-        };
+        let ExtensionSlotSelection {
+            selected,
+            mut mapped,
+            mut mapping_errors,
+            ambiguous,
+        } = self.select_extension_call_with_slots(call, name, receiver, args, type_args)?;
         if ambiguous {
             self.diags.error(
                 self.call_callee_name_span(call),
@@ -24730,7 +24773,15 @@ impl<'a> Checker<'a> {
             return ClasspathMemberSlotCall::NoMatch;
         }
         if candidates.is_empty() {
-            if self.extension_could_serve(rt, name) {
+            if !mapping_errors.is_empty()
+                && self.applicable_extension_for_member_fallback(
+                    call,
+                    rt,
+                    name,
+                    args,
+                    implicit_receiver,
+                )
+            {
                 return ClasspathMemberSlotCall::NoMatch;
             }
             let unanimous = mapping_errors
@@ -24784,7 +24835,13 @@ impl<'a> Checker<'a> {
             // deferring every named call is what silently dropped mapping errors, arity errors, type
             // mismatches and ambiguity for the classpath-member origin while every other origin reported
             // them.
-            if self.extension_could_serve(rt, name) {
+            if self.applicable_extension_for_member_fallback(
+                call,
+                rt,
+                name,
+                args,
+                implicit_receiver,
+            ) {
                 return ClasspathMemberSlotCall::NoMatch;
             }
             if candidates.len() == 1 && mapping_errors.is_empty() {
@@ -24878,32 +24935,75 @@ impl<'a> Checker<'a> {
         ClasspathMemberSlotCall::Resolved(ret)
     }
 
-    /// Whether an EXTENSION could serve this call, in which case a classpath member family rejecting it is
-    /// not the final word and must stay silent so the extension gets its turn (`"".pick(value = 1)` where
-    /// only `String.pick(value)` declares that name; `"".literalChoice(a = { … })` where only the extension
-    /// takes a lambda). Used as the deferral condition instead of "the call has named arguments": deferring
-    /// every named call is what silently dropped mapping errors, arity errors, type mismatches and
-    /// ambiguity for the classpath-member origin while every other origin reported them.
-    fn extension_could_serve(&self, receiver: Ty, name: &str) -> bool {
-        self.member_extension_supports_named(receiver, name)
-            || self
-                .resolver()
-                .resolve_symbol(
-                    crate::symbol_resolver::SymRecv::Value(receiver),
+    /// Whether the exact call can fall through to an extension after every same-named member candidate
+    /// proved inapplicable. Kotlin gives members precedence only when they are APPLICABLE; reporting a
+    /// member's slot-mapping/type error here would otherwise hide a valid extension.
+    ///
+    /// The resolver query is deliberately origin-neutral: its federated source selects same-file,
+    /// sibling-module, and classpath extensions through one overload path, including explicit type
+    /// arguments and literal/lambda provenance. Do not recover module extensions with a second
+    /// source-only lookup—the selected `FunctionInfo` is already the shared applicability contract.
+    fn applicable_extension_for_member_fallback(
+        &mut self,
+        call: ExprId,
+        receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        implicit_receiver: bool,
+    ) -> bool {
+        let arg_kinds = self.call_arg_kinds(args);
+        let type_args = self.resolved_explicit_type_args(call);
+        let labelled = self
+            .file
+            .call_arg_names
+            .get(&call.0)
+            .is_some_and(|names| names.iter().any(Option::is_some));
+        let top_level = if labelled {
+            self.select_extension_call_with_slots(call, name, receiver, args, &type_args)
+                .is_some_and(|selection| {
+                    selection.ambiguous
+                        || selection.selected.is_some_and(|extension| {
+                            // The implicit-receiver fallback intentionally declines vararg
+                            // extensions; claiming one here would silence the member diagnostic
+                            // without leaving a realizable fallback.
+                            !implicit_receiver || !extension.0.call_sig.vararg
+                        })
+                })
+        } else {
+            self.resolver()
+                .resolve_extension_info(
+                    receiver,
                     name,
-                    &[],
-                    &[],
+                    &arg_kinds,
+                    &type_args,
+                    Some(self.file_index),
                 )
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .unwrap_or_default()
-                .iter()
-                .filter(|candidate| candidate.is_extension())
-                // Only an extension that CARRIES parameter names can take these labels — that is exactly
-                // the filter the extension resolution itself applies before considering a candidate. If it
-                // would skip every extension, deferring to it hands the call to a path that also declines,
-                // and the two deferrals compose into silence: the member's own mapping errors and type
-                // mismatches are never reported.
-                .any(|candidate| candidate.call_sig.has_param_names())
+                .is_some_and(|extension| !implicit_receiver || !extension.call_sig.vararg)
+        };
+        if top_level || implicit_receiver {
+            return top_level;
+        }
+
+        // Qualified calls can also fall through to an extension declared as a member of the current
+        // dispatch-receiver scope. Probe the same instantiated candidate routine the real fallback uses,
+        // so labels, defaults, explicit generics, lambda literals, and receiver priority stay consistent.
+        let arg_tys = args
+            .iter()
+            .map(|argument| self.expr_types[argument.0 as usize])
+            .collect::<Vec<_>>();
+        let arg_names = self.file.call_arg_names.get(&call.0);
+        match self.member_extension_function(MemberExtensionFunctionCall {
+            extension_receiver: receiver,
+            name,
+            args,
+            arg_tys: &arg_tys,
+            arg_names: arg_names.map(Vec::as_slice),
+            explicit_type_args: &type_args,
+            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
+        }) {
+            Ok(Some(_)) | Err(()) => true,
+            Ok(None) => false,
+        }
     }
 
     fn call_slot_score(&self, params: &[Ty], slots: &[Option<ExprId>]) -> Option<usize> {
