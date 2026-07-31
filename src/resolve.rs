@@ -7227,6 +7227,23 @@ fn infer_lit_ty_p(
         // Constructor call `Foo(args)` — infer type from callee name via class_names (seeded from
         // classpath scan + user-defined classes).
         Expr::Call { callee, args } => {
+            // Explicit type arguments (`mutableMapOf<String, JsonObject>()`) bind the callee's
+            // type parameters directly: dropping them erases the recorded PROPERTY type to
+            // `MutableMap<Any, Any>` (the full checker keeps them for a local `val`; the
+            // signature phase must too).
+            let call_targs: Vec<Ty> = file
+                .call_type_args
+                .get(&e.0)
+                .filter(|t| !t.is_empty())
+                .map(|targs| {
+                    let empty_tp = TParams::from_bindings([]);
+                    let mut sink = crate::diag::DiagSink::new();
+                    targs
+                        .iter()
+                        .map(|r| ty_of_ref(r, class_names, &empty_tp, &mut sink))
+                        .collect()
+                })
+                .unwrap_or_default();
             match file.expr(*callee) {
                 Expr::Name(n) => {
                     // A call to a top-level function with a known return type (`val v = mk()`).
@@ -7244,22 +7261,19 @@ fn infer_lit_ty_p(
                         // Preserve EXPLICIT type arguments on a generic constructor call
                         // (`ConcurrentHashMap<String, V>()`) so an inferred PROPERTY keeps them — else a
                         // later indexing / generic-member access on the field erases its element to `Any`.
-                        // (The full checker keeps them for a local `val`; the signature phase must too.)
-                        if let Some(targs) = file.call_type_args.get(&e.0).filter(|t| !t.is_empty())
-                        {
-                            let empty_tp = TParams::from_bindings([]);
-                            let mut sink = crate::diag::DiagSink::new();
-                            let args: Vec<Ty> = targs
-                                .iter()
-                                .map(|r| ty_of_ref(r, class_names, &empty_tp, &mut sink))
-                                .collect();
-                            return Ty::Obj(internal, Box::leak(args.into_boxed_slice()));
+                        if !call_targs.is_empty() {
+                            return Ty::Obj(internal, Box::leak(call_targs.into_boxed_slice()));
                         }
                         return Ty::obj_name(internal);
                     }
                     // A top-level library/stdlib function — federated resolution (no hardcoded names).
-                    if let Some(t) = resolved_ret(&resolver, n, None) {
-                        return t;
+                    // The return-agreement probe resolves WITHOUT explicit type arguments, so it
+                    // erases them to `Any` — skip it when the call carries any and let the
+                    // generic path below bind them instead.
+                    if call_targs.is_empty() {
+                        if let Some(t) = resolved_ret(&resolver, n, None) {
+                            return t;
+                        }
                     }
                     // A member of a classpath OBJECT imported unqualified (`import Obj.member`; the
                     // top-level `val logger = logger {}` idiom): resolve the member's return on the
@@ -7296,7 +7310,7 @@ fn infer_lit_ty_p(
                                 crate::symbol_resolver::SymRecv::TopLevel,
                                 n,
                                 &arg_kinds,
-                                &[],
+                                &call_targs,
                             )
                             .and_then(crate::symbol_resolver::Symbol::top_level_call)
                         {
