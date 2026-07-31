@@ -23014,14 +23014,22 @@ impl<'a> Checker<'a> {
         if direct_candidate {
             return ClasspathMemberSlotCall::NoMatch;
         }
-        if candidates.iter().all(|(score, _, _, _)| score.is_none()) {
+        if !(candidates.is_empty() && mapping_errors.is_empty())
+            && candidates.iter().all(|(score, _, _, _)| score.is_none())
+        {
             let arg_kinds = self.call_arg_kinds(args);
             let type_args = self.resolved_explicit_type_args(call);
             let extension_applies = self
                 .resolver()
                 .resolve_symbol_with_literal_and_lambda_args(receiver, name, &arg_kinds, &type_args)
                 .and_then(crate::symbol_resolver::Symbol::extension_call)
-                .is_some();
+                .is_some()
+                // A same-module extension emits through the module path, so it is dropped from
+                // `Symbol::extension_call` — probe it directly. The implicit-receiver fallback
+                // declines vararg extensions, so the probe must too.
+                || self
+                    .selected_source_extension(rt, name, &arg_kinds)
+                    .is_some_and(|(_, signature)| !implicit_receiver || !signature.vararg());
             if extension_applies {
                 return ClasspathMemberSlotCall::NoMatch;
             }

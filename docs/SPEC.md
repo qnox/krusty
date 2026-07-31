@@ -2099,6 +2099,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   miscompile). A malformed/unhandled reified marker cleanly SKIPS the whole splice (never miscompiles).
   (`build775_ee1_reified_vc_ext_e2e`)
 
+- **An ARITY-inapplicable same-named member does not hide a same-module EXTENSION.** For
+  `registry.getServices<Deployer>()` where `ServiceRegistry` declares `fun <T> getServices(type:
+  KClass<*>)` and the same module declares `inline fun <reified T : Any> ServiceRegistry.getServices():
+  List<T>`, kotlinc resolves the extension (members win only when APPLICABLE). The slot-mapping member
+  probe already rescued the call when a CLASSPATH extension applied, but its applicability check read
+  `Symbol::extension_call`, which deliberately drops `Origin::Module` callables (a same-module extension
+  emits through the module path) — so the unanimous `MissingRequired` mapping error (`no value passed for
+  parameter 'type'.`) was reported and the extension sections never ran. The rescue probe now also asks
+  `selected_source_extension`, letting the call fall through to the ordinary source-extension resolution
+  (mirroring that fallback's decline of vararg extensions on the implicit-receiver path).
+  (`member_extension_function_e2e::arity_inapplicable_member_falls_through_to_reified_extension`,
+  `…_implicit_receiver`, `…_still_errors_when_source_extension_inapplicable`,
+  `…_reified_extension_run`)
+
 - **A `suspend` call as a STATEMENT in a coroutine-builder lambda + implicit-`Unit` suspend fns
   (build.775 aa1/ii1).** `runBlocking { f(r); if (…) … }` (a bare suspend-call statement followed by more
   code) no longer skips the file — the single-suspension lambda lowering falls back to the general

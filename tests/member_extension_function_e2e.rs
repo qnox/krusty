@@ -350,6 +350,102 @@ fn member_extension_function_resolution() {
 }
 
 #[test]
+fn arity_inapplicable_member_falls_through_to_reified_extension() {
+    const SOURCE: &str = r#"
+        interface ServiceRegistry {
+            fun <T> getService(type: kotlin.reflect.KClass<*>): T? = null
+            fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+        }
+        inline fun <reified T : Any> ServiceRegistry.getServices(): List<T> = getServices(T::class)
+
+        class Deployer
+
+        fun services(registry: ServiceRegistry): List<Deployer> = registry.getServices<Deployer>()
+    "#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+        return;
+    };
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn arity_inapplicable_member_falls_through_to_reified_extension_implicit_receiver() {
+    const SOURCE: &str = r#"
+        interface ServiceRegistry {
+            fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+        }
+        inline fun <reified T : Any> ServiceRegistry.getServices(): List<T> = getServices(T::class)
+
+        class Deployer
+
+        fun services(registry: ServiceRegistry): List<Deployer> =
+            with(registry) { getServices<Deployer>() }
+    "#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+        return;
+    };
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn arity_inapplicable_member_still_errors_when_source_extension_inapplicable() {
+    const SOURCE: &str = r#"
+        interface ServiceRegistry {
+            fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T> = emptyList()
+        }
+        fun ServiceRegistry.getServices(extra: Int): List<String> = emptyList()
+
+        class Deployer
+
+        fun services(registry: ServiceRegistry): List<Deployer> = registry.getServices<Deployer>()
+    "#;
+
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("value passed for parameter 'type'")),
+        "expected member arity diagnostic, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn arity_inapplicable_member_reified_extension_run() {
+    const SOURCE: &str = r#"
+        interface ServiceRegistry {
+            fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T>
+        }
+        inline fun <reified T : Any> ServiceRegistry.getServices(): List<T> = getServices(T::class)
+
+        class Deployer
+
+        class Registry : ServiceRegistry {
+            override fun <T> getServices(type: kotlin.reflect.KClass<*>): List<T> =
+                if (type == Deployer::class) listOf(Deployer() as T) else emptyList()
+        }
+
+        fun box(): String {
+            val services = Registry().getServices<Deployer>()
+            if (services.size != 1) return "size"
+            if (services[0] !is Deployer) return "type"
+            return "OK"
+        }
+    "#;
+
+    common::expect_box_ok_with_stdlib(SOURCE, "S");
+}
+
+#[test]
 fn safe_call_ordinary_member_keeps_precedence_over_member_extension() {
     const SOURCE: &str = r#"
         class Entry {
