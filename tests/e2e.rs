@@ -248,6 +248,8 @@ mod context_parameters_e2e;
 mod contract_erasure_e2e;
 #[path = "contract_smartcast_e2e.rs"]
 mod contract_smartcast_e2e;
+#[path = "contract_user_e2e.rs"]
+mod contract_user_e2e;
 #[path = "coroutine_intrinsics_e2e.rs"]
 mod coroutine_intrinsics_e2e;
 #[path = "cross_file_companion_fun_e2e.rs"]

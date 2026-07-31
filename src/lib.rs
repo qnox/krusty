@@ -16,6 +16,7 @@ pub mod ast_print;
 pub mod backend;
 pub mod compiler;
 pub mod conformance;
+pub mod contracts;
 pub mod diag;
 pub mod dump;
 pub mod features;

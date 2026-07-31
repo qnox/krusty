@@ -9338,6 +9338,7 @@ fn make_checker<'a>(
         narrowed_this_member: HashMap::new(),
         pending_unknown_named_arg: HashMap::new(),
         resolved_calls: HashMap::new(),
+        source_contracts: HashMap::new(),
         resolved_source_calls: HashMap::new(),
         source_extension_properties: HashMap::new(),
         source_extension_property_writes: HashMap::new(),
@@ -9839,6 +9840,10 @@ fn check_file_at_impl_mode(
 
     let mut c = make_checker(file, file_index, source_files, &*syms, diags);
     c.discover_anonymous_captures = capture_discovery;
+    // Decode every top-level function's `contract { … }` up front (decode needs only the AST
+    // plus the intrinsic-identity check), so a call site sees a source function's contract
+    // regardless of the order function bodies are checked in.
+    c.collect_source_contracts();
 
     // Each top-level declaration is checked in its OWN scope. Reset to the base depth (file-level
     // scope, e.g. top-level properties) before each one so a prior decl's leftover scope can't leak —
@@ -11262,6 +11267,10 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Decoded `contract { … }` effects of the current file's top-level functions, keyed by
+    /// `DeclId`. Filled before the decl walk (decode is AST-only) so call sites see contracts
+    /// irrespective of function declaration order.
+    source_contracts: HashMap<DeclId, std::rc::Rc<crate::contracts::Contract>>,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     source_extension_properties: HashMap<ExprId, crate::libraries::PropertyInfo>,
     source_extension_property_writes: HashMap<StmtId, crate::libraries::PropertyInfo>,
@@ -13175,6 +13184,182 @@ impl<'a> Checker<'a> {
             Some(ResolvedCall::TopLevel(c))
                 if c.name == name && c.owner.starts_with("kotlin/PreconditionsKt")
         )
+    }
+
+    /// Decode every top-level function's `contract { … }` block up front (see the call site in
+    /// `check_file_at_impl_mode`).
+    fn collect_source_contracts(&mut self) {
+        let file = self.file;
+        for &d in &file.decls {
+            let Decl::Fun(f) = file.decl(d) else { continue };
+            if let Some(contract) = self.decode_fun_contract(f) {
+                self.source_contracts.insert(d, std::rc::Rc::new(contract));
+            }
+        }
+    }
+
+    /// The decoded contract of a source function, or `None` when its body has no (confirmed)
+    /// `kotlin.contracts.contract { … }` statement.
+    fn decode_fun_contract(&self, f: &FunDecl) -> Option<crate::contracts::Contract> {
+        let crate::ast::FunBody::Block(block) = f.body else {
+            return None;
+        };
+        let Expr::Block { stmts, .. } = self.file.expr(block) else {
+            return None;
+        };
+        for s in stmts {
+            let Stmt::Expr(e) = self.file.stmt(*s) else {
+                continue;
+            };
+            if self.is_contract_call(*e) {
+                let params: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
+                return crate::contracts::decode_source(
+                    self.file,
+                    *e,
+                    &params,
+                    &f.name,
+                    f.receiver.is_some(),
+                );
+            }
+        }
+        None
+    }
+
+    /// The contract of the function a call resolved to, when it is a same-file source function
+    /// (classpath contracts arrive via classfile metadata instead). `ModuleTopLevel` carries the
+    /// decl id; a module EXTENSION call is matched back to its declaration by name.
+    fn source_contract_for_call(
+        &self,
+        call: ExprId,
+    ) -> Option<std::rc::Rc<crate::contracts::Contract>> {
+        match self.resolved_calls.get(&call) {
+            Some(ResolvedCall::ModuleTopLevel(c)) => c
+                .source_decl
+                .and_then(|d| self.source_contracts.get(&d).cloned()),
+            Some(ResolvedCall::ModuleExtension { name, .. }) => self
+                .source_contracts
+                .iter()
+                .find(|(d, _)| {
+                    matches!(self.file.decl(**d), Decl::Fun(f) if f.name == *name && f.receiver.is_some())
+                })
+                .map(|(_, c)| c.clone()),
+            _ => None,
+        }
+    }
+
+    /// The actual argument expression a contract [`crate::contracts::ParamRef`] refers to at
+    /// this call site: the receiver expression for `Receiver`, the i-th positional argument
+    /// for `Param(i)`.
+    fn contract_arg_expr(&self, call: ExprId, param: crate::contracts::ParamRef) -> Option<ExprId> {
+        let Expr::Call { callee, args } = self.file.expr(call) else {
+            return None;
+        };
+        match param {
+            crate::contracts::ParamRef::Param(i) => args.get(i).copied(),
+            crate::contracts::ParamRef::Receiver => match self.file.expr(*callee) {
+                Expr::Member { receiver, .. } => Some(*receiver),
+                _ => None,
+            },
+        }
+    }
+
+    /// The name of a STABLE binding passed as a contract argument, when it is one (`x`, `this`).
+    fn contract_stable_arg_name(
+        &self,
+        call: ExprId,
+        param: crate::contracts::ParamRef,
+    ) -> Option<String> {
+        match self
+            .contract_arg_expr(call, param)
+            .map(|e| self.file.expr(e))
+        {
+            Some(Expr::Name(n)) => Some(n.clone()),
+            _ => None,
+        }
+    }
+
+    /// Map a contract conclusion onto the call's actual arguments, producing `(name, Ty)`
+    /// narrowings for stable bindings. Only sound forms narrow: `x != null`, `x is T` (positive),
+    /// the boolean argument itself (recursed through the ordinary condition machinery), and
+    /// `&&` compounds. `x == null`, `!is`, `||`, and constants yield nothing.
+    fn conclusion_narrowings(
+        &self,
+        call: ExprId,
+        conclusion: &crate::contracts::Condition,
+        out: &mut Vec<(String, Ty)>,
+    ) {
+        use crate::contracts::{Condition, ConditionType};
+        match conclusion {
+            Condition::IsNull {
+                param,
+                negated: true,
+            } => {
+                let Some(n) = self.contract_stable_arg_name(call, *param) else {
+                    return;
+                };
+                let stable_ty = if n == "this" {
+                    self.this_ty
+                } else {
+                    self.lookup(&n).filter(|l| !l.is_var).map(|l| l.ty)
+                };
+                if let Some(Ty::Nullable(inner)) = stable_ty {
+                    out.push((n, *inner));
+                }
+            }
+            Condition::IsType {
+                param,
+                ty: ConditionType::Source(tyref),
+                negated: false,
+            } => {
+                let Some(n) = self.contract_stable_arg_name(call, *param) else {
+                    return;
+                };
+                if matches!(self.lookup(&n), Some(l) if l.is_var) {
+                    return;
+                }
+                let tt = self.resolve_ty_no_diag(tyref);
+                if tt != Ty::Error && tt.is_reference() {
+                    out.push((n, tt));
+                }
+            }
+            Condition::BoolParam(param) => {
+                if let Some(arg) = self.contract_arg_expr(call, *param) {
+                    self.collect_condition_narrowings(arg, true, out);
+                }
+            }
+            Condition::And(l, r) => {
+                self.conclusion_narrowings(call, l, out);
+                self.conclusion_narrowings(call, r, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// Smart casts from a same-module function's contract at a CONDITION position:
+    /// `if (r.isErr())` with `returns(true) implies (this@isErr is Err)` narrows per the
+    /// conclusion when the call's truth value matches the effect's return constant.
+    fn source_contract_condition_narrowings(
+        &self,
+        cond: ExprId,
+        truth: bool,
+        out: &mut Vec<(String, Ty)>,
+    ) {
+        let Some(contract) = self.source_contract_for_call(cond) else {
+            return;
+        };
+        for effect in &contract.effects {
+            let crate::contracts::Effect::ConditionalReturns {
+                returns,
+                conclusion,
+            } = effect
+            else {
+                continue;
+            };
+            let applies = matches!(returns, crate::contracts::ReturnsValue::Bool(b) if *b == truth);
+            if applies {
+                self.conclusion_narrowings(cond, conclusion, out);
+            }
+        }
     }
 
     fn member_inline_body_available(&self, member: &crate::libraries::LibraryMember) -> bool {
@@ -16719,6 +16904,7 @@ impl<'a> Checker<'a> {
         if let Some(binding) = self.contract_condition_narrowing(cond, truth) {
             out.push(binding);
         }
+        self.source_contract_condition_narrowings(cond, truth, out);
         if let Some(binding) = self.smartcast_binding(cond, !truth) {
             out.push(binding);
         }
@@ -20735,6 +20921,30 @@ impl<'a> Checker<'a> {
                         match else_branch {
                             Some(eb) => level = eb,
                             None => break,
+                        }
+                    }
+                    // A same-module function whose contract has `returns() implies <cond>`: the
+                    // conclusion holds for the rest of the block (the general source form of the
+                    // stdlib precondition contracts above).
+                    if let Expr::Call { .. } = self.file.expr(ie) {
+                        if let Some(contract) = self.source_contract_for_call(ie) {
+                            for effect in &contract.effects {
+                                if let crate::contracts::Effect::ConditionalReturns {
+                                    returns: crate::contracts::ReturnsValue::Any,
+                                    conclusion,
+                                } = effect
+                                {
+                                    let mut casts = Vec::new();
+                                    self.conclusion_narrowings(ie, conclusion, &mut casts);
+                                    let compound =
+                                        matches!(conclusion, crate::contracts::Condition::And(..));
+                                    for (name, ty) in casts {
+                                        if self.narrowing_is_supported(&name, ty, compound) {
+                                            self.declare(&name, ty, false);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     // `require(x is T)` / `check(x is T)` — a stdlib precondition that throws when the
