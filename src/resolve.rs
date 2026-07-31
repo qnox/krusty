@@ -1740,6 +1740,16 @@ impl SymbolTable {
             && !inline_body_has_splice_only_shape(file, f)
     }
 
+    /// Whether a top-level function is lowered + emitted as a facade static, so a CROSS-FILE call
+    /// links against a plain `invokestatic`: every non-inline top-level fun, plus an `inline` one
+    /// that is safe standalone (`inline_fn_facade_emittable`). Splice-only inline funs emit
+    /// nothing. Shared by every module-symbol registration driver (backend, survey, conformance
+    /// harness) so the three registration sites can't drift apart.
+    pub fn emits_fn_facade(&self, file: &File, file_index: u32, decl: DeclId, f: &FunDecl) -> bool {
+        f.receiver.is_none()
+            && (!f.is_inline() || self.inline_fn_facade_emittable(file, file_index, decl, f))
+    }
+
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
     /// anywhere inside a function type's parameters/return.
     fn ty_mentions_value_class(&self, t: Ty) -> bool {

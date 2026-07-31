@@ -870,6 +870,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (splice the caller's lambda at the callee's `FunctionN.invoke` sites — retires the
   `forEach`/`let`/`also` desugars) → non-local return → invokedynamic relocation. Tested by the
   `UserInline` snippet in `tests/feature_box_e2e.rs`.
+  **Cross-file source calls to top-level `inline fun`s link as facade statics.** A same-file call
+  splices the body; a call from ANOTHER file of the same module has no AST to splice, so the
+  defining file lowers + emits the inline fun as a facade static (kotlinc's `public static
+  synthetic` shape) and the caller emits a plain `invokestatic` via the existing `Callee::CrossFile`
+  path. Emittability is gated twice — syntactically (`FunDecl::has_emittable_inline_body`:
+  top-level, non-reified, non-suspend) and semantically (`SymbolTable::inline_fn_facade_emittable`:
+  no value class in the signature — a cross-file `invokestatic` applies no mangling/erasure — and
+  no splice-only body shape: nested lambdas, anonymous objects, `try`/`break`/`continue`,
+  expression-position `return`, `is`/`as` on a type parameter) — with the shared registration
+  predicate `SymbolTable::emits_fn_facade` used by the backend, survey, and conformance drivers.
+  Unsafe call sites BAIL rather than miscompile: an unregistered (unemittable) callee, a lambda
+  argument with a non-local `return` or a mutating capture, a callable-reference/anonymous-function
+  argument, a function-typed variable, or an enclosing inline lambda parameter passed as a value
+  (`tests/cross_file_inline_call_e2e.rs`).
 - **Collection `+=` (read-only vs mutable).** `coll += x` mutates in place when a `plusAssign` operator is
   applicable to the receiver, else reassigns (`coll = coll.plus(x)`) — exactly kotlinc's augmented-assignment
   resolution, with NO mutability predicate. The read-only/mutable distinction (`List` vs `MutableList`) is a

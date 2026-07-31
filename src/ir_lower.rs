@@ -8,7 +8,9 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
+use crate::ast::{
+    self, BinOp, Decl, DeclId, Expr, ExprId as AstExprId, FunBody, FunDecl, Stmt, TemplatePart,
+};
 use crate::frontend::{
     classifier_over_default, function_import_scope, qualified_path, typeref_leaf,
     AnonymousObjectCapture, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
@@ -2121,13 +2123,19 @@ fn lower_file_at_reporting_impl(
         }
     }
 
+    // A splice-only inline fun is registered/lowered NOWHERE (its body is expanded at each call
+    // site); an `inline_fn_facade_emittable` one ALSO emits a facade static for cross-file calls,
+    // so it goes through registration and body lowering like a plain fun.
+    let splice_only_inline = |f: &FunDecl, d: DeclId| {
+        f.is_inline()
+            && !f.has_callable_inline_extension_body()
+            && !syms.inline_fn_facade_emittable(file, file_index, d, f)
+    };
+
     // Pass 1b: register callable top-level and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
-            if f.is_inline()
-                && !f.has_callable_inline_extension_body()
-                && !syms.inline_fn_facade_emittable(file, file_index, d, f)
-            {
+            if splice_only_inline(f, d) {
                 continue;
             }
             if let Some(recv_ref) = &f.receiver {
@@ -2397,10 +2405,7 @@ fn lower_file_at_reporting_impl(
     // Pass 2: lower bodies.
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f)
-                if f.is_inline()
-                    && !f.has_callable_inline_extension_body()
-                    && !syms.inline_fn_facade_emittable(file, file_index, d, f) => {}
+            Decl::Fun(f) if splice_only_inline(f, d) => {}
             Decl::Fun(f) => {
                 lo.set_bail("deep:fun");
                 lo.scope.clear();
@@ -22271,10 +22276,13 @@ impl<'a> Lower<'a> {
                     .cloned()
                 {
                     // Same-file inline call: splice the body, exactly kotlinc's inliner. A
-                    // CROSS-FILE inline target has no AST here to splice — fall THROUGH to the
-                    // cross-file module-call path below, which emits a plain `invokestatic`
-                    // against the callee's facade static (lowered + emitted for any
-                    // `inline_fn_facade_emittable` function; unregistered callees bail there).
+                    // CROSS-FILE target has no AST here to splice — fall THROUGH to the module-call
+                    // path below (a plain `invokestatic` against the callee's facade static), but
+                    // ONLY when that callee was actually emitted (`inline_fn_facade_emittable`,
+                    // registered in `fn_facades_by_decl`): anything else must BAIL here, or the
+                    // generic dispatch would reinterpret the call (e.g. as a constructor of its
+                    // result type) and miscompile. Unsafe-to-close arguments (see
+                    // `cross_file_inline_arg_unsafe`) bail for the same reason.
                     if target.source_file == Some(self.file_index) {
                         let target_name = target.name.clone();
                         return self.lower_inline_fn_call(
@@ -22286,14 +22294,6 @@ impl<'a> Lower<'a> {
                             None,
                         );
                     }
-                    // A CROSS-FILE inline call has no AST here to splice. Fall through to the
-                    // cross-file module-call path below ONLY when the callee was emitted as a
-                    // facade static (`inline_fn_facade_emittable`, registered in
-                    // `fn_facades_by_decl`). Anything else must BAIL here — the generic dispatch
-                    // below would reinterpret the unresolved call (e.g. as a constructor of its
-                    // result type) and miscompile. A non-local `return` in a lambda argument is
-                    // legal ONLY when the callee is spliced — a real closure has no lowering for
-                    // it — so that bails here too rather than linking a broken body.
                     let emitted =
                         target
                             .source_file
