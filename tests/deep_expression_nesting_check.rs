@@ -1,11 +1,11 @@
 //! The recursive expression passes (checker and IR-lowering `expr_inner`) are depth-bounded
 //! (`expr_depth`, 500) and promise the bound is survivable: past it the expression degrades
 //! (`Error` type / lowering bail), the file is skipped, never crashed. That promise must hold on a
-//! default 2 MiB test-thread stack even in unoptimized builds, where a single `expr_inner` frame
-//! is ~120–150 KiB — a left-leaning `a && b && c && …` chain only a few dozen operands long used
-//! to overflow the stack long before the depth guard fired (each pass now runs on a dedicated
-//! wide-stack thread sized for its guard). A front-end + lowering regression guard — no classpath
-//! needed, so it runs everywhere.
+//! default 2 MiB test-thread stack even in unoptimized builds. Before the large match arms were
+//! extracted, a single `expr_inner` frame was ~120–150 KiB; after extraction, the smaller recursive
+//! frames still exhaust 2 MiB before reaching the documented bound. Each pass now grows a temporary
+//! stack segment on the same thread when its caller lacks the required reserve. This is a front-end
+//! + lowering regression guard — no classpath needed, so it runs everywhere.
 
 use krusty::diag::DiagSink;
 use krusty::frontend::{check_file, collect_signatures};

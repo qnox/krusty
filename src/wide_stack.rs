@@ -1,49 +1,28 @@
-//! A big-stack trampoline for the compiler's recursive passes.
+//! Same-thread stack growth for the compiler's depth-bounded recursive passes.
 //!
 //! The expression passes (checker `expr_inner`, lowering `expr_inner`) recurse over the AST and
 //! bound that recursion with explicit depth guards — but the guards are only survivable if every
-//! level's stack frames fit. Unoptimized builds give those giant match functions ~120–150 KiB
-//! frames (one stack slot per match-arm local, no slot coloring at opt-level 0), so a few dozen
-//! levels of nesting exhaust a default 2 MiB test-thread stack long before any guard fires. Each
-//! recursive pass entry runs on a thread sized for its depth guard instead, so the guard — not the
-//! calling thread's stack — is what limits expression nesting in every build profile and embedder
-//! (tests, CLI, LSP).
+//! level's stack frames fit. Even after the largest expression dispatchers were split into
+//! per-variant helpers, some unoptimized recursive frames remain large enough that the 500-level
+//! bound does not fit on a default 2 MiB test thread. Each recursive pass entry therefore checks
+//! the caller's remaining stack and, only when necessary, runs on a temporary stack segment on the
+//! SAME thread. The depth guard — not an embedder's incidental thread-stack size — remains the
+//! limit in tests, the CLI, and the LSP.
 
-/// Sized for the deepest depth guard (500) times the worst unoptimized per-level frame total
-/// (~165 KiB), with margin; the memory is virtual until touched.
-const WIDE_STACK_BYTES: usize = 128 * 1024 * 1024;
+/// The largest remaining measured unoptimized recursive frame is approximately 14 KiB. Its
+/// 500-level guard consumes about 7 MiB, so require 8 MiB at pass entry and use a 16 MiB temporary
+/// segment when the caller does not have that reserve. A 16 MiB segment also keeps the existing
+/// 450-level full-pipeline regression meaningful: its explicitly provisioned 16 MiB test thread
+/// already has enough space and does not need stack growth.
+const MIN_REMAINING_STACK_BYTES: usize = 8 * 1024 * 1024;
+const GROWN_STACK_BYTES: usize = 16 * 1024 * 1024;
 
-/// Run `f` to completion on a dedicated wide-stack thread and return its result.
+/// Run `f` with enough stack for the compiler's recursion bounds and return its result.
 ///
-/// This is a strictly SEQUENTIAL handoff, not concurrency: the compiler state `f` borrows is not
-/// `Send` (`Rc` handles and `RefCell` caches in the symbol table / platform), but the borrows move
-/// to the spawned thread, the parent blocks inside `scope` until it finishes, and the result moves
-/// back through `join` (which synchronizes-with the child). No allocation is ever touched by two
-/// threads at once, so the non-atomic refcounts and unguarded caches stay single-threaded.
-///
-/// Implicit precondition: nothing reachable from `f` may stash non-`Sync` state in thread-locals
-/// or rely on running on a particular thread — the compiler has no `thread_local!` state today,
-/// and any future addition must account for passes running on this throwaway thread.
+/// Stack growth stays on the caller's OS thread. That property is required because compiler state
+/// deliberately contains non-`Send` `Rc`/`RefCell` values, public runtime traits can be implemented
+/// by callers with thread-affine state, and diagnostics/tracing may acquire thread-local context.
+/// `stacker::maybe_grow` switches stack segments without weakening any of those type guarantees.
 pub(crate) fn on_wide_stack<T>(f: impl FnOnce() -> T) -> T {
-    struct AssertSend<T>(T);
-    unsafe impl<T> Send for AssertSend<T> {}
-    impl<T> AssertSend<T> {
-        // Takes WHOLE `self` so the spawned closure captures the wrapper, not (via the edition-2021
-        // disjoint-capture rules) the non-`Send` field inside it.
-        fn into_inner(self) -> T {
-            self.0
-        }
-    }
-
-    let call = AssertSend(f);
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("krusty-wide-stack".into())
-            .stack_size(WIDE_STACK_BYTES)
-            .spawn_scoped(scope, move || AssertSend(call.into_inner()()))
-            .expect("failed to spawn wide-stack thread")
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            .into_inner()
-    })
+    stacker::maybe_grow(MIN_REMAINING_STACK_BYTES, GROWN_STACK_BYTES, f)
 }
