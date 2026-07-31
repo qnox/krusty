@@ -18,14 +18,15 @@ use serde_json::{json, Value};
 
 use super::super::{
     CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex,
-    HoverIndex, LibraryDefinitionIndex, MaterializedDefinition, SemanticTokenIndex,
-    SemanticTokenRange, SignatureHelpIndex, WorkspaceSymbolIndex, MAX_RETAINED_ANALYSIS_BYTES,
-    SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
+    HoverIndex, IndexOutcome, IndexedFile, LibraryDefinitionIndex, MaterializedDefinition,
+    SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex, WorkspaceSymbolIndex,
+    MAX_RETAINED_ANALYSIS_BYTES, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
+use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
 use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
-    AnalysisBatch, AnalysisEngine, AnalysisJob, EngineBackend, EngineEvent, MaterializeJob,
-    MaterializeResult,
+    AnalysisBatch, AnalysisEngine, AnalysisJob, DumpJob, DumpOutcome, DumpResult, EngineBackend,
+    EngineEvent, IndexBatch, MaterializeJob, MaterializeResult,
 };
 use crate::server::status::StatusReporter;
 use crate::uri::{file_uri_to_path, path_to_file_uri};
@@ -36,6 +37,10 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 4;
 const MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE: usize = 32;
+/// How long shutdown waits for the analysis thread to notice the disconnect before
+/// abandoning it. Without a bound, one wedged analysis keeps the process — and its
+/// worker child — alive indefinitely after the client is gone.
+const ENGINE_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const MAX_OPEN_DOCUMENTS: usize = 256;
 const MAX_OPEN_SOURCE_BYTES: usize = MAX_RETAINED_ANALYSIS_BYTES;
 const MAX_CONTENT_CHANGES: usize = 256;
@@ -49,16 +54,21 @@ const MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_SET_DIAGNOSTIC_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const DIAGNOSTIC_WIRE_FIXED_BYTES: usize = 256;
 const MAX_PENDING_ANALYSIS_REQUEST_BYTES: usize = 256 * 1024;
+/// Same bound as `MAX_PENDING_MATERIALIZATIONS`: a held-down keybinding must not grow the map of
+/// dumps waiting on the analysis thread without limit.
+const MAX_PENDING_DUMPS: usize = 128;
 const BOUNDED_EXACT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WORKSPACE_DIAGNOSTIC_REPORTS: usize = 32 * 1024;
 const MAX_RENAME_IDENTIFIER_BYTES: usize = 1024;
 const MAX_RENAME_SPELLINGS: usize = 8;
 pub(super) const MAX_RENAME_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const RENAME_DOCUMENT_WIRE_FIXED_BYTES: usize = 128;
 const RENAME_EDIT_WIRE_FIXED_BYTES: usize = 192;
 const MAX_FORMATTING_RESULT_BYTES: usize = BOUNDED_EXACT_RESPONSE_BYTES;
-const DIAGNOSTIC_WARNING_BIT: u32 = 1 << 31;
-const DIAGNOSTIC_INSPECTION_BIT: u32 = 1 << 30;
-const DIAGNOSTIC_MESSAGE_MASK: u32 = !(DIAGNOSTIC_WARNING_BIT | DIAGNOSTIC_INSPECTION_BIT);
+pub(super) const DIAGNOSTIC_WARNING_BIT: u32 = 1 << 31;
+pub(super) const DIAGNOSTIC_INSPECTION_BIT: u32 = 1 << 30;
+pub(super) const DIAGNOSTIC_MESSAGE_MASK: u32 =
+    !(DIAGNOSTIC_WARNING_BIT | DIAGNOSTIC_INSPECTION_BIT);
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
 const MAX_BATCH_DURATION: Duration = Duration::from_millis(500);
 const ANALYSIS_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -211,6 +221,28 @@ impl DocumentAdmission {
 pub trait Analysis {
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis>;
 
+    /// Index workspace files that are not open. Required rather than defaulted: a silently empty
+    /// default let the whole background path look wired while producing nothing.
+    fn index_workspace_files(&mut self, uris: &[&str]) -> IndexOutcome;
+
+    /// Workspace sources sharing a module with one of the open documents. These are the files a
+    /// change to the open set is most likely to affect, so they index ahead of the sweep.
+    fn neighborhood_index_candidates(&mut self, _open_uris: &[&str]) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Every workspace source that is a candidate for background indexing, as file URIs. Reuses
+    /// the project model's own source inventory rather than walking the tree a second time.
+    fn workspace_index_candidates(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Whether the current model's inventory was truncated. Kept separate from the URI vector so
+    /// queueing stays allocation-focused while the engine can report incomplete workspace coverage.
+    fn workspace_index_incomplete(&self) -> bool {
+        false
+    }
+
     fn document_admission(&self) -> DocumentAdmission {
         DocumentAdmission::default()
     }
@@ -232,6 +264,13 @@ pub trait Analysis {
         &mut self,
         _reference: &LibraryRef,
     ) -> Option<MaterializedDefinition> {
+        None
+    }
+
+    /// Render the dev-mode AST/checker/IR dump for `uri` and report where it was written. `None`
+    /// when dev mode is off, the document was not part of the retained analysis payload, or
+    /// rendering failed.
+    fn dump(&mut self, _uri: &str) -> Option<DumpResult> {
         None
     }
 
@@ -276,7 +315,55 @@ pub trait Analysis {
 /// URI-aware analysis for open Kotlin and Java documents.
 pub struct DocumentAnalyzer;
 
+/// FNV-1a over the file text. Only ever compared against another hash this process produced, so a
+/// non-cryptographic hash is the right trade.
+pub fn workspace_text_hash(text: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
 impl Analysis for DocumentAnalyzer {
+    fn index_workspace_files(&mut self, uris: &[&str]) -> IndexOutcome {
+        let readable: Vec<(String, String)> = uris
+            .iter()
+            .filter_map(|uri| {
+                let path = url::Url::parse(uri).ok()?.to_file_path().ok()?;
+                let text = std::fs::read_to_string(path).ok()?;
+                Some(((*uri).to_string(), text))
+            })
+            .collect();
+        if readable.is_empty() {
+            // This standalone host has no infrastructure that can be pending: an empty read set is
+            // a conclusive set of tombstones, not a failed analysis attempt.
+            return IndexOutcome {
+                files: Vec::new(),
+                conclusive: true,
+            };
+        }
+        let documents: Vec<(&str, &str)> = readable
+            .iter()
+            .map(|(uri, text)| (uri.as_str(), text.as_str()))
+            .collect();
+        let open: Vec<&str> = documents.iter().map(|(uri, _)| *uri).collect();
+        let (analyses, _support) = self.analyze_open_documents(&documents, &open);
+        let conclusive = analyses.len() == readable.len();
+        let files = analyses
+            .into_iter()
+            .zip(readable)
+            .map(|(analysis, (uri, text))| IndexedFile {
+                uri,
+                diagnostics: analysis.diagnostics,
+                text_hash: workspace_text_hash(&text),
+                text,
+            })
+            .collect();
+        IndexOutcome { files, conclusive }
+    }
+
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
         crate::analysis::analyze_for_lsp(sources)
     }
@@ -297,6 +384,12 @@ impl<F> Analysis for F
 where
     F: FnMut(&[&str]) -> Vec<DocumentAnalysis>,
 {
+    /// A bare closure analyses open documents only; workspace indexing needs the project model,
+    /// which a closure does not carry.
+    fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+        IndexOutcome::default()
+    }
+
     fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
         self(sources)
     }
@@ -312,6 +405,17 @@ pub trait AnalysisBackend {
         Some(MaterializeResult {
             token: job.token,
             definition: None,
+        })
+    }
+    /// Render the dev-mode dump for `job.uri`.
+    ///
+    /// Mirrors [`AnalysisBackend::materialize`]: `Some` answers the request now, `None` means the
+    /// backend will publish an [`EngineEvent::Dumped`] carrying the same token later. The default
+    /// answers immediately with nothing to open.
+    fn dump(&mut self, job: DumpJob) -> Option<DumpOutcome> {
+        Some(DumpOutcome {
+            token: job.token,
+            dump: None,
         })
     }
     fn set_workspace_root(&mut self, root: Option<PathBuf>) -> Option<ProjectFeedback>;
@@ -373,6 +477,14 @@ impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
         Some(MaterializeResult {
             token: job.token,
             definition,
+        })
+    }
+
+    fn dump(&mut self, job: DumpJob) -> Option<DumpOutcome> {
+        let dump = self.0.dump(&job.uri);
+        Some(DumpOutcome {
+            token: job.token,
+            dump,
         })
     }
 
@@ -610,6 +722,28 @@ impl DiagnosticIndex {
         DiagnosticIndex::default().result_id()
     }
 
+    /// Entries are already resolved and messages already interned, so this is a copy rather than
+    /// another position-resolution pass.
+    fn from_workspace(found: &WorkspaceDiagnostics<'_>) -> DiagnosticIndex {
+        let mut messages = Vec::new();
+        let mut remapped = HashMap::<u32, u32>::new();
+        let entries = found
+            .entries
+            .iter()
+            .map(|entry| {
+                let stored = entry[4] & DIAGNOSTIC_MESSAGE_MASK;
+                let next = u32::try_from(messages.len()).unwrap_or(DIAGNOSTIC_MESSAGE_MASK);
+                let local = *remapped.entry(stored).or_insert_with(|| {
+                    messages.push(found.messages[stored as usize].clone());
+                    next
+                });
+                let flags = entry[4] & !DIAGNOSTIC_MESSAGE_MASK;
+                [entry[0], entry[1], entry[2], entry[3], flags | local]
+            })
+            .collect();
+        DiagnosticIndex { entries, messages }
+    }
+
     fn encode(&self) -> Vec<Value> {
         self.entries
             .iter()
@@ -644,7 +778,7 @@ fn json_string_wire_bytes(value: &str) -> usize {
     })
 }
 
-fn resolve_diagnostic_positions(
+pub(super) fn resolve_diagnostic_positions(
     text: &str,
     pending: &[PendingDiagnosticEntry],
 ) -> Vec<DiagnosticEntry> {
@@ -794,6 +928,7 @@ pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
     workspace_symbols: WorkspaceSymbolIndex,
+    workspace_diagnostics: WorkspaceDiagnosticStore,
     backend: B,
     analysis_dirty: bool,
     analysis_retry_at: Option<Instant>,
@@ -814,7 +949,20 @@ pub struct LspService<B> {
     pending_analysis_request_bytes: usize,
     next_materialize_token: u64,
     pending_materializations: HashMap<u64, Value>,
+    next_dump_token: u64,
+    pending_dumps: HashMap<u64, PendingDump>,
+    dev: bool,
     status: StatusReporter,
+}
+
+/// A `textDocument/codeAction` request waiting for the analysis thread to write its dump.
+///
+/// The originating URI and position are kept because the client-side navigation command needs them
+/// in its argument list, and the request that carried them is long gone by the time the dump lands.
+struct PendingDump {
+    id: Value,
+    uri: String,
+    position: Position,
 }
 
 impl<A: Analysis> LspService<InlineBackend<A>> {
@@ -832,6 +980,7 @@ where
             documents: HashMap::new(),
             source_set: Vec::new(),
             workspace_symbols: WorkspaceSymbolIndex::default(),
+            workspace_diagnostics: WorkspaceDiagnosticStore::default(),
             backend,
             analysis_dirty: false,
             analysis_retry_at: None,
@@ -852,8 +1001,18 @@ where
             pending_analysis_request_bytes: 0,
             next_materialize_token: 0,
             pending_materializations: HashMap::new(),
+            next_dump_token: 0,
+            pending_dumps: HashMap::new(),
+            dev: false,
             status: StatusReporter::default(),
         }
+    }
+
+    /// Turn on the developer surfaces — currently the dump code action and the capability that
+    /// advertises it. Off by default, so an ordinary session is unchanged.
+    pub fn with_dev(mut self, dev: bool) -> Self {
+        self.dev = dev;
+        self
     }
 
     pub fn open_document_count(&self) -> usize {
@@ -1111,6 +1270,39 @@ where
         messages
     }
 
+    pub(crate) fn apply_index_batch(&mut self, batch: IndexBatch) -> Vec<Value> {
+        let outcome = self.workspace_diagnostics.merge(
+            batch.generation,
+            &batch.attempted,
+            batch.conclusive,
+            batch.files,
+            resolve_diagnostic_positions,
+        );
+        if !outcome.accepted {
+            return Vec::new();
+        }
+        let mut messages = Vec::new();
+        if outcome.newly_truncated {
+            messages.push(log_message(
+                "krusty: workspace diagnostic retention reached its memory limit; results are incomplete"
+                    .to_string(),
+            ));
+        }
+        // Files the sweep touched may now have different diagnostics, and a pull-based client has
+        // no other way to hear about a file it is not actively pulling.
+        if outcome.changed {
+            messages.extend(self.diagnostic_refresh());
+        }
+        messages
+    }
+
+    pub(crate) fn reset_workspace_index(&mut self, generation: u64) -> Vec<Value> {
+        self.workspace_diagnostics.reset_to(generation);
+        // Clearing old-model results is itself a diagnostic change. Pull clients must be told even
+        // when the replacement model produces no files or its first analysis is still pending.
+        self.diagnostic_refresh().into_iter().collect()
+    }
+
     fn schedule_analysis_retry(&mut self, uris: &[String]) {
         self.source_set.clear();
         self.workspace_symbols = WorkspaceSymbolIndex::default();
@@ -1238,48 +1430,53 @@ where
                 self.client_refreshes_diagnostics = client_supports_diagnostic_refresh(&params);
                 self.pending_init_feedback =
                     self.backend.set_workspace_root(workspace_root(&params));
+                let mut capabilities = json!({
+                    "hoverProvider": true,
+                    "definitionProvider": true,
+                    "typeDefinitionProvider": true,
+                    "implementationProvider": true,
+                    "referencesProvider": true,
+                    "renameProvider": true,
+                    "documentSymbolProvider": true,
+                    "workspaceSymbolProvider": {
+                        "resolveProvider": false,
+                        "workDoneProgress": true,
+                    },
+                    "documentFormattingProvider": true,
+                    "foldingRangeProvider": true,
+                    "diagnosticProvider": {
+                        "interFileDependencies": true,
+                        "workspaceDiagnostics": true,
+                        "workDoneProgress": false,
+                    },
+                    "completionProvider": {
+                        "resolveProvider": true,
+                        "triggerCharacters": ["."],
+                    },
+                    "signatureHelpProvider": {
+                        "triggerCharacters": ["(", ","],
+                        "retriggerCharacters": [","],
+                        "workDoneProgress": false,
+                    },
+                    "positionEncoding": "utf-16",
+                    "semanticTokensProvider": {
+                        "legend": {
+                            "tokenTypes": SEMANTIC_TOKEN_TYPES,
+                            "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS,
+                        },
+                        "full": true,
+                        "range": true,
+                    },
+                    "textDocumentSync": 2
+                });
+                // Advertised only under `--dev`; an ordinary session must not offer the action.
+                if self.dev {
+                    capabilities["codeActionProvider"] = json!(true);
+                }
                 Dispatch::messages(vec![rpc_result(
                     id,
                     json!({
-                        "capabilities": {
-                            "hoverProvider": true,
-                            "definitionProvider": true,
-                            "typeDefinitionProvider": true,
-                            "implementationProvider": true,
-                            "referencesProvider": true,
-                            "renameProvider": true,
-                            "documentSymbolProvider": true,
-                            "workspaceSymbolProvider": {
-                                "resolveProvider": false,
-                                "workDoneProgress": true,
-                            },
-                            "documentFormattingProvider": true,
-                            "foldingRangeProvider": true,
-                            "diagnosticProvider": {
-                                "interFileDependencies": true,
-                                "workspaceDiagnostics": false,
-                                "workDoneProgress": false,
-                            },
-                            "completionProvider": {
-                                "resolveProvider": true,
-                                "triggerCharacters": ["."],
-                            },
-                            "signatureHelpProvider": {
-                                "triggerCharacters": ["(", ","],
-                                "retriggerCharacters": [","],
-                                "workDoneProgress": false,
-                            },
-                            "positionEncoding": "utf-16",
-                            "semanticTokensProvider": {
-                                "legend": {
-                                    "tokenTypes": SEMANTIC_TOKEN_TYPES,
-                                    "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS,
-                                },
-                                "full": true,
-                                "range": true,
-                            },
-                            "textDocumentSync": 2
-                        },
+                        "capabilities": capabilities,
                         "serverInfo": {
                             "name": "krusty-lsp",
                             "version": SERVER_VERSION
@@ -1314,6 +1511,7 @@ where
             "textDocument/didClose" => self.did_close(id, params, defer_analysis),
             "textDocument/hover" => self.hover(id, params),
             "textDocument/definition" => self.definition(id, params),
+            "textDocument/codeAction" => self.code_action(id, params),
             "textDocument/typeDefinition" => self.type_definition(id, params),
             "textDocument/implementation" => self.implementation(id, params),
             "textDocument/references" => self.references(id, params),
@@ -1323,6 +1521,7 @@ where
             "textDocument/formatting" => self.formatting(id, params),
             "textDocument/foldingRange" => self.folding_ranges(id, params),
             "textDocument/diagnostic" => self.pull_diagnostics(id, params),
+            "workspace/diagnostic" => self.workspace_diagnostic(id, params),
             "textDocument/completion" => self.completion(id, params),
             "textDocument/signatureHelp" => self.signature_help(id, params),
             "completionItem/resolve" => self.resolve_completion(id, params),
@@ -1946,6 +2145,53 @@ where
         Some(self.materialize_response(id, result))
     }
 
+    /// Dev-mode only: a single action whose command the client handles by navigating to the dump
+    /// file the analysis thread wrote.
+    ///
+    /// The dump is produced on that thread, so the answer usually arrives later; the request id is
+    /// parked here and resolved by [`LspService::complete_dump`].
+    fn code_action(&mut self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        if !self.dev {
+            return Dispatch::messages(vec![rpc_result(id, Value::Array(Vec::new()))]);
+        }
+        let Ok(params) = serde_json::from_value::<CodeActionParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        if self.pending_dumps.len() >= MAX_PENDING_DUMPS {
+            return Dispatch::messages(vec![rpc_error(id, -32000, "too many pending dumps")]);
+        }
+        let token = self.next_dump_token;
+        self.next_dump_token = self.next_dump_token.wrapping_add(1);
+        let uri = params.text_document.uri;
+        let position = params.range.start;
+        match self.backend.dump(DumpJob {
+            token,
+            uri: uri.clone(),
+        }) {
+            Some(outcome) => {
+                Dispatch::messages(vec![dump_code_actions(id, &uri, position, outcome.dump)])
+            }
+            None => {
+                self.pending_dumps
+                    .insert(token, PendingDump { id, uri, position });
+                Dispatch::none()
+            }
+        }
+    }
+
+    fn complete_dump(&mut self, outcome: DumpOutcome) -> Option<Value> {
+        let pending = self.pending_dumps.remove(&outcome.token)?;
+        Some(dump_code_actions(
+            pending.id,
+            &pending.uri,
+            pending.position,
+            outcome.dump,
+        ))
+    }
+
     fn type_definition(&self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
@@ -2358,9 +2604,21 @@ where
         let uri = params.text_document.uri;
         let previous_result_id = params.previous_result_id;
         if !self.document_waits_for_analysis(&uri) {
+            // An open buffer is newer than whatever the sweep read from disk, so it always wins.
+            if let Some(open) = self.documents.get(&uri) {
+                return Dispatch::messages(vec![diagnostic_report(
+                    id,
+                    Some(&open.diagnostics),
+                    previous_result_id.as_deref(),
+                )]);
+            }
+            let indexed = self
+                .workspace_diagnostics
+                .diagnostics(&uri)
+                .map(|found| DiagnosticIndex::from_workspace(&found));
             return Dispatch::messages(vec![diagnostic_report(
                 id,
-                self.documents.get(&uri).map(|open| &open.diagnostics),
+                indexed.as_ref(),
                 previous_result_id.as_deref(),
             )]);
         }
@@ -2420,6 +2678,105 @@ where
                 retained_bytes,
             });
         Dispatch::messages(messages)
+    }
+
+    /// Report every file the sweep has indexed. Without this the retained diagnostics are
+    /// unreachable: a client only pulls `textDocument/diagnostic` for documents it has open, and
+    /// those are always answered from the open buffer.
+    fn workspace_diagnostic(&mut self, id: Option<Value>, params: Value) -> Dispatch {
+        let Some(id) = id else {
+            return Dispatch::none();
+        };
+        let Ok(params) = serde_json::from_value::<WorkspaceDiagnosticParams>(params) else {
+            return invalid_params(Some(id));
+        };
+        if params.previous_result_ids.len() > MAX_WORKSPACE_DIAGNOSTIC_REPORTS {
+            return Dispatch::messages(vec![diagnostic_server_cancelled(
+                id,
+                "workspace diagnostic prior-result set exceeds the response limit",
+                false,
+            )]);
+        }
+        let previous: HashMap<String, String> = params
+            .previous_result_ids
+            .into_iter()
+            .map(|previous| (previous.uri, previous.value))
+            .collect();
+        // Include prior client state even when the file disappeared: omitting that URI would leave
+        // its old diagnostics installed forever. Open buffers also belong here and are authoritative
+        // over the sweep, just as they are for textDocument/diagnostic.
+        let mut uris = self.workspace_diagnostics.indexed_uris();
+        uris.extend(self.documents.keys().cloned());
+        uris.extend(previous.keys().cloned());
+        uris.sort_unstable();
+        uris.dedup();
+        if uris.len() > MAX_WORKSPACE_DIAGNOSTIC_REPORTS {
+            return Dispatch::messages(vec![diagnostic_server_cancelled(
+                id,
+                "workspace diagnostic report exceeds the bounded non-streaming response limit",
+                false,
+            )]);
+        }
+
+        let mut items = Vec::new();
+        let mut item_wire_bytes = 2usize;
+        for uri in uris {
+            let workspace_index;
+            let empty_index;
+            let index = if let Some(open) = self.documents.get(&uri) {
+                &open.diagnostics
+            } else if let Some(found) = self.workspace_diagnostics.diagnostics(&uri) {
+                workspace_index = DiagnosticIndex::from_workspace(&found);
+                &workspace_index
+            } else {
+                empty_index = DiagnosticIndex::default();
+                &empty_index
+            };
+            let result_id = index.result_id();
+            let item = if previous.get(&uri).map(String::as_str) == Some(result_id.as_str()) {
+                json!({
+                    "kind": "unchanged",
+                    "uri": uri,
+                    "version": Value::Null,
+                    "resultId": result_id,
+                })
+            } else {
+                json!({
+                "kind": "full",
+                "uri": uri,
+                    "version": Value::Null,
+                    "resultId": result_id,
+                "items": index.encode(),
+                })
+            };
+            let Ok(encoded) = serde_json::to_vec(&item) else {
+                return Dispatch::messages(vec![rpc_error(
+                    id,
+                    -32603,
+                    "workspace diagnostic serialization failed",
+                )]);
+            };
+            item_wire_bytes = item_wire_bytes
+                .saturating_add(encoded.len())
+                .saturating_add(1);
+            if item_wire_bytes > BOUNDED_EXACT_RESPONSE_BYTES {
+                return Dispatch::messages(vec![diagnostic_server_cancelled(
+                    id,
+                    "workspace diagnostic report exceeds the bounded non-streaming response limit",
+                    false,
+                )]);
+            }
+            items.push(item);
+        }
+        let response = rpc_result(id.clone(), json!({"items": items}));
+        if !serialized_value_fits(&response, MAX_MESSAGE_BYTES) {
+            return Dispatch::messages(vec![diagnostic_server_cancelled(
+                id,
+                "workspace diagnostic response exceeds the protocol message limit",
+                false,
+            )]);
+        }
+        Dispatch::messages(vec![response])
     }
 
     fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
@@ -2504,6 +2861,34 @@ struct TextDocumentIdentifier {
     uri: String,
 }
 
+const DUMP_ACTION_TITLE: &str = "krusty (dev): dump AST + checker + IR";
+
+/// The code-action response for a finished dump: one navigation action, or an empty list when the
+/// document had no dump to open.
+///
+/// The `arguments` array must carry three elements. Zed reads `arguments[2]` as the location list
+/// and ignores the first two, but returns early when fewer than three are present — which turns the
+/// action into a silent no-op with no error anywhere.
+fn dump_code_actions(id: Value, uri: &str, position: Position, dump: Option<DumpResult>) -> Value {
+    let Some(dump_uri) = dump.and_then(|dump| path_to_file_uri(&dump.path)) else {
+        return rpc_result(id, Value::Array(Vec::new()));
+    };
+    let zero = json!({"line": 0, "character": 0});
+    let location = json!({"uri": dump_uri, "range": {"start": zero, "end": zero}});
+    rpc_result(
+        id,
+        json!([{
+            "title": DUMP_ACTION_TITLE,
+            "kind": "source",
+            "command": {
+                "title": DUMP_ACTION_TITLE,
+                "command": "editor.action.goToLocations",
+                "arguments": [uri, position, [location]],
+            }
+        }]),
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DocumentSymbolParams {
@@ -2545,6 +2930,19 @@ struct DocumentDiagnosticParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceDiagnosticParams {
+    #[serde(default)]
+    previous_result_ids: Vec<WorkspacePreviousResultId>,
+}
+
+#[derive(Deserialize)]
+struct WorkspacePreviousResultId {
+    uri: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DidCloseParams {
     text_document: TextDocumentIdentifier,
 }
@@ -2554,6 +2952,13 @@ struct DidCloseParams {
 struct TextDocumentPositionParams {
     text_document: TextDocumentIdentifier,
     position: Position,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeActionParams {
+    text_document: TextDocumentIdentifier,
+    range: Range,
 }
 
 #[derive(Deserialize)]
@@ -3114,7 +3519,7 @@ fn publish_diagnostics(uri: &str, version: Option<i64>, diagnostics: &Diagnostic
 /// the same message lowercase. Do this only at the protocol boundary so compiler diagnostics remain
 /// byte-for-byte compatible with kotlinc. Current Kotlin diagnostic prefixes are ASCII; mutating that
 /// byte in place avoids another allocation in the analysis-to-wire path.
-fn lsp_diagnostic_message(mut message: String) -> String {
+pub(super) fn lsp_diagnostic_message(mut message: String) -> String {
     if let Some(first_byte) = message.get_mut(..1) {
         first_byte.make_ascii_uppercase();
     }
@@ -3548,6 +3953,18 @@ where
                 service.mark_analysis_dirty();
             }
         }
+        EngineEvent::IndexProgress(batch) => {
+            for message in service.apply_index_batch(batch) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
+        EngineEvent::IndexReset(generation) => {
+            for message in service.reset_workspace_index(generation) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
         EngineEvent::WatchedGlobs(globs) => {
             if globs.is_empty() {
                 return Ok(());
@@ -3585,6 +4002,12 @@ where
         }
         EngineEvent::Materialized(result) => {
             if let Some(message) = service.complete_materialization(result) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
+        }
+        EngineEvent::Dumped(outcome) => {
+            if let Some(message) = service.complete_dump(outcome) {
                 let encoded = serde_json::to_vec(&message).map_err(json_io)?;
                 write_framed(writer, &encoded)?;
             }
@@ -3628,7 +4051,9 @@ where
     Ok(None)
 }
 
-pub fn run_stdio_connection_async<A>(analyze: A) -> io::Result<i32>
+/// `dev` turns on the developer surfaces; it must be the same flag the analysis host was built
+/// with, because the capability is advertised here while the dump is produced there.
+pub fn run_stdio_connection_async<A>(analyze: A, dev: bool) -> io::Result<i32>
 where
     A: Analysis + Send + 'static,
 {
@@ -3657,7 +4082,7 @@ where
     let backend = EngineBackend::new(engine, false);
     let stdout = io::stdout();
     let mut writer = stdout.lock();
-    let service = LspService::with_backend(backend);
+    let service = LspService::with_backend(backend).with_dev(dev);
     run_async_loop(service, &mut writer, incoming)
 }
 
@@ -3724,13 +4149,46 @@ where
             let _ = write_framed(writer, &encoded);
         }
     }
-    let mut engine = service.backend.into_engine();
-    engine.disconnect();
-    while !engine.is_finished() {
-        let _ = incoming.recv_timeout(Duration::from_millis(50));
-    }
-    engine.join();
+    let _ = shutdown_engine(
+        service.backend.into_engine(),
+        &incoming,
+        ENGINE_SHUTDOWN_GRACE,
+    );
     outcome
+}
+
+/// Disconnect the analysis command queue and wait at most `grace` for its thread to unwind.
+///
+/// Returning whether the thread joined makes the exceptional detach path directly testable without
+/// baking the production two-second budget into a unit test. While waiting, drain engine events: the
+/// engine uses a bounded event channel and could otherwise be finished with analysis but blocked trying
+/// to publish its last result. Once the deadline expires, dropping the join handle deliberately detaches
+/// the thread so the server's main thread can return and process teardown can reclaim it.
+fn shutdown_engine(
+    mut engine: AnalysisEngine,
+    incoming: &Receiver<Incoming>,
+    grace: Duration,
+) -> bool {
+    engine.disconnect();
+    let deadline = Instant::now()
+        .checked_add(grace)
+        .unwrap_or_else(Instant::now);
+    while !engine.is_finished() {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        // Do not overshoot a short test budget by the production polling interval.
+        let _ = incoming.recv_timeout(remaining.min(Duration::from_millis(50)));
+    }
+    if engine.is_finished() {
+        engine.join();
+        true
+    } else {
+        // The analysis thread is wedged. Leave it detached and let process teardown
+        // reap it; blocking here would strand the server after the client is gone.
+        engine.abandon();
+        false
+    }
 }
 
 fn maintenance_preempts_input(input_dispatches: usize, due: Option<Duration>) -> bool {
@@ -4141,6 +4599,171 @@ mod tests {
         );
     }
 
+    fn dump_code_action_request(id: i64, uri: &str, line: u32, character: u32) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": line, "character": character},
+                    "end": {"line": line, "character": character}
+                },
+                "context": {"diagnostics": []}
+            }
+        })
+    }
+
+    fn drain_engine(engine: AnalysisEngine, incoming: &Receiver<Incoming>) {
+        let mut engine = engine;
+        engine.disconnect();
+        while !engine.is_finished() {
+            let _ = incoming.recv_timeout(Duration::from_millis(50));
+        }
+        engine.join();
+    }
+
+    /// The production server runs on `EngineBackend`, which answers a dump only after the analysis
+    /// thread has written it. A code action that works solely through an inline stub would be dead
+    /// in the real editor, so the whole deferred round trip is exercised here.
+    #[test]
+    fn dev_mode_code_action_is_answered_through_the_engine_backend() {
+        use std::sync::mpsc::sync_channel;
+
+        struct DumpHost;
+        impl Analysis for DumpHost {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
+
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn dump(&mut self, uri: &str) -> Option<DumpResult> {
+                (uri == "file:///w/Main.kt").then(|| DumpResult {
+                    path: PathBuf::from("/cache/dumps/Main.kt.krusty.md"),
+                })
+            }
+        }
+
+        let (sender, incoming) = sync_channel::<Incoming>(INPUT_QUEUE_CAPACITY);
+        let engine = AnalysisEngine::spawn(DumpHost, sender.clone());
+        let mut service = LspService::with_backend(EngineBackend::new(engine, true)).with_dev(true);
+        service.force_initialized_for_test();
+
+        let mut pending = VecDeque::new();
+        let mut out: Vec<u8> = Vec::new();
+
+        let ready = incoming.recv().expect("engine startup ready-state");
+        step_async(&mut service, &mut out, &incoming, &mut pending, ready).unwrap();
+
+        step_async(
+            &mut service,
+            &mut out,
+            &incoming,
+            &mut pending,
+            Incoming::Message(dump_code_action_request(7, "file:///w/Main.kt", 2, 1)),
+        )
+        .unwrap();
+        assert!(
+            decode_messages(&out)
+                .iter()
+                .all(|message| message["id"] != 7),
+            "the engine backend must answer the dump asynchronously"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let response = loop {
+            if let Some(message) = decode_messages(&out)
+                .into_iter()
+                .find(|message| message["id"] == 7)
+            {
+                break message;
+            }
+            assert!(Instant::now() < deadline, "no dump response arrived");
+            let event = match pending.pop_front() {
+                Some(event) => Some(event),
+                None => incoming.recv_timeout(Duration::from_millis(100)).ok(),
+            };
+            if let Some(event) = event {
+                step_async(&mut service, &mut out, &incoming, &mut pending, event).unwrap();
+            }
+        };
+
+        let actions = response["result"].as_array().expect("array result");
+        assert_eq!(actions.len(), 1, "{response}");
+        assert_eq!(actions[0]["kind"], "source");
+        let command = &actions[0]["command"];
+        assert_eq!(command["command"], "editor.action.goToLocations");
+        let arguments = command["arguments"].as_array().expect("arguments array");
+        assert_eq!(
+            arguments.len(),
+            3,
+            "Zed drops the command when arguments.len() < 3"
+        );
+        assert_eq!(arguments[0], "file:///w/Main.kt");
+        assert_eq!(arguments[1], json!({"line": 2, "character": 1}));
+        assert_eq!(
+            arguments[2][0]["uri"],
+            "file:///cache/dumps/Main.kt.krusty.md"
+        );
+
+        drain_engine(service.backend.into_engine(), &incoming);
+    }
+
+    /// Holding down the keybinding must not grow the pending map without bound.
+    #[test]
+    fn pending_dumps_are_bounded() {
+        use std::sync::mpsc::sync_channel;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
+
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let (sender, incoming) = sync_channel::<Incoming>(INPUT_QUEUE_CAPACITY);
+        let engine = AnalysisEngine::spawn(Mock, sender.clone());
+        let mut service = LspService::with_backend(EngineBackend::new(engine, true)).with_dev(true);
+        service.force_initialized_for_test();
+
+        for id in 0..MAX_PENDING_DUMPS {
+            let dispatch = service.handle(dump_code_action_request(
+                id as i64,
+                "file:///w/Main.kt",
+                0,
+                0,
+            ));
+            assert!(
+                dispatch.messages.is_empty(),
+                "request {id} must wait for the analysis thread"
+            );
+        }
+        assert_eq!(service.pending_dumps.len(), MAX_PENDING_DUMPS);
+
+        let dispatch = service.handle(dump_code_action_request(
+            MAX_PENDING_DUMPS as i64,
+            "file:///w/Main.kt",
+            0,
+            0,
+        ));
+        assert_eq!(dispatch.messages.len(), 1);
+        assert_eq!(dispatch.messages[0]["error"]["code"], -32000);
+        assert_eq!(
+            service.pending_dumps.len(),
+            MAX_PENDING_DUMPS,
+            "a rejected dump must not be retained"
+        );
+
+        drain_engine(service.backend.into_engine(), &incoming);
+    }
+
     #[test]
     fn engine_thread_is_joined_on_eof() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -4157,6 +4780,9 @@ mod tests {
             _flag: DropFlag,
         }
         impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 sources.iter().map(|_| DocumentAnalysis::empty()).collect()
             }
@@ -4187,6 +4813,9 @@ mod tests {
     fn shutdown_ends_open_status() {
         struct Mock;
         impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 sources.iter().map(|_| DocumentAnalysis::empty()).collect()
             }
@@ -4234,6 +4863,9 @@ mod tests {
             _flag: DropFlag,
         }
         impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 sources.iter().map(|_| DocumentAnalysis::empty()).collect()
             }
@@ -4273,6 +4905,73 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_abandons_analysis_that_exceeds_its_grace_period() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::{channel, sync_channel};
+        use std::sync::Arc;
+
+        struct BlockingAnalysis {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+            completed: Arc<AtomicBool>,
+        }
+        impl Analysis for BlockingAnalysis {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                // This fixture isolates shutdown while an interactive analysis is blocked; it has
+                // no project model and therefore no legitimate workspace-index producer.
+                IndexOutcome::default()
+            }
+
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                let _ = self.entered.send(());
+                let _ = self.release.recv();
+                self.completed.store(true, Ordering::SeqCst);
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+        }
+
+        let (entered_tx, entered_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let analysis = BlockingAnalysis {
+            entered: entered_tx,
+            release: release_rx,
+            completed: completed.clone(),
+        };
+        let (events, incoming) = sync_channel(INPUT_QUEUE_CAPACITY);
+        let engine = AnalysisEngine::spawn(analysis, events);
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///blocked.kt".into(), "fun blocked() {}".into(), 1)],
+            open_uris: vec!["file:///blocked.kt".into()],
+        }));
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("analysis entered its blocking section");
+
+        let started = Instant::now();
+        assert!(
+            !shutdown_engine(engine, &incoming, Duration::from_millis(20)),
+            "a still-running analysis must take the detach path"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "shutdown exceeded its bounded grace period"
+        );
+
+        // Detachment must not corrupt the engine's own unwind path. Release the synthetic block and
+        // wait for it to finish before the test drops its channels, keeping this regression leak-free.
+        release_tx.send(()).expect("release detached analysis");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !completed.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "detached analysis did not unwind after its blocker was released"
+        );
+    }
+
+    #[test]
     fn request_is_answered_while_analysis_is_in_flight() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc::{channel, sync_channel};
@@ -4284,6 +4983,9 @@ mod tests {
             completed: Arc<AtomicBool>,
         }
         impl Analysis for BlockingAnalysis {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 let _ = self.entered.send(());
                 let _ = self.release.recv_timeout(Duration::from_secs(5));
@@ -5742,8 +6444,8 @@ mod tests {
     #[test]
     fn a_file_uri_decodes_percent_escapes_and_drops_the_scheme() {
         assert_eq!(
-            file_uri_to_path("file:///home/qnox/pro%20ject"),
-            Some(PathBuf::from("/home/qnox/pro ject"))
+            file_uri_to_path("file:///workspace/pro%20ject"),
+            Some(PathBuf::from("/workspace/pro ject"))
         );
     }
 
@@ -5883,5 +6585,276 @@ mod tests {
         });
         assert!(client_supports_work_done_progress(&params));
         assert!(!client_supports_work_done_progress(&json!({})));
+    }
+    #[test]
+    fn a_pull_for_an_unopened_file_answers_from_the_workspace_index() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec!["file:///w/Swept.kt".to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: "file:///w/Swept.kt".to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(4, 9),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "swept boom".to_string(),
+                    file: 0,
+                }],
+                text_hash: 3,
+                text: "val broken = 1\n".to_string(),
+            }],
+        });
+
+        let report = service.pull_diagnostics(
+            Some(json!(1)),
+            json!({"textDocument": {"uri": "file:///w/Swept.kt"}}),
+        );
+        let items = &report.messages[0]["result"]["items"];
+        assert_eq!(items.as_array().map(Vec::len), Some(1));
+        assert_eq!(items[0]["message"], "Swept boom");
+        assert_eq!(items[0]["range"]["start"]["line"], 0);
+        assert_eq!(
+            items[0]["range"]["start"]["character"], 4,
+            "byte spans must be resolved to UTF-16 columns while the text is still in hand"
+        );
+    }
+
+    #[test]
+    fn an_attempted_file_that_produced_no_result_loses_its_retained_diagnostics() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///w/Gone.kt".to_string();
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.clone()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: uri.clone(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "will be deleted".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x\n".to_string(),
+            }],
+        });
+
+        // The file is deleted, so the next sweep attempts it and produces nothing for it.
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.clone()],
+            conclusive: true,
+            files: Vec::new(),
+        });
+
+        let report =
+            service.pull_diagnostics(Some(json!(2)), json!({"textDocument": {"uri": uri}}));
+        assert_eq!(
+            report.messages[0]["result"]["items"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "a deleted file must not keep reporting diagnostics forever"
+        );
+    }
+
+    #[test]
+    fn an_index_batch_from_a_replaced_model_is_rejected() {
+        let mut service = LspService::new(|s: &[&str]| {
+            s.iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.apply_index_batch(IndexBatch {
+            generation: 4,
+            attempted: vec!["file:///new/A.kt".to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: "file:///new/A.kt".to_string(),
+                diagnostics: Vec::new(),
+                text_hash: 1,
+                text: String::new(),
+            }],
+        });
+        service.apply_index_batch(IndexBatch {
+            generation: 1,
+            attempted: vec!["file:///new/A.kt".to_string()],
+            conclusive: true,
+            files: Vec::new(),
+        });
+
+        assert!(
+            service
+                .workspace_diagnostics
+                .diagnostics("file:///new/A.kt")
+                .is_some(),
+            "a late batch from a replaced model must not delete data the current model produced"
+        );
+    }
+
+    #[test]
+    fn a_model_reset_clears_retained_diagnostics_before_the_replacement_sweep() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///old/Model.kt";
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: uri.to_string(),
+                diagnostics: Vec::new(),
+                text_hash: 1,
+                text: String::new(),
+            }],
+        });
+
+        let _refresh = service.reset_workspace_index(1);
+
+        assert!(
+            service.workspace_diagnostics.diagnostics(uri).is_none(),
+            "old-model results must disappear when the model changes, not when its first new batch arrives"
+        );
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            conclusive: true,
+            files: Vec::new(),
+        });
+        assert!(
+            service.workspace_diagnostics.diagnostics(uri).is_none(),
+            "a late old-generation batch must not repopulate the cleared store"
+        );
+    }
+
+    #[test]
+    fn workspace_report_honors_prior_ids_and_clears_disappeared_files() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let indexed_uri = "file:///w/Indexed.kt";
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![indexed_uri.to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: indexed_uri.to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "indexed".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x".to_string(),
+            }],
+        });
+        let first = service.workspace_diagnostic(Some(json!(1)), json!({}));
+        let prior = first.messages[0]["result"]["items"][0]["resultId"]
+            .as_str()
+            .expect("workspace result id")
+            .to_string();
+
+        let second = service.workspace_diagnostic(
+            Some(json!(2)),
+            json!({
+                "previousResultIds": [
+                    {"uri": indexed_uri, "value": prior},
+                    {"uri": "file:///w/Deleted.kt", "value": "stale"},
+                ]
+            }),
+        );
+        let items = second.messages[0]["result"]["items"]
+            .as_array()
+            .expect("workspace diagnostic items");
+        let indexed = items
+            .iter()
+            .find(|item| item["uri"] == indexed_uri)
+            .expect("indexed report");
+        assert_eq!(indexed["kind"], "unchanged");
+        assert_eq!(indexed["version"], Value::Null);
+        let deleted = items
+            .iter()
+            .find(|item| item["uri"] == "file:///w/Deleted.kt")
+            .expect("deleted-file tombstone");
+        assert_eq!(deleted["kind"], "full");
+        assert_eq!(deleted["items"], json!([]));
+        assert_eq!(deleted["version"], Value::Null);
+        assert!(
+            serialized_value_fits(&second.messages[0], MAX_MESSAGE_BYTES),
+            "workspace diagnostic response must respect the framed protocol limit"
+        );
+    }
+
+    #[test]
+    fn workspace_report_uses_the_open_buffer_over_retained_disk_results() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///w/Open.kt";
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: uri.to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "stale disk diagnostic".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x".to_string(),
+            }],
+        });
+        service.open_document_for_test(uri, "val current = 1", 1);
+
+        let report = service.workspace_diagnostic(Some(json!(1)), json!({}));
+        let item = &report.messages[0]["result"]["items"][0];
+        assert_eq!(item["uri"], uri);
+        assert_eq!(
+            item["items"],
+            json!([]),
+            "the current open buffer must win over an older sweep snapshot"
+        );
     }
 }

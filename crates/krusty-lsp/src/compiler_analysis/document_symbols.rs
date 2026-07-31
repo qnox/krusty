@@ -1327,6 +1327,28 @@ mod tests {
     }
 
     #[test]
+    fn class_header_scan_terminates_on_stray_quotes() {
+        // A header whose scan runs past the declaration bound and then meets a quote used to
+        // reset the cursor backwards and rescan the same bytes forever, wedging the analysis
+        // thread on a single file. Asserted end to end, so it holds whichever way the
+        // individual scan helpers are bounded.
+        for source in [
+            "class Foo \"bar\"\n",
+            "class Foo \"\"\"bar\"\"\"\n",
+            "class Foo `bar`\n",
+            "class Foo 'x'\n",
+            "class Fo\u{00e9} \"x\"\n",
+            "class Foo constructor \"x\"\n",
+            "class Foo @Ann \"x\"\n",
+            "class Foo /* unterminated\n",
+        ] {
+            let mut analysis = analyze_standalone_source_set(&[source]);
+            let file = analysis.files.pop().expect("analyzed file");
+            let _ = document_symbol_occurrences(source, &file, 64);
+        }
+    }
+
+    #[test]
     fn parameter_separator_discards_nested_generic_commas_once_per_depth() {
         let parameter = b"Map<A, Map<B, Map<C, D>>> = emptyMap<A, Map<B, C>>(), val next: Int";
         let separator = parameter_separator(parameter, 0, parameter.len()).expect("separator");

@@ -700,14 +700,84 @@ fn cache_limit_message() -> String {
         .to_string()
 }
 
+/// Every Kotlin source the project model knows about, for background indexing.
+///
+/// Reuses `find_sources`, so the ignore rules and entry budget that govern open-document source
+/// discovery govern the sweep too; a second walk here would be a second, divergent definition of
+/// what counts as a workspace source.
+pub fn workspace_sources(model: &super::model::ProjectModel) -> (Vec<PathBuf>, bool) {
+    let mut roots: Vec<PathBuf> = model
+        .modules
+        .iter()
+        .flat_map(|module| module.source_roots.iter().map(|root| root.path.clone()))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    let all_roots = roots.clone();
+    let mut sources = Vec::new();
+    let mut truncated = false;
+    'roots: for root in &roots {
+        // A root nested inside another would otherwise be walked twice and charged twice.
+        let excluded: Vec<PathBuf> = all_roots
+            .iter()
+            .filter(|other| *other != root && other.starts_with(root))
+            .cloned()
+            .collect();
+        // Budget per root rather than shared across the workspace: one large module must not
+        // starve every module after it in iteration order, silently and with no report.
+        let mut remaining = MAX_INVENTORY_ENTRIES;
+        let mut found = Vec::new();
+        if find_sources_into(root, true, &excluded, &mut remaining, &mut found).is_err() {
+            // Keep the bounded prefix. Dropping it would make a large root contribute no files at
+            // all, even though the caller explicitly asked for best-effort workspace coverage.
+            truncated = true;
+        }
+        for path in found
+            .into_iter()
+            .filter(|path| krusty::source::is_supported_path(path))
+        {
+            if sources.len() >= crate::MAX_WORKSPACE_INDEX_FILES {
+                truncated = true;
+                break 'roots;
+            }
+            sources.push(path);
+        }
+    }
+    sources.sort();
+    sources.dedup();
+    (sources, truncated)
+}
+
 fn find_sources(
     root: &Path,
     ignore_workspace_directories: bool,
     excluded_source_roots: &[PathBuf],
     remaining_entries: &mut usize,
 ) -> Result<Vec<PathBuf>, String> {
-    let mut pending = vec![root.to_path_buf()];
     let mut sources = Vec::new();
+    find_sources_into(
+        root,
+        ignore_workspace_directories,
+        excluded_source_roots,
+        remaining_entries,
+        &mut sources,
+    )?;
+    Ok(sources)
+}
+
+/// Shared walker for strict open-document discovery and best-effort workspace inventory.
+///
+/// The strict wrapper above discards this buffer on error. Workspace indexing deliberately keeps
+/// it, so both paths share traversal and ignore rules without sharing incompatible truncation
+/// semantics.
+fn find_sources_into(
+    root: &Path,
+    ignore_workspace_directories: bool,
+    excluded_source_roots: &[PathBuf],
+    remaining_entries: &mut usize,
+    sources: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
@@ -737,7 +807,7 @@ fn find_sources(
             }
         }
     }
-    Ok(sources)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1568,6 +1638,26 @@ mod tests {
 
         fs::remove_dir_all(directory).ok();
         assert_eq!(result.unwrap_err(), inventory_limit_message());
+    }
+
+    #[test]
+    fn workspace_inventory_keeps_the_bounded_prefix_of_a_large_root() {
+        let directory = temp_path("workspace-inventory-prefix");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("First.kt"), "").unwrap();
+        fs::write(directory.join("Second.kt"), "").unwrap();
+        let mut remaining_entries = 1;
+        let mut found = Vec::new();
+
+        let result = find_sources_into(&directory, false, &[], &mut remaining_entries, &mut found);
+
+        fs::remove_dir_all(directory).ok();
+        assert_eq!(result.unwrap_err(), inventory_limit_message());
+        assert_eq!(
+            found.len(),
+            1,
+            "best-effort indexing must retain work discovered before the inventory ceiling"
+        );
     }
 
     #[test]

@@ -75,17 +75,18 @@ pub fn stub_classes(
     let mut out = Vec::new();
     let mut emitted: HashSet<&str> = HashSet::new();
     for (ctx, decls) in &parsed {
-        let r = Resolver {
-            ctx,
-            resolve: &resolve_all,
-            mode,
-        };
         for raw in decls {
             if (raw.internal.contains('$') && raw.access & ACC_PRIVATE != 0)
                 || !emitted.insert(raw.internal.as_str())
             {
                 continue;
             }
+            let r = Resolver {
+                ctx,
+                resolve: &resolve_all,
+                mode,
+                owner: Some(raw.internal.as_str()),
+            };
             match r.emit(raw) {
                 Some(bytes) => out.push((raw.internal.clone(), bytes)),
                 None if mode.is_lenient() => continue,
@@ -100,10 +101,27 @@ struct Resolver<'a> {
     ctx: &'a FileCtx,
     resolve: &'a dyn Fn(&str) -> bool,
     mode: StubMode,
+    /// Internal name of the declaration being emitted — member types of the enclosing chain
+    /// shadow the package (`Proc` inside `Builder` is `Builder$Proc`, JLS scoping).
+    owner: Option<&'a str>,
 }
 
 impl Resolver<'_> {
     fn internal_of(&self, name: &str) -> Option<String> {
+        if let Some(owner) = self.owner {
+            let nested = name.replace('.', "$");
+            let mut scope = owner;
+            loop {
+                let candidate = format!("{scope}${nested}");
+                if (self.resolve)(&candidate) {
+                    return Some(candidate);
+                }
+                let Some((enclosing, _)) = scope.rsplit_once('$') else {
+                    break;
+                };
+                scope = enclosing;
+            }
+        }
         resolve_internal_name(&self.ctx.package, &self.ctx.imports, name, self.resolve)
     }
 
@@ -301,7 +319,16 @@ impl Resolver<'_> {
             } else {
                 None
             };
-            w.add_field_sig(*acc & !STUB_DEFAULT, name, &desc, fsig.as_deref());
+            // Interface fields are implicitly public static final (JLS §9.3). Stamping the
+            // semantic JVM flags here keeps every constant-holder interface on the same path;
+            // callers never need to recognize a particular holder or field name.
+            let acc = (*acc & !STUB_DEFAULT)
+                | if d.is_interface() {
+                    ACC_PUBLIC | ACC_STATIC | ACC_FINAL
+                } else {
+                    0
+                };
+            w.add_field_sig(acc, name, &desc, fsig.as_deref());
         }
 
         if is_record {
@@ -832,6 +859,67 @@ mod tests {
             .and_then(|(_, bytes)| parse_class(bytes).ok())
             .expect("Holder");
         assert!(holder.method("value", "()LSame;").is_some());
+    }
+
+    #[test]
+    fn interface_nested_types_are_implicitly_public() {
+        // JLS §9.5: member types of an interface are implicitly public even without a modifier.
+        let out = stubs(
+            "public interface Registry { final class Handler { public static void go() {} } }",
+            &["java/lang/Object"],
+        )
+        .expect("interface with nested class");
+        let handler = out
+            .iter()
+            .find(|(name, _)| name == "Registry$Handler")
+            .map(|(_, bytes)| parse_class(bytes).expect("parse"))
+            .expect("Handler stub");
+        assert!(handler.is_public(), "interface member types are public");
+    }
+
+    #[test]
+    fn java_varargs_parameters_emit_acc_varargs() {
+        // `Fix... fixes` must carry ACC_VARARGS so member resolution accepts element-style
+        // calls and spreads; without it the parameter is an ordinary array.
+        let out = stubs(
+            "public class Holder {\n\
+             \u{20} public void reg(String s, Object... fixes) {}\n\
+             \u{20} public Holder(int... ns) {}\n\
+             }",
+            &["java/lang/Object", "java/lang/String"],
+        )
+        .expect("varargs stub");
+        let ci = parse_class(&out[0].1).expect("parse");
+        let reg = ci
+            .method("reg", "(Ljava/lang/String;[Ljava/lang/Object;)V")
+            .expect("reg method");
+        assert!(reg.is_vararg(), "method varargs flag");
+        let ctor = ci.method("<init>", "([I)V").expect("varargs ctor");
+        assert!(ctor.is_vararg(), "constructor varargs flag");
+    }
+
+    #[test]
+    fn interface_fields_are_implicitly_public_static_final() {
+        // JLS §9.3: every interface field is public static final. Generic fixture names keep
+        // this test tied to the language rule instead of any downstream API.
+        let out = stubs(
+            "public interface Mods { String STATIC = \"static\"; int LEVEL = 3; }",
+            &["java/lang/Object", "java/lang/String"],
+        )
+        .expect("interface constants stub");
+        let ci = parse_class(&out[0].1).expect("parse");
+        for name in ["STATIC", "LEVEL"] {
+            let field = ci
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .expect("constant field");
+            assert_eq!(
+                field.access & (ACC_PUBLIC | ACC_STATIC | ACC_FINAL),
+                ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
+                "{name} must be public static final"
+            );
+        }
     }
 
     #[test]

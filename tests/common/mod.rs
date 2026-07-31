@@ -786,8 +786,51 @@ fn hash_str(s: &str) -> u64 {
 #[allow(unused_imports)]
 pub use krusty::toolchain::{
     box_corpus_dir, classpath_jars_for, coroutines_jar, dist_jar, ensure_maven, find_jar,
-    jdk_modules, kotlin_test_jar, kotlin_version, kotlinc_lib_dir, stdlib_classpath, stdlib_jar,
+    kotlin_test_jar, kotlin_version, kotlinc_lib_dir, stdlib_classpath, stdlib_jar,
 };
+
+/// The JDK `lib/modules` jimage the front-end resolves `java.*` against.
+///
+/// The library form reports an unconfigured toolchain as `None`, which is right for the
+/// `survey` binary but wrong here: every JVM-backed test then skips or fails on its own
+/// `.expect`, so one missing environment variable surfaces as hundreds of identical
+/// panics with nothing naming the cause. Tests stop on the first one instead, with the
+/// reason and the fix. Callers keep the `Option` shape — this only ever returns `Some`
+/// or panics, so their skip arms are unreachable when the toolchain is misconfigured.
+#[allow(dead_code)]
+pub fn jdk_modules() -> Option<PathBuf> {
+    if let Some(modules) = krusty::toolchain::jdk_modules() {
+        return Some(modules);
+    }
+    if let Some(explicit) =
+        std::env::var_os("KRUSTY_SURVEY_JDK_MODULES").filter(|path| !path.is_empty())
+    {
+        panic!(
+            "KRUSTY_SURVEY_JDK_MODULES is set but is not a file: {}\n\
+             It must point at a JDK's lib/modules jimage. Unset it to fall back to JAVA_HOME.",
+            Path::new(&explicit).display()
+        );
+    }
+    // Match `krusty::toolchain::jdk_modules` and Bash's `${JAVA_HOME:-...}` semantics: an
+    // exported-but-empty primary variable must not suppress the configured reference JDK.
+    let home = std::env::var_os("JAVA_HOME")
+        .filter(|home| !home.is_empty())
+        .or_else(|| std::env::var_os("KRUSTY_REF_JAVA_HOME").filter(|home| !home.is_empty()))
+        .map(PathBuf::from);
+    match home {
+        None => panic!(
+            "JAVA_HOME is not set, so this test cannot resolve java.* and every JVM-backed \
+             test in the suite will fail the same way.\n\
+             There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
+        ),
+        Some(home) => panic!(
+            "no lib/modules jimage under JAVA_HOME: {}\n\
+             That path is not a JDK home. A package-manager prefix is the usual mistake — the \
+             real home is often a subdirectory (e.g. .../openjdk@21/libexec/openjdk.jdk/Contents/Home).",
+            home.display()
+        ),
+    }
+}
 
 /// Whether a box-test directive (`// NAME` …) is present. Single source of truth in the lib
 /// (`krusty::conformance`), shared with the gate + survey so directive parsing never drifts.
@@ -798,7 +841,9 @@ pub fn directive(src: &str, name: &str) -> bool {
 
 #[allow(dead_code)]
 pub fn stdlib_toolchain_ready() -> bool {
-    stdlib_jar().is_some() && jdk_modules().is_some()
+    // A probe, so it asks the library form rather than the diagnosing wrapper above:
+    // reporting "not ready" is this function's whole job and must not panic.
+    stdlib_jar().is_some() && krusty::toolchain::jdk_modules().is_some()
 }
 
 // ---------------------------------------------------------------------------
