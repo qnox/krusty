@@ -1271,12 +1271,17 @@ where
     }
 
     pub(crate) fn apply_index_batch(&mut self, batch: IndexBatch) -> Vec<Value> {
-        let indexed = batch.attempted.clone();
+        let IndexBatch {
+            generation,
+            attempted,
+            files,
+            conclusive,
+        } = batch;
         let outcome = self.workspace_diagnostics.merge(
-            batch.generation,
-            &batch.attempted,
-            batch.conclusive,
-            batch.files,
+            generation,
+            &attempted,
+            conclusive,
+            files,
             resolve_diagnostic_positions,
         );
         if !outcome.accepted {
@@ -1294,7 +1299,7 @@ where
             // and on a large repository the sweep runs for hours -- waiting until the end would
             // show nothing for the whole of it. Open documents are excluded: their buffer is
             // newer than whatever the sweep read from disk.
-            for uri in indexed {
+            for uri in attempted {
                 if self.documents.contains_key(&uri) {
                     continue;
                 }
@@ -7024,6 +7029,53 @@ mod tests {
                 .iter()
                 .any(|message| message["method"] == "textDocument/publishDiagnostics"),
             "the buffer the user is editing must not be overwritten by what the sweep read"
+        );
+    }
+
+    #[test]
+    fn a_deleted_indexed_file_pushes_an_empty_diagnostic_set() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///w/Removed.kt".to_string();
+        service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.clone()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: uri.clone(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "removed diagnostic".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x\n".to_string(),
+            }],
+        });
+
+        let messages = service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec![uri.clone()],
+            conclusive: true,
+            files: Vec::new(),
+        });
+        let published = messages
+            .iter()
+            .find(|message| message["method"] == "textDocument/publishDiagnostics")
+            .expect("removing retained diagnostics must clear the client's pushed copy");
+        assert_eq!(published["params"]["uri"], uri);
+        assert_eq!(
+            published["params"]["diagnostics"].as_array().map(Vec::len),
+            Some(0)
         );
     }
 }

@@ -358,9 +358,11 @@ impl CommandState {
                                     stale_sweep_copy: false,
                                 },
                             );
+                            // Count admitted work, not queue copies. Promotion adds a higher-priority
+                            // copy and leaves the sweep copy stale, but the URI is still processed once.
+                            self.indexed_total = self.indexed_total.saturating_add(1);
                         }
                     }
-                    self.indexed_total = self.indexed_total.saturating_add(1);
                     chunk.push(uri);
                     if chunk.len() == MAX_INDEX_CHUNK_FILES {
                         self.push_index_chunk(priority, std::mem::take(&mut chunk));
@@ -483,7 +485,10 @@ impl CommandState {
     }
 
     fn indexing_outstanding(&self) -> bool {
-        !self.neighborhood.is_empty() || !self.sweep.is_empty()
+        // `queued` is the ownership authority. Priority promotion deliberately leaves a stale sweep
+        // copy in its deque; counting raw chunks would keep the progress token open after the promoted
+        // URI had finished, even though `take` will discard that stale copy without producing work.
+        !self.queued.is_empty()
     }
 
     /// `(files handed out, files seen)` for this sweep. Reset once nothing is queued, so the next
@@ -1943,6 +1948,66 @@ mod tests {
     }
 
     #[test]
+    fn multiple_index_chunks_report_monotonic_operation_progress() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+
+        struct Mock;
+        impl Analysis for Mock {
+            fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
+                sources.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn index_workspace_files(&mut self, uris: &[&str]) -> IndexOutcome {
+                IndexOutcome {
+                    files: uris
+                        .iter()
+                        .map(|uri| IndexedFile {
+                            uri: (*uri).to_string(),
+                            diagnostics: Vec::new(),
+                            text_hash: 0,
+                            text: String::new(),
+                        })
+                        .collect(),
+                    conclusive: true,
+                }
+            }
+        }
+
+        let file_count = MAX_INDEX_CHUNK_FILES + 1;
+        let (tx, rx) = sync_channel(16);
+        let engine = AnalysisEngine::spawn(Mock, tx);
+        engine.submit(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Sweep,
+            uris: (0..file_count)
+                .map(|index| format!("file:///w/F{index}.kt"))
+                .collect(),
+        }));
+
+        let mut statuses = Vec::new();
+        while statuses.len() < 3 {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Incoming::Engine(EngineEvent::Status(status))) => statuses.push(status),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert_eq!(
+            statuses,
+            vec![
+                ServerStatus::Working(format!(
+                    "Indexing workspace: {MAX_INDEX_CHUNK_FILES} of {file_count} files"
+                )),
+                ServerStatus::Working(format!(
+                    "Indexing workspace: {file_count} of {file_count} files"
+                )),
+                ServerStatus::Ready,
+            ]
+        );
+        engine.join();
+    }
+
+    #[test]
     fn a_disconnected_queue_abandons_index_work_but_finishes_interactive_work() {
         let (sender, receiver) = command_queue();
         sender.send(EngineCommand::Analyze(AnalysisJob {
@@ -2002,6 +2067,15 @@ mod tests {
         };
         assert_eq!(first.priority, IndexPriority::Neighborhood);
         assert_eq!(first.uris, vec!["file:///w/A.kt".to_string()]);
+        assert!(
+            !state.indexing_outstanding(),
+            "a stale sweep copy must not keep the operation marked as active"
+        );
+        assert_eq!(
+            state.indexing_progress(),
+            (1, 1),
+            "promotion changes priority, not the amount of admitted work"
+        );
         assert!(
             state.take().is_none(),
             "the superseded sweep entry must not be indexed a second time"

@@ -64,13 +64,17 @@ boundary.
   queued work, and clears old retained results before replacement analysis can arrive. Each
   background chunk goes through the same module visibility, language-feature, and classpath
   selection as open documents, but uses separate source-discovery and analysis caches so indexing
-  cannot evict the interactive hot path.
+  cannot evict the interactive hot path. One work-done token spans the queued operation; every
+  chunk updates an admitted-files `(handed out, total)` pair, and priority promotion changes queue
+  ownership without double-counting the file.
 - Workspace diagnostics retain only bounded file URIs, text hashes, packed UTF-16 ranges/severity,
   and deduplicated display messages. Replaced entry slices are compacted and deleted file slots are
   reused; no source text, AST, semantic class identity, classpath entry, or compiler snapshot
   survives the chunk merge. Workspace-wide pull responses honor prior result ids and emit
   tombstones for disappeared files, but are cancelled with a non-retriggering protocol error when the
-  bounded non-streaming report would exceed its item, byte, or message limit.
+  bounded non-streaming report would exceed its item, byte, or message limit. Each accepted changed
+  chunk also pushes diagnostics for its closed attempted files immediately (including an empty set
+  for a deleted file); open documents are excluded because their buffers supersede disk snapshots.
 - An open document retains its source text, a bounded compact diagnostic cache for published and
   pull diagnostics, and compact indexes for hover, completion, definitions, document symbols,
   signature help, folding ranges, and semantic highlighting. The compiler's full diagnostic vector
