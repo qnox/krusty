@@ -11476,6 +11476,50 @@ impl crate::assignable::TypeOracle for Checker<'_> {
     }
 }
 
+/// Join two spellings of the SAME semantic type/class while preserving their real nullability.
+///
+/// This is the single same-class path used by `Checker::join`:
+///
+/// * two `Obj`/`TyParam` spellings compare their erased object identity and erase type arguments,
+///   preserving the existing `List<A>` + `List<B>` -> `List<*>` behavior;
+/// * an exact builtin/function shape keeps that canonical shape;
+/// * a builtin and its object spelling compare their Kotlin class identity, with the builtin shape
+///   winning (`String` + `Obj("kotlin/String")` -> `String`).
+///
+/// Nullability is reapplied from the ORIGINAL inputs. That last detail matters for mixed spellings:
+/// unequal `Ty` values do not imply that one was nullable, so two non-null String spellings must not
+/// accidentally become `String?`.
+fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
+    let (an, bn) = (a.non_null(), b.non_null());
+    let erased = |ty: Ty| matches!(ty, Ty::Obj(..) | Ty::TyParam(..));
+    let same_kotlin_class = |left: Ty, right: Ty| {
+        matches!(
+            (left.kotlin_class_internal(), right.kotlin_class_internal()),
+            (Some(left), Some(right)) if left == right
+        )
+    };
+
+    let base = match (erased(an), erased(bn)) {
+        // Keep the pre-existing erased-object semantics for generic classes and type parameters.
+        (true, true) => match (an.obj_internal(), bn.obj_internal()) {
+            (Some(left), Some(right)) if left == right => Ty::obj_name(left),
+            _ => return None,
+        },
+        // Non-object shapes (builtin scalars and function types) must agree exactly.
+        (false, false) if an == bn => an,
+        // A mixed object/builtin spelling uses the source-level class identity, then retains the
+        // non-object shape as the canonical front-end representation.
+        (false, true) if same_kotlin_class(an, bn) => an,
+        (true, false) if same_kotlin_class(an, bn) => bn,
+        _ => return None,
+    };
+    Some(if a.is_nullable() || b.is_nullable() {
+        Ty::nullable(base)
+    } else {
+        base
+    })
+}
+
 impl<'a> Checker<'a> {
     fn reset_body_mutations(&mut self, body: Option<ExprId>) {
         self.fn_reassigned.clear();
@@ -30276,20 +30320,12 @@ impl<'a> Checker<'a> {
                 return nb;
             }
         }
-        // Two values of the SAME class join to that class with erased type arguments (`List<C>` and
-        // `List<D>` → `List<*>`), differing only in NULLABILITY to its nullable form (`C` and `C?` → `C?`).
-        // Comparing the NON-NULL forms covers the mixed case (`x ?: y` where one side is `C` and the other
-        // `C?` — e.g. a map get typed `C` elvis a nullable member return `C?`), which the bare-`Obj` match
-        // missed, collapsing it to `Any`.
-        if let (Some(ai), Some(bi)) = (a.non_null().obj_internal(), b.non_null().obj_internal()) {
-            if ai == bi {
-                let base = Ty::obj_name(ai);
-                return if a.is_nullable() || b.is_nullable() {
-                    Ty::nullable(base)
-                } else {
-                    base
-                };
-            }
+        // One semantic SAME-CLASS path covers source, module, and classpath spellings. It preserves
+        // actual nullability, keeps canonical builtin/function shapes, and retains the established
+        // erased-type-argument behavior for `Obj`/`TyParam` joins. Keeping this federated avoids the
+        // object-only and builtin-only branches disagreeing on mixed representations.
+        if let Some(joined) = same_type_class_join(a, b) {
+            return joined;
         }
         // Two values of DIFFERENT reference classes join to their common supertype, which krusty
         // approximates as `Any` (`java/lang/Object`) — the universal upper bound. Preserve nullability
@@ -31661,6 +31697,66 @@ mod tests {
             })
             .expect("elvis expression");
         assert_eq!(info.ty(elvis), Ty::obj("StoredItem"));
+    }
+
+    #[test]
+    fn elvis_joins_non_null_and_nullable_string_to_nullable_string() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "fun pick(name: String, fallback: String?) {\n\
+                 val chosen = name ?: fallback\n\
+             }",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let elvis = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::Elvis { .. }).then_some(ExprId(index as u32))
+            })
+            .expect("elvis expression");
+        assert_eq!(info.ty(elvis), Ty::nullable(Ty::String));
+    }
+
+    #[test]
+    fn same_type_class_join_unifies_spellings_without_inventing_nullability() {
+        assert_eq!(
+            same_type_class_join(Ty::String, Ty::nullable(Ty::String)),
+            Some(Ty::nullable(Ty::String))
+        );
+        // Mixed NON-NULL spellings remain non-null. The original follow-up returned `String?`
+        // here merely because the two representations were unequal.
+        assert_eq!(
+            same_type_class_join(Ty::String, Ty::obj("kotlin/String")),
+            Some(Ty::String)
+        );
+        assert_eq!(
+            same_type_class_join(Ty::String, Ty::nullable(Ty::obj("kotlin/String"))),
+            Some(Ty::nullable(Ty::String))
+        );
+        assert_eq!(
+            same_type_class_join(Ty::obj("kotlin/String"), Ty::String),
+            Some(Ty::String)
+        );
+        // Object pairs retain the established erased-type-argument join.
+        assert_eq!(
+            same_type_class_join(
+                Ty::obj_args("kotlin/collections/List", &[Ty::Int]),
+                Ty::obj_args("kotlin/collections/List", &[Ty::String])
+            ),
+            Some(Ty::obj("kotlin/collections/List"))
+        );
+        assert_eq!(same_type_class_join(Ty::String, Ty::Int), None);
+        assert_eq!(
+            same_type_class_join(Ty::String, Ty::obj("kotlin/Any")),
+            None
+        );
     }
 
     #[test]

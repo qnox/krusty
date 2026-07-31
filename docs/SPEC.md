@@ -2209,7 +2209,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`List<*>`). The runtime class is identical, so the merge stack frame is exactly that class — safe to
   emit (unlike a join of *unrelated* references, which would merge to `Object`, a frame krusty's emitter
   can't yet reconcile; those stay unsupported). Type arguments are erased to none at the join, so a member
-  read on the result resolves against the raw class (element type `Any`).
+  read on the result resolves against the raw class (element type `Any`). The same semantic path handles
+  builtin and mixed frontend/object spellings: `String` with `String?` joins to `String?`, while non-null
+  `Ty::String` with non-null `Obj("kotlin/String")` remains non-null `String`. Nullability is derived from
+  the original operands rather than from whether their internal representations compare equal. This join
+  is representation-generic; it does not branch on whether a type came from the current file, another
+  module file, or the classpath (`tests/elvis_nullability_join_e2e.rs`).
 
 - **`if`/`when` branch join: unrelated reference classes → common supertype (`Object`).** Two branches of
   different reference classes (`if (c) Foo() else Bar()`) join to their common supertype, which krusty
