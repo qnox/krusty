@@ -13855,21 +13855,31 @@ impl<'a> Lower<'a> {
             // array. In particular, `vararg T` specialized to `String` still emits `Object[]`.
             // Reject a malformed record rather than shifting arguments into a non-array slot.
             array_type.array_elem()?;
-            if args.len() < slot {
-                return None;
-            }
-            for (index, &arg) in args[..slot].iter().enumerate() {
+            // Pre-slot params may themselves be defaulted-and-omitted (`f(a: Int = 0, vararg xs: T)`
+            // called as `f()`): placeholder + mask bit for those. The vararg slot NEVER takes a
+            // mask bit — kotlinc's `$default` passes the array straight through — so an omitted
+            // vararg is an EMPTY array, not a placeholder.
+            let provided_prefix = args.len().min(slot);
+            for (index, &arg) in args[..provided_prefix].iter().enumerate() {
                 out.push(self.lower_arg(arg, &ty_to_ir(params[index]))?);
             }
+            for &param in &params[provided_prefix..slot] {
+                out.push(self.zero_placeholder(param));
+            }
             let mut elements = Vec::new();
-            for &arg in &args[slot..] {
-                elements.push(self.lower_vararg_element(arg, elem, array_type)?);
+            if args.len() > slot {
+                for &arg in &args[slot..] {
+                    elements.push(self.lower_vararg_element(arg, elem, array_type)?);
+                }
             }
             out.push(self.emit_vararg(ty_to_ir(array_type), elements));
             for &param in &params[slot + 1..] {
                 out.push(self.zero_placeholder(param));
             }
-            let mask: i32 = (slot + 1..params.len()).map(|j| 1i32 << j).sum();
+            let mask: i32 = (provided_prefix..slot)
+                .chain(slot + 1..params.len())
+                .map(|j| 1i32 << j)
+                .sum();
             self.append_default_mask_marker(out, mask);
             return Some(());
         }
@@ -22600,7 +22610,11 @@ impl<'a> Lower<'a> {
                         a.push(self.emit_get_value(v));
                     }
                 }
-                if vararg {
+                // A `$default` call whose last parameter is a vararg (`f(a: Int = 0, vararg xs: T)`
+                // omitting both) is NOT an element-pack: it lowers through the `default_call`
+                // branch, which placeholders/masks the pre-vararg defaults and emits an empty
+                // array for the omitted vararg slot.
+                if vararg && !c.default_call {
                     let fixed = c.params.len() - 1;
                     if args.len() < fixed {
                         return None;

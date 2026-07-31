@@ -1937,9 +1937,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CallSig::has_known_required_param` skips the vararg slot (mirroring the call-arg slot mapper).
   Without this, a classpath function with BOTH a defaulted parameter and a `vararg` (mockk's
   `mockk(name: String? = null, …, vararg moreInterfaces: KClass<*>, …)`) rejected its own `$default`
-  candidate on a call omitting both, reporting `unresolved function 'mockk'`
-  (`classpath_default_vararg_call_e2e`). Known gap: the named-array form `f(more = arrayOf(x))` with
-  an omitted default before the vararg still fails to map.
+  candidate on a call omitting both, reporting `unresolved function 'mockk'`. The emit side matches:
+  a top-level `$default` callable carries the vararg slot/element to the lowerer (as the extension
+  path already did), the shape-based element-pack branch yields to the `default_call` branch, and an
+  omitted vararg lowers as an EMPTY array with NO mask bit — kotlinc's `$default` passes the array
+  straight through, so a null placeholder trips the callee's non-null vararg check
+  (`classpath_default_vararg_call_e2e`, including a JVM box run). Known gap: the named-array form
+  `f(more = arrayOf(x))` with an omitted default before the vararg still fails to map.
   Calling an ordinary member or a concrete non-null extension through a nullable receiver reports
   `only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T?'.`
   at the unsafe `.`. A nullable-receiver extension remains callable through ordinary dot syntax and

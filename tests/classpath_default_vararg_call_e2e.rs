@@ -30,6 +30,17 @@ fn default_and_vararg_omitted_with_type_arg() {
 }
 
 #[test]
+fn default_and_vararg_omitted_runs_on_jvm() {
+    // End-to-end: the `$default` emit shape (omitted vararg slot → placeholder + mask bit) must
+    // also lower correctly, not just resolve.
+    common::expect_box_ok_against(
+        "default_vararg_box",
+        LIB,
+        "import lib.mockkish\nfun box(): String = if (mockkish<Any>() == \"ok\") \"OK\" else \"fail\"\n",
+    );
+}
+
+#[test]
 fn default_and_vararg_omitted_plain() {
     assert_accepted(
         "no args at all",
@@ -39,6 +50,8 @@ fn default_and_vararg_omitted_plain() {
 
 #[test]
 fn vararg_used_default_given() {
+    // Regression guard: supplies every parameter, so it passes through the base overload's vararg
+    // machinery and never touches the changed guard — it passed pre-fix too.
     assert_accepted(
         "first arg + vararg elements",
         "import lib.mockkish\nfun box() { mockkish(\"n\", Any()) }\n",

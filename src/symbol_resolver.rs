@@ -2702,7 +2702,21 @@ impl<'a> SymbolResolver<'a> {
                 base_gsig.is_some()
             );
             let ret_ty = o.ret.apply(ret_ty);
-            return Some(callable_with_return(c, ret_ty, true));
+            let mut callable = callable_with_return(c, ret_ty, true);
+            // Tell the lowerer the vararg slot/element (the extension path does the same at
+            // `bind_extension_callable`): an omitted vararg lowers as an EMPTY array — never a
+            // mask bit (kotlinc's `$default` passes the array straight through, and a null
+            // placeholder trips the callee's non-null vararg check). Only element-form calls
+            // count: a caller passing the array itself (`f("n", arr)`) must not be packed.
+            if let Some(index) = o.call_sig.vararg_index {
+                if let Some(elem) = params.get(index).and_then(|param| param.array_elem()) {
+                    if args.get(index).copied() != params.get(index).copied() {
+                        callable.vararg_elem = Some(elem);
+                        callable.vararg_index = Some(index);
+                    }
+                }
+            }
+            return Some(callable);
         }
         None
     }
