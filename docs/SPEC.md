@@ -2288,6 +2288,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`fun pkg1.Cls.fn()`), parameter/return/property types, type arguments, generic bounds, supertype
   lists, and typealias targets (`fq_source_typeref_e2e`).
 
+- **Unannotated top-level computed-property getter inference.** An expression getter uses the same
+  lightweight value-scope inference as a property initializer: named context parameters first, then
+  module properties, so context shadowing and nested reads (`holder.value`) require no getter-specific
+  name-resolution branches. After collection, unresolved computed getters retry to a bounded fixed
+  point because getter bodies may legally reference later declarations; eager initializer ordering is
+  unchanged. The bound is the number of pending getters, so self/mutual cycles terminate as `Error` and
+  receive the normal inference diagnostic (`computed_prop_e2e`, resolve unit regression).
+
 - **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
   Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc
   constructs `Id()` via the static `constructor-impl$default(dummy, mask, marker)`, which fills the
