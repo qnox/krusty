@@ -2618,6 +2618,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `CharSequence.get`. Tests: `tests/for_destructuring_components_e2e.rs`,
   `tests/collection_special_member_stub_e2e.rs`.
 
+- **The invoke CONVENTION admits a member EXTENSION `operator fun Recv.invoke`, and a supertype-
+  constructor lambda argument is typed against the selected ctor's parameter.** A receiver-DSL shape
+  such as `class A : DslBase({ "case" { … } })` failed twice over: **(a)** a lambda in class-header
+  base args was typed with no expected type, so the DSL receiver scope never entered the implicit-
+  receiver stack — base-arg lambdas are now deferred, and the ordinary constructor-delegation
+  candidate/slot machinery selects the super constructor uniformly for same-file, module, and
+  classpath bases. The lambda is then checked against its source argument's selected parameter type,
+  including named/vararg mapping, like an ordinary call-site argument; **(b)** `record_invoke` only
+  considered member `invoke` and top-level extension `invoke`, never a member extension — it now
+  selects member-extension candidates in an explicit operator-only mode (a non-`operator fun
+  Recv.invoke` stays rejected by call syntax), and the lowerer emits the recorded
+  `ModuleMemberExtension` for a call whose callee is an arbitrary expression (the literal `"case"`).
+  Tests:
+  `invoke_operator_extension_e2e::member_extension_invoke_in_super_ctor_receiver_lambda` (runs),
+  `…::named_super_ctor_lambda_uses_its_mapped_parameter_type`,
+  `…::sibling_file_super_ctor_receiver_lambda_uses_shared_frontend_resolution`,
+  `…::classpath_super_ctor_receiver_lambda_uses_shared_resolution` (runs),
+  `…::secondary_super_delegation_receiver_lambda_uses_shared_resolution` (runs),
+  `…::member_extension_invoke_in_with_receiver_lambda` (runs, no ctor lambda involved),
+  `…::non_operator_member_extension_invoke_not_used_by_call_syntax`,
+  `…::non_operator_top_level_extension_invoke_not_used_by_call_syntax`.
+
 - **Reference range expressions and bound-aware classpath generics.** A standalone `a..b` over
   reference operands resolves through the ordinary `rangeTo` operator path after primitive range
   handling. Classpath generic signatures preserve declared bounds for receiver matching and JVM
