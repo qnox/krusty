@@ -29944,6 +29944,15 @@ impl<'a> Checker<'a> {
                 };
             }
         }
+        // The same BUILTIN type differing only in nullability joins to its nullable form
+        // (`String` and `String?` → `String?`). `obj_internal` above only sees `Obj`/`TyParam`,
+        // so builtin variants (`Ty::String`, …) would otherwise fall through to the `Any?`
+        // supertype below (`x?.takeIf { … } ?: y` inferred `Any?` instead of `String?`).
+        // Reaching here with equal non-null forms means at least one side is nullable (the
+        // `a == b` fast path above caught the rest), so the join is always the nullable form.
+        if a.non_null() == b.non_null() {
+            return Ty::nullable(a.non_null());
+        }
         // Two values of DIFFERENT reference classes join to their common supertype, which krusty
         // approximates as `Any` (`java/lang/Object`) — the universal upper bound. Preserve nullability
         // when either input is nullable: `String?` and `Marker` join to `Any?`, never the unsound `Any`.
@@ -31314,6 +31323,31 @@ mod tests {
             })
             .expect("elvis expression");
         assert_eq!(info.ty(elvis), Ty::obj("StoredItem"));
+    }
+
+    #[test]
+    fn elvis_joins_non_null_and_nullable_string_to_nullable_string() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "fun pick(name: String, fallback: String?) {\n\
+                 val chosen = name ?: fallback\n\
+             }",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let elvis = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::Elvis { .. }).then_some(ExprId(index as u32))
+            })
+            .expect("elvis expression");
+        assert_eq!(info.ty(elvis), Ty::nullable(Ty::String));
     }
 
     #[test]

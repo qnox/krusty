@@ -31,3 +31,23 @@ fun box(): String {\n\
         "OK"
     );
 }
+
+#[test]
+fn elvis_of_safe_takeif_and_nullable_string() {
+    // The builtin-class spelling of the same join gap: `s?.takeIf { … }` is `String?`, the elvis
+    // fallback is `String?`, and the join of their non-null/nullable forms is over `Ty::String` — a
+    // builtin variant `obj_internal` does not see — so it fell through to the `Any?` supertype and a
+    // member access on the result failed "unresolved member 'length' on 'kotlin/Any'".
+    const SRC: &str = "fun pick(req: String?, jwt: String?): Int {\n\
+        val effective = req?.takeIf { it.isNotBlank() } ?: jwt\n\
+        return effective?.length ?: -1\n\
+    }\n\
+    fun box(): String {\n\
+        return if (pick(\"  \", \"ab\") == 2 && pick(null, null) == -1 && pick(\"hey\", null) == 3) \"OK\" else \"FAIL\"\n\
+    }\n";
+    assert_eq!(
+        run(SRC)
+            .expect("elvis of String and String? joins to String? (member access resolves) + runs"),
+        "OK"
+    );
+}
