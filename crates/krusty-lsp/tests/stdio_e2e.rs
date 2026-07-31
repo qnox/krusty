@@ -1,6 +1,7 @@
 mod common;
 
 use std::io::{BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -32,9 +33,24 @@ impl ServerProcess {
         Self::start_with_timeout(arguments, PIPE_TIMEOUT)
     }
 
+    fn start_in(arguments: &[&str], current_dir: &Path) -> Self {
+        Self::start_with_timeout_in(arguments, PIPE_TIMEOUT, Some(current_dir))
+    }
+
     fn start_with_timeout(arguments: &[&str], timeout: Duration) -> Self {
+        Self::start_with_timeout_in(arguments, timeout, None)
+    }
+
+    fn start_with_timeout_in(
+        arguments: &[&str],
+        timeout: Duration,
+        current_dir: Option<&Path>,
+    ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_krusty-lsp"));
         command.args(["--stdio", "-no-jdk"]).args(arguments);
+        if let Some(current_dir) = current_dir {
+            command.current_dir(current_dir);
+        }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1265,7 +1281,12 @@ const DUMP_ACTION_SOURCE: &str = "fun box(): String = \"OK\"\n";
 #[test]
 fn stdio_server_offers_the_dev_dump_code_action_for_a_rootless_document() {
     let uri = "file:///dev-dump/Main.kt";
-    let mut server = ServerProcess::start(&["--dev"]);
+    // An initialize request without an explicit root deliberately falls back to the server's
+    // current directory. Give this process an empty directory: inheriting the repository would
+    // make the supposedly rootless fixture discover transient Kotlin files produced by parallel
+    // tests, so unrelated corpus size could consume the bounded dump-retention budget.
+    let isolated_cwd = TempProject::new("dev-dump-rootless-cwd");
+    let mut server = ServerProcess::start_in(&["--dev"], isolated_cwd.path());
     let initialize = server.request(1, "initialize", json!({}));
     let capabilities = &initialize["result"]["capabilities"];
     assert_eq!(
