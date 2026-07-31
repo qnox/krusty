@@ -22611,9 +22611,8 @@ impl<'a> Lower<'a> {
                     }
                 }
                 // A `$default` call whose last parameter is a vararg (`f(a: Int = 0, vararg xs: T)`
-                // omitting both) is NOT an element-pack: it lowers through the `default_call`
-                // branch, which placeholders/masks the pre-vararg defaults and emits an empty
-                // array for the omitted vararg slot.
+                // omitting both) is NOT an element-pack: the `default_call` branch emits the
+                // placeholders/mask and an empty array for the omitted vararg slot.
                 if vararg && !c.default_call {
                     let fixed = c.params.len() - 1;
                     if args.len() < fixed {

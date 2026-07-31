@@ -1935,9 +1935,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A `vararg` parameter is always omittable in default-argument resolution.** Kotlin metadata never
   sets `declares_default_value` on a `vararg` — it is implicitly omittable — so
   `CallSig::has_known_required_param` skips the vararg slot (mirroring the call-arg slot mapper).
-  Without this, a classpath function with BOTH a defaulted parameter and a `vararg` (mockk's
-  `mockk(name: String? = null, …, vararg moreInterfaces: KClass<*>, …)`) rejected its own `$default`
-  candidate on a call omitting both, reporting `unresolved function 'mockk'`. The emit side matches:
+  Without this, a classpath function with BOTH a defaulted parameter and a `vararg`
+  (`fun f(a: Int = 0, vararg xs: T)`, called as `f()`) rejected its own `$default`
+  candidate on a call omitting both, reporting `unresolved function 'f'`. The emit side matches:
   a top-level `$default` callable carries the vararg slot/element to the lowerer (as the extension
   path already did), the shape-based element-pack branch yields to the `default_call` branch, and an
   omitted vararg lowers as an EMPTY array with NO mask bit — kotlinc's `$default` passes the array

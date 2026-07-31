@@ -1217,6 +1217,29 @@ fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> Lib
     }
 }
 
+/// Record the vararg slot/element on a `$default` callable so the lowerer packs loose trailing
+/// elements into the slot's array — or emits an EMPTY array when the vararg itself is omitted
+/// (kotlinc's `$default` passes the array straight through, so the slot takes NO mask bit and a
+/// null placeholder would trip the callee's non-null vararg check). The arg-vs-param identity
+/// guard keeps a caller passing the array itself (`f("n", arr)`) from being packed.
+fn record_default_vararg_slot(
+    callable: &mut LibraryCallable,
+    vararg_index: Option<usize>,
+    params: &[Ty],
+    args: &[Ty],
+) {
+    let Some(index) = vararg_index else {
+        return;
+    };
+    let Some(elem) = params.get(index).and_then(|param| param.array_elem()) else {
+        return;
+    };
+    if args.get(index).copied() != params.get(index).copied() {
+        callable.vararg_elem = Some(elem);
+        callable.vararg_index = Some(index);
+    }
+}
+
 /// The arg-dependent binding layer over a [`SymbolSource`]: it selects overloads and binds generics for
 /// a specific call site. Holds the oracle by reference — cheap to construct per query.
 pub struct SymbolResolver<'a> {
@@ -2381,26 +2404,15 @@ impl<'a> SymbolResolver<'a> {
             let mut c = callable_with_return(&c, ret_ty, true);
             // An element-form vararg call reaching the `$default` (`split('.')`): tell the
             // lowerer which element type to PACK before the mask machinery — without it the
-            // loose element lowers straight into the array slot (a VerifyError).
-            if let Some((index, elem)) = spread_slot.or_else(|| {
-                (!o.flags.suspend)
-                    .then_some(o.call_sig.vararg_index)
-                    .flatten()
-                    .and_then(|index| {
-                        vparams
-                            .get(index)
-                            .and_then(|param| param.array_elem())
-                            .map(|element| (index, element))
-                    })
-            }) {
-                // `spread_slot` already normalized the selector's arguments to the physical
-                // array shape, so its equality here is expected. The fallback comparison covers
-                // older providers that expose the vararg flag without the normalized shape.
-                if spread_slot.is_some() || args.get(index).copied() != vparams.get(index).copied()
-                {
-                    c.vararg_elem = Some(elem);
-                    c.vararg_index = Some(index);
-                }
+            // loose element lowers straight into the array slot (a VerifyError). A spread was
+            // already normalized to the physical array shape, so it records unconditionally;
+            // otherwise fall back to the provider's vararg flag (skipped for `suspend`, whose
+            // `$default` threads a Continuation this shape does not model).
+            if let Some((slot, element)) = spread_slot {
+                c.vararg_elem = Some(element);
+                c.vararg_index = Some(slot);
+            } else if !o.flags.suspend {
+                record_default_vararg_slot(&mut c, o.call_sig.vararg_index, &vparams, args);
             }
             return Some(c);
         }
@@ -2703,19 +2715,7 @@ impl<'a> SymbolResolver<'a> {
             );
             let ret_ty = o.ret.apply(ret_ty);
             let mut callable = callable_with_return(c, ret_ty, true);
-            // Tell the lowerer the vararg slot/element (the extension path does the same at
-            // `bind_extension_callable`): an omitted vararg lowers as an EMPTY array — never a
-            // mask bit (kotlinc's `$default` passes the array straight through, and a null
-            // placeholder trips the callee's non-null vararg check). Only element-form calls
-            // count: a caller passing the array itself (`f("n", arr)`) must not be packed.
-            if let Some(index) = o.call_sig.vararg_index {
-                if let Some(elem) = params.get(index).and_then(|param| param.array_elem()) {
-                    if args.get(index).copied() != params.get(index).copied() {
-                        callable.vararg_elem = Some(elem);
-                        callable.vararg_index = Some(index);
-                    }
-                }
-            }
+            record_default_vararg_slot(&mut callable, o.call_sig.vararg_index, params, args);
             return Some(callable);
         }
         None
