@@ -509,6 +509,7 @@ fn fn_info(
         origin,
         // Representation lowering needs the declaration receiver before erasure.
         source_receiver,
+        contract: None,
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -548,6 +549,7 @@ fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> L
         signature: None,
         origin: Origin::Module { facade: owner },
         source_receiver: None,
+        contract: None,
     }
 }
 

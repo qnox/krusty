@@ -176,6 +176,7 @@ mod tests {
         let allowed = [
             "ast",
             "backend",
+            "contracts",
             "diag",
             "frontend",
             "ir",
@@ -289,7 +290,10 @@ mod tests {
 
     #[test]
     fn semantic_library_contract_uses_only_symbol_source_and_type_dependencies() {
-        assert_allowed_crate_modules("src/libraries.rs", &["name_tree", "symbol_source", "types"]);
+        assert_allowed_crate_modules(
+            "src/libraries.rs",
+            &["contracts", "name_tree", "symbol_source", "types"],
+        );
     }
 
     #[test]

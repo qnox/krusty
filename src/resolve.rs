@@ -11270,7 +11270,7 @@ struct Checker<'a> {
     /// Decoded `contract { … }` effects of the current file's top-level functions, keyed by
     /// `DeclId`. Filled before the decl walk (decode is AST-only) so call sites see contracts
     /// irrespective of function declaration order.
-    source_contracts: HashMap<DeclId, std::rc::Rc<crate::contracts::Contract>>,
+    source_contracts: HashMap<DeclId, std::sync::Arc<crate::contracts::Contract>>,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     source_extension_properties: HashMap<ExprId, crate::libraries::PropertyInfo>,
     source_extension_property_writes: HashMap<StmtId, crate::libraries::PropertyInfo>,
@@ -13178,14 +13178,6 @@ impl<'a> Checker<'a> {
         .any(|o| o.callable.owner.starts_with("kotlin/contracts"))
     }
 
-    fn is_resolved_stdlib_precondition_call(&self, call: ExprId, name: &str) -> bool {
-        matches!(
-            self.resolved_calls.get(&call),
-            Some(ResolvedCall::TopLevel(c))
-                if c.name == name && c.owner.starts_with("kotlin/PreconditionsKt")
-        )
-    }
-
     /// Decode every top-level function's `contract { … }` block up front (see the call site in
     /// `check_file_at_impl_mode`).
     fn collect_source_contracts(&mut self) {
@@ -13193,7 +13185,8 @@ impl<'a> Checker<'a> {
         for &d in &file.decls {
             let Decl::Fun(f) = file.decl(d) else { continue };
             if let Some(contract) = self.decode_fun_contract(f) {
-                self.source_contracts.insert(d, std::rc::Rc::new(contract));
+                self.source_contracts
+                    .insert(d, std::sync::Arc::new(contract));
             }
         }
     }
@@ -13225,14 +13218,18 @@ impl<'a> Checker<'a> {
         None
     }
 
-    /// The contract of the function a call resolved to, when it is a same-file source function
-    /// (classpath contracts arrive via classfile metadata instead). `ModuleTopLevel` carries the
-    /// decl id; a module EXTENSION call is matched back to its declaration by name.
-    fn source_contract_for_call(
+    /// The contract of the function a call resolved to — decoded from the same-file source for
+    /// module calls (`ModuleTopLevel` carries the decl id; a module EXTENSION call is matched
+    /// back to its declaration by name), or from `@Metadata` for classpath calls (attached to
+    /// the resolved callable).
+    fn contract_for_call(
         &self,
         call: ExprId,
-    ) -> Option<std::rc::Rc<crate::contracts::Contract>> {
+    ) -> Option<std::sync::Arc<crate::contracts::Contract>> {
         match self.resolved_calls.get(&call) {
+            Some(ResolvedCall::TopLevel(c)) | Some(ResolvedCall::Extension(c)) => {
+                c.contract.clone()
+            }
             Some(ResolvedCall::ModuleTopLevel(c)) => c
                 .source_decl
                 .and_then(|d| self.source_contracts.get(&d).cloned()),
@@ -13335,16 +13332,18 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Smart casts from a same-module function's contract at a CONDITION position:
+    /// Smart casts from the resolved callable's contract at a CONDITION position:
     /// `if (r.isErr())` with `returns(true) implies (this@isErr is Err)` narrows per the
-    /// conclusion when the call's truth value matches the effect's return constant.
-    fn source_contract_condition_narrowings(
+    /// conclusion when the call's truth value matches the effect's return constant. The contract
+    /// is decoded from same-file source or from `@Metadata` (`!s.isNullOrBlank()` narrows `s`
+    /// through the deserialized kotlin.text contract — no per-function special cases).
+    fn contract_condition_narrowings(
         &self,
         cond: ExprId,
         truth: bool,
         out: &mut Vec<(String, Ty)>,
     ) {
-        let Some(contract) = self.source_contract_for_call(cond) else {
+        let Some(contract) = self.contract_for_call(cond) else {
             return;
         };
         for effect in &contract.effects {
@@ -16844,43 +16843,6 @@ impl<'a> Checker<'a> {
         result
     }
 
-    /// Contract-based narrowing for the stdlib `kotlin.text` predicates whose
-    /// `contract { returns(false) implies (receiver != null) }` krusty does not read from metadata:
-    /// `isNullOrEmpty`/`isNullOrBlank` holding FALSE ⇒ receiver non-null. The call must resolve to
-    /// the stdlib (a same-named user extension must not narrow) and the receiver must be a stable
-    /// nullable binding.
-    fn contract_condition_narrowing(&self, cond: ExprId, truth: bool) -> Option<(String, Ty)> {
-        let Expr::Call { callee, args } = self.file.expr(cond) else {
-            return None;
-        };
-        if !args.is_empty() {
-            return None;
-        }
-        let Expr::Member { receiver, .. } = self.file.expr(*callee) else {
-            return None;
-        };
-        // Gate on the RESOLVED callable, not the syntax name: an alias import
-        // (`import kotlin.text.isNullOrEmpty as x`) carries the same contract, while a same-named
-        // user extension must not narrow. (A user fn in package `kotlin.text` still passes —
-        // accepted, mirroring the precondition-guard convention.)
-        let is_stdlib = match self.resolved_calls.get(&cond) {
-            Some(ResolvedCall::Extension(c)) | Some(ResolvedCall::TopLevel(c)) => {
-                matches!(c.name.as_str(), "isNullOrEmpty" | "isNullOrBlank")
-                    && c.owner.starts_with("kotlin/text/")
-            }
-            _ => false,
-        };
-        if !is_stdlib || truth {
-            // The contract only narrows when the predicate holds FALSE.
-            return None;
-        }
-        let Expr::Name(n) = self.file.expr(*receiver).clone() else {
-            return None;
-        };
-        self.stable_nullable_binding(&n)
-            .map(|non_null| (n, non_null))
-    }
-
     fn collect_condition_narrowings(&self, cond: ExprId, truth: bool, out: &mut Vec<(String, Ty)>) {
         // `!cond` flips the branch facts: the narrowings of `cond`-false hold when `!cond` is true
         // (and vice versa). Recursing with a flipped `truth` also yields De Morgan for `!(a && b)` /
@@ -16901,10 +16863,7 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        if let Some(binding) = self.contract_condition_narrowing(cond, truth) {
-            out.push(binding);
-        }
-        self.source_contract_condition_narrowings(cond, truth, out);
+        self.contract_condition_narrowings(cond, truth, out);
         if let Some(binding) = self.smartcast_binding(cond, !truth) {
             out.push(binding);
         }
@@ -20923,11 +20882,12 @@ impl<'a> Checker<'a> {
                             None => break,
                         }
                     }
-                    // A same-module function whose contract has `returns() implies <cond>`: the
-                    // conclusion holds for the rest of the block (the general source form of the
-                    // stdlib precondition contracts above).
+                    // A function whose contract has `returns() implies <cond>`: the conclusion
+                    // holds for the rest of the block. Uniform for stdlib preconditions
+                    // (`require(x is T)`, `requireNotNull(x)` — contracts deserialized from
+                    // `@Metadata`) and same-module source functions alike.
                     if let Expr::Call { .. } = self.file.expr(ie) {
-                        if let Some(contract) = self.source_contract_for_call(ie) {
+                        if let Some(contract) = self.contract_for_call(ie) {
                             for effect in &contract.effects {
                                 if let crate::contracts::Effect::ConditionalReturns {
                                     returns: crate::contracts::ReturnsValue::Any,
@@ -20941,46 +20901,6 @@ impl<'a> Checker<'a> {
                                     for (name, ty) in casts {
                                         if self.narrowing_is_supported(&name, ty, compound) {
                                             self.declare(&name, ty, false);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // `require(x is T)` / `check(x is T)` — a stdlib precondition that throws when the
-                    // condition is FALSE (`contract { returns() implies (x is T) }`), so the condition
-                    // holds for the rest of the block. Narrow a stable binding in the FIRST argument
-                    // (the condition), exactly as the `if (…) return` guard above does. Gated on the
-                    // stdlib name not being shadowed by a lexical local or module-declared function.
-                    if let Expr::Call { callee, args } = self.file.expr(ie).clone() {
-                        if let Expr::Name(fname) = self.file.expr(callee).clone() {
-                            if (fname == "require" || fname == "check")
-                                && !args.is_empty()
-                                && self.is_resolved_stdlib_precondition_call(ie, &fname)
-                            {
-                                let casts = self.condition_narrowings(args[0], true);
-                                let compound = matches!(
-                                    self.file.expr(args[0]),
-                                    Expr::Binary { op: BinOp::And, .. }
-                                );
-                                for (name, ty) in casts {
-                                    if self.narrowing_is_supported(&name, ty, compound) {
-                                        self.declare(&name, ty, false);
-                                    }
-                                }
-                            }
-                            // `requireNotNull(x)` / `checkNotNull(x)` — the stdlib contract is
-                            // `returns() implies (x != null)`, so a stable nullable FIRST argument
-                            // is non-null for the rest of the block (the not-null RETURN type comes
-                            // from the call's generic signature).
-                            else if (fname == "requireNotNull" || fname == "checkNotNull")
-                                && !args.is_empty()
-                                && self.is_resolved_stdlib_precondition_call(ie, &fname)
-                            {
-                                if let Expr::Name(n) = self.file.expr(args[0]).clone() {
-                                    if let Some(non_null) = self.stable_nullable_binding(&n) {
-                                        if self.narrowing_is_supported(&n, non_null, false) {
-                                            self.declare(&n, non_null, false);
                                         }
                                     }
                                 }

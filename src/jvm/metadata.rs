@@ -740,6 +740,9 @@ struct ParsedFunction {
     /// `(class name, arguments)` downstream where the string table is available. Kotlin stores an
     /// annotation here when it has `BINARY`/`RUNTIME` retention (`@JvmName`, `@OverloadResolutionBy…`).
     annotation_bodies: Vec<Vec<u8>>,
+    /// Raw `Contract` message body (`Function.contract`, field 32) — the function's declared
+    /// `contract { … }` effects, decoded downstream where the string table is available.
+    contract_body: Option<Vec<u8>>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -764,9 +767,15 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut return_body: Option<Vec<u8>> = None;
     let mut receiver_body: Option<Vec<u8>> = None;
     let mut annotation_bodies: Vec<Vec<u8>> = Vec::new();
+    let mut contract_body: Option<Vec<u8>> = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
+            (32, 2) => {
+                // Function.contract (`Contract` message) — the declared contract's effects.
+                let n = pb.varint()? as usize;
+                contract_body = Some(pb.bytes(n)?.to_vec());
+            }
             (12, 2) => {
                 // Function.annotation (repeated `Annotation`) — decoded downstream (needs the string table).
                 let n = pb.varint()? as usize;
@@ -876,7 +885,238 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         return_body,
         receiver_body,
         annotation_bodies,
+        contract_body,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Contract decoding (`Function.contract`, field 32)
+// ---------------------------------------------------------------------------
+//
+// Proto (`core/metadata/src/metadata.proto`): `Contract.effect` = 1 (repeated `Effect`).
+// `Effect.effect_type` = 1: RETURNS_CONSTANT = 0 / CALLS = 1 / RETURNS_NOT_NULL = 2 /
+// RETURNS_RESULT_OF = 3 — there is NO conditional type: `conclusion_of_conditional_effect` = 3
+// being present (with `condition_kind` = 5 absent/CONCLUSION_CONDITION = 0) makes the whole
+// message `<returns-effect> implies <conclusion>`. `Effect.kind` = 4: `InvocationKind`
+// AT_MOST_ONCE = 0 / EXACTLY_ONCE = 1 / AT_LEAST_ONCE = 2 (the enum order is NOT the Kotlin
+// declaration order — verified against kotlin-stdlib's `run`, which is EXACTLY_ONCE = 1).
+// `Expression.flags` = 1 (bit 0 = negated, bit 1 = null-check predicate),
+// `value_parameter_reference` = 2 (0 = extension receiver, else the 1-based value-parameter
+// index), `constant_value` = 3 (TRUE = 0 / FALSE = 1 / NULL = 2), `is_instance_type` = 4
+// (inline `Type`), `and_argument` = 6 / `or_argument` = 7 (repeated `Expression`; the FIRST
+// operand of the formula is embedded inline in the parent when it is primitive).
+
+/// Decode a `Contract` message body into the shared contract IR. `tparams` maps the function's
+/// type-parameter ids to names (for an `is R` conclusion over a generic parameter).
+fn decode_contract(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    tparams: &HashMap<u64, String>,
+) -> Option<crate::contracts::Contract> {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut effects = Vec::new();
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (1, 2) => {
+                let n = pb.varint()? as usize;
+                effects.push(decode_effect(pb.bytes(n)?, records, d2, tparams)?);
+            }
+            (_, w) => pb.skip(w)?,
+        }
+    }
+    (!effects.is_empty()).then_some(crate::contracts::Contract { effects })
+}
+
+fn decode_effect(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    tparams: &HashMap<u64, String>,
+) -> Option<crate::contracts::Effect> {
+    use crate::contracts::{Effect, InvocationKind};
+    let mut pb = Pb { b: body, i: 0 };
+    let mut effect_type = 0u64;
+    let mut args: Vec<Vec<u8>> = Vec::new();
+    let mut conclusion: Option<Vec<u8>> = None;
+    let mut kind = 0u64;
+    let mut condition_kind = 0u64;
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (1, 0) => effect_type = pb.varint()?,
+            (2, 2) => {
+                let n = pb.varint()? as usize;
+                args.push(pb.bytes(n)?.to_vec());
+            }
+            (3, 2) => {
+                let n = pb.varint()? as usize;
+                conclusion = Some(pb.bytes(n)?.to_vec());
+            }
+            (4, 0) => kind = pb.varint()?,
+            (5, 0) => condition_kind = pb.varint()?,
+            (_, w) => pb.skip(w)?,
+        }
+    }
+    let base = match effect_type {
+        // RETURNS_CONSTANT — returns()/returns(c) (the constant is the argument, if any).
+        0 => Effect::Returns(returns_constant(args.first())),
+        // CALLS — callsInPlace(param, kind).
+        1 => Effect::CallsInPlace {
+            param: param_ref(expression_param_ref(args.first()?)?),
+            kind: match kind {
+                0 => InvocationKind::AtMostOnce,
+                1 => InvocationKind::ExactlyOnce,
+                2 => InvocationKind::AtLeastOnce,
+                _ => InvocationKind::Unknown,
+            },
+        },
+        // RETURNS_NOT_NULL — returnsNotNull().
+        2 => Effect::Returns(crate::contracts::ReturnsValue::NotNull),
+        // RETURNS_RESULT_OF — not modeled.
+        _ => return None,
+    };
+    // `conclusion_of_conditional_effect` with the default CONCLUSION_CONDITION kind turns the
+    // returns-effect into `<returns> implies <conclusion>`. (RETURNS_CONDITION / HOLDSIN forms
+    // are not modeled.)
+    if condition_kind == 0 {
+        if let Some(cb) = conclusion {
+            if let Effect::Returns(returns) = base {
+                return Some(Effect::ConditionalReturns {
+                    returns,
+                    conclusion: decode_expression(&cb, records, d2, tparams)?,
+                });
+            }
+        }
+    }
+    Some(base)
+}
+
+/// The `returns(…)` constant of a RETURNS_CONSTANT effect: an `Expression` whose `constant_value`
+/// is the returned literal; no argument at all spells `returns()`.
+fn returns_constant(arg: Option<&Vec<u8>>) -> crate::contracts::ReturnsValue {
+    use crate::contracts::ReturnsValue;
+    let Some(body) = arg else {
+        return ReturnsValue::Any;
+    };
+    let mut pb = Pb { b: body, i: 0 };
+    let mut constant = None;
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (3, 0) => constant = pb.varint(),
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    match constant {
+        Some(0) => ReturnsValue::Bool(true),
+        Some(1) => ReturnsValue::Bool(false),
+        Some(2) => ReturnsValue::Null,
+        _ => ReturnsValue::Any,
+    }
+}
+
+/// The `value_parameter_reference` of an `Expression` body, when present.
+fn expression_param_ref(body: &[u8]) -> Option<u64> {
+    let mut pb = Pb { b: body, i: 0 };
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (2, 0) => return pb.varint(),
+            (_, w) => pb.skip(w)?,
+        }
+    }
+    None
+}
+
+/// `value_parameter_reference`: 0 is the extension receiver; n is the 1-based value-parameter index.
+fn param_ref(vpr: u64) -> crate::contracts::ParamRef {
+    if vpr == 0 {
+        crate::contracts::ParamRef::Receiver
+    } else {
+        crate::contracts::ParamRef::Param((vpr - 1) as usize)
+    }
+}
+
+/// Decode an `Expression` in conclusion position into a [`crate::contracts::Condition`]. A
+/// boolean formula embeds its FIRST operand inline in this message when it is primitive, with
+/// the rest in `and_argument` (field 6) / `or_argument` (field 7).
+fn decode_expression(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    tparams: &HashMap<u64, String>,
+) -> Option<crate::contracts::Condition> {
+    use crate::contracts::{Condition, ConditionType};
+    let mut pb = Pb { b: body, i: 0 };
+    let mut flags = 0u64;
+    let mut vpr = None;
+    let mut constant = None;
+    let mut instance_body = None;
+    let mut ands: Vec<Condition> = Vec::new();
+    let mut ors: Vec<Condition> = Vec::new();
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (1, 0) => flags = pb.varint()?,
+            (2, 0) => vpr = Some(pb.varint()?),
+            (3, 0) => constant = Some(pb.varint()?),
+            (4, 2) => {
+                let n = pb.varint()? as usize;
+                instance_body = Some(pb.bytes(n)?.to_vec());
+            }
+            (6, 2) => {
+                let n = pb.varint()? as usize;
+                ands.push(decode_expression(pb.bytes(n)?, records, d2, tparams)?);
+            }
+            (7, 2) => {
+                let n = pb.varint()? as usize;
+                ors.push(decode_expression(pb.bytes(n)?, records, d2, tparams)?);
+            }
+            (_, w) => pb.skip(w)?,
+        }
+    }
+    // The primitive condition embedded inline in this message, if any.
+    let negated = flags & 1 != 0;
+    let null_check = flags & 2 != 0;
+    let self_cond = if null_check {
+        Some(Condition::IsNull {
+            param: param_ref(vpr?),
+            negated,
+        })
+    } else if let Some(tb) = instance_body {
+        Some(Condition::IsType {
+            param: param_ref(vpr?),
+            ty: ConditionType::Metadata(parse_type_gsig(&tb, records, d2, tparams)?),
+            negated,
+        })
+    } else {
+        match constant {
+            Some(0) => Some(Condition::Const(true)),
+            Some(1) => Some(Condition::Const(false)),
+            _ => vpr.map(|v| Condition::BoolParam(param_ref(v))),
+        }
+    };
+    fn fold(
+        cs: Vec<Condition>,
+        mk: fn(Box<Condition>, Box<Condition>) -> Condition,
+    ) -> Option<Condition> {
+        let mut it = cs.into_iter();
+        let first = it.next()?;
+        Some(it.fold(first, |acc, c| mk(Box::new(acc), Box::new(c))))
+    }
+    if !ands.is_empty() {
+        return fold(self_cond.into_iter().chain(ands).collect(), Condition::And);
+    }
+    if !ors.is_empty() {
+        return fold(self_cond.into_iter().chain(ors).collect(), Condition::Or);
+    }
+    self_cond
 }
 
 /// The `@kotlin.jvm.JvmName("...")` value from a function's decoded annotation bodies, if present. The
@@ -1281,6 +1521,10 @@ pub struct MetaFn {
     /// straight from `@Metadata` rather than the JVM `Signature` attribute — a JVM-agnostic, Kotlin-faithful
     /// source (nullability, variance, Kotlin type identities). `None` when the return type won't decode.
     pub generic_sig: Option<GenericSig>,
+    /// The function's declared contract (`Function.contract`, field 32), decoded into the shared
+    /// contract IR — the effects the checker applies at call sites (`returns(…) implies …`,
+    /// `callsInPlace`). `None` when the function declares no contract.
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
 impl MetaFn {
@@ -1621,6 +1865,12 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                     // params only) so it is a drop-in replacement; the uniform member-receiver synthesis is
                     // a later step (`class_receiver = None` here keeps a member's params value-only).
                     let generic_sig = build_generic_sig(&pf, records, d2, None);
+                    let contract = pf.contract_body.as_deref().and_then(|body| {
+                        let tparams = type_parameter_context(&[], &pf.type_params, records, d2)
+                            .map(|c| c.names)
+                            .unwrap_or_default();
+                        decode_contract(body, records, d2, &tparams).map(std::sync::Arc::new)
+                    });
                     out.push(MetaFn {
                         kotlin_name,
                         jvm_name,
@@ -1636,6 +1886,7 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                         ret_class: ret_class.map(|s| type_name(&s)),
                         value_params,
                         generic_sig,
+                        contract,
                     });
                 }
             }
@@ -2826,6 +3077,80 @@ mod module_reader_tests {
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
     use std::collections::HashMap;
+
+    /// The decoded contract of a stdlib function, or `None` when the stdlib jar is not
+    /// provisioned in this environment (the test then vacuously passes).
+    fn stdlib_contract(facade: &str, name: &str) -> Option<crate::contracts::Contract> {
+        let cp = crate::toolchain::stdlib_classpath();
+        cp.meta_functions_name(crate::types::type_name(facade))
+            .iter()
+            .find(|f| f.kotlin_name == name)
+            .and_then(|f| f.contract.as_deref().cloned())
+    }
+
+    #[test]
+    fn decodes_stdlib_is_null_or_blank_contract() {
+        use crate::contracts::{Condition, Effect, ParamRef, ReturnsValue};
+        let Some(c) = stdlib_contract("kotlin/text/StringsKt", "isNullOrBlank") else {
+            return;
+        };
+        assert_eq!(
+            c.effects,
+            vec![Effect::ConditionalReturns {
+                returns: ReturnsValue::Bool(false),
+                conclusion: Condition::IsNull {
+                    param: ParamRef::Receiver,
+                    negated: true,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn decodes_stdlib_require_and_require_not_null_contracts() {
+        use crate::contracts::{Condition, Effect, ParamRef, ReturnsValue};
+        let Some(req) = stdlib_contract("kotlin/PreconditionsKt", "require") else {
+            return;
+        };
+        assert!(
+            req.effects.contains(&Effect::ConditionalReturns {
+                returns: ReturnsValue::Any,
+                conclusion: Condition::BoolParam(ParamRef::Param(0)),
+            }),
+            "require contract effects: {:?}",
+            req.effects
+        );
+        let Some(rnn) = stdlib_contract("kotlin/PreconditionsKt", "requireNotNull") else {
+            return;
+        };
+        assert!(
+            rnn.effects.contains(&Effect::ConditionalReturns {
+                returns: ReturnsValue::Any,
+                conclusion: Condition::IsNull {
+                    param: ParamRef::Param(0),
+                    negated: true,
+                },
+            }),
+            "requireNotNull contract effects: {:?}",
+            rnn.effects
+        );
+    }
+
+    #[test]
+    fn decodes_stdlib_run_calls_in_place_contract() {
+        use crate::contracts::{Effect, InvocationKind, ParamRef};
+        let Some(c) = stdlib_contract("kotlin/StandardKt", "run") else {
+            return;
+        };
+        assert!(
+            c.effects.contains(&Effect::CallsInPlace {
+                param: ParamRef::Param(0),
+                kind: InvocationKind::ExactlyOnce,
+            }),
+            "run contract effects: {:?}",
+            c.effects
+        );
+    }
 
     #[test]
     fn function_operator_flag_uses_kotlin_metadata_bit_eight() {

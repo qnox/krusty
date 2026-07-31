@@ -182,6 +182,7 @@ impl JvmLibraries {
                 .cp
                 .is_inline_callable_name(c.owner, meta_name, &inline_desc, &params);
             let call_sig = meta.call_sig;
+            let contract = meta.contract.clone();
             let ret_metadata = meta.ret;
             let ret = if suspend {
                 match ret_metadata.class {
@@ -202,6 +203,7 @@ impl JvmLibraries {
                 suspend,
                 default_call: is_default,
                 signature: c.signature.clone(),
+                contract,
                 ..LibraryCallable::library(
                     c.owner,
                     c.name.clone(),
@@ -2289,6 +2291,7 @@ impl SymbolSource for JvmLibraries {
                     inline,
                     suspend: mf.is_suspend(),
                     source_receiver,
+                    contract: mf.contract.clone(),
                     // Carry the resolved bytecode method's generic `Signature` — a `<reified T>` extension's
                     // splice reads its formal-type-parameter NAMES from here to bind the call's explicit
                     // type arguments. Without it the reified body cannot be specialized and the call falls

@@ -726,6 +726,8 @@ pub struct MetadataCallFacts {
     pub ret: ReturnInfo,
     /// Kotlin's source-level `operator` modifier. The JVM descriptor/name cannot encode it.
     pub is_operator: bool,
+    /// The callable's declared contract, decoded from `@Metadata` (`None` when it has none).
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
 impl MetadataCallFacts {
@@ -735,6 +737,7 @@ impl MetadataCallFacts {
             call_sig,
             ret: ReturnInfo::default(),
             is_operator: false,
+            contract: None,
         }
     }
 }
@@ -1615,6 +1618,7 @@ impl Classpath {
             call_sig,
             ret: metadata_return_info(c.ret_class, c.ret_nullable()),
             is_operator: c.is_operator(),
+            contract: c.contract.clone(),
         }
     }
 
@@ -1632,6 +1636,7 @@ impl Classpath {
             call_sig: function.member_call_sig(),
             ret: metadata_return_info(function.ret_class, function.ret_nullable()),
             is_operator: function.is_operator(),
+            contract: function.contract.clone(),
         })
     }
 
@@ -4187,6 +4192,7 @@ mod fq_tests {
                 params: vec![param],
                 ret,
             }),
+            contract: None,
         };
 
         let narrow = [

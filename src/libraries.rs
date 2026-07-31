@@ -378,6 +378,7 @@ impl LibraryCallable {
             signature: None,
             origin: Origin::Library,
             source_receiver: None,
+            contract: None,
         }
     }
 
@@ -485,6 +486,9 @@ pub struct LibraryCallable {
     /// extension receiver must unbox to the value class's underlying; `params[0]` is already erased and
     /// cannot make that distinction. This is the un-erased-source-type down payment on task B.
     pub source_receiver: Option<Ty>,
+    /// The callable's declared contract, decoded from `@Metadata` — the effects the checker applies
+    /// at call sites (`returns(…) implies …`, `callsInPlace`). `None` when it declares none.
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member
