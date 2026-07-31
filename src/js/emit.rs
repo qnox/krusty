@@ -267,6 +267,22 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             let name = &ir.classes[*class as usize].fields[*index as usize].name;
             format!("{}.{}", emit_expr(ir, *receiver, inst), name)
         }
+        IrExpr::PropertyRead {
+            receiver,
+            owner,
+            name,
+            ..
+        } => {
+            let receiver = emit_expr(ir, *receiver, inst);
+            // Plain JavaScript has no Kotlin accessor ABI, but a source-written Kotlin accessor is still
+            // executable user code: common lowering retains that body as an IrFunction. Calling it here
+            // is the JS realization of the same semantic property operation; using `receiver.name`
+            // unconditionally would bypass computed/custom getters and silently read the backing field.
+            match declared_property_accessor(ir, *owner, name, false) {
+                Some(accessor) => format!("{receiver}.{}()", accessor.name),
+                None => format!("{receiver}.{name}"),
+            }
+        }
         IrExpr::New { internal, args, .. } => {
             let fq = internal.render();
             let name = class_simple(&fq);
@@ -452,6 +468,22 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 emit_expr(ir, *value, inst)
             )
         }
+        IrExpr::PropertyWrite {
+            receiver,
+            owner,
+            name,
+            value,
+            ..
+        } => {
+            let receiver = emit_expr(ir, *receiver, inst);
+            let value = emit_expr(ir, *value, inst);
+            // As for reads, a source-written setter body is a real method in the common IR and must run.
+            // A plain/default property has no such method and maps naturally to a JS field assignment.
+            match declared_property_accessor(ir, *owner, name, true) {
+                Some(accessor) => format!("{receiver}.{}({value})", accessor.name),
+                None => format!("({receiver}.{name} = {value})"),
+            }
+        }
         IrExpr::SetStatic { index, value } => {
             format!(
                 "({} = {})",
@@ -459,8 +491,44 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 emit_expr(ir, *value, inst)
             )
         }
-        _ => "undefined".to_string(),
+        // The JS backend covers a subset of the IR. A node it cannot represent must NOT masquerade as a
+        // value: `undefined` silently compiles a wrong program (a property read read back as `undefined`
+        // instead of the value, with no error anywhere). JS has no compile step of its own, so the honest
+        // realization is a throw at the point of use.
+        other => format!(
+            "(() => {{ throw new Error(\"krusty: JS backend cannot emit {}\"); }})()",
+            expr_kind(other)
+        ),
     }
+}
+
+/// The source-written accessor body for a property declared in this IR file. Default accessors are
+/// intentionally absent: they are target realization, so JS uses its native field operation for them.
+fn declared_property_accessor<'a>(
+    ir: &'a IrFile,
+    owner: crate::types::TypeName,
+    name: &str,
+    setter: bool,
+) -> Option<&'a crate::ir::IrFunction> {
+    let class = ir.classes.iter().find(|class| class.fq_name == owner)?;
+    let property = class
+        .properties
+        .iter()
+        .find(|property| property.name == name)?;
+    let function = if setter {
+        property.setter
+    } else {
+        property.getter
+    }?;
+    ir.functions.get(function as usize)
+}
+
+/// Variant name of an IR node, for the unsupported-node message.
+fn expr_kind(e: &IrExpr) -> String {
+    format!("{e:?}")
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect()
 }
 
 fn js_op(op: IrBinOp) -> &'static str {
