@@ -8356,6 +8356,10 @@ pub struct ResolvedCtorDelegation {
     pub argument_slots: Vec<usize>,
     /// Expected type for each source argument after vararg expansion/spread handling.
     pub argument_types: Vec<Ty>,
+    /// Whether each source argument lands in a receiver-function parameter. Source `ClassSig`
+    /// parameter types intentionally erase receiver syntax to the JVM-compatible `FunctionN` shape,
+    /// so contextual lambda checking must retain this declaration fact separately.
+    argument_lambda_receivers: Vec<bool>,
     pub omitted: Vec<usize>,
     pub vararg: Option<usize>,
     /// Empty for a direct constructor invocation.
@@ -8389,6 +8393,10 @@ struct CtorDelegationCandidate {
     /// Source declaration constraints, parallel to the target parameters. Empty means the declaration
     /// is unavailable; matching then falls back to the semantic `Ty` without inventing source metadata.
     parameter_constraints: Vec<ConstructorParameterConstraint>,
+    /// Receiver-function syntax, parallel to target parameters. This is declaration metadata rather
+    /// than an origin branch: source declarations provide it from `TypeRef`, while classpath semantic
+    /// function signatures provide the equivalent `FnSig` flag.
+    lambda_receivers: Vec<bool>,
 }
 
 fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
@@ -10210,7 +10218,12 @@ fn check_file_at_impl_mode(
                     match &sc.delegation {
                         CtorDelegation::This(delegation) => {
                             for &argument in &delegation.args {
-                                c.expr(argument);
+                                // A delegation lambda is contextual: leave its initial `Error`
+                                // placeholder until the shared constructor selector maps it to a
+                                // parameter slot, just like a primary class-header base argument.
+                                if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                                    c.expr(argument);
+                                }
                             }
                             let candidates =
                                 c.this_ctor_delegation_candidates(cl, sc_index, &primary_params);
@@ -10228,7 +10241,9 @@ fn check_file_at_impl_mode(
                         }
                         CtorDelegation::Super(delegation) => {
                             for &argument in &delegation.args {
-                                c.expr(argument);
+                                if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                                    c.expr(argument);
+                                }
                             }
                             let candidates = c.super_ctor_delegation_candidates(cl);
                             c.select_ctor_delegation(
@@ -10322,44 +10337,57 @@ fn check_file_at_impl_mode(
                 // checked below once the ctor is resolved; anything else is typed up front.
                 let file = c.file;
                 let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
-                let base_arg_tys: Vec<Ty> = cl
-                    .base_args
-                    .iter()
-                    .map(|&arg| {
-                        if is_lambda(arg) {
-                            Ty::Error
-                        } else {
-                            c.expr(arg)
-                        }
-                    })
-                    .collect();
-                // Resolve which base constructor `super(args)` targets — uniformly for a same-file,
-                // module, or classpath base via the symbol source — and record its parameter types so
-                // the lowerer emits `super(args)` against them instead of re-resolving the constructor.
+                for &arg in &cl.base_args {
+                    if !is_lambda(arg) {
+                        c.expr(arg);
+                    }
+                }
+                // Resolve the primary constructor's `Base(args)` clause through the SAME delegation
+                // candidates and argument-slot mapper used by secondary `super(args)` calls. Besides
+                // keeping same-file, sibling-module, and classpath bases on one path, the resulting
+                // source-order `argument_types` are essential for named/vararg arguments: zipping the
+                // source arguments with parameter order would contextually type the wrong lambda.
                 if !cl.base_args.is_empty() {
                     let internal = class_internal(c.file, &cl.name);
-                    let base_internal = c
-                        .syms
-                        .class_by_internal(&internal)
-                        .and_then(ClassSig::super_internal_name);
-                    let params = base_internal.and_then(|base_int| {
-                        c.resolve_super_ctor_params_name(base_int, &cl.base_args, &base_arg_tys)
-                    });
-                    if let Some(params) = params {
-                        // The lambda's implicit label is the base class's simple name (`return@Spec`).
-                        let label = base_internal.map(|base| {
-                            base.render()
-                                .rsplit('/')
+                    let names = cl
+                        .base_args
+                        .first()
+                        .and_then(|argument| c.file.base_arg_names.get(&argument.0))
+                        .cloned()
+                        .unwrap_or_else(|| vec![None; cl.base_args.len()]);
+                    let arguments = CtorDelegationCall {
+                        args: cl.base_args.clone(),
+                        names,
+                        trailing_lambda: false,
+                    };
+                    let candidates = c.super_ctor_delegation_candidates(cl);
+                    if let Some(selected) = c.select_source_constructor(&arguments, &candidates) {
+                        // A receiver lambda's implicit label is the source-level base class's SIMPLE
+                        // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
+                        // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
+                        let label = cl.base_class.as_deref().map(|base| {
+                            base.rsplit(['/', '.', '$'])
                                 .next()
-                                .unwrap_or_default()
+                                .unwrap_or(base)
                                 .to_string()
                         });
-                        for (&arg, &expected) in cl.base_args.iter().zip(params.iter()) {
+                        for ((&arg, &expected), &has_receiver) in cl
+                            .base_args
+                            .iter()
+                            .zip(&selected.argument_types)
+                            .zip(&selected.argument_lambda_receivers)
+                        {
                             if is_lambda(arg) {
-                                c.check_argument_expected(arg, expected, false, label.as_deref());
+                                c.check_argument_expected(
+                                    arg,
+                                    expected,
+                                    has_receiver,
+                                    label.as_deref(),
+                                );
                             }
                         }
-                        c.super_ctor_params.insert(internal, params);
+                        c.super_ctor_params
+                            .insert(internal, selected.target.params().to_vec());
                     } else {
                         // No unique ctor match: type the deferred lambda args without an expected type.
                         for &arg in &cl.base_args {
@@ -14314,8 +14342,8 @@ impl<'a> Checker<'a> {
                     MemberExtensionSelection::Operators,
                 ) {
                     // A member EXTENSION `operator fun Recv.invoke(...)` on an implicit receiver
-                    // (the kotest-style `"test" { … }` inside a receiver lambda): the selected
-                    // callable is recorded, and the lowerer emits it as a member-extension call.
+                    // (`"case" { … }` inside a receiver-DSL lambda): the selected callable is
+                    // recorded, and the lowerer emits it as a member-extension call.
                     return Some(ret);
                 } else {
                     let fi = self
@@ -14329,7 +14357,10 @@ impl<'a> Checker<'a> {
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .unwrap_or_default()
                         .into_iter()
-                        .filter(|o| o.is_extension() && o.receiver_rank == 0)
+                        // The call convention is semantic: a same-named non-operator extension remains
+                        // callable explicitly as `receiver.invoke(...)`, but never as `receiver(...)`.
+                        // `FnFlags::operator` is populated uniformly from source and classpath metadata.
+                        .filter(|o| o.is_extension() && o.receiver_rank == 0 && o.flags.operator)
                         .find(|o| {
                             o.extension_value_params().len() == arg_tys.len()
                                 // A `suspend operator fun …invoke` would need continuation threading the
@@ -14752,45 +14783,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Resolve a bare type `name` through this file's imports to an internal name that actually exists on
-    /// The parameter types of the base constructor that `: Base(args)` targets — the UNIQUE constructor
-    /// (module or classpath, resolved through the symbol source) to which every argument is assignable.
-    /// `base_internal` is the ALREADY-RESOLVED base class internal name.
-    /// `None` if the base type is unresolved, has no matching constructor, or the match is ambiguous
-    /// (then the lowerer bails rather than emitting a `super(...)` to a guessed overload).
-    fn resolve_super_ctor_params_name(
-        &self,
-        base_internal: TypeName,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-    ) -> Option<Vec<Ty>> {
-        let lt = self.resolved_type_name(base_internal)?;
-        // EXACT (nullability-insensitive) type match — a loose reference→reference assignability can't
-        // tell `RuntimeException(String)` from `RuntimeException(Throwable)` for a `String` argument.
-        // A lambda argument's type depends on the parameter it lands in (a receiver lambda's `this`
-        // comes from the expected type), so it is matched STRUCTURALLY against a function-typed
-        // parameter and re-checked against it by the caller.
-        let mut matches = lt.constructors.iter().filter(|ctor| {
-            ctor.params.len() == arg_tys.len()
-                && ctor
-                    .params
-                    .iter()
-                    .zip(args.iter().zip(arg_tys))
-                    .all(|(&p, (&arg, &a))| {
-                        if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
-                            matches!(p.non_null(), Ty::Fun(_))
-                        } else {
-                            p.non_null() == a.non_null()
-                        }
-                    })
-        });
-        let first = matches.next()?;
-        if matches.next().is_some() {
-            return None; // ambiguous — don't guess an overload
-        }
-        Some(first.params.clone())
-    }
-
     fn source_class_decl_by_internal(&self, internal: TypeName) -> Option<ClassDecl> {
         let find = |file: &File| {
             file.decls
@@ -14815,6 +14807,15 @@ impl<'a> Checker<'a> {
 
     fn secondary_ctor_param_ty(&mut self, parameter: &Param) -> Ty {
         self.resolve_ty(&parameter.ty)
+    }
+
+    fn semantic_lambda_receiver_flags(params: &[Ty]) -> Vec<bool> {
+        params
+            .iter()
+            .map(|parameter| {
+                matches!(parameter.non_null(), Ty::Fun(signature) if signature.has_receiver)
+            })
+            .collect()
     }
 
     fn this_ctor_delegation_candidates(
@@ -14847,6 +14848,11 @@ impl<'a> Checker<'a> {
                     .map(|parameter| {
                         Self::constructor_parameter_constraint(&parameter.ty, &class.type_params)
                     })
+                    .collect(),
+                lambda_receivers: class
+                    .props
+                    .iter()
+                    .map(|parameter| parameter.ty.fun_has_receiver())
                     .collect(),
             });
         }
@@ -14882,6 +14888,11 @@ impl<'a> Checker<'a> {
                     .map(|parameter| {
                         Self::constructor_parameter_constraint(&parameter.ty, &class.type_params)
                     })
+                    .collect(),
+                lambda_receivers: constructor
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.ty.fun_has_receiver())
                     .collect(),
             });
         }
@@ -14961,6 +14972,11 @@ impl<'a> Checker<'a> {
                         )
                     })
                     .collect(),
+                lambda_receivers: declaration
+                    .props
+                    .iter()
+                    .map(|parameter| parameter.ty.fun_has_receiver())
+                    .collect(),
             });
         }
         for (index, params) in class.secondary_ctors.iter().enumerate() {
@@ -14996,6 +15012,11 @@ impl<'a> Checker<'a> {
                             &declaration.type_params,
                         )
                     })
+                    .collect(),
+                lambda_receivers: constructor
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.ty.fun_has_receiver())
                     .collect(),
             });
         }
@@ -15143,6 +15164,7 @@ impl<'a> Checker<'a> {
                 vararg: None,
                 supports_default_abi: false,
                 parameter_constraints: Vec::new(),
+                lambda_receivers: Vec::new(),
             }];
         };
         if let Some(base) = self.syms.class_by_type_name(owner) {
@@ -15180,6 +15202,15 @@ impl<'a> Checker<'a> {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    lambda_receivers: declaration
+                        .as_ref()
+                        .map(|base| {
+                            base.props
+                                .iter()
+                                .map(|parameter| parameter.ty.fun_has_receiver())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| Self::semantic_lambda_receiver_flags(&base.ctor_params)),
                 });
             }
             for (index, params) in base.secondary_ctors.iter().enumerate() {
@@ -15235,6 +15266,15 @@ impl<'a> Checker<'a> {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    lambda_receivers: metadata
+                        .map(|constructor| {
+                            constructor
+                                .params
+                                .iter()
+                                .map(|parameter| parameter.ty.fun_has_receiver())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| Self::semantic_lambda_receiver_flags(params)),
                 });
             }
             return candidates;
@@ -15289,6 +15329,7 @@ impl<'a> Checker<'a> {
                 vararg,
                 supports_default_abi,
                 parameter_constraints: Vec::new(),
+                lambda_receivers: Self::semantic_lambda_receiver_flags(&constructor.params),
             });
         }
         candidates
@@ -15352,6 +15393,7 @@ impl<'a> Checker<'a> {
             })
             .collect::<Option<Vec<_>>>()?;
         let mut argument_types = Vec::with_capacity(arguments.args.len());
+        let mut argument_lambda_receivers = Vec::with_capacity(arguments.args.len());
         for (&argument, &slot) in arguments.args.iter().zip(&argument_slots) {
             let parameter = *params.get(slot)?;
             let expected = if candidate.vararg == Some(slot) {
@@ -15385,7 +15427,15 @@ impl<'a> Checker<'a> {
                         ConstructorParameterConstraint::Inferred
                     }
                 });
+            let lambda_literal = matches!(self.file.expr(argument), Expr::Lambda { .. });
             let fits = match constraint {
+                // A lambda literal must first land in a FUNCTION slot; its actual type is contextual
+                // and is checked only after overload selection. Applying this rule here, in the shared
+                // constructor matcher, makes primary/secondary and file/module/classpath delegation
+                // agree instead of teaching the class-header path a private lambda exception.
+                ConstructorParameterConstraint::Concrete if lambda_literal => {
+                    matches!(expected.non_null(), Ty::Fun(_))
+                }
                 ConstructorParameterConstraint::Concrete => {
                     self.receiver_is_assignable(actual, expected)
                 }
@@ -15394,14 +15444,25 @@ impl<'a> Checker<'a> {
                     // A lambda's arity is contextual (an omitted parameter list can mean zero
                     // parameters or implicit `it`), so its provisional type cannot reject a function
                     // candidate. Non-lambda values already have a stable function shape and must match.
-                    matches!(self.file.expr(argument), Expr::Lambda { .. })
-                        || self.generic_function_constructor_arg_fits(expected, actual)
+                    lambda_literal || self.generic_function_constructor_arg_fits(expected, actual)
                 }
             };
-            if actual != Ty::Error && !fits {
+            // `Error` normally suppresses cascades, but a DEFERRED lambda deliberately uses it as a
+            // placeholder. Its structural function-slot test is therefore authoritative and must
+            // still reject a non-function constructor overload.
+            if (lambda_literal || actual != Ty::Error) && !fits {
                 return None;
             }
             argument_types.push(expected);
+            argument_lambda_receivers.push(
+                candidate
+                    .lambda_receivers
+                    .get(slot)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        matches!(expected.non_null(), Ty::Fun(signature) if signature.has_receiver)
+                    }),
+            );
         }
         let omitted = slots
             .iter()
@@ -15423,6 +15484,7 @@ impl<'a> Checker<'a> {
                 target: candidate.target.clone(),
                 argument_slots,
                 argument_types,
+                argument_lambda_receivers,
                 omitted,
                 vararg: candidate.vararg,
                 default_masks,
@@ -15520,6 +15582,16 @@ impl<'a> Checker<'a> {
             .zip(&selected.resolved.argument_types)
             .enumerate()
         {
+            if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                let has_receiver = selected
+                    .resolved
+                    .argument_lambda_receivers
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false);
+                self.check_argument_expected(argument, expected, has_receiver, None);
+                continue;
+            }
             let constraint = selected
                 .resolved
                 .argument_slots
