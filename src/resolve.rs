@@ -5586,15 +5586,34 @@ fn collect_signatures_with_cp_impl(
                         // for a computed property, from its expression getter body).
                         match (&p.ty, &p.getter) {
                             (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                            (None, Some(FunBody::Expr(g))) if is_computed => infer_lit_ty_scoped(
-                                file,
-                                *g,
-                                &class_names,
-                                &fun_rets,
-                                &context_scope,
-                                &*libraries,
-                                &table,
-                            ),
+                            (None, Some(FunBody::Expr(g))) if is_computed => {
+                                // Thread already-collected top-level properties into getter-body
+                                // inference, exactly like the initializer branch below: a computed
+                                // `val http get() = httpHolder.client` reads another top-level
+                                // property, and without the scope its type inferred as Error
+                                // ("cannot infer the type of property 'http'"). Context params
+                                // come first — they shadow a same-named top-level property
+                                // (`props` resolution is first-match).
+                                let props: Vec<(String, Ty, bool)> = context_scope
+                                    .iter()
+                                    .cloned()
+                                    .chain(
+                                        table
+                                            .props
+                                            .iter()
+                                            .map(|(n, (t, v, _))| (n.clone(), *t, *v)),
+                                    )
+                                    .collect();
+                                infer_lit_ty_scoped(
+                                    file,
+                                    *g,
+                                    &class_names,
+                                    &fun_rets,
+                                    &props,
+                                    &*libraries,
+                                    &table,
+                                )
+                            }
                             (None, _) => p
                                 .init
                                 .map(|i| {
@@ -32101,6 +32120,24 @@ fun box(): String {
         };
         assert_eq!(target.stmt_id, inner_f_stmt);
         assert_eq!(target.provided_arg_count, 0);
+    }
+
+    #[test]
+    fn computed_property_getter_forward_reference_stays_rejected() {
+        // A computed getter reading a LATER-declared top-level property still cannot infer —
+        // signature-phase inference is sequential, at parity with initializer inference
+        // (`val a = b` before `val b` fails the same way).
+        let (errs, _) = check(
+            r#"
+val x get() = y
+val y = 1
+"#,
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("cannot infer the type of property 'x'")),
+            "expected a forward-reference inference error, got {errs:?}"
+        );
     }
 
     #[test]

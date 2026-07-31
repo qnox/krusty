@@ -22,3 +22,20 @@ return \"OK\"\n\
 }\n";
     common::assert_box_ok_with_stdlib(SRC, "P");
 }
+
+/// A TOP-LEVEL computed property with NO type annotation infers from its expression getter body —
+/// and the body may read another top-level property (`val http get() = httpHolder.client`, the
+/// holder idiom). Signature-phase getter inference scoped only context parameters, so the read
+/// resolved nothing and the property typed as Error ("cannot infer the type of property 'http'").
+/// The initializer branch already threaded the already-collected top-level props in; the getter
+/// branch now shares that scope. A computed property reading an EARLIER computed property works
+/// too (forward references stay rejected, at parity with initializers).
+#[test]
+fn computed_property_getter_reads_toplevel_property() {
+    const SRC: &str = "class Holder(val client: String)\n\
+val httpHolder = Holder(\"OK\")\n\
+val http get() = httpHolder.client\n\
+val httpAgain get() = http\n\
+fun box(): String = if (http == \"OK\" && httpAgain == \"OK\") \"OK\" else \"fail: $http\"\n";
+    common::assert_box_ok_with_stdlib(SRC, "G");
+}
