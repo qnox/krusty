@@ -16,7 +16,7 @@ use crate::libraries::{
     map_call_args, required_arity, CallArgMappingError, CallArgMappingFailure, CallSig,
     EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
-use crate::names::{property_getter_name, property_setter_name};
+use crate::names::{nested_internal_name_candidates, property_getter_name, property_setter_name};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
 use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
@@ -624,6 +624,9 @@ pub struct DeclaredPropertySig {
 #[derive(Clone, Debug)]
 pub struct ClassSig {
     pub internal: TypeName,
+    /// File that declares this source classifier. Class visibility cannot be decided from the module
+    /// alone: a top-level `private` class is visible only to declarations in this same file.
+    pub source_file: u32,
     pub visibility: Visibility,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     pub declared_props: HashMap<String, DeclaredPropertySig>,
@@ -1516,6 +1519,9 @@ impl SymbolTable {
         };
         for signature in self.funs.values_mut().flatten() {
             offset_signature(signature);
+        }
+        for class in self.classes.values_mut() {
+            class.source_file += offset;
         }
         self.conflicting_top_level_key_by_source =
             std::mem::take(&mut self.conflicting_top_level_key_by_source)
@@ -3233,14 +3239,12 @@ fn object_member_import_sig(file: &File, name: &str, src: &dyn SymbolSource) -> 
         .iter()
         .find(|i| !i.ends_with(".*") && i.ends_with(&suffix))?;
     let owner_path = fq[..fq.len() - suffix.len()].replace('.', "/");
-    let mut cand = owner_path;
-    loop {
-        if src.resolve_type(&cand).is_some_and(|t| t.is_object()) {
-            return Some(cand);
-        }
-        let pos = cand.rfind('/')?;
-        cand.replace_range(pos..=pos, "$");
-    }
+    nested_internal_name_candidates(&owner_path)
+        .into_iter()
+        .find(|candidate| {
+            src.resolve_type(candidate)
+                .is_some_and(|classifier| classifier.is_object())
+        })
 }
 
 fn resolve_nested_internal(internal: &str, source: &dyn SymbolSource) -> Option<String> {
@@ -3254,12 +3258,7 @@ fn resolve_nested_internal_name(internal: &str, source: &dyn SymbolSource) -> Op
         let t = source.resolve_type_name(name)?;
         Some(t.alias_target.unwrap_or(name))
     };
-    if let Some(r) = resolved(internal) {
-        return Some(r);
-    }
-    let mut cand = internal.to_string();
-    while let Some(pos) = cand.rfind('/') {
-        cand.replace_range(pos..=pos, "$");
+    for cand in nested_internal_name_candidates(internal) {
         if let Some(r) = resolved(&cand) {
             return Some(r);
         }
@@ -3420,14 +3419,14 @@ fn source_classifier_from_path(
     path: &str,
     declarations: &std::collections::HashSet<String>,
 ) -> Option<TypeName> {
-    let mut candidate = path.to_string();
-    loop {
+    // kotlinc resolves a dotted path classifier-first — an in-scope type shadows a package path —
+    // so try the nested (`$`) forms before the plain package path: `a$b$c`, `a/b$c`, then `a/b/c`.
+    for candidate in nested_internal_name_candidates(path).into_iter().rev() {
         if declarations.contains(&candidate) {
             return Some(type_name(&candidate));
         }
-        let separator = candidate.rfind('/')?;
-        candidate.replace_range(separator..=separator, "$");
     }
+    None
 }
 
 fn type_ref_formal_occurrences(
@@ -3596,6 +3595,17 @@ fn collect_signatures_with_cp_impl(
                     .or(same_package_source)
                     .or_else(|| {
                         resolve_name_against_imports_name(&name, &imap, &levels, &*libraries)
+                    })
+                    .or_else(|| {
+                        // A dotted name may be the fully-qualified path of a SOURCE class in this
+                        // module (`pkg1.Cls`, `pkg1.Outer.Inner`) — source shadows the classpath.
+                        // Some positions (supertypes, delegation specs) arrive already
+                        // internalized (`pkg1/Cls`), so accept '/' too.
+                        if name.contains('.') || name.contains('/') {
+                            source_classifier_from_path(&name.replace('.', "/"), &user_defined)
+                        } else {
+                            None
+                        }
                     })
                     .or_else(|| {
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
@@ -5313,6 +5323,7 @@ fn collect_signatures_with_cp_impl(
                         c.name.clone(),
                         ClassSig {
                             internal: internal_ref,
+                            source_file: i as u32,
                             visibility: c.visibility,
                             props,
                             declared_props,
@@ -5405,6 +5416,7 @@ fn collect_signatures_with_cp_impl(
                             comp_internal.clone(),
                             ClassSig {
                                 internal: comp_internal_ref,
+                                source_file: i as u32,
                                 visibility: Visibility::Public,
                                 props: Vec::new(),
                                 declared_props: HashMap::new(),
