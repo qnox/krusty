@@ -24,18 +24,41 @@ return \"OK\"\n\
 }
 
 /// A TOP-LEVEL computed property with NO type annotation infers from its expression getter body —
-/// and the body may read another top-level property (`val http get() = httpHolder.client`, the
-/// holder idiom). Signature-phase getter inference scoped only context parameters, so the read
-/// resolved nothing and the property typed as Error ("cannot infer the type of property 'http'").
+/// and the body may read another top-level property (`val derived get() = holder.value`).
+/// Signature-phase getter inference scoped only context parameters, so the read resolved nothing
+/// and the property typed as Error ("cannot infer the type of property 'derived'").
 /// The initializer branch already threaded the already-collected top-level props in; the getter
 /// branch now shares that scope. A computed property reading an EARLIER computed property works
-/// too (forward references stay rejected, at parity with initializers).
+/// too. Getter bodies are executable, so a LATER property is also legal; a bounded signature retry
+/// resolves that forward edge without changing the sequential rules for eager initializers.
 #[test]
 fn computed_property_getter_reads_toplevel_property() {
-    const SRC: &str = "class Holder(val client: String)\n\
-val httpHolder = Holder(\"OK\")\n\
-val http get() = httpHolder.client\n\
-val httpAgain get() = http\n\
-fun box(): String = if (http == \"OK\" && httpAgain == \"OK\") \"OK\" else \"fail: $http\"\n";
+    const SRC: &str = "class Holder(val value: String)\n\
+val holder = Holder(\"OK\")\n\
+val derived get() = holder.value\n\
+val repeated get() = derived\n\
+val forward get() = forwardAgain\n\
+val forwardAgain get() = laterHolder.value\n\
+val laterHolder = Holder(\"OK\")\n\
+fun box(): String = if (derived == \"OK\" && repeated == \"OK\" && forward == \"OK\") \"OK\" else \"fail: $derived\"\n";
     common::assert_box_ok_with_stdlib(SRC, "G");
+}
+
+#[test]
+fn computed_property_getter_reads_sibling_file_property() {
+    // Signature collection owns a module-wide property table, so the same inference path must work
+    // across the per-file streaming boundary; no separate same-file lookup is needed.
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            (
+                "shared/State",
+                "package shared\nclass State(val value: String)\nval state = State(\"OK\")\n",
+            ),
+            (
+                "shared/Use",
+                "package shared\nval computed get() = state.value\nfun box(): String = computed\n",
+            ),
+        ],
+        "computed_prop_sibling",
+    );
 }

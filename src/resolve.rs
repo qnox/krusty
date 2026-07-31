@@ -5550,8 +5550,9 @@ fn collect_signatures_with_cp_impl(
                         }
                         continue;
                     }
-                    // A top-level *computed* property (custom getter, no initializer) — needs a type
-                    // annotation (no getter-return inference at top level yet); emitted as `getX()`.
+                    // A top-level *computed* property (custom getter, no initializer) is emitted as
+                    // `getX()`. An expression getter may supply its inferred type; block getters still
+                    // require an annotation because the lightweight signature inferer has no block flow.
                     let is_computed = p.getter.is_some() && p.init.is_none();
                     let context_params = p
                         .context_params
@@ -5599,29 +5600,12 @@ fn collect_signatures_with_cp_impl(
                         match (&p.ty, &p.getter) {
                             (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
                             (None, Some(FunBody::Expr(g))) if is_computed => {
-                                // Thread already-collected top-level properties into getter-body
-                                // inference, exactly like the initializer branch below: a computed
-                                // `val http get() = httpHolder.client` reads another top-level
-                                // property, and without the scope its type inferred as Error
-                                // ("cannot infer the type of property 'http'"). Context params
-                                // come first — they shadow a same-named top-level property
-                                // (`props` resolution is first-match).
-                                let props: Vec<(String, Ty, bool)> = context_scope
-                                    .iter()
-                                    .cloned()
-                                    .chain(
-                                        table
-                                            .props
-                                            .iter()
-                                            .map(|(n, (t, v, _))| (n.clone(), *t, *v)),
-                                    )
-                                    .collect();
-                                infer_lit_ty_scoped(
+                                infer_top_level_property_expr(
                                     file,
                                     *g,
                                     &class_names,
                                     &fun_rets,
-                                    &props,
+                                    &context_scope,
                                     &*libraries,
                                     &table,
                                 )
@@ -5629,19 +5613,12 @@ fn collect_signatures_with_cp_impl(
                             (None, _) => p
                                 .init
                                 .map(|i| {
-                                    // Thread already-collected top-level properties into initializer
-                                    // inference, including nested reads such as `a.compareTo(b)`.
-                                    let props: Vec<(String, Ty, bool)> = table
-                                        .props
-                                        .iter()
-                                        .map(|(n, (t, v, _))| (n.clone(), *t, *v))
-                                        .collect();
-                                    infer_lit_ty_scoped(
+                                    infer_top_level_property_expr(
                                         file,
                                         i,
                                         &class_names,
                                         &fun_rets,
-                                        &props,
+                                        &context_scope,
                                         &*libraries,
                                         &table,
                                     )
@@ -5649,7 +5626,9 @@ fn collect_signatures_with_cp_impl(
                                 .unwrap_or(Ty::Error),
                         }
                     };
-                    if ty == Ty::Error && (p.init.is_some() || is_computed) && p.ty.is_none() {
+                    // Computed getters are diagnosed only after the bounded module-wide retry below:
+                    // unlike an eager initializer, a getter may legally reference a later declaration.
+                    if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                         diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
                     }
                     if is_computed {
@@ -5675,6 +5654,15 @@ fn collect_signatures_with_cp_impl(
             }
         }
     }
+
+    finish_top_level_computed_property_inference(
+        files,
+        &file_class_names,
+        &fun_rets,
+        &*libraries,
+        &mut table,
+        diags,
+    );
 
     table.conflicting_top_level_keys = report_conflicting_top_level_overloads(
         files,
@@ -6781,6 +6769,162 @@ struct InferEnv<'a> {
     /// Resolve a static value declared by a same-module classifier. The lightweight inferer receives
     /// only the external platform source, so source enum entries need this module-table bridge.
     static_classifier_value: &'a dyn Fn(TypeName, &str) -> Option<Ty>,
+}
+
+/// Infer an eager top-level initializer or expression getter against the same value scope. Named
+/// context parameters come first because lightweight name resolution is first-match; they therefore
+/// shadow module properties just as they do in the real checker. Module properties follow so nested
+/// expressions such as `holder.value` and `a.compareTo(b)` do not need call-site-specific branches.
+fn infer_top_level_property_expr(
+    file: &File,
+    expression: ExprId,
+    class_names: &ClassNames,
+    fun_rets: &HashMap<String, Ty>,
+    context_scope: &[(String, Ty, bool)],
+    src: &dyn SemanticPlatform,
+    table: &SymbolTable,
+) -> Ty {
+    let props = context_scope
+        .iter()
+        .cloned()
+        .chain(
+            table
+                .props
+                .iter()
+                .map(|(name, (ty, is_var, _))| (name.clone(), *ty, *is_var)),
+        )
+        .collect::<Vec<_>>();
+    infer_lit_ty_scoped(file, expression, class_names, fun_rets, &props, src, table)
+}
+
+/// Retry unannotated top-level expression getters after every property signature is present. A getter
+/// is an executable body, so Kotlin permits it to read a later declaration (`val first get() = later`),
+/// unlike an eager initializer. Iterating at most once per pending getter resolves finite dependency
+/// chains while guaranteeing that self/mutual cycles terminate as `Error`; diagnostics are emitted only
+/// after the fixed point so a legal forward edge never leaves a stale inference error behind.
+fn finish_top_level_computed_property_inference(
+    files: &[File],
+    file_class_names: &[ClassNames],
+    fun_rets: &HashMap<String, Ty>,
+    src: &dyn SemanticPlatform,
+    table: &mut SymbolTable,
+    diags: &mut DiagSink,
+) {
+    let pending_count = files
+        .iter()
+        .flat_map(|file| {
+            file.decls
+                .iter()
+                .map(move |&declaration| (file, declaration))
+        })
+        .filter(|(file, declaration)| {
+            matches!(
+                file.decl(*declaration),
+                Decl::Property(property)
+                    if property.receiver.is_none()
+                        && property.ty.is_none()
+                        && property.init.is_none()
+                        && property.getter.is_some()
+                        && property.delegate.is_none()
+            )
+        })
+        .count();
+
+    for _ in 0..pending_count {
+        let mut changed = false;
+        for (file_index, file) in files.iter().enumerate() {
+            for &declaration in &file.decls {
+                let Decl::Property(property) = file.decl(declaration) else {
+                    continue;
+                };
+                let (None, None, None, Some(FunBody::Expr(getter))) = (
+                    &property.receiver,
+                    &property.ty,
+                    property.init,
+                    &property.getter,
+                ) else {
+                    continue;
+                };
+                if property.delegate.is_some() {
+                    continue;
+                }
+                let context_types = table
+                    .context_props
+                    .get(&(file_index as u32, declaration.0))
+                    .map(|signature| signature.context_params.clone())
+                    .unwrap_or_default();
+                let context_scope = property
+                    .context_params
+                    .iter()
+                    .zip(&context_types)
+                    .filter(|(parameter, _)| parameter.name != "_")
+                    .map(|(parameter, ty)| (parameter.name.clone(), *ty, false))
+                    .collect::<Vec<_>>();
+                let inferred = infer_top_level_property_expr(
+                    file,
+                    *getter,
+                    &file_class_names[file_index],
+                    fun_rets,
+                    &context_scope,
+                    src,
+                    table,
+                );
+                if inferred == Ty::Error {
+                    continue;
+                }
+                let current = if context_types.is_empty() {
+                    table
+                        .props
+                        .get_mut(&property.name)
+                        .map(|entry| &mut entry.0)
+                } else {
+                    table
+                        .context_props
+                        .get_mut(&(file_index as u32, declaration.0))
+                        .map(|signature| &mut signature.ty)
+                };
+                if let Some(current) = current.filter(|current| **current == Ty::Error) {
+                    *current = inferred;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for (file_index, file) in files.iter().enumerate() {
+        diags.set_file(file_index as u32);
+        for &declaration in &file.decls {
+            let Decl::Property(property) = file.decl(declaration) else {
+                continue;
+            };
+            if property.receiver.is_some()
+                || property.ty.is_some()
+                || property.init.is_some()
+                || property.getter.is_none()
+                || property.delegate.is_some()
+            {
+                continue;
+            }
+            let inferred = table
+                .context_props
+                .get(&(file_index as u32, declaration.0))
+                .map(|signature| signature.ty)
+                .or_else(|| table.props.get(&property.name).map(|entry| entry.0))
+                .unwrap_or(Ty::Error);
+            if inferred == Ty::Error {
+                diags.error(
+                    property.span,
+                    format!(
+                        "krusty: cannot infer the type of property '{}'; add an explicit type",
+                        property.name
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// Infer a declaration initializer's type with a fresh cycle-guard, using `table` to resolve
@@ -32308,20 +32452,37 @@ fun box(): String {
     }
 
     #[test]
-    fn computed_property_getter_forward_reference_stays_rejected() {
-        // A computed getter reading a LATER-declared top-level property still cannot infer —
-        // signature-phase inference is sequential, at parity with initializer inference
-        // (`val a = b` before `val b` fails the same way).
+    fn computed_property_getter_cycle_reports_inference_error() {
+        // The bounded module-wide retry must stop on mutual getter recursion instead of looping or
+        // inventing a type. Both declarations remain Error and receive the ordinary inference error.
         let (errs, _) = check(
             r#"
 val x get() = y
-val y = 1
+val y get() = x
 "#,
         );
         assert!(
             errs.iter()
                 .any(|e| e.contains("cannot infer the type of property 'x'")),
-            "expected a forward-reference inference error, got {errs:?}"
+            "expected a cyclic inference error, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn computed_property_retry_does_not_change_eager_initializer_order() {
+        // Only executable getter bodies participate in the module-wide retry. An eager initializer
+        // still observes declaration order, so the retry cannot silently widen the feature into a
+        // different initialization model.
+        let (errs, _) = check(
+            r#"
+val eager = later
+val later = 1
+"#,
+        );
+        assert!(
+            errs.iter()
+                .any(|error| error.contains("cannot infer the type of property 'eager'")),
+            "expected an eager forward-reference inference error, got {errs:?}"
         );
     }
 
