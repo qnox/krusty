@@ -38,8 +38,8 @@ fn elvis_of_safe_takeif_and_nullable_string() {
     // fallback is `String?`, and the join of their non-null/nullable forms is over `Ty::String` — a
     // builtin variant `obj_internal` does not see — so it fell through to the `Any?` supertype and a
     // member access on the result failed "unresolved member 'length' on 'kotlin/Any'".
-    const SRC: &str = "fun pick(req: String?, jwt: String?): Int {\n\
-        val effective = req?.takeIf { it.isNotBlank() } ?: jwt\n\
+    const SRC: &str = "fun pick(source: String?, fallback: String?): Int {\n\
+        val effective = source?.takeIf { it.isNotBlank() } ?: fallback\n\
         return effective?.length ?: -1\n\
     }\n\
     fun box(): String {\n\
