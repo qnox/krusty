@@ -8729,6 +8729,21 @@ impl<'a> Lower<'a> {
             }
             lo.afile
                 .any_child_expr(e, &mut |c| scan(lo, cur, bound, c, deep), &mut |s| {
+                    // A bare-name field WRITE (`res = v`, `res++`) is an implicit-`this` member
+                    // access too — its target is a plain `String` on the stmt, never an
+                    // `Expr::Name` the scan above would see, so a write-only lambda must still
+                    // capture the enclosing `this` (else the write bails in the closure).
+                    if let Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } = lo.afile.stmt(s)
+                    {
+                        if !bound.contains(name)
+                            && (lo.resolve_field_name(cur, name).is_some()
+                                || !crate::module_symbols::ModuleSymbols::new(lo.syms)
+                                    .instance_members(Ty::obj_name(cur), name)
+                                    .is_empty())
+                        {
+                            return true;
+                        }
+                    }
                     lo.afile
                         .any_child_stmt(s, &mut |c| scan(lo, cur, bound, c, deep))
                 })

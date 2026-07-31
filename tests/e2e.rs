@@ -244,6 +244,8 @@ mod context_function_type_e2e;
 mod context_local_fun_e2e;
 #[path = "context_parameters_e2e.rs"]
 mod context_parameters_e2e;
+#[path = "contract_calls_in_place_e2e.rs"]
+mod contract_calls_in_place_e2e;
 #[path = "contract_erasure_e2e.rs"]
 mod contract_erasure_e2e;
 #[path = "contract_smartcast_e2e.rs"]

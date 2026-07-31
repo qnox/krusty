@@ -1,0 +1,57 @@
+//! `callsInPlace(x, EXACTLY_ONCE)` contract effects: the lambda is invoked exactly once in
+//! place, so (a) the checker permits captured-var mutation like an inline call even when the
+//! callee is NOT inline, and (b) the lowerer emits the write — for a non-inline EO lambda a
+//! captured `var`/field is Ref-boxed / written through the captured `this`.
+//! Mirrors `contracts/constructorArgument.kt` (non-inline, init lambda) and
+//! `contracts/fieldInConstructorParens.kt` (private inline member, val-field write).
+
+use super::common;
+
+fn run(src: &str) -> Option<String> {
+    common::compile_and_run_with_stdlib(src, "Main")
+}
+
+#[test]
+fn non_inline_exactly_once_lambda_writes_captured_var_in_init() {
+    const SRC: &str = "import kotlin.contracts.*\n\
+@OptIn(kotlin.contracts.ExperimentalContracts::class)\n\
+fun runOnce(action: () -> Unit) {\n\
+    contract { callsInPlace(action, InvocationKind.EXACTLY_ONCE) }\n\
+    action()\n\
+}\n\
+class Foo(foo: Boolean) {\n\
+    var res = \"FAIL\"\n\
+    init {\n\
+        runOnce {\n\
+            foo\n\
+            res = \"OK\"\n\
+        }\n\
+    }\n\
+}\n\
+fun box(): String = Foo(true).res\n";
+    assert_eq!(
+        run(SRC).expect("EO lambda captured-var write compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn inline_member_exactly_once_lambda_initializes_val_field() {
+    const SRC: &str = "import kotlin.contracts.*\n\
+class Smth {\n\
+    val whatever: Int\n\
+    init {\n\
+        calculate({ whatever = it })\n\
+    }\n\
+    @OptIn(ExperimentalContracts::class)\n\
+    private inline fun calculate(block: (Int) -> Unit) {\n\
+        contract { callsInPlace(block, InvocationKind.EXACTLY_ONCE) }\n\
+        block(42)\n\
+    }\n\
+}\n\
+fun box(): String = if (Smth().whatever == 42) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        run(SRC).expect("inline EO lambda val-field write compiles + runs"),
+        "OK"
+    );
+}
