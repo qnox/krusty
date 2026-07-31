@@ -176,6 +176,7 @@ mod tests {
         let allowed = [
             "ast",
             "backend",
+            "contracts",
             "diag",
             "frontend",
             "ir",
@@ -288,8 +289,18 @@ mod tests {
     }
 
     #[test]
+    fn contract_ir_depends_only_on_ast_and_types() {
+        // The shared contract IR must stay backend-agnostic: proto wire shapes live in
+        // `jvm/metadata` + `metadata/builder`, call-site application in `resolve`.
+        assert_allowed_crate_modules("src/contracts.rs", &["ast", "types"]);
+    }
+
+    #[test]
     fn semantic_library_contract_uses_only_symbol_source_and_type_dependencies() {
-        assert_allowed_crate_modules("src/libraries.rs", &["name_tree", "symbol_source", "types"]);
+        assert_allowed_crate_modules(
+            "src/libraries.rs",
+            &["contracts", "name_tree", "symbol_source", "types"],
+        );
     }
 
     #[test]

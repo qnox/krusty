@@ -182,6 +182,23 @@ impl JvmLibraries {
                 .cp
                 .is_inline_callable_name(c.owner, meta_name, &inline_desc, &params);
             let call_sig = meta.call_sig;
+            let contract = meta.contract.clone();
+            let context_count = meta.context_count;
+            // Context parameters' metadata nullability rides `platform_nullable_params`; matching
+            // applies it arg-driven (Java semantics), but the checker ALSO needs it on the stored
+            // callable (context source resolution reads the callable's context param types
+            // directly). Apply the metadata-declared flags unconditionally — they are Kotlin
+            // declarations, not platform types.
+            if context_count > 0 {
+                for (p, &nullable) in params
+                    .iter_mut()
+                    .zip(call_sig.platform_nullable_params.iter())
+                {
+                    if nullable && p.is_reference() {
+                        *p = Ty::nullable(*p);
+                    }
+                }
+            }
             let ret_metadata = meta.ret;
             let ret = if suspend {
                 match ret_metadata.class {
@@ -197,11 +214,21 @@ impl JvmLibraries {
                 physical_ret
             };
             let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
+            let generic_sig_for_callable = self.callable_generic_sig(
+                c.owner,
+                &c.name,
+                &c.descriptor,
+                c.signature.as_deref(),
+                false,
+            );
             let callable = LibraryCallable {
                 inline: inline_kind,
                 suspend,
                 default_call: is_default,
                 signature: c.signature.clone(),
+                context_count,
+                contract,
+                generic_sig: generic_sig_for_callable.clone().map(Box::new),
                 ..LibraryCallable::library(
                     c.owner,
                     c.name.clone(),
@@ -216,13 +243,7 @@ impl JvmLibraries {
             // an `Extension`, not a receiver-less `TopLevel`. Extension resolution reaches it through the
             // by-receiver query; keeping the kind honest is what lets the top-level queries ignore it
             // without per-call-site receiver checks.
-            let generic_sig = self.callable_generic_sig(
-                c.owner,
-                &c.name,
-                &c.descriptor,
-                c.signature.as_deref(),
-                false,
-            );
+            let generic_sig = generic_sig_for_callable;
             let kind = if generic_sig.as_ref().is_some_and(|g| g.receiver.is_some()) {
                 FnKind::Extension
             } else {
@@ -234,6 +255,7 @@ impl JvmLibraries {
                 overload_rank: descriptor_narrowing(&c.descriptor) as u32,
                 generic_sig,
                 call_sig,
+                context_count,
                 flags: FnFlags {
                     inline: inline_kind,
                     suspend,
@@ -2289,6 +2311,9 @@ impl SymbolSource for JvmLibraries {
                     inline,
                     suspend: mf.is_suspend(),
                     source_receiver,
+                    context_count: mf.context_count,
+                    contract: mf.contract.clone(),
+                    generic_sig: generic_sig.clone().map(Box::new),
                     // Carry the resolved bytecode method's generic `Signature` — a `<reified T>` extension's
                     // splice reads its formal-type-parameter NAMES from here to bind the call's explicit
                     // type arguments. Without it the reified body cannot be specialized and the call falls
@@ -2300,6 +2325,7 @@ impl SymbolSource for JvmLibraries {
                     ret: ReturnInfo::new(mf.ret_nullable(), ret_class),
                     visibility: mf.visibility,
                     generic_sig,
+                    context_count: mf.context_count,
                     flags: FnFlags {
                         inline,
                         suspend: mf.is_suspend(),

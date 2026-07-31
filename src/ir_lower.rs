@@ -8480,6 +8480,34 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_lambda(&mut self, e: AstExprId, params: &[String], body: AstExprId) -> Option<u32> {
+        // A `suspend { … }` literal (parser-marked): build the `SuspendLambda` state machine
+        // instead of a plain `FunctionN` closure (which `lower_lambda_sam` would bail on).
+        if self.afile.suspend_lambdas.contains(&e.0) {
+            // Conservative v1 gate: a body with MEMBER accesses (`c.bar()`, `c.x`) hits latent
+            // suspend+delegation/state-machine gaps (silent resume loss) — bail (skip the file)
+            // rather than miscompile. Bare calls (incl. suspend function PARAMETERS, the
+            // `runBlocking`/`contract` shape) are supported.
+            fn has_member_access(lo: &Lower, e: AstExprId) -> bool {
+                if matches!(lo.afile.expr(e), Expr::Member { .. }) {
+                    return true;
+                }
+                lo.afile
+                    .any_child_expr(e, &mut |c| has_member_access(lo, c), &mut |s| {
+                        lo.afile
+                            .any_child_stmt(s, &mut |c| has_member_access(lo, c))
+                    })
+            }
+            let has_member_call = has_member_access(self, body);
+            if has_member_call {
+                return None;
+            }
+            let Ty::Fun(sig) = self.info.ty(e) else {
+                return None;
+            };
+            let value_params: Vec<Ty> = sig.params.to_vec();
+            let bind_names = ast::lambda_params_or_implicit(params, value_params.len())?;
+            return self.lower_suspend_lambda(body, &value_params, bind_names);
+        }
         self.lower_lambda_sam(e, params, body, None)
     }
 
@@ -8815,6 +8843,21 @@ impl<'a> Lower<'a> {
             }
             lo.afile
                 .any_child_expr(e, &mut |c| scan(lo, cur, bound, c, deep), &mut |s| {
+                    // A bare-name field WRITE (`res = v`, `res++`) is an implicit-`this` member
+                    // access too — its target is a plain `String` on the stmt, never an
+                    // `Expr::Name` the scan above would see, so a write-only lambda must still
+                    // capture the enclosing `this` (else the write bails in the closure).
+                    if let Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } = lo.afile.stmt(s)
+                    {
+                        if !bound.contains(name)
+                            && (lo.resolve_field_name(cur, name).is_some()
+                                || !crate::module_symbols::ModuleSymbols::new(lo.syms)
+                                    .instance_members(Ty::obj_name(cur), name)
+                                    .is_empty())
+                        {
+                            return true;
+                        }
+                    }
                     lo.afile
                         .any_child_stmt(s, &mut |c| scan(lo, cur, bound, c, deep))
                 })
@@ -9768,6 +9811,25 @@ impl<'a> Lower<'a> {
         );
         // The hash of the (known non-null) field value `v`.
         let hash_of = |s: &mut Self, v: u32| -> Option<u32> {
+            // A value-class field (stdlib unsigned or classpath): kotlinc calls the mangled STATIC
+            // `hashCode-impl(<underlying>)` on the unboxed value — a virtual `hashCode()` would
+            // dispatch on the primitive underlying and fail verification (the value-classes pass
+            // only rewrites calls on value classes declared in THIS file).
+            if let Some(internal) = t.non_null().kotlin_class_internal() {
+                if let Some(under) = s.syms.libraries.value_underlying_name(internal) {
+                    let erased = s.vc_erase_ty(under);
+                    let udesc = s.runtime.type_descriptor(erased)?;
+                    let owner = internal.render();
+                    s.ir.set_data_hashcode_owner(&class_internal, &field_name, owner.clone());
+                    return Some(s.emit_static_call(
+                        owner,
+                        "hashCode-impl".to_string(),
+                        format!("({udesc})I"),
+                        InlineKind::None,
+                        vec![v],
+                    ));
+                }
+            }
             if is_prim {
                 return if guarded {
                     // The field is BOXED (`Int?`): kotlinc dispatches `Object.hashCode()` — the
@@ -11954,6 +12016,10 @@ impl<'a> Lower<'a> {
         vararg_tail: bool,
         target_vararg: bool,
     ) -> Option<u32> {
+        // A cross-file target whose facade never resolved (a sibling-file function krusty does
+        // not emit — e.g. a non-callable inline fn) would produce a call to `<"">.name` and a
+        // class format error at load time. Bail (skip the file) instead.
+        let owner = owner.filter(|f| !f.render().is_empty());
         let name = target.name.as_str();
         let target_params = target.params.as_slice();
         let (n, m) = (adapted_params.len(), target_params.len());
@@ -15237,7 +15303,10 @@ impl<'a> Lower<'a> {
                 ..
             } = &target
             {
-                if *receiver != this_ty {
+                // Compare CLASS IDENTITY, not the full `Ty`: the checker records the receiver of
+                // a generic class's member as `Box<T>` (type-parameter argument) while the
+                // lowerer's `this` is the erased `Box` — same receiver slot, same dispatch.
+                if receiver.non_null().obj_internal() != this_ty.non_null().obj_internal() {
                     return None;
                 }
                 if target_name != name {
@@ -16662,6 +16731,7 @@ impl<'a> Lower<'a> {
                                 source_file: None,
                                 source_receiver: None,
                                 package: String::new(),
+                                contract: None,
                             },
                             *ret,
                         )
@@ -18282,6 +18352,15 @@ impl<'a> Lower<'a> {
                 if tparams.contains(recv_ref.name.as_str()) {
                     tbinds.entry(recv_ref.name.clone()).or_insert(rt);
                 }
+                // A generic-CLASS receiver (`<T, R> Recv<T, R>.foo`): bind each type-parameter type
+                // argument to the actual receiver's type arguments (`Recv<Any, String>` → T=Any,
+                // R=String). This is the ONLY binding source for a (reified) parameter that appears
+                // nowhere in the value parameters.
+                for (tref, actual) in recv_ref.targs.iter().zip(rt.type_args().iter()) {
+                    if tparams.contains(tref.name.as_str()) {
+                        tbinds.entry(tref.name.clone()).or_insert(*actual);
+                    }
+                }
             }
         }
         let member_param_shapes = member.as_ref().and_then(|member| {
@@ -18313,7 +18392,12 @@ impl<'a> Lower<'a> {
                             explicit
                                 .and_then(|types| types.get(i))
                                 .and_then(|ty| self.resolve_reified_type_ref(ty))
-                        });
+                        })
+                        // A reified parameter the call never names (inferred, not explicit): fall
+                        // back to the splice's own inference — the receiver's type arguments and
+                        // the value arguments already bound above (`Refinement<Any, String>`
+                        // binds `R = String` for `validate(x)`).
+                        .or_else(|| tbinds.get(tp).copied());
                     let Some(actual) = actual else {
                         self.inline_active.truncate(active_depth);
                         return None;
@@ -22757,35 +22841,56 @@ impl<'a> Lower<'a> {
                     }
                     a.push(self.emit_vararg(ty_to_ir(c.params[fixed]), elements));
                 } else if c.default_call {
-                    // A `name$default` call (`assertEquals(a, b)` omits the `message` default):
-                    // lower the provided prefix, then append a placeholder per omitted trailing
-                    // parameter, an `int` bit-mask (a bit per omitted param), and a `null` marker.
-                    // A generic function whose provided parameters share one type variable
-                    // (`assertEquals(expected: T, actual: T)`) boxes each argument as its OWN
-                    // primitive; mismatched primitives (`assertEquals(0, longVal)`) would compare
-                    // `areEqual(Integer, Long)` = false (kotlinc unifies `T` and coerces the
-                    // literal, which krusty doesn't model) — skip rather than miscompile.
-                    let prim_args: Vec<Ty> = self
-                        .arg_tys(&args)
-                        .into_iter()
-                        .filter(|t| self.has_scalar_value_repr(*t))
-                        .collect();
-                    let generic_provided =
-                        c.params.iter().take(args.len()).all(|p| p.is_erased_top());
-                    if generic_provided && prim_args.windows(2).any(|w| w[0] != w[1]) {
-                        return None;
+                    // A named `$default` call (`foo(y = "Y")` omitting `x`): the checker recorded
+                    // the argument→slot mapping, and it is authoritative — the positional
+                    // prefix path below would bind the argument to the FIRST slot and mask the
+                    // LAST, silently swapping the parameters. Mirror the FQ path: slot-order the
+                    // arguments and mask exactly the unmapped slots.
+                    if ctx_n == 0 && self.info.resolved_call_arg_slots.contains_key(&e) {
+                        let slots = self.info.resolved_call_arg_slots.get(&e).cloned()?;
+                        let (slot_args, prelude) =
+                            self.lower_call_slot_args_source_order(&args, &slots, &c.params, true)?;
+                        a.extend(slot_args);
+                        arg_prelude = prelude;
+                        self.append_default_masks_marker(
+                            &mut a,
+                            c.params.len(),
+                            slots
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, slot)| slot.is_none().then_some(index)),
+                        );
+                    } else {
+                        // A `name$default` call (`assertEquals(a, b)` omits the `message` default):
+                        // lower the provided prefix, then append a placeholder per omitted trailing
+                        // parameter, an `int` bit-mask (a bit per omitted param), and a `null` marker.
+                        // A generic function whose provided parameters share one type variable
+                        // (`assertEquals(expected: T, actual: T)`) boxes each argument as its OWN
+                        // primitive; mismatched primitives (`assertEquals(0, longVal)`) would compare
+                        // `areEqual(Integer, Long)` = false (kotlinc unifies `T` and coerces the
+                        // literal, which krusty doesn't model) — skip rather than miscompile.
+                        let prim_args: Vec<Ty> = self
+                            .arg_tys(&args)
+                            .into_iter()
+                            .filter(|t| self.has_scalar_value_repr(*t))
+                            .collect();
+                        let generic_provided =
+                            c.params.iter().take(args.len()).all(|p| p.is_erased_top());
+                        if generic_provided && prim_args.windows(2).any(|w| w[0] != w[1]) {
+                            return None;
+                        }
+                        let trailing_lambda = args
+                            .last()
+                            .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
+                        self.append_default_call_args(
+                            &mut a,
+                            &c.params,
+                            &args,
+                            trailing_lambda,
+                            c.vararg_elem,
+                            c.vararg_index,
+                        )?;
                     }
-                    let trailing_lambda = args
-                        .last()
-                        .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
-                    self.append_default_call_args(
-                        &mut a,
-                        &c.params,
-                        &args,
-                        trailing_lambda,
-                        c.vararg_elem,
-                        c.vararg_index,
-                    )?;
                 } else {
                     // `ctx_n` leading context arguments are already in `a`; the explicit source
                     // arguments fill the remaining parameters `c.params[ctx_n..]`.
@@ -23409,6 +23514,10 @@ impl<'a> Lower<'a> {
             // Inner-class construction `outerInstance.Inner(args)` → `new Outer$Inner(outer,
             // args)`: the checker typed the call as the inner class (whose first field is the
             // synthetic `this$0`), so pass the receiver as the leading constructor argument.
+            // `this0_outer` must be Some — a NESTED (non-inner) class has no `this$0`, and a bare
+            // CLASSIFIER receiver (`Outer.Inner(…)`) has no object type to compare, so the
+            // equality would pass vacuously and steal the nested-class construction below
+            // whenever the argument count coincidentally fits (`S.E(x)` with an omitted default).
             if let Some(class_id) = self
                 .info
                 .ty(e)
@@ -23426,6 +23535,7 @@ impl<'a> Lower<'a> {
                         _ => None,
                     };
                     c.fq_name().ends_with(&format!("${name}"))
+                        && this0_outer.is_some()
                         && this0_outer == self.info.ty(receiver).obj_internal()
                 })
             {

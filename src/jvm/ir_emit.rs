@@ -7307,10 +7307,33 @@ impl<'a> Emitter<'a> {
             descriptor,
             splice_desc,
         } = target;
+        // A `$default` body is a mask-and-marker wrapper the caller drives with placeholder
+        // nulls for omitted parameters: splicing it types the parameter locals from those
+        // placeholders (`Object`), while the body's own calls demand the DECLARED parameter
+        // types — a VerifyError (`multiModuleDefaultArgsCleanup`). The real call is
+        // verifier-correct (null is assignable to the declared type), so decline outright.
+        if name.ends_with("$default") {
+            return false;
+        }
         let Some(body) = self.bodies.body(owner, name, descriptor) else {
             crate::trace_compiler!("splice", "no body for {owner}.{name}{descriptor}");
             return false;
         };
+        // A body that references a PRIVATE member (its own facade's helper or backing field) runs
+        // legally only inside the defining class — spliced into the caller, the reference is an
+        // IllegalAccessError (kotlinc rewrites it to a synthetic `access$…` bridge, which krusty
+        // does not model). Decline: the fallback emits a real call, which stays in the class.
+        if crate::jvm::inline::references_private_member(
+            &body.code,
+            &body.source_cp,
+            &mut |o, n, d| self.bodies.member_is_private(o, n, d),
+        ) {
+            crate::trace_compiler!(
+                "splice",
+                "private member reference in {owner}.{name}{descriptor}"
+            );
+            return false;
+        }
         if !allow_owner_bridge && owner != methodref_owner(&body, name, descriptor).unwrap_or(owner)
         {
             crate::trace_compiler!(
