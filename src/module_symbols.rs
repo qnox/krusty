@@ -804,6 +804,25 @@ impl SymbolSource for ModuleSymbols<'_> {
             .map(|class| class.visibility)
     }
 
+    fn classifier_accessible_from_package(
+        &self,
+        internal: TypeName,
+        _accessor_package: TypeName,
+    ) -> bool {
+        let Some(class) = self.class_by_type_name(internal) else {
+            return false;
+        };
+        match class.visibility {
+            Visibility::Public | Visibility::Internal => true,
+            // Top-level `private` is file-private. Nested-private access is owner-scoped instead and
+            // is handled from the resolver's lexical classifier stack below this source boundary.
+            Visibility::Private if !internal.contains("$") => {
+                self.source_file == Some(class.source_file)
+            }
+            Visibility::Private | Visibility::Protected => false,
+        }
+    }
+
     fn inheritance_shape_name(&self, internal: TypeName) -> Option<InheritanceShape> {
         let class = self.class_by_type_name(internal)?;
         Some(InheritanceShape {
@@ -855,6 +874,7 @@ mod tests {
     fn class(internal: &str) -> FrontendClassSig {
         FrontendClassSig {
             internal: internal.into(),
+            source_file: 0,
             visibility: Visibility::Public,
             props: vec![],
             declared_props: HashMap::new(),

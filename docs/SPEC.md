@@ -2209,7 +2209,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`List<*>`). The runtime class is identical, so the merge stack frame is exactly that class — safe to
   emit (unlike a join of *unrelated* references, which would merge to `Object`, a frame krusty's emitter
   can't yet reconcile; those stay unsupported). Type arguments are erased to none at the join, so a member
-  read on the result resolves against the raw class (element type `Any`).
+  read on the result resolves against the raw class (element type `Any`). The same semantic path handles
+  builtin and mixed frontend/object spellings: `String` with `String?` joins to `String?`, while non-null
+  `Ty::String` with non-null `Obj("kotlin/String")` remains non-null `String`. Nullability is derived from
+  the original operands rather than from whether their internal representations compare equal. This join
+  is representation-generic; it does not branch on whether a type came from the current file, another
+  module file, or the classpath (`tests/elvis_nullability_join_e2e.rs`).
 
 - **`if`/`when` branch join: unrelated reference classes → common supertype (`Object`).** Two branches of
   different reference classes (`if (c) Foo() else Bar()`) join to their common supertype, which krusty
@@ -2266,6 +2271,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   registers such names into `class_names` (so the checker/lowerer agree), and the checker/lowerer
   `resolve_qualified_nested` share the ordering — covering both a parameter/return type ref and a
   qualified constructor call `lib.Thing(5)` (`classpath_type_ref_e2e`).
+
+- **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
+  matches a class declared in the same module (a sibling file's package, no `import` needed — as
+  kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The
+  import pass tries this after explicit-import and same-package resolution and before the classpath
+  dotted rules; positions the parser stores already internalized (`pkg1/Cls` — supertypes,
+  delegation specs) take the same path. Candidate source forms are tried NESTED-first (`a$b$c`, then
+  `a/b$c`, then `a/b/c`), matching kotlinc's classifier-shadows-package rule — this ordering now
+  applies to explicit-import source paths too. The package-first candidate construction itself is a
+  shared naming primitive used by source resolution, classpath nested-name recovery, object-member
+  import inference, and Java-source analysis; only the source lookup reverses it for classifier-first
+  semantics. Resolving the identity does not widen access: module classifiers carry their declaring
+  file, so a top-level `private` FQN remains inaccessible from a sibling file while the declaring file
+  can still use it. Covers every signature-pass type position — extension receivers
+  (`fun pkg1.Cls.fn()`), parameter/return/property types, type arguments, generic bounds, supertype
+  lists, and typealias targets (`fq_source_typeref_e2e`).
+
+- **Unannotated top-level computed-property getter inference.** An expression getter uses the same
+  lightweight value-scope inference as a property initializer: named context parameters first, then
+  module properties, so context shadowing and nested reads (`holder.value`) require no getter-specific
+  name-resolution branches. After collection, unresolved computed getters retry to a bounded fixed
+  point because getter bodies may legally reference later declarations; eager initializer ordering is
+  unchanged. The bound is the number of pending getters, so self/mutual cycles terminate as `Error` and
+  receive the normal inference diagnostic (`computed_prop_e2e`, resolve unit regression).
 
 - **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
   Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc
