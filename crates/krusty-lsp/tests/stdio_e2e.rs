@@ -1,6 +1,7 @@
 mod common;
 
 use std::io::{BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -32,9 +33,24 @@ impl ServerProcess {
         Self::start_with_timeout(arguments, PIPE_TIMEOUT)
     }
 
+    fn start_in(arguments: &[&str], current_dir: &Path) -> Self {
+        Self::start_with_timeout_in(arguments, PIPE_TIMEOUT, Some(current_dir))
+    }
+
     fn start_with_timeout(arguments: &[&str], timeout: Duration) -> Self {
+        Self::start_with_timeout_in(arguments, timeout, None)
+    }
+
+    fn start_with_timeout_in(
+        arguments: &[&str],
+        timeout: Duration,
+        current_dir: Option<&Path>,
+    ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_krusty-lsp"));
         command.args(["--stdio", "-no-jdk"]).args(arguments);
+        if let Some(current_dir) = current_dir {
+            command.current_dir(current_dir);
+        }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1221,5 +1237,149 @@ fn stdio_server_suppresses_semantic_diagnostics_for_an_incomplete_source_set() {
     assert!(diagnostics[0]["message"]
         .as_str()
         .is_some_and(|message| message.contains("semantic diagnostics suppressed")));
+    server.shutdown_and_exit();
+}
+
+/// Opens one document and immediately asks for the dev dump action.
+///
+/// All three coverage cases use the same wire sequence. Keeping that sequence here makes their
+/// differences explicit: initialization capabilities and workspace rooting belong to each test,
+/// while document synchronization and the code-action request must stay structurally equivalent.
+/// Deliberately do not wait for a diagnostic publish: the action itself must wait for the current
+/// analysis, otherwise a fast editor request can race the retained dump input and return no action.
+fn request_dump_code_action(
+    server: &mut ServerProcess,
+    request_id: i64,
+    uri: &str,
+    text: &str,
+) -> Value {
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": text
+            }
+        }),
+    );
+    server.request(
+        request_id,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": 0, "character": 0}},
+            "context": {"diagnostics": []}
+        }),
+    )
+}
+
+const DUMP_ACTION_SOURCE: &str = "fun box(): String = \"OK\"\n";
+
+#[test]
+fn stdio_server_offers_the_dev_dump_code_action_for_a_rootless_document() {
+    let uri = "file:///dev-dump/Main.kt";
+    // An initialize request without an explicit root deliberately falls back to the server's
+    // current directory. Give this process an empty directory: inheriting the repository would
+    // make the supposedly rootless fixture discover transient Kotlin files produced by parallel
+    // tests, so unrelated corpus size could consume the bounded dump-retention budget.
+    let isolated_cwd = TempProject::new("dev-dump-rootless-cwd");
+    let mut server = ServerProcess::start_in(&["--dev"], isolated_cwd.path());
+    let initialize = server.request(1, "initialize", json!({}));
+    let capabilities = &initialize["result"]["capabilities"];
+    assert_eq!(
+        capabilities["codeActionProvider"],
+        json!(true),
+        "dev mode must advertise the code action capability: {initialize}"
+    );
+    // Advertising the provider is not sufficient. Zed discards a returned code action whose
+    // `command` is missing from `executeCommandProvider.commands` before the action reaches the
+    // menu, and reports nothing — the user sees "no code actions available" from a server that
+    // answered correctly. The command itself is handled by the editor and never sent back here.
+    let advertised = capabilities["executeCommandProvider"]["commands"]
+        .as_array()
+        .expect("dev mode must advertise the executeCommandProvider commands");
+    assert!(
+        advertised
+            .iter()
+            .any(|command| command == "editor.action.goToLocations"),
+        "the action's command must be advertised or the editor drops the action: {initialize}"
+    );
+    server.notify("initialized", json!({}));
+    let response = request_dump_code_action(&mut server, 2, uri, DUMP_ACTION_SOURCE);
+    let actions = response["result"]
+        .as_array()
+        .expect("code action array result");
+    assert_eq!(actions.len(), 1, "expected the dump action: {response}");
+
+    let command = &actions[0]["command"];
+    assert_eq!(command["command"], "editor.action.goToLocations");
+    // Zed reads arguments[2] as the location list and ignores the first two, but bails when the
+    // array holds fewer than three entries — turning the action into a silent no-op with no error
+    // anywhere. The in-crate tests pin this shape; this one proves it survives the real binary.
+    let arguments = command["arguments"]
+        .as_array()
+        .expect("command arguments array");
+    assert_eq!(arguments.len(), 3, "{command}");
+    assert_eq!(arguments[0], uri);
+    let locations = arguments[2].as_array().expect("location array");
+    assert_eq!(locations.len(), 1, "{command}");
+    assert!(
+        locations[0]["uri"]
+            .as_str()
+            .is_some_and(|uri| uri.ends_with(".krusty.md")),
+        "the action must point at a written dump: {command}"
+    );
+    server.shutdown_and_exit();
+}
+
+#[test]
+fn stdio_server_offers_no_code_actions_without_dev_mode() {
+    // The dump is invisible unless the server was started with `--dev`. Without coverage here, a
+    // correctly built server reads as a broken one: the editor just reports no code actions.
+    let uri = "file:///dev-dump/Main.kt";
+    let mut server = ServerProcess::start(&[]);
+    let initialize = server.request(1, "initialize", json!({}));
+    assert!(
+        initialize["result"]["capabilities"]
+            .get("codeActionProvider")
+            .is_none(),
+        "a non-dev server must not advertise the capability: {initialize}"
+    );
+    assert!(
+        initialize["result"]["capabilities"]
+            .get("executeCommandProvider")
+            .is_none(),
+        "a non-dev server must not advertise dump commands either: {initialize}"
+    );
+    server.notify("initialized", json!({}));
+    let response = request_dump_code_action(&mut server, 2, uri, DUMP_ACTION_SOURCE);
+    assert_eq!(
+        response["result"],
+        json!([]),
+        "a non-dev server must answer with an empty action list: {response}"
+    );
+    server.shutdown_and_exit();
+}
+
+#[test]
+fn stdio_server_offers_the_dev_dump_code_action_in_a_project() {
+    let project = TempProject::new("dev-dump-project");
+    project.write("src/Main.kt", "fun box(): String = \"OK\"\n");
+    let uri = project.uri("src/Main.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+
+    let mut server = ServerProcess::start(&["--dev"]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    let response = request_dump_code_action(&mut server, 2, &uri, DUMP_ACTION_SOURCE);
+    let actions = response["result"]
+        .as_array()
+        .expect("code action array result");
+    assert_eq!(actions.len(), 1, "expected the dump action: {response}");
     server.shutdown_and_exit();
 }

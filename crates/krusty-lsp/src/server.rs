@@ -3244,6 +3244,11 @@ mod tests {
             capabilities.get("codeActionProvider").is_none(),
             "{capabilities}"
         );
+        assert!(
+            capabilities.get("executeCommandProvider").is_none(),
+            "ordinary sessions must not expose the dev action's compatibility command: \
+             {capabilities}"
+        );
     }
 
     #[test]
@@ -3255,6 +3260,11 @@ mod tests {
         let response = server.handle(request(1, "initialize", json!({})));
         let capabilities = &response.messages[0]["result"]["capabilities"];
         assert_eq!(capabilities["codeActionProvider"], true);
+        assert_eq!(
+            capabilities["executeCommandProvider"]["commands"],
+            json!(["editor.action.goToLocations"]),
+            "the action and its advertised compatibility command are one capability contract"
+        );
         assert_eq!(
             capabilities["hoverProvider"], true,
             "dev mode must keep every ordinary capability: {capabilities}"
