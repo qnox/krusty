@@ -3566,6 +3566,17 @@ impl super::inline::MethodBodies for Classpath {
                 .any(|m| m.name == name && m.descriptor == descriptor && m.is_static())
         })
     }
+    fn member_is_private(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        self.find(owner).is_some_and(|ci| {
+            ci.methods
+                .iter()
+                .any(|m| m.name == name && m.descriptor == descriptor && m.is_private())
+                || ci
+                    .fields
+                    .iter()
+                    .any(|f| f.name == name && f.descriptor == descriptor && f.is_private())
+        })
+    }
     fn property_read_access(
         &self,
         owner: &str,

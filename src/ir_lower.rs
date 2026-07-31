@@ -22841,35 +22841,56 @@ impl<'a> Lower<'a> {
                     }
                     a.push(self.emit_vararg(ty_to_ir(c.params[fixed]), elements));
                 } else if c.default_call {
-                    // A `name$default` call (`assertEquals(a, b)` omits the `message` default):
-                    // lower the provided prefix, then append a placeholder per omitted trailing
-                    // parameter, an `int` bit-mask (a bit per omitted param), and a `null` marker.
-                    // A generic function whose provided parameters share one type variable
-                    // (`assertEquals(expected: T, actual: T)`) boxes each argument as its OWN
-                    // primitive; mismatched primitives (`assertEquals(0, longVal)`) would compare
-                    // `areEqual(Integer, Long)` = false (kotlinc unifies `T` and coerces the
-                    // literal, which krusty doesn't model) — skip rather than miscompile.
-                    let prim_args: Vec<Ty> = self
-                        .arg_tys(&args)
-                        .into_iter()
-                        .filter(|t| self.has_scalar_value_repr(*t))
-                        .collect();
-                    let generic_provided =
-                        c.params.iter().take(args.len()).all(|p| p.is_erased_top());
-                    if generic_provided && prim_args.windows(2).any(|w| w[0] != w[1]) {
-                        return None;
+                    // A named `$default` call (`foo(y = "Y")` omitting `x`): the checker recorded
+                    // the argument→slot mapping, and it is authoritative — the positional
+                    // prefix path below would bind the argument to the FIRST slot and mask the
+                    // LAST, silently swapping the parameters. Mirror the FQ path: slot-order the
+                    // arguments and mask exactly the unmapped slots.
+                    if ctx_n == 0 && self.info.resolved_call_arg_slots.contains_key(&e) {
+                        let slots = self.info.resolved_call_arg_slots.get(&e).cloned()?;
+                        let (slot_args, prelude) =
+                            self.lower_call_slot_args_source_order(&args, &slots, &c.params, true)?;
+                        a.extend(slot_args);
+                        arg_prelude = prelude;
+                        self.append_default_masks_marker(
+                            &mut a,
+                            c.params.len(),
+                            slots
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, slot)| slot.is_none().then_some(index)),
+                        );
+                    } else {
+                        // A `name$default` call (`assertEquals(a, b)` omits the `message` default):
+                        // lower the provided prefix, then append a placeholder per omitted trailing
+                        // parameter, an `int` bit-mask (a bit per omitted param), and a `null` marker.
+                        // A generic function whose provided parameters share one type variable
+                        // (`assertEquals(expected: T, actual: T)`) boxes each argument as its OWN
+                        // primitive; mismatched primitives (`assertEquals(0, longVal)`) would compare
+                        // `areEqual(Integer, Long)` = false (kotlinc unifies `T` and coerces the
+                        // literal, which krusty doesn't model) — skip rather than miscompile.
+                        let prim_args: Vec<Ty> = self
+                            .arg_tys(&args)
+                            .into_iter()
+                            .filter(|t| self.has_scalar_value_repr(*t))
+                            .collect();
+                        let generic_provided =
+                            c.params.iter().take(args.len()).all(|p| p.is_erased_top());
+                        if generic_provided && prim_args.windows(2).any(|w| w[0] != w[1]) {
+                            return None;
+                        }
+                        let trailing_lambda = args
+                            .last()
+                            .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
+                        self.append_default_call_args(
+                            &mut a,
+                            &c.params,
+                            &args,
+                            trailing_lambda,
+                            c.vararg_elem,
+                            c.vararg_index,
+                        )?;
                     }
-                    let trailing_lambda = args
-                        .last()
-                        .is_some_and(|&x| matches!(self.info.ty(x), Ty::Fun(_)));
-                    self.append_default_call_args(
-                        &mut a,
-                        &c.params,
-                        &args,
-                        trailing_lambda,
-                        c.vararg_elem,
-                        c.vararg_index,
-                    )?;
                 } else {
                     // `ctx_n` leading context arguments are already in `a`; the explicit source
                     // arguments fill the remaining parameters `c.params[ctx_n..]`.

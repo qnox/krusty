@@ -56,6 +56,13 @@ pub trait MethodBodies {
     fn owner_is_interface(&self, _owner: &str) -> bool {
         false
     }
+    /// Whether `owner.name descriptor` (a method OR a field) is `ACC_PRIVATE`. A private member an
+    /// inline body references is legal in the DEFINING class but unreachable once the body is
+    /// spliced into another class — the splice must decline so the caller emits a real call
+    /// instead. Default `false` (no visibility information).
+    fn member_is_private(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
+        false
+    }
     /// Whether `owner.name descriptor` is `ACC_STATIC`. A Kotlin `@JvmStatic` member of an `object` or
     /// companion is an ordinary MEMBER in the language — the front end resolves and lowers it as one, with
     /// a receiver — but kotlinc emits its method as a static that takes no receiver. Only the emitter can
@@ -131,6 +138,44 @@ pub fn relocate_const(src_cp: &[C], idx: u16, cw: &mut ClassWriter) -> Option<u1
         }
         _ => None,
     }
+}
+
+/// Whether any instruction in `code` references (through `src_cp`) a method/field `is_private`
+/// flags as `ACC_PRIVATE`. Such a body runs legally only inside its DEFINING class: spliced into a
+/// caller, the reference is an `IllegalAccessError` (kotlinc rewrites it to a synthetic `access$…`
+/// bridge — unmodelled here), so the splicer must decline. A malformed body reports `true` — the
+/// caller cannot verify what it cannot walk, and declining is always safe (a real call instead).
+pub fn references_private_member(
+    code: &[u8],
+    src_cp: &[C],
+    is_private: &mut dyn FnMut(&str, &str, &str) -> bool,
+) -> bool {
+    let mut pc = 0;
+    while pc < code.len() {
+        let Some(len) = instruction_len(code, pc) else {
+            return true;
+        };
+        if let Some((off, width)) = pool_operand(code[pc]) {
+            let idx = if width == 1 {
+                u16::from(code[pc + off])
+            } else {
+                u16::from_be_bytes([code[pc + off], code[pc + off + 1]])
+            };
+            let member = match src_cp.get(idx as usize) {
+                Some(C::Methodref(c, nt) | C::InterfaceMethodref(c, nt) | C::Fieldref(c, nt)) => {
+                    class_name(src_cp, *c).zip(name_and_type(src_cp, *nt))
+                }
+                _ => None,
+            };
+            if let Some((owner, (name, descriptor))) = member {
+                if is_private(owner, name, descriptor) {
+                    return true;
+                }
+            }
+        }
+        pc += len;
+    }
+    false
 }
 
 /// The length in bytes of the instruction at `pc` (opcode + operands), including the variable-length

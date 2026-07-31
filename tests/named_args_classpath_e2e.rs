@@ -362,3 +362,39 @@ fn implicit_receiver_classpath_extension_default_uses_slots() {
     };
     assert_eq!(out.trim(), "OK", "box() returned {out:?}");
 }
+
+/// A named argument that also OMITS a defaulted parameter (`foo(y = "Y")` skipping `x`): the
+/// bare-name `$default` emit must read the checker's recorded argument→slot mapping — the
+/// positional prefix path bound the argument to the FIRST slot and masked the LAST, silently
+/// swapping the parameters (`xy;Xy;Yy;XY` for the four-call shape below).
+#[test]
+fn named_arg_omitting_a_default_maps_to_its_own_slot() {
+    super::common::expect_box_ok_against(
+        "named_omit_default",
+        "package lib\nfun foo(x: String = \"x\", y: String = \"y\") = x + y\n",
+        "import lib.foo\n\
+         fun test() = foo() + \";\" + foo(x = \"X\") + \";\" + foo(y = \"Y\") + \";\" + foo(x = \"X\", y = \"Y\")\n\
+         fun box(): String {\n\
+         \x20   val r = test()\n\
+         \x20   return if (r == \"xy;Xy;xY;XY\") \"OK\" else \"fail: $r\"\n\
+         }\n",
+    );
+}
+
+/// The same shape against an INLINE classpath function: the call resolves to `foo$default`,
+/// whose body must NOT be bytecode-spliced (its parameter locals would be typed from the
+/// caller's placeholder nulls — a VerifyError). The real call is verifier-correct; the slot
+/// mapping keeps the named argument in its own slot.
+#[test]
+fn named_arg_omitting_a_default_on_an_inline_callee() {
+    super::common::expect_box_ok_against(
+        "named_omit_default_inline",
+        "package lib\ninline fun foo(x: String = \"x\", y: String = \"y\") = x + y\n",
+        "import lib.foo\n\
+         fun test() = foo() + \";\" + foo(x = \"X\") + \";\" + foo(y = \"Y\") + \";\" + foo(x = \"X\", y = \"Y\")\n\
+         fun box(): String {\n\
+         \x20   val r = test()\n\
+         \x20   return if (r == \"xy;Xy;xY;XY\") \"OK\" else \"fail: $r\"\n\
+         }\n",
+    );
+}
