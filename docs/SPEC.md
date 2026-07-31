@@ -532,7 +532,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in overlapping exception ranges and trips a verify error — so a nesting that involves any `finally` is
   rejected (skip), never miscompiled (`NestedTry` in `tests/feature_box_e2e.rs`).
 - `as T` to a non-null reference type throws on `null`: `Intrinsics.checkNotNull(value, "null cannot be
-  cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. `as T?` and primitive
+  cast to non-null type <kotlin-name>")` then `checkcast` — matching kotlinc. The same null-check
+  applies to a DEFINITELY-NON-NULL type-parameter target `as (T & Any)` — even on an unbounded
+  (nullable-bound) `T`, the `& Any` intersection throws NPE on `null`
+  (`tests/definitely_non_null_type_e2e.rs`). `as T?` and primitive
   casts are a plain `checkcast`/coercion. The safe cast `x as? T` lowers to
   `{ val t = x; if (t is T) t as T else null }` — `instanceof` then `checkcast` on a match, `null` on a
   mismatch (it never throws); the result is `T?`. The target must be a reference type (a primitive

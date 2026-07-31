@@ -20890,13 +20890,16 @@ impl<'a> Lower<'a> {
                 // the cast target; the JVM backend erases it (checkcast to the bound, `Object` for an
                 // unbounded `T`). A non-null `T` (`<T : Any>`, `<T : Foo>`) null-checks like kotlinc
                 // (`CastNonNull`); a nullable target (`as T?`, or an unbounded `<T : Any?>`) does not.
+                // A DEFINITELY-NON-NULL target (`as (T & Any)`) null-checks too — even on an unbounded
+                // (nullable-bound) `T`, the `& Any` intersection throws NPE on `null` (kotlinc emits the
+                // same `checkNotNull`).
                 if let Some((name, bound, non_null)) = self
                     .cur_tparams
                     .iter()
                     .find(|(n, _, _)| *n == ty.name)
                     .filter(|_| reified_target.is_none())
                 {
-                    let op = if *non_null && !ty.nullable() {
+                    let op = if (*non_null || ty.definitely_non_null()) && !ty.nullable() {
                         IrTypeOp::CastNonNull
                     } else {
                         IrTypeOp::Cast
