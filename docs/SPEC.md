@@ -457,6 +457,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
   `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
   (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
+- **Implicit `it` in an untyped lambda is lexical, not textual.** When no expected function type has
+  established the lambda's parameters, a parameterless lambda synthesizes `it` only if its body uses
+  that name and no enclosing scope already binds it. Thus `outer?.let { sink.emit { "$it" } }` passes a
+  `Function0` to `emit` and captures the outer `it`; likewise, `{ it }` captures a local named `it`.
+  Typed lambdas still receive and shadow with their expected `Function1` parameter. Overload probing and
+  fallback lambda typing share this decision so they cannot infer different arities
+  (`tests/classpath_object_member_import_e2e.rs`,
+  `tests/nested_lambda_capture_e2e.rs::untyped_lambda_captures_local_named_it`).
 - **Mutable capture**: a local `var` written by a non-inlined lambda (a closure) needs a shared mutable
   cell so writes are visible to the enclosing scope and vice versa. The lowerer computes this per body by
   checking whether a lambda captures a `var` from an outer local scope; the JVM realization currently
@@ -2201,7 +2209,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`List<*>`). The runtime class is identical, so the merge stack frame is exactly that class — safe to
   emit (unlike a join of *unrelated* references, which would merge to `Object`, a frame krusty's emitter
   can't yet reconcile; those stay unsupported). Type arguments are erased to none at the join, so a member
-  read on the result resolves against the raw class (element type `Any`).
+  read on the result resolves against the raw class (element type `Any`). The same semantic path handles
+  builtin and mixed frontend/object spellings: `String` with `String?` joins to `String?`, while non-null
+  `Ty::String` with non-null `Obj("kotlin/String")` remains non-null `String`. Nullability is derived from
+  the original operands rather than from whether their internal representations compare equal. This join
+  is representation-generic; it does not branch on whether a type came from the current file, another
+  module file, or the classpath (`tests/elvis_nullability_join_e2e.rs`).
 
 - **`if`/`when` branch join: unrelated reference classes → common supertype (`Object`).** Two branches of
   different reference classes (`if (c) Foo() else Bar()`) join to their common supertype, which krusty
@@ -2362,6 +2375,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the runtime value is a real `KClass<Prov>` (repointing WITHOUT keeping `getOrCreateKotlinClass` would
   miscompile). A malformed/unhandled reified marker cleanly SKIPS the whole splice (never miscompiles).
   (`build775_ee1_reified_vc_ext_e2e`)
+
+- **An ARITY-inapplicable same-named member does not hide an applicable EXTENSION.** For a synthetic
+  `catalog.loadAll<Entry>()` example where `Catalog` declares `fun <T> loadAll(type: KClass<*>)` and
+  the same module declares `inline fun <reified T : Any> Catalog.loadAll(): List<T>`, kotlinc resolves
+  the extension because member precedence applies only to applicable
+  candidates. The classpath-member slot-mapping path now asks the federated extension overload selector
+  whether the exact call can fall through before it reports a member mapping/type error. That single
+  applicability query covers same-file, sibling-module, and classpath extensions with the call's labels,
+  explicit type arguments, integer-literal provenance, and lambda-literal shape; qualified calls also
+  probe member extensions through their ordinary instantiated-candidate path. An inapplicable extension
+  does not suppress the member diagnostic, and the implicit-receiver path declines vararg extensions it
+  cannot realize.
+  (`member_extension_function_e2e::arity_inapplicable_member_falls_through_to_reified_extension`,
+  `…_implicit_receiver`, `…_still_errors_when_source_extension_inapplicable`,
+  `…_reified_extension_run`, `…_sibling_module_extension`, `…_classpath_extension`)
 
 - **A `suspend` call as a STATEMENT in a coroutine-builder lambda + implicit-`Unit` suspend fns
   (build.775 aa1/ii1).** `runBlocking { f(r); if (…) … }` (a bare suspend-call statement followed by more
@@ -2613,6 +2641,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for Kotlin properties and methods with different physical names, such as `Map.keys` and
   `CharSequence.get`. Tests: `tests/for_destructuring_components_e2e.rs`,
   `tests/collection_special_member_stub_e2e.rs`.
+
+- **The invoke CONVENTION admits a member EXTENSION `operator fun Recv.invoke`, and a supertype-
+  constructor lambda argument is typed against the selected ctor's parameter.** A receiver-DSL shape
+  such as `class A : DslBase({ "case" { … } })` failed twice over: **(a)** a lambda in class-header
+  base args was typed with no expected type, so the DSL receiver scope never entered the implicit-
+  receiver stack — base-arg lambdas are now deferred, and the ordinary constructor-delegation
+  candidate/slot machinery selects the super constructor uniformly for same-file, module, and
+  classpath bases. The lambda is then checked against its source argument's selected parameter type,
+  including named/vararg mapping, like an ordinary call-site argument; **(b)** `record_invoke` only
+  considered member `invoke` and top-level extension `invoke`, never a member extension — it now
+  selects member-extension candidates in an explicit operator-only mode (a non-`operator fun
+  Recv.invoke` stays rejected by call syntax), and the lowerer emits the recorded
+  `ModuleMemberExtension` for a call whose callee is an arbitrary expression (the literal `"case"`).
+  Tests:
+  `invoke_operator_extension_e2e::member_extension_invoke_in_super_ctor_receiver_lambda` (runs),
+  `…::named_super_ctor_lambda_uses_its_mapped_parameter_type`,
+  `…::sibling_file_super_ctor_receiver_lambda_uses_shared_frontend_resolution`,
+  `…::classpath_super_ctor_receiver_lambda_uses_shared_resolution` (runs),
+  `…::secondary_super_delegation_receiver_lambda_uses_shared_resolution` (runs),
+  `…::member_extension_invoke_in_with_receiver_lambda` (runs, no ctor lambda involved),
+  `…::non_operator_member_extension_invoke_not_used_by_call_syntax`,
+  `…::non_operator_top_level_extension_invoke_not_used_by_call_syntax`.
 
 - **Reference range expressions and bound-aware classpath generics.** A standalone `a..b` over
   reference operands resolves through the ordinary `rangeTo` operator path after primitive range

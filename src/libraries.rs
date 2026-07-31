@@ -1101,6 +1101,9 @@ pub struct FnFlags {
     /// `suspend` — decoded from `@Metadata` (the `IS_SUSPEND` function flag). A call to a suspend
     /// function is a coroutine suspension point (the JVM lowering threads a `Continuation`).
     pub suspend: bool,
+    /// Kotlin's `operator` modifier. Call conventions such as `receiver(args)` must filter on this
+    /// semantic flag; JVM method names alone cannot distinguish an explicit `.invoke()` declaration.
+    pub operator: bool,
 }
 
 /// All overloads of one function name applicable to a call — members AND extensions AND top-level, in one

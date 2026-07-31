@@ -29,8 +29,8 @@ fn not_is_null_or_empty_narrows_both_receivers() {
     return if (!a.isNullOrEmpty() && !b.isNullOrEmpty()) a to b else null\n\
 }\n\
 fun box(): String {\n\
-    val p = extract(\"iss\", \"sub\") ?: return \"FAIL\"\n\
-    return if (p.first == \"iss\" && p.second == \"sub\") \"OK\" else \"FAIL\"\n\
+    val p = extract(\"left\", \"right\") ?: return \"FAIL\"\n\
+    return if (p.first == \"left\" && p.second == \"right\") \"OK\" else \"FAIL\"\n\
 }\n";
     assert_eq!(run(SRC).expect("contract smartcast compiles + runs"), "OK");
 }
