@@ -1224,11 +1224,13 @@ fn stdio_server_suppresses_semantic_diagnostics_for_an_incomplete_source_set() {
     server.shutdown_and_exit();
 }
 
-/// Opens one document and asks for the dev dump action after its first analysis.
+/// Opens one document and immediately asks for the dev dump action.
 ///
 /// All three coverage cases use the same wire sequence. Keeping that sequence here makes their
 /// differences explicit: initialization capabilities and workspace rooting belong to each test,
 /// while document synchronization and the code-action request must stay structurally equivalent.
+/// Deliberately do not wait for a diagnostic publish: the action itself must wait for the current
+/// analysis, otherwise a fast editor request can race the retained dump input and return no action.
 fn request_dump_code_action(
     server: &mut ServerProcess,
     request_id: i64,
@@ -1246,7 +1248,6 @@ fn request_dump_code_action(
             }
         }),
     );
-    let _ = server.await_diagnostics(uri);
     server.request(
         request_id,
         "textDocument/codeAction",

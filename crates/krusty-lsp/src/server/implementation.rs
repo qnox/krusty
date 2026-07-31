@@ -1400,6 +1400,10 @@ where
                     || self.analysis_in_flight
                     || self.resubmit_pending
                     || self.analysis_retry_at.is_some())
+        } else if method == "textDocument/codeAction" && !self.dev {
+            // The only action is the dev dump. An ordinary session must answer with its deliberate
+            // empty list immediately rather than waiting for analysis that cannot change the result.
+            false
         } else {
             exact_analysis_request_uri(&method, &params)
                 .is_some_and(|uri| self.document_waits_for_analysis(uri))
@@ -3727,6 +3731,7 @@ fn exact_analysis_request_uri<'a>(method: &str, params: &'a Value) -> Option<&'a
             | "textDocument/references"
             | "textDocument/rename"
             | "textDocument/documentSymbol"
+            | "textDocument/codeAction"
             | "textDocument/foldingRange"
             | "textDocument/semanticTokens/full"
             | "textDocument/semanticTokens/range"
@@ -3740,6 +3745,7 @@ fn exact_analysis_response_bytes(method: &str) -> usize {
     match method {
         "textDocument/rename"
         | "textDocument/documentSymbol"
+        | "textDocument/codeAction"
         | "textDocument/foldingRange"
         | "workspace/symbol" => BOUNDED_EXACT_RESPONSE_BYTES,
         _ => MAX_RETAINED_ANALYSIS_BYTES,
@@ -5434,6 +5440,60 @@ mod tests {
         assert!(messages[1]["result"]
             .as_array()
             .is_some_and(|locations| !locations.is_empty()));
+    }
+
+    #[test]
+    fn only_dev_code_actions_wait_for_the_current_analysis_batch() {
+        let uri = "file:///document.kt";
+        let source = "fun box(): String = \"OK\"\n";
+        let analysis_in_flight = |dev| {
+            let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut service = LspService::with_backend(RecordingBackend {
+                ready: true,
+                submitted,
+            })
+            .with_dev(dev);
+            service.force_initialized_for_test();
+            service.open_document_for_test(uri, source, 1);
+            service.mark_analysis_dirty_for_test();
+            let _job = service
+                .dispatch_pending_analysis()
+                .expect("analysis starts for the open document");
+            service
+        };
+
+        let mut dev_service = analysis_in_flight(true);
+
+        let pending = dev_service.handle(dump_code_action_request(7, uri, 0, 0));
+        assert!(
+            pending.messages.is_empty(),
+            "a dump must not inspect retained input while its replacement analysis is in flight"
+        );
+        assert_eq!(dev_service.pending_analysis_requests.len(), 1);
+
+        let messages = dev_service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![(uri.into(), 1)],
+            analyses: vec![DocumentAnalysis::empty()],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        assert_eq!(messages.len(), 2, "one diagnostic publish plus the action");
+        assert_eq!(messages[1]["id"], 7);
+        assert_eq!(
+            messages[1]["result"],
+            json!([]),
+            "the recording backend has no dump, but it is consulted only after analysis completes"
+        );
+
+        let mut ordinary_service = analysis_in_flight(false);
+        let immediate = ordinary_service.handle(dump_code_action_request(8, uri, 0, 0));
+        assert_eq!(immediate.messages.len(), 1);
+        assert_eq!(immediate.messages[0]["id"], 8);
+        assert_eq!(immediate.messages[0]["result"], json!([]));
+        assert!(
+            ordinary_service.pending_analysis_requests.is_empty(),
+            "non-dev mode has no action whose answer could depend on analysis"
+        );
     }
 
     #[test]
