@@ -571,40 +571,33 @@ pub(crate) fn classpath_sam_signature(
 
 pub(crate) fn specialized_sam_member_params(
     member: &LibraryMember,
-    args: &[Ty],
-    lambda_literals: &[bool],
+    args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    specialized_sam_params(
-        &member.params,
-        member.generic_sig.as_ref(),
-        args,
-        lambda_literals,
-        type_args,
-    )
+    specialized_sam_params(&member.params, member.generic_sig.as_ref(), args, type_args)
 }
 
 fn specialized_sam_params(
     params: &[Ty],
     generic_sig: Option<&GenericSig>,
-    args: &[Ty],
-    lambda_literals: &[bool],
+    args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Vec<Ty> {
     let Some(gsig) = generic_sig.filter(|sig| sig.params.len() == params.len()) else {
         return params.to_vec();
     };
-    // Explicit call type arguments bind the formals up front (`create<String, Int>` fixes
-    // `K`/`V` before any argument unification).
+    // Explicit call type arguments bind the formals before argument inference. `CallArgKind`
+    // deliberately owns the syntactic lambda/literal provenance, so this generic specialization
+    // never has to keep parallel boolean slices aligned with the argument types.
     let mut binds = seeded_gsig_binds(gsig, type_args);
-    for (index, (&param, &arg)) in gsig.params.iter().zip(args).enumerate() {
-        if lambda_literals.get(index) != Some(&true) {
-            unify_inferred_ty(param, arg, &mut binds);
+    for (&param, arg) in gsig.params.iter().zip(args) {
+        if !arg.is_lambda_literal() {
+            unify_inferred_ty(param, arg.ty(), &mut binds);
         }
     }
     let mut specialized = params.to_vec();
     for (index, param) in specialized.iter_mut().enumerate() {
-        if lambda_literals.get(index) == Some(&true) {
+        if args.get(index).is_some_and(|arg| arg.is_lambda_literal()) {
             *param = ty_subst(gsig.params[index], &binds);
         }
     }
@@ -799,10 +792,6 @@ fn resolution_subtype(
     ) || platform_subtype(lib, sub, sup)
 }
 
-fn integer_literal_adapts(param: Ty, arg: Ty, is_literal: bool) -> bool {
-    is_literal && arg == Ty::Int && param == Ty::Long
-}
-
 pub(crate) enum CandidateSelection<T> {
     None,
     Selected(T),
@@ -878,8 +867,8 @@ fn unique_most_specific_with_conflicts<T>(
 
 fn fixed_parameter_shape(
     params: &[Ty],
-    args: &[Ty],
-    fits: impl Fn(usize, &Ty, &Ty) -> bool,
+    args: &[CallArgKind],
+    fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
 ) -> Option<Vec<Ty>> {
     (params.len() == args.len()
         && params
@@ -892,8 +881,8 @@ fn fixed_parameter_shape(
 
 fn omitted_parameter_shape(
     params: &[Ty],
-    args: &[Ty],
-    fits: impl Fn(usize, &Ty, &Ty) -> bool,
+    args: &[CallArgKind],
+    fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
 ) -> Option<Vec<Ty>> {
     (params.len() > args.len()
         && params[..args.len()]
@@ -906,8 +895,8 @@ fn omitted_parameter_shape(
 
 fn vararg_parameter_shape(
     params: &[Ty],
-    args: &[Ty],
-    fits: impl Fn(usize, &Ty, &Ty) -> bool,
+    args: &[CallArgKind],
+    fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
 ) -> Option<Vec<Ty>> {
     let vararg_index = params.len().checked_sub(1)?;
     vararg_parameter_shape_at(params, args, vararg_index, &[], fits)
@@ -919,14 +908,16 @@ fn vararg_parameter_shape(
 /// a default. The returned shape is parallel to the provided arguments for specificity ranking.
 fn vararg_parameter_shape_at(
     params: &[Ty],
-    args: &[Ty],
+    args: &[CallArgKind],
     vararg_index: usize,
     param_defaults: &[bool],
-    fits: impl Fn(usize, &Ty, &Ty) -> bool,
+    fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
 ) -> Option<Vec<Ty>> {
     let array = *params.get(vararg_index)?;
     let element = array.array_elem()?;
-    if args.len() == vararg_index + 1 && args.get(vararg_index) == Some(&array) {
+    if args.len() == vararg_index + 1
+        && args.get(vararg_index).map(|argument| argument.ty()) == Some(array)
+    {
         return None;
     }
     if args.len() < vararg_index
@@ -951,9 +942,8 @@ fn vararg_parameter_shape_at(
 
 fn integer_literal_call_applies(
     params: &[Ty],
-    args: &[Ty],
-    integer_literals: &[bool],
-    mut fits: impl FnMut(usize, &Ty, &Ty) -> bool,
+    args: &[CallArgKind],
+    mut fits: impl FnMut(usize, &Ty, &CallArgKind) -> bool,
 ) -> Option<bool> {
     if params.len() != args.len() {
         return None;
@@ -962,16 +952,12 @@ fn integer_literal_call_applies(
         .iter()
         .zip(args)
         .enumerate()
-        .try_fold(false, |adapted, (i, (&param, &arg))| {
-            if param == arg {
+        .try_fold(false, |adapted, (i, (&param, arg))| {
+            if param == arg.ty() {
                 Some(adapted)
-            } else if integer_literal_adapts(
-                param,
-                arg,
-                integer_literals.get(i).copied().unwrap_or(false),
-            ) {
+            } else if arg.adapts_integer_literal_to(param) {
                 Some(true)
-            } else if fits(i, &param, &arg) {
+            } else if fits(i, &param, arg) {
                 Some(adapted)
             } else {
                 None
@@ -983,30 +969,27 @@ fn parameter_at_least_as_specific(
     lib: &dyn SemanticPlatform,
     left: Ty,
     right: Ty,
-    integer_literal: bool,
+    arg: CallArgKind,
 ) -> bool {
     left == right
-        || (integer_literal && left == Ty::Int && right == Ty::Long)
+        || (left == arg.ty() && arg.adapts_integer_literal_to(right))
         || platform_arg_assignable(lib, &right, &left)
 }
 
 fn integer_literal_overload<T>(
     candidates: impl Iterator<Item = (Vec<Ty>, T)>,
-    args: &[Ty],
-    integer_literals: &[bool],
-    mut fits: impl FnMut(usize, &Ty, &Ty) -> bool,
-    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
+    args: &[CallArgKind],
+    mut fits: impl FnMut(usize, &Ty, &CallArgKind) -> bool,
+    at_least_as_specific: impl Fn(usize, Ty, Ty, CallArgKind) -> bool,
     equivalent_conflicts: impl Fn(&T, &T) -> bool,
 ) -> CandidateSelection<T> {
-    if !integer_literals.iter().any(|literal| *literal) {
+    if !args.iter().any(|arg| arg.is_integer_literal()) {
         return CandidateSelection::None;
     }
     let mut applicable = Vec::new();
     let mut has_adaptation = false;
     for (params, candidate) in candidates {
-        let Some(adapted) =
-            integer_literal_call_applies(&params, args, integer_literals, &mut fits)
-        else {
+        let Some(adapted) = integer_literal_call_applies(&params, args, &mut fits) else {
             continue;
         };
         has_adaptation |= adapted;
@@ -1023,7 +1006,18 @@ fn integer_literal_overload<T>(
     if !has_adaptation {
         return CandidateSelection::None;
     }
-    unique_most_specific_with_conflicts(applicable, at_least_as_specific, equivalent_conflicts)
+    unique_most_specific_with_conflicts(
+        applicable,
+        |position, left, right| {
+            at_least_as_specific(
+                position,
+                left,
+                right,
+                *args.get(position).unwrap_or(&CallArgKind::Typed(Ty::Error)),
+            )
+        },
+        equivalent_conflicts,
+    )
 }
 
 fn best_companion_overload<'a>(
@@ -1031,54 +1025,43 @@ fn best_companion_overload<'a>(
     src: &dyn SymbolSource,
     candidates: impl Iterator<Item = &'a LibraryMember> + Clone,
     name: &str,
-    args: CallArgs<'_>,
+    args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Option<&'a LibraryMember> {
-    let CallArgs {
-        types: args,
-        integer_literals,
-        lambda_literals,
-    } = args;
-    debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
-    let adapts = |p: &Ty, a: &Ty, i: usize| {
-        integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
-    };
-    let fits = |position: usize, param: &Ty, arg: &Ty| {
-        if lambda_literals.get(position) == Some(&true) {
+    let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
+    let fits = |_position: usize, param: &Ty, arg: &CallArgKind| {
+        if arg.is_lambda_literal() {
             if param.fun_arity().is_some() {
-                arg_fits_source(lib, src, param, arg)
+                arg_fits_source(lib, src, param, &arg.ty())
             } else {
-                classpath_sam_arg_matches(lib, *param, *arg)
+                classpath_sam_arg_matches(lib, *param, arg.ty())
             }
         } else {
-            arg_fits_source(lib, src, param, arg)
+            arg_fits_source(lib, src, param, &arg.ty())
         }
     };
     let logical = |member: &LibraryMember| {
-        let params = specialized_sam_member_params(member, args, lambda_literals, type_args);
+        let params = specialized_sam_member_params(member, args, type_args);
         apply_platform_call_parameter_nullability(
             params,
             &member.call_sig.platform_nullable_params,
-            args,
+            &args.iter().map(|arg| arg.ty()).collect::<Vec<_>>(),
             member.call_sig.vararg,
         )
     };
     let named = candidates.filter(|member| member.name == name);
-    if let Some(exact) = named.clone().find(|member| logical(member) == args) {
+    // Literal provenance lives beside the type, so exact probes see the ordinary runtime `Int`.
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
+    if let Some(exact) = named.clone().find(|member| logical(member) == arg_tys) {
         return Some(exact);
     }
     match integer_literal_overload(
         named.clone().map(|member| (logical(member), member)),
         args,
-        integer_literals,
         |position, param, arg| fits(position, param, arg),
-        |position, left, right| {
-            parameter_at_least_as_specific(
-                lib,
-                left,
-                right,
-                integer_literals.get(position).copied().unwrap_or(false),
-            ) || resolution_subtype(lib, src, left, right)
+        |_position, left, right, arg| {
+            parameter_at_least_as_specific(lib, left, right, arg)
+                || resolution_subtype(lib, src, left, right)
         },
         |_, _| false,
     ) {
@@ -1774,38 +1757,30 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         type_args: &[Ty],
     ) -> Option<Symbol> {
-        self.resolve_symbol_with_literal_args(recv, name, args, &[], type_args)
+        let args: Vec<CallArgKind> = args.iter().map(|&ty| CallArgKind::Typed(ty)).collect();
+        self.resolve_symbol_with_literal_args(recv, name, &args, type_args)
     }
 
-    pub fn resolve_symbol_with_literal_args(
+    pub(crate) fn resolve_symbol_with_literal_args(
         &self,
         recv: SymRecv,
         name: &str,
-        args: &[Ty],
-        integer_literals: &[bool],
+        args: &[CallArgKind],
         type_args: &[Ty],
     ) -> Option<Symbol> {
-        self.resolve_symbol_with_literal_and_lambda_args(
-            recv,
-            name,
-            args,
-            integer_literals,
-            &[],
-            type_args,
-        )
+        self.resolve_symbol_with_literal_and_lambda_args(recv, name, args, type_args)
     }
 
     /// Resolve a top-level call with expected-return-type inference.
     pub(crate) fn resolve_top_level_with_expected(
         &self,
         name: &str,
-        args: &[Ty],
-        integer_literals: &[bool],
+        args: &[CallArgKind],
         type_args: &[Ty],
         expected: Ty,
     ) -> Option<LibraryCallable> {
         let fs = function_set_from_symbols(self.symbols_in_scope(name));
-        self.pick_top_level(name, &fs, args, integer_literals, type_args, Some(expected))
+        self.pick_top_level(name, &fs, args, type_args, Some(expected))
     }
 
     pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
@@ -1819,16 +1794,14 @@ impl<'a> SymbolResolver<'a> {
         &self,
         receiver: Ty,
         name: &str,
-        args: &[Ty],
-        integer_literals: &[bool],
+        args: &[CallArgKind],
         type_args: &[Ty],
     ) -> Vec<Option<Ty>> {
-        let lambda_literals = vec![false; args.len()];
         let Some(overload) = select_overload(
             self.lib,
             receiver,
             name,
-            CallArgs::new(args, integer_literals, &lambda_literals),
+            args,
             type_args,
             FnKind::Extension,
             ExtCtx {
@@ -1849,13 +1822,14 @@ impl<'a> SymbolResolver<'a> {
         if let Some(recv_sig) = gsig.receiver {
             unify_ty(recv_sig, receiver, &mut binds);
         }
-        for (&parameter, &argument) in gsig.params.iter().zip(args) {
+        let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
+        for (&parameter, &argument) in gsig.params.iter().zip(&arg_tys) {
             unify_ty(parameter, argument, &mut binds);
         }
         let expectations: Vec<Option<Ty>> = gsig
             .params
             .iter()
-            .zip(args)
+            .zip(&arg_tys)
             .map(|(&parameter, &argument)| {
                 let Ty::TyParam(name, _) = parameter else {
                     return None;
@@ -1876,17 +1850,13 @@ impl<'a> SymbolResolver<'a> {
         expectations
     }
 
-    pub fn resolve_symbol_with_literal_and_lambda_args(
+    pub(crate) fn resolve_symbol_with_literal_and_lambda_args(
         &self,
         recv: SymRecv,
         name: &str,
-        args: &[Ty],
-        integer_literals: &[bool],
-        lambda_literals: &[bool],
+        args: &[CallArgKind],
         type_args: &[Ty],
     ) -> Option<Symbol> {
-        debug_assert!(integer_literals.is_empty() || integer_literals.len() == args.len());
-        debug_assert!(lambda_literals.is_empty() || lambda_literals.len() == args.len());
         let implicit_value = matches!(recv, SymRecv::ImplicitValue(_));
         match recv {
             SymRecv::Value(ty) | SymRecv::ImplicitValue(ty) => {
@@ -1905,15 +1875,7 @@ impl<'a> SymbolResolver<'a> {
                 };
                 let call = member_receiver_accessible
                     .then(|| {
-                        resolve_instance_member(
-                            self.lib,
-                            ty,
-                            name,
-                            args,
-                            integer_literals,
-                            lambda_literals,
-                            Some(&member_access),
-                        )
+                        resolve_instance_member(self.lib, ty, name, args, Some(&member_access))
                     })
                     .flatten();
                 let read = member_receiver_accessible
@@ -1932,11 +1894,12 @@ impl<'a> SymbolResolver<'a> {
                 // `@InlineOnly` splice candidates — a plain and an inline call resolve identically, only the
                 // emitter differs). A same-module extension emits through the module path, not a library
                 // callable, so it is dropped here.
+                let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
                 let extension_call = select_overload(
                     self.lib,
                     ty,
                     name,
-                    CallArgs::new(args, integer_literals, lambda_literals),
+                    args,
                     type_args,
                     FnKind::Extension,
                     ExtCtx {
@@ -1948,7 +1911,7 @@ impl<'a> SymbolResolver<'a> {
                     },
                 )
                 .filter(|o| !matches!(o.callable.origin, Origin::Module { .. }))
-                .and_then(|o| self.build_extension_callable(name, ty, args, type_args, &o));
+                .and_then(|o| self.build_extension_callable(name, ty, &arg_tys, type_args, &o));
                 let recv_mro = ReceiverMro::new(&self.src, ty);
                 let extension_property = self
                     .resolve_extension_property(ty, name)
@@ -2018,8 +1981,7 @@ impl<'a> SymbolResolver<'a> {
                 // reads `overloads` to inspect the family, or `top_level_call` for the arg/type-arg selected
                 // callable (default/vararg-aware) ready to emit.
                 let fs = function_set_from_symbols(self.symbols_in_scope(name));
-                let top_level_call =
-                    self.pick_top_level(name, &fs, args, integer_literals, type_args, None);
+                let top_level_call = self.pick_top_level(name, &fs, args, type_args, None);
                 let overloads = fs.overloads;
                 if overloads.is_empty() && top_level_call.is_none() {
                     return None;
@@ -2040,8 +2002,6 @@ impl<'a> SymbolResolver<'a> {
                 SymRecv::TypeName(crate::types::type_name(internal)),
                 name,
                 args,
-                integer_literals,
-                lambda_literals,
                 type_args,
             ),
             SymRecv::TypeName(internal) => {
@@ -2054,13 +2014,15 @@ impl<'a> SymbolResolver<'a> {
                     lexical_classes: &self.lexical_classes,
                     receiver: Some(Ty::obj_name(internal)),
                 };
+                // Constructor overload probes compare RUNTIME types (see above).
+                let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
                 if name.is_empty() {
                     // `Type(args)` — the type's constructor, real or synthesized.
-                    resolve_constructor_name(self.lib, &self.src, internal, args)
+                    resolve_constructor_name(self.lib, &self.src, internal, &arg_tys)
                         .filter(|member| access.allows(member.visibility, internal))
                         .map(Symbol::Constructor)
                         .or_else(|| {
-                            resolve_synthetic_constructor_name(self.lib, internal, args)
+                            resolve_synthetic_constructor_name(self.lib, internal, &arg_tys)
                                 .filter(|constructor| {
                                     access.allows(constructor.visibility, internal)
                                 })
@@ -2069,28 +2031,20 @@ impl<'a> SymbolResolver<'a> {
                 } else {
                     // `Type.name(args)` — an object/companion instance member, else a static/companion
                     // member. The resolver discovers which.
-                    resolve_instance_name(
-                        self.lib,
-                        internal,
-                        name,
-                        args,
-                        integer_literals,
-                        lambda_literals,
-                        Some(&access),
-                    )
-                    .map(Symbol::Instance)
-                    .or_else(|| {
-                        resolve_companion_name(
-                            self.lib,
-                            &self.src,
-                            internal,
-                            name,
-                            CallArgs::new(args, integer_literals, lambda_literals),
-                            type_args,
-                            Some(&access),
-                        )
-                        .map(Symbol::Companion)
-                    })
+                    resolve_instance_name(self.lib, internal, name, args, Some(&access))
+                        .map(Symbol::Instance)
+                        .or_else(|| {
+                            resolve_companion_name(
+                                self.lib,
+                                &self.src,
+                                internal,
+                                name,
+                                args,
+                                type_args,
+                                Some(&access),
+                            )
+                            .map(Symbol::Companion)
+                        })
                 }
             }
         }
@@ -2100,15 +2054,14 @@ impl<'a> SymbolResolver<'a> {
         &self,
         recv: Ty,
         name: &str,
-        args: &[Ty],
-        lambda_literals: &[bool],
+        args: &[CallArgKind],
         current_source_file: Option<u32>,
     ) -> Option<FunctionInfo> {
         select_overload(
             self.lib,
             recv,
             name,
-            CallArgs::new(args, &[], lambda_literals),
+            args,
             &[],
             FnKind::Extension,
             ExtCtx {
@@ -2125,7 +2078,7 @@ impl<'a> SymbolResolver<'a> {
         &self,
         internal: TypeName,
         name: &str,
-        args: &[Ty],
+        args: &[CallArgKind],
     ) -> Option<LibraryMember> {
         let access = MemberAccess {
             source: &self.src,
@@ -2133,7 +2086,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: &self.lexical_classes,
             receiver: None,
         };
-        resolve_instance_name(self.lib, internal, name, args, &[], &[], Some(&access))
+        resolve_instance_name(self.lib, internal, name, args, Some(&access))
     }
 
     /// Overload-resolve a top-level call against an already-built [`FunctionSet`] (from the resolver's
@@ -2142,11 +2095,12 @@ impl<'a> SymbolResolver<'a> {
         &self,
         name: &str,
         fs: &FunctionSet,
-        args: &[Ty],
-        integer_literals: &[bool],
+        args: &[CallArgKind],
         type_args: &[Ty],
         expected: Option<Ty>,
     ) -> Option<LibraryCallable> {
+        // Exact/default probes see ordinary runtime types; `args` separately drives adaptation.
+        let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .top_level()
             .filter(|o| o.public())
@@ -2154,18 +2108,16 @@ impl<'a> SymbolResolver<'a> {
                 let params = apply_platform_call_parameter_nullability(
                     o.callable.params.clone(),
                     &o.call_sig.platform_nullable_params,
-                    args,
+                    &arg_tys,
                     o.call_sig.vararg,
                 );
                 (o, params, o.callable.ret)
             })
             .collect();
-        let fits = |p: &Ty, a: &Ty| self.arg_fits_or_subtype(p, a);
-        let adapts = |p: &Ty, a: &Ty, i: usize| {
-            integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
-        };
+        let fits = |p: &Ty, a: &CallArgKind| self.arg_fits_or_subtype(p, &a.ty());
+        let adapts = |p: &Ty, a: &CallArgKind, _i: usize| a.adapts_integer_literal_to(*p);
 
-        let pick = if let Some(exact) = parsed.iter().find(|(_, params, _)| params == args) {
+        let pick = if let Some(exact) = parsed.iter().find(|(_, params, _)| params == &arg_tys) {
             Some(exact)
         } else {
             let literal_pick = match integer_literal_overload(
@@ -2173,15 +2125,10 @@ impl<'a> SymbolResolver<'a> {
                     .iter()
                     .map(|entry @ (_, params, _)| (params.clone(), entry)),
                 args,
-                integer_literals,
                 |_, param, arg| fits(param, arg),
-                |position, left, right| {
-                    parameter_at_least_as_specific(
-                        self.lib,
-                        left,
-                        right,
-                        integer_literals.get(position).copied().unwrap_or(false),
-                    ) || resolution_subtype(self.lib, &self.src, left, right)
+                |_position, left, right, arg| {
+                    parameter_at_least_as_specific(self.lib, left, right, arg)
+                        || resolution_subtype(self.lib, &self.src, left, right)
                 },
                 |_, _| false,
             ) {
@@ -2219,11 +2166,11 @@ impl<'a> SymbolResolver<'a> {
 
         if pick.is_none() {
             if let Some(c) =
-                self.resolve_top_level_default_callable(name, args, type_args, expected)
+                self.resolve_top_level_default_callable(name, &arg_tys, type_args, expected)
             {
                 crate::trace_compiler!(
                     "resolve",
-                    "top-level {name} args={args:?} -> {}.{}{} default inline={:?}",
+                    "top-level {name} args={arg_tys:?} -> {}.{}{} default inline={:?}",
                     c.owner.render(),
                     c.name,
                     c.descriptor,
@@ -2233,11 +2180,12 @@ impl<'a> SymbolResolver<'a> {
             }
         }
 
-        if let Some(c) = self.resolve_top_level_inline_only_callable(fs, args, type_args, expected)
+        if let Some(c) =
+            self.resolve_top_level_inline_only_callable(fs, &arg_tys, type_args, expected)
         {
             crate::trace_compiler!(
                 "resolve",
-                "top-level {name} args={args:?} -> {}.{}{} inline-only",
+                "top-level {name} args={arg_tys:?} -> {}.{}{} inline-only",
                 c.owner.render(),
                 c.name,
                 c.descriptor
@@ -2267,11 +2215,11 @@ impl<'a> SymbolResolver<'a> {
                 // `T` unbound (→ `List<Any>`). A spread (`listOf(*arr)`) passes the array itself — same
                 // arity AND the last arg IS the array param — so it is not a vararg here.
                 let vararg = params.last().is_some_and(|p| p.array_elem().is_some())
-                    && (params.len() != args.len() || args.last() != params.last());
+                    && (params.len() != arg_tys.len() || arg_tys.last() != params.last());
                 if vararg && !gsig.params.is_empty() {
                     let fixed = gsig.params.len() - 1;
                     for (i, ps) in gsig.params.iter().take(fixed).enumerate() {
-                        if let Some(a) = args.get(i) {
+                        if let Some(a) = arg_tys.get(i) {
                             if type_args.is_empty() {
                                 unify_inferred_ty(*ps, *a, &mut binds);
                             } else {
@@ -2280,7 +2228,7 @@ impl<'a> SymbolResolver<'a> {
                         }
                     }
                     if let Some(inner) = gsig.params[fixed].array_elem() {
-                        for a in &args[fixed..] {
+                        for a in &arg_tys[fixed..] {
                             if type_args.is_empty() {
                                 unify_inferred_ty(inner, *a, &mut binds);
                             } else {
@@ -2290,7 +2238,7 @@ impl<'a> SymbolResolver<'a> {
                         vararg_elem = Some(ty_subst(inner, &binds));
                     }
                 } else {
-                    for (ps, a) in gsig.params.iter().zip(args) {
+                    for (ps, a) in gsig.params.iter().zip(&arg_tys) {
                         if type_args.is_empty() {
                             unify_inferred_ty(*ps, *a, &mut binds);
                         } else {
@@ -2308,7 +2256,7 @@ impl<'a> SymbolResolver<'a> {
 
         crate::trace_compiler!(
             "resolve",
-            "top-level {name} args={args:?} -> {}.{}{} inline={:?}",
+            "top-level {name} args={arg_tys:?} -> {}.{}{} inline={:?}",
             c.owner.render(),
             c.name,
             c.descriptor,
@@ -2893,6 +2841,7 @@ fn resolve_vararg_constructor<'a>(
     constructors: &'a [LibraryMember],
     args: &[Ty],
 ) -> Option<&'a LibraryMember> {
+    let call_args: Vec<CallArgKind> = args.iter().map(|&a| CallArgKind::Typed(a)).collect();
     let candidates = constructors.iter().filter_map(|member| {
         if !member.call_sig.vararg {
             return None;
@@ -2903,8 +2852,8 @@ fn resolve_vararg_constructor<'a>(
             args,
             true,
         );
-        vararg_parameter_shape(&params, args, |_, parameter, argument| {
-            abi_arg_assignable_to_param(lib, *argument, *parameter)
+        vararg_parameter_shape(&params, &call_args, |_, parameter, argument| {
+            abi_arg_assignable_to_param(lib, argument.ty(), *parameter)
         })
         .map(|shape| (shape, member))
     });
@@ -3254,12 +3203,10 @@ fn resolve_companion_name(
     src: &dyn SymbolSource,
     internal: TypeName,
     name: &str,
-    args: CallArgs<'_>,
+    args: &[CallArgKind],
     type_args: &[Ty],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryMember> {
-    let call_args = args;
-    let args = call_args.types;
     let t = lib.resolve_type_name(internal)?;
     best_companion_overload(
         lib,
@@ -3272,7 +3219,7 @@ fn resolve_companion_name(
             )
         }),
         name,
-        call_args,
+        args,
         type_args,
     )
     .cloned()
@@ -3284,8 +3231,8 @@ fn resolve_companion_name(
             // Explicit call type arguments (`Maps.create<String, Int> { … }`) seed the
             // formals positionally; argument unification fills the rest.
             let mut binds = seeded_gsig_binds(gsig, type_args);
-            for (&parameter, &argument) in gsig.params.iter().zip(args) {
-                unify_ty(parameter, argument, &mut binds);
+            for (&parameter, argument) in gsig.params.iter().zip(args) {
+                unify_ty(parameter, argument.ty(), &mut binds);
             }
             member.ret = merge_specialized_return(member.ret, ty_subst(gsig.ret, &binds));
         }
@@ -3301,21 +3248,10 @@ fn resolve_instance_name(
     lib: &dyn SemanticPlatform,
     internal: TypeName,
     name: &str,
-    args: &[Ty],
-    integer_literals: &[bool],
-    lambda_literals: &[bool],
+    args: &[CallArgKind],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryMember> {
-    select_instance_info(
-        lib,
-        Ty::obj_name(internal),
-        name,
-        args,
-        integer_literals,
-        lambda_literals,
-        member_access,
-    )
-    .map(|o| {
+    select_instance_info(lib, Ty::obj_name(internal), name, args, member_access).map(|o| {
         let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })
@@ -3487,24 +3423,15 @@ fn resolve_instance_member(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
-    args: &[Ty],
-    integer_literals: &[bool],
-    lambda_literals: &[bool],
+    args: &[CallArgKind],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
-    let o = select_instance_info(
-        lib,
-        recv,
-        name,
-        args,
-        integer_literals,
-        lambda_literals,
-        member_access,
-    )?;
+    let o = select_instance_info(lib, recv, name, args, member_access)?;
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     let ret = o
         .generic_sig
         .as_ref()
-        .map(|gsig| bind_member_return(gsig, recv, args, o.callable.ret))
+        .map(|gsig| bind_member_return(gsig, recv, &arg_tys, o.callable.ret))
         .unwrap_or(o.callable.ret);
     let ret = o.ret.apply(ret);
     let member = o.member_with_return(o.callable.ret);
@@ -3541,7 +3468,7 @@ fn property_getter_via_query(
         .min_by_key(|p| p.receiver_rank)
         .map(|p| p.getter.name)
         .filter(|getter| !getter.contains('-'))?;
-    resolve_instance_member(lib, recv, &getter, &[], &[], &[], member_access)
+    resolve_instance_member(lib, recv, &getter, &[], member_access)
         .filter(|m| m.ret.is_read_value_result())
 }
 
@@ -3555,13 +3482,13 @@ fn resolve_property_member(
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
     property_getter_via_query(lib, recv, property, member_access)
-        .or_else(|| resolve_instance_member(lib, recv, property, &[], &[], &[], member_access))
+        .or_else(|| resolve_instance_member(lib, recv, property, &[], member_access))
         .filter(|m| m.ret.is_read_value_result())
         .or_else(|| {
             lib.physical_property_getter_names(property)
                 .into_iter()
                 .find_map(|getter| {
-                    resolve_instance_member(lib, recv, &getter, &[], &[], &[], member_access)
+                    resolve_instance_member(lib, recv, &getter, &[], member_access)
                         .filter(|m| m.ret.is_read_value_result())
                 })
         })
@@ -3653,16 +3580,14 @@ fn select_instance_info(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
-    args: &[Ty],
-    integer_literals: &[bool],
-    lambda_literals: &[bool],
+    args: &[CallArgKind],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<FunctionInfo> {
     select_overload(
         lib,
         recv,
         name,
-        CallArgs::new(args, integer_literals, lambda_literals),
+        args,
         &[],
         FnKind::Member,
         ExtCtx {
@@ -3995,21 +3920,55 @@ fn member_visible(
     })
 }
 
-#[derive(Clone, Copy)]
-struct CallArgs<'a> {
-    types: &'a [Ty],
-    integer_literals: &'a [bool],
-    lambda_literals: &'a [bool],
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CallArgKind {
+    /// A fully inferred non-lambda expression type.
+    Typed(Ty),
+    /// A lambda literal whose `Ty::Fun` may have unknown parameter/return types (`Error`).
+    /// The resolver may infer those unknowns from the candidate overload.
+    LambdaLiteral(Ty),
+    /// A safely folded integer constant and its ordinary runtime type. Expressions that overflow
+    /// `Int` or divide by zero never receive this variant: lowering evaluates their `Int` operations
+    /// before a call-boundary coercion, so treating them as adaptable would change their behavior.
+    IntegerLiteral { ty: Ty, value: i32 },
 }
 
-impl<'a> CallArgs<'a> {
-    fn new(types: &'a [Ty], integer_literals: &'a [bool], lambda_literals: &'a [bool]) -> Self {
-        debug_assert!(integer_literals.is_empty() || integer_literals.len() == types.len());
-        debug_assert!(lambda_literals.is_empty() || lambda_literals.len() == types.len());
-        Self {
-            types,
-            integer_literals,
-            lambda_literals,
+impl CallArgKind {
+    pub(crate) fn integer_literal(ty: Ty, value: i32) -> Self {
+        Self::IntegerLiteral { ty, value }
+    }
+
+    pub(crate) fn ty(self) -> Ty {
+        match self {
+            CallArgKind::Typed(ty)
+            | CallArgKind::LambdaLiteral(ty)
+            | CallArgKind::IntegerLiteral { ty, .. } => ty,
+        }
+    }
+
+    pub(crate) fn is_lambda_literal(self) -> bool {
+        matches!(self, CallArgKind::LambdaLiteral(_))
+    }
+
+    pub(crate) fn is_integer_literal(self) -> bool {
+        matches!(self, CallArgKind::IntegerLiteral { .. })
+    }
+
+    /// Whether this literal may be contextually typed as `parameter`.
+    ///
+    /// Keeping the rule on the argument object makes positional, named, module, classpath, and
+    /// extension resolution share one adaptation policy instead of maintaining origin-specific
+    /// boolean arrays. A runtime `Int` is exact; contextual adaptation additionally admits `Long`,
+    /// and admits `Byte`/`Short` only when the folded value is known to fit.
+    pub(crate) fn adapts_integer_literal_to(self, parameter: Ty) -> bool {
+        let CallArgKind::IntegerLiteral { ty: Ty::Int, value } = self else {
+            return false;
+        };
+        match parameter {
+            Ty::Byte => i8::try_from(value).is_ok(),
+            Ty::Short => i16::try_from(value).is_ok(),
+            Ty::Long => true,
+            _ => false,
         }
     }
 }
@@ -4068,7 +4027,7 @@ fn select_overload(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     name: &str,
-    args: CallArgs<'_>,
+    args: &[CallArgKind],
     type_args: &[Ty],
     kind: FnKind,
     ext: ExtCtx<'_, '_>,
@@ -4080,11 +4039,7 @@ fn select_overload(
     // ENUMERATION stays on `ext.source` — widening it would surface module members through the
     // library path and skip module-side checks (e.g. the `operator` modifier requirement).
     let assign_src: &dyn SymbolSource = ext.member_access.map_or(src, |access| access.source);
-    let CallArgs {
-        types: args,
-        integer_literals,
-        lambda_literals,
-    } = args;
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     let allow_must_inline = ext.allow_must_inline;
     // EXTENSION candidates come from the ONE query — union `resolve_symbols`' function callables over the
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
@@ -4175,7 +4130,7 @@ fn select_overload(
                 src,
                 o.generic_sig.as_ref(),
                 binding_receiver,
-                args,
+                &arg_tys,
                 type_args,
             )
         {
@@ -4186,17 +4141,11 @@ fn select_overload(
             continue;
         }
         let lp = logical_value_params(lib, o, binding_receiver, type_args);
-        let lp = specialized_sam_params(
-            &lp,
-            o.generic_sig.as_ref(),
-            args,
-            lambda_literals,
-            type_args,
-        );
+        let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, type_args);
         let lp = apply_platform_call_parameter_nullability(
             lp,
             &o.call_sig.platform_nullable_params,
-            args,
+            &arg_tys,
             o.call_sig.vararg,
         );
         crate::trace_compiler!(
@@ -4207,14 +4156,7 @@ fn select_overload(
         by_rank.entry(rank).or_default().push((o, lp));
     }
     for cands in by_rank.values() {
-        match best_by_args(
-            lib,
-            assign_src,
-            cands,
-            args,
-            integer_literals,
-            lambda_literals,
-        ) {
+        match best_by_args(lib, assign_src, cands, args) {
             CandidateSelection::Selected(overload) => return Some(overload.clone()),
             CandidateSelection::Ambiguous => return None,
             CandidateSelection::None => {}
@@ -4226,9 +4168,10 @@ fn select_overload(
     // The ordered applicability pass above stays stricter so exact/defaulted calls still win first.
     for cands in by_rank.values() {
         let mut applicable = cands.iter().filter(|(_, lp)| {
-            lp.len() == args.len()
+            lp.len() == arg_tys.len()
                 && lp.iter().zip(args).all(|(p, a)| {
-                    platform_arg_assignable(lib, p, a) || source_arg_assignable(assign_src, p, a)
+                    platform_arg_assignable(lib, p, &a.ty())
+                        || source_arg_assignable(assign_src, p, &a.ty())
                 })
         });
         if let Some((o, _)) = applicable.next() {
@@ -4259,15 +4202,17 @@ fn select_overload(
         };
         args.len() >= vararg_index
             && lp[..vararg_index].iter().zip(args).all(|(p, a)| {
-                fun_arg_matches(lib, p, a, false)
-                    || platform_arg_assignable(lib, p, a)
-                    || source_arg_assignable(assign_src, p, a)
+                let ty = a.ty();
+                fun_arg_matches(lib, p, &ty, a.is_lambda_literal())
+                    || platform_arg_assignable(lib, p, &ty)
+                    || source_arg_assignable(assign_src, p, &ty)
             })
             && args[vararg_index..].iter().all(|a| {
-                *a == elem
+                let ty = a.ty();
+                ty == elem
                     || (!exact
-                        && (platform_arg_assignable(lib, &elem, a)
-                            || source_arg_assignable(assign_src, &elem, a)))
+                        && (platform_arg_assignable(lib, &elem, &ty)
+                            || source_arg_assignable(assign_src, &elem, &ty)))
             })
             && (vararg_index + 1..lp.len()).all(|index| o.call_sig.param_has_default(index))
     };
@@ -4286,7 +4231,7 @@ fn select_overload(
     }
     // ABI-form pass, shared with constructor resolution: bridge target collection identity and
     // erase type arguments after exact, widened, and source-level subtype matching have failed.
-    if let Some(abi_args) = abi_form_args(lib, args) {
+    if let Some(abi_args) = abi_form_args(lib, &arg_tys) {
         for cands in by_rank.values() {
             let mut applicable = cands
                 .iter()
@@ -4297,7 +4242,7 @@ fn select_overload(
                 }
                 crate::trace_compiler!(
                     "resolve",
-                    "select_overload {} matched via abi-form args {args:?} -> {abi_args:?}",
+                    "select_overload {} matched via abi-form args {arg_tys:?} -> {abi_args:?}",
                     o.callable.name
                 );
                 return Some((*o).clone());
@@ -4478,47 +4423,45 @@ pub(crate) fn best_by_args<'a>(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
-    args: &[Ty],
-    integer_literals: &[bool],
-    lambda_literals: &[bool],
+    args: &[CallArgKind],
 ) -> CandidateSelection<&'a FunctionInfo> {
-    let adapts = |p: &Ty, a: &Ty, i: usize| {
-        integer_literal_adapts(*p, *a, integer_literals.get(i).copied().unwrap_or(false))
-    };
-    let function_like_fits = |p: &Ty, a: &Ty| {
-        a.fun_arity().is_none()
+    // Exact passes see runtime types; literal provenance only drives the adaptation passes.
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
+    let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
+    let function_like_fits = |p: &Ty, arg: &CallArgKind| {
+        arg.ty().fun_arity().is_none()
             && p.fun_arity()
-                .zip(lib.function_like_arity(*a))
+                .zip(lib.function_like_arity(arg.ty()))
                 .is_some_and(|(param, arg)| usize::from(param) == arg)
     };
     // The DEFAULT-omitting passes accept a reference SUBTYPE / value-class-underlying argument (a
     // `joinToString(separator: CharSequence = …)` call with a `String`), matching the assignability the
     // exact-arity subtype pass in `select_overload` applies — the exact/`Any`-widened passes above stay
     // stricter so an exact call still prefers its precise overload.
-    let fits = |position: usize, p: &Ty, a: &Ty| {
-        if lambda_literals.get(position) == Some(&true) && p.fun_arity().is_none() {
-            classpath_sam_arg_matches(lib, *p, *a)
+    let fits = |_position: usize, p: &Ty, arg: &CallArgKind| {
+        if arg.is_lambda_literal() && p.fun_arity().is_none() {
+            classpath_sam_arg_matches(lib, *p, arg.ty())
         } else {
-            fun_arg_matches(lib, p, a, lambda_literals.get(position) == Some(&true))
-                || platform_arg_assignable(lib, p, a)
-                || source_arg_assignable(src, p, a)
-                || function_like_fits(p, a)
+            fun_arg_matches(lib, p, &arg.ty(), arg.is_lambda_literal())
+                || platform_arg_assignable(lib, p, &arg.ty())
+                || source_arg_assignable(src, p, &arg.ty())
+                || function_like_fits(p, arg)
         }
     };
-    let erased_fits = |position: usize, p: &Ty, a: &Ty| {
-        if lambda_literals.get(position) == Some(&true) && p.fun_arity().is_none() {
-            classpath_sam_arg_matches(lib, *p, *a)
+    let erased_fits = |_position: usize, p: &Ty, arg: &CallArgKind| {
+        if arg.is_lambda_literal() && p.fun_arity().is_none() {
+            classpath_sam_arg_matches(lib, *p, arg.ty())
         } else {
-            p == a
+            *p == arg.ty()
                 || *p == Ty::obj("kotlin/Any")
-                || fun_arg_matches(lib, p, a, lambda_literals.get(position) == Some(&true))
-                || function_like_fits(p, a)
+                || fun_arg_matches(lib, p, &arg.ty(), arg.is_lambda_literal())
+                || function_like_fits(p, arg)
         }
     };
     match unique_most_specific_with_conflicts(
         cands
             .iter()
-            .filter(|(_, params)| params.as_slice() == args)
+            .filter(|(_, params)| params.as_slice() == arg_tys)
             .map(|(candidate, params)| (params.clone(), *candidate)),
         |_, left, right| left == right,
         |left, right| distinct_source_declarations(left, right),
@@ -4534,16 +4477,8 @@ pub(crate) fn best_by_args<'a>(
             .iter()
             .map(|(candidate, params)| (params.clone(), *candidate)),
         args,
-        integer_literals,
         |position, param, arg| fits(position, param, arg),
-        |position, left, right| {
-            parameter_at_least_as_specific(
-                lib,
-                left,
-                right,
-                integer_literals.get(position).copied().unwrap_or(false),
-            )
-        },
+        |_position, left, right, arg| parameter_at_least_as_specific(lib, left, right, arg),
         |left, right| distinct_source_declarations(left, right),
     ) {
         CandidateSelection::Selected(candidate) => {
@@ -4552,7 +4487,7 @@ pub(crate) fn best_by_args<'a>(
         CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
         CandidateSelection::None => {}
     }
-    if lambda_literals.iter().any(|literal| *literal) {
+    if args.iter().any(|arg| arg.is_lambda_literal()) {
         match unique_most_specific_with_conflicts(
             cands.iter().filter_map(|(candidate, params)| {
                 fixed_parameter_shape(params, args, |position, param, arg| {
@@ -4560,7 +4495,9 @@ pub(crate) fn best_by_args<'a>(
                 })
                 .map(|shape| (shape, *candidate))
             }),
-            |_, left, right| parameter_at_least_as_specific(lib, left, right, false),
+            |_, left, right| {
+                parameter_at_least_as_specific(lib, left, right, CallArgKind::Typed(Ty::Error))
+            },
             |left, right| distinct_source_declarations(left, right),
         ) {
             CandidateSelection::Selected(candidate) => {
@@ -4570,8 +4507,9 @@ pub(crate) fn best_by_args<'a>(
             CandidateSelection::None => {}
         }
     }
-    let specificity =
-        |_: usize, left: Ty, right: Ty| parameter_at_least_as_specific(lib, left, right, false);
+    let specificity = |_: usize, left: Ty, right: Ty| {
+        parameter_at_least_as_specific(lib, left, right, CallArgKind::Typed(Ty::Error))
+    };
 
     // Exact arity, judged by ASSIGNABILITY, before the erased pass below. `erased_fits` admits a
     // `kotlin/Any` parameter for any argument but nothing else that is merely assignable, so with
@@ -4631,7 +4569,7 @@ pub(crate) fn best_by_args<'a>(
         CandidateSelection::None => {}
     }
 
-    if matches!(args.last(), Some(Ty::Fun(_))) {
+    if matches!(args.last(), Some(arg) if arg.ty().fun_arity().is_some()) {
         match source_aware_most_specific(
             cands.iter().filter_map(|(candidate, params)| {
                 let last = params.len().checked_sub(1)?;
@@ -4642,9 +4580,11 @@ pub(crate) fn best_by_args<'a>(
                         || candidate.call_sig.required <= prefix)
                     && params[..prefix.min(params.len())]
                         .iter()
-                        .zip(&args[..prefix])
+                        .zip(&arg_tys[..prefix])
                         .enumerate()
-                        .all(|(i, (param, arg))| fits(i, param, arg) || adapts(param, arg, i)))
+                        .all(|(i, (param, _arg))| {
+                            fits(i, param, &args[i]) || adapts(param, &args[i], i)
+                        }))
                 .then(|| (params.clone(), *candidate))
             }),
             specificity,
@@ -5057,10 +4997,12 @@ mod tests {
         let params = specialized_sam_member_params(
             &member,
             &[
-                Ty::obj_args("fixture/Duo", &[Ty::String, Ty::obj("kotlin/Any")]),
-                Ty::Error,
+                CallArgKind::Typed(Ty::obj_args(
+                    "fixture/Duo",
+                    &[Ty::String, Ty::obj("kotlin/Any")],
+                )),
+                CallArgKind::LambdaLiteral(Ty::Error),
             ],
-            &[false, true],
             &[],
         );
 
@@ -5112,8 +5054,10 @@ mod tests {
             receiver: None,
             info: top_level_nullable_string_info(),
         };
-        let args = [Ty::Int, Ty::Int];
-        let literals = [true, true];
+        let args = [
+            CallArgKind::integer_literal(Ty::Int, 1),
+            CallArgKind::integer_literal(Ty::Int, 1),
+        ];
         let selected = integer_literal_overload(
             [
                 (vec![Ty::Int, Ty::Long], "narrow"),
@@ -5121,16 +5065,8 @@ mod tests {
             ]
             .into_iter(),
             &args,
-            &literals,
-            |_, param, arg| arg_fits(param, arg),
-            |position, left, right| {
-                parameter_at_least_as_specific(
-                    &source,
-                    left,
-                    right,
-                    literals.get(position).copied().unwrap_or(false),
-                )
-            },
+            |_, param, arg| arg_fits(param, &arg.ty()),
+            |_, left, right, arg| parameter_at_least_as_specific(&source, left, right, arg),
             |_, _| false,
         );
         assert!(matches!(selected, CandidateSelection::Selected("narrow")));
@@ -5142,19 +5078,29 @@ mod tests {
             ]
             .into_iter(),
             &args,
-            &literals,
-            |_, param, arg| arg_fits(param, arg),
-            |position, left, right| {
-                parameter_at_least_as_specific(
-                    &source,
-                    left,
-                    right,
-                    literals.get(position).copied().unwrap_or(false),
-                )
-            },
+            |_, param, arg| arg_fits(param, &arg.ty()),
+            |_, left, right, arg| parameter_at_least_as_specific(&source, left, right, arg),
             |_, _| false,
         );
         assert!(matches!(ambiguous, CandidateSelection::Ambiguous));
+
+        let select_integral_width = |value| {
+            integer_literal_overload(
+                [(vec![Ty::Byte], "byte"), (vec![Ty::Long], "long")].into_iter(),
+                &[CallArgKind::integer_literal(Ty::Int, value)],
+                |_, param, arg| arg_fits(param, &arg.ty()),
+                |_, left, right, arg| parameter_at_least_as_specific(&source, left, right, arg),
+                |_, _| false,
+            )
+        };
+        assert!(matches!(
+            select_integral_width(1),
+            CandidateSelection::Ambiguous
+        ));
+        assert!(matches!(
+            select_integral_width(1_000),
+            CandidateSelection::Selected("long")
+        ));
     }
 
     #[test]
@@ -5202,7 +5148,12 @@ mod tests {
         ];
         let argument = Ty::fun(vec![Ty::Error], Ty::String);
 
-        let selected = best_by_args(&source, &source, &candidates, &[argument], &[], &[true]);
+        let selected = best_by_args(
+            &source,
+            &source,
+            &candidates,
+            &[CallArgKind::LambdaLiteral(argument)],
+        );
 
         let CandidateSelection::Selected(selected) = selected else {
             panic!("concrete lambda return should select one overload");
@@ -5228,7 +5179,7 @@ mod tests {
             &source,
             [&broad, &specific, &specific_duplicate].into_iter(),
             "make",
-            CallArgs::new(&[Ty::obj("demo/Leaf")], &[], &[]),
+            &[CallArgKind::Typed(Ty::obj("demo/Leaf"))],
             &[],
         )
         .expect("the most specific source supertype should be selected");
@@ -5241,7 +5192,10 @@ mod tests {
             &source,
             [&left, &right].into_iter(),
             "make",
-            CallArgs::new(&[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")], &[], &[]),
+            &[
+                CallArgKind::Typed(Ty::obj("demo/Leaf")),
+                CallArgKind::Typed(Ty::obj("demo/Leaf")),
+            ],
             &[],
         )
         .is_none());
@@ -5280,7 +5234,7 @@ mod tests {
             &source,
             [&default_broad, &default_specific].into_iter(),
             "make",
-            CallArgs::new(&[Ty::obj("demo/Leaf")], &[], &[]),
+            &[CallArgKind::Typed(Ty::obj("demo/Leaf"))],
             &[],
         )
         .expect("the defaulted source-supertype overload should resolve");
@@ -5300,7 +5254,7 @@ mod tests {
             &source,
             [&vararg_broad, &vararg_specific].into_iter(),
             "make",
-            CallArgs::new(&[Ty::obj("demo/Leaf")], &[], &[]),
+            &[CallArgKind::Typed(Ty::obj("demo/Leaf"))],
             &[],
         )
         .expect("the vararg source-supertype overload should resolve");
@@ -5313,7 +5267,7 @@ mod tests {
                 &source,
                 [&ordinary].into_iter(),
                 "make",
-                CallArgs::new(&[Ty::obj("demo/Leaf")], &[], &[]),
+                &[CallArgKind::Typed(Ty::obj("demo/Leaf"))],
                 &[],
             )
             .is_none(),
@@ -5490,8 +5444,7 @@ mod tests {
                         FunctionInfo::plain(FnKind::TopLevel, None, specific),
                     ],
                 },
-                &[Ty::obj("demo/Leaf")],
-                &[],
+                &[CallArgKind::Typed(Ty::obj("demo/Leaf"))],
                 &[],
                 None,
             )
@@ -5521,8 +5474,7 @@ mod tests {
                         alias(Ty::String, "(Ljava/lang/String;)V"),
                     ],
                 },
-                &[Ty::obj("java/lang/String")],
-                &[],
+                &[CallArgKind::Typed(Ty::obj("java/lang/String"))],
                 &[],
                 None,
             )
@@ -5552,8 +5504,10 @@ mod tests {
                         vararg(Ty::obj("demo/Mid"), "([Ldemo/Mid;)V"),
                     ],
                 },
-                &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
-                &[],
+                &[
+                    CallArgKind::Typed(Ty::obj("demo/Leaf")),
+                    CallArgKind::Typed(Ty::obj("demo/Leaf")),
+                ],
                 &[],
                 None,
             )
@@ -5583,8 +5537,10 @@ mod tests {
                         literal(Ty::obj("demo/Mid"), "(JLdemo/Mid;)V"),
                     ],
                 },
-                &[Ty::Int, Ty::obj("demo/Leaf")],
-                &[true, false],
+                &[
+                    CallArgKind::integer_literal(Ty::Int, 1),
+                    CallArgKind::Typed(Ty::obj("demo/Leaf")),
+                ],
                 &[],
                 None,
             )
@@ -5633,8 +5589,10 @@ mod tests {
                     ),
                 ],
             },
-            &[Ty::obj("demo/Leaf"), Ty::obj("demo/Leaf")],
-            &[],
+            &[
+                CallArgKind::Typed(Ty::obj("demo/Leaf")),
+                CallArgKind::Typed(Ty::obj("demo/Leaf")),
+            ],
             &[],
             None,
         );
@@ -5665,9 +5623,8 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_nullable_string_info(),
         };
-        let resolved =
-            resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], &[], &[], None)
-                .expect("nullable member should resolve");
+        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], None)
+            .expect("nullable member should resolve");
         assert_eq!(resolved.ret, Ty::nullable(Ty::String));
         assert_eq!(resolved.member.physical_ret, Ty::String);
     }
@@ -5679,9 +5636,8 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_metadata_class_info(),
         };
-        let resolved =
-            resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], &[], &[], None)
-                .expect("member with metadata return class should resolve");
+        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], None)
+            .expect("member with metadata return class should resolve");
         assert_eq!(
             resolved.ret,
             Ty::obj_args("kotlin/collections/List", &[Ty::String])
