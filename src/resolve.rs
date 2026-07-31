@@ -19024,9 +19024,19 @@ impl<'a> Checker<'a> {
                 // type arguments (`List<Backup>` from the body vs `List<Nothing>` from a bare
                 // `emptyList()` catch) merge to that class with erased arguments (`List<*>`), assignable
                 // to the declared `List<Backup>` return — instead of collapsing to `Unit`, which wrongly
-                // typed an expression-bodied `try { … } catch { emptyList() }` as `Unit`. (This mirrors
-                // one case of `join` without its by-span coercion side effects, which mis-emit here.)
-                result = if result == ht {
+                // typed an expression-bodied `try { … } catch { emptyList() }` as `Unit`.
+                //
+                // In VALUE position, REFERENCE branches use the same full join as other conditional
+                // expressions: `try { x } catch { null }` is `T?`, and different reference classes
+                // join to `Any`. Restricting this to reference-like branches is intentional. The JVM
+                // lowering currently stores each branch directly into one merge slot, so a primitive
+                // join that requires per-branch widening or boxing (`Int` versus `Long`) cannot be
+                // represented soundly and retains the lenient statement-style fallback below.
+                let reference_like =
+                    |ty: Ty| ty.is_reference() || matches!(ty, Ty::Nothing | Ty::Error);
+                result = if value_required && reference_like(result) && reference_like(ht) {
+                    self.join(result, ht, self.span(e))
+                } else if result == ht {
                     result
                 } else if result == Ty::Nothing {
                     ht
@@ -29837,11 +29847,18 @@ impl<'a> Checker<'a> {
             }
         }
         // Two values of DIFFERENT reference classes join to their common supertype, which krusty
-        // approximates as `Any` (`java/lang/Object`) — the universal upper bound. The emitter writes
-        // `Object` for the merge-point frame so each branch's (more specific) value verifies against it.
-        // `String`/`Array`/`Fun` are references too, so this also covers `if (c) "s" else SomeObj()`.
+        // approximates as `Any` (`java/lang/Object`) — the universal upper bound. Preserve nullability
+        // when either input is nullable: `String?` and `Marker` join to `Any?`, never the unsound `Any`.
+        // The emitter writes `Object` for the merge-point frame so each branch's (more specific) value
+        // verifies against it. `String`/`Array`/`Fun` are references too, so this also covers
+        // `if (c) "s" else SomeObj()`.
         if a.is_reference() && b.is_reference() {
-            return Ty::obj("kotlin/Any");
+            let any = Ty::obj("kotlin/Any");
+            return if a.is_nullable() || b.is_nullable() {
+                Ty::nullable(any)
+            } else {
+                any
+            };
         }
         self.diags.error(
             span,
