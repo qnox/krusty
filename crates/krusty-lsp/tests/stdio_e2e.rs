@@ -1224,6 +1224,43 @@ fn stdio_server_suppresses_semantic_diagnostics_for_an_incomplete_source_set() {
     server.shutdown_and_exit();
 }
 
+/// Opens one document and asks for the dev dump action after its first analysis.
+///
+/// All three coverage cases use the same wire sequence. Keeping that sequence here makes their
+/// differences explicit: initialization capabilities and workspace rooting belong to each test,
+/// while document synchronization and the code-action request must stay structurally equivalent.
+fn request_dump_code_action(
+    server: &mut ServerProcess,
+    request_id: i64,
+    uri: &str,
+    text: &str,
+) -> Value {
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": text
+            }
+        }),
+    );
+    let _ = server.await_diagnostics(uri);
+    server.request(
+        request_id,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": 0, "character": 0}},
+            "context": {"diagnostics": []}
+        }),
+    )
+}
+
+const DUMP_ACTION_SOURCE: &str = "fun box(): String = \"OK\"\n";
+
 #[test]
 fn stdio_server_offers_the_dev_dump_code_action_for_a_rootless_document() {
     let uri = "file:///dev-dump/Main.kt";
@@ -1249,29 +1286,7 @@ fn stdio_server_offers_the_dev_dump_code_action_for_a_rootless_document() {
         "the action's command must be advertised or the editor drops the action: {initialize}"
     );
     server.notify("initialized", json!({}));
-    server.notify(
-        "textDocument/didOpen",
-        json!({
-            "textDocument": {
-                "uri": uri,
-                "languageId": "kotlin",
-                "version": 1,
-                "text": "fun box(): String = \"OK\"\n"
-            }
-        }),
-    );
-    let _ = server.await_diagnostics(uri);
-
-    let response = server.request(
-        2,
-        "textDocument/codeAction",
-        json!({
-            "textDocument": {"uri": uri},
-            "range": {"start": {"line": 0, "character": 0},
-                      "end": {"line": 0, "character": 0}},
-            "context": {"diagnostics": []}
-        }),
-    );
+    let response = request_dump_code_action(&mut server, 2, uri, DUMP_ACTION_SOURCE);
     let actions = response["result"]
         .as_array()
         .expect("code action array result");
@@ -1318,29 +1333,7 @@ fn stdio_server_offers_no_code_actions_without_dev_mode() {
         "a non-dev server must not advertise dump commands either: {initialize}"
     );
     server.notify("initialized", json!({}));
-    server.notify(
-        "textDocument/didOpen",
-        json!({
-            "textDocument": {
-                "uri": uri,
-                "languageId": "kotlin",
-                "version": 1,
-                "text": "fun box(): String = \"OK\"\n"
-            }
-        }),
-    );
-    let _ = server.await_diagnostics(uri);
-
-    let response = server.request(
-        2,
-        "textDocument/codeAction",
-        json!({
-            "textDocument": {"uri": uri},
-            "range": {"start": {"line": 0, "character": 0},
-                      "end": {"line": 0, "character": 0}},
-            "context": {"diagnostics": []}
-        }),
-    );
+    let response = request_dump_code_action(&mut server, 2, uri, DUMP_ACTION_SOURCE);
     assert_eq!(
         response["result"],
         json!([]),
@@ -1361,29 +1354,7 @@ fn stdio_server_offers_the_dev_dump_code_action_in_a_project() {
     let mut server = ServerProcess::start(&["--dev"]);
     server.request(1, "initialize", json!({"rootUri": root_uri}));
     server.notify("initialized", json!({}));
-    server.notify(
-        "textDocument/didOpen",
-        json!({
-            "textDocument": {
-                "uri": uri,
-                "languageId": "kotlin",
-                "version": 1,
-                "text": "fun box(): String = \"OK\"\n"
-            }
-        }),
-    );
-    let _ = server.await_diagnostics(&uri);
-
-    let response = server.request(
-        2,
-        "textDocument/codeAction",
-        json!({
-            "textDocument": {"uri": uri},
-            "range": {"start": {"line": 0, "character": 0},
-                      "end": {"line": 0, "character": 0}},
-            "context": {"diagnostics": []}
-        }),
-    );
+    let response = request_dump_code_action(&mut server, 2, &uri, DUMP_ACTION_SOURCE);
     let actions = response["result"]
         .as_array()
         .expect("code action array result");
