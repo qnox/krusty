@@ -181,7 +181,6 @@ Server-side grammar, with a compatibility rule for Zed's client-side filter.
 | fuzzy / prefix | subsequence-compatible; the client filter agrees with ours |
 | CamelHump (`PSF`) | `by_initials`; the expansion is a subsequence of the name |
 | package-qualified (`kotlin.collections.listOf`) | **adaptive naming**: when the query contains `.` or `/`, return the *qualified* name in the `name` field, so the query is a literal subsequence of it and survives the client filter |
-| kind filter | post-filter on the packed kind word |
 
 Adaptive naming is what makes IntelliJ-style package search work in Zed with no user-visible syntax.
 Simple names are returned for unqualified queries so the picker stays readable.
@@ -196,7 +195,6 @@ server.
 |---|---|
 | wildcards | `*Parse*::`, `Fo?Bar::` |
 | wrong keyboard layout | `зфкыу::` → `parse` |
-| scope markers | `#`, `*` (rust-analyzer style) |
 
 Trade-off in this mode: results sort alphabetically and cap at 100, because the client scores every
 candidate `0.`. Acceptable for power queries; not the default path.
@@ -209,10 +207,11 @@ re-filter" is a small, precedented change. Worth filing regardless of what ships
 
 - **Wildcards** — extract the literal prefix before the first metacharacter, binary-search that
   range, then glob-verify inside it. `Foo*` is sub-microsecond; `*Foo*` degrades to the 4 ms
-  substring scan. No new structure.
-- **Keyboard layout** — a ЙЦУКЕН↔QWERTY positional table applied to the *query*; search both forms
-  and union. ~200 bytes, zero index cost.
-- **Kind filters** — post-filter on the entry's packed kind. Free.
+  substring scan. `?` consumes one Unicode scalar rather than one UTF-8 byte, and a shared
+  transition budget bounds adversarial wildcard backtracking. No new index structure.
+- **Keyboard layout** — a ЙЦУКЕН→QWERTY positional table applied to the *query*; search both forms
+  and union. The explicit mapping touches Cyrillic characters only, so ordinary qualified-query
+  punctuation does not spuriously create a translated query. ~200 bytes, zero index cost.
 
 ## Composite index
 

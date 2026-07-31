@@ -77,6 +77,10 @@ pub const MAX_WORKSPACE_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKSPACE_SYMBOL_QUERY_BYTES: usize = 1024;
 const MAX_WORKSPACE_SYMBOL_CONTAINER_DEPTH: usize = 128;
+/// A leading-wildcard query scans the retained index. Bound the greedy matcher's total transitions
+/// as well as input and response bytes, so an adversarial `*aaaa...b` pattern cannot multiply a
+/// maximum-sized name table into unbounded request latency.
+const MAX_WORKSPACE_SYMBOL_GLOB_STEPS: usize = 32 * 1024 * 1024;
 const JSON_U32_MAX_BYTES: usize = 10;
 // Entry array and separator, plus one value in each search permutation.
 const WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES: usize =
@@ -1276,24 +1280,26 @@ impl WorkspaceSymbolIndex {
         if query.globbed {
             // A literal prefix still narrows through the sorted array; `*foo*` has none and falls
             // back to a scan, which is the cost of a leading wildcard.
-            let prefix = query.literal_prefix().to_string();
-            let scanned = if prefix.is_empty() {
-                (0..self.entries.len() as u32).collect::<Vec<u32>>()
+            let prefix = query.literal_prefix();
+            return if prefix.is_empty() {
+                self.encode_glob_candidates(
+                    0..self.entries.len() as u32,
+                    query,
+                    source_set,
+                    result,
+                    wire_bytes,
+                    seen,
+                )
             } else {
-                self.prefix_matches(&prefix).to_vec()
+                self.encode_glob_candidates(
+                    self.prefix_matches(prefix).iter().copied(),
+                    query,
+                    source_set,
+                    result,
+                    wire_bytes,
+                    seen,
+                )
             };
-            for index in scanned {
-                let Some(name) = self.source_name(index) else {
-                    continue;
-                };
-                if !matches_glob(&name.to_lowercase(), &query.pattern) {
-                    continue;
-                }
-                if !self.admit(index, query, source_set, result, wire_bytes, seen) {
-                    return false;
-                }
-            }
-            return true;
         }
 
         for &index in self.prefix_matches(lowercase_query) {
@@ -1345,6 +1351,35 @@ impl WorkspaceSymbolIndex {
         true
     }
 
+    /// Verify a candidate range without materialising another entry-index vector. `None` from the
+    /// matcher means the per-request transition budget is exhausted; return the bounded prefix
+    /// already encoded rather than continuing an attacker-controlled backtracking scan.
+    fn encode_glob_candidates(
+        &self,
+        candidates: impl IntoIterator<Item = u32>,
+        query: &WorkspaceQuery,
+        source_set: &[(String, String)],
+        result: &mut Vec<Value>,
+        wire_bytes: &mut usize,
+        seen: &mut std::collections::HashSet<u32>,
+    ) -> bool {
+        let mut remaining_steps = MAX_WORKSPACE_SYMBOL_GLOB_STEPS;
+        for index in candidates {
+            let Some(name) = self.source_name(index) else {
+                continue;
+            };
+            match matches_glob(&name.to_lowercase(), &query.pattern, &mut remaining_steps) {
+                Some(true) => {}
+                Some(false) => continue,
+                None => return false,
+            }
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Encode one entry if its package satisfies the query and no earlier rung claimed it.
     fn admit(
         &self,
@@ -1361,12 +1396,13 @@ impl WorkspaceSymbolIndex {
         if !seen.insert(index) {
             return true;
         }
-        self.push_encoded(index, source_set, result, wire_bytes)
+        self.push_encoded(index, query, source_set, result, wire_bytes)
     }
 
     /// Whether an entry's package satisfies a qualified query. An unqualified query admits every
-    /// entry; a qualified one matches any package whose dotted path contains the requested prefix,
-    /// so `collections.listOf` finds `kotlin.collections`.
+    /// entry; a qualified one matches a complete package suffix on a segment boundary, so
+    /// `collections.listOf` finds `kotlin.collections` without also admitting
+    /// `kotlin.collectionsExtra`.
     fn package_matches(&self, entry_index: u32, package: Option<&str>) -> bool {
         let Some(package) = package else {
             return true;
@@ -1376,7 +1412,13 @@ impl WorkspaceSymbolIndex {
         };
         self.packages
             .get(entry[9] as usize)
-            .is_some_and(|declared| contains_folded(declared, package))
+            .is_some_and(|declared| {
+                let declared = declared.to_lowercase();
+                declared == package
+                    || declared
+                        .strip_suffix(package)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            })
     }
 
     /// Whether every indexable declaration fit in the retained snapshot budget.
@@ -1394,6 +1436,7 @@ impl WorkspaceSymbolIndex {
     fn push_encoded(
         &self,
         entry_index: u32,
+        query: &WorkspaceQuery,
         source_set: &[(String, String)],
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
@@ -1404,9 +1447,20 @@ impl WorkspaceSymbolIndex {
         let Some((uri, _)) = source_set.get(entry[0] as usize) else {
             return true;
         };
-        let Some(name) = self.source_name(entry_index) else {
+        let Some(source_name) = self.source_name(entry_index) else {
             return true;
         };
+        // Zed re-filters workspace symbols against the returned `name`. A package-qualified query
+        // cannot survive that filter if the server returns only the declaration's bare name, so
+        // preserve the user's separator and qualify only these responses. Unqualified pickers keep
+        // the compact source spelling.
+        let name = query.response_name(
+            self.packages
+                .get(entry[9] as usize)
+                .map(String::as_str)
+                .unwrap_or(""),
+            source_name,
+        );
         let symbol = json!({
             "name": name,
             "kind": entry[7],
@@ -1520,6 +1574,9 @@ struct WorkspaceQuery {
     pattern: String,
     /// Folded package prefix, when the query was written qualified (`kotlin.collections.listOf`).
     package: Option<String>,
+    /// Separator used by the client. Qualified response names preserve it so a client that
+    /// re-filters the returned text can match both dotted and slashed queries.
+    separator: Option<char>,
     globbed: bool,
 }
 
@@ -1537,17 +1594,24 @@ impl WorkspaceQuery {
             },
         );
         let folded = body.to_lowercase();
-        // A dotted or slashed query names a package; the last segment is the symbol.
-        let (package, pattern) = match folded.rsplit_once(['.', '/']) {
-            Some((head, tail)) if !head.is_empty() && !tail.is_empty() => {
-                (Some(head.replace('/', ".")), tail.to_string())
+        // A dotted or slashed query names a package; the last segment is the symbol. Retain the
+        // delimiter separately because the response name must survive client-side filtering.
+        let (package, pattern, separator) = match folded.rfind(['.', '/']) {
+            Some(index) if index > 0 && index + 1 < folded.len() => {
+                let separator = folded[index..].chars().next().expect("ASCII separator");
+                (
+                    Some(folded[..index].replace('/', ".")),
+                    folded[index + 1..].to_string(),
+                    Some(separator),
+                )
             }
-            _ => (None, folded),
+            _ => (None, folded, None),
         };
         WorkspaceQuery {
             globbed: pattern.contains('*') || pattern.contains('?'),
             pattern,
             package,
+            separator,
         }
     }
 
@@ -1560,50 +1624,82 @@ impl WorkspaceQuery {
     fn is_empty(&self) -> bool {
         self.pattern.is_empty() && self.package.is_none()
     }
+
+    fn response_name(&self, declared_package: &str, source_name: &str) -> String {
+        let Some(separator) = self.separator else {
+            return source_name.to_string();
+        };
+        if declared_package.is_empty() {
+            return source_name.to_string();
+        }
+        let package = if separator == '/' {
+            declared_package.replace('.', "/")
+        } else {
+            declared_package.to_string()
+        };
+        format!("{package}{separator}{source_name}")
+    }
 }
 
 /// Glob match over folded text: `*` spans any run, `?` one character.
-fn matches_glob(text: &str, pattern: &str) -> bool {
-    // Iterative backtracking rather than recursion: names are short but the input is untrusted.
-    let text = text.as_bytes();
-    let pattern = pattern.as_bytes();
-    let (mut t, mut p) = (0usize, 0usize);
-    let (mut star, mut resume) = (usize::MAX, 0usize);
-    while t < text.len() {
-        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == text[t]) {
-            t += 1;
-            p += 1;
-        } else if p < pattern.len() && pattern[p] == b'*' {
-            star = p;
-            resume = t;
-            p += 1;
-        } else if star != usize::MAX {
-            p = star + 1;
-            resume += 1;
-            t = resume;
-        } else {
-            return false;
+fn matches_glob(text: &str, pattern: &str, remaining_steps: &mut usize) -> Option<bool> {
+    // Keep byte offsets only for slicing, but advance them by decoded characters. Treating `?` as
+    // one UTF-8 byte made it impossible to match the Unicode identifiers Kotlin permits.
+    let (mut text_offset, mut pattern_offset) = (0usize, 0usize);
+    let mut star_pattern = None;
+    let mut star_text = 0usize;
+    while text_offset < text.len() {
+        *remaining_steps = remaining_steps.checked_sub(1)?;
+        let (text_character, next_text) = next_character(text, text_offset)?;
+        match next_character(pattern, pattern_offset) {
+            Some(('*', next_pattern)) => {
+                star_pattern = Some(next_pattern);
+                star_text = text_offset;
+                pattern_offset = next_pattern;
+            }
+            Some((candidate, next_pattern)) if candidate == '?' || candidate == text_character => {
+                text_offset = next_text;
+                pattern_offset = next_pattern;
+            }
+            _ => {
+                let Some(resume_pattern) = star_pattern else {
+                    return Some(false);
+                };
+                let Some((_, next_resume)) = next_character(text, star_text) else {
+                    return Some(false);
+                };
+                star_text = next_resume;
+                text_offset = next_resume;
+                pattern_offset = resume_pattern;
+            }
         }
     }
-    while p < pattern.len() && pattern[p] == b'*' {
-        p += 1;
+    while let Some((character, next_pattern)) = next_character(pattern, pattern_offset) {
+        *remaining_steps = remaining_steps.checked_sub(1)?;
+        if character != '*' {
+            return Some(false);
+        }
+        pattern_offset = next_pattern;
     }
-    p == pattern.len()
+    Some(true)
+}
+
+fn next_character(value: &str, offset: usize) -> Option<(char, usize)> {
+    let character = value.get(offset..)?.chars().next()?;
+    Some((character, offset.saturating_add(character.len_utf8())))
 }
 
 /// Positional ЙЦУКЕН -> QWERTY mapping, for a query typed without switching layout.
 ///
 /// Returns `None` when the query holds no Cyrillic, so callers can skip the second search.
 fn qwerty_from_cyrillic(query: &str) -> Option<String> {
-    const CYRILLIC: &str = "йцукенгшщзхъфывапролджэячсмитьбю.ё";
-    const LATIN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`";
     let mut mapped = String::with_capacity(query.len());
     let mut translated = false;
     for character in query.chars() {
         let folded = character.to_lowercase().next().unwrap_or(character);
-        match CYRILLIC.chars().position(|candidate| candidate == folded) {
-            Some(index) => {
-                mapped.push(LATIN.chars().nth(index).unwrap_or(folded));
+        match qwerty_from_cyrillic_character(folded) {
+            Some(latin) => {
+                mapped.push(latin);
                 translated = true;
             }
             None => mapped.push(character),
@@ -1612,21 +1708,42 @@ fn qwerty_from_cyrillic(query: &str) -> Option<String> {
     translated.then_some(mapped)
 }
 
-/// Case-insensitive substring test that allocates nothing. `needle` must already be folded.
-fn contains_folded(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let haystack = haystack.as_bytes();
-    let needle = needle.as_bytes();
-    if haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|window| {
-        window
-            .iter()
-            .zip(needle)
-            .all(|(left, right)| left.to_ascii_lowercase() == *right)
+fn qwerty_from_cyrillic_character(character: char) -> Option<char> {
+    Some(match character {
+        'й' => 'q',
+        'ц' => 'w',
+        'у' => 'e',
+        'к' => 'r',
+        'е' => 't',
+        'н' => 'y',
+        'г' => 'u',
+        'ш' => 'i',
+        'щ' => 'o',
+        'з' => 'p',
+        'х' => '[',
+        'ъ' => ']',
+        'ф' => 'a',
+        'ы' => 's',
+        'в' => 'd',
+        'а' => 'f',
+        'п' => 'g',
+        'р' => 'h',
+        'о' => 'j',
+        'л' => 'k',
+        'д' => 'l',
+        'ж' => ';',
+        'э' => '\'',
+        'я' => 'z',
+        'ч' => 'x',
+        'с' => 'c',
+        'м' => 'v',
+        'и' => 'b',
+        'т' => 'n',
+        'ь' => 'm',
+        'б' => ',',
+        'ю' => '.',
+        'ё' => '`',
+        _ => return None,
     })
 }
 
@@ -3179,21 +3296,42 @@ mod tests {
             &[
                 "package kotlin.collections\nfun listOf(): Int = 1\n",
                 "package demo.app\nfun listOf(): Int = 2\n",
+                "package demo.collectionsExtra\nfun listOf(): Int = 3\n",
+                "package Δοκιμή.app\nfun findMe(): Int = 4\n",
             ],
-            &["file:///A.kt", "file:///B.kt"],
+            &[
+                "file:///A.kt",
+                "file:///B.kt",
+                "file:///C.kt",
+                "file:///D.kt",
+            ],
         );
 
-        // Unqualified finds both declarations.
-        assert_eq!(encoded_names(&index, "listOf", &set).len(), 2);
+        // Unqualified finds every declaration and keeps the compact source spelling.
+        assert_eq!(encoded_names(&index, "listOf", &set).len(), 3);
 
-        // Qualifying by package selects one, and a `/` separator behaves like `.`.
+        // Qualifying by package selects one. The response name preserves that qualification so
+        // clients that re-filter server results do not discard it as a non-match.
         let qualified = index.encode("kotlin.collections.listOf", &set);
         assert_eq!(qualified.len(), 1);
+        assert_eq!(qualified[0]["name"], "kotlin.collections.listOf");
         assert_eq!(qualified[0]["containerName"], "kotlin.collections");
-        assert_eq!(index.encode("demo/app/listOf", &set).len(), 1);
+        let slashed = index.encode("demo/app/listOf", &set);
+        assert_eq!(slashed.len(), 1);
+        assert_eq!(slashed[0]["name"], "demo/app/listOf");
 
         // A package that matches nothing yields nothing, rather than falling back to the bare name.
         assert!(index.encode("nosuch.pkg.listOf", &set).is_empty());
+        assert_eq!(
+            encoded_names(&index, "collections.listOf", &set),
+            vec!["kotlin.collections.listOf"],
+            "a package suffix must match on a segment boundary, not inside another segment"
+        );
+        assert_eq!(
+            encoded_names(&index, "δοκιμή.app.findMe", &set),
+            vec!["Δοκιμή.app.findMe"],
+            "qualified package matching must fold Unicode source identifiers, not ASCII bytes only"
+        );
     }
 
     #[test]
@@ -3229,8 +3367,10 @@ mod tests {
         let dotted = WorkspaceQuery::parse("kotlin.collections.listOf");
         assert_eq!(dotted.pattern, "listof");
         assert_eq!(dotted.package.as_deref(), Some("kotlin.collections"));
+        assert_eq!(dotted.separator, Some('.'));
         let slashed = WorkspaceQuery::parse("kotlin/collections/listOf");
         assert_eq!(slashed.package.as_deref(), Some("kotlin.collections"));
+        assert_eq!(slashed.separator, Some('/'));
 
         // A trailing `::` is the client-filter escape and is not part of the pattern.
         let escaped = WorkspaceQuery::parse("*Parse*::");
@@ -3252,19 +3392,32 @@ mod tests {
 
     #[test]
     fn glob_matching_handles_stars_and_single_characters() {
-        assert!(matches_glob("kotlinparser", "*parse*"));
-        assert!(matches_glob("parser", "parse?"));
-        assert!(!matches_glob("parse", "parse?"));
-        assert!(matches_glob("foobar", "foo*"));
-        assert!(matches_glob("foobar", "*bar"));
-        assert!(matches_glob("foobar", "f?o*r"));
-        assert!(!matches_glob("foobar", "*baz"));
-        assert!(matches_glob("anything", "*"));
-        assert!(matches_glob("exact", "exact"));
-        assert!(!matches_glob("exact", "exac"));
+        let matches = |text, pattern| {
+            let mut remaining_steps = usize::MAX;
+            matches_glob(text, pattern, &mut remaining_steps).expect("unlimited test budget")
+        };
+        assert!(matches("kotlinparser", "*parse*"));
+        assert!(matches("parser", "parse?"));
+        assert!(!matches("parse", "parse?"));
+        assert!(matches("foobar", "foo*"));
+        assert!(matches("foobar", "*bar"));
+        assert!(matches("foobar", "f?o*r"));
+        assert!(!matches("foobar", "*baz"));
+        assert!(matches("anything", "*"));
+        assert!(matches("exact", "exact"));
+        assert!(!matches("exact", "exac"));
         // Backtracking: the first `*` must give ground so the trailing literal can land.
-        assert!(matches_glob("aaa", "a*a"));
-        assert!(matches_glob("abcabc", "*abc"));
+        assert!(matches("aaa", "a*a"));
+        assert!(matches("abcabc", "*abc"));
+        assert!(matches("λparser", "?parser"));
+        assert!(!matches("λparser", "??parser"));
+
+        let mut no_steps = 0;
+        assert_eq!(
+            matches_glob("anything", "*thing", &mut no_steps),
+            None,
+            "glob evaluation must stop at its deterministic work ceiling"
+        );
     }
 
     #[test]
@@ -3273,6 +3426,11 @@ mod tests {
         assert_eq!(qwerty_from_cyrillic("зфкыу").as_deref(), Some("parse"));
         // Nothing to do for a query that is already Latin.
         assert_eq!(qwerty_from_cyrillic("parse"), None);
+        assert_eq!(
+            qwerty_from_cyrillic("demo.parse"),
+            None,
+            "ordinary punctuation is not evidence of a Cyrillic layout"
+        );
         // Mixed input still translates the Cyrillic run.
         assert_eq!(qwerty_from_cyrillic("зфкыу2").as_deref(), Some("parse2"));
     }
