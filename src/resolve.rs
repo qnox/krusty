@@ -14561,10 +14561,11 @@ impl<'a> Checker<'a> {
     /// classpath internal name (`lib/Subject$User`). The longest resolvable prefix names the outer
     /// type; the remaining segments are the nested path joined with `$` (kotlinc's nesting separator).
     /// Existence is verified via `resolve_type` so a bogus `A.B` stays unresolved (never a phantom `Obj`).
-    /// A qualified nested-class CONSTRUCTOR call `Outer.Nested(...)` — the receiver names a TYPE (not a
-    /// value in scope) and `Outer.Nested` resolves to a classpath nested class. The nested internal, so
-    /// named/omitted-default argument mapping can reach the class's `@Metadata`. `None` when the receiver
-    /// is a value (a normal `recv.method(...)` call) or the path is not a nested type.
+    /// A qualified CONSTRUCTOR call `Outer.Nested(...)` or `pkg.Type(...)` — the receiver names a
+    /// classifier/package (not a value in scope) and the full spelling resolves through the composite
+    /// module + classpath source. Returns the resolved internal name so named/default argument mapping
+    /// uses the same semantic constructor shape regardless of origin. `None` when the receiver is a
+    /// value (a normal `recv.method(...)` call) or the path is not a classifier.
     /// The leftmost simple name of a dotted `Name`/`Member` chain (`a.b.c` → `a`), or `None` if the
     /// chain bottoms out in something other than a bare name. Lets a fully-qualified path be told apart
     /// from a member access on a value by testing whether the root is a value in scope.
@@ -14603,7 +14604,7 @@ impl<'a> Checker<'a> {
             // `Outer.Nested(…)` — a nested type under an in-scope/imported outer type.
             Expr::Name(outer) => self.resolve_qualified_nested_name(&format!("{outer}.{name}")),
             // `a.b.Ctx(…)` — a FULLY-QUALIFIED constructor via a package PATH: the receiver `a.b` is a
-            // package, `Ctx` a top-level class of it (`a/b/Ctx`), verified on the classpath.
+            // package, `Ctx` a top-level class of it (`a/b/Ctx`), verified by the composite source.
             Expr::Member { .. } => {
                 let internal = format!("{}/{name}", qualified_path(self.file, receiver)?);
                 let internal = type_name(&internal);
@@ -15492,6 +15493,31 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether the classifier denoted by an UNQUALIFIED call name can map named arguments.
+    ///
+    /// The classifier lookup is deliberately origin-agnostic: lexical nested classes, inherited
+    /// classifiers, module classes, imports, and classpath classes all resolve through
+    /// `scoped_classifier_name`. A source declaration is sufficient because source-constructor
+    /// selection reads every primary/secondary parameter list directly from that declaration. For
+    /// federated shapes, require either constructor metadata or a named `Companion.invoke`; admitting
+    /// a metadata-free external constructor would let its labels fall through as positional arguments.
+    /// Keeping this capability check behind one resolved classifier identity prevents named-call
+    /// admission from accumulating a separate branch for every spelling/origin.
+    fn scoped_classifier_supports_named_call(&self, name: &str, min_arity: usize) -> bool {
+        let Some(internal) = self.scoped_classifier_name(name).found() else {
+            return false;
+        };
+        if self.source_class_decl_by_internal(internal).is_some() {
+            return true;
+        }
+        self.resolved_type_name(internal).is_some_and(|classifier| {
+            classifier.constructor_named_params(min_arity).is_some()
+                || classifier.companion.iter().any(|member| {
+                    member.name == CALLABLE_INVOKE_OPERATOR && member.call_sig.has_param_names()
+                })
+        })
+    }
+
     /// Resolve a dotted import flattened to slashes (`import lib.Scope.Ws` → `lib/Scope/Ws`) to the
     /// internal name that actually EXISTS on the classpath, treating trailing path segments as NESTED
     /// classes (`lib/Scope$Ws`). A nested-type import can't be told apart from a package path
@@ -15508,26 +15534,19 @@ impl<'a> Checker<'a> {
 
     /// Find a nested type visible from the lexical class receiver stack.
     fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
-        for receiver in self
-            .this_labels
-            .iter()
-            .rev()
-            .filter_map(|(_, receiver, is_class)| is_class.then_some(*receiver))
-        {
-            let Ty::Obj(outer, _) = receiver.non_null() else {
-                continue;
-            };
-            let outer = outer.render();
-            let mut prefix: &str = &outer;
-            loop {
-                let candidate = type_name(&format!("{prefix}${name}"));
-                if self.syms.class_by_type_name(candidate).is_some() {
-                    return Some(candidate);
-                }
-                match prefix.rsplit_once('$') {
-                    Some((enclosing, _)) => prefix = enclosing,
-                    None => break,
-                }
+        // Walk the LEXICAL enclosing classes, not just `this_labels`. Inside a plain `companion object`
+        // there is no class `this` — a companion only becomes a first-class type when it declares a
+        // supertype — so a `this_labels`-only walk saw no enclosing class at all and a sibling nested type
+        // referenced by simple name came back unresolved: `companion object { fun f() = Inner(…) }` failed
+        // with "unresolved function 'Inner'" while the same call from an ordinary member, and the qualified
+        // `Outer.Inner(…)` from the companion, both resolved. `lexical_source_class_names` already covers
+        // the companion (via `companion_of`) and returns the current class plus every lexical owner in
+        // nearest-first order. Nested-type scoping is the same question: probe each owner exactly once
+        // instead of both maintaining another receiver walk and repeating the `$`-prefix traversal.
+        for outer in self.lexical_source_class_names() {
+            let candidate = type_name(&format!("{}${name}", outer.render()));
+            if self.syms.class_by_type_name(candidate).is_some() {
+                return Some(candidate);
             }
         }
         None
@@ -25567,7 +25586,6 @@ impl<'a> Checker<'a> {
                 Expr::Name(n) => {
                     self.script_host_may_declare_call(n)
                         || self.module_declares(n)
-                        || self.syms.classes.contains_key(n.as_str())
                         || self
                             .lookup_local_fun(n)
                             .is_some_and(|(_, signature)| !signature.param_names.is_empty())
@@ -25618,75 +25636,57 @@ impl<'a> Checker<'a> {
                             // still handles positionally — the accept-then-lower-wrong shape this very
                             // change exists to remove. Widen both ends together or neither.
                             .is_some_and(|narrowed| self.module_member_supports_named(narrowed, n))
-                        // A CLASSPATH CONSTRUCTOR whose `@Metadata` records parameter names
-                        // (`Point(y = 2, x = 1)`, or `Cfg(a = 1, c = "x")` omitting a defaulted `b`,
-                        // against a data/plain class from a dependency). `constructor_named_params` returns
-                        // the FULL parameter list for a ctor with at least `args.len()` params, so an
-                        // omitted-default named call is still recognized.
-                        || self
-                            .classpath_class_internal_name(n)
-                            .and_then(|i| self.resolved_type_name(i))
-                            .and_then(|t| t.constructor_named_params(args.len()))
-                            .is_some()
-                        || self
-                            .inherited_nested_type_name(n)
-                            .found()
-                            .and_then(|i| self.resolved_type_name(i))
-                            .and_then(|t| t.constructor_named_params(args.len()))
-                            .is_some()
-                }
-                Expr::Member { receiver, name }
-                    if self.same_file_nested_class_qname(*receiver, name).is_some() =>
-                {
-                    self.same_file_nested_class_qname(*receiver, name)
-                        .and_then(|q| self.primary_ctor_param_list(&q))
-                        .is_some()
-                }
-                Expr::Member { receiver, name }
-                    if self
-                        .qualified_nested_ctor_internal_name(*receiver, name)
-                        .is_some() =>
-                {
-                    // Classpath nested-class constructor with named args.
-                    self.qualified_nested_ctor_internal_name(*receiver, name)
-                        .and_then(|i| self.resolved_type_name(i))
-                        .and_then(|t| t.constructor_named_params(args.len()))
-                        .is_some()
+                        // A constructor from ANY classifier origin/spelling — lexical/module/imported/
+                        // inherited/classpath — whose semantic shape records parameter names. The
+                        // classifier and its metadata are both resolved through shared seams, so adding
+                        // a new origin does not require another named-call admission branch here.
+                        || self.scoped_classifier_supports_named_call(n, args.len())
                 }
                 Expr::Member { receiver, name } => {
-                    let qualified_top_level = if let Some(root) = self.dotted_root(*receiver) {
-                        if !self.value_root_shadows_classifier(&root)
-                            && self.classpath_type_receiver_internal(*receiver).is_none()
-                        {
-                            if let Some(package) = qualified_path(self.file, *receiver) {
-                                let scope = [type_name(&package)];
-                                self.resolver_in_scope(&scope)
-                                    .top_level_candidates(name)
-                                    .iter()
-                                    .any(|candidate| candidate.call_sig.has_param_names())
+                    // A qualified constructor from either the module or classpath uses the same
+                    // semantic constructor metadata contract. Resolve it once here; otherwise this is
+                    // a qualified top-level/member call and follows the callable paths below.
+                    if let Some(internal) =
+                        self.qualified_nested_ctor_internal_name(*receiver, name)
+                    {
+                        self.resolved_type_name(internal)
+                            .and_then(|t| t.constructor_named_params(args.len()))
+                            .is_some()
+                    } else {
+                        let qualified_top_level = if let Some(root) = self.dotted_root(*receiver) {
+                            if !self.value_root_shadows_classifier(&root)
+                                && self.classpath_type_receiver_internal(*receiver).is_none()
+                            {
+                                if let Some(package) = qualified_path(self.file, *receiver) {
+                                    let scope = [type_name(&package)];
+                                    self.resolver_in_scope(&scope)
+                                        .top_level_candidates(name)
+                                        .iter()
+                                        .any(|candidate| candidate.call_sig.has_param_names())
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             }
                         } else {
                             false
+                        };
+                        qualified_top_level || {
+                            let rt = self.expr(*receiver);
+                            self.resolver()
+                                .resolve_symbol(
+                                    crate::symbol_resolver::SymRecv::Value(rt),
+                                    name,
+                                    &[],
+                                    &[],
+                                )
+                                .map(crate::symbol_resolver::Symbol::overloads)
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|o| o.call_sig.has_param_names())
+                                || self.member_extension_supports_named(rt, name)
                         }
-                    } else {
-                        false
-                    };
-                    qualified_top_level || {
-                        let rt = self.expr(*receiver);
-                        self.resolver()
-                            .resolve_symbol(
-                                crate::symbol_resolver::SymRecv::Value(rt),
-                                name,
-                                &[],
-                                &[],
-                            )
-                            .map(crate::symbol_resolver::Symbol::overloads)
-                            .unwrap_or_default()
-                            .iter()
-                            .any(|o| o.call_sig.has_param_names())
-                            || self.member_extension_supports_named(rt, name)
                     }
                 }
                 _ => false,

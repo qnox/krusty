@@ -22723,6 +22723,17 @@ impl<'a> Lower<'a> {
                     }
                     return None;
                 }
+                // Resolve source constructor metadata from the ALREADY-RESOLVED IR class identity,
+                // never from `fname` (the spelling at the call site). A nested class is declared under
+                // its hoisted identity (`Outer$Inner`) while callers may write either `Inner(...)` or
+                // `Outer.Inner(...)`; imported/module spellings can differ in the same way. Holding the
+                // declaration selected by semantic identity keeps generic coercions and the legacy
+                // default fallback origin- and spelling-agnostic. Capture it before an annotation class
+                // is redirected to its synthetic `$annotationImpl`, which has no source declaration.
+                let source_ctor_decl = {
+                    let internal = type_name(&self.ir.classes[class as usize].fq_name());
+                    self.class_decl_by_type_name(internal).cloned()
+                };
                 // Constructing an annotation (`A(args)`) builds its synthetic IMPL class — the
                 // annotation INTERFACE itself can't be `new`'d. Redirect to `<A>$annotationImpl`
                 // (same fields/ctor); the result still types as the annotation (the impl IS-A `A`).
@@ -22764,8 +22775,8 @@ impl<'a> Lower<'a> {
                 // `Long`. Only the simple all-property positional case.
                 // A NULLABLE type-param field (`val z: T?`) stays boxed (`Int?`) — only coerce a
                 // non-nullable one (`val value: T`); use an empty (non-matching) name for nullable.
-                let (tparams, prop_tys): (Vec<String>, Vec<String>) = self
-                    .class_decl(&fname)
+                let (tparams, prop_tys): (Vec<String>, Vec<String>) = source_ctor_decl
+                    .as_ref()
                     .map(|cd| {
                         (
                             cd.type_params.clone(),
@@ -22894,8 +22905,8 @@ impl<'a> Lower<'a> {
                     }
                     return Some(self.emit_new(class, a, None));
                 }
-                let meta: Vec<(String, Option<AstExprId>)> = self
-                    .class_decl(&fname)
+                let meta: Vec<(String, Option<AstExprId>)> = source_ctor_decl
+                    .as_ref()
                     .map(|cd| {
                         cd.props
                             .iter()
@@ -22958,7 +22969,7 @@ impl<'a> Lower<'a> {
                 } else if let Some((mut a, omitted)) = {
                     // A `@JvmInline value class` uses `constructor-impl$default`, NOT `<init>$default`
                     // — its omitted-default construction is the value-class path's; skip it here.
-                    if self.class_decl(&fname).is_some_and(|c| c.is_value) {
+                    if source_ctor_decl.as_ref().is_some_and(|c| c.is_value) {
                         None
                     } else {
                         let meta_hd: Vec<(String, bool)> =
