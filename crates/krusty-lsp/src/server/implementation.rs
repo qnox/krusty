@@ -657,6 +657,10 @@ impl DiagnosticIndex {
                 .min(MAX_SOURCE_SET_DIAGNOSTIC_ENTRIES.saturating_sub(budget.entries)),
         );
         let mut message_ids = HashMap::<String, u32>::new();
+        // The client renders every entry, so an identical diagnostic reported twice by the
+        // analysis pipeline would show up twice in the editor. Drop exact repeats here; the
+        // workspace sweep applies the same dedup when it merges into its store.
+        let mut seen_entries = HashSet::<PendingDiagnosticEntry>::new();
         for diagnostic in diagnostics {
             let span = diagnostic.editor_span.unwrap_or(diagnostic.span);
             let message = lsp_diagnostic_message(diagnostic.msg);
@@ -697,7 +701,11 @@ impl DiagnosticIndex {
             } else {
                 0
             };
-            pending.push([span.lo, span.hi.max(span.lo), severity | kind | message_id]);
+            let entry = [span.lo, span.hi.max(span.lo), severity | kind | message_id];
+            if !seen_entries.insert(entry) {
+                continue;
+            }
+            pending.push(entry);
             budget.entries += 1;
             budget.text_bytes += retained_bytes;
             budget.wire_bytes += wire_bytes;
@@ -1298,17 +1306,21 @@ where
             // Publish each chunk as it lands. A workspace pull only arrives if the client asks,
             // and on a large repository the sweep runs for hours -- waiting until the end would
             // show nothing for the whole of it. Open documents are excluded: their buffer is
-            // newer than whatever the sweep read from disk.
-            for uri in attempted {
-                if self.documents.contains_key(&uri) {
-                    continue;
+            // newer than whatever the sweep read from disk. Pull clients are excluded too: they
+            // collect the same results through workspace/diagnostic, and pushing on top of that
+            // renders every entry twice.
+            if self.pushes_diagnostics() {
+                for uri in attempted {
+                    if self.documents.contains_key(&uri) {
+                        continue;
+                    }
+                    let index = self
+                        .workspace_diagnostics
+                        .diagnostics(&uri)
+                        .map(|found| DiagnosticIndex::from_workspace(&found))
+                        .unwrap_or_default();
+                    messages.push(publish_diagnostics(&uri, None, &index));
                 }
-                let index = self
-                    .workspace_diagnostics
-                    .diagnostics(&uri)
-                    .map(|found| DiagnosticIndex::from_workspace(&found))
-                    .unwrap_or_default();
-                messages.push(publish_diagnostics(&uri, None, &index));
             }
             messages.extend(self.diagnostic_refresh());
         }
@@ -6499,14 +6511,16 @@ mod tests {
         let prefix = "x".repeat(256 * 1024);
         let source = format!("{prefix}\r\n😀tail");
         let emoji = u32::try_from(prefix.len() + 2).unwrap();
+        // Distinct messages keep the entries distinct: exact repeats are deduplicated before
+        // they ever reach this encoding path.
         let diagnostics = (0..4096)
-            .map(|_| Diagnostic {
+            .map(|i| Diagnostic {
                 span: krusty::diag::Span::new(emoji, emoji + 4),
                 editor_span: None,
                 identity: None,
                 severity: Severity::Error,
                 kind: DiagnosticKind::Compiler,
-                msg: "late source diagnostic".to_string(),
+                msg: format!("late source diagnostic {i}"),
                 file: 0,
             })
             .collect();
@@ -6516,9 +6530,9 @@ mod tests {
         assert!(index.entries.iter().all(|entry| entry[..4] == [1, 0, 1, 2]));
 
         let large_message = "m".repeat(128 * 1024);
-        let repeated = (0..100)
-            .map(|_| Diagnostic {
-                span: krusty::diag::Span::new(0, 0),
+        let repeated = (0..100u32)
+            .map(|i| Diagnostic {
+                span: krusty::diag::Span::new(i, i),
                 editor_span: None,
                 identity: None,
                 severity: Severity::Warning,
@@ -6528,7 +6542,8 @@ mod tests {
             })
             .collect();
         let mut output_budget = DiagnosticBudget::default();
-        let bounded = DiagnosticIndex::from_diagnostics(repeated, "", &mut output_budget);
+        let bounded =
+            DiagnosticIndex::from_diagnostics(repeated, &"x".repeat(4096), &mut output_budget);
         assert_eq!(bounded.messages.len(), 1);
         assert!(!bounded.entries.is_empty());
         assert!(bounded.entries.len() < 100);
@@ -7076,6 +7091,77 @@ mod tests {
         assert_eq!(
             published["params"]["diagnostics"].as_array().map(Vec::len),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn a_pull_client_gets_no_push_from_the_sweep() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.client_pulls_diagnostics = true;
+        service.client_refreshes_diagnostics = true;
+
+        let messages = service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec!["file:///w/Swept.kt".to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: "file:///w/Swept.kt".to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 3),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "swept boom".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "val x = 1\n".to_string(),
+            }],
+        });
+
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["method"] == "textDocument/publishDiagnostics"),
+            "a client that pulls workspace diagnostics must not also receive pushes for the same\
+             files, or every entry shows up twice"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message["method"] == "workspace/diagnostic/refresh"),
+            "the pull client still needs to hear that the sweep produced new results"
+        );
+    }
+
+    #[test]
+    fn identical_diagnostics_are_published_once() {
+        let diagnostic = || Diagnostic {
+            span: krusty::diag::Span::new(0, 3),
+            editor_span: None,
+            identity: None,
+            severity: Severity::Error,
+            kind: DiagnosticKind::Compiler,
+            msg: "boom".to_string(),
+            file: 0,
+        };
+        let index = DiagnosticIndex::from_diagnostics(
+            vec![diagnostic(), diagnostic()],
+            "val x = 1\n",
+            &mut DiagnosticBudget::default(),
+        );
+
+        assert_eq!(
+            index.entries.len(),
+            1,
+            "an exact repeat must not reach the client twice"
         );
     }
 }

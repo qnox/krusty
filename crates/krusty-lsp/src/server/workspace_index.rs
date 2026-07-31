@@ -137,11 +137,12 @@ impl WorkspaceDiagnosticStore {
             let available_entries = MAX_RETAINED_ENTRIES
                 .saturating_sub(self.live_entries.saturating_sub(previous_entries));
             let mut pending = Vec::with_capacity(file.diagnostics.len().min(available_entries));
+            // Same dedup the open-document path applies: an exact repeat must not render twice in
+            // the client, and must not burn the retention budget or trip truncation spuriously.
+            // Interning first is safe: a duplicate's message is already interned by its first
+            // occurrence, so a dropped entry never adds to the message table.
+            let mut seen = std::collections::HashSet::with_capacity(pending.capacity());
             for diagnostic in file.diagnostics {
-                if pending.len() >= available_entries {
-                    self.truncated = true;
-                    break;
-                }
                 // Same protocol-boundary casing the open-document path applies, so a message does
                 // not change appearance depending on whether its file happens to be open.
                 let message = super::implementation::lsp_diagnostic_message(diagnostic.msg);
@@ -159,7 +160,15 @@ impl WorkspaceDiagnosticStore {
                     0
                 };
                 let span = diagnostic.editor_span.unwrap_or(diagnostic.span);
-                pending.push([span.lo, span.hi.max(span.lo), severity | kind | message_id]);
+                let entry = [span.lo, span.hi.max(span.lo), severity | kind | message_id];
+                if !seen.insert(entry) {
+                    continue;
+                }
+                if pending.len() >= available_entries {
+                    self.truncated = true;
+                    break;
+                }
+                pending.push(entry);
             }
             // Resolve while the text is still in hand: the store keeps no text, and re-reading the
             // file at pull time would race whatever the sweep is writing.
@@ -396,6 +405,25 @@ mod tests {
 
         assert!(outcome.accepted);
         assert!(!outcome.changed);
+    }
+
+    #[test]
+    fn identical_diagnostics_are_retained_once() {
+        let mut store = WorkspaceDiagnosticStore::default();
+        let uri = "file:///workspace/Duplicated.kt";
+        let mut file = indexed(uri, 1);
+        let duplicate = file.diagnostics[0].clone();
+        file.diagnostics.push(duplicate);
+
+        let outcome = store.merge(0, &[uri.to_string()], true, vec![file], resolve);
+
+        assert!(outcome.accepted);
+        assert_eq!(
+            store.live_entries, 1,
+            "an exact repeat must be retained once, not once per occurrence"
+        );
+        assert_eq!(store.messages, ["Broken"]);
+        assert!(!outcome.newly_truncated);
     }
 
     #[test]

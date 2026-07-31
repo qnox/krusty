@@ -819,7 +819,11 @@ fn run<A: Analysis>(
             None => Some("Refreshing project".to_string()),
             Some(EngineCommand::SetWorkspaceRoot(_)) => Some("Loading project".to_string()),
             Some(EngineCommand::Analyze(job)) => {
-                Some(format!("Analyzing {} files", job.documents.len()))
+                // This count is the number of open buffers in the job, not progress: every
+                // analysis re-analyzes all open documents, so it only moves when an editor tab
+                // opens or closes. Say so, or it reads like a stuck "x of y" counter next to the
+                // indexing sweep's real one.
+                Some(format!("Analyzing {} open files", job.documents.len()))
             }
             Some(EngineCommand::Index(_)) => {
                 let (done, total) = commands.indexing_progress();
@@ -1626,7 +1630,7 @@ mod tests {
             vec![
                 ServerStatus::Working("Loading project".to_string()),
                 ServerStatus::Ready,
-                ServerStatus::Working("Analyzing 1 files".to_string()),
+                ServerStatus::Working("Analyzing 1 open files".to_string()),
                 ServerStatus::Ready,
             ]
         );
