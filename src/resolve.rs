@@ -16,7 +16,7 @@ use crate::libraries::{
     map_call_args, required_arity, CallArgMappingError, CallArgMappingFailure, CallSig,
     EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
-use crate::names::{property_getter_name, property_setter_name};
+use crate::names::{nested_internal_name_candidates, property_getter_name, property_setter_name};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
 use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
@@ -628,6 +628,9 @@ pub struct DeclaredPropertySig {
 #[derive(Clone, Debug)]
 pub struct ClassSig {
     pub internal: TypeName,
+    /// File that declares this source classifier. Class visibility cannot be decided from the module
+    /// alone: a top-level `private` class is visible only to declarations in this same file.
+    pub source_file: u32,
     pub visibility: Visibility,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     pub declared_props: HashMap<String, DeclaredPropertySig>,
@@ -1521,6 +1524,9 @@ impl SymbolTable {
         for signature in self.funs.values_mut().flatten() {
             offset_signature(signature);
         }
+        for class in self.classes.values_mut() {
+            class.source_file += offset;
+        }
         self.conflicting_top_level_key_by_source =
             std::mem::take(&mut self.conflicting_top_level_key_by_source)
                 .into_iter()
@@ -1668,6 +1674,103 @@ impl SymbolTable {
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.values().find(|sig| sig.internal == internal)
+    }
+}
+
+/// Shapes that lower correctly ONLY when an `inline` body is spliced into a caller — the checker
+/// analyses the body with splice assumptions, so emitting it standalone (a facade static for
+/// cross-file calls) would miscompile: nested lambdas / anonymous objects (capture analysis +
+/// synthetic numbering), `try` / `break` / `continue` / expression-position `return` (inline-frame
+/// control flow), and `is`/`as` on a type parameter (splicing substitutes the call-site type
+/// argument; a standalone body can only erase to the bound). Conservative: the file just skips.
+fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
+    fn bad_expr(file: &File, e: ExprId, tparams: &[String]) -> bool {
+        if file.anonymous_object_classes.contains_key(&e) {
+            return true;
+        }
+        match file.expr(e) {
+            Expr::Lambda { .. }
+            | Expr::Try { .. }
+            | Expr::Break { .. }
+            | Expr::Continue { .. }
+            | Expr::Return { .. } => true,
+            Expr::Is { ty, .. } | Expr::As { ty, .. } if tparams.contains(&ty.name) => true,
+            _ => file.any_child_expr(
+                e,
+                &mut |child| bad_expr(file, child, tparams),
+                &mut |stmt| bad_stmt(file, stmt, tparams),
+            ),
+        }
+    }
+    fn bad_stmt(file: &File, s: StmtId, tparams: &[String]) -> bool {
+        if matches!(
+            file.stmt(s),
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(_, Some(_))
+        ) {
+            return true;
+        }
+        file.any_child_stmt(s, &mut |child| bad_expr(file, child, tparams))
+    }
+    match &f.body {
+        FunBody::Expr(body) | FunBody::Block(body) => bad_expr(file, *body, &f.type_params),
+        FunBody::None => true,
+    }
+}
+
+impl SymbolTable {
+    /// Whether an `inline fun` may be lowered + emitted as a callable facade static for CROSS-FILE
+    /// calls: [`FunDecl::has_emittable_inline_body`] syntactically, its signature mentions no value
+    /// class (a cross-file `invokestatic` applies no value-class mangling/erasure), and its body
+    /// carries no splice-only shape (the checker analyses an `inline` body with splice
+    /// assumptions). Anything else stays splice-only — a cross-file call keeps the file skipped.
+    pub fn inline_fn_facade_emittable(
+        &self,
+        file: &File,
+        file_index: u32,
+        decl: DeclId,
+        f: &FunDecl,
+    ) -> bool {
+        if !f.has_emittable_inline_body() {
+            return false;
+        }
+        let Some(sig) = self.funs.get(&f.name).and_then(|sigs| {
+            sigs.iter()
+                .find(|s| s.source_file == Some(file_index) && s.source_decl == Some(decl))
+        }) else {
+            return false;
+        };
+        !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
+            && !self.ty_mentions_value_class(sig.ret)
+            && !inline_body_has_splice_only_shape(file, f)
+    }
+
+    /// Whether a top-level function is lowered + emitted as a facade static, so a CROSS-FILE call
+    /// links against a plain `invokestatic`: every non-inline top-level fun, plus an `inline` one
+    /// that is safe standalone (`inline_fn_facade_emittable`). Splice-only inline funs emit
+    /// nothing. Shared by every module-symbol registration driver (backend, survey, conformance
+    /// harness) so the three registration sites can't drift apart.
+    pub fn emits_fn_facade(&self, file: &File, file_index: u32, decl: DeclId, f: &FunDecl) -> bool {
+        f.receiver.is_none()
+            && (!f.is_inline() || self.inline_fn_facade_emittable(file, file_index, decl, f))
+    }
+
+    /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
+    /// anywhere inside a function type's parameters/return.
+    fn ty_mentions_value_class(&self, t: Ty) -> bool {
+        match t {
+            Ty::Obj(n, args) => {
+                self.class_by_type_name(n)
+                    .is_some_and(|c| c.value_field.is_some())
+                    || args.iter().any(|a| self.ty_mentions_value_class(*a))
+            }
+            Ty::Fun(sig) => {
+                sig.params.iter().any(|p| self.ty_mentions_value_class(*p))
+                    || self.ty_mentions_value_class(sig.ret)
+            }
+            Ty::Nullable(inner) => self.ty_mentions_value_class(*inner),
+            Ty::TyParam(_, bound) => self.ty_mentions_value_class(*bound),
+            _ => false,
+        }
     }
 
     pub(crate) fn applied_source_parents(
@@ -3237,14 +3340,12 @@ fn object_member_import_sig(file: &File, name: &str, src: &dyn SymbolSource) -> 
         .iter()
         .find(|i| !i.ends_with(".*") && i.ends_with(&suffix))?;
     let owner_path = fq[..fq.len() - suffix.len()].replace('.', "/");
-    let mut cand = owner_path;
-    loop {
-        if src.resolve_type(&cand).is_some_and(|t| t.is_object()) {
-            return Some(cand);
-        }
-        let pos = cand.rfind('/')?;
-        cand.replace_range(pos..=pos, "$");
-    }
+    nested_internal_name_candidates(&owner_path)
+        .into_iter()
+        .find(|candidate| {
+            src.resolve_type(candidate)
+                .is_some_and(|classifier| classifier.is_object())
+        })
 }
 
 fn resolve_nested_internal(internal: &str, source: &dyn SymbolSource) -> Option<String> {
@@ -3258,12 +3359,7 @@ fn resolve_nested_internal_name(internal: &str, source: &dyn SymbolSource) -> Op
         let t = source.resolve_type_name(name)?;
         Some(t.alias_target.unwrap_or(name))
     };
-    if let Some(r) = resolved(internal) {
-        return Some(r);
-    }
-    let mut cand = internal.to_string();
-    while let Some(pos) = cand.rfind('/') {
-        cand.replace_range(pos..=pos, "$");
+    for cand in nested_internal_name_candidates(internal) {
         if let Some(r) = resolved(&cand) {
             return Some(r);
         }
@@ -3424,14 +3520,14 @@ fn source_classifier_from_path(
     path: &str,
     declarations: &std::collections::HashSet<String>,
 ) -> Option<TypeName> {
-    let mut candidate = path.to_string();
-    loop {
+    // kotlinc resolves a dotted path classifier-first — an in-scope type shadows a package path —
+    // so try the nested (`$`) forms before the plain package path: `a$b$c`, `a/b$c`, then `a/b/c`.
+    for candidate in nested_internal_name_candidates(path).into_iter().rev() {
         if declarations.contains(&candidate) {
             return Some(type_name(&candidate));
         }
-        let separator = candidate.rfind('/')?;
-        candidate.replace_range(separator..=separator, "$");
     }
+    None
 }
 
 fn type_ref_formal_occurrences(
@@ -3600,6 +3696,17 @@ fn collect_signatures_with_cp_impl(
                     .or(same_package_source)
                     .or_else(|| {
                         resolve_name_against_imports_name(&name, &imap, &levels, &*libraries)
+                    })
+                    .or_else(|| {
+                        // A dotted name may be the fully-qualified path of a SOURCE class in this
+                        // module (`pkg1.Cls`, `pkg1.Outer.Inner`) — source shadows the classpath.
+                        // Some positions (supertypes, delegation specs) arrive already
+                        // internalized (`pkg1/Cls`), so accept '/' too.
+                        if name.contains('.') || name.contains('/') {
+                            source_classifier_from_path(&name.replace('.', "/"), &user_defined)
+                        } else {
+                            None
+                        }
                     })
                     .or_else(|| {
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
@@ -5321,6 +5428,7 @@ fn collect_signatures_with_cp_impl(
                         c.name.clone(),
                         ClassSig {
                             internal: internal_ref,
+                            source_file: i as u32,
                             visibility: c.visibility,
                             props,
                             declared_props,
@@ -5413,6 +5521,7 @@ fn collect_signatures_with_cp_impl(
                             comp_internal.clone(),
                             ClassSig {
                                 internal: comp_internal_ref,
+                                source_file: i as u32,
                                 visibility: Visibility::Public,
                                 props: Vec::new(),
                                 declared_props: HashMap::new(),
@@ -5546,8 +5655,9 @@ fn collect_signatures_with_cp_impl(
                         }
                         continue;
                     }
-                    // A top-level *computed* property (custom getter, no initializer) — needs a type
-                    // annotation (no getter-return inference at top level yet); emitted as `getX()`.
+                    // A top-level *computed* property (custom getter, no initializer) is emitted as
+                    // `getX()`. An expression getter may supply its inferred type; block getters still
+                    // require an annotation because the lightweight signature inferer has no block flow.
                     let is_computed = p.getter.is_some() && p.init.is_none();
                     let context_params = p
                         .context_params
@@ -5594,31 +5704,26 @@ fn collect_signatures_with_cp_impl(
                         // for a computed property, from its expression getter body).
                         match (&p.ty, &p.getter) {
                             (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
-                            (None, Some(FunBody::Expr(g))) if is_computed => infer_lit_ty_scoped(
-                                file,
-                                *g,
-                                &class_names,
-                                &fun_rets,
-                                &context_scope,
-                                &*libraries,
-                                &table,
-                            ),
+                            (None, Some(FunBody::Expr(g))) if is_computed => {
+                                infer_top_level_property_expr(
+                                    file,
+                                    *g,
+                                    &class_names,
+                                    &fun_rets,
+                                    &context_scope,
+                                    &*libraries,
+                                    &table,
+                                )
+                            }
                             (None, _) => p
                                 .init
                                 .map(|i| {
-                                    // Thread already-collected top-level properties into initializer
-                                    // inference, including nested reads such as `a.compareTo(b)`.
-                                    let props: Vec<(String, Ty, bool)> = table
-                                        .props
-                                        .iter()
-                                        .map(|(n, (t, v, _))| (n.clone(), *t, *v))
-                                        .collect();
-                                    infer_lit_ty_scoped(
+                                    infer_top_level_property_expr(
                                         file,
                                         i,
                                         &class_names,
                                         &fun_rets,
-                                        &props,
+                                        &context_scope,
                                         &*libraries,
                                         &table,
                                     )
@@ -5626,7 +5731,9 @@ fn collect_signatures_with_cp_impl(
                                 .unwrap_or(Ty::Error),
                         }
                     };
-                    if ty == Ty::Error && (p.init.is_some() || is_computed) && p.ty.is_none() {
+                    // Computed getters are diagnosed only after the bounded module-wide retry below:
+                    // unlike an eager initializer, a getter may legally reference a later declaration.
+                    if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                         diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
                     }
                     if is_computed {
@@ -5652,6 +5759,15 @@ fn collect_signatures_with_cp_impl(
             }
         }
     }
+
+    finish_top_level_computed_property_inference(
+        files,
+        &file_class_names,
+        &fun_rets,
+        &*libraries,
+        &mut table,
+        diags,
+    );
 
     table.conflicting_top_level_keys = report_conflicting_top_level_overloads(
         files,
@@ -6758,6 +6874,162 @@ struct InferEnv<'a> {
     /// Resolve a static value declared by a same-module classifier. The lightweight inferer receives
     /// only the external platform source, so source enum entries need this module-table bridge.
     static_classifier_value: &'a dyn Fn(TypeName, &str) -> Option<Ty>,
+}
+
+/// Infer an eager top-level initializer or expression getter against the same value scope. Named
+/// context parameters come first because lightweight name resolution is first-match; they therefore
+/// shadow module properties just as they do in the real checker. Module properties follow so nested
+/// expressions such as `holder.value` and `a.compareTo(b)` do not need call-site-specific branches.
+fn infer_top_level_property_expr(
+    file: &File,
+    expression: ExprId,
+    class_names: &ClassNames,
+    fun_rets: &HashMap<String, Ty>,
+    context_scope: &[(String, Ty, bool)],
+    src: &dyn SemanticPlatform,
+    table: &SymbolTable,
+) -> Ty {
+    let props = context_scope
+        .iter()
+        .cloned()
+        .chain(
+            table
+                .props
+                .iter()
+                .map(|(name, (ty, is_var, _))| (name.clone(), *ty, *is_var)),
+        )
+        .collect::<Vec<_>>();
+    infer_lit_ty_scoped(file, expression, class_names, fun_rets, &props, src, table)
+}
+
+/// Retry unannotated top-level expression getters after every property signature is present. A getter
+/// is an executable body, so Kotlin permits it to read a later declaration (`val first get() = later`),
+/// unlike an eager initializer. Iterating at most once per pending getter resolves finite dependency
+/// chains while guaranteeing that self/mutual cycles terminate as `Error`; diagnostics are emitted only
+/// after the fixed point so a legal forward edge never leaves a stale inference error behind.
+fn finish_top_level_computed_property_inference(
+    files: &[File],
+    file_class_names: &[ClassNames],
+    fun_rets: &HashMap<String, Ty>,
+    src: &dyn SemanticPlatform,
+    table: &mut SymbolTable,
+    diags: &mut DiagSink,
+) {
+    let pending_count = files
+        .iter()
+        .flat_map(|file| {
+            file.decls
+                .iter()
+                .map(move |&declaration| (file, declaration))
+        })
+        .filter(|(file, declaration)| {
+            matches!(
+                file.decl(*declaration),
+                Decl::Property(property)
+                    if property.receiver.is_none()
+                        && property.ty.is_none()
+                        && property.init.is_none()
+                        && property.getter.is_some()
+                        && property.delegate.is_none()
+            )
+        })
+        .count();
+
+    for _ in 0..pending_count {
+        let mut changed = false;
+        for (file_index, file) in files.iter().enumerate() {
+            for &declaration in &file.decls {
+                let Decl::Property(property) = file.decl(declaration) else {
+                    continue;
+                };
+                let (None, None, None, Some(FunBody::Expr(getter))) = (
+                    &property.receiver,
+                    &property.ty,
+                    property.init,
+                    &property.getter,
+                ) else {
+                    continue;
+                };
+                if property.delegate.is_some() {
+                    continue;
+                }
+                let context_types = table
+                    .context_props
+                    .get(&(file_index as u32, declaration.0))
+                    .map(|signature| signature.context_params.clone())
+                    .unwrap_or_default();
+                let context_scope = property
+                    .context_params
+                    .iter()
+                    .zip(&context_types)
+                    .filter(|(parameter, _)| parameter.name != "_")
+                    .map(|(parameter, ty)| (parameter.name.clone(), *ty, false))
+                    .collect::<Vec<_>>();
+                let inferred = infer_top_level_property_expr(
+                    file,
+                    *getter,
+                    &file_class_names[file_index],
+                    fun_rets,
+                    &context_scope,
+                    src,
+                    table,
+                );
+                if inferred == Ty::Error {
+                    continue;
+                }
+                let current = if context_types.is_empty() {
+                    table
+                        .props
+                        .get_mut(&property.name)
+                        .map(|entry| &mut entry.0)
+                } else {
+                    table
+                        .context_props
+                        .get_mut(&(file_index as u32, declaration.0))
+                        .map(|signature| &mut signature.ty)
+                };
+                if let Some(current) = current.filter(|current| **current == Ty::Error) {
+                    *current = inferred;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for (file_index, file) in files.iter().enumerate() {
+        diags.set_file(file_index as u32);
+        for &declaration in &file.decls {
+            let Decl::Property(property) = file.decl(declaration) else {
+                continue;
+            };
+            if property.receiver.is_some()
+                || property.ty.is_some()
+                || property.init.is_some()
+                || property.getter.is_none()
+                || property.delegate.is_some()
+            {
+                continue;
+            }
+            let inferred = table
+                .context_props
+                .get(&(file_index as u32, declaration.0))
+                .map(|signature| signature.ty)
+                .or_else(|| table.props.get(&property.name).map(|entry| entry.0))
+                .unwrap_or(Ty::Error);
+            if inferred == Ty::Error {
+                diags.error(
+                    property.span,
+                    format!(
+                        "krusty: cannot infer the type of property '{}'; add an explicit type",
+                        property.name
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// Infer a declaration initializer's type with a fresh cycle-guard, using `table` to resolve
@@ -17080,10 +17352,11 @@ impl<'a> Checker<'a> {
             );
         }
         self.reset_body_mutations(fun_body_expr(&f.body));
-        // Inline functions are expanded at each call site by the lowerer (like kotlinc's inliner),
-        // so the body is checked here but never emitted standalone. A lambda *parameter* of an
-        // inline function may be invoked on a mutable capture (it ends up inlined into the caller),
-        // so permit mutation while checking the body.
+        // Inline functions are expanded at each call site by the lowerer (like kotlinc's inliner);
+        // a body that is ALSO emitted standalone (a facade static for cross-file calls — see
+        // `inline_fn_facade_emittable`) is lowered identically to a plain function, so checking it
+        // here covers both. A lambda *parameter* of an inline function may be invoked on a mutable
+        // capture (it ends up inlined into the caller), so permit mutation while checking the body.
         let prev_allow = self.allow_lambda_mutation;
         if f.is_inline() {
             self.allow_lambda_mutation = true;
@@ -32666,6 +32939,41 @@ fun box(): String {
         };
         assert_eq!(target.stmt_id, inner_f_stmt);
         assert_eq!(target.provided_arg_count, 0);
+    }
+
+    #[test]
+    fn computed_property_getter_cycle_reports_inference_error() {
+        // The bounded module-wide retry must stop on mutual getter recursion instead of looping or
+        // inventing a type. Both declarations remain Error and receive the ordinary inference error.
+        let (errs, _) = check(
+            r#"
+val x get() = y
+val y get() = x
+"#,
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("cannot infer the type of property 'x'")),
+            "expected a cyclic inference error, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn computed_property_retry_does_not_change_eager_initializer_order() {
+        // Only executable getter bodies participate in the module-wide retry. An eager initializer
+        // still observes declaration order, so the retry cannot silently widen the feature into a
+        // different initialization model.
+        let (errs, _) = check(
+            r#"
+val eager = later
+val later = 1
+"#,
+        );
+        assert!(
+            errs.iter()
+                .any(|error| error.contains("cannot infer the type of property 'eager'")),
+            "expected an eager forward-reference inference error, got {errs:?}"
+        );
     }
 
     #[test]

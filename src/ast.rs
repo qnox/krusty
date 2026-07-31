@@ -677,6 +677,17 @@ impl FunDecl {
                     && !parameter.ty.fun_suspend()
             })
     }
+    /// Top-level `inline` function whose body can ALSO be lowered + emitted as a facade static
+    /// (kotlinc's `public static synthetic` shape), so a call from ANOTHER source file of the same
+    /// module — where the body can't be spliced — links against a real `invokestatic`. `reified`
+    /// type parameters specialize per call site and `suspend` bodies CPS-lower per call, so those
+    /// stay splice-only: a cross-file call to one keeps the file safely skipped.
+    pub fn has_emittable_inline_body(&self) -> bool {
+        self.is_inline()
+            && self.receiver.is_none()
+            && self.reified_type_params.is_empty()
+            && !self.is_suspend()
+    }
     #[inline]
     pub fn is_inline(&self) -> bool {
         self.flags.has(FdFlags::IS_INLINE)

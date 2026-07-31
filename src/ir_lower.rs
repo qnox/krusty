@@ -8,7 +8,9 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{self, BinOp, Decl, Expr, ExprId as AstExprId, FunBody, Stmt, TemplatePart};
+use crate::ast::{
+    self, BinOp, Decl, DeclId, Expr, ExprId as AstExprId, FunBody, FunDecl, Stmt, TemplatePart,
+};
 use crate::frontend::{
     classifier_over_default, function_import_scope, qualified_path, typeref_leaf,
     AnonymousObjectCapture, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
@@ -2121,10 +2123,19 @@ fn lower_file_at_reporting_impl(
         }
     }
 
+    // A splice-only inline fun is registered/lowered NOWHERE (its body is expanded at each call
+    // site); an `inline_fn_facade_emittable` one ALSO emits a facade static for cross-file calls,
+    // so it goes through registration and body lowering like a plain fun.
+    let splice_only_inline = |f: &FunDecl, d: DeclId| {
+        f.is_inline()
+            && !f.has_callable_inline_extension_body()
+            && !syms.inline_fn_facade_emittable(file, file_index, d, f)
+    };
+
     // Pass 1b: register callable top-level and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
-            if f.is_inline() && !f.has_callable_inline_extension_body() {
+            if splice_only_inline(f, d) {
                 continue;
             }
             if let Some(recv_ref) = &f.receiver {
@@ -2394,7 +2405,7 @@ fn lower_file_at_reporting_impl(
     // Pass 2: lower bodies.
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) if f.is_inline() && !f.has_callable_inline_extension_body() => {}
+            Decl::Fun(f) if splice_only_inline(f, d) => {}
             Decl::Fun(f) => {
                 lo.set_bail("deep:fun");
                 lo.scope.clear();
@@ -7170,6 +7181,81 @@ impl<'a> Lower<'a> {
     /// through the module source rather than touching `syms.funs` directly.
     fn module_declares(&self, name: &str) -> bool {
         crate::module_symbols::ModuleSymbols::new(self.syms).declares_top_level(name)
+    }
+
+    /// Whether argument `e` of a CROSS-FILE `inline fun` call is unsafe to pass to a real
+    /// `invokestatic` (a closure, not a splice): a callable reference (adapted/bound-reference
+    /// lowering assumes splicing), or a lambda that
+    /// 1. contains a NON-LOCAL `return` targeting the enclosing function (legal only when the
+    ///    callee is spliced; a `return@<callee>` is the lambda's own implicit label — local), or
+    /// 2. ASSIGNS a local of the enclosing function (`x = …` / `x++`) — the checker analysed the
+    ///    lambda's captures for splicing, so a closure would mutate a COPY, silently.
+    ///
+    /// Writes to top-level/member properties compile to real field accesses in a closure — safe.
+    fn cross_file_inline_arg_unsafe(&self, e: AstExprId, fname: &str) -> bool {
+        fn visit_expr(
+            file: &ast::File,
+            e: AstExprId,
+            fname: &str,
+            assigned: &std::cell::RefCell<Vec<String>>,
+        ) -> bool {
+            match file.expr(e) {
+                Expr::Return { label, .. } if label.as_deref() != Some(fname) => {
+                    return true;
+                }
+                Expr::IncDec { target, .. } => {
+                    if let Expr::Name(n) = file.expr(*target) {
+                        assigned.borrow_mut().push(n.clone());
+                    }
+                }
+                _ => {}
+            }
+            file.any_child_expr(
+                e,
+                &mut |child| visit_expr(file, child, fname, assigned),
+                &mut |stmt| visit_stmt(file, stmt, fname, assigned),
+            )
+        }
+        fn visit_stmt(
+            file: &ast::File,
+            s: ast::StmtId,
+            fname: &str,
+            assigned: &std::cell::RefCell<Vec<String>>,
+        ) -> bool {
+            match file.stmt(s) {
+                Stmt::Return(_, label) if label.as_deref() != Some(fname) => {
+                    return true;
+                }
+                Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } => {
+                    assigned.borrow_mut().push(name.clone());
+                }
+                _ => {}
+            }
+            file.any_child_stmt(s, &mut |child| visit_expr(file, child, fname, assigned))
+        }
+        match self.afile.expr(e) {
+            Expr::CallableRef { .. } => true,
+            // An anonymous-function argument is only ever lowered splice-style (a standalone
+            // closure of one mis-emits its return); a function-typed VARIABLE argument aliases a
+            // lambda whose capture/reassignment analysis assumed splicing — both stay rejected.
+            Expr::Lambda { .. } if self.afile.anon_fun_lambdas.contains(&e.0) => true,
+            // A name bound to an ENCLOSING inline call's lambda parameter (`inner(block)`) is a
+            // splice-registered lambda passed as a value — it has no closure value at all, so it
+            // must reject rather than bind a same-named module-level symbol (or mis-lower).
+            Expr::Name(n) if self.inline_lambdas.iter().any(|lambda| lambda.name == *n) => true,
+            Expr::Name(n) => self
+                .lookup(n)
+                .is_some_and(|(_, ty)| matches!(ty.non_null(), Ty::Fun(_))),
+            Expr::Lambda { body, .. } => {
+                let assigned: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+                if visit_expr(self.afile, *body, fname, &assigned) {
+                    return true;
+                }
+                let assigned = assigned.take();
+                assigned.iter().any(|name| self.lookup(name).is_some())
+            }
+            _ => false,
+        }
     }
     fn fresh_value(&mut self) -> u32 {
         let v = self.next_value;
@@ -13921,21 +14007,31 @@ impl<'a> Lower<'a> {
             // array. In particular, `vararg T` specialized to `String` still emits `Object[]`.
             // Reject a malformed record rather than shifting arguments into a non-array slot.
             array_type.array_elem()?;
-            if args.len() < slot {
-                return None;
-            }
-            for (index, &arg) in args[..slot].iter().enumerate() {
+            // Pre-slot params may themselves be defaulted-and-omitted (`f(a: Int = 0, vararg xs: T)`
+            // called as `f()`): placeholder + mask bit for those. The vararg slot NEVER takes a
+            // mask bit — kotlinc's `$default` passes the array straight through — so an omitted
+            // vararg is an EMPTY array, not a placeholder.
+            let provided_prefix = args.len().min(slot);
+            for (index, &arg) in args[..provided_prefix].iter().enumerate() {
                 out.push(self.lower_arg(arg, &ty_to_ir(params[index]))?);
             }
+            for &param in &params[provided_prefix..slot] {
+                out.push(self.zero_placeholder(param));
+            }
             let mut elements = Vec::new();
-            for &arg in &args[slot..] {
-                elements.push(self.lower_vararg_element(arg, elem, array_type)?);
+            if args.len() > slot {
+                for &arg in &args[slot..] {
+                    elements.push(self.lower_vararg_element(arg, elem, array_type)?);
+                }
             }
             out.push(self.emit_vararg(ty_to_ir(array_type), elements));
             for &param in &params[slot + 1..] {
                 out.push(self.zero_placeholder(param));
             }
-            let mask: i32 = (slot + 1..params.len()).map(|j| 1i32 << j).sum();
+            let mask: i32 = (provided_prefix..slot)
+                .chain(slot + 1..params.len())
+                .map(|j| 1i32 << j)
+                .sum();
             self.append_default_mask_marker(out, mask);
             return Some(());
         }
@@ -22263,15 +22359,39 @@ impl<'a> Lower<'a> {
                     .filter(|target| target.inline.can_inline())
                     .cloned()
                 {
-                    let target_name = target.name.clone();
-                    return self.lower_inline_fn_call(
-                        &target_name,
-                        &args,
-                        e.0,
-                        None,
-                        Some(&target),
-                        None,
-                    );
+                    // Same-file inline call: splice the body, exactly kotlinc's inliner. A
+                    // CROSS-FILE target has no AST here to splice — fall THROUGH to the module-call
+                    // path below (a plain `invokestatic` against the callee's facade static), but
+                    // ONLY when that callee was actually emitted (`inline_fn_facade_emittable`,
+                    // registered in `fn_facades_by_decl`): anything else must BAIL here, or the
+                    // generic dispatch would reinterpret the call (e.g. as a constructor of its
+                    // result type) and miscompile. Unsafe-to-close arguments (see
+                    // `cross_file_inline_arg_unsafe`) bail for the same reason.
+                    if target.source_file == Some(self.file_index) {
+                        let target_name = target.name.clone();
+                        return self.lower_inline_fn_call(
+                            &target_name,
+                            &args,
+                            e.0,
+                            None,
+                            Some(&target),
+                            None,
+                        );
+                    }
+                    let emitted =
+                        target
+                            .source_file
+                            .zip(target.source_decl)
+                            .is_some_and(|(file, decl)| {
+                                self.syms.fn_facades_by_decl.contains_key(&(file, decl.0))
+                            });
+                    if !emitted
+                        || args
+                            .iter()
+                            .any(|&arg| self.cross_file_inline_arg_unsafe(arg, &target.name))
+                    {
+                        return None;
+                    }
                 }
             }
             // SAM conversion `Pred { lambda }`: constructor syntax for a functional interface.
@@ -22684,7 +22804,10 @@ impl<'a> Lower<'a> {
                         a.push(self.emit_get_value(v));
                     }
                 }
-                if vararg {
+                // A `$default` call whose last parameter is a vararg (`f(a: Int = 0, vararg xs: T)`
+                // omitting both) is NOT an element-pack: the `default_call` branch emits the
+                // placeholders/mask and an empty array for the omitted vararg slot.
+                if vararg && !c.default_call {
                     let fixed = c.params.len() - 1;
                     if args.len() < fixed {
                         return None;

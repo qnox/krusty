@@ -138,6 +138,8 @@ mod classpath_ctor_vs_same_named_function_e2e;
 mod classpath_data_copy_e2e;
 #[path = "classpath_default_args_e2e.rs"]
 mod classpath_default_args_e2e;
+#[path = "classpath_default_vararg_call_e2e.rs"]
+mod classpath_default_vararg_call_e2e;
 #[path = "classpath_enum_regex_vc_e2e.rs"]
 mod classpath_enum_regex_vc_e2e;
 #[path = "classpath_function_reference_e2e.rs"]
@@ -260,6 +262,8 @@ mod coroutine_intrinsics_e2e;
 mod cross_file_companion_fun_e2e;
 #[path = "cross_file_ctor_default_e2e.rs"]
 mod cross_file_ctor_default_e2e;
+#[path = "cross_file_inline_call_e2e.rs"]
+mod cross_file_inline_call_e2e;
 #[path = "cross_file_operator_e2e.rs"]
 mod cross_file_operator_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
@@ -434,6 +438,8 @@ mod for_iterable_elvis_e2e;
 mod for_typed_loop_var_e2e;
 #[path = "fq_ctor_call_e2e.rs"]
 mod fq_ctor_call_e2e;
+#[path = "fq_source_typeref_e2e.rs"]
+mod fq_source_typeref_e2e;
 #[path = "fq_static_call_e2e.rs"]
 mod fq_static_call_e2e;
 #[path = "fq_toplevel_call_e2e.rs"]

@@ -870,6 +870,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (splice the caller's lambda at the callee's `FunctionN.invoke` sites — retires the
   `forEach`/`let`/`also` desugars) → non-local return → invokedynamic relocation. Tested by the
   `UserInline` snippet in `tests/feature_box_e2e.rs`.
+  **Cross-file source calls to top-level `inline fun`s link as facade statics.** A same-file call
+  splices the body; a call from ANOTHER file of the same module has no AST to splice, so the
+  defining file lowers + emits the inline fun as a facade static (kotlinc's `public static
+  synthetic` shape) and the caller emits a plain `invokestatic` via the existing `Callee::CrossFile`
+  path. Emittability is gated twice — syntactically (`FunDecl::has_emittable_inline_body`:
+  top-level, non-reified, non-suspend) and semantically (`SymbolTable::inline_fn_facade_emittable`:
+  no value class in the signature — a cross-file `invokestatic` applies no mangling/erasure — and
+  no splice-only body shape: nested lambdas, anonymous objects, `try`/`break`/`continue`,
+  expression-position `return`, `is`/`as` on a type parameter) — with the shared registration
+  predicate `SymbolTable::emits_fn_facade` used by the backend, survey, and conformance drivers.
+  Unsafe call sites BAIL rather than miscompile: an unregistered (unemittable) callee, a lambda
+  argument with a non-local `return` or a mutating capture, a callable-reference/anonymous-function
+  argument, a function-typed variable, or an enclosing inline lambda parameter passed as a value
+  (`tests/cross_file_inline_call_e2e.rs`).
 - **Collection `+=` (read-only vs mutable).** `coll += x` mutates in place when a `plusAssign` operator is
   applicable to the receiver, else reassigns (`coll = coll.plus(x)`) — exactly kotlinc's augmented-assignment
   resolution, with NO mutability predicate. The read-only/mutable distinction (`List` vs `MutableList`) is a
@@ -1932,6 +1946,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   cannot supply a final vararg and reads
   `passing value as a vararg is allowed only inside a parenthesized argument list.`; normal overload
   selection still takes precedence.
+- **A `vararg` parameter is always omittable in default-argument resolution.** Kotlin metadata never
+  sets `declares_default_value` on a `vararg` — it is implicitly omittable — so
+  `CallSig::has_known_required_param` skips the vararg slot (mirroring the call-arg slot mapper).
+  Without this, a classpath function with BOTH a defaulted parameter and a `vararg`
+  (`fun f(a: Int = 0, vararg xs: T)`, called as `f()`) rejected its own `$default`
+  candidate on a call omitting both, reporting `unresolved function 'f'`. The emit side matches:
+  a top-level `$default` callable carries the vararg slot/element to the lowerer (as the extension
+  path already did), the shape-based element-pack branch yields to the `default_call` branch, and an
+  omitted vararg lowers as an EMPTY array with NO mask bit — kotlinc's `$default` passes the array
+  straight through, so a null placeholder trips the callee's non-null vararg check
+  (`classpath_default_vararg_call_e2e`, including a JVM box run). Known gap: the named-array form
+  `f(more = arrayOf(x))` with an omitted default before the vararg still fails to map.
   Calling an ordinary member or a concrete non-null extension through a nullable receiver reports
   `only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T?'.`
   at the unsafe `.`. A nullable-receiver extension remains callable through ordinary dot syntax and
@@ -2271,6 +2297,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   registers such names into `class_names` (so the checker/lowerer agree), and the checker/lowerer
   `resolve_qualified_nested` share the ordering — covering both a parameter/return type ref and a
   qualified constructor call `lib.Thing(5)` (`classpath_type_ref_e2e`).
+
+- **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
+  matches a class declared in the same module (a sibling file's package, no `import` needed — as
+  kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The
+  import pass tries this after explicit-import and same-package resolution and before the classpath
+  dotted rules; positions the parser stores already internalized (`pkg1/Cls` — supertypes,
+  delegation specs) take the same path. Candidate source forms are tried NESTED-first (`a$b$c`, then
+  `a/b$c`, then `a/b/c`), matching kotlinc's classifier-shadows-package rule — this ordering now
+  applies to explicit-import source paths too. The package-first candidate construction itself is a
+  shared naming primitive used by source resolution, classpath nested-name recovery, object-member
+  import inference, and Java-source analysis; only the source lookup reverses it for classifier-first
+  semantics. Resolving the identity does not widen access: module classifiers carry their declaring
+  file, so a top-level `private` FQN remains inaccessible from a sibling file while the declaring file
+  can still use it. Covers every signature-pass type position — extension receivers
+  (`fun pkg1.Cls.fn()`), parameter/return/property types, type arguments, generic bounds, supertype
+  lists, and typealias targets (`fq_source_typeref_e2e`).
+
+- **Unannotated top-level computed-property getter inference.** An expression getter uses the same
+  lightweight value-scope inference as a property initializer: named context parameters first, then
+  module properties, so context shadowing and nested reads (`holder.value`) require no getter-specific
+  name-resolution branches. After collection, unresolved computed getters retry to a bounded fixed
+  point because getter bodies may legally reference later declarations; eager initializer ordering is
+  unchanged. The bound is the number of pending getters, so self/mutual cycles terminate as `Error` and
+  receive the normal inference diagnostic (`computed_prop_e2e`, resolve unit regression).
 
 - **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
   Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc
