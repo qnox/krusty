@@ -2279,9 +2279,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   dotted rules; positions the parser stores already internalized (`pkg1/Cls` — supertypes,
   delegation specs) take the same path. Candidate source forms are tried NESTED-first (`a$b$c`, then
   `a/b$c`, then `a/b/c`), matching kotlinc's classifier-shadows-package rule — this ordering now
-  applies to explicit-import source paths too. Covers every signature-pass type position — extension
-  receivers (`fun pkg1.Cls.fn()`), parameter/return/property types, type arguments, generic bounds,
-  supertype lists, and typealias targets (`fq_source_typeref_e2e`).
+  applies to explicit-import source paths too. The package-first candidate construction itself is a
+  shared naming primitive used by source resolution, classpath nested-name recovery, object-member
+  import inference, and Java-source analysis; only the source lookup reverses it for classifier-first
+  semantics. Resolving the identity does not widen access: module classifiers carry their declaring
+  file, so a top-level `private` FQN remains inaccessible from a sibling file while the declaring file
+  can still use it. Covers every signature-pass type position — extension receivers
+  (`fun pkg1.Cls.fn()`), parameter/return/property types, type arguments, generic bounds, supertype
+  lists, and typealias targets (`fq_source_typeref_e2e`).
 
 - **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
   Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc

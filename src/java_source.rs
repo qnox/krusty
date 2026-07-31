@@ -1,6 +1,7 @@
 //! Java source syntax shared by compiler stubs and editor analysis.
 
 use crate::diag::Span;
+use crate::names::nested_internal_name_candidates;
 use std::collections::HashSet;
 
 const ACC_PUBLIC: u16 = 0x0001;
@@ -1073,14 +1074,9 @@ fn explicit_body_type_refs(tokens: &[Tok], spans: &[Span]) -> Vec<SrcType> {
 // --- Resolution + emission -------------------------------------------------
 
 fn nested_candidate(name: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
-    let mut candidate = name.replace('.', "/");
-    loop {
-        if exists(&candidate) {
-            return Some(candidate);
-        }
-        let separator = candidate.rfind('/')?;
-        candidate.replace_range(separator..=separator, "$");
-    }
+    nested_internal_name_candidates(&name.replace('.', "/"))
+        .into_iter()
+        .find(|candidate| exists(candidate))
 }
 
 fn existing_candidates(

@@ -186,6 +186,85 @@ fn fq_source_nested_classifier_shadows_package_path() {
 }
 
 #[test]
+fn fq_source_classifier_shadows_same_fqn_classpath_classifier() {
+    let Some(classpath) = common::compile_lib(
+        "fq_source_shadow",
+        "package pkg1\nclass Cls(val classpathOnly: Int)\n",
+    ) else {
+        return;
+    };
+    let diagnostics = common::front_end_diagnostics_files(
+        &[
+            "package pkg1\nclass Cls(val sourceOnly: String)\n",
+            "package pkg2\nfun read(c: pkg1.Cls): String = c.sourceOnly\n",
+        ],
+        &[classpath],
+        None,
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "source classifier must shadow its same-FQN classpath counterpart: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn fq_source_classifier_still_enforces_private_file_visibility() {
+    let diagnostics = common::front_end_diagnostics_files(
+        &[
+            "package pkg1\nprivate class Secret\n",
+            "package pkg2\nfun expose(value: pkg1.Secret): Any = value\n",
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("cannot access 'pkg1.Secret': it is private")),
+        "FQ lookup must not bypass the shared classifier visibility check: {diagnostics:?}"
+    );
+
+    let diagnostics = common::front_end_diagnostics_files(
+        &["package pkg1\nprivate class Secret\nfun expose(value: Secret): Any = value\n"],
+        &[],
+        None,
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "the same source file must retain access to its top-level private classifier: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn source_private_nested_classifier_uses_lexical_owner_visibility() {
+    let diagnostics = common::front_end_diagnostics_files(
+        &["package pkg1\n\
+           class Outer {\n\
+               private class Hidden\n\
+               fun retain(value: Hidden): Any = value\n\
+           }\n\
+           class Peer { fun expose(value: Outer.Hidden): Any = value }\n"],
+        &[],
+        None,
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("cannot access 'Outer.Hidden': it is private")
+        }),
+        "a sibling class in the same file must not inherit an outer class's private access: \
+         {diagnostics:?}"
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.contains("cannot access"))
+            .count(),
+        1,
+        "the declaring outer must retain lexical access to its nested private class: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn fq_source_typerefs_compile_and_run() {
     // FQ param + return types across packages, exercised end-to-end on the JVM. (A cross-package
     // extension DECLARATION would be the ideal vehicle, but the IR backend rejects those today —
