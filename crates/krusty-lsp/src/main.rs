@@ -507,8 +507,8 @@ struct WorkerHost {
     clock: Instant,
     root: Option<PathBuf>,
     jdk_warning_shown: bool,
-    /// Set when the source inventory hit its per-root limit, so the shortfall is reported rather
-    /// than looking like a fully indexed workspace.
+    /// Set when the source inventory was cut short — an unreadable root or the retention
+    /// ceiling — so the shortfall is reported rather than looking like a fully indexed workspace.
     truncated_inventory: bool,
     /// One model generation's URI inventory. Both priority tiers derive from this snapshot; walking
     /// every source root once for the neighbourhood and again for the sweep doubled cold indexing
@@ -525,6 +525,9 @@ struct WorkerHost {
     worker_reconfigure_retry_backoff_ms: u64,
     retained: RetainedAnalysis,
     rendered_dumps: RenderedDumps,
+    /// Engine-installed reporter for the workspace file-tree scan. `None` outside the engine
+    /// (tests, one-shot paths), where scan progress has no client to render on.
+    scan_reporter: Option<krusty_lsp::ScanReporter>,
 }
 
 impl WorkerHost {
@@ -556,6 +559,7 @@ impl WorkerHost {
             worker_reconfigure_retry_backoff_ms: 0,
             retained: RetainedAnalysis::default(),
             rendered_dumps: RenderedDumps::default(),
+            scan_reporter: None,
         }
     }
 
@@ -576,7 +580,26 @@ impl WorkerHost {
             self.workspace_inventory = Some(Vec::new());
             return;
         };
-        let (sources, mut truncated) = krusty_lsp::project::workspace_sources(model);
+        // Taken rather than borrowed: the model borrows `self.sync`, so the reporter cannot be
+        // reached through `self` while the walk runs. It goes back immediately after.
+        let mut reporter = self.scan_reporter.take();
+        if let Some(reporter) = reporter.as_mut() {
+            reporter(krusty_lsp::ScanProgress::Started);
+        }
+        let started = Instant::now();
+        let mut ignore = |_| {};
+        let progress: &mut dyn FnMut(krusty_lsp::ScanProgress) = match reporter.as_mut() {
+            Some(reporter) => reporter,
+            None => &mut ignore,
+        };
+        let (sources, mut truncated) = krusty_lsp::project::workspace_sources(model, progress);
+        if let Some(reporter) = reporter.as_mut() {
+            reporter(krusty_lsp::ScanProgress::Finished {
+                files: sources.len() as u64,
+                millis: started.elapsed().as_millis() as u64,
+            });
+        }
+        self.scan_reporter = reporter;
         let mut retained_bytes = 0usize;
         let mut uris = Vec::new();
         for path in sources {
@@ -858,6 +881,10 @@ impl krusty_lsp::Analysis for WorkerHost {
 
     fn workspace_index_incomplete(&self) -> bool {
         self.truncated_inventory
+    }
+
+    fn set_scan_reporter(&mut self, reporter: krusty_lsp::ScanReporter) {
+        self.scan_reporter = Some(reporter);
     }
 
     fn document_admission(&self) -> krusty_lsp::DocumentAdmission {

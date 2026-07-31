@@ -5,9 +5,13 @@ use std::path::{Path, PathBuf};
 
 use super::model::{SourceModuleGraph, SourceModuleGraphKey};
 
-const MAX_INVENTORY_ENTRIES: usize = 32 * 1024;
+const MAX_CACHED_SOURCE_ENTRIES: usize = 32 * 1024;
 const MAX_CACHED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CACHED_MODULE_KEYS: usize = 32 * 1024;
+
+/// Lower bound between scan-progress checkpoints. The workspace walk runs on the engine thread,
+/// so reports must be rare enough that rendering them never competes with the walk itself.
+const SCAN_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub type LoadedProjectSources<'a> = (&'a [(String, String)], usize, Vec<String>);
 
@@ -172,14 +176,12 @@ impl ProjectSources {
             return Ok((&cache.documents, cache.inferred_count, java_sources));
         }
 
-        let mut remaining_entries = MAX_INVENTORY_ENTRIES;
         let mut paths = Vec::new();
         for (root, ignore_workspace_directories) in &root_policies {
             paths.extend(find_sources(
                 root,
                 *ignore_workspace_directories,
                 &excluded_source_roots,
-                &mut remaining_entries,
             )?);
         }
         paths.retain(|path| self.excluded_paths.binary_search(path).is_err());
@@ -277,7 +279,7 @@ impl ProjectSources {
             cache.retained_entries(),
             cache.retained_module_keys(),
             MAX_CACHED_SOURCE_BYTES,
-            MAX_INVENTORY_ENTRIES,
+            MAX_CACHED_SOURCE_ENTRIES,
             MAX_CACHED_MODULE_KEYS,
         ) {
             return Err(cache_limit_message());
@@ -685,12 +687,6 @@ fn size_limit_message(max_bytes: usize) -> String {
     )
 }
 
-fn inventory_limit_message() -> String {
-    format!(
-        "module source inventory exceeds analysis limit (maximum {MAX_INVENTORY_ENTRIES} entries); semantic diagnostics suppressed"
-    )
-}
-
 fn read_error_message() -> String {
     "module source set contains an unreadable source; semantic diagnostics suppressed".to_string()
 }
@@ -702,10 +698,14 @@ fn cache_limit_message() -> String {
 
 /// Every Kotlin source the project model knows about, for background indexing.
 ///
-/// Reuses `find_sources`, so the ignore rules and entry budget that govern open-document source
-/// discovery govern the sweep too; a second walk here would be a second, divergent definition of
-/// what counts as a workspace source.
-pub fn workspace_sources(model: &super::model::ProjectModel) -> (Vec<PathBuf>, bool) {
+/// Reuses `find_sources`, so the ignore rules that govern open-document source discovery govern
+/// the sweep too; a second walk here would be a second, divergent definition of what counts as a
+/// workspace source. The walk is unbounded in depth and entry count — a large tree must scan
+/// completely, and `progress` is what keeps the client informed while it does.
+pub fn workspace_sources(
+    model: &super::model::ProjectModel,
+    progress: &mut dyn FnMut(crate::ScanProgress),
+) -> (Vec<PathBuf>, bool) {
     let mut roots: Vec<PathBuf> = model
         .modules
         .iter()
@@ -723,13 +723,19 @@ pub fn workspace_sources(model: &super::model::ProjectModel) -> (Vec<PathBuf>, b
             .filter(|other| *other != root && other.starts_with(root))
             .cloned()
             .collect();
-        // Budget per root rather than shared across the workspace: one large module must not
-        // starve every module after it in iteration order, silently and with no report.
-        let mut remaining = MAX_INVENTORY_ENTRIES;
         let mut found = Vec::new();
-        if find_sources_into(root, true, &excluded, &mut remaining, &mut found).is_err() {
-            // Keep the bounded prefix. Dropping it would make a large root contribute no files at
-            // all, even though the caller explicitly asked for best-effort workspace coverage.
+        // Keep the discovered prefix on a read error. Dropping it would make the root contribute
+        // no files at all, even though the caller explicitly asked for best-effort coverage.
+        // The walker counts only its own root; offset by what earlier roots found so the client
+        // sees a monotonic workspace total rather than a counter that restarts per module.
+        let base = sources.len() as u64;
+        let mut root_progress = |progress_event: crate::ScanProgress| match progress_event {
+            crate::ScanProgress::Found { files } => progress(crate::ScanProgress::Found {
+                files: base + files,
+            }),
+            other => progress(other),
+        };
+        if find_sources_into(root, true, &excluded, &mut found, &mut root_progress).is_err() {
             truncated = true;
         }
         for path in found
@@ -752,15 +758,14 @@ fn find_sources(
     root: &Path,
     ignore_workspace_directories: bool,
     excluded_source_roots: &[PathBuf],
-    remaining_entries: &mut usize,
 ) -> Result<Vec<PathBuf>, String> {
     let mut sources = Vec::new();
     find_sources_into(
         root,
         ignore_workspace_directories,
         excluded_source_roots,
-        remaining_entries,
         &mut sources,
+        &mut |_| {},
     )?;
     Ok(sources)
 }
@@ -768,15 +773,18 @@ fn find_sources(
 /// Shared walker for strict open-document discovery and best-effort workspace inventory.
 ///
 /// The strict wrapper above discards this buffer on error. Workspace indexing deliberately keeps
-/// it, so both paths share traversal and ignore rules without sharing incompatible truncation
-/// semantics.
+/// it, so both paths share traversal and ignore rules without sharing incompatible error
+/// semantics. The walk is iterative and unlimited in depth and entry count; `progress` receives
+/// the discovered-source count at most every `SCAN_PROGRESS_INTERVAL` and once when the root's
+/// walk ends, so a long scan is visible without flooding the client.
 fn find_sources_into(
     root: &Path,
     ignore_workspace_directories: bool,
     excluded_source_roots: &[PathBuf],
-    remaining_entries: &mut usize,
     sources: &mut Vec<PathBuf>,
+    progress: &mut dyn FnMut(crate::ScanProgress),
 ) -> Result<(), String> {
+    let mut last_report = std::time::Instant::now();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         let entries = match fs::read_dir(directory) {
@@ -791,10 +799,6 @@ fn find_sources_into(
             if kind.is_dir() && excluded_source_roots.binary_search(&path).is_ok() {
                 continue;
             }
-            let Some(next_remaining) = remaining_entries.checked_sub(1) else {
-                return Err(inventory_limit_message());
-            };
-            *remaining_entries = next_remaining;
             if kind.is_dir()
                 && (!ignore_workspace_directories || !super::walk::is_ignored_directory(&path))
             {
@@ -806,7 +810,16 @@ fn find_sources_into(
                 sources.push(path);
             }
         }
+        if last_report.elapsed() >= SCAN_PROGRESS_INTERVAL {
+            progress(crate::ScanProgress::Found {
+                files: sources.len() as u64,
+            });
+            last_report = std::time::Instant::now();
+        }
     }
+    progress(crate::ScanProgress::Found {
+        files: sources.len() as u64,
+    });
     Ok(())
 }
 
@@ -1627,41 +1640,56 @@ mod tests {
     }
 
     #[test]
-    fn inventory_is_entry_bounded() {
+    fn inventory_scans_every_entry_regardless_of_tree_size() {
         let directory = temp_path("support-inventory");
-        fs::create_dir_all(&directory).unwrap();
+        fs::create_dir_all(directory.join("deep/nested/tree")).unwrap();
         fs::write(directory.join("First.kt"), "").unwrap();
         fs::write(directory.join("Second.kt"), "").unwrap();
-        let mut remaining_entries = 1;
+        fs::write(directory.join("deep/nested/tree/Third.kt"), "").unwrap();
 
-        let result = find_sources(&directory, false, &[], &mut remaining_entries);
+        let result = find_sources(&directory, false, &[]);
 
-        fs::remove_dir_all(directory).ok();
-        assert_eq!(result.unwrap_err(), inventory_limit_message());
-    }
-
-    #[test]
-    fn workspace_inventory_keeps_the_bounded_prefix_of_a_large_root() {
-        let directory = temp_path("workspace-inventory-prefix");
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("First.kt"), "").unwrap();
-        fs::write(directory.join("Second.kt"), "").unwrap();
-        let mut remaining_entries = 1;
-        let mut found = Vec::new();
-
-        let result = find_sources_into(&directory, false, &[], &mut remaining_entries, &mut found);
-
-        fs::remove_dir_all(directory).ok();
-        assert_eq!(result.unwrap_err(), inventory_limit_message());
+        fs::remove_dir_all(&directory).ok();
+        let mut found = result.unwrap();
+        found.sort();
         assert_eq!(
-            found.len(),
-            1,
-            "best-effort indexing must retain work discovered before the inventory ceiling"
+            found,
+            vec![
+                directory.join("First.kt"),
+                directory.join("Second.kt"),
+                directory.join("deep/nested/tree/Third.kt"),
+            ],
+            "no depth or entry ceiling may cut the scan short"
         );
     }
 
     #[test]
-    fn inventory_prunes_unrelated_nested_source_roots_before_counting() {
+    fn workspace_inventory_reports_scan_progress() {
+        let directory = temp_path("workspace-inventory-progress");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("First.kt"), "").unwrap();
+        fs::write(directory.join("Second.kt"), "").unwrap();
+        let mut found = Vec::new();
+        let mut reports = Vec::new();
+
+        let result = find_sources_into(&directory, false, &[], &mut found, &mut |progress| {
+            if let crate::ScanProgress::Found { files } = progress {
+                reports.push(files);
+            }
+        });
+
+        fs::remove_dir_all(&directory).ok();
+        assert!(result.is_ok());
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            reports.last(),
+            Some(&2),
+            "a finished root walk must report its final discovered-source count"
+        );
+    }
+
+    #[test]
+    fn inventory_prunes_unrelated_nested_source_roots() {
         let directory = temp_path("support-pruned-module");
         let unrelated = directory.join("nested");
         fs::create_dir_all(&unrelated).unwrap();
@@ -1669,14 +1697,8 @@ mod tests {
         for index in 0..8 {
             fs::write(unrelated.join(format!("{index}.kt")), "").unwrap();
         }
-        let mut remaining_entries = 1;
 
-        let result = find_sources(
-            &directory,
-            false,
-            std::slice::from_ref(&unrelated),
-            &mut remaining_entries,
-        );
+        let result = find_sources(&directory, false, std::slice::from_ref(&unrelated));
 
         fs::remove_dir_all(&directory).ok();
         assert_eq!(result.unwrap(), vec![directory.join("Active.kt")]);
@@ -1691,9 +1713,8 @@ mod tests {
             fs::write(directory.join(format!("target/cache/{index}.kt")), "").unwrap();
         }
         fs::write(directory.join("src/Feature.kt"), "").unwrap();
-        let mut remaining_entries = 3;
 
-        let result = find_sources(&directory, true, &[], &mut remaining_entries);
+        let result = find_sources(&directory, true, &[]);
 
         fs::remove_dir_all(&directory).ok();
         assert_eq!(result.unwrap(), vec![directory.join("src/Feature.kt")]);
@@ -1704,9 +1725,8 @@ mod tests {
         let directory = temp_path("source-package");
         fs::create_dir_all(directory.join("build")).unwrap();
         fs::write(directory.join("build/Feature.kt"), "").unwrap();
-        let mut remaining_entries = 2;
 
-        let result = find_sources(&directory, false, &[], &mut remaining_entries);
+        let result = find_sources(&directory, false, &[]);
 
         fs::remove_dir_all(&directory).ok();
         assert_eq!(result.unwrap(), vec![directory.join("build/Feature.kt")]);

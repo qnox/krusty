@@ -14,6 +14,7 @@ use super::implementation::{
     Analysis, AnalysisBackend, DocumentAdmission, Incoming, ProjectFeedback,
 };
 use crate::compiler_analysis::LibraryRef;
+use crate::{ScanProgress, ScanReporter};
 
 const MAX_PENDING_WATCHED_FILES: usize = 1024;
 /// The longest an interactive command can be made to wait: one chunk of index work. Sized to sit
@@ -808,6 +809,29 @@ fn run<A: Analysis>(
     let mut last_ready = analyze.analysis_ready();
     let mut submitted_sweep_generation = None;
     let _ = events.send(Incoming::Engine(EngineEvent::ReadyState(last_ready)));
+    // The scan walks the tree synchronously inside a command, so the engine cannot report on it
+    // from the loop: hand the backend a reporter that speaks in statuses instead.
+    let scan_events = events.clone();
+    analyze.set_scan_reporter(Box::new(move |progress| {
+        let status = match progress {
+            ScanProgress::Started => ServerStatus::Working("Scanning workspace files".to_string()),
+            ScanProgress::Found { files } => {
+                ServerStatus::Working(format!("Scanning workspace: {files} files found"))
+            }
+            ScanProgress::Finished { files, millis } => {
+                let _ = scan_events.send(Incoming::Engine(EngineEvent::Project(ProjectFeedback {
+                    logs: vec![format!(
+                        "krusty: workspace scan found {files} sources in {millis} ms"
+                    )],
+                    ..ProjectFeedback::default()
+                })));
+                // The sweep, if any, reopens the token with its own progress; without this a
+                // fileless scan would leave "Scanning" up forever.
+                ServerStatus::Ready
+            }
+        };
+        let _ = send_status(&scan_events, status);
+    }) as ScanReporter);
     // Reconfiguration and analysis must remain ordered on this thread.
     loop {
         let command = match commands.recv(analyze.project_refresh_due_in()) {
@@ -923,7 +947,7 @@ fn run<A: Analysis>(
                                 .send(Incoming::Engine(EngineEvent::Project(ProjectFeedback {
                                     logs: vec![
                                         "krusty: workspace diagnostic inventory reached its \
-                                         traversal or queue limit; background results are incomplete"
+                                         retention or queue limit; background results are incomplete"
                                             .to_string(),
                                     ],
                                     ..ProjectFeedback::default()
@@ -1627,6 +1651,76 @@ mod tests {
                 ServerStatus::Working("Loading project".to_string()),
                 ServerStatus::Ready,
                 ServerStatus::Working("Analyzing 1 files".to_string()),
+                ServerStatus::Ready,
+            ]
+        );
+
+        engine.join();
+    }
+
+    #[test]
+    fn a_workspace_scan_reports_its_progress_as_working_status() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+
+        struct Mock {
+            reporter: Option<ScanReporter>,
+        }
+        impl Analysis for Mock {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
+            fn analyze(&mut self, s: &[&str]) -> Vec<DocumentAnalysis> {
+                s.iter().map(|_| DocumentAnalysis::empty()).collect()
+            }
+            fn set_workspace_root(&mut self, _root: Option<std::path::PathBuf>) -> ProjectFeedback {
+                ProjectFeedback::default()
+            }
+            fn set_scan_reporter(&mut self, reporter: ScanReporter) {
+                self.reporter = Some(reporter);
+            }
+            fn workspace_index_candidates(&mut self) -> Vec<String> {
+                let mut reporter = self
+                    .reporter
+                    .take()
+                    .expect("the engine installs a scan reporter before its loop");
+                reporter(ScanProgress::Started);
+                reporter(ScanProgress::Found { files: 7 });
+                reporter(ScanProgress::Finished {
+                    files: 7,
+                    millis: 3,
+                });
+                self.reporter = Some(reporter);
+                Vec::new()
+            }
+        }
+
+        let (tx, rx) = sync_channel(16);
+        let engine = AnalysisEngine::spawn(Mock { reporter: None }, tx);
+        engine.submit(EngineCommand::SetWorkspaceRoot(None));
+        engine.submit(EngineCommand::Analyze(AnalysisJob {
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            open_uris: vec!["file:///a.kt".into()],
+        }));
+
+        let mut statuses = Vec::new();
+        while statuses.len() < 7 {
+            match rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(Incoming::Engine(EngineEvent::Status(status))) => statuses.push(status),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        assert_eq!(
+            statuses,
+            vec![
+                ServerStatus::Working("Loading project".to_string()),
+                ServerStatus::Ready,
+                ServerStatus::Working("Analyzing 1 files".to_string()),
+                ServerStatus::Ready,
+                ServerStatus::Working("Scanning workspace files".to_string()),
+                ServerStatus::Working("Scanning workspace: 7 files found".to_string()),
                 ServerStatus::Ready,
             ]
         );
