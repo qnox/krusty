@@ -1,6 +1,7 @@
 mod engine;
 mod implementation;
 mod status;
+mod workspace_index;
 pub use engine::{AnalysisBatch, AnalysisJob};
 pub use implementation::*;
 
@@ -14,7 +15,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
-    use crate::DocumentAnalysis;
+    use crate::{DocumentAnalysis, IndexOutcome};
     use krusty::diag::{Diagnostic, Severity, Span};
 
     fn request(id: i64, method: &str, params: Value) -> Value {
@@ -60,6 +61,10 @@ mod tests {
     }
 
     impl Analysis for RecordingHost {
+        fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+            IndexOutcome::default()
+        }
+
         fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
             self.analysis_calls.set(self.analysis_calls.get() + 1);
             if self.real_analysis {
@@ -3025,6 +3030,10 @@ mod tests {
             cache: std::path::PathBuf,
         }
         impl Analysis for LibraryHost {
+            fn index_workspace_files(&mut self, _uris: &[&str]) -> IndexOutcome {
+                IndexOutcome::default()
+            }
+
             fn analyze(&mut self, sources: &[&str]) -> Vec<DocumentAnalysis> {
                 sources
                     .iter()
@@ -4689,7 +4698,7 @@ mod tests {
             initialized.messages[0]["result"]["capabilities"]["diagnosticProvider"],
             json!({
                 "interFileDependencies": true,
-                "workspaceDiagnostics": false,
+                "workspaceDiagnostics": true,
                 "workDoneProgress": false
             })
         );

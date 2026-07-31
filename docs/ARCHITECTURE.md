@@ -57,6 +57,20 @@ boundary.
 - Diagnostics use either pull responses with refresh requests or
   `textDocument/publishDiagnostics`, according to the client's capabilities. Compiler diagnostics
   are deduplicated by `(span, severity, kind, message)` before entering the LSP indexes.
+- Closed workspace files are indexed only after interactive analysis has been served. One cached
+  project-model inventory feeds a module-neighbourhood priority and a lower-priority full sweep;
+  watched source changes requeue their own file without rebuilding that inventory. Queue count and
+  owned-URI bytes are bounded, and a project-model replacement advances a generation, discards
+  queued work, and clears old retained results before replacement analysis can arrive. Each
+  background chunk goes through the same module visibility, language-feature, and classpath
+  selection as open documents, but uses separate source-discovery and analysis caches so indexing
+  cannot evict the interactive hot path.
+- Workspace diagnostics retain only bounded file URIs, text hashes, packed UTF-16 ranges/severity,
+  and deduplicated display messages. Replaced entry slices are compacted and deleted file slots are
+  reused; no source text, AST, semantic class identity, classpath entry, or compiler snapshot
+  survives the chunk merge. Workspace-wide pull responses honor prior result ids and emit
+  tombstones for disappeared files, but are cancelled with a non-retriggering protocol error when the
+  bounded non-streaming report would exceed its item, byte, or message limit.
 - An open document retains its source text, a bounded compact diagnostic cache for published and
   pull diagnostics, and compact indexes for hover, completion, definitions, document symbols,
   signature help, folding ranges, and semantic highlighting. The compiler's full diagnostic vector

@@ -27,5 +27,5 @@ pub use jdk::{
 pub use model::{Module, ModuleId, ProjectModel, ProviderKind, SourceRoot, SourceRootKind};
 pub use provider::{ProbeError, ProjectProvider};
 pub use runner::{Command, CommandOutput, CommandRunner, ProcessRunner};
-pub use sources::{LoadedProjectSources, ProjectSources};
+pub use sources::{workspace_sources, LoadedProjectSources, ProjectSources};
 pub use sync::{ProjectSync, RefreshOutcome};
