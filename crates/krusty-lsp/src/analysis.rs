@@ -77,6 +77,10 @@ pub const MAX_WORKSPACE_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKSPACE_SYMBOL_QUERY_BYTES: usize = 1024;
 const MAX_WORKSPACE_SYMBOL_CONTAINER_DEPTH: usize = 128;
+/// A leading-wildcard query scans the retained index. Bound the greedy matcher's total transitions
+/// as well as input and response bytes, so an adversarial `*aaaa...b` pattern cannot multiply a
+/// maximum-sized name table into unbounded request latency.
+const MAX_WORKSPACE_SYMBOL_GLOB_STEPS: usize = 32 * 1024 * 1024;
 const JSON_U32_MAX_BYTES: usize = 10;
 // Entry array and separator, plus one value in each search permutation.
 const WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES: usize =
@@ -1232,32 +1236,86 @@ impl WorkspaceSymbolIndex {
         if query.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
             return Vec::new();
         }
-        let lowercase_query = query.to_lowercase();
-        let mut result = Vec::new();
-        let mut wire_bytes = 2usize;
-        if lowercase_query.is_empty() {
-            for index in 0..self.entries.len() as u32 {
-                if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                    return result;
-                }
+        // A query typed without switching keyboard layout is searched in both forms, so `зфкыу`
+        // finds what `parse` would.
+        let mut parsed = vec![WorkspaceQuery::parse(query)];
+        if let Some(latin) = qwerty_from_cyrillic(query) {
+            let translated = WorkspaceQuery::parse(&latin);
+            if translated != parsed[0] {
+                parsed.push(translated);
             }
-            return result;
         }
 
-        for &index in self.prefix_matches(&lowercase_query) {
-            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                return result;
+        let mut result = Vec::new();
+        let mut wire_bytes = 2usize;
+        // Two query forms can reach the same entry, so ranks are deduplicated across them.
+        let mut seen = std::collections::HashSet::new();
+        for query in &parsed {
+            if !self.encode_ranked(query, source_set, &mut result, &mut wire_bytes, &mut seen) {
+                break;
             }
         }
-        for &index in self.initials_matches(&lowercase_query) {
+        result
+    }
+
+    /// Rank and encode matches for one parsed query. Returns false once the wire budget is spent.
+    fn encode_ranked(
+        &self,
+        query: &WorkspaceQuery,
+        source_set: &[(String, String)],
+        result: &mut Vec<Value>,
+        wire_bytes: &mut usize,
+        seen: &mut std::collections::HashSet<u32>,
+    ) -> bool {
+        let lowercase_query = &query.pattern;
+        if query.is_empty() {
+            for index in 0..self.entries.len() as u32 {
+                if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if query.globbed {
+            // A literal prefix still narrows through the sorted array; `*foo*` has none and falls
+            // back to a scan, which is the cost of a leading wildcard.
+            let prefix = query.literal_prefix();
+            return if prefix.is_empty() {
+                self.encode_glob_candidates(
+                    0..self.entries.len() as u32,
+                    query,
+                    source_set,
+                    result,
+                    wire_bytes,
+                    seen,
+                )
+            } else {
+                self.encode_glob_candidates(
+                    self.prefix_matches(prefix).iter().copied(),
+                    query,
+                    source_set,
+                    result,
+                    wire_bytes,
+                    seen,
+                )
+            };
+        }
+
+        for &index in self.prefix_matches(lowercase_query) {
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
+            }
+        }
+        for &index in self.initials_matches(lowercase_query) {
             if self
                 .source_name(index)
-                .is_some_and(|name| starts_with_lowercase(name, &lowercase_query))
+                .is_some_and(|name| starts_with_lowercase(name, lowercase_query))
             {
                 continue;
             }
-            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                return result;
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
             }
         }
         for &index in &self.by_initials {
@@ -1265,14 +1323,14 @@ impl WorkspaceSymbolIndex {
                 continue;
             };
             let initials = camel_hump_initials(name);
-            if starts_with_lowercase(name, &lowercase_query)
-                || initials.starts_with(&lowercase_query)
-                || !is_ordered_subsequence_lowercase(&initials, &lowercase_query)
+            if starts_with_lowercase(name, lowercase_query)
+                || initials.starts_with(lowercase_query)
+                || !is_ordered_subsequence_lowercase(&initials, lowercase_query)
             {
                 continue;
             }
-            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                return result;
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
             }
         }
         for index in 0..self.entries.len() as u32 {
@@ -1280,17 +1338,87 @@ impl WorkspaceSymbolIndex {
                 continue;
             };
             let initials = camel_hump_initials(name);
-            if starts_with_lowercase(name, &lowercase_query)
-                || is_ordered_subsequence_lowercase(&initials, &lowercase_query)
-                || !is_ordered_subsequence_lowercase(name, &lowercase_query)
+            if starts_with_lowercase(name, lowercase_query)
+                || is_ordered_subsequence_lowercase(&initials, lowercase_query)
+                || !is_ordered_subsequence_lowercase(name, lowercase_query)
             {
                 continue;
             }
-            if !self.push_encoded(index, source_set, &mut result, &mut wire_bytes) {
-                return result;
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
             }
         }
-        result
+        true
+    }
+
+    /// Verify a candidate range without materialising another entry-index vector. `None` from the
+    /// matcher means the per-request transition budget is exhausted; return the bounded prefix
+    /// already encoded rather than continuing an attacker-controlled backtracking scan.
+    fn encode_glob_candidates(
+        &self,
+        candidates: impl IntoIterator<Item = u32>,
+        query: &WorkspaceQuery,
+        source_set: &[(String, String)],
+        result: &mut Vec<Value>,
+        wire_bytes: &mut usize,
+        seen: &mut std::collections::HashSet<u32>,
+    ) -> bool {
+        let mut remaining_steps = MAX_WORKSPACE_SYMBOL_GLOB_STEPS;
+        for index in candidates {
+            let Some(name) = self.source_name(index) else {
+                continue;
+            };
+            match matches_glob(&name.to_lowercase(), &query.pattern, &mut remaining_steps) {
+                Some(true) => {}
+                Some(false) => continue,
+                None => return false,
+            }
+            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Encode one entry if its package satisfies the query and no earlier rung claimed it.
+    fn admit(
+        &self,
+        index: u32,
+        query: &WorkspaceQuery,
+        source_set: &[(String, String)],
+        result: &mut Vec<Value>,
+        wire_bytes: &mut usize,
+        seen: &mut std::collections::HashSet<u32>,
+    ) -> bool {
+        if !self.package_matches(index, query.package.as_deref()) {
+            return true;
+        }
+        if !seen.insert(index) {
+            return true;
+        }
+        self.push_encoded(index, query, source_set, result, wire_bytes)
+    }
+
+    /// Whether an entry's package satisfies a qualified query. An unqualified query admits every
+    /// entry; a qualified one matches a complete package suffix on a segment boundary, so
+    /// `collections.listOf` finds `kotlin.collections` without also admitting
+    /// `kotlin.collectionsExtra`.
+    fn package_matches(&self, entry_index: u32, package: Option<&str>) -> bool {
+        let Some(package) = package else {
+            return true;
+        };
+        let Some(entry) = self.entries.get(entry_index as usize) else {
+            return false;
+        };
+        self.packages
+            .get(entry[9] as usize)
+            .is_some_and(|declared| {
+                let declared = declared.to_lowercase();
+                declared == package
+                    || declared
+                        .strip_suffix(package)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            })
     }
 
     /// Whether every indexable declaration fit in the retained snapshot budget.
@@ -1308,6 +1436,7 @@ impl WorkspaceSymbolIndex {
     fn push_encoded(
         &self,
         entry_index: u32,
+        query: &WorkspaceQuery,
         source_set: &[(String, String)],
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
@@ -1318,9 +1447,20 @@ impl WorkspaceSymbolIndex {
         let Some((uri, _)) = source_set.get(entry[0] as usize) else {
             return true;
         };
-        let Some(name) = self.source_name(entry_index) else {
+        let Some(source_name) = self.source_name(entry_index) else {
             return true;
         };
+        // Zed re-filters workspace symbols against the returned `name`. A package-qualified query
+        // cannot survive that filter if the server returns only the declaration's bare name, so
+        // preserve the user's separator and qualify only these responses. Unqualified pickers keep
+        // the compact source spelling.
+        let name = query.response_name(
+            self.packages
+                .get(entry[9] as usize)
+                .map(String::as_str)
+                .unwrap_or(""),
+            source_name,
+        );
         let symbol = json!({
             "name": name,
             "kind": entry[7],
@@ -1418,6 +1558,193 @@ fn workspace_symbol_parent_is_valid(
         && parent[11] <= child[11]
         && child[12] <= parent[12]
         && (parent[11], parent[12]) != (child[11], child[12])
+}
+
+/// A parsed `workspace/symbol` query.
+///
+/// The protocol defines no matching semantics beyond "a query string to filter symbols by", so the
+/// grammar here is ours. Zed re-filters results with a subsequence matcher against the name the
+/// server returns, which silently discards anything whose query contains characters no symbol name
+/// holds - wildcards, or a wrong-layout query. A trailing `::` is the escape: Zed keeps only the text
+/// after the last `::` for its own filter, so an empty remainder disables client filtering and leaves
+/// the server authoritative.
+#[derive(Debug, PartialEq, Eq)]
+struct WorkspaceQuery {
+    /// Folded name pattern; may contain `*` and `?` when `globbed` is set.
+    pattern: String,
+    /// Folded package prefix, when the query was written qualified (`kotlin.collections.listOf`).
+    package: Option<String>,
+    /// Separator used by the client. Qualified response names preserve it so a client that
+    /// re-filters the returned text can match both dotted and slashed queries.
+    separator: Option<char>,
+    globbed: bool,
+}
+
+impl WorkspaceQuery {
+    fn parse(raw: &str) -> WorkspaceQuery {
+        // Everything before the last `::` is the server-side query; the marker itself is not matched.
+        let body = raw.rsplit_once("::").map_or(
+            raw,
+            |(head, tail)| {
+                if tail.is_empty() {
+                    head
+                } else {
+                    raw
+                }
+            },
+        );
+        let folded = body.to_lowercase();
+        // A dotted or slashed query names a package; the last segment is the symbol. Retain the
+        // delimiter separately because the response name must survive client-side filtering.
+        let (package, pattern, separator) = match folded.rfind(['.', '/']) {
+            Some(index) if index > 0 && index + 1 < folded.len() => {
+                let separator = folded[index..].chars().next().expect("ASCII separator");
+                (
+                    Some(folded[..index].replace('/', ".")),
+                    folded[index + 1..].to_string(),
+                    Some(separator),
+                )
+            }
+            _ => (None, folded, None),
+        };
+        WorkspaceQuery {
+            globbed: pattern.contains('*') || pattern.contains('?'),
+            pattern,
+            package,
+            separator,
+        }
+    }
+
+    /// The literal text before the first wildcard, usable as a sorted-array prefix.
+    fn literal_prefix(&self) -> &str {
+        let end = self.pattern.find(['*', '?']).unwrap_or(self.pattern.len());
+        &self.pattern[..end]
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pattern.is_empty() && self.package.is_none()
+    }
+
+    fn response_name(&self, declared_package: &str, source_name: &str) -> String {
+        let Some(separator) = self.separator else {
+            return source_name.to_string();
+        };
+        if declared_package.is_empty() {
+            return source_name.to_string();
+        }
+        let package = if separator == '/' {
+            declared_package.replace('.', "/")
+        } else {
+            declared_package.to_string()
+        };
+        format!("{package}{separator}{source_name}")
+    }
+}
+
+/// Glob match over folded text: `*` spans any run, `?` one character.
+fn matches_glob(text: &str, pattern: &str, remaining_steps: &mut usize) -> Option<bool> {
+    // Keep byte offsets only for slicing, but advance them by decoded characters. Treating `?` as
+    // one UTF-8 byte made it impossible to match the Unicode identifiers Kotlin permits.
+    let (mut text_offset, mut pattern_offset) = (0usize, 0usize);
+    let mut star_pattern = None;
+    let mut star_text = 0usize;
+    while text_offset < text.len() {
+        *remaining_steps = remaining_steps.checked_sub(1)?;
+        let (text_character, next_text) = next_character(text, text_offset)?;
+        match next_character(pattern, pattern_offset) {
+            Some(('*', next_pattern)) => {
+                star_pattern = Some(next_pattern);
+                star_text = text_offset;
+                pattern_offset = next_pattern;
+            }
+            Some((candidate, next_pattern)) if candidate == '?' || candidate == text_character => {
+                text_offset = next_text;
+                pattern_offset = next_pattern;
+            }
+            _ => {
+                let Some(resume_pattern) = star_pattern else {
+                    return Some(false);
+                };
+                let Some((_, next_resume)) = next_character(text, star_text) else {
+                    return Some(false);
+                };
+                star_text = next_resume;
+                text_offset = next_resume;
+                pattern_offset = resume_pattern;
+            }
+        }
+    }
+    while let Some((character, next_pattern)) = next_character(pattern, pattern_offset) {
+        *remaining_steps = remaining_steps.checked_sub(1)?;
+        if character != '*' {
+            return Some(false);
+        }
+        pattern_offset = next_pattern;
+    }
+    Some(true)
+}
+
+fn next_character(value: &str, offset: usize) -> Option<(char, usize)> {
+    let character = value.get(offset..)?.chars().next()?;
+    Some((character, offset.saturating_add(character.len_utf8())))
+}
+
+/// Positional ЙЦУКЕН -> QWERTY mapping, for a query typed without switching layout.
+///
+/// Returns `None` when the query holds no Cyrillic, so callers can skip the second search.
+fn qwerty_from_cyrillic(query: &str) -> Option<String> {
+    let mut mapped = String::with_capacity(query.len());
+    let mut translated = false;
+    for character in query.chars() {
+        let folded = character.to_lowercase().next().unwrap_or(character);
+        match qwerty_from_cyrillic_character(folded) {
+            Some(latin) => {
+                mapped.push(latin);
+                translated = true;
+            }
+            None => mapped.push(character),
+        }
+    }
+    translated.then_some(mapped)
+}
+
+fn qwerty_from_cyrillic_character(character: char) -> Option<char> {
+    Some(match character {
+        'й' => 'q',
+        'ц' => 'w',
+        'у' => 'e',
+        'к' => 'r',
+        'е' => 't',
+        'н' => 'y',
+        'г' => 'u',
+        'ш' => 'i',
+        'щ' => 'o',
+        'з' => 'p',
+        'х' => '[',
+        'ъ' => ']',
+        'ф' => 'a',
+        'ы' => 's',
+        'в' => 'd',
+        'а' => 'f',
+        'п' => 'g',
+        'р' => 'h',
+        'о' => 'j',
+        'л' => 'k',
+        'д' => 'l',
+        'ж' => ';',
+        'э' => '\'',
+        'я' => 'z',
+        'ч' => 'x',
+        'с' => 'c',
+        'м' => 'v',
+        'и' => 'b',
+        'т' => 'n',
+        'ь' => 'm',
+        'б' => ',',
+        'ю' => '.',
+        'ё' => '`',
+        _ => return None,
+    })
 }
 
 fn camel_hump_initials(name: &str) -> String {
@@ -2293,6 +2620,41 @@ pub struct MaterializedDefinition {
     pub hi: u32,
 }
 
+/// One chunk's indexing result.
+///
+/// `conclusive` separates "the analysis ran and these files produced nothing" from "the analysis
+/// could not run". Only the former may delete retained data; conflating them lets a worker restart
+/// silently erase a whole chunk's diagnostics.
+#[derive(Clone, Debug, Default)]
+pub struct IndexOutcome {
+    pub files: Vec<IndexedFile>,
+    pub conclusive: bool,
+}
+
+/// One workspace file's indexing result. Only diagnostics and the text hash are retained; the
+/// rich per-document indices are derived while indexing and dropped, because a swept file is
+/// re-analysed interactively the moment it is opened.
+#[derive(Clone, Debug)]
+pub struct IndexedFile {
+    pub uri: String,
+    pub diagnostics: Vec<Diagnostic>,
+    pub text_hash: u64,
+    /// Retained only until the store resolves byte spans to line and UTF-16 column, then dropped.
+    /// Resolving later would need the text again, and re-reading would race the sweep.
+    pub text: String,
+}
+
+/// Global ceiling on one model generation's cached source inventory.
+pub const MAX_WORKSPACE_INDEX_FILES: usize = 200_000;
+/// URI payload and record bytes retained by the producer's cached source inventory.
+pub const MAX_WORKSPACE_INDEX_URI_BYTES: usize = 16 * 1024 * 1024;
+
+/// One owned URI's payload plus its `String` record. Queue layers multiply this by the number of
+/// representations they retain, keeping producer and consumer accounting on the same unit.
+pub fn workspace_index_uri_bytes(uri: &str) -> usize {
+    uri.len().saturating_add(std::mem::size_of::<String>())
+}
+
 #[derive(Clone)]
 pub struct DocumentAnalysis {
     pub diagnostics: Vec<Diagnostic>,
@@ -2882,6 +3244,195 @@ mod tests {
             serialized_json_wire_bytes(&value).unwrap(),
             serde_json::to_string(&value).unwrap().len()
         );
+    }
+
+    fn indexed(sources: &[&str], uris: &[&str]) -> (WorkspaceSymbolIndex, Vec<(String, String)>) {
+        let analysis = analyze_standalone_source_set(sources);
+        // from_source_set already establishes the search order.
+        let index = WorkspaceSymbolIndex::from_source_set(sources, &analysis.files);
+        let source_set = uris
+            .iter()
+            .zip(sources)
+            .map(|(uri, source)| ((*uri).to_string(), (*source).to_string()))
+            .collect();
+        (index, source_set)
+    }
+
+    fn encoded_names(
+        index: &WorkspaceSymbolIndex,
+        query: &str,
+        set: &[(String, String)],
+    ) -> Vec<String> {
+        index
+            .encode(query, set)
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn workspace_symbols_match_wildcard_queries() {
+        let (index, set) = indexed(
+            &["class KotlinParser\nclass Lexer\nfun parseAll(): Int = 1\n"],
+            &["file:///W.kt"],
+        );
+
+        // Leading wildcard: no literal prefix to binary-search, so this exercises the scan path.
+        let mut interior = encoded_names(&index, "*parse*", &set);
+        interior.sort();
+        assert_eq!(interior, vec!["KotlinParser", "parseAll"]);
+
+        // A literal prefix narrows through the sorted array before the glob verifies.
+        assert_eq!(encoded_names(&index, "Kotlin*", &set), vec!["KotlinParser"]);
+
+        // `?` spans exactly one character.
+        assert_eq!(encoded_names(&index, "Lexe?", &set), vec!["Lexer"]);
+        assert!(encoded_names(&index, "Lexe??", &set).is_empty());
+    }
+
+    #[test]
+    fn workspace_symbols_match_package_qualified_queries() {
+        let (index, set) = indexed(
+            &[
+                "package kotlin.collections\nfun listOf(): Int = 1\n",
+                "package demo.app\nfun listOf(): Int = 2\n",
+                "package demo.collectionsExtra\nfun listOf(): Int = 3\n",
+                "package Δοκιμή.app\nfun findMe(): Int = 4\n",
+            ],
+            &[
+                "file:///A.kt",
+                "file:///B.kt",
+                "file:///C.kt",
+                "file:///D.kt",
+            ],
+        );
+
+        // Unqualified finds every declaration and keeps the compact source spelling.
+        assert_eq!(encoded_names(&index, "listOf", &set).len(), 3);
+
+        // Qualifying by package selects one. The response name preserves that qualification so
+        // clients that re-filter server results do not discard it as a non-match.
+        let qualified = index.encode("kotlin.collections.listOf", &set);
+        assert_eq!(qualified.len(), 1);
+        assert_eq!(qualified[0]["name"], "kotlin.collections.listOf");
+        assert_eq!(qualified[0]["containerName"], "kotlin.collections");
+        let slashed = index.encode("demo/app/listOf", &set);
+        assert_eq!(slashed.len(), 1);
+        assert_eq!(slashed[0]["name"], "demo/app/listOf");
+
+        // A package that matches nothing yields nothing, rather than falling back to the bare name.
+        assert!(index.encode("nosuch.pkg.listOf", &set).is_empty());
+        assert_eq!(
+            encoded_names(&index, "collections.listOf", &set),
+            vec!["kotlin.collections.listOf"],
+            "a package suffix must match on a segment boundary, not inside another segment"
+        );
+        assert_eq!(
+            encoded_names(&index, "δοκιμή.app.findMe", &set),
+            vec!["Δοκιμή.app.findMe"],
+            "qualified package matching must fold Unicode source identifiers, not ASCII bytes only"
+        );
+    }
+
+    #[test]
+    fn workspace_symbols_match_a_wrong_layout_query() {
+        let (index, set) = indexed(&["fun parse(): Int = 1\n"], &["file:///L.kt"]);
+
+        // `зфкыу` is `parse` typed on a Cyrillic layout; the Latin form still matches too.
+        assert_eq!(encoded_names(&index, "зфкыу", &set), vec!["parse"]);
+        assert_eq!(encoded_names(&index, "parse", &set), vec!["parse"]);
+    }
+
+    #[test]
+    fn a_trailing_double_colon_is_stripped_before_matching() {
+        let (index, set) = indexed(&["class KotlinParser\n"], &["file:///E.kt"]);
+
+        // Zed keeps only the text after the last `::` for its own filter, so a trailing marker
+        // disables client filtering; the server must not try to match the marker itself.
+        assert_eq!(
+            encoded_names(&index, "*parser*::", &set),
+            vec!["KotlinParser"]
+        );
+    }
+
+    #[test]
+    fn workspace_query_parses_packages_wildcards_and_the_escape() {
+        // Plain name.
+        let plain = WorkspaceQuery::parse("Widget");
+        assert_eq!(plain.pattern, "widget");
+        assert_eq!(plain.package, None);
+        assert!(!plain.globbed);
+
+        // Qualified: the last segment is the symbol, the rest is the package. `/` normalises to `.`.
+        let dotted = WorkspaceQuery::parse("kotlin.collections.listOf");
+        assert_eq!(dotted.pattern, "listof");
+        assert_eq!(dotted.package.as_deref(), Some("kotlin.collections"));
+        assert_eq!(dotted.separator, Some('.'));
+        let slashed = WorkspaceQuery::parse("kotlin/collections/listOf");
+        assert_eq!(slashed.package.as_deref(), Some("kotlin.collections"));
+        assert_eq!(slashed.separator, Some('/'));
+
+        // A trailing `::` is the client-filter escape and is not part of the pattern.
+        let escaped = WorkspaceQuery::parse("*Parse*::");
+        assert_eq!(escaped.pattern, "*parse*");
+        assert!(escaped.globbed);
+
+        // A non-empty tail after `::` is a path-style query, not the escape, so it stays intact.
+        assert_eq!(WorkspaceQuery::parse("foo::bar").pattern, "foo::bar");
+    }
+
+    #[test]
+    fn workspace_query_reports_the_literal_prefix_before_a_wildcard() {
+        assert_eq!(WorkspaceQuery::parse("Foo*Bar").literal_prefix(), "foo");
+        assert_eq!(WorkspaceQuery::parse("Fo?o").literal_prefix(), "fo");
+        // A leading wildcard leaves nothing to binary-search on.
+        assert_eq!(WorkspaceQuery::parse("*Parse*").literal_prefix(), "");
+        assert_eq!(WorkspaceQuery::parse("plain").literal_prefix(), "plain");
+    }
+
+    #[test]
+    fn glob_matching_handles_stars_and_single_characters() {
+        let matches = |text, pattern| {
+            let mut remaining_steps = usize::MAX;
+            matches_glob(text, pattern, &mut remaining_steps).expect("unlimited test budget")
+        };
+        assert!(matches("kotlinparser", "*parse*"));
+        assert!(matches("parser", "parse?"));
+        assert!(!matches("parse", "parse?"));
+        assert!(matches("foobar", "foo*"));
+        assert!(matches("foobar", "*bar"));
+        assert!(matches("foobar", "f?o*r"));
+        assert!(!matches("foobar", "*baz"));
+        assert!(matches("anything", "*"));
+        assert!(matches("exact", "exact"));
+        assert!(!matches("exact", "exac"));
+        // Backtracking: the first `*` must give ground so the trailing literal can land.
+        assert!(matches("aaa", "a*a"));
+        assert!(matches("abcabc", "*abc"));
+        assert!(matches("λparser", "?parser"));
+        assert!(!matches("λparser", "??parser"));
+
+        let mut no_steps = 0;
+        assert_eq!(
+            matches_glob("anything", "*thing", &mut no_steps),
+            None,
+            "glob evaluation must stop at its deterministic work ceiling"
+        );
+    }
+
+    #[test]
+    fn wrong_keyboard_layout_maps_to_the_intended_latin_query() {
+        // `зфкыу` is `parse` typed on a Cyrillic layout.
+        assert_eq!(qwerty_from_cyrillic("зфкыу").as_deref(), Some("parse"));
+        // Nothing to do for a query that is already Latin.
+        assert_eq!(qwerty_from_cyrillic("parse"), None);
+        assert_eq!(
+            qwerty_from_cyrillic("demo.parse"),
+            None,
+            "ordinary punctuation is not evidence of a Cyrillic layout"
+        );
+        // Mixed input still translates the Cyrillic run.
+        assert_eq!(qwerty_from_cyrillic("зфкыу2").as_deref(), Some("parse2"));
     }
 
     #[test]

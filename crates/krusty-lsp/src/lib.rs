@@ -2,10 +2,11 @@ mod analysis;
 mod compiler_analysis;
 mod dependency_sources;
 pub mod deps_cache;
+pub mod dump_cache;
 mod options;
 pub mod project;
 mod server;
-mod uri;
+pub mod uri;
 mod worker;
 
 pub use analysis::*;

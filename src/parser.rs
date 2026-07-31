@@ -2768,16 +2768,27 @@ impl<'a> Parser<'a> {
         params
     }
 
-    /// Parse a parenthesised argument list `( expr,* )` into expressions, via the real grammar.
-    /// Returns an empty list if no `(` is present.
-    fn parse_call_arguments(&mut self) -> Vec<ExprId> {
+    /// Parse a value-argument list after its opening parenthesis.
+    fn parse_call_argument_list(
+        &mut self,
+    ) -> (Vec<ExprId>, Vec<Option<String>>, Vec<Option<Span>>) {
         let mut args = Vec::new();
-        if !self.eat(TokenKind::LParen) {
-            return args;
-        }
+        let mut names: Vec<Option<String>> = Vec::new();
+        let mut name_spans: Vec<Option<Span>> = Vec::new();
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-            // Spread `*expr` — an array spread into a `vararg` parameter (e.g. a `super(*x)` delegation).
+            if self.at_named_arg() {
+                let name_span = self.syntactic_ident_span(self.tok());
+                let n = self.text().to_string();
+                self.bump(); // name
+                self.bump(); // '='
+                self.skip_newlines();
+                names.push(Some(n));
+                name_spans.push(Some(name_span));
+            } else {
+                names.push(None);
+                name_spans.push(None);
+            }
             let spread = self.eat(TokenKind::Star);
             let arg = self.parse_expr();
             if spread {
@@ -2790,8 +2801,20 @@ impl<'a> Parser<'a> {
             }
             self.skip_newlines();
         }
+        (args, names, name_spans)
+    }
+
+    fn parse_call_arguments(&mut self) -> Vec<ExprId> {
+        self.parse_call_arguments_with_names().0
+    }
+
+    fn parse_call_arguments_with_names(&mut self) -> (Vec<ExprId>, Vec<Option<String>>) {
+        if !self.eat(TokenKind::LParen) {
+            return (Vec::new(), Vec::new());
+        }
+        let (args, names, _) = self.parse_call_argument_list();
         self.expect(TokenKind::RParen, "')'");
-        args
+        (args, names)
     }
 
     /// v0 class: `class Name(val/var p: Type, ...)` with an optional empty body `{}`.
@@ -3119,14 +3142,7 @@ impl<'a> Parser<'a> {
                     {
                         let _ = self.parse_nested_type_decl();
                     }
-                    // Secondary constructor: `constructor(params) [: this/super(args)] { body }`.
-                    // krusty doesn't emit these, so a call to the secondary ctor would resolve to a
-                    // non-existent `<init>` (NoSuchMethodError). Reject the class rather than silently
-                    // drop the constructor and miscompile.
                     TokenKind::Ident if self.text() == "constructor" => {
-                        // Parse the secondary constructor through real productions — the parameter
-                        // list, the `: this(args)`/`: super(args)` delegation, and the body block —
-                        // never by skipping to a balanced delimiter.
                         let ctor_span = self.tok().span;
                         self.bump(); // 'constructor'
                         let params = self.parse_param_list();
@@ -3140,10 +3156,15 @@ impl<'a> Parser<'a> {
                             } else {
                                 String::new()
                             };
-                            let args = self.parse_call_arguments();
+                            let (args, names) = self.parse_call_arguments_with_names();
+                            let delegation_call = crate::ast::CtorDelegationCall {
+                                args,
+                                names,
+                                trailing_lambda: false,
+                            };
                             delegation = match target.as_str() {
-                                "this" => CtorDelegation::This(args),
-                                "super" => CtorDelegation::Super(args),
+                                "this" => CtorDelegation::This(delegation_call),
+                                "super" => CtorDelegation::Super(delegation_call),
                                 _ => {
                                     self.diags.error(
                                         ctor_span,
@@ -4877,11 +4898,26 @@ impl<'a> Parser<'a> {
                 self.bump(); // '@'
             }
         }
-        if self.is_script {
+        // A modifier-prefixed LOCAL function (`tailrec fun f(…)`, `suspend fun g(…)`) is a
+        // declaration statement in any body, not just scripts — without the prefix scan the
+        // leading soft keyword parses as an expression name and reports itself unresolved.
+        let modifier_prefixed_local_fun = !self.is_script
+            && matches!(self.kind(), TokenKind::Ident | TokenKind::At)
+            && self.local_declaration_after_prefix() == Some(TokenKind::KwFun);
+        if self.is_script || modifier_prefixed_local_fun {
             if let Some(kind) = self.local_declaration_after_prefix() {
                 let start = self.tok().span;
                 if kind == TokenKind::KwFun {
                     let mods = self.parse_member_decl_prefix();
+                    // A local `suspend fun` needs its own CPS lowering, which krusty does not
+                    // model for `Stmt::LocalFun` — reject cleanly (skip, never a wrong body or
+                    // a backend ICE). Scripts keep their historical acceptance.
+                    if !self.is_script && mods.iter().any(|modifier| modifier == "suspend") {
+                        self.diags.error(
+                            start,
+                            "krusty: local 'suspend' functions are not supported".to_string(),
+                        );
+                    }
                     let mut function = self.parse_fun(
                         mods.iter().any(|modifier| modifier == "inline"),
                         mods.iter().any(|modifier| modifier == "final"),
@@ -5628,7 +5664,7 @@ impl<'a> Parser<'a> {
         // any trailing infix generically; the result's TYPE (e.g. `IntProgression` from `step`) drives
         // the loop lowering. A bare range (no trailing infix) keeps the optimized counted `Stmt::For`.
         if self.at(TokenKind::Ident) && {
-            let next = self.t.get(self.i + 1).is_some_and(|t| starts_expr(t.kind));
+            let next = self.infix_operand_follows();
             !matches!(self.text(), "is" | "as" | "in") && next
         } {
             let lspan = self.file.expr_spans[rstart.0 as usize];
@@ -5692,15 +5728,19 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Apply trailing infix function calls to a `for`-loop iterable base: each `name rhs` becomes
-    /// `recv.name(rhs)`, chaining left-to-right (`p step 2 step 0` → `(p.step(2)).step(0)`). The
-    /// operand is parsed at additive precedence so a following infix starts a new call rather than
-    /// being swallowed. These are ordinary functions — the loop lowering keys off the resulting
-    /// value's type, never the function name.
+    /// Return whether an infix operand follows, allowing newlines after the operator.
+    fn infix_operand_follows(&self) -> bool {
+        self.t
+            .get(self.i + 1..)
+            .and_then(|rest| rest.iter().find(|t| t.kind != TokenKind::Newline))
+            .is_some_and(|t| starts_expr(t.kind))
+    }
+
+    /// Apply trailing infix function calls to a `for`-loop iterable base.
     fn parse_for_trailing_infix(&mut self, mut recv: ExprId) -> ExprId {
         while self.at(TokenKind::Ident) {
             let name = self.text();
-            let next_starts_expr = self.t.get(self.i + 1).is_some_and(|t| starts_expr(t.kind));
+            let next_starts_expr = self.infix_operand_follows();
             if matches!(name, "is" | "as" | "in") || !next_starts_expr {
                 break;
             }
@@ -6116,10 +6156,7 @@ impl<'a> Parser<'a> {
                 // infix functions and parse as such here (`a until b` → `a.until(b)`); the `for`/`in`
                 // forms recognize them separately before reaching this point.
                 let is_soft_kw = matches!(name, "is" | "as" | "in");
-                let next_starts_expr = self
-                    .t
-                    .get(self.i + 1)
-                    .map_or(false, |t| starts_expr(t.kind));
+                let next_starts_expr = self.infix_operand_follows();
                 if !is_soft_kw && next_starts_expr {
                     let name = name.to_string();
                     let lspan = self.file.expr_spans[lhs.0 as usize];
@@ -6387,19 +6424,14 @@ impl<'a> Parser<'a> {
                     let name = self.ident_or_error("member name");
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let type_args = self.parse_call_type_args();
+                    let mut safe_names: Vec<Option<String>> = Vec::new();
+                    let mut safe_name_spans: Vec<Option<Span>> = Vec::new();
                     let args = if self.at(TokenKind::LParen) {
                         self.bump();
-                        self.skip_newlines();
-                        let mut args = Vec::new();
-                        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                            args.push(self.parse_expr());
-                            self.skip_newlines();
-                            if !self.eat(TokenKind::Comma) {
-                                break;
-                            }
-                            self.skip_newlines();
-                        }
+                        let (args, names, name_spans) = self.parse_call_argument_list();
                         self.expect(TokenKind::RParen, "')'");
+                        safe_names = names;
+                        safe_name_spans = name_spans;
                         Some(args)
                     } else {
                         None
@@ -6421,6 +6453,12 @@ impl<'a> Parser<'a> {
                     }
                     if !type_args.is_empty() {
                         self.file.call_type_args.insert(safe_call.0, type_args);
+                    }
+                    if safe_names.iter().any(|n| n.is_some()) {
+                        self.file.call_arg_names.insert(safe_call.0, safe_names);
+                        self.file
+                            .call_arg_name_spans
+                            .insert(safe_call.0, safe_name_spans);
                     }
                     lhs = safe_call;
                 }
@@ -6512,38 +6550,7 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::LParen => {
                     let open_paren = self.bump().span;
-                    self.skip_newlines();
-                    let mut args = Vec::new();
-                    let mut names: Vec<Option<String>> = Vec::new();
-                    let mut name_spans: Vec<Option<Span>> = Vec::new();
-                    while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                        // Named argument `name = expr` — `name` is an identifier followed by a single
-                        // `=` (not `==`, which begins an equality expression).
-                        if self.at_named_arg() {
-                            let name_span = self.syntactic_ident_span(self.tok());
-                            let n = self.text().to_string();
-                            self.bump(); // name
-                            self.bump(); // '='
-                            self.skip_newlines();
-                            names.push(Some(n));
-                            name_spans.push(Some(name_span));
-                        } else {
-                            names.push(None);
-                            name_spans.push(None);
-                        }
-                        // Spread operator `*expr` — the argument is an array spread into a `vararg`.
-                        let spread = self.eat(TokenKind::Star);
-                        let arg = self.parse_expr();
-                        if spread {
-                            self.file.spread_arg_ids.insert(arg.0);
-                        }
-                        args.push(arg);
-                        self.skip_newlines();
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                        self.skip_newlines();
-                    }
+                    let (args, names, name_spans) = self.parse_call_argument_list();
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.tok().span;
                     self.expect(TokenKind::RParen, "')'");
@@ -7205,6 +7212,8 @@ impl<'a> Parser<'a> {
                     None
                 };
                 self.expect(TokenKind::Eq, "'='");
+                // A `when` subject initializer may start on the next line.
+                self.skip_newlines();
                 let init = self.parse_expr();
                 self.skip_newlines();
                 self.expect(TokenKind::RParen, "')'");

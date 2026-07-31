@@ -5,15 +5,23 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use krusty::jvm::classpath::platform_jdk_modules;
+use krusty::source::SourceKind;
 use krusty_lsp::{
-    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, JdkRequest, LibraryRef, LspOptions,
-    MaterializedDefinition, ProcessRunner, ProjectFeedback, ProjectMessageKind, ProjectModel,
-    ProjectSources, ProjectSync, ProviderKind, RefreshOutcome, SystemEnvironment,
+    detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, JdkRequest,
+    LibraryRef, LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback,
+    ProjectMessageKind, ProjectModel, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
+    SystemEnvironment,
 };
 
+#[cfg(unix)]
+const ORPHAN_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const WORKER_RECONFIGURE_RETRY_INITIAL_MS: u64 = 1_000;
 const WORKER_RECONFIGURE_RETRY_MAX_MS: u64 = 30_000;
 const MAX_RETAINED_SUPPORT_DOCUMENTS: usize = 32 * 1024;
+/// Dev-mode replay inputs are full compiler source sets, unlike the compact query snapshots kept by
+/// normal LSP sessions. Reuse the supervisor's global retained-analysis ceiling so a many-module
+/// workspace cannot multiply the same open texts into an unbounded second in-memory workspace.
+const MAX_RETAINED_DUMP_INPUT_BYTES: usize = krusty_lsp::MAX_RETAINED_ANALYSIS_BYTES;
 
 fn is_java_source_path(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some("java")
@@ -101,22 +109,67 @@ fn parse_cache_command(args: &[String]) -> Result<(bool, Option<PathBuf>), Strin
     Ok((all, root))
 }
 
+/// Remove the private worker-mode marker and the spawning server's PID from an argument vector.
+///
+/// The PID is positional and mandatory because this is an internal exec protocol, not a user-facing
+/// option. Keeping it next to the marker also prevents either value from reaching `LspOptions`.
+fn take_worker_parent(arguments: &mut Vec<String>) -> Result<Option<u32>, String> {
+    let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--analysis-worker")
+    else {
+        return Ok(None);
+    };
+    arguments.remove(index);
+    let parent = arguments
+        .get(index)
+        .ok_or_else(|| "--analysis-worker requires the server PID".to_string())?
+        .parse::<u32>()
+        .map_err(|_| "--analysis-worker server PID must be an unsigned integer".to_string())?;
+    arguments.remove(index);
+    Ok(Some(parent))
+}
+
+/// Terminate the worker once its server is gone.
+///
+/// The worker normally stops when the server closes its stdin, but a worker busy in
+/// analysis never reaches the next read and would survive as an orphan burning a core.
+/// Watching for reparenting catches that case without touching the analysis path. The
+/// expected PID comes from the spawning server, closing the race where the server exits
+/// before the worker can sample its current parent.
+#[cfg(unix)]
+fn exit_when_orphaned(server: u32) {
+    use std::os::unix::process::parent_id;
+
+    std::thread::spawn(move || loop {
+        // Check before sleeping so a worker whose server died during exec exits promptly instead
+        // of adopting the reaper as its baseline or doing unnecessary compiler initialization.
+        if parent_id() != server {
+            std::process::exit(0);
+        }
+        std::thread::sleep(ORPHAN_CHECK_INTERVAL);
+    });
+}
+
+#[cfg(not(unix))]
+fn exit_when_orphaned(_server: u32) {}
+
 fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("cache") {
         run_cache_command(&arguments[1..]);
         return;
     }
-    let worker_mode = arguments
-        .iter()
-        .position(|argument| argument == "--analysis-worker")
-        .map(|index| arguments.remove(index))
-        .is_some();
+    let worker_parent = take_worker_parent(&mut arguments).unwrap_or_else(|error| {
+        eprintln!("krusty-lsp: {error}");
+        std::process::exit(2);
+    });
     let options = LspOptions::parse(arguments.clone()).unwrap_or_else(|error| {
         eprintln!("krusty-lsp: {error}");
         std::process::exit(2);
     });
-    if worker_mode {
+    if let Some(server) = worker_parent {
+        exit_when_orphaned(server);
         let stdin = io::stdin();
         let stdout = io::stdout();
         if let Err(error) = krusty_lsp::run_analysis_worker(
@@ -154,8 +207,9 @@ fn main() {
         let _ = krusty_lsp::deps_cache::gc(&cache_root, max_age_days, max_bytes, now_secs);
     });
 
+    let dev = options.dev();
     let host = WorkerHost::new(worker, options);
-    match krusty_lsp::run_stdio_connection_async(host) {
+    match krusty_lsp::run_stdio_connection_async(host, dev) {
         Ok(0) => {}
         Ok(code) => std::process::exit(code),
         Err(error) => {
@@ -163,6 +217,286 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// One analysis call's inputs, exactly as the worker received them.
+///
+/// Every field changes what the dump sees. The kinds keep Java and script documents out of the
+/// Kotlin parser, the Java sources keep the group's stub overlay, and the language arguments and
+/// classpath keep the module's own compiler configuration — a dump analyzed against the launch
+/// classpath would report unresolved types for a file the editor shows as clean.
+struct AnalysisPayload<'a> {
+    sources: &'a [String],
+    source_kinds: &'a [SourceKind],
+    /// Parallel to `sources`. Empty for a slot whose text was blanked out because the document
+    /// belongs to another analysis group, so such a slot never matches a dump request.
+    uris: &'a [String],
+    result_count: usize,
+    inferred_count: usize,
+    java_sources: &'a [String],
+    language_arguments: &'a [String],
+    classpath: Option<&'a [PathBuf]>,
+}
+
+/// One analysis group's payload, exactly as that group was analyzed.
+#[derive(Default)]
+struct RetainedGroup {
+    sources: Vec<String>,
+    source_kinds: Vec<SourceKind>,
+    uris: Vec<String>,
+    result_count: usize,
+    inferred_count: usize,
+    java_sources: Vec<String>,
+    language_arguments: Vec<String>,
+    classpath: Option<Vec<PathBuf>>,
+    /// Digest of everything above. The payload is the dump's only input, so two payloads with the
+    /// same digest render the same document and a repeat request can reuse the rendered file.
+    fingerprint: u64,
+}
+
+/// Digest every input a dump is rendered from.
+fn retained_group_fingerprint(payload: &AnalysisPayload<'_>) -> u64 {
+    let mut fingerprint = DefaultHasher::new();
+    payload.sources.hash(&mut fingerprint);
+    for kind in payload.source_kinds {
+        kind.wire_code().hash(&mut fingerprint);
+    }
+    payload.uris.hash(&mut fingerprint);
+    payload.result_count.hash(&mut fingerprint);
+    payload.inferred_count.hash(&mut fingerprint);
+    payload.java_sources.hash(&mut fingerprint);
+    payload.language_arguments.hash(&mut fingerprint);
+    payload.classpath.hash(&mut fingerprint);
+    fingerprint.finish()
+}
+
+/// Heap bytes that cloning `payload` into a [`RetainedGroup`] is expected to own.
+///
+/// Count vector elements as well as their variable data: a workspace can contain thousands of
+/// empty strings or classpath entries, so summing string lengths alone is not a memory bound. Vec
+/// headers and scalar fields live in `RetainedGroup` itself and are covered by its struct size.
+fn retained_payload_bytes(payload: &AnalysisPayload<'_>) -> usize {
+    fn strings(values: &[String]) -> usize {
+        std::mem::size_of_val(values).saturating_add(
+            values
+                .iter()
+                .fold(0usize, |bytes, value| bytes.saturating_add(value.len())),
+        )
+    }
+    fn paths(values: &[PathBuf]) -> usize {
+        std::mem::size_of_val(values).saturating_add(values.iter().fold(0usize, |bytes, value| {
+            bytes.saturating_add(value.as_os_str().as_encoded_bytes().len())
+        }))
+    }
+
+    std::mem::size_of::<RetainedGroup>()
+        .saturating_add(strings(payload.sources))
+        .saturating_add(std::mem::size_of_val(payload.source_kinds))
+        .saturating_add(strings(payload.uris))
+        .saturating_add(strings(payload.java_sources))
+        .saturating_add(strings(payload.language_arguments))
+        .saturating_add(payload.classpath.map_or(0, paths))
+}
+
+impl RetainedGroup {
+    /// Replay this group as a dump of slot `target`.
+    ///
+    /// `language_arguments` is always `Some`: the analysis call derives its features from the
+    /// module's arguments even when that list is empty, so falling back to the worker's session
+    /// features here would dump under a different feature set than the editor analyzed under.
+    fn dump_target<'a>(
+        &'a self,
+        target: usize,
+        label: &'a str,
+        cache_key: &'a str,
+        cache_root: &'a Path,
+    ) -> DumpTarget<'a> {
+        DumpTarget {
+            sources: &self.sources,
+            source_kinds: &self.source_kinds,
+            target,
+            label,
+            cache_key,
+            cache_root,
+            result_count: self.result_count,
+            inferred_count: self.inferred_count,
+            java_sources: &self.java_sources,
+            language_arguments: Some(&self.language_arguments),
+            classpath: self.classpath.as_deref(),
+        }
+    }
+}
+
+/// Every group the latest analysis pass covered, kept only under `--dev` so a dump request can
+/// replay exactly the source set and configuration the session analyzed.
+///
+/// One entry per admitted group, not one entry in total: a pass walks every group, and a single
+/// retained payload would leave every module but the last one permanently undumpable. Groups are
+/// admitted in traversal order up to one global byte budget. This matters because each group may
+/// repeat open and support texts from its dependencies; merely dropping superseded passes does not
+/// bound that multiplication within one many-module pass.
+#[derive(Default)]
+struct RetainedAnalysis {
+    groups: Vec<RetainedGroup>,
+    retained_bytes: usize,
+}
+
+impl RetainedAnalysis {
+    /// Drop the previous pass's payloads. Cheap and unconditional: outside dev mode nothing was
+    /// ever recorded, so this clears an empty vector and allocates nothing.
+    fn begin_pass(&mut self) {
+        self.groups.clear();
+        self.retained_bytes = 0;
+    }
+
+    /// Retain one group's payload, or retain nothing at all when dev mode is off.
+    ///
+    /// Callers additionally skip building the payload outside dev mode — copying every source text
+    /// on each keystroke is the cost this gate exists to avoid — but the check lives here so
+    /// retention cannot be reached another way.
+    fn record(&mut self, dev: bool, payload: &AnalysisPayload<'_>) -> bool {
+        self.record_with_budget(dev, payload, MAX_RETAINED_DUMP_INPUT_BYTES)
+    }
+
+    /// Budget-parameterized implementation so the invariant can be tested with tiny fixtures
+    /// instead of allocating tens of MiB in a unit test.
+    fn record_with_budget(
+        &mut self,
+        dev: bool,
+        payload: &AnalysisPayload<'_>,
+        max_bytes: usize,
+    ) -> bool {
+        if !dev {
+            return false;
+        }
+        let retained_bytes = retained_payload_bytes(payload);
+        if retained_bytes > max_bytes.saturating_sub(self.retained_bytes) {
+            return false;
+        }
+        self.groups.push(RetainedGroup {
+            sources: payload.sources.to_vec(),
+            source_kinds: payload.source_kinds.to_vec(),
+            uris: payload.uris.to_vec(),
+            result_count: payload.result_count,
+            inferred_count: payload.inferred_count,
+            java_sources: payload.java_sources.to_vec(),
+            language_arguments: payload.language_arguments.to_vec(),
+            classpath: payload.classpath.map(<[PathBuf]>::to_vec),
+            fingerprint: retained_group_fingerprint(payload),
+        });
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        true
+    }
+
+    /// The retained group and slot holding `uri`, if the latest pass covered it.
+    ///
+    /// A URI is dumpable in at most one group: `project_group_uris` blanks every slot the group
+    /// does not own, so support copies of another module's file never claim it.
+    fn locate(&self, uri: &str) -> Option<(&RetainedGroup, usize)> {
+        if uri.is_empty() {
+            return None;
+        }
+        self.groups.iter().find_map(|group| {
+            group
+                .uris
+                .iter()
+                .position(|candidate| candidate == uri)
+                .map(|slot| (group, slot))
+        })
+    }
+}
+
+/// Bounded so a session cycling through files cannot grow the reuse list without limit. Small on
+/// purpose: an entry only serves repeat requests on a document whose analysis has not moved.
+const MAX_RENDERED_DUMPS: usize = 16;
+
+struct RenderedDump {
+    uri: String,
+    fingerprint: u64,
+    path: PathBuf,
+}
+
+/// Documents already rendered this session, keyed by the file and the payload it was rendered from.
+///
+/// A code action is not one deliberate user gesture: clients refresh code actions whenever the
+/// cursor settles — Zed's inline indicator, VS Code's lightbulb — and every refresh would otherwise
+/// re-parse, re-check and re-lower the whole module group and rewrite a large Markdown file,
+/// serially on the thread that also serves diagnostics, completion and hover. A repeat request on
+/// an unchanged document costs one hash comparison instead.
+///
+/// Keyed by the payload rather than by the document version deliberately. The payload is what the
+/// document is rendered from, and it can lag the buffer; a version key would pin a dump rendered
+/// from pre-edit state and keep serving it after the analysis had caught up.
+#[derive(Default)]
+struct RenderedDumps {
+    entries: Vec<RenderedDump>,
+}
+
+impl RenderedDumps {
+    /// The file already rendered for `uri` from this exact payload, if there is one.
+    fn lookup(&self, uri: &str, fingerprint: u64) -> Option<&Path> {
+        self.entries
+            .iter()
+            .find(|entry| entry.fingerprint == fingerprint && entry.uri == uri)
+            .map(|entry| entry.path.as_path())
+    }
+
+    /// Note what a render produced. One entry per URI: an entry whose payload has been superseded
+    /// can never be reused, so it is replaced rather than kept.
+    fn record(&mut self, uri: &str, fingerprint: u64, path: &Path) {
+        self.entries.retain(|entry| entry.uri != uri);
+        if self.entries.len() >= MAX_RENDERED_DUMPS {
+            self.entries.remove(0);
+        }
+        self.entries.push(RenderedDump {
+            uri: uri.to_string(),
+            fingerprint,
+            path: path.to_path_buf(),
+        });
+    }
+}
+
+/// Workspace-relative presentation label for a document URI.
+///
+/// The cache key is the full URI and is hashed separately. A non-file label keeps only its scheme
+/// and last path component, so a query string carrying editor/session data is never copied into the
+/// dump body merely to provide a heading.
+fn workspace_relative_label(root: Option<&Path>, uri: &str) -> String {
+    let label = if let Some(path) = krusty_lsp::uri::file_uri_to_path(uri) {
+        if let Some(relative) = root.and_then(|root| path.strip_prefix(root).ok()) {
+            relative.to_string_lossy().into_owned()
+        } else {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<external file>".to_string())
+        }
+    } else if let Ok(uri) = url::Url::parse(uri) {
+        let component = uri
+            .path()
+            .rsplit('/')
+            .find(|component| !component.is_empty());
+        component.map_or_else(
+            || format!("{}:<document>", uri.scheme()),
+            |component| format!("{}:{component}", uri.scheme()),
+        )
+    } else {
+        "<document>".to_string()
+    };
+    bounded_dump_label(label)
+}
+
+fn bounded_dump_label(mut label: String) -> String {
+    const MAX_LABEL_BYTES: usize = 1024;
+    if label.len() <= MAX_LABEL_BYTES {
+        return label;
+    }
+    let mut end = MAX_LABEL_BYTES;
+    while !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    label.truncate(end);
+    label.push('…');
+    label
 }
 
 struct WorkerHost {
@@ -173,12 +507,24 @@ struct WorkerHost {
     clock: Instant,
     root: Option<PathBuf>,
     jdk_warning_shown: bool,
+    /// Set when the source inventory hit its per-root limit, so the shortfall is reported rather
+    /// than looking like a fully indexed workspace.
+    truncated_inventory: bool,
+    /// One model generation's URI inventory. Both priority tiers derive from this snapshot; walking
+    /// every source root once for the neighbourhood and again for the sweep doubled cold indexing
+    /// work, while rebuilding it after every keystroke could block the interactive engine thread.
+    workspace_inventory: Option<Vec<String>>,
     project_sources: ProjectSources,
+    /// Background chunks use the same module/source-set algorithm but a separate discovery cache,
+    /// so hours of indexing cannot evict the open document's hot support-source inventory.
+    index_project_sources: ProjectSources,
     analysis_cache: Vec<CachedProjectAnalysis>,
     analysis_pending: bool,
     platform_classpath: Vec<PathBuf>,
     worker_reconfigure_retry_at_ms: Option<u64>,
     worker_reconfigure_retry_backoff_ms: u64,
+    retained: RetainedAnalysis,
+    rendered_dumps: RenderedDumps,
 }
 
 impl WorkerHost {
@@ -199,17 +545,57 @@ impl WorkerHost {
             clock: Instant::now(),
             root: None,
             jdk_warning_shown: false,
+            truncated_inventory: false,
+            workspace_inventory: None,
             project_sources: ProjectSources::default(),
+            index_project_sources: ProjectSources::default(),
             analysis_cache: Vec::new(),
             analysis_pending: false,
             platform_classpath,
             worker_reconfigure_retry_at_ms: None,
             worker_reconfigure_retry_backoff_ms: 0,
+            retained: RetainedAnalysis::default(),
+            rendered_dumps: RenderedDumps::default(),
         }
     }
 
     fn now_ms(&self) -> u64 {
         self.clock.elapsed().as_millis() as u64
+    }
+
+    fn ensure_workspace_inventory(&mut self) {
+        if self.workspace_inventory.is_some() {
+            return;
+        }
+        let Some(model) = self
+            .sync
+            .as_ref()
+            .and_then(ProjectSync::snapshot)
+            .map(|snapshot| snapshot.model())
+        else {
+            self.workspace_inventory = Some(Vec::new());
+            return;
+        };
+        let (sources, mut truncated) = krusty_lsp::project::workspace_sources(model);
+        let mut retained_bytes = 0usize;
+        let mut uris = Vec::new();
+        for path in sources {
+            let Some(uri) = krusty_lsp::uri::path_to_file_uri(&path) else {
+                continue;
+            };
+            let uri_bytes = krusty_lsp::workspace_index_uri_bytes(&uri);
+            if uris.len() >= krusty_lsp::MAX_WORKSPACE_INDEX_FILES
+                || uri_bytes
+                    > krusty_lsp::MAX_WORKSPACE_INDEX_URI_BYTES.saturating_sub(retained_bytes)
+            {
+                truncated = true;
+                break;
+            }
+            retained_bytes = retained_bytes.saturating_add(uri_bytes);
+            uris.push(uri);
+        }
+        self.truncated_inventory |= truncated;
+        self.workspace_inventory = Some(uris);
     }
 
     fn configure(&mut self) -> ProjectFeedback {
@@ -221,7 +607,10 @@ impl WorkerHost {
             RefreshOutcome::Unchanged => ProjectFeedback::default(),
             RefreshOutcome::Updated => {
                 self.project_sources.invalidate();
+                self.index_project_sources.invalidate();
                 self.analysis_cache.clear();
+                self.workspace_inventory = None;
+                self.truncated_inventory = false;
                 let (classpath, jdk_home) = Self::launch_from(sync, &self.options, &self.runner);
                 let mut language_features = sync.project_language_features();
                 self.options.apply_language_features(&mut language_features);
@@ -363,7 +752,114 @@ impl WorkerHost {
     }
 }
 
+/// Bytes one index chunk may read. Mirrors the open-document budget in spirit: a count of files is
+/// not a memory bound.
+const MAX_INDEX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
 impl krusty_lsp::Analysis for WorkerHost {
+    fn index_workspace_files(&mut self, uris: &[&str]) -> krusty_lsp::IndexOutcome {
+        let mut budget = MAX_INDEX_CHUNK_BYTES;
+        let readable: Vec<(String, String)> = uris
+            .iter()
+            .filter_map(|uri| {
+                let path = krusty_lsp::uri::file_uri_to_path(uri)?;
+                // Reject a known-oversized file before allocating its contents. Rechecking the
+                // actual string length after the read handles a file that grows between metadata
+                // and read without charging an inaccurate size.
+                let metadata_bytes = usize::try_from(std::fs::metadata(&path).ok()?.len()).ok()?;
+                if metadata_bytes > budget {
+                    return None;
+                }
+                let text = std::fs::read_to_string(path).ok()?;
+                // The open-document path is byte-bounded; indexing has to be too, or a generated
+                // multi-hundred-megabyte source would sit in memory twice per chunk.
+                budget = budget.checked_sub(text.len())?;
+                Some(((*uri).to_string(), text))
+            })
+            .collect();
+        if readable.is_empty() {
+            // No worker call was needed, but every URI was conclusively absent, unreadable, or
+            // outside the read budget. Treating this as infrastructure failure would make a
+            // one-file deletion retain stale diagnostics forever.
+            return krusty_lsp::IndexOutcome {
+                files: Vec::new(),
+                conclusive: true,
+            };
+        }
+        let documents: Vec<(&str, &str)> = readable
+            .iter()
+            .map(|(uri, text)| (uri.as_str(), text.as_str()))
+            .collect();
+        let indexed_uris: Vec<&str> = documents.iter().map(|(uri, _)| *uri).collect();
+        // Use the same module grouping, source visibility, language flags, and classpath selection
+        // as interactive analysis. A raw `analyze(&texts)` call loses every one of those origins
+        // and publishes false unresolved-reference diagnostics for otherwise valid workspace files.
+        //
+        // Indexing still must not evict or populate the interactive cache. Temporarily replacing
+        // that cache lets the shared project-analysis path stay the single semantic implementation
+        // while keeping background chunks invisible to the next keystroke's hot state.
+        let interactive_cache = std::mem::take(&mut self.analysis_cache);
+        std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
+        let (analyses, _support) = self.analyze_open_documents(&documents, &indexed_uris);
+        std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
+        self.analysis_cache = interactive_cache;
+        // A short result means the worker did not answer; report it as inconclusive so the store
+        // keeps what it already has rather than treating the gap as deletions.
+        let conclusive = analyses.len() == readable.len();
+        let files = analyses
+            .into_iter()
+            .zip(readable)
+            .map(|(analysis, (uri, text))| krusty_lsp::IndexedFile {
+                uri,
+                diagnostics: analysis.diagnostics,
+                text_hash: krusty_lsp::workspace_text_hash(&text),
+                text,
+            })
+            .collect();
+        krusty_lsp::IndexOutcome { files, conclusive }
+    }
+
+    fn neighborhood_index_candidates(&mut self, open_uris: &[&str]) -> Vec<String> {
+        self.ensure_workspace_inventory();
+        let Some(snapshot) = self.sync.as_ref().and_then(ProjectSync::snapshot) else {
+            return Vec::new();
+        };
+        let model = snapshot.model();
+        let open_modules: std::collections::HashSet<usize> = open_uris
+            .iter()
+            .filter_map(|uri| krusty_lsp::uri::file_uri_to_path(uri))
+            .filter_map(|path| model.module_index_for_source(&path))
+            .collect();
+        if open_modules.is_empty() {
+            return Vec::new();
+        }
+        self.workspace_inventory
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|uri| {
+                let Some(path) = krusty_lsp::uri::file_uri_to_path(uri) else {
+                    return false;
+                };
+                model
+                    .module_index_for_source(&path)
+                    .is_some_and(|module| open_modules.contains(&module))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Candidates come from the project model's own source inventory. Walking the tree separately
+    /// here would be a second, divergent definition of what counts as a workspace source.
+    fn workspace_index_candidates(&mut self) -> Vec<String> {
+        self.ensure_workspace_inventory();
+        self.workspace_inventory.clone().unwrap_or_default()
+    }
+
+    fn workspace_index_incomplete(&self) -> bool {
+        self.truncated_inventory
+    }
+
     fn document_admission(&self) -> krusty_lsp::DocumentAdmission {
         self.sync
             .as_ref()
@@ -410,6 +906,47 @@ impl krusty_lsp::Analysis for WorkerHost {
         })
     }
 
+    fn dump(&mut self, uri: &str) -> Option<DumpResult> {
+        if !self.options.dev() {
+            return None;
+        }
+        let (group, slot) = self.retained.locate(uri)?;
+        let fingerprint = group.fingerprint;
+        // Re-rendering costs a full re-parse, re-check and re-lowering of the module group plus a
+        // large file write, all on the thread that also serves diagnostics and completion. Nothing
+        // about the document has changed since the last render, so nothing about it needs redoing.
+        if let Some(path) = self
+            .rendered_dumps
+            .lookup(uri, fingerprint)
+            .filter(|path| path.exists())
+        {
+            return Some(DumpResult {
+                path: path.to_path_buf(),
+            });
+        }
+        let label = workspace_relative_label(self.root.as_deref(), uri);
+        let cache_root = self
+            .options
+            .deps_cache_dir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| {
+                krusty_lsp::deps_cache::default_cache_root(&|key| std::env::var(key).ok())
+            });
+        let response = self
+            .worker
+            // `label` is presentation text; the full URI is the stable document identity. Keeping
+            // those roles separate prevents two same-named files outside the workspace from
+            // sharing a cache entry, while `dump_cache` hashes the URI so it never reaches disk as
+            // readable path or class-name text.
+            .dump(&group.dump_target(slot, &label, uri, &cache_root))
+            .ok()
+            .flatten()?;
+        self.rendered_dumps.record(uri, fingerprint, &response.path);
+        Some(DumpResult {
+            path: response.path,
+        })
+    }
+
     fn analyze_open_documents(
         &mut self,
         documents: &[(&str, &str)],
@@ -424,6 +961,9 @@ impl krusty_lsp::Analysis for WorkerHost {
             .collect::<Vec<_>>();
         let mut workspace_symbols = krusty_lsp::WorkspaceSymbolIndex::default();
         self.analysis_pending = false;
+        // Retention spans the pass, not one group inside it: every group this loop reaches is
+        // recorded, so a file is dumpable whichever module it belongs to.
+        self.retained.begin_pass();
 
         let mut retained_support_bytes = 0usize;
         let mut support_documents = Vec::new();
@@ -559,6 +1099,39 @@ impl krusty_lsp::Analysis for WorkerHost {
             };
             let inputs = project_group_inputs(documents, &group);
             let fingerprint = project_group_fingerprint(documents, &group);
+            // Resolved before the cache lookup because retention has to happen on both arms: a pass
+            // that serves this group from cache still analyzed it, and a dump of one of its files
+            // must not fail just because no re-analysis was needed. Outside dev mode this stays
+            // `None` and costs nothing.
+            let mut group_config = self.options.dev().then(|| {
+                project_group_compiler_config(
+                    self.sync.as_ref().and_then(ProjectSync::model),
+                    group.module_index,
+                    &self.platform_classpath,
+                    &self.options,
+                )
+            });
+            if let Some((classpath, language_arguments)) = group_config.as_ref() {
+                let retained_uris = project_group_uris(documents, &group);
+                let retained_sources = inputs
+                    .iter()
+                    .map(|input| input.text.to_string())
+                    .collect::<Vec<_>>();
+                let retained_kinds = inputs.iter().map(|input| input.kind).collect::<Vec<_>>();
+                self.retained.record(
+                    true,
+                    &AnalysisPayload {
+                        sources: &retained_sources,
+                        source_kinds: &retained_kinds,
+                        uris: &retained_uris,
+                        result_count: documents.len(),
+                        inferred_count: documents.len() + group.inferred_support_count,
+                        java_sources: &group.java_sources,
+                        language_arguments,
+                        classpath: classpath.as_deref(),
+                    },
+                );
+            }
             let mut selected = if let Some(index) = self.analysis_cache.iter().position(|cached| {
                 cached.module_index == group.module_index
                     && cached.fingerprint == fingerprint
@@ -569,12 +1142,14 @@ impl krusty_lsp::Analysis for WorkerHost {
                 self.analysis_cache.push(cached);
                 selected
             } else {
-                let (classpath, language_arguments) = project_group_compiler_config(
-                    self.sync.as_ref().and_then(ProjectSync::model),
-                    group.module_index,
-                    &self.platform_classpath,
-                    &self.options,
-                );
+                let (classpath, language_arguments) = group_config.take().unwrap_or_else(|| {
+                    project_group_compiler_config(
+                        self.sync.as_ref().and_then(ProjectSync::model),
+                        group.module_index,
+                        &self.platform_classpath,
+                        &self.options,
+                    )
+                });
                 let result = self.worker.analyze_inputs_prefix_with_config(
                     &inputs,
                     documents.len(),
@@ -671,7 +1246,15 @@ impl krusty_lsp::Analysis for WorkerHost {
         self.root = Some(root);
         self.sync = Some(ProjectSync::new(provider));
         self.project_sources.invalidate();
+        self.index_project_sources.invalidate();
         self.analysis_cache.clear();
+        self.workspace_inventory = None;
+        self.truncated_inventory = false;
+        // A root change can change both a module configuration and the workspace-relative heading.
+        // Do not reuse a retained payload or rendered path until the replacement analysis pass has
+        // established both under the new root.
+        self.retained.begin_pass();
+        self.rendered_dumps.entries.clear();
         let mut feedback = self.configure();
         feedback
             .logs
@@ -729,6 +1312,7 @@ impl krusty_lsp::Analysis for WorkerHost {
         });
         if is_project_source {
             self.project_sources.invalidate();
+            self.index_project_sources.invalidate();
             true
         } else {
             self.note_project_change();
@@ -900,26 +1484,58 @@ fn open_documents_from_modules<'a>(
         .collect()
 }
 
-fn project_group_inputs<'a>(
-    documents: &[(&'a str, &'a str)],
+/// The group's worker slots in wire order, each paired with the URI it may be dumped under.
+///
+/// One traversal so the source inputs and the dump URIs cannot drift apart: a slot's URI is empty
+/// exactly when that slot is not a primary document of this group, and a dump of an empty URI is
+/// never offered. Two kinds of slot are deliberately blank:
+///
+/// - open documents belonging to another group, whose text this group blanks out anyway; and
+/// - the support tail, which carries friend and dependency sources — including *open* files from
+///   another module. Those are analyzed here under this group's classpath and language arguments,
+///   not their own module's, so dumping one would render unresolved types and feature errors for a
+///   file the editor shows as clean.
+///
+/// The URI is a borrowed `&str` rather than an owned `String` because this traversal is on the
+/// analysis hot path; only the dev-mode dump path pays for copies.
+fn project_group_slots<'a>(
+    documents: &'a [(&'a str, &'a str)],
     group: &'a ProjectAnalysisGroup,
-) -> Vec<krusty::source::SourceInput<'a>> {
+) -> impl Iterator<Item = (&'a str, krusty::source::SourceInput<'a>)> + 'a {
     documents
         .iter()
         .enumerate()
-        .map(|(index, (uri, source))| {
-            krusty::source::SourceInput::new(
-                source_kind_from_uri(uri),
-                if group.document_indices.contains(&index) {
-                    source
-                } else {
-                    ""
-                },
+        .map(move |(index, (uri, source))| {
+            let in_group = group.document_indices.contains(&index);
+            (
+                if in_group { *uri } else { "" },
+                krusty::source::SourceInput::new(
+                    source_kind_from_uri(uri),
+                    if in_group { source } else { "" },
+                ),
             )
         })
         .chain(group.support_documents.iter().map(|(uri, source)| {
-            krusty::source::SourceInput::new(source_kind_from_uri(uri), source)
+            (
+                "",
+                krusty::source::SourceInput::new(source_kind_from_uri(uri), source),
+            )
         }))
+}
+
+fn project_group_inputs<'a>(
+    documents: &'a [(&'a str, &'a str)],
+    group: &'a ProjectAnalysisGroup,
+) -> Vec<krusty::source::SourceInput<'a>> {
+    project_group_slots(documents, group)
+        .map(|(_, input)| input)
+        .collect()
+}
+
+/// Dump URIs parallel to `project_group_inputs`, blank wherever the slot is not dumpable.
+fn project_group_uris(documents: &[(&str, &str)], group: &ProjectAnalysisGroup) -> Vec<String> {
+    project_group_slots(documents, group)
+        .map(|(uri, _)| uri.to_string())
         .collect()
 }
 
@@ -1049,6 +1665,23 @@ mod tests {
         );
         assert!(parse_cache_command(&args(&["clean", "-deps-cache-dir"])).is_err());
         assert!(parse_cache_command(&args(&["clean", "--unknown"])).is_err());
+    }
+
+    #[test]
+    fn worker_parent_protocol_is_required_and_removed_before_option_parsing() {
+        let mut arguments = vec![
+            "-classpath".to_string(),
+            "/project/classes".to_string(),
+            "--analysis-worker".to_string(),
+            "42".to_string(),
+        ];
+        assert_eq!(take_worker_parent(&mut arguments).unwrap(), Some(42));
+        assert_eq!(arguments, ["-classpath", "/project/classes"]);
+
+        let mut missing = vec!["--analysis-worker".to_string()];
+        assert!(take_worker_parent(&mut missing).is_err());
+        let mut invalid = vec!["--analysis-worker".to_string(), "parent".to_string()];
+        assert!(take_worker_parent(&mut invalid).is_err());
     }
 
     #[test]
@@ -1446,5 +2079,488 @@ mod tests {
         assert!(!is_java_source_path(Path::new(
             "src/main/kotlin/p/Widget.kt"
         )));
+    }
+
+    /// A two-module fixture whose consumer group carries a support tail holding the *open*
+    /// dependency file, modelled on `project_analysis_groups_preserve_global_slots`.
+    fn consumer_group_fixture() -> (String, String, ProjectAnalysisGroup) {
+        let dependency_uri = url::Url::from_file_path("/workspace/dependency/src/First.kt")
+            .unwrap()
+            .to_string();
+        let consumer_uri = url::Url::from_file_path("/workspace/consumer/src/Second.kt")
+            .unwrap()
+            .to_string();
+        let group = ProjectAnalysisGroup {
+            module_index: Some(1),
+            document_indices: vec![2],
+            support_documents: vec![
+                (
+                    "file:///consumer-support.kt".into(),
+                    "fun helper() {}".into(),
+                ),
+                // Spliced in by `open_documents_from_modules`, so it carries the open text verbatim.
+                (dependency_uri.clone(), "fun dependency() {}".into()),
+            ],
+            inferred_support_count: 1,
+            java_sources: Vec::new(),
+            navigation_file_remaps: vec![(3, 4), (4, 0)],
+        };
+        (dependency_uri, consumer_uri, group)
+    }
+
+    #[test]
+    fn dump_uris_stay_parallel_to_the_group_inputs() {
+        let (dependency_uri, consumer_uri, group) = consumer_group_fixture();
+        let unowned_uri = url::Url::from_file_path("/workspace/other/Third.kt")
+            .unwrap()
+            .to_string();
+        let documents = [
+            (dependency_uri.as_str(), "fun dependency() {}"),
+            (unowned_uri.as_str(), "fun unowned() {}"),
+            (consumer_uri.as_str(), "fun consumer() {}"),
+        ];
+
+        let inputs = project_group_inputs(&documents, &group);
+        let uris = project_group_uris(&documents, &group);
+
+        assert_eq!(
+            uris.len(),
+            inputs.len(),
+            "a dump index is an index into the worker's own slots"
+        );
+        // Every dumpable slot must hold the text of the URI it claims, whatever order the traversal
+        // emits slots in.
+        for (slot, uri) in uris.iter().enumerate() {
+            if uri.is_empty() {
+                continue;
+            }
+            let expected = documents
+                .iter()
+                .find(|(open_uri, _)| open_uri == uri)
+                .unwrap_or_else(|| panic!("slot {slot} names an unknown document {uri}"))
+                .1;
+            assert_eq!(
+                inputs[slot].text, expected,
+                "slot {slot} does not hold the source of {uri}"
+            );
+        }
+        assert_eq!(
+            uris[2], consumer_uri,
+            "the group's own document is dumpable"
+        );
+        assert_eq!(uris[0], "", "another group's document has no source here");
+        assert_eq!(uris[1], "", "another group's document has no source here");
+    }
+
+    #[test]
+    fn support_documents_are_not_dumpable_under_another_modules_configuration() {
+        let (dependency_uri, consumer_uri, group) = consumer_group_fixture();
+        let unowned_uri = url::Url::from_file_path("/workspace/other/Third.kt")
+            .unwrap()
+            .to_string();
+        let documents = [
+            (dependency_uri.as_str(), "fun dependency() {}"),
+            (unowned_uri.as_str(), "fun unowned() {}"),
+            (consumer_uri.as_str(), "fun consumer() {}"),
+        ];
+        let inputs = project_group_inputs(&documents, &group);
+        let uris = project_group_uris(&documents, &group);
+        let sources = inputs
+            .iter()
+            .map(|input| input.text.to_string())
+            .collect::<Vec<_>>();
+        let kinds = inputs.iter().map(|input| input.kind).collect::<Vec<_>>();
+
+        // The dependency file is open and its real text sits in this group's support tail, but it is
+        // analyzed here under the consumer module's classpath and language arguments.
+        assert_eq!(sources[4], documents[0].1);
+        assert_eq!(uris[3], "", "support slots are never dumpable");
+        assert_eq!(uris[4], "", "support slots are never dumpable");
+
+        let mut retained = RetainedAnalysis::default();
+        retained.record(
+            true,
+            &AnalysisPayload {
+                sources: &sources,
+                source_kinds: &kinds,
+                uris: &uris,
+                result_count: documents.len(),
+                inferred_count: documents.len() + group.inferred_support_count,
+                java_sources: &[],
+                language_arguments: &["-Xcontext-parameters".to_string()],
+                classpath: None,
+            },
+        );
+
+        assert!(
+            retained.locate(&dependency_uri).is_none(),
+            "a file that is only support for another module must not be dumped under this \
+             module's configuration"
+        );
+        assert_eq!(
+            retained.locate(&consumer_uri).map(|(_, slot)| slot),
+            Some(2)
+        );
+    }
+
+    /// Record one group's payload with a single dumpable slot, as one pass over one module would.
+    fn record_module(retained: &mut RetainedAnalysis, dev: bool, uri: &str, source: &str) {
+        retained.record(
+            dev,
+            &AnalysisPayload {
+                sources: &[source.to_string()],
+                source_kinds: &[SourceKind::Kotlin],
+                uris: &[uri.to_string()],
+                result_count: 1,
+                inferred_count: 1,
+                java_sources: &[],
+                language_arguments: &[],
+                classpath: None,
+            },
+        );
+    }
+
+    #[test]
+    fn every_group_in_a_pass_stays_dumpable() {
+        let mut retained = RetainedAnalysis::default();
+
+        // One pass over a workspace with a file open from each of two modules. The traversal order
+        // is deterministic, so a single retained payload would leave the same module undumpable
+        // forever rather than intermittently.
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///dependency/First.kt", "a");
+        record_module(&mut retained, true, "file:///consumer/Second.kt", "b");
+
+        assert_eq!(
+            retained
+                .locate("file:///dependency/First.kt")
+                .map(|(group, slot)| (group.sources.clone(), slot)),
+            Some((vec!["a".to_string()], 0)),
+            "the group analyzed first must stay dumpable once a later group is analyzed"
+        );
+        assert_eq!(
+            retained
+                .locate("file:///consumer/Second.kt")
+                .map(|(_, slot)| slot),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn retained_dump_groups_share_one_global_byte_budget() {
+        let mut retained = RetainedAnalysis::default();
+        let source = vec!["body".to_string()];
+        let kinds = vec![SourceKind::Kotlin];
+        let first_uri = vec!["file:///first/First.kt".to_string()];
+        let second_uri = vec!["file:///second/Second.kt".to_string()];
+        fn payload<'a>(
+            source: &'a [String],
+            kinds: &'a [SourceKind],
+            uris: &'a [String],
+        ) -> AnalysisPayload<'a> {
+            AnalysisPayload {
+                sources: source,
+                source_kinds: kinds,
+                uris,
+                result_count: 1,
+                inferred_count: 1,
+                java_sources: &[],
+                language_arguments: &[],
+                classpath: None,
+            }
+        }
+        let first_group = retained_payload_bytes(&payload(&source, &kinds, &first_uri));
+        let one_group = first_group.max(retained_payload_bytes(&payload(
+            &source,
+            &kinds,
+            &second_uri,
+        )));
+
+        assert!(retained.record_with_budget(
+            true,
+            &payload(&source, &kinds, &first_uri),
+            one_group
+        ));
+        assert!(
+            !retained.record_with_budget(true, &payload(&source, &kinds, &second_uri), one_group),
+            "a second module must not multiply retained source sets past the pass-wide budget"
+        );
+        assert_eq!(retained.groups.len(), 1);
+        assert_eq!(retained.retained_bytes, first_group);
+
+        retained.begin_pass();
+        assert_eq!(retained.retained_bytes, 0);
+        assert!(
+            retained.record_with_budget(true, &payload(&source, &kinds, &second_uri), one_group),
+            "a superseding pass must receive a fresh budget"
+        );
+    }
+
+    /// A pass that serves a group from the analysis cache still leaves that group's files dumpable.
+    ///
+    /// Structural rather than behavioural: reaching the cache-hit arm needs a live worker process
+    /// and a resolved project model, so what is pinned here is the property that made the arm
+    /// matter — retention happens for the group regardless of which arm produces its analyses.
+    #[test]
+    fn retention_covers_a_pass_that_is_served_from_the_analysis_cache() {
+        let source = include_str!("main.rs");
+        let pass = source
+            .split_once("fn analyze_open_documents(")
+            .expect("the analysis pass")
+            .1;
+        let begin = pass
+            .find("self.retained.begin_pass()")
+            .expect("the pass drops the previous pass's payloads");
+        let record = pass
+            .find("self.retained.record(")
+            .expect("the pass retains each group it reaches");
+        let lookup = pass
+            .find("self.analysis_cache.iter().position(")
+            .expect("the pass consults the analysis cache");
+
+        assert!(begin < record, "the pass must be cleared before it records");
+        assert!(
+            record < lookup,
+            "retaining inside the cache-miss arm leaves a cached group undumpable, so a pass \
+             triggered by a project change would drop every module but the last"
+        );
+    }
+
+    #[test]
+    fn a_new_pass_supersedes_the_previous_one_wholesale() {
+        let mut retained = RetainedAnalysis::default();
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///a.kt", "a");
+
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///b.kt", "b");
+        record_module(&mut retained, true, "file:///c.kt", "c");
+
+        assert!(retained.locate("file:///b.kt").is_some());
+        assert!(retained.locate("file:///c.kt").is_some());
+        assert!(
+            retained.locate("file:///a.kt").is_none(),
+            "the superseded pass must be dropped, not accumulated"
+        );
+        assert_eq!(retained.groups.len(), 2);
+    }
+
+    #[test]
+    fn a_repeat_dump_on_an_unchanged_document_is_not_re_rendered() {
+        let mut retained = RetainedAnalysis::default();
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///a.kt", "fun foo() {}");
+        let (group, _) = retained.locate("file:///a.kt").expect("retained");
+
+        let mut rendered = RenderedDumps::default();
+        assert_eq!(
+            rendered.lookup("file:///a.kt", group.fingerprint),
+            None,
+            "the first request has nothing to reuse"
+        );
+        rendered.record(
+            "file:///a.kt",
+            group.fingerprint,
+            Path::new("/cache/dumps/a.kt.md"),
+        );
+
+        // A burst of code action requests — 20 rapid presses, or one per cursor settle — hits the
+        // same payload, so only the first re-analyzes the module group and rewrites the document.
+        for _ in 0..20 {
+            assert_eq!(
+                rendered.lookup("file:///a.kt", group.fingerprint),
+                Some(Path::new("/cache/dumps/a.kt.md"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_re_analyzed_document_is_rendered_again() {
+        let mut retained = RetainedAnalysis::default();
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///a.kt", "fun foo() {}");
+        let before = retained
+            .locate("file:///a.kt")
+            .expect("retained")
+            .0
+            .fingerprint;
+
+        // Length-preserving: the payload's byte count is unchanged, so only a content-sensitive key
+        // can tell the two apart.
+        retained.begin_pass();
+        record_module(&mut retained, true, "file:///a.kt", "fun bar() {}");
+        let after = retained
+            .locate("file:///a.kt")
+            .expect("retained")
+            .0
+            .fingerprint;
+
+        assert_ne!(before, after);
+
+        let mut rendered = RenderedDumps::default();
+        rendered.record("file:///a.kt", before, Path::new("/cache/dumps/a.kt.md"));
+        assert_eq!(
+            rendered.lookup("file:///a.kt", after),
+            None,
+            "a document analyzed since the last render must be rendered again"
+        );
+    }
+
+    #[test]
+    fn rendered_dumps_stay_bounded() {
+        let mut rendered = RenderedDumps::default();
+        for index in 0..(MAX_RENDERED_DUMPS * 3) {
+            rendered.record(
+                &format!("file:///{index}.kt"),
+                index as u64,
+                Path::new("/cache/dumps/x.md"),
+            );
+        }
+
+        assert_eq!(rendered.entries.len(), MAX_RENDERED_DUMPS);
+        assert!(
+            rendered
+                .lookup(
+                    &format!("file:///{}.kt", MAX_RENDERED_DUMPS * 3 - 1),
+                    (MAX_RENDERED_DUMPS * 3 - 1) as u64
+                )
+                .is_some(),
+            "the most recent render must survive the bound"
+        );
+
+        // Re-rendering one document does not accumulate: its superseded entry can never be reused.
+        rendered.record("file:///0.kt", 1, Path::new("/cache/dumps/x.md"));
+        rendered.record("file:///0.kt", 2, Path::new("/cache/dumps/x.md"));
+        assert_eq!(
+            rendered
+                .entries
+                .iter()
+                .filter(|entry| entry.uri == "file:///0.kt")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn nothing_is_retained_outside_dev_mode() {
+        let mut retained = RetainedAnalysis::default();
+        let sources = ["a".to_string()];
+        let uris = ["file:///a.kt".to_string()];
+        let classpath = vec![PathBuf::from("/modules/lib.jar")];
+
+        retained.begin_pass();
+        retained.record(
+            false,
+            &AnalysisPayload {
+                sources: &sources,
+                source_kinds: &[SourceKind::Kotlin],
+                uris: &uris,
+                result_count: 1,
+                inferred_count: 1,
+                java_sources: &["class Stub {}".to_string()],
+                language_arguments: &["-Xcontext-parameters".to_string()],
+                classpath: Some(&classpath),
+            },
+        );
+
+        assert!(retained.locate("file:///a.kt").is_none());
+        assert!(
+            retained.groups.is_empty(),
+            "a non-dev session must retain nothing at all"
+        );
+    }
+
+    #[test]
+    fn the_retained_payload_carries_the_module_configuration_to_the_dump() {
+        let mut retained = RetainedAnalysis::default();
+        let sources = ["fun box() = 1".to_string(), "class Helper {}".to_string()];
+        let uris = [
+            "file:///w/Main.kt".to_string(),
+            "file:///w/Helper.java".to_string(),
+        ];
+        let source_kinds = [SourceKind::Kotlin, SourceKind::Java];
+        let java_sources = ["package p; class Stub {}".to_string()];
+        let language_arguments = ["-Xname-based-destructuring".to_string()];
+        let classpath = vec![PathBuf::from("/modules/lib.jar")];
+
+        retained.record(
+            true,
+            &AnalysisPayload {
+                sources: &sources,
+                source_kinds: &source_kinds,
+                uris: &uris,
+                result_count: 2,
+                inferred_count: 3,
+                java_sources: &java_sources,
+                language_arguments: &language_arguments,
+                classpath: Some(&classpath),
+            },
+        );
+
+        let (group, slot) = retained
+            .locate("file:///w/Main.kt")
+            .expect("the analyzed target must be retained");
+        let cache_root = Path::new("/cache");
+        let cache_key = "file:///w/Main.kt";
+        let target = group.dump_target(slot, "Main.kt", cache_key, cache_root);
+
+        assert_eq!(target.target, 0);
+        assert_eq!(target.sources, sources);
+        assert_eq!(
+            target.source_kinds, source_kinds,
+            "a Java document fed to the Kotlin parser fills the dump with spurious diagnostics"
+        );
+        assert_eq!(target.result_count, 2);
+        assert_eq!(target.inferred_count, 3);
+        assert_eq!(
+            target.java_sources, java_sources,
+            "without the Java stub overlay, references into Java sources stop resolving"
+        );
+        assert_eq!(
+            target.language_arguments,
+            Some(&language_arguments[..]),
+            "the module's language arguments must not fall back to session features"
+        );
+        assert_eq!(
+            target.classpath,
+            Some(&classpath[..]),
+            "without the module classpath the dump falls back to the launch -cp"
+        );
+        assert_eq!(target.label, "Main.kt");
+        assert_eq!(target.cache_key, cache_key);
+        assert_eq!(target.cache_root, cache_root);
+    }
+
+    #[test]
+    fn dump_labels_are_workspace_relative() {
+        let root = Path::new("/workspace");
+        let uri = url::Url::from_file_path("/workspace/src/Main.kt")
+            .unwrap()
+            .to_string();
+
+        assert_eq!(
+            workspace_relative_label(Some(root), &uri),
+            Path::new("src/Main.kt").to_string_lossy()
+        );
+
+        let outside = url::Url::from_file_path("/elsewhere/Other.kt")
+            .unwrap()
+            .to_string();
+        assert_eq!(workspace_relative_label(Some(root), &outside), "Other.kt");
+        assert_eq!(workspace_relative_label(None, &outside), "Other.kt");
+        assert_eq!(
+            workspace_relative_label(Some(root), "untitled:Untitled-1"),
+            "untitled:Untitled-1"
+        );
+        assert_eq!(
+            workspace_relative_label(Some(root), "editor:/virtual/Scratch.kt?session=opaque"),
+            "editor:Scratch.kt",
+            "URI query data must not become presentation text in a persisted dump"
+        );
+        let long = format!("editor:/{}", "x".repeat(4_096));
+        assert!(
+            workspace_relative_label(Some(root), &long).len() <= 1_027,
+            "an untrusted virtual URI must not create an unbounded heading"
+        );
     }
 }
