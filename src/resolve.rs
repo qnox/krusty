@@ -11393,6 +11393,22 @@ impl crate::assignable::TypeOracle for Checker<'_> {
     }
 }
 
+/// The canonical non-null form shared by two NON-NULL spellings of the same builtin class, if
+/// any: identical builtin variants (`String`/`String`), or a builtin variant against the `Obj`
+/// spelling of its class (`String` vs `Obj("kotlin/String")`) — in both cases the builtin
+/// variant wins, it is the canonical spelling. `Obj`/`TyParam` pairs return `None`: the
+/// caller joins those via `obj_internal` (with type-argument erasure) instead.
+fn same_builtin_class_base(an: Ty, bn: Ty) -> Option<Ty> {
+    // "Builtin" here = not an `Obj`/`TyParam` spelling (so also `Fun`, primitives, …).
+    let builtin = |t: Ty| (!matches!(t, Ty::Obj(..) | Ty::TyParam(..))).then_some(t);
+    match (builtin(an), builtin(bn)) {
+        (Some(x), Some(y)) => (x == y).then_some(x),
+        (Some(x), None) => (bn.kotlin_class_internal() == x.kotlin_class_internal()).then_some(x),
+        (None, Some(y)) => (an.kotlin_class_internal() == y.kotlin_class_internal()).then_some(y),
+        (None, None) => None,
+    }
+}
+
 impl<'a> Checker<'a> {
     fn reset_body_mutations(&mut self, body: Option<ExprId>) {
         self.fn_reassigned.clear();
@@ -29948,10 +29964,12 @@ impl<'a> Checker<'a> {
         // (`String` and `String?` → `String?`). `obj_internal` above only sees `Obj`/`TyParam`,
         // so builtin variants (`Ty::String`, …) would otherwise fall through to the `Any?`
         // supertype below (`x?.takeIf { … } ?: y` inferred `Any?` instead of `String?`).
-        // Reaching here with equal non-null forms means at least one side is nullable (the
+        // `same_builtin_class_base` compares class identities, so MIXED SPELLINGS of one
+        // builtin class (`Ty::String` vs `Obj("kotlin/String")`) join to the canonical
+        // builtin spelling as well. Reaching here means at least one side is nullable (the
         // `a == b` fast path above caught the rest), so the join is always the nullable form.
-        if a.non_null() == b.non_null() {
-            return Ty::nullable(a.non_null());
+        if let Some(base) = same_builtin_class_base(a.non_null(), b.non_null()) {
+            return Ty::nullable(base);
         }
         // Two values of DIFFERENT reference classes join to their common supertype, which krusty
         // approximates as `Any` (`java/lang/Object`) — the universal upper bound. Preserve nullability
@@ -31348,6 +31366,33 @@ mod tests {
             })
             .expect("elvis expression");
         assert_eq!(info.ty(elvis), Ty::nullable(Ty::String));
+    }
+
+    #[test]
+    fn same_builtin_class_base_unifies_builtin_spellings() {
+        assert_eq!(
+            same_builtin_class_base(Ty::String, Ty::String),
+            Some(Ty::String)
+        );
+        // Mixed spellings of one builtin class join to the canonical builtin variant.
+        assert_eq!(
+            same_builtin_class_base(Ty::String, Ty::obj("kotlin/String")),
+            Some(Ty::String)
+        );
+        assert_eq!(
+            same_builtin_class_base(Ty::obj("kotlin/String"), Ty::String),
+            Some(Ty::String)
+        );
+        // `Obj` pairs keep the erased-argument `obj_internal` join in `Checker::join`.
+        assert_eq!(
+            same_builtin_class_base(Ty::obj("kotlin/String"), Ty::obj("kotlin/String")),
+            None
+        );
+        assert_eq!(same_builtin_class_base(Ty::String, Ty::Int), None);
+        assert_eq!(
+            same_builtin_class_base(Ty::String, Ty::obj("kotlin/Any")),
+            None
+        );
     }
 
     #[test]
