@@ -1223,3 +1223,150 @@ fn stdio_server_suppresses_semantic_diagnostics_for_an_incomplete_source_set() {
         .is_some_and(|message| message.contains("semantic diagnostics suppressed")));
     server.shutdown_and_exit();
 }
+
+#[test]
+fn stdio_server_offers_the_dev_dump_code_action_for_a_rootless_document() {
+    let uri = "file:///dev-dump/Main.kt";
+    let mut server = ServerProcess::start(&["--dev"]);
+    let initialize = server.request(1, "initialize", json!({}));
+    assert_eq!(
+        initialize["result"]["capabilities"]["codeActionProvider"],
+        json!(true),
+        "dev mode must advertise the code action capability: {initialize}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": "fun box(): String = \"OK\"\n"
+            }
+        }),
+    );
+    let _ = server.await_diagnostics(uri);
+
+    let response = server.request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": 0, "character": 0}},
+            "context": {"diagnostics": []}
+        }),
+    );
+    let actions = response["result"]
+        .as_array()
+        .expect("code action array result");
+    assert_eq!(actions.len(), 1, "expected the dump action: {response}");
+
+    let command = &actions[0]["command"];
+    assert_eq!(command["command"], "editor.action.goToLocations");
+    // Zed reads arguments[2] as the location list and ignores the first two, but bails when the
+    // array holds fewer than three entries — turning the action into a silent no-op with no error
+    // anywhere. The in-crate tests pin this shape; this one proves it survives the real binary.
+    let arguments = command["arguments"]
+        .as_array()
+        .expect("command arguments array");
+    assert_eq!(arguments.len(), 3, "{command}");
+    assert_eq!(arguments[0], uri);
+    let locations = arguments[2].as_array().expect("location array");
+    assert_eq!(locations.len(), 1, "{command}");
+    assert!(
+        locations[0]["uri"]
+            .as_str()
+            .is_some_and(|uri| uri.ends_with(".krusty.md")),
+        "the action must point at a written dump: {command}"
+    );
+    server.shutdown_and_exit();
+}
+
+#[test]
+fn stdio_server_offers_no_code_actions_without_dev_mode() {
+    // The dump is invisible unless the server was started with `--dev`. Without coverage here, a
+    // correctly built server reads as a broken one: the editor just reports no code actions.
+    let uri = "file:///dev-dump/Main.kt";
+    let mut server = ServerProcess::start(&[]);
+    let initialize = server.request(1, "initialize", json!({}));
+    assert!(
+        initialize["result"]["capabilities"]
+            .get("codeActionProvider")
+            .is_none(),
+        "a non-dev server must not advertise the capability: {initialize}"
+    );
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": "fun box(): String = \"OK\"\n"
+            }
+        }),
+    );
+    let _ = server.await_diagnostics(uri);
+
+    let response = server.request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": 0, "character": 0}},
+            "context": {"diagnostics": []}
+        }),
+    );
+    assert_eq!(
+        response["result"],
+        json!([]),
+        "a non-dev server must answer with an empty action list: {response}"
+    );
+    server.shutdown_and_exit();
+}
+
+#[test]
+fn stdio_server_offers_the_dev_dump_code_action_in_a_project() {
+    let project = TempProject::new("dev-dump-project");
+    project.write("src/Main.kt", "fun box(): String = \"OK\"\n");
+    let uri = project.uri("src/Main.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+
+    let mut server = ServerProcess::start(&["--dev"]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": "fun box(): String = \"OK\"\n"
+            }
+        }),
+    );
+    let _ = server.await_diagnostics(&uri);
+
+    let response = server.request(
+        2,
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": uri},
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": 0, "character": 0}},
+            "context": {"diagnostics": []}
+        }),
+    );
+    let actions = response["result"]
+        .as_array()
+        .expect("code action array result");
+    assert_eq!(actions.len(), 1, "expected the dump action: {response}");
+    server.shutdown_and_exit();
+}
