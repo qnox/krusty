@@ -35,3 +35,39 @@ fn enum_value_of_rejects_a_non_enum_type() {
         "a non-enum type argument must not reach enum intrinsic lowering"
     );
 }
+
+#[test]
+fn enum_value_of_safe_wrapper_through_reified_inline() {
+    // The `safeEnumValueOf` idiom: a reified `T : Enum<T>` forwarded to `enumValueOf<T>` inside a
+    // `try`/`catch` EXPRESSION. The try's value merges `T` (checked against the erased `Enum` bound)
+    // with `null` to `T?`, and the expansion's result slot is typed by that erased bound — the value
+    // is cast back to the call-site `Color?` at the expansion boundary.
+    let src = "enum class Color { RED, GREEN, BLUE }\n\
+private inline fun <reified T : Enum<T>> safeEnumValueOf(value: String?): T? {\n\
+    if (value == null) return null\n\
+    return try {\n\
+        enumValueOf<T>(value)\n\
+    } catch (_: IllegalArgumentException) {\n\
+        null\n\
+    }\n\
+}\n\
+fun box(): String {\n\
+    val c = safeEnumValueOf<Color>(\"RED\")\n\
+    val bad = safeEnumValueOf<Color>(\"NOPE\")\n\
+    val nul = safeEnumValueOf<Color>(null)\n\
+    return if (c == Color.RED && bad == null && nul == null) \"OK\" else \"FAIL\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "EnumValueOfSafeWrapper");
+}
+
+#[test]
+fn enum_value_of_reified_inline_expression_body_try() {
+    // Expression-bodied variant — no `return` statement, so the expansion yields the try value
+    // directly; the erased-view → call-site cast happens at the expansion boundary too.
+    let src = "enum class Color { RED, GREEN }\n\
+inline fun <reified T : Enum<T>> parseOrNull(s: String): T? =\n\
+    try { enumValueOf<T>(s) } catch (e: IllegalArgumentException) { null }\n\
+fun box(): String =\n\
+    if (parseOrNull<Color>(\"GREEN\") == Color.GREEN && parseOrNull<Color>(\"zz\") == null) \"OK\" else \"FAIL\"\n";
+    common::expect_box_ok_with_stdlib(src, "EnumValueOfExprBodyTry");
+}

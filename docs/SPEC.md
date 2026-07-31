@@ -517,7 +517,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   store; each catch is an exception-table handler whose StackMapTable frame has the caught exception on
   the stack and the pre-`try` locals. A diverging body/catch (`throw`/`return`) emits no dead store, and
   a fully-diverging `try` has no merge. try in a property initializer is skipped (constructor frame
-  context). `throw e` → `athrow` (`tests/try_catch_e2e.rs`). A `finally` block is inlined (like kotlinc)
+  context). `throw e` → `athrow` (`tests/try_catch_e2e.rs`). In VALUE position the branch types merge
+  with the full `join` — `try { x } catch { null }` is `T?`, two different reference classes merge to
+  `Any`, and the same class with differing type arguments erases to that class (`List<*>`) — but only
+  for REFERENCE branches (the emitter's untyped merge slot models no primitive widening/boxing, so a
+  primitive mismatch keeps the lenient statement merge, `Unit`)
+  (`tests/try_catch_expr_nullable_merge_e2e.rs`, `tests/try_catch_expr_generic_merge_e2e.rs`). A `finally` block is inlined (like kotlinc)
   at each exit: the normal fall-through, the end of each catch, and a synthetic catch-all (any
   throwable) covering the body + catch handlers that runs the `finally` then re-throws. A `try` whose
   body/catch performs a `return`/`break`/`continue` out of the `try` (which must run `finally` first) is
@@ -588,7 +593,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rejects, so `is_branchy` treats those as non-spliceable (`ArrayOfRef` in `tests/feature_box_e2e.rs`).
 - **Enum reflection intrinsics** `enumValueOf<E>(name)` / `enumValues<E>()`: the checker requires an
   enum type argument and types the result as `E` / `Array<E>`. The synthetic registry emits
-  `E.valueOf(name)` / `E.values()`, including through an expanded reified inline function.
+  `E.valueOf(name)` / `E.values()`, including through an expanded reified inline function. A reified
+  inline function returning `T` (e.g. a `safeEnumValueOf` wrapper) is checked inside the body against
+  T's erased bound (`Enum`): the expansion's result slot is typed by that erased return and the
+  expansion's value is cast back to the call-site type (the `checkcast` kotlinc emits after a reified
+  call), keeping branch-merge frames consistent (`tests/enum_value_of_intrinsic_e2e.rs`).
 - **Primitive-array init constructor** `IntArray(n) { i -> elem }` (and `Long`/`Double`/`Float`/`Boolean`/
   `Char`/`Byte`/`Short`): kotlinc inlines the index lambda into a fill loop, which krusty reproduces by
   desugaring to `{ val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }`

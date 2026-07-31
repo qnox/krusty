@@ -17970,11 +17970,27 @@ impl<'a> Lower<'a> {
         // SPECIALIZED to the concrete argument types (`foo(1){…}: T` → `Int`), not the erased declared
         // `sig_ret` (`Object`). Using the specialized type keeps the slot, the `return` coercions, and
         // the downstream use (`foo(…) != 1`) consistent — no primitive-into-Object-slot VerifyError.
+        // A REIFIED type parameter is checked inside the body against its erased bound (`T : Enum<T>`
+        // is `Enum` there), while `sig_ret`/the specialized call type carry the CALL-SITE substitution
+        // (`Color`). Every value a `return` in the body produces is physically the erased type, so when
+        // they differ the result slot must be typed by the erased (body-view) return — otherwise a
+        // `return <T-valued expr>` stores e.g. an `Enum` into a `Color`-framed slot (VerifyError). The
+        // expansion's output is coerced back to the call-site type once, at the end of this function
+        // (the `checkcast` kotlinc emits after a reified call).
+        let body_ret = f
+            .ret
+            .as_ref()
+            .map_or(Ty::Unit, |t| ty_of(self.afile, t, &*self.syms.libraries));
+        let reified_ret_erasure = !f.reified_type_params.is_empty()
+            && body_ret != Ty::Unit
+            && body_ret.non_null() != sig_ret.non_null();
         let ret_ty = {
             let specialized = self.info.ty(AstExprId(call_id));
             // Only a NON-nullable, concrete specialization is a valid slot type: a nullable primitive
             // (`Int?`) has no unboxed slot form, so keep the erased `sig_ret` (a boxed reference) there.
-            if specialized != Ty::Error
+            if reified_ret_erasure {
+                ty_to_ir(body_ret)
+            } else if specialized != Ty::Error
                 && specialized != Ty::Unit
                 && specialized == specialized.non_null()
             {
@@ -18017,7 +18033,7 @@ impl<'a> Lower<'a> {
             self.inline_return.pop();
         }
         let body_val = body_val?;
-        if let Some((slot, label)) = target {
+        let out = if let Some((slot, label)) = target {
             let unit_ret = ret_ty == Ty::Unit;
             // `while(true) { <body>; [result = fall-through value;] break@end }` — runs the inlined body
             // exactly once (the trailing `break` exits), while any `return` inside breaks early (after
@@ -18071,7 +18087,17 @@ impl<'a> Lower<'a> {
             Some(body_val)
         } else {
             Some(self.emit_block(stmts, Some(body_val)))
-        }
+        };
+        // A reified return was produced in the body's ERASED view (`Enum`); coerce the expansion's
+        // value back to the call-site type (`Color`) — the `checkcast` kotlinc emits after a reified
+        // call whose substituted return is more specific than the erased bound.
+        out.map(|out| {
+            if reified_ret_erasure {
+                self.coerce_erased_call_result(AstExprId(call_id), out, &body_ret, true)
+            } else {
+                out
+            }
+        })
     }
 
     /// Expand a call `param(args)` to an inlined lambda parameter: bind the lambda's parameters to the

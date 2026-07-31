@@ -17562,9 +17562,19 @@ impl<'a> Checker<'a> {
                     // type arguments (`List<Backup>` from the body vs `List<Nothing>` from a bare
                     // `emptyList()` catch) merge to that class with erased arguments (`List<*>`), assignable
                     // to the declared `List<Backup>` return — instead of collapsing to `Unit`, which wrongly
-                    // typed an expression-bodied `try { … } catch { emptyList() }` as `Unit`. (This mirrors
-                    // one case of `join` without its by-span coercion side effects, which mis-emit here.)
-                    result = if result == ht {
+                    // typed an expression-bodied `try { … } catch { emptyList() }` as `Unit`.
+                    //
+                    // In VALUE position, REFERENCE branches merge with the full `join` instead:
+                    // `try { x } catch { null }` is `T?` (a `null`/`Nothing` catch must not collapse the
+                    // expression to `Unit`), and two different reference classes join to `Any`. The join is
+                    // restricted to reference-like branches because the emitter stores each branch value
+                    // into the merge slot with an untyped `astore` — a join needing a primitive
+                    // widening/boxing coercion (`Int` vs `Long` → `Long`) is not modeled there, so those
+                    // keep the lenient merge (a mismatch still errors downstream at the `return`).
+                    let ref_like = |t: Ty| t.is_reference() || matches!(t, Ty::Nothing | Ty::Error);
+                    result = if value_required && ref_like(result) && ref_like(ht) {
+                        self.join(result, ht, self.span(e))
+                    } else if result == ht {
                         result
                     } else if result == Ty::Nothing {
                         ht
