@@ -1664,6 +1664,24 @@ pub fn emit_all_with_class_meta(
     opts: &EmitOptions,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    // The emitter recurses over IR values (`emit_value_node` → `emit_cond_branch`/`emit_when` → …)
+    // as deep as the lowered expression tree, whose depth the lowering pass bounds at 500. Run on a
+    // sufficiently large same-thread stack segment, so the guard — not the calling thread's
+    // stack — limits expression nesting without changing thread-local behavior (see
+    // [`crate::wide_stack`]).
+    crate::wide_stack::on_wide_stack(move || {
+        emit_all_with_class_meta_impl(ir, facade, env, metadata, opts, class_meta)
+    })
+}
+
+fn emit_all_with_class_meta_impl(
+    ir: &IrFile,
+    facade: &str,
+    env: &EmitEnv,
+    metadata: Option<&KotlinMetadata>,
+    opts: &EmitOptions,
+    class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
+) -> Option<Vec<(String, Vec<u8>)>> {
     // Pass 1 (discovery): emit everything, recording which lambda impls actually get an `invokedynamic`
     // (`run.used_lambdas`). A lambda spliced by the inliner never emits one — its standalone `$lambda$N`
     // is dead, and kotlinc emits neither the method nor (for a class-only file) the facade holding it.

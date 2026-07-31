@@ -3465,6 +3465,19 @@ pub fn collect_signatures_with_cp(
     libraries: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
 ) -> SymbolTable {
+    // Signature collection structurally infers expression-body literal types (`infer_lit_ty_p`, a
+    // per-operand recursion over the body), so a deep expression recurses here BEFORE any wrapped
+    // check runs — it needs the same grown stack segment (see [`crate::wide_stack`]).
+    crate::wide_stack::on_wide_stack(move || {
+        collect_signatures_with_cp_impl(files, libraries, diags)
+    })
+}
+
+fn collect_signatures_with_cp_impl(
+    files: &[File],
+    libraries: Box<dyn SemanticPlatform>,
+    diags: &mut DiagSink,
+) -> SymbolTable {
     let platform_default_imports = libraries.platform_default_import_packages();
     // Pass 1: every class simple-name -> internal name (no bodies, just the type universe). Nothing is
     // pre-seeded: every referenced type resolves through the file's imports and default packages below
@@ -9702,6 +9715,15 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
 /// erased `java/util/List` instead of the inferred `List<Role>`) would resolve against the collection
 /// default until B is processed. Iterating a global fixpoint over all files closes that cross-file gap.
 pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
+    // Pre-inference (and the capture discovery it starts with) checks expression bodies with the
+    // same recursion as the main pass, so it needs the same stack reserve — it runs BEFORE any
+    // file's `check_file_on_checker_stack`, and without this an inferred-return deep expression
+    // would overflow a small caller stack long before the depth guard fires (see
+    // [`crate::wide_stack`]).
+    crate::wide_stack::on_wide_stack(move || preinfer_module_returns_impl(files, syms, diags))
+}
+
+fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
     discover_anonymous_object_captures(files, syms);
     let saved = diags.current_file();
     for _pass in 0..8 {
@@ -10849,7 +10871,7 @@ pub fn check_file_at(
     syms: &mut SymbolTable,
     diags: &mut DiagSink,
 ) -> TypeInfo {
-    check_file_at_impl(file, file_index, None, syms, diags)
+    check_file_on_checker_stack(file, file_index, None, syms, diags)
 }
 
 pub fn check_file_in_source_set(
@@ -10859,7 +10881,22 @@ pub fn check_file_in_source_set(
     diags: &mut DiagSink,
 ) -> TypeInfo {
     let file = &files[file_index as usize];
-    check_file_at_impl(file, file_index, Some(files), syms, diags)
+    check_file_on_checker_stack(file, file_index, Some(files), syms, diags)
+}
+
+/// Run the check with enough same-thread stack for the `expr_depth` bound (500), so the depth guard
+/// — not the calling thread's stack — limits expression nesting in every build profile without
+/// moving non-`Send` symbols or caller-defined platform state (see [`crate::wide_stack`]).
+fn check_file_on_checker_stack(
+    file: &File,
+    file_index: u32,
+    source_files: Option<&[File]>,
+    syms: &mut SymbolTable,
+    diags: &mut DiagSink,
+) -> TypeInfo {
+    crate::wide_stack::on_wide_stack(move || {
+        check_file_at_impl(file, file_index, source_files, syms, diags)
+    })
 }
 
 #[derive(Clone)]

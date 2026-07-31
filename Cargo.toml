@@ -18,6 +18,10 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 flate2 = "1"
 # Kotlin identifier categories.
 unicode-general-category = "1"
+# Keep depth-bounded recursive compiler passes on the caller thread while supplying enough stack
+# for their documented bound. This avoids an unsafe `Send` escape hatch for compiler state that
+# intentionally contains `Rc`/`RefCell` values and may be backed by caller-defined runtimes.
+stacker = "0.1.24"
 # Heap profiler, OFF by default (optional dep, enabled only by the `dhat-heap` feature) so normal
 # builds pay zero cost. See the `dhat-heap` feature.
 dhat = { version = "0.3", optional = true }
