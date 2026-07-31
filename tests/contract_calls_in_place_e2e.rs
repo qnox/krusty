@@ -1,7 +1,10 @@
-//! `callsInPlace(x, EXACTLY_ONCE)` contract effects: the lambda is invoked exactly once in
-//! place, so (a) the checker permits captured-var mutation like an inline call even when the
-//! callee is NOT inline, and (b) the lowerer emits the write — for a non-inline EO lambda a
-//! captured `var`/field is Ref-boxed / written through the captured `this`.
+//! `callsInPlace(x, EXACTLY_ONCE)` contract effects compile and run correctly: the effect is
+//! parsed from source, decoded from / emitted to `@Metadata` (the round trip is covered by
+//! `contract_metadata_roundtrip_e2e`), and these programs lower to working code — a captured
+//! `var`/field write from an exactly-once lambda is Ref-boxed / written through the captured
+//! `this`. Call-site SEMANTICS (definite assignment, captured-var permission) are NOT yet derived
+//! from `callsInPlace` — the checker has no `Effect::CallsInPlace` consumer; these tests pin the
+//! shapes so a future application can't regress the compile+run behavior.
 //! Mirrors `contracts/constructorArgument.kt` (non-inline, init lambda) and
 //! `contracts/fieldInConstructorParens.kt` (private inline member, val-field write).
 

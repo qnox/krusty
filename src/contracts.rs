@@ -98,6 +98,30 @@ pub enum InvocationKind {
     Unknown,
 }
 
+impl InvocationKind {
+    /// `Effect.kind` wire number (kotlinx-metadata's InvocationKind order). Shared by metadata
+    /// decode and emit so the mapping lives in exactly one place.
+    pub fn from_wire(kind: u64) -> InvocationKind {
+        match kind {
+            0 => InvocationKind::AtMostOnce,
+            1 => InvocationKind::ExactlyOnce,
+            2 => InvocationKind::AtLeastOnce,
+            _ => InvocationKind::Unknown,
+        }
+    }
+
+    /// The inverse of [`InvocationKind::from_wire`]; `None` for `Unknown`, which emit OMITS
+    /// (a kindless CALLS effect reads back as `Unknown`).
+    pub fn to_wire(self) -> Option<u64> {
+        match self {
+            InvocationKind::AtMostOnce => Some(0),
+            InvocationKind::ExactlyOnce => Some(1),
+            InvocationKind::AtLeastOnce => Some(2),
+            InvocationKind::Unknown => None,
+        }
+    }
+}
+
 /// Which function input a condition talks about. Mirrors the proto
 /// `Expression.value_parameter_reference` convention: the extension receiver vs a 0-based
 /// value-parameter index.
@@ -105,6 +129,27 @@ pub enum InvocationKind {
 pub enum ParamRef {
     Receiver,
     Param(usize),
+}
+
+impl ParamRef {
+    /// The `value_parameter_reference` wire convention (Expression field 2): 0 is the extension
+    /// receiver, n is the 1-based value-parameter index. Shared by metadata decode and emit so
+    /// the off-by-one lives in exactly one place.
+    pub fn from_wire(vpr: u64) -> ParamRef {
+        if vpr == 0 {
+            ParamRef::Receiver
+        } else {
+            ParamRef::Param((vpr - 1) as usize)
+        }
+    }
+
+    /// The inverse of [`ParamRef::from_wire`].
+    pub fn to_wire(self) -> u64 {
+        match self {
+            ParamRef::Receiver => 0,
+            ParamRef::Param(i) => (i + 1) as u64,
+        }
+    }
 }
 
 /// A boolean condition over the function's inputs (the right side of `implies`).

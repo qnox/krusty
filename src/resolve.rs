@@ -13545,9 +13545,8 @@ impl<'a> Checker<'a> {
     }
 
     /// The contract of the function a call resolved to — decoded from the same-file source for
-    /// module calls (`ModuleTopLevel` carries the decl id; a module EXTENSION call is matched
-    /// back to its declaration by name), or from `@Metadata` for classpath calls (attached to
-    /// the resolved callable).
+    /// module calls (`ModuleTopLevel`/`ModuleExtension` carry the decl id), or from `@Metadata`
+    /// for classpath calls (attached to the resolved callable).
     fn contract_for_call(
         &self,
         call: ExprId,
@@ -13556,20 +13555,18 @@ impl<'a> Checker<'a> {
             Some(ResolvedCall::TopLevel(c)) | Some(ResolvedCall::Extension(c)) => {
                 c.contract.clone()
             }
-            Some(ResolvedCall::ModuleTopLevel(c)) => c
-                .contract
-                .clone()
-                .or_else(|| {
-                    c.source_decl
-                        .and_then(|d| self.source_contracts.get(&d).cloned())
-                }),
-            Some(ResolvedCall::ModuleExtension { name, .. }) => self
-                .source_contracts
-                .iter()
-                .find(|(d, _)| {
-                    matches!(self.file.decl(**d), Decl::Fun(f) if f.name == *name && f.receiver.is_some())
-                })
-                .map(|(_, c)| c.clone()),
+            Some(ResolvedCall::ModuleTopLevel(c)) => c.contract.clone().or_else(|| {
+                c.source_decl
+                    .and_then(|d| self.source_contracts.get(&d).cloned())
+            }),
+            // Key by the selected declaration, NOT by name: `source_contracts` is a HashMap, so a
+            // name scan could bind a same-named sibling overload's contract (nondeterministically)
+            // to this call. `source` is (file, decl); only same-file decls are decoded here —
+            // cross-file extension contracts arrive already patched onto the signature (see the
+            // `source_contracts` drain in `check_file_at_impl_mode`).
+            Some(ResolvedCall::ModuleExtension { source, .. }) => source
+                .filter(|(file, _)| *file == self.file_index)
+                .and_then(|(_, decl)| self.source_contracts.get(&DeclId(decl)).cloned()),
             _ => None,
         }
     }
@@ -13590,7 +13587,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The name of a STABLE binding passed as a contract argument, when it is one (`x`, `this`).
     /// The name of a STABLE binding a contract parameter refers to at this call site: the
     /// positional argument expression for `Param(i)`, the receiver expression for `Receiver` —
     /// or, for a leading CONTEXT parameter (supplied implicitly), the context SOURCE the checker
@@ -13642,13 +13638,10 @@ impl<'a> Checker<'a> {
                 let Some(n) = self.contract_stable_arg_name(call, *param) else {
                     return;
                 };
-                let stable_ty = if n == "this" {
-                    self.this_ty
-                } else {
-                    self.lookup(&n).filter(|l| !l.is_var).map(|l| l.ty)
-                };
-                if let Some(Ty::Nullable(inner)) = stable_ty {
-                    out.push((n, *inner));
+                // Shared with the flow smart-cast paths (`stable_nullable_binding`): `this`,
+                // `var`-rejection, and the nullable unwrap must not drift by condition shape.
+                if let Some(inner) = self.stable_nullable_binding(&n) {
+                    out.push((n, inner));
                 }
             }
             Condition::IsType {

@@ -169,20 +169,15 @@ fn contract_pb(
 }
 
 fn effect_pb(st: &mut StringTable, e: &crate::contracts::Effect, tps: &HashMap<&str, u64>) -> Pb {
-    use crate::contracts::{Effect, InvocationKind};
+    use crate::contracts::Effect;
     let mut p = Pb::new();
     match e {
         Effect::CallsInPlace { param, kind } => {
             p.field_varint(1, 1); // Effect.effect_type = CALLS
             let arg = expression_param_ref_pb(*param);
             p.repeated_message(2, &arg); // Effect.effect_constructor_argument
-            let kind = match kind {
-                InvocationKind::AtMostOnce => Some(0),
-                InvocationKind::ExactlyOnce => Some(1),
-                InvocationKind::AtLeastOnce => Some(2),
-                InvocationKind::Unknown => None,
-            };
-            if let Some(k) = kind {
+                                         // `Unknown` has no wire form — emit OMITS the kind.
+            if let Some(k) = kind.to_wire() {
                 p.field_varint(4, k); // Effect.kind
             }
         }
@@ -227,15 +222,11 @@ fn write_returns_effect(
     }
 }
 
-/// An `Expression` naming a parameter: `value_parameter_reference` (0 = receiver, n = 1-based
-/// value-parameter index — the wire convention).
+/// An `Expression` naming a parameter: `value_parameter_reference` (the wire convention lives
+/// on [`crate::contracts::ParamRef`]).
 fn expression_param_ref_pb(param: crate::contracts::ParamRef) -> Pb {
     let mut p = Pb::new();
-    let vpr = match param {
-        crate::contracts::ParamRef::Receiver => 0,
-        crate::contracts::ParamRef::Param(i) => (i + 1) as u64,
-    };
-    p.field_varint(2, vpr);
+    p.field_varint(2, param.to_wire());
     p
 }
 
@@ -249,15 +240,13 @@ fn condition_pb(
     match c {
         Condition::IsNull { param, negated } => {
             p.field_varint(1, 2 | u64::from(*negated)); // flags: null-check predicate | negated
-            let vpr = vpr_of(*param);
-            p.field_varint(2, vpr);
+            p.field_varint(2, param.to_wire());
         }
         Condition::IsType { param, ty, negated } => {
             if *negated {
                 p.field_varint(1, 1);
             }
-            let vpr = vpr_of(*param);
-            p.field_varint(2, vpr);
+            p.field_varint(2, param.to_wire());
             let ty = match ty {
                 ConditionType::Metadata(ty) => *ty,
                 // Source references are resolved to semantic types before emission
@@ -268,8 +257,7 @@ fn condition_pb(
             p.field_message(4, &it); // Expression.is_instance_type
         }
         Condition::BoolParam(param) => {
-            let vpr = vpr_of(*param);
-            p.field_varint(2, vpr);
+            p.field_varint(2, param.to_wire());
         }
         Condition::Const(b) => {
             p.field_varint(3, if *b { 0 } else { 1 }); // Expression.constant_value TRUE/FALSE
@@ -288,13 +276,6 @@ fn condition_pb(
         }
     }
     p
-}
-
-fn vpr_of(param: crate::contracts::ParamRef) -> u64 {
-    match param {
-        crate::contracts::ParamRef::Receiver => 0,
-        crate::contracts::ParamRef::Param(i) => (i + 1) as u64,
-    }
 }
 
 fn flatten_condition<'a>(

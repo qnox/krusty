@@ -1012,13 +1012,8 @@ fn decode_effect(
         0 => Effect::Returns(returns_constant(args.first())),
         // CALLS — callsInPlace(param, kind).
         1 => Effect::CallsInPlace {
-            param: param_ref(expression_param_ref(args.first()?)?),
-            kind: match kind {
-                0 => InvocationKind::AtMostOnce,
-                1 => InvocationKind::ExactlyOnce,
-                2 => InvocationKind::AtLeastOnce,
-                _ => InvocationKind::Unknown,
-            },
+            param: crate::contracts::ParamRef::from_wire(expression_param_ref(args.first()?)?),
+            kind: InvocationKind::from_wire(kind),
         },
         // RETURNS_NOT_NULL — returnsNotNull().
         2 => Effect::Returns(crate::contracts::ReturnsValue::NotNull),
@@ -1082,15 +1077,6 @@ fn expression_param_ref(body: &[u8]) -> Option<u64> {
     None
 }
 
-/// `value_parameter_reference`: 0 is the extension receiver; n is the 1-based value-parameter index.
-fn param_ref(vpr: u64) -> crate::contracts::ParamRef {
-    if vpr == 0 {
-        crate::contracts::ParamRef::Receiver
-    } else {
-        crate::contracts::ParamRef::Param((vpr - 1) as usize)
-    }
-}
-
 /// Decode an `Expression` in conclusion position into a [`crate::contracts::Condition`]. A
 /// boolean formula embeds its FIRST operand inline in this message when it is primitive, with
 /// the rest in `and_argument` (field 6) / `or_argument` (field 7).
@@ -1149,7 +1135,7 @@ fn decode_expression(
     let null_check = flags & 2 != 0;
     let self_cond = if null_check {
         Some(Condition::IsNull {
-            param: param_ref(vpr?),
+            param: crate::contracts::ParamRef::from_wire(vpr?),
             negated,
         })
     } else if instance_body.is_some() || instance_id.is_some() {
@@ -1168,7 +1154,7 @@ fn decode_expression(
             ty = Ty::nullable(ty);
         }
         Some(Condition::IsType {
-            param: param_ref(vpr?),
+            param: crate::contracts::ParamRef::from_wire(vpr?),
             ty: ConditionType::Metadata(ty),
             negated,
         })
@@ -1176,7 +1162,7 @@ fn decode_expression(
         match constant {
             Some(0) => Some(Condition::Const(true)),
             Some(1) => Some(Condition::Const(false)),
-            _ => vpr.map(|v| Condition::BoolParam(param_ref(v))),
+            _ => vpr.map(|v| Condition::BoolParam(crate::contracts::ParamRef::from_wire(v))),
         }
     };
     fn fold(
