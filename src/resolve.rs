@@ -16277,6 +16277,24 @@ impl<'a> Checker<'a> {
                 if narrows_then != for_else {
                     let name = match (self.file.expr(lhs).clone(), self.file.expr(rhs).clone()) {
                         (Expr::Name(n), Expr::NullLit) | (Expr::NullLit, Expr::Name(n)) => Some(n),
+                        // `b?.prop != null` / `b?.f() != null`: a non-null safe-call RESULT means the
+                        // receiver itself was non-null (kotlinc narrows `b` in the branch). Descend a
+                        // chain of safe calls — `a?.b?.c != null` means every prefix, hence the root,
+                        // was non-null — but stop at anything else (a plain call's result says nothing
+                        // about ITS receiver). Only a stable name receiver narrows soundly.
+                        (Expr::SafeCall { receiver, .. }, Expr::NullLit)
+                        | (Expr::NullLit, Expr::SafeCall { receiver, .. }) => {
+                            let mut root = receiver;
+                            loop {
+                                match self.file.expr(root) {
+                                    Expr::Name(n) => break Some(n.clone()),
+                                    Expr::SafeCall {
+                                        receiver: inner, ..
+                                    } => root = *inner,
+                                    _ => break None,
+                                }
+                            }
+                        }
                         _ => None,
                     };
                     if let Some(n) = name {
@@ -16365,7 +16383,63 @@ impl<'a> Checker<'a> {
         result
     }
 
+    /// Contract-based narrowing for the stdlib `kotlin.text` predicates whose
+    /// `contract { returns(false) implies (receiver != null) }` krusty does not read from metadata:
+    /// `isNullOrEmpty`/`isNullOrBlank` holding FALSE ⇒ receiver non-null. The call must resolve to
+    /// the stdlib (a same-named user extension must not narrow) and the receiver must be a stable
+    /// nullable binding.
+    fn contract_condition_narrowing(&self, cond: ExprId, truth: bool) -> Option<(String, Ty)> {
+        let Expr::Call { callee, args } = self.file.expr(cond) else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        let Expr::Member { receiver, .. } = self.file.expr(*callee) else {
+            return None;
+        };
+        // Gate on the RESOLVED callable, not the syntax name: an alias import
+        // (`import kotlin.text.isNullOrEmpty as x`) carries the same contract, while a same-named
+        // user extension must not narrow. (A user fn in package `kotlin.text` still passes —
+        // accepted, mirroring the precondition-guard convention.)
+        let is_stdlib = match self.resolved_calls.get(&cond) {
+            Some(ResolvedCall::Extension(c)) | Some(ResolvedCall::TopLevel(c)) => {
+                matches!(c.name.as_str(), "isNullOrEmpty" | "isNullOrBlank")
+                    && c.owner.starts_with("kotlin/text/")
+            }
+            _ => false,
+        };
+        if !is_stdlib || truth {
+            // The contract only narrows when the predicate holds FALSE.
+            return None;
+        }
+        let Expr::Name(n) = self.file.expr(*receiver).clone() else {
+            return None;
+        };
+        let stable_ty = if n == "this" {
+            self.this_ty
+        } else {
+            self.lookup(&n).filter(|l| !l.is_var).map(|l| l.ty)
+        };
+        if let Some(Ty::Nullable(inner)) = stable_ty {
+            Some((n, *inner))
+        } else {
+            None
+        }
+    }
+
     fn collect_condition_narrowings(&self, cond: ExprId, truth: bool, out: &mut Vec<(String, Ty)>) {
+        // `!cond` flips the branch facts: the narrowings of `cond`-false hold when `!cond` is true
+        // (and vice versa). Recursing with a flipped `truth` also yields De Morgan for `!(a && b)` /
+        // `!(a || b)` through the combine rule below.
+        if let Expr::Unary {
+            op: UnOp::Not,
+            operand,
+        } = self.file.expr(cond).clone()
+        {
+            self.collect_condition_narrowings(operand, !truth, out);
+            return;
+        }
         if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
             let combines = (truth && op == BinOp::And) || (!truth && op == BinOp::Or);
             if combines {
@@ -16373,6 +16447,9 @@ impl<'a> Checker<'a> {
                 self.collect_condition_narrowings(rhs, truth, out);
                 return;
             }
+        }
+        if let Some(binding) = self.contract_condition_narrowing(cond, truth) {
+            out.push(binding);
         }
         if let Some(binding) = self.smartcast_binding(cond, !truth) {
             out.push(binding);
@@ -20399,6 +20476,27 @@ impl<'a> Checker<'a> {
                                 for (name, ty) in casts {
                                     if self.narrowing_is_supported(&name, ty, compound) {
                                         self.declare(&name, ty, false);
+                                    }
+                                }
+                            }
+                            // `requireNotNull(x)` / `checkNotNull(x)` — the stdlib contract is
+                            // `returns() implies (x != null)`, so a stable nullable FIRST argument
+                            // is non-null for the rest of the block (the not-null RETURN type comes
+                            // from the call's generic signature).
+                            else if (fname == "requireNotNull" || fname == "checkNotNull")
+                                && !args.is_empty()
+                                && self.is_resolved_stdlib_precondition_call(ie, &fname)
+                            {
+                                if let Expr::Name(n) = self.file.expr(args[0]).clone() {
+                                    let stable_ty = if n == "this" {
+                                        self.this_ty
+                                    } else {
+                                        self.lookup(&n).filter(|l| !l.is_var).map(|l| l.ty)
+                                    };
+                                    if let Some(Ty::Nullable(inner)) = stable_ty {
+                                        if self.narrowing_is_supported(&n, *inner, false) {
+                                            self.declare(&n, *inner, false);
+                                        }
                                     }
                                 }
                             }
@@ -30002,7 +30100,18 @@ impl<'a> Checker<'a> {
             Stmt::While { cond, body, label } => {
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
+                // `while (x != null) …` — the condition holds on body entry, so narrow stable
+                // bindings exactly like an `if` then-branch (kotlinc does the same).
+                let casts = self.condition_narrowings(cond, true);
+                let compound = matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
+                self.push_scope();
+                for (name, ty) in &casts {
+                    if self.narrowing_is_supported(name, *ty, compound) {
+                        self.declare(name, *ty, false);
+                    }
+                }
                 self.check_loop_body(body, &label);
+                self.pop_scope();
             }
             Stmt::DoWhile { body, cond, label } => {
                 self.check_loop_body(body, &label);
