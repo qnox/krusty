@@ -243,6 +243,10 @@ pub trait Analysis {
         false
     }
 
+    /// Install the reporter for workspace file-tree scan progress. The engine sets it once before
+    /// its main loop; backends that never scan keep the default no-op.
+    fn set_scan_reporter(&mut self, _reporter: crate::ScanReporter) {}
+
     fn document_admission(&self) -> DocumentAdmission {
         DocumentAdmission::default()
     }

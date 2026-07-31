@@ -59,7 +59,10 @@ boundary.
   are deduplicated by `(span, severity, kind, message)` before entering the LSP indexes.
 - Closed workspace files are indexed only after interactive analysis has been served. One cached
   project-model inventory feeds a module-neighbourhood priority and a lower-priority full sweep;
-  watched source changes requeue their own file without rebuilding that inventory. Queue count and
+  watched source changes requeue their own file without rebuilding that inventory. The inventory
+  walk is unlimited in tree depth and entry count and reports its progress — start, throttled
+  discovered-source checkpoints, and a finished summary with file count and elapsed time — through
+  the same work-done status token and the client log. Queue count and
   owned-URI bytes are bounded, and a project-model replacement advances a generation, discards
   queued work, and clears old retained results before replacement analysis can arrive. Each
   background chunk goes through the same module visibility, language-feature, and classpath
