@@ -457,6 +457,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-generic function, are supported; capturing lambdas, `Unit`/`Nothing` lambdas (need the
   `kotlin/Unit` singleton), lambdas inside class methods, and generic/suspend consumers are skipped
   (`tests/lambda_e2e.rs`, `tests/indy_infra_e2e.rs`).
+- **Implicit `it` in an untyped lambda is lexical, not textual.** When no expected function type has
+  established the lambda's parameters, a parameterless lambda synthesizes `it` only if its body uses
+  that name and no enclosing scope already binds it. Thus `outer?.let { sink.emit { "$it" } }` passes a
+  `Function0` to `emit` and captures the outer `it`; likewise, `{ it }` captures a local named `it`.
+  Typed lambdas still receive and shadow with their expected `Function1` parameter. Overload probing and
+  fallback lambda typing share this decision so they cannot infer different arities
+  (`tests/classpath_object_member_import_e2e.rs`,
+  `tests/nested_lambda_capture_e2e.rs::untyped_lambda_captures_local_named_it`).
 - **Mutable capture**: a local `var` written by a non-inlined lambda (a closure) needs a shared mutable
   cell so writes are visible to the enclosing scope and vice versa. The lowerer computes this per body by
   checking whether a lambda captures a `var` from an outer local scope; the JVM realization currently
@@ -2201,7 +2209,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`List<*>`). The runtime class is identical, so the merge stack frame is exactly that class — safe to
   emit (unlike a join of *unrelated* references, which would merge to `Object`, a frame krusty's emitter
   can't yet reconcile; those stay unsupported). Type arguments are erased to none at the join, so a member
-  read on the result resolves against the raw class (element type `Any`).
+  read on the result resolves against the raw class (element type `Any`). The same semantic path handles
+  builtin and mixed frontend/object spellings: `String` with `String?` joins to `String?`, while non-null
+  `Ty::String` with non-null `Obj("kotlin/String")` remains non-null `String`. Nullability is derived from
+  the original operands rather than from whether their internal representations compare equal. This join
+  is representation-generic; it does not branch on whether a type came from the current file, another
+  module file, or the classpath (`tests/elvis_nullability_join_e2e.rs`).
 
 - **`if`/`when` branch join: unrelated reference classes → common supertype (`Object`).** Two branches of
   different reference classes (`if (c) Foo() else Bar()`) join to their common supertype, which krusty
@@ -2258,6 +2271,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   registers such names into `class_names` (so the checker/lowerer agree), and the checker/lowerer
   `resolve_qualified_nested` share the ordering — covering both a parameter/return type ref and a
   qualified constructor call `lib.Thing(5)` (`classpath_type_ref_e2e`).
+
+- **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
+  matches a class declared in the same module (a sibling file's package, no `import` needed — as
+  kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The
+  import pass tries this after explicit-import and same-package resolution and before the classpath
+  dotted rules; positions the parser stores already internalized (`pkg1/Cls` — supertypes,
+  delegation specs) take the same path. Candidate source forms are tried NESTED-first (`a$b$c`, then
+  `a/b$c`, then `a/b/c`), matching kotlinc's classifier-shadows-package rule — this ordering now
+  applies to explicit-import source paths too. The package-first candidate construction itself is a
+  shared naming primitive used by source resolution, classpath nested-name recovery, object-member
+  import inference, and Java-source analysis; only the source lookup reverses it for classifier-first
+  semantics. Resolving the identity does not widen access: module classifiers carry their declaring
+  file, so a top-level `private` FQN remains inaccessible from a sibling file while the declaring file
+  can still use it. Covers every signature-pass type position — extension receivers
+  (`fun pkg1.Cls.fn()`), parameter/return/property types, type arguments, generic bounds, supertype
+  lists, and typealias targets (`fq_source_typeref_e2e`).
 
 - **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
   Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc

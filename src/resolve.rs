@@ -16,7 +16,7 @@ use crate::libraries::{
     map_call_args, required_arity, CallArgMappingError, CallArgMappingFailure, CallSig,
     EmptySymbolSource, GenericSig, InlineKind, Origin, ParamList, SemanticPlatform,
 };
-use crate::names::{property_getter_name, property_setter_name};
+use crate::names::{nested_internal_name_candidates, property_getter_name, property_setter_name};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
 use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
@@ -624,6 +624,9 @@ pub struct DeclaredPropertySig {
 #[derive(Clone, Debug)]
 pub struct ClassSig {
     pub internal: TypeName,
+    /// File that declares this source classifier. Class visibility cannot be decided from the module
+    /// alone: a top-level `private` class is visible only to declarations in this same file.
+    pub source_file: u32,
     pub visibility: Visibility,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     pub declared_props: HashMap<String, DeclaredPropertySig>,
@@ -1516,6 +1519,9 @@ impl SymbolTable {
         };
         for signature in self.funs.values_mut().flatten() {
             offset_signature(signature);
+        }
+        for class in self.classes.values_mut() {
+            class.source_file += offset;
         }
         self.conflicting_top_level_key_by_source =
             std::mem::take(&mut self.conflicting_top_level_key_by_source)
@@ -3233,14 +3239,12 @@ fn object_member_import_sig(file: &File, name: &str, src: &dyn SymbolSource) -> 
         .iter()
         .find(|i| !i.ends_with(".*") && i.ends_with(&suffix))?;
     let owner_path = fq[..fq.len() - suffix.len()].replace('.', "/");
-    let mut cand = owner_path;
-    loop {
-        if src.resolve_type(&cand).is_some_and(|t| t.is_object()) {
-            return Some(cand);
-        }
-        let pos = cand.rfind('/')?;
-        cand.replace_range(pos..=pos, "$");
-    }
+    nested_internal_name_candidates(&owner_path)
+        .into_iter()
+        .find(|candidate| {
+            src.resolve_type(candidate)
+                .is_some_and(|classifier| classifier.is_object())
+        })
 }
 
 fn resolve_nested_internal(internal: &str, source: &dyn SymbolSource) -> Option<String> {
@@ -3254,12 +3258,7 @@ fn resolve_nested_internal_name(internal: &str, source: &dyn SymbolSource) -> Op
         let t = source.resolve_type_name(name)?;
         Some(t.alias_target.unwrap_or(name))
     };
-    if let Some(r) = resolved(internal) {
-        return Some(r);
-    }
-    let mut cand = internal.to_string();
-    while let Some(pos) = cand.rfind('/') {
-        cand.replace_range(pos..=pos, "$");
+    for cand in nested_internal_name_candidates(internal) {
         if let Some(r) = resolved(&cand) {
             return Some(r);
         }
@@ -3420,14 +3419,14 @@ fn source_classifier_from_path(
     path: &str,
     declarations: &std::collections::HashSet<String>,
 ) -> Option<TypeName> {
-    let mut candidate = path.to_string();
-    loop {
+    // kotlinc resolves a dotted path classifier-first — an in-scope type shadows a package path —
+    // so try the nested (`$`) forms before the plain package path: `a$b$c`, `a/b$c`, then `a/b/c`.
+    for candidate in nested_internal_name_candidates(path).into_iter().rev() {
         if declarations.contains(&candidate) {
             return Some(type_name(&candidate));
         }
-        let separator = candidate.rfind('/')?;
-        candidate.replace_range(separator..=separator, "$");
     }
+    None
 }
 
 fn type_ref_formal_occurrences(
@@ -3596,6 +3595,17 @@ fn collect_signatures_with_cp_impl(
                     .or(same_package_source)
                     .or_else(|| {
                         resolve_name_against_imports_name(&name, &imap, &levels, &*libraries)
+                    })
+                    .or_else(|| {
+                        // A dotted name may be the fully-qualified path of a SOURCE class in this
+                        // module (`pkg1.Cls`, `pkg1.Outer.Inner`) — source shadows the classpath.
+                        // Some positions (supertypes, delegation specs) arrive already
+                        // internalized (`pkg1/Cls`), so accept '/' too.
+                        if name.contains('.') || name.contains('/') {
+                            source_classifier_from_path(&name.replace('.', "/"), &user_defined)
+                        } else {
+                            None
+                        }
                     })
                     .or_else(|| {
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
@@ -5313,6 +5323,7 @@ fn collect_signatures_with_cp_impl(
                         c.name.clone(),
                         ClassSig {
                             internal: internal_ref,
+                            source_file: i as u32,
                             visibility: c.visibility,
                             props,
                             declared_props,
@@ -5405,6 +5416,7 @@ fn collect_signatures_with_cp_impl(
                             comp_internal.clone(),
                             ClassSig {
                                 internal: comp_internal_ref,
+                                source_file: i as u32,
                                 visibility: Visibility::Public,
                                 props: Vec::new(),
                                 declared_props: HashMap::new(),
@@ -11495,6 +11507,50 @@ impl crate::assignable::TypeOracle for Checker<'_> {
     }
 }
 
+/// Join two spellings of the SAME semantic type/class while preserving their real nullability.
+///
+/// This is the single same-class path used by `Checker::join`:
+///
+/// * two `Obj`/`TyParam` spellings compare their erased object identity and erase type arguments,
+///   preserving the existing `List<A>` + `List<B>` -> `List<*>` behavior;
+/// * an exact builtin/function shape keeps that canonical shape;
+/// * a builtin and its object spelling compare their Kotlin class identity, with the builtin shape
+///   winning (`String` + `Obj("kotlin/String")` -> `String`).
+///
+/// Nullability is reapplied from the ORIGINAL inputs. That last detail matters for mixed spellings:
+/// unequal `Ty` values do not imply that one was nullable, so two non-null String spellings must not
+/// accidentally become `String?`.
+fn same_type_class_join(a: Ty, b: Ty) -> Option<Ty> {
+    let (an, bn) = (a.non_null(), b.non_null());
+    let erased = |ty: Ty| matches!(ty, Ty::Obj(..) | Ty::TyParam(..));
+    let same_kotlin_class = |left: Ty, right: Ty| {
+        matches!(
+            (left.kotlin_class_internal(), right.kotlin_class_internal()),
+            (Some(left), Some(right)) if left == right
+        )
+    };
+
+    let base = match (erased(an), erased(bn)) {
+        // Keep the pre-existing erased-object semantics for generic classes and type parameters.
+        (true, true) => match (an.obj_internal(), bn.obj_internal()) {
+            (Some(left), Some(right)) if left == right => Ty::obj_name(left),
+            _ => return None,
+        },
+        // Non-object shapes (builtin scalars and function types) must agree exactly.
+        (false, false) if an == bn => an,
+        // A mixed object/builtin spelling uses the source-level class identity, then retains the
+        // non-object shape as the canonical front-end representation.
+        (false, true) if same_kotlin_class(an, bn) => an,
+        (true, false) if same_kotlin_class(an, bn) => bn,
+        _ => return None,
+    };
+    Some(if a.is_nullable() || b.is_nullable() {
+        Ty::nullable(base)
+    } else {
+        base
+    })
+}
+
 impl<'a> Checker<'a> {
     fn reset_body_mutations(&mut self, body: Option<ExprId>) {
         self.fn_reassigned.clear();
@@ -11988,6 +12044,74 @@ impl<'a> Checker<'a> {
             receiver.source_name(),
             signature.ret.source_name()
         )
+    }
+
+    /// The member-call last-resort diagnostic, with the rejected overloads LISTED: the bare
+    /// "none of the following candidates is applicable:" prefix said nothing about WHICH members
+    /// rejected `recv.name(args)` — an empty list reads as a compiler bug, not a verdict. Render
+    /// each discarded overload (source declarations via `source_callable_display`, classpath
+    /// members from their resolved signature), then sort and deduplicate the displays before
+    /// applying the shared count/byte caps. Sorting makes the result independent of candidate
+    /// discovery order; trying every retained display lets a short signature fit even when an
+    /// earlier long signature does not.
+    fn inapplicable_member_candidates_message(
+        &self,
+        name: &str,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> String {
+        let prefix = INAPPLICABLE_OVERLOAD_PREFIX;
+        let mut displays = candidates
+            .iter()
+            .map(|candidate| {
+                self.source_callable_display(candidate).unwrap_or_else(|| {
+                    // An extension's `callable.params` prepends the receiver while `call_sig` does
+                    // not; skip it so names and types stay parallel.
+                    let (params, receiver) = match candidate.kind {
+                        crate::libraries::FnKind::Extension => (
+                            &candidate.callable.params[1.min(candidate.callable.params.len())..],
+                            candidate.receiver,
+                        ),
+                        _ => (candidate.callable.params.as_slice(), None),
+                    };
+                    let parameters =
+                        Self::callable_ref_parameters(params, &candidate.call_sig.param_names);
+                    let suspend = if candidate.callable.suspend {
+                        "suspend "
+                    } else {
+                        ""
+                    };
+                    match receiver {
+                        Some(receiver) => format!(
+                            "{suspend}fun {}.{name}({parameters}): {}",
+                            receiver.source_name(),
+                            candidate.callable.ret.source_name()
+                        ),
+                        None => format!(
+                            "{suspend}fun {name}({parameters}): {}",
+                            candidate.callable.ret.source_name()
+                        ),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        displays.sort_unstable();
+        displays.dedup();
+        displays.truncate(MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES);
+
+        let mut message = String::from(prefix);
+        for display in displays {
+            let separator = if message.len() == prefix.len() {
+                "\n\n"
+            } else {
+                "\n"
+            };
+            if message.len() + separator.len() + display.len() > MAX_OVERLOAD_DIAGNOSTIC_BYTES {
+                continue;
+            }
+            message.push_str(separator);
+            message.push_str(&display);
+        }
+        message
     }
 
     fn toplevel_source_ref_candidate(
@@ -17928,12 +18052,21 @@ impl<'a> Checker<'a> {
             Expr::Lambda { params, .. } if !params.is_empty() => {
                 Some(Ty::fun(vec![Ty::Error; params.len()], Ty::Error))
             }
-            Expr::Lambda { body, .. } if self.file.expr_uses_name(*body, "it") => {
+            Expr::Lambda { body, .. } if self.untyped_lambda_binds_implicit_it(*body) => {
                 Some(Ty::fun(vec![Ty::Error], Ty::Error))
             }
             Expr::Lambda { .. } => Some(Ty::Error),
             _ => None,
         }
+    }
+
+    /// Whether an UNTYPED lambda that omits its parameter list must synthesize Kotlin's implicit `it`.
+    ///
+    /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
+    /// exists, the inner lambda CAPTURES that value and remains `Function0`. Keep this decision in one
+    /// helper because both overload probing and fallback lambda typing must infer the same arity.
+    fn untyped_lambda_binds_implicit_it(&self, body: ExprId) -> bool {
+        self.file.expr_uses_name(body, "it") && self.lookup("it").is_none()
     }
 
     fn classpath_sam_param_types(
@@ -19024,7 +19157,7 @@ impl<'a> Checker<'a> {
             // parameters but a body referencing `it`, bind the implicit single parameter.
             let bind_names: Vec<String> = if !params.is_empty() {
                 params.clone()
-            } else if self.file.expr_uses_name(body, "it") {
+            } else if self.untyped_lambda_binds_implicit_it(body) {
                 vec!["it".to_string()]
             } else {
                 vec![]
@@ -26672,8 +26805,8 @@ impl<'a> Checker<'a> {
                 }
                 // Java static call: `ClassName.method(args)` where ClassName is an imported class
                 // (not a local/param) resolvable on the classpath. A top-level PROPERTY of the same name
-                // shadows the type/import in value position (`private val logger = logger {}; logger.info()`
-                // — `logger` is the KLogger value, not the imported `logger` symbol), so skip the static
+                // shadows the type/import in value position (`private val sink = sink {}; sink.read()`
+                // — `sink` is the EventSink value, not the imported `sink` symbol), so skip the static
                 // path and let the receiver resolve as that property value below.
                 if let Expr::Name(cls) = self.file.expr(receiver).clone() {
                     if !self.value_root_shadows_classifier(&cls) {
@@ -27794,17 +27927,17 @@ impl<'a> Checker<'a> {
                         return Ty::Error;
                     }
                 }
-                let has_inapplicable_candidate = self
+                let inapplicable_candidates = self
                     .resolver()
                     .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
                     .map(crate::symbol_resolver::Symbol::overloads)
-                    .is_some_and(|overloads| !overloads.is_empty());
+                    .unwrap_or_default();
                 self.diags.error(
                     self.call_callee_name_span(call),
-                    if has_inapplicable_candidate {
-                        INAPPLICABLE_OVERLOAD_PREFIX.to_string()
-                    } else {
+                    if inapplicable_candidates.is_empty() {
                         format!("unresolved reference '{name}'.")
+                    } else {
+                        self.inapplicable_member_candidates_message(&name, &inapplicable_candidates)
                     },
                 );
                 Ty::Error
@@ -29946,7 +30079,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // An unqualified call to a MEMBER function of a classpath `object` imported through
-                // `import Obj.member` (`private val logger = logger {}`, kotlin-logging's idiom). The
+                // `import Obj.member` (`private val sink = sink {}`). The
                 // positional import stores `Obj/member`; if the owner is an object with a matching member,
                 // Kotlin dispatches on the singleton — record the object so LOWERING emits
                 // `getstatic Obj.INSTANCE; invokevirtual`. Args (including a trailing lambda) were typed
@@ -30218,20 +30351,12 @@ impl<'a> Checker<'a> {
                 return nb;
             }
         }
-        // Two values of the SAME class join to that class with erased type arguments (`List<C>` and
-        // `List<D>` → `List<*>`), differing only in NULLABILITY to its nullable form (`C` and `C?` → `C?`).
-        // Comparing the NON-NULL forms covers the mixed case (`x ?: y` where one side is `C` and the other
-        // `C?` — e.g. a map get typed `C` elvis a nullable member return `C?`), which the bare-`Obj` match
-        // missed, collapsing it to `Any`.
-        if let (Some(ai), Some(bi)) = (a.non_null().obj_internal(), b.non_null().obj_internal()) {
-            if ai == bi {
-                let base = Ty::obj_name(ai);
-                return if a.is_nullable() || b.is_nullable() {
-                    Ty::nullable(base)
-                } else {
-                    base
-                };
-            }
+        // One semantic SAME-CLASS path covers source, module, and classpath spellings. It preserves
+        // actual nullability, keeps canonical builtin/function shapes, and retains the established
+        // erased-type-argument behavior for `Obj`/`TyParam` joins. Keeping this federated avoids the
+        // object-only and builtin-only branches disagreeing on mixed representations.
+        if let Some(joined) = same_type_class_join(a, b) {
+            return joined;
         }
         // Two values of DIFFERENT reference classes join to their common supertype, which krusty
         // approximates as `Any` (`java/lang/Object`) — the universal upper bound. Preserve nullability
@@ -31606,6 +31731,66 @@ mod tests {
     }
 
     #[test]
+    fn elvis_joins_non_null_and_nullable_string_to_nullable_string() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "fun pick(name: String, fallback: String?) {\n\
+                 val chosen = name ?: fallback\n\
+             }",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let elvis = files[0]
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::Elvis { .. }).then_some(ExprId(index as u32))
+            })
+            .expect("elvis expression");
+        assert_eq!(info.ty(elvis), Ty::nullable(Ty::String));
+    }
+
+    #[test]
+    fn same_type_class_join_unifies_spellings_without_inventing_nullability() {
+        assert_eq!(
+            same_type_class_join(Ty::String, Ty::nullable(Ty::String)),
+            Some(Ty::nullable(Ty::String))
+        );
+        // Mixed NON-NULL spellings remain non-null. The original follow-up returned `String?`
+        // here merely because the two representations were unequal.
+        assert_eq!(
+            same_type_class_join(Ty::String, Ty::obj("kotlin/String")),
+            Some(Ty::String)
+        );
+        assert_eq!(
+            same_type_class_join(Ty::String, Ty::nullable(Ty::obj("kotlin/String"))),
+            Some(Ty::nullable(Ty::String))
+        );
+        assert_eq!(
+            same_type_class_join(Ty::obj("kotlin/String"), Ty::String),
+            Some(Ty::String)
+        );
+        // Object pairs retain the established erased-type-argument join.
+        assert_eq!(
+            same_type_class_join(
+                Ty::obj_args("kotlin/collections/List", &[Ty::Int]),
+                Ty::obj_args("kotlin/collections/List", &[Ty::String])
+            ),
+            Some(Ty::obj("kotlin/collections/List"))
+        );
+        assert_eq!(same_type_class_join(Ty::String, Ty::Int), None);
+        assert_eq!(
+            same_type_class_join(Ty::String, Ty::obj("kotlin/Any")),
+            None
+        );
+    }
+
+    #[test]
     fn super_calls_record_the_exact_source_overload() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(
@@ -32746,8 +32931,8 @@ fun box(): String {
                     vec![false, false],
                 )],
                 "choose" => vec![
-                    member(vec![Ty::Boolean], "(Z)Ljava/lang/String;", vec![false]),
                     member(vec![Ty::Int], "(I)Ljava/lang/String;", vec![false]),
+                    member(vec![Ty::Boolean], "(Z)Ljava/lang/String;", vec![false]),
                 ],
                 "tie" => vec![
                     member(vec![Ty::Long], "(J)Ljava/lang/String;", vec![false]),
@@ -33396,6 +33581,45 @@ fun box(): String {
                 .iter()
                 .map(|diagnostic| &diagnostic.msg)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn inapplicable_member_call_lists_the_rejected_overloads() {
+        // The member-call last-resort diagnostic must NAME the overloads that rejected the call —
+        // the bare prefix alone reads as a compiler bug, not a verdict (the captured-`it`
+        // `sink.emit { … }` false positive surfaced with an empty list).
+        let source = "fun f(): String = \"\".choose(\"x\")\n";
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(source, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        let message = diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .find(|msg| msg.starts_with("none of the following candidates is applicable:"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the inapplicable member call should report its candidates: {:?}",
+                    diagnostics
+                        .diags
+                        .iter()
+                        .map(|diagnostic| &diagnostic.msg)
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            message.contains("fun choose(a: Boolean): String")
+                && message.contains("fun choose(a: Int): String"),
+            "every rejected overload should be listed, got: {message:?}"
+        );
+        assert!(
+            message.find("Boolean").unwrap() < message.find("Int").unwrap(),
+            "candidate diagnostics must be sorted independently of provider order: {message:?}"
         );
     }
 
