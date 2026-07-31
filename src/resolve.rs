@@ -3598,6 +3598,16 @@ fn collect_signatures_with_cp_impl(
                         resolve_name_against_imports_name(&name, &imap, &levels, &*libraries)
                     })
                     .or_else(|| {
+                        // A dotted name may be the fully-qualified path of a SOURCE class in this
+                        // module (`pkg1.Cls`, `pkg1.Outer.Inner`) — source shadows the classpath.
+                        // Supertypes arrive already internalized (`pkg1/Cls`), so accept '/' too.
+                        (name.contains('.') || name.contains('/'))
+                            .then(|| {
+                                source_classifier_from_path(&name.replace('.', "/"), &user_defined)
+                            })
+                            .flatten()
+                    })
+                    .or_else(|| {
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
                         // or a nested type under a resolvable outer prefix.
                         resolve_dotted_classpath_type(

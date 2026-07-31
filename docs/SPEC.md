@@ -2259,6 +2259,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve_qualified_nested` share the ordering — covering both a parameter/return type ref and a
   qualified constructor call `lib.Thing(5)` (`classpath_type_ref_e2e`).
 
+- **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
+  matches a class declared in the same module (a sibling file's package, no `import` needed — as
+  kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The
+  import pass tries this after explicit-import and same-package resolution and before the classpath
+  dotted rules, via the same `/`→`$` nested walk as explicit imports; supertypes, which the parser
+  stores already internalized (`pkg1/Cls`), take the same path. This covers every signature-pass type
+  position — extension receivers (`fun pkg1.Cls.fn()`), parameter/return/property types, type
+  arguments, generic bounds, supertype lists, and typealias targets (`fq_source_typeref_e2e`).
+
 - **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
   Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc
   constructs `Id()` via the static `constructor-impl$default(dummy, mask, marker)`, which fills the
