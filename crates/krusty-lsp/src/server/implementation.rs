@@ -1271,6 +1271,7 @@ where
     }
 
     pub(crate) fn apply_index_batch(&mut self, batch: IndexBatch) -> Vec<Value> {
+        let indexed = batch.attempted.clone();
         let outcome = self.workspace_diagnostics.merge(
             batch.generation,
             &batch.attempted,
@@ -1288,9 +1289,22 @@ where
                     .to_string(),
             ));
         }
-        // Files the sweep touched may now have different diagnostics, and a pull-based client has
-        // no other way to hear about a file it is not actively pulling.
         if outcome.changed {
+            // Publish each chunk as it lands. A workspace pull only arrives if the client asks,
+            // and on a large repository the sweep runs for hours -- waiting until the end would
+            // show nothing for the whole of it. Open documents are excluded: their buffer is
+            // newer than whatever the sweep read from disk.
+            for uri in indexed {
+                if self.documents.contains_key(&uri) {
+                    continue;
+                }
+                let index = self
+                    .workspace_diagnostics
+                    .diagnostics(&uri)
+                    .map(|found| DiagnosticIndex::from_workspace(&found))
+                    .unwrap_or_default();
+                messages.push(publish_diagnostics(&uri, None, &index));
+            }
             messages.extend(self.diagnostic_refresh());
         }
         messages
@@ -6932,6 +6946,84 @@ mod tests {
             item["items"],
             json!([]),
             "the current open buffer must win over an older sweep snapshot"
+        );
+    }
+    #[test]
+    fn each_indexed_chunk_publishes_its_diagnostics_immediately() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let messages = service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec!["file:///w/Swept.kt".to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: "file:///w/Swept.kt".to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 3),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "swept boom".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "val x = 1\n".to_string(),
+            }],
+        });
+
+        let published = messages
+            .iter()
+            .find(|message| message["method"] == "textDocument/publishDiagnostics")
+            .expect("a sweep that runs for hours must publish as it goes, not only at the end");
+        assert_eq!(published["params"]["uri"], "file:///w/Swept.kt");
+        assert_eq!(
+            published["params"]["diagnostics"].as_array().map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn an_open_document_is_not_republished_by_the_sweep() {
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///w/Open.kt", "fun a() {}", 1);
+
+        let messages = service.apply_index_batch(IndexBatch {
+            generation: 0,
+            attempted: vec!["file:///w/Open.kt".to_string()],
+            conclusive: true,
+            files: vec![IndexedFile {
+                uri: "file:///w/Open.kt".to_string(),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: "stale from disk".to_string(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "fun a() {}\n".to_string(),
+            }],
+        });
+
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message["method"] == "textDocument/publishDiagnostics"),
+            "the buffer the user is editing must not be overwritten by what the sweep read"
         );
     }
 }
