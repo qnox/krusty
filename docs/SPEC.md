@@ -1770,6 +1770,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and constructors resolve without imports, while inaccessible classifiers produce the diagnostic
   for the source spelling. Exposed-visibility diagnostics for public declarations remain unsupported.
 
+- **The dev-mode dump renders AST and IR arenas flat and id-ordered, never as trees.** The AST and
+  IR are index-based by design (nodes reference each other by `u32` arena ids), so a flat listing is
+  the faithful view: every node appears exactly once, including nodes unreachable from any
+  declaration, and each node's `Debug` output carries its child ids for navigation. A tree renderer
+  would need a match arm per variant across the full node sets and would rot as variants are added.
+  The LSP keeps replay inputs only under `--dev`, with one pass-wide byte budget shared by every
+  module; the on-disk store separately bounds individual and aggregate output. Cache names are
+  SHA-256 digests of full document URIs, so workspace paths and source names do not leak through the
+  directory layout and same-named external files cannot alias. Tests: `src/dump.rs` cover the
+  document shape; `crates/krusty-lsp/src/dump_cache.rs` covers identity, privacy, atomicity, and
+  retention.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

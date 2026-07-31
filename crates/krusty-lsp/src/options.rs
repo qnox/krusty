@@ -15,6 +15,7 @@ pub struct LspOptions {
     deps_cache_max_age_days: Option<u64>,
     deps_cache_max_bytes: Option<u64>,
     deps_sources: Option<bool>,
+    dev: bool,
 }
 
 impl LspOptions {
@@ -24,6 +25,7 @@ impl LspOptions {
         while let Some(argument) = args.next() {
             match argument.as_str() {
                 "--stdio" => {}
+                "--dev" => options.dev = true,
                 "-cp" | "-classpath" | "-class-path" => {
                     let value = args
                         .next()
@@ -135,6 +137,12 @@ impl LspOptions {
     pub fn deps_sources_enabled(&self) -> bool {
         self.deps_sources.unwrap_or(true)
     }
+
+    /// Dev mode: enables the AST/checker/IR dump code action. Off by default so a normal editor
+    /// session advertises no extra capabilities and retains no extra state.
+    pub fn dev(&self) -> bool {
+        self.dev
+    }
 }
 
 #[cfg(test)]
@@ -210,5 +218,17 @@ mod tests {
             parse(&["-jdk-home"]).err().as_deref(),
             Some("-jdk-home requires a value")
         );
+    }
+
+    #[test]
+    fn dev_mode_is_off_unless_requested() {
+        let options = LspOptions::parse(["--stdio".to_string()]).unwrap();
+        assert!(!options.dev());
+    }
+
+    #[test]
+    fn dev_flag_turns_dev_mode_on() {
+        let options = LspOptions::parse(["--stdio".to_string(), "--dev".to_string()]).unwrap();
+        assert!(options.dev());
     }
 }
