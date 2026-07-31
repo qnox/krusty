@@ -1671,6 +1671,103 @@ impl SymbolTable {
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.values().find(|sig| sig.internal == internal)
     }
+}
+
+/// Shapes that lower correctly ONLY when an `inline` body is spliced into a caller — the checker
+/// analyses the body with splice assumptions, so emitting it standalone (a facade static for
+/// cross-file calls) would miscompile: nested lambdas / anonymous objects (capture analysis +
+/// synthetic numbering), `try` / `break` / `continue` / expression-position `return` (inline-frame
+/// control flow), and `is`/`as` on a type parameter (splicing substitutes the call-site type
+/// argument; a standalone body can only erase to the bound). Conservative: the file just skips.
+fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
+    fn bad_expr(file: &File, e: ExprId, tparams: &[String]) -> bool {
+        if file.anonymous_object_classes.contains_key(&e) {
+            return true;
+        }
+        match file.expr(e) {
+            Expr::Lambda { .. }
+            | Expr::Try { .. }
+            | Expr::Break { .. }
+            | Expr::Continue { .. }
+            | Expr::Return { .. } => true,
+            Expr::Is { ty, .. } | Expr::As { ty, .. } if tparams.contains(&ty.name) => true,
+            _ => file.any_child_expr(
+                e,
+                &mut |child| bad_expr(file, child, tparams),
+                &mut |stmt| bad_stmt(file, stmt, tparams),
+            ),
+        }
+    }
+    fn bad_stmt(file: &File, s: StmtId, tparams: &[String]) -> bool {
+        if matches!(
+            file.stmt(s),
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(_, Some(_))
+        ) {
+            return true;
+        }
+        file.any_child_stmt(s, &mut |child| bad_expr(file, child, tparams))
+    }
+    match &f.body {
+        FunBody::Expr(body) | FunBody::Block(body) => bad_expr(file, *body, &f.type_params),
+        FunBody::None => true,
+    }
+}
+
+impl SymbolTable {
+    /// Whether an `inline fun` may be lowered + emitted as a callable facade static for CROSS-FILE
+    /// calls: [`FunDecl::has_emittable_inline_body`] syntactically, its signature mentions no value
+    /// class (a cross-file `invokestatic` applies no value-class mangling/erasure), and its body
+    /// carries no splice-only shape (the checker analyses an `inline` body with splice
+    /// assumptions). Anything else stays splice-only — a cross-file call keeps the file skipped.
+    pub fn inline_fn_facade_emittable(
+        &self,
+        file: &File,
+        file_index: u32,
+        decl: DeclId,
+        f: &FunDecl,
+    ) -> bool {
+        if !f.has_emittable_inline_body() {
+            return false;
+        }
+        let Some(sig) = self.funs.get(&f.name).and_then(|sigs| {
+            sigs.iter()
+                .find(|s| s.source_file == Some(file_index) && s.source_decl == Some(decl))
+        }) else {
+            return false;
+        };
+        !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
+            && !self.ty_mentions_value_class(sig.ret)
+            && !inline_body_has_splice_only_shape(file, f)
+    }
+
+    /// Whether a top-level function is lowered + emitted as a facade static, so a CROSS-FILE call
+    /// links against a plain `invokestatic`: every non-inline top-level fun, plus an `inline` one
+    /// that is safe standalone (`inline_fn_facade_emittable`). Splice-only inline funs emit
+    /// nothing. Shared by every module-symbol registration driver (backend, survey, conformance
+    /// harness) so the three registration sites can't drift apart.
+    pub fn emits_fn_facade(&self, file: &File, file_index: u32, decl: DeclId, f: &FunDecl) -> bool {
+        f.receiver.is_none()
+            && (!f.is_inline() || self.inline_fn_facade_emittable(file, file_index, decl, f))
+    }
+
+    /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
+    /// anywhere inside a function type's parameters/return.
+    fn ty_mentions_value_class(&self, t: Ty) -> bool {
+        match t {
+            Ty::Obj(n, args) => {
+                self.class_by_type_name(n)
+                    .is_some_and(|c| c.value_field.is_some())
+                    || args.iter().any(|a| self.ty_mentions_value_class(*a))
+            }
+            Ty::Fun(sig) => {
+                sig.params.iter().any(|p| self.ty_mentions_value_class(*p))
+                    || self.ty_mentions_value_class(sig.ret)
+            }
+            Ty::Nullable(inner) => self.ty_mentions_value_class(*inner),
+            Ty::TyParam(_, bound) => self.ty_mentions_value_class(*bound),
+            _ => false,
+        }
+    }
 
     pub(crate) fn applied_source_parents(
         &self,
@@ -16966,10 +17063,11 @@ impl<'a> Checker<'a> {
             );
         }
         self.reset_body_mutations(fun_body_expr(&f.body));
-        // Inline functions are expanded at each call site by the lowerer (like kotlinc's inliner),
-        // so the body is checked here but never emitted standalone. A lambda *parameter* of an
-        // inline function may be invoked on a mutable capture (it ends up inlined into the caller),
-        // so permit mutation while checking the body.
+        // Inline functions are expanded at each call site by the lowerer (like kotlinc's inliner);
+        // a body that is ALSO emitted standalone (a facade static for cross-file calls — see
+        // `inline_fn_facade_emittable`) is lowered identically to a plain function, so checking it
+        // here covers both. A lambda *parameter* of an inline function may be invoked on a mutable
+        // capture (it ends up inlined into the caller), so permit mutation while checking the body.
         let prev_allow = self.allow_lambda_mutation;
         if f.is_inline() {
             self.allow_lambda_mutation = true;
