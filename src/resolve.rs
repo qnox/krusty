@@ -19,7 +19,7 @@ use crate::libraries::{
 use crate::names::{property_getter_name, property_setter_name};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
-use crate::types::{existing_type_name, intern_ty, type_name, Ty, TypeName, Visibility};
+use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
 
 mod source_fallback;
 pub(crate) use source_fallback::SourceFallbackPlatform;
@@ -977,15 +977,63 @@ pub type MethodMap = HashMap<String, Vec<Signature>>;
 fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
     let mut sc = 0;
     for (&p, &a) in params.iter().zip(arg_tys.iter()) {
-        // Score against the RUNTIME type: a `Const(Int)` literal is an exact `Int` match, not a
-        // loose fit — the `Const` provenance must not tie-break toward a reference overload.
-        let a = a.normalize();
         if !arg_assignable_simple(p, a) {
             return None;
         }
         sc += if p == a { 2 } else { 1 };
     }
     Some(sc)
+}
+
+/// Recognize and safely fold the integer-constant syntax accepted at call sites.
+///
+/// This is deliberately the one AST walk used by both lightweight signature inference and the full
+/// checker. Every operation is checked in the expression's ordinary `Int` representation, not in a
+/// wider scratch type: lowering evaluates the same `Int` operations before any call-boundary
+/// coercion, so accepting an expression that overflows here would silently change Kotlin semantics.
+/// Keeping this outside either phase also prevents the two call paths from drifting on which
+/// expressions carry literal provenance.
+fn folded_integer_literal(file: &File, expression: ExprId) -> Option<i32> {
+    match file.expr(expression) {
+        Expr::IntLit(value) => i32::try_from(*value).ok(),
+        Expr::Unary {
+            op: UnOp::Plus,
+            operand,
+        } => folded_integer_literal(file, *operand),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+        } => folded_integer_literal(file, *operand)?.checked_neg(),
+        Expr::Binary { op, lhs, rhs, .. }
+            if matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+            ) =>
+        {
+            let left = folded_integer_literal(file, *lhs)?;
+            let right = folded_integer_literal(file, *rhs)?;
+            match op {
+                BinOp::Add => left.checked_add(right),
+                BinOp::Sub => left.checked_sub(right),
+                BinOp::Mul => left.checked_mul(right),
+                BinOp::Div => left.checked_div(right),
+                BinOp::Rem => left.checked_rem(right),
+                _ => unreachable!("guarded integer constant operator"),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Combine an already-computed runtime type with syntax-only call-argument provenance.
+fn call_arg_kind(file: &File, expression: ExprId, ty: Ty) -> CallArgKind {
+    if matches!(file.expr(expression), Expr::Lambda { .. }) {
+        CallArgKind::LambdaLiteral(ty)
+    } else if let Some(value) = folded_integer_literal(file, expression) {
+        CallArgKind::integer_literal(ty, value)
+    } else {
+        CallArgKind::Typed(ty)
+    }
 }
 
 fn positional_candidate_score(
@@ -3773,8 +3821,7 @@ fn collect_signatures_with_cp_impl(
                                     &this_scope,
                                     &*libraries,
                                     &table,
-                                )
-                                .normalize();
+                                );
                                 if t != Ty::Error {
                                     t
                                 } else if let Expr::Name(n) = file.expr(*e) {
@@ -4451,32 +4498,27 @@ fn collect_signatures_with_cp_impl(
                                     })
                                     .unwrap_or(Ty::Error),
                             }
-                        }
-                        .normalize();
-                        let storage_ty = bp
-                            .explicit_backing_field
-                            .as_ref()
-                            .map(|field| {
-                                field
-                                    .ty
-                                    .as_ref()
-                                    .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
-                                    .or_else(|| {
-                                        bp.init.map(|init| {
-                                            infer_lit_ty_scoped(
-                                                file,
-                                                init,
-                                                &class_names,
-                                                &fun_rets,
-                                                &property_scope,
-                                                &*libraries,
-                                                &table,
-                                            )
-                                        })
+                        };
+                        let storage_ty = bp.explicit_backing_field.as_ref().map(|field| {
+                            field
+                                .ty
+                                .as_ref()
+                                .map(|ty| ty_of_ref(ty, &class_names, &btp, diags))
+                                .or_else(|| {
+                                    bp.init.map(|init| {
+                                        infer_lit_ty_scoped(
+                                            file,
+                                            init,
+                                            &class_names,
+                                            &fun_rets,
+                                            &property_scope,
+                                            &*libraries,
+                                            &table,
+                                        )
                                     })
-                                    .unwrap_or(Ty::Error)
-                            })
-                            .map(|ty| ty.normalize());
+                                })
+                                .unwrap_or(Ty::Error)
+                        });
                         if storage_ty == Some(Ty::Error) {
                             diags.error(
                                 bp.span,
@@ -4665,8 +4707,7 @@ fn collect_signatures_with_cp_impl(
                                             &table,
                                         )
                                     })
-                                    .unwrap_or(Ty::Error)
-                                    .normalize(),
+                                    .unwrap_or(Ty::Error),
                             };
                             if ty != Ty::Error {
                                 props.push((bp.name.clone(), ty, bp.is_var));
@@ -4777,8 +4818,7 @@ fn collect_signatures_with_cp_impl(
                                         &scope,
                                         &*libraries,
                                         &table,
-                                    )
-                                    .normalize();
+                                    );
                                     if t != Ty::Error {
                                         return t;
                                     }
@@ -5082,8 +5122,7 @@ fn collect_signatures_with_cp_impl(
                                             &class_names,
                                             &fun_rets,
                                             &*libraries,
-                                        )
-                                        .normalize();
+                                        );
                                         if t != Ty::Error {
                                             t
                                         } else {
@@ -5151,7 +5190,7 @@ fn collect_signatures_with_cp_impl(
                         .map(|p| {
                             let ty = match &p.ty {
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)).unwrap_or(Ty::Error).normalize(),
+                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)).unwrap_or(Ty::Error),
                             };
                             if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
@@ -5462,8 +5501,7 @@ fn collect_signatures_with_cp_impl(
                                     )),
                                     _ => None,
                                 })
-                                .unwrap_or(Ty::Error)
-                                .normalize();
+                                .unwrap_or(Ty::Error);
                         if recv_ty != Ty::Error && ty != Ty::Error {
                             let receiver = recv_ty.erased_recv();
                             let declared_receiver = if accepts_nullable_receiver {
@@ -5579,8 +5617,7 @@ fn collect_signatures_with_cp_impl(
                                 })
                                 .unwrap_or(Ty::Error),
                         }
-                    }
-                    .normalize();
+                    };
                     if ty == Ty::Error && (p.init.is_some() || is_computed) && p.ty.is_none() {
                         diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
                     }
@@ -6789,43 +6826,10 @@ fn infer_lit_ty_p(
         }
         ret
     }
-    /// Whether an expression is an integer-literal CONSTANT: a literal, or a constant fold
-    /// (unary `-`/`+`, arithmetic) over integer literals. Such an argument widens to a larger
-    /// numeric parameter (`Long`, `Double`) exactly as a bare literal does — kotlinc evaluates the
-    /// constant against the expected type. The provenance is SYNTACTIC: no `Const` wrapper is ever
-    /// stored in a type.
-    fn is_integer_literal_arg(file: &File, expr: ExprId) -> bool {
-        match file.expr(expr) {
-            Expr::IntLit(_) => true,
-            Expr::Unary {
-                op: UnOp::Neg | UnOp::Plus,
-                operand,
-            } => is_integer_literal_arg(file, *operand),
-            Expr::Binary { op, lhs, rhs, .. } => {
-                matches!(
-                    op,
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
-                ) && is_integer_literal_arg(file, *lhs)
-                    && is_integer_literal_arg(file, *rhs)
-            }
-            _ => false,
-        }
-    }
-    fn is_lambda_literal_arg(file: &File, expr: ExprId) -> bool {
-        matches!(file.expr(expr), Expr::Lambda { .. })
-    }
     fn call_arg_kinds(file: &File, args: &[ExprId], arg_tys: &[Ty]) -> Vec<CallArgKind> {
         args.iter()
             .zip(arg_tys)
-            .map(|(&arg, &ty)| {
-                if is_lambda_literal_arg(file, arg) {
-                    CallArgKind::LambdaLiteral(ty)
-                } else if is_integer_literal_arg(file, arg) {
-                    CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
-                } else {
-                    CallArgKind::Typed(ty)
-                }
-            })
+            .map(|(&arg, &ty)| call_arg_kind(file, arg, ty))
             .collect()
     }
 
@@ -7011,8 +7015,10 @@ fn infer_lit_ty_p(
                         return t;
                     }
                     if !arg_tys.contains(&Ty::Error) {
-                        let arg_kinds: Vec<CallArgKind> =
-                            arg_tys.iter().map(|&ty| CallArgKind::Typed(ty)).collect();
+                        // Preserve the same syntax-only provenance as member-call inference. A
+                        // property initialized by an imported top-level overload must not resolve
+                        // differently merely because its callable has no explicit receiver.
+                        let arg_kinds = call_arg_kinds(file, args, &arg_tys);
                         if let Some(c) = resolver
                             .resolve_symbol_with_literal_and_lambda_args(
                                 crate::symbol_resolver::SymRecv::TopLevel,
@@ -9154,12 +9160,8 @@ pub enum LambdaCapture {
 }
 
 impl TypeInfo {
-    /// The checked type of an expression, with the `Ty::Const` literal-provenance wrapper stripped.
-    /// `Const` exists only for overload resolution inside the checker (integer-literal widening);
-    /// consumers of checked types — the lowerer, the JVM backend, tooling — always see the runtime
-    /// type (`Const(Int)` reads as `Int`).
     pub fn ty(&self, e: ExprId) -> Ty {
-        self.expr_types[e.0 as usize].normalize()
+        self.expr_types[e.0 as usize]
     }
     pub fn local_fun(&self, stmt_id: StmtId) -> Option<&LocalFunInfo> {
         match self.stmt_lowers.get(&stmt_id)? {
@@ -17647,15 +17649,7 @@ impl<'a> Checker<'a> {
         let arg_kinds: Vec<CallArgKind> = arguments
             .iter()
             .zip(argument_types.iter())
-            .map(|(&arg, &ty)| {
-                if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
-                    CallArgKind::LambdaLiteral(ty)
-                } else if self.is_integer_literal_arg(arg) {
-                    CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
-                } else {
-                    CallArgKind::Typed(ty)
-                }
-            })
+            .map(|(&arg, &ty)| call_arg_kind(self.file, arg, ty))
             .collect();
         let expectations = self.resolver().extension_argument_expectations(
             receiver,
@@ -17710,15 +17704,7 @@ impl<'a> Checker<'a> {
         let arg_kinds: Vec<CallArgKind> = args
             .iter()
             .zip(provisional)
-            .map(|(&arg, ty)| {
-                if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
-                    CallArgKind::LambdaLiteral(ty)
-                } else if self.is_integer_literal_arg(arg) {
-                    CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
-                } else {
-                    CallArgKind::Typed(ty)
-                }
-            })
+            .map(|(&arg, ty)| call_arg_kind(self.file, arg, ty))
             .collect();
         let candidate = self
             .resolver()
@@ -17746,18 +17732,15 @@ impl<'a> Checker<'a> {
     }
 
     /// The [`CallArgKind`] for an already-checked argument — pure, no checking side effects.
-    fn call_arg_kind(&self, arg: ExprId) -> CallArgKind {
-        if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
-            let ty = match self.expr_types[arg.0 as usize] {
-                Ty::Error => self.lambda_probe_ty(arg).unwrap_or(Ty::Error),
-                ty => ty,
-            };
-            CallArgKind::LambdaLiteral(ty)
-        } else if self.is_integer_literal_arg(arg) {
-            CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
+    fn call_arg_kind(&self, argument: ExprId) -> CallArgKind {
+        let ty = if matches!(self.file.expr(argument), Expr::Lambda { .. })
+            && self.expr_types[argument.0 as usize] == Ty::Error
+        {
+            self.lambda_probe_ty(argument).unwrap_or(Ty::Error)
         } else {
-            CallArgKind::Typed(self.expr_types[arg.0 as usize])
-        }
+            self.expr_types[argument.0 as usize]
+        };
+        call_arg_kind(self.file, argument, ty)
     }
 
     fn call_arg_kinds(&mut self, args: &[ExprId]) -> Vec<CallArgKind> {
@@ -17816,53 +17799,25 @@ impl<'a> Checker<'a> {
         args.iter()
             .enumerate()
             .map(|(index, &arg)| {
-                if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
-                    let ty = match lambda_params
+                let ty = if matches!(self.file.expr(arg), Expr::Lambda { .. }) {
+                    match lambda_params
                         .as_ref()
                         .and_then(|all| all.get(index))
                         .and_then(Option::as_deref)
                     {
                         Some(params) => self.check_lambda_with_types(arg, params),
                         None => partial[index].unwrap_or_else(|| self.expr(arg)),
-                    };
-                    CallArgKind::LambdaLiteral(ty)
-                } else if self.is_integer_literal_arg(arg) {
-                    CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int)))
+                    }
                 } else {
-                    CallArgKind::Typed(partial[index].unwrap_or(Ty::Error))
-                }
+                    partial[index].unwrap_or(Ty::Error)
+                };
+                call_arg_kind(self.file, arg, ty)
             })
             .collect()
     }
 
-    /// The checker-side view of [`is_integer_literal_arg`]: a literal or a constant fold over
-    /// literals (unary `-3`, arithmetic `1_700_000_000 + 1`). Provenance is SYNTACTIC — the
-    /// checker's expression types stay runtime types; the `Const` wrapper is only synthesized for
-    /// [`CallArgKind`] at call-argument positions.
-    fn is_integer_literal_arg(&self, expr: ExprId) -> bool {
-        match self.file.expr(expr) {
-            Expr::IntLit(_) => true,
-            Expr::Unary {
-                op: UnOp::Neg | UnOp::Plus,
-                operand,
-            } => self.is_integer_literal_arg(*operand),
-            Expr::Binary { op, lhs, rhs, .. } => {
-                matches!(
-                    op,
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
-                ) && self.is_integer_literal_arg(*lhs)
-                    && self.is_integer_literal_arg(*rhs)
-            }
-            _ => false,
-        }
-    }
-
-    fn integer_literal_adapts_to(&self, expected: Ty, actual: Ty, expr: ExprId) -> bool {
-        expected == Ty::Long && actual == Ty::Int && self.is_integer_literal_arg(expr)
-    }
-
     fn expect_library_call_arg(&mut self, expected: Ty, actual: Ty, expr: ExprId, context: &str) {
-        if !self.integer_literal_adapts_to(expected, actual, expr) {
+        if !call_arg_kind(self.file, expr, actual).adapts_integer_literal_to(expected) {
             self.expect_assignable(expected, actual, self.span(expr), context);
         }
     }
@@ -24949,9 +24904,10 @@ impl<'a> Checker<'a> {
         for (i, slot) in slots.iter().enumerate() {
             let Some(arg) = slot else { continue };
             let aty = self.expr_types[arg.0 as usize];
+            let argument = call_arg_kind(self.file, *arg, aty);
             if aty != Ty::Error
                 && !self.receiver_is_assignable(aty, params[i])
-                && !self.integer_literal_adapts_to_integral(params[i], aty, *arg)
+                && !argument.adapts_integer_literal_to(params[i])
                 && !self.erased_function_param_fits(params[i], aty)
             {
                 return None;
@@ -24959,18 +24915,6 @@ impl<'a> Checker<'a> {
             score += if params[i] == aty { 4 } else { 1 };
         }
         Some(score)
-    }
-
-    /// An integer LITERAL adapts to any integral parameter type, not just `Long`. Kotlin types the literal
-    /// from its context, so `f(a = 1)` is applicable to `f(a: Byte)`, `f(a: Short)` and `f(a: Long)` alike.
-    /// Scoring only `Int`→`Long` made an overload pair like `tie(Long)`/`tie(Byte)` look like a single
-    /// applicable candidate, so a genuinely AMBIGUOUS call silently picked one instead of being reported —
-    /// the "do not fall back to first match" property. Every adapted parameter scores the same as any other
-    /// inexact match, so the tie stays a tie.
-    fn integer_literal_adapts_to_integral(&self, expected: Ty, actual: Ty, expr: ExprId) -> bool {
-        actual == Ty::Int
-            && matches!(expected, Ty::Byte | Ty::Short | Ty::Long)
-            && self.is_integer_literal_arg(expr)
     }
 
     fn same_named_callable_exists(&self, name: &str) -> bool {
@@ -25126,9 +25070,6 @@ impl<'a> Checker<'a> {
     /// the argument is there to bind. So a function-typed parameter is matched on ARITY, and only its
     /// components that are NOT the erased top are judged.
     fn member_argument_score(&self, expected: Ty, actual: Ty) -> Option<usize> {
-        // `Ty::Const` records call-site provenance only. Module-member scoring must compare the
-        // value's runtime type or a literal `1` would stop matching an `Int` parameter.
-        let actual = actual.normalize();
         if expected == actual {
             return Some(4);
         }
@@ -25175,7 +25116,16 @@ impl<'a> Checker<'a> {
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
     ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
-        let score = |expected: Ty, actual: Ty| self.member_argument_score(expected, actual);
+        // Candidate scoring receives the expression as well as its runtime type so every module
+        // call shape (positional, named, defaulted, and vararg) consults the same literal adaptation
+        // carried by `CallArgKind`.
+        let score = |expected: Ty, actual: Ty, argument: ExprId| {
+            self.member_argument_score(expected, actual).or_else(|| {
+                call_arg_kind(self.file, argument, actual)
+                    .adapts_integer_literal_to(expected)
+                    .then_some(1)
+            })
+        };
         if arg_names.is_none() && !trailing_lambda {
             if !member.call_sig.vararg {
                 if args
@@ -25189,9 +25139,11 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 let mut type_score = 0;
-                for (expected, actual) in member.params.iter().zip(partial_arg_tys) {
+                for (index, (expected, actual)) in
+                    member.params.iter().zip(partial_arg_tys).enumerate()
+                {
                     if let Some(actual) = actual {
-                        type_score += score(*expected, *actual)?;
+                        type_score += score(*expected, *actual, args[index])?;
                     }
                 }
                 return Some((
@@ -25219,7 +25171,7 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 if let Some(actual) = actual {
-                    type_score += score(*expected, *actual)?;
+                    type_score += score(*expected, *actual, args[index])?;
                 }
             }
             let element = vararg.array_elem().unwrap_or(Ty::Error);
@@ -25231,7 +25183,7 @@ impl<'a> Checker<'a> {
                     } else {
                         element
                     };
-                    type_score += score(expected, *actual)?;
+                    type_score += score(expected, *actual, argument)?;
                 }
             }
             return Some((
@@ -25264,7 +25216,7 @@ impl<'a> Checker<'a> {
             } else {
                 *parameter
             };
-            type_score += score(expected, *actual)?;
+            type_score += score(expected, *actual, *argument)?;
         }
         Some((
             type_score,
@@ -26810,10 +26762,17 @@ impl<'a> Checker<'a> {
                 let classpath_arg_kinds: Vec<CallArgKind> = arg_kinds
                     .iter()
                     .map(|arg| {
-                        if has_classpath_sam {
-                            *arg
-                        } else {
-                            CallArgKind::Typed(arg.ty())
+                        match *arg {
+                            // A lambda probe is meaningful only when a classpath SAM candidate
+                            // supplied its expected parameter shape. Without one, keep the checked
+                            // function type and avoid letting the resolver reinterpret the lambda.
+                            CallArgKind::LambdaLiteral(ty) if !has_classpath_sam => {
+                                CallArgKind::Typed(ty)
+                            }
+                            // Integer provenance is independent of SAM inference and must reach
+                            // every classpath member path; collapsing it here rejects valid calls
+                            // such as a literal `Int` argument for a Java `long` parameter.
+                            arg => arg,
                         }
                     })
                     .collect();
@@ -26908,11 +26867,7 @@ impl<'a> Checker<'a> {
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
                     }
-                    // The hardcoded builtin shapes compare RUNTIME types — a `Const(Int)` literal
-                    // argument matches the `Int` shape.
-                    let runtime_arg_tys: Vec<Ty> =
-                        arg_tys.iter().map(|ty| ty.normalize()).collect();
-                    match (name.as_str(), runtime_arg_tys.as_slice()) {
+                    match (name.as_str(), arg_tys.as_slice()) {
                         ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => {
                             return Ty::String;
                         }
@@ -27426,10 +27381,6 @@ impl<'a> Checker<'a> {
                         .map(crate::symbol_resolver::Symbol::overloads)
                         .is_some_and(|overloads| !overloads.is_empty())
                         || {
-                            // Literal arguments carry the `Const` provenance wrapper — compare the
-                            // runtime types so `substring(1)` still matches the builtin shape.
-                            let arg_tys: Vec<Ty> =
-                                arg_tys.iter().map(|ty| ty.normalize()).collect();
                             matches!(
                                 (non_null, name.as_str(), arg_tys.as_slice()),
                                 (Ty::String, "substring", [Ty::Int])
@@ -31046,6 +30997,41 @@ mod tests {
     }
 
     #[test]
+    fn integer_literal_provenance_is_call_local_and_range_aware() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "fun sample() { target(127, 128, -129, 1 + 2, 1 / 0, 2_000_000_000 + 2_000_000_000) }",
+            &mut diagnostics,
+        );
+        let arguments = file
+            .expr_arena
+            .iter()
+            .find_map(|expression| match expression {
+                Expr::Call { callee, args }
+                    if matches!(file.expr(*callee), Expr::Name(name) if name == "target") =>
+                {
+                    Some(args)
+                }
+                _ => None,
+            })
+            .expect("target call");
+        let kinds = arguments
+            .iter()
+            .map(|argument| call_arg_kind(&file, *argument, Ty::Int))
+            .collect::<Vec<_>>();
+
+        assert!(kinds[0].adapts_integer_literal_to(Ty::Byte));
+        assert!(!kinds[1].adapts_integer_literal_to(Ty::Byte));
+        assert!(kinds[1].adapts_integer_literal_to(Ty::Short));
+        assert!(!kinds[2].adapts_integer_literal_to(Ty::Byte));
+        assert!(kinds[3].adapts_integer_literal_to(Ty::Byte));
+        assert!(!kinds[4].adapts_integer_literal_to(Ty::Short));
+        assert!(!kinds[4].adapts_integer_literal_to(Ty::Long));
+        assert!(!kinds[5].adapts_integer_literal_to(Ty::Long));
+        assert!(kinds.iter().all(|argument| argument.ty() == Ty::Int));
+    }
+
+    #[test]
     fn expected_unit_lambda_checks_trailing_when_as_a_statement() {
         ok("fun consumeUnit(block: () -> Unit) { block() }\n\
             fun statementWhen(value: Int) {\n\
@@ -33636,6 +33622,16 @@ fun box(): String {
         assert_eq!(target.param_meta, vec![("x".to_string(), None)]);
         assert!(!target.ret_is_tparam);
         assert_eq!(target.context_args, Vec::<String>::new());
+    }
+
+    #[test]
+    fn integer_literal_adaptation_is_consistent_across_source_call_origins() {
+        ok("fun topLevel(value: Long): Long = value\n\
+             class Owner { fun member(value: Long): Long = value }\n\
+             fun String.extension(value: Long): Long = value\n\
+             fun useTopLevel(): Long = topLevel(1)\n\
+             fun useMember(): Long = Owner().member(1 + 1)\n\
+             fun useExtension(): Long = \"\".extension(-1)");
     }
 
     #[test]

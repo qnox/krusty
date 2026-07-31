@@ -276,9 +276,6 @@ pub(crate) fn infer_constructor_type_args(
 /// Bind type variables by unifying a signature `Ty` (whose type variables are [`Ty::TyParam`]) against
 /// an actual argument `Ty`.
 pub(crate) fn unify_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
-    // Bind type variables to the RUNTIME type (see `unify_inferred_ty`): a literal receiver's
-    // `Const` provenance must not propagate through substitution into the backend.
-    let actual = actual.normalize();
     match sig {
         Ty::TyParam(n, _) => {
             binds.entry(n.to_string()).or_insert(actual);
@@ -339,10 +336,8 @@ pub(crate) fn inference_actual(actual: Ty) -> Ty {
 }
 
 pub(crate) fn merge_inferred_ty(current: Option<Ty>, actual: Ty) -> Ty {
-    // Joins produce a STORED type (branch result, inferred common type) — strip the `Const` literal
-    // provenance, which is only meaningful at call-argument positions.
-    let actual = inference_actual(actual.normalize());
-    let Some(current) = current.map(Ty::normalize) else {
+    let actual = inference_actual(actual);
+    let Some(current) = current else {
         return actual;
     };
     if actual == Ty::Nothing {
@@ -368,10 +363,6 @@ pub(crate) fn merge_inferred_ty(current: Option<Ty>, actual: Ty) -> Ty {
 }
 
 fn unify_inferred_ty(sig: Ty, actual: Ty, binds: &mut GSigBinds) {
-    // Generic bindings are SIGNATURE material: bind type variables to the argument's RUNTIME type.
-    // The `Const` literal provenance must not propagate through substitution into return types and
-    // the backend — it only matters for literal-adaptation during overload selection.
-    let actual = actual.normalize();
     match sig {
         Ty::TyParam(name, _) => match binds.entry(name.to_string()) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -801,10 +792,6 @@ fn resolution_subtype(
     ) || platform_subtype(lib, sub, sup)
 }
 
-fn integer_literal_adapts(param: Ty, arg: CallArgKind) -> bool {
-    arg.is_integer_literal() && arg.ty().normalize() == Ty::Int && param == Ty::Long
-}
-
 pub(crate) enum CandidateSelection<T> {
     None,
     Selected(T),
@@ -968,7 +955,7 @@ fn integer_literal_call_applies(
         .try_fold(false, |adapted, (i, (&param, arg))| {
             if param == arg.ty() {
                 Some(adapted)
-            } else if integer_literal_adapts(param, *arg) {
+            } else if arg.adapts_integer_literal_to(param) {
                 Some(true)
             } else if fits(i, &param, arg) {
                 Some(adapted)
@@ -984,9 +971,8 @@ fn parameter_at_least_as_specific(
     right: Ty,
     arg: CallArgKind,
 ) -> bool {
-    let right = right.normalize();
     left == right
-        || (arg.is_integer_literal() && left == Ty::Int && right == Ty::Long)
+        || (left == arg.ty() && arg.adapts_integer_literal_to(right))
         || platform_arg_assignable(lib, &right, &left)
 }
 
@@ -1042,7 +1028,7 @@ fn best_companion_overload<'a>(
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Option<&'a LibraryMember> {
-    let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| integer_literal_adapts(*p, *arg);
+    let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
     let fits = |_position: usize, param: &Ty, arg: &CallArgKind| {
         if arg.is_lambda_literal() {
             if param.fun_arity().is_some() {
@@ -1064,9 +1050,8 @@ fn best_companion_overload<'a>(
         )
     };
     let named = candidates.filter(|member| member.name == name);
-    // The exact-match probe compares RUNTIME types (see `best_by_args`): a `Const(Int)` literal
-    // fits an `int` parameter exactly; the literal passes below handle the widening cases.
-    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty().normalize()).collect();
+    // Literal provenance lives beside the type, so exact probes see the ordinary runtime `Int`.
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     if let Some(exact) = named.clone().find(|member| logical(member) == arg_tys) {
         return Some(exact);
     }
@@ -2030,7 +2015,7 @@ impl<'a> SymbolResolver<'a> {
                     receiver: Some(Ty::obj_name(internal)),
                 };
                 // Constructor overload probes compare RUNTIME types (see above).
-                let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty().normalize()).collect();
+                let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
                 if name.is_empty() {
                     // `Type(args)` — the type's constructor, real or synthesized.
                     resolve_constructor_name(self.lib, &self.src, internal, &arg_tys)
@@ -2114,9 +2099,8 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
         expected: Option<Ty>,
     ) -> Option<LibraryCallable> {
-        // Exact-match and default-mapping probes compare RUNTIME types (see `best_by_args`): a
-        // `Const(Int)` literal fits an `Int` parameter exactly; the literal passes use `args`.
-        let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty().normalize()).collect();
+        // Exact/default probes see ordinary runtime types; `args` separately drives adaptation.
+        let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
         let parsed: Vec<(&FunctionInfo, Vec<Ty>, Ty)> = fs
             .top_level()
             .filter(|o| o.public())
@@ -2131,7 +2115,7 @@ impl<'a> SymbolResolver<'a> {
             })
             .collect();
         let fits = |p: &Ty, a: &CallArgKind| self.arg_fits_or_subtype(p, &a.ty());
-        let adapts = |p: &Ty, a: &CallArgKind, _i: usize| integer_literal_adapts(*p, *a);
+        let adapts = |p: &Ty, a: &CallArgKind, _i: usize| a.adapts_integer_literal_to(*p);
 
         let pick = if let Some(exact) = parsed.iter().find(|(_, params, _)| params == &arg_tys) {
             Some(exact)
@@ -3938,17 +3922,27 @@ fn member_visible(
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CallArgKind {
-    /// A fully inferred expression type. Integer literals use `Ty::Const(Int)`.
+    /// A fully inferred non-lambda expression type.
     Typed(Ty),
     /// A lambda literal whose `Ty::Fun` may have unknown parameter/return types (`Error`).
     /// The resolver may infer those unknowns from the candidate overload.
     LambdaLiteral(Ty),
+    /// A safely folded integer constant and its ordinary runtime type. Expressions that overflow
+    /// `Int` or divide by zero never receive this variant: lowering evaluates their `Int` operations
+    /// before a call-boundary coercion, so treating them as adaptable would change their behavior.
+    IntegerLiteral { ty: Ty, value: i32 },
 }
 
 impl CallArgKind {
+    pub(crate) fn integer_literal(ty: Ty, value: i32) -> Self {
+        Self::IntegerLiteral { ty, value }
+    }
+
     pub(crate) fn ty(self) -> Ty {
         match self {
-            CallArgKind::Typed(ty) | CallArgKind::LambdaLiteral(ty) => ty,
+            CallArgKind::Typed(ty)
+            | CallArgKind::LambdaLiteral(ty)
+            | CallArgKind::IntegerLiteral { ty, .. } => ty,
         }
     }
 
@@ -3957,7 +3951,25 @@ impl CallArgKind {
     }
 
     pub(crate) fn is_integer_literal(self) -> bool {
-        matches!(self, CallArgKind::Typed(ty) if ty.is_const() && ty.const_inner() == Ty::Int)
+        matches!(self, CallArgKind::IntegerLiteral { .. })
+    }
+
+    /// Whether this literal may be contextually typed as `parameter`.
+    ///
+    /// Keeping the rule on the argument object makes positional, named, module, classpath, and
+    /// extension resolution share one adaptation policy instead of maintaining origin-specific
+    /// boolean arrays. A runtime `Int` is exact; contextual adaptation additionally admits `Long`,
+    /// and admits `Byte`/`Short` only when the folded value is known to fit.
+    pub(crate) fn adapts_integer_literal_to(self, parameter: Ty) -> bool {
+        let CallArgKind::IntegerLiteral { ty: Ty::Int, value } = self else {
+            return false;
+        };
+        match parameter {
+            Ty::Byte => i8::try_from(value).is_ok(),
+            Ty::Short => i16::try_from(value).is_ok(),
+            Ty::Long => true,
+            _ => false,
+        }
     }
 }
 
@@ -4413,10 +4425,9 @@ pub(crate) fn best_by_args<'a>(
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[CallArgKind],
 ) -> CandidateSelection<&'a FunctionInfo> {
-    // Exact-match passes compare RUNTIME types: a `Const(Int)` literal fits an `Int` parameter
-    // exactly. The `Const` provenance only drives the literal-adaptation passes (via `args`).
-    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty().normalize()).collect();
-    let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| integer_literal_adapts(*p, *arg);
+    // Exact passes see runtime types; literal provenance only drives the adaptation passes.
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
+    let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
     let function_like_fits = |p: &Ty, arg: &CallArgKind| {
         arg.ty().fun_arity().is_none()
             && p.fun_arity()
@@ -4441,7 +4452,7 @@ pub(crate) fn best_by_args<'a>(
         if arg.is_lambda_literal() && p.fun_arity().is_none() {
             classpath_sam_arg_matches(lib, *p, arg.ty())
         } else {
-            *p == arg.ty().normalize()
+            *p == arg.ty()
                 || *p == Ty::obj("kotlin/Any")
                 || fun_arg_matches(lib, p, &arg.ty(), arg.is_lambda_literal())
                 || function_like_fits(p, arg)
@@ -4676,7 +4687,7 @@ mod tests {
         CallSig, FunctionSet, LibraryCallable, LibraryMember, LibraryType, Origin, TypeKind,
     };
     use crate::symbol_source::SymbolSource;
-    use crate::types::{intern_ty, type_name};
+    use crate::types::type_name;
 
     #[test]
     fn inferred_generic_binding_joins_null_with_the_non_null_element_type() {
@@ -5044,8 +5055,8 @@ mod tests {
             info: top_level_nullable_string_info(),
         };
         let args = [
-            CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int))),
-            CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int))),
+            CallArgKind::integer_literal(Ty::Int, 1),
+            CallArgKind::integer_literal(Ty::Int, 1),
         ];
         let selected = integer_literal_overload(
             [
@@ -5054,7 +5065,7 @@ mod tests {
             ]
             .into_iter(),
             &args,
-            |_, param, arg| arg_fits(param, &arg.ty().normalize()),
+            |_, param, arg| arg_fits(param, &arg.ty()),
             |_, left, right, arg| parameter_at_least_as_specific(&source, left, right, arg),
             |_, _| false,
         );
@@ -5067,11 +5078,29 @@ mod tests {
             ]
             .into_iter(),
             &args,
-            |_, param, arg| arg_fits(param, &arg.ty().normalize()),
+            |_, param, arg| arg_fits(param, &arg.ty()),
             |_, left, right, arg| parameter_at_least_as_specific(&source, left, right, arg),
             |_, _| false,
         );
         assert!(matches!(ambiguous, CandidateSelection::Ambiguous));
+
+        let select_integral_width = |value| {
+            integer_literal_overload(
+                [(vec![Ty::Byte], "byte"), (vec![Ty::Long], "long")].into_iter(),
+                &[CallArgKind::integer_literal(Ty::Int, value)],
+                |_, param, arg| arg_fits(param, &arg.ty()),
+                |_, left, right, arg| parameter_at_least_as_specific(&source, left, right, arg),
+                |_, _| false,
+            )
+        };
+        assert!(matches!(
+            select_integral_width(1),
+            CandidateSelection::Ambiguous
+        ));
+        assert!(matches!(
+            select_integral_width(1_000),
+            CandidateSelection::Selected("long")
+        ));
     }
 
     #[test]
@@ -5509,7 +5538,7 @@ mod tests {
                     ],
                 },
                 &[
-                    CallArgKind::Typed(Ty::Const(intern_ty(Ty::Int))),
+                    CallArgKind::integer_literal(Ty::Int, 1),
                     CallArgKind::Typed(Ty::obj("demo/Leaf")),
                 ],
                 &[],

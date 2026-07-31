@@ -13569,10 +13569,6 @@ impl<'a> Lower<'a> {
     }
 
     fn coerce_argument_value(&mut self, value: u32, actual: Ty, target: Ty) -> Option<u32> {
-        // `Ty::Const` is an overload-resolution provenance wrapper; for JVM emission we care about
-        // the underlying representation, so strip it before deciding on boxing/unboxing/widening.
-        let actual = actual.normalize();
-        let target = target.normalize();
         let target_ref = ir_type_is_reference(&target);
         if actual.is_unsigned() && target_ref {
             return self.box_unsigned(value, actual);

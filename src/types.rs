@@ -489,11 +489,6 @@ pub enum Ty {
     /// A nullable type `T?`. Wraps the interned non-null type. Kotlin has no `T??`, so the inner type
     /// is never itself `Nullable` (the [`Ty::nullable`] constructor enforces this).
     Nullable(&'static Ty),
-    /// A compile-time constant of the inner type. Produced from integer literals and preserved through
-    /// constant-foldable expressions so that overload resolution can apply literal widening (e.g.
-    /// `Const(Int)` matches a `Long` parameter). Must be normalized away before backend emission and
-    /// before storing types in signatures.
-    Const(&'static Ty),
     /// A generic type-parameter reference (`T`), carrying its name and declared upper bound
     /// (`<T : CharSequence>` → bound `CharSequence`; unbounded `<T>` → bound `kotlin/Any`). The checker
     /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime
@@ -534,7 +529,6 @@ impl Ty {
         match self {
             Ty::Obj(_, args) => args,
             Ty::TyParam(_, b) => b.type_args(),
-            Ty::Const(inner) => inner.type_args(),
             _ => &[],
         }
     }
@@ -559,7 +553,6 @@ impl Ty {
             Ty::Obj(n, args) if n.matches("kotlin/Array") => args.first().copied(),
             Ty::Obj(n, _) => prim_array_element(n),
             Ty::TyParam(_, b) => b.array_elem(),
-            Ty::Const(inner) => inner.array_elem(),
             _ => None,
         }
     }
@@ -601,61 +594,6 @@ impl Ty {
         }
     }
 
-    /// Whether this is a compile-time constant type (`Const(_)`).
-    pub fn is_const(self) -> bool {
-        matches!(self, Ty::Const(_))
-    }
-
-    /// The inner type of a `Const(_)` type, else `self`.
-    pub fn const_inner(self) -> Ty {
-        match self {
-            Ty::Const(inner) => *inner,
-            _ => self,
-        }
-    }
-
-    /// Strip `Const` wrappers, returning the underlying type. Used wherever the compiler needs the
-    /// runtime/checking type rather than the compile-time-constant provenance. Recurses through
-    /// function signatures, nullability, and type arguments so no `Const` remains nested inside a
-    /// composite type (e.g. the return type of a lambda whose body is an integer literal).
-    pub fn normalize(self) -> Ty {
-        match self {
-            Ty::Const(inner) => inner.normalize(),
-            Ty::Nullable(inner) => {
-                let inner_norm = inner.normalize();
-                if inner_norm == *inner {
-                    self
-                } else {
-                    Ty::nullable(inner_norm)
-                }
-            }
-            Ty::Fun(sig) => {
-                let params: Vec<Ty> = sig.params.iter().map(|p| p.normalize()).collect();
-                let ret = sig.ret.normalize();
-                if params == sig.params && ret == sig.ret {
-                    self
-                } else {
-                    Ty::Fun(intern_fnsig(FnSig {
-                        params,
-                        ret,
-                        context_count: sig.context_count,
-                        has_receiver: sig.has_receiver,
-                        suspend: sig.suspend,
-                    }))
-                }
-            }
-            Ty::Obj(name, args) => {
-                let normalized: Vec<Ty> = args.iter().map(|a| a.normalize()).collect();
-                if *normalized.as_slice() == *args {
-                    self
-                } else {
-                    Ty::Obj(name, intern_tys(&normalized))
-                }
-            }
-            _ => self,
-        }
-    }
-
     /// Kotlin class identity for types that have one in source-level member/subtype lookup.
     ///
     /// This is not a JVM descriptor mapping: it returns Kotlin internal names (`kotlin/Int`,
@@ -676,7 +614,6 @@ impl Ty {
             Ty::UInt => Some(type_name("kotlin/UInt")),
             Ty::ULong => Some(type_name("kotlin/ULong")),
             Ty::Nullable(inner) => inner.kotlin_class_internal(),
-            Ty::Const(inner) => inner.kotlin_class_internal(),
             Ty::TyParam(_, bound) => bound.kotlin_class_internal(),
             _ => None,
         }
@@ -736,7 +673,6 @@ impl Ty {
                 other => other.erased_recv(),
             },
             Ty::TyParam(_, b) => b.erased_recv(),
-            Ty::Const(inner) => inner.erased_recv(),
             // `Array<T>` keeps its array-ness but erases the ELEMENT's own generics (`Array<List<Int>>` →
             // `Array<List>`) — an array receiver keys per element class. Use `obj_args` (NOT `Ty::array`,
             // which collapses a bare-primitive element to a `IntArray` = `[I`, breaking the boxed
@@ -761,7 +697,6 @@ impl Ty {
     pub fn extension_recv_key(self) -> Ty {
         match self {
             Ty::Nullable(inner) => Ty::nullable(inner.extension_recv_key()),
-            Ty::Const(inner) => inner.extension_recv_key(),
             Ty::TyParam(_, bound) => Ty::ty_param("\u{0}", bound.extension_recv_key()),
             Ty::Obj(n, args) if n.matches("kotlin/Array") => {
                 let element = args
@@ -1038,7 +973,6 @@ impl Ty {
                     format!("{rendered}?")
                 }
             }
-            Ty::Const(inner) => inner.source_name(),
             Ty::TyParam(n, _) => n.to_string(),
         }
     }
@@ -1063,7 +997,6 @@ impl Ty {
             Ty::Error => "<error>".to_string(),
             Ty::Fun(_) => "Function".to_string(),
             Ty::Nullable(inner) => format!("{}?", inner.name()),
-            Ty::Const(inner) => inner.name(),
             Ty::TyParam(name, _) => name.to_string(),
         }
     }
@@ -1083,7 +1016,6 @@ impl Ty {
     pub fn is_reference(self) -> bool {
         match self {
             Ty::TyParam(_, b) => b.is_reference(),
-            Ty::Const(inner) => inner.is_reference(),
             _ => matches!(
                 self,
                 Ty::String | Ty::Obj(..) | Ty::Null | Ty::Fun(_) | Ty::Nullable(_)
@@ -1092,20 +1024,14 @@ impl Ty {
     }
 
     pub fn is_numeric(self) -> bool {
-        match self {
-            Ty::Const(inner) => inner.is_numeric(),
-            _ => matches!(
-                self,
-                Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double
-            ),
-        }
+        matches!(
+            self,
+            Ty::Int | Ty::Byte | Ty::Short | Ty::Long | Ty::Float | Ty::Double
+        )
     }
 
     pub fn is_numeric_or_char(self) -> bool {
-        match self {
-            Ty::Const(inner) => inner.is_numeric_or_char(),
-            _ => self.is_numeric() || self == Ty::Char,
-        }
+        self.is_numeric() || self == Ty::Char
     }
 
     /// True for a member/property read result that can be used as an expression value in the current
@@ -1159,12 +1085,8 @@ impl Ty {
     }
 
     /// Whether a numeric `actual` can be assigned to this numeric target in source checking.
-    /// `Const` wrappers are normalized away on the actual side so a `Const(Int)` literal can be
-    /// accepted where `Long` is expected.
     pub fn accepts_numeric(self, actual: Ty) -> bool {
-        let actual = actual.normalize();
         match self {
-            Ty::Int => matches!(actual, Ty::Int),
             Ty::Byte | Ty::Short => matches!(actual, Ty::Int | Ty::Byte | Ty::Short),
             Ty::Long => matches!(actual, Ty::Int | Ty::Byte | Ty::Short | Ty::Char),
             Ty::Float | Ty::Double => matches!(

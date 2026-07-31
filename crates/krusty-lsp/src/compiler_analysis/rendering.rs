@@ -88,8 +88,6 @@ pub(crate) fn render_ty(ty: Ty) -> String {
             format!("{suspend}({parameters}) -> {}", render_ty(signature.ret))
         }
         Ty::Nullable(inner) => format!("{}?", render_ty(*inner)),
-        // Compile-time-constant provenance is invisible to the user — render the underlying type.
-        Ty::Const(inner) => render_ty(*inner),
         Ty::TyParam(name, _) => name.to_string(),
     }
 }
