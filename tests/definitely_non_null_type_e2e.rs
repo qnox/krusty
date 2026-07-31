@@ -423,3 +423,19 @@ fn inferred_nullable_constructor_type_is_retained_for_member_reads() {
         );
     }
 }
+
+#[test]
+fn dnn_cast_throws_npe_on_null() {
+    // `t as (T & Any)` on an unbounded (nullable-bound) `T` null-checks like kotlinc: `null` throws
+    // NullPointerException, a non-null value passes through. (The Kotlin box-corpus case
+    // `casts/castToDefinitelyNotNullType.kt`.)
+    const SRC: &str = "fun <T> test(t: T) = t as (T & Any)\n\
+        fun box(): String =\n\
+        \x20 try {\n\
+        \x20   test<Any?>(null)\n\
+        \x20   \"FAIL: expected NPE\"\n\
+        \x20 } catch (ex: NullPointerException) {\n\
+        \x20   test(\"OK\")\n\
+        \x20 }\n";
+    assert_eq!(run(SRC).expect("dnn cast NPE"), "OK");
+}
