@@ -869,7 +869,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   against a real kotlinc `if/else` inline fn (`inline_splice_e2e`). Pending: lambda-argument splicing
   (splice the caller's lambda at the callee's `FunctionN.invoke` sites — retires the
   `forEach`/`let`/`also` desugars) → non-local return → invokedynamic relocation. Tested by the
-  `UserInline` snippet in `tests/feature_box_e2e.rs`.
+  `UserInline` snippet in `tests/feature_box_e2e.rs`. Two soundness declines gate every splice: a
+  `$default` body is never spliced (the caller's placeholder nulls would type its parameter locals
+  `Object`, a VerifyError — the real call is verifier-correct), and a body referencing an
+  `ACC_PRIVATE` method/field is never spliced (the member is legal only inside the defining class;
+  kotlinc rewrites to a synthetic `access$…` bridge krusty does not model — the fallback real call
+  stays in the class).
   **Cross-file source calls to top-level `inline fun`s link as facade statics.** A same-file call
   splices the body; a call from ANOTHER file of the same module has no AST to splice, so the
   defining file lowers + emits the inline fun as a facade static (kotlinc's `public static
@@ -1963,6 +1968,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   straight through, so a null placeholder trips the callee's non-null vararg check
   (`classpath_default_vararg_call_e2e`, including a JVM box run). Known gap: the named-array form
   `f(more = arrayOf(x))` with an omitted default before the vararg still fails to map.
+  A NAMED argument that also omits a default (`foo(y = "Y")` skipping `x`) maps through the
+  checker's recorded argument→slot mapping at every `$default` emit site — the bare-name path once
+  ignored it and bound the argument to the FIRST slot while masking the LAST, silently swapping
+  the parameters (`named_args_classpath_e2e::named_arg_omitting_a_default_maps_to_its_own_slot`).
   Calling an ordinary member or a concrete non-null extension through a nullable receiver reports
   `only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T?'.`
   at the unsafe `.`. A nullable-receiver extension remains callable through ordinary dot syntax and

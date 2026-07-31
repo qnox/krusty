@@ -9,6 +9,7 @@
 use crate::types::{TypeName, TypeNameList};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
+pub const ACC_PRIVATE: u16 = 0x0002;
 pub const ACC_PROTECTED: u16 = 0x0004;
 pub const ACC_STATIC: u16 = 0x0008;
 pub const ACC_BRIDGE: u16 = 0x0040;
@@ -47,6 +48,9 @@ impl MethodSig {
     pub fn is_static(&self) -> bool {
         self.access & ACC_STATIC != 0
     }
+    pub fn is_private(&self) -> bool {
+        self.access & ACC_PRIVATE != 0
+    }
     pub fn is_abstract(&self) -> bool {
         self.access & 0x0400 != 0
     }
@@ -74,6 +78,12 @@ pub struct FieldSig {
     pub const_value: Option<ConstVal>,
     /// The field's generic `Signature` attribute (`TA;` for a type-parameter field), if present.
     pub signature: Option<String>,
+}
+
+impl FieldSig {
+    pub fn is_private(&self) -> bool {
+        self.access & ACC_PRIVATE != 0
+    }
 }
 
 /// A field's compile-time constant value (from the `ConstantValue` attribute).

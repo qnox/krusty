@@ -505,7 +505,6 @@ fn compile_blocks(
     jdk_modules: Option<&std::path::Path>,
     features: &krusty::features::LangFeatures,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    use krusty::ast::Decl;
     let mut diags = DiagSink::new();
     let mut files: Vec<_> = blocks
         .iter()
@@ -537,36 +536,11 @@ fn compile_blocks(
     if diags.has_errors() {
         return None;
     }
-    // Cross-file maps: each top-level (non-extension) function/property → its file's facade.
-    let mut fns: Vec<(u32, u32, String, String)> = Vec::new();
-    let mut props: Vec<(String, String)> = Vec::new();
-    for (i, file) in files.iter().enumerate() {
-        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
-        for &d in &file.decls {
-            match file.decl(d) {
-                Decl::Fun(f) if syms.emits_fn_facade(file, i as u32, d, f) => {
-                    fns.push((i as u32, d.0, f.name.clone(), facade.clone()))
-                }
-                Decl::Property(p) if p.receiver.is_none() => {
-                    props.push((p.name.clone(), facade.clone()))
-                }
-                _ => {}
-            }
-        }
-    }
-    for (file_index, decl_id, name, facade) in fns {
-        let facade_name = krusty::types::type_name(&facade);
-        syms.fn_facades_by_decl
-            .insert((file_index, decl_id), facade_name);
-        syms.fn_facades.insert(name, facade_name);
-    }
-    for (name, facade) in props {
-        if let Some(&(ty, is_var, is_const)) = syms.props.get(&name) {
-            let facade_name = krusty::types::type_name(&facade);
-            syms.prop_facades
-                .insert(name, (facade_name, ty, is_var, is_const));
-        }
-    }
+    // Cross-file maps: each top-level function/property (inline fns with callable bodies
+    // included) → its file's facade. Use the PRODUCTION registration so the harness can't drift
+    // from the CLI (it did: it excluded all inline fns).
+    let stems: Vec<String> = blocks.iter().map(|(name, _)| name.clone()).collect();
+    krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
 
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {

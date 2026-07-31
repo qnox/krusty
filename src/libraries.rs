@@ -378,6 +378,9 @@ impl LibraryCallable {
             signature: None,
             origin: Origin::Library,
             source_receiver: None,
+            context_count: 0,
+            contract: None,
+            generic_sig: None,
         }
     }
 
@@ -485,6 +488,18 @@ pub struct LibraryCallable {
     /// extension receiver must unbox to the value class's underlying; `params[0]` is already erased and
     /// cannot make that distinction. This is the un-erased-source-type down payment on task B.
     pub source_receiver: Option<Ty>,
+    /// Number of LEADING context parameters (`context(a: A) fun f()`) in `params` — supplied
+    /// implicitly by the caller, not positionally, so arity checks and argument mapping skip them.
+    pub context_count: usize,
+    /// The callable's declared contract, decoded from `@Metadata` — the effects the checker applies
+    /// at call sites (`returns(…) implies …`, `callsInPlace`). `None` when it declares none.
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
+    /// The metadata-primary generic signature (formal type parameters + receiver/param/return
+    /// nodes), when the callable came from `@Metadata` with one. The checker reads this to bind a
+    /// contract's type-parameter conclusions (`value is R`) at the call site — the JVM `Signature`
+    /// in [`Self::signature`] is absent on krusty-emitted classes. Boxed: this struct rides the
+    /// `ResolvedCall` enum, whose variant size must stay flat.
+    pub generic_sig: Option<Box<GenericSig>>,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member

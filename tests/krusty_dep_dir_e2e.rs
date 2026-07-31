@@ -76,3 +76,21 @@ fn extension_property_from_dep_dir() {
         .expect("extension property from a krusty-built dep dir must compile and run");
     assert_eq!(out, "OK");
 }
+
+/// The multi-module conformance shape (`inlineSizeReduction/multiModuleDefaultArgsCleanup`): an
+/// inline fn with defaulted params in a KRUSTY-built dep, called with named/omitted arguments
+/// from another module. The `$default` body must not be spliced and the slot mapping must hold.
+#[test]
+fn inline_fn_with_defaults_named_calls_from_dep_dir() {
+    let Some(dir) = dep_dir(
+        "inline_named",
+        "package dep\n\ninline fun foo(x: String = \"x\", y: String = \"y\") = x + y\n",
+    ) else {
+        return;
+    };
+    let Some(stdlib) = stdlib_jar() else { return };
+    let main = "import dep.foo\n\nfun box(): String {\n    val r = foo() + \";\" + foo(x = \"X\") + \";\" + foo(y = \"Y\") + \";\" + foo(x = \"X\", y = \"Y\")\n    return if (r == \"xy;Xy;xY;XY\") \"OK\" else \"fail: $r\"\n}\n";
+    let out = compile_and_run_box(main, "Main", &[dir, stdlib], jdk_modules().as_deref())
+        .expect("inline fn with defaults from a krusty-built dep dir must compile and run");
+    assert_eq!(out, "OK");
+}
