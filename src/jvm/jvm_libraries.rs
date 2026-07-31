@@ -237,6 +237,7 @@ impl JvmLibraries {
                 flags: FnFlags {
                     inline: inline_kind,
                     suspend,
+                    operator: meta.is_operator,
                 },
                 ..FunctionInfo::plain(kind, None, callable)
             });
@@ -2302,6 +2303,7 @@ impl SymbolSource for JvmLibraries {
                     flags: FnFlags {
                         inline,
                         suspend: mf.is_suspend(),
+                        operator: mf.is_operator(),
                     },
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
@@ -2573,7 +2575,8 @@ impl SymbolSource for JvmLibraries {
                             recovered.unwrap_or(m.ret)
                         };
                         let call_sig = member_facts
-                            .map(|facts| facts.call_sig)
+                            .as_ref()
+                            .map(|facts| facts.call_sig.clone())
                             .unwrap_or_else(|| m.call_sig.clone());
                         // A generic-return builtin member (`Map.get(K): V?`) resolves to the erased
                         // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
@@ -2626,6 +2629,9 @@ impl SymbolSource for JvmLibraries {
                             flags: FnFlags {
                                 inline: m.inline,
                                 suspend,
+                                operator: member_facts
+                                    .as_ref()
+                                    .is_some_and(|facts| facts.is_operator),
                             },
                             ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
                         });

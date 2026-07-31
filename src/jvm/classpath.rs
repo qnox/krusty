@@ -724,6 +724,8 @@ pub struct MetadataCallFacts {
     pub kept_params: Option<usize>,
     pub call_sig: CallSig,
     pub ret: ReturnInfo,
+    /// Kotlin's source-level `operator` modifier. The JVM descriptor/name cannot encode it.
+    pub is_operator: bool,
 }
 
 impl MetadataCallFacts {
@@ -732,6 +734,7 @@ impl MetadataCallFacts {
             kept_params: None,
             call_sig,
             ret: ReturnInfo::default(),
+            is_operator: false,
         }
     }
 }
@@ -1611,6 +1614,7 @@ impl Classpath {
             kept_params: Some(end),
             call_sig,
             ret: metadata_return_info(c.ret_class, c.ret_nullable()),
+            is_operator: c.is_operator(),
         }
     }
 
@@ -1627,6 +1631,7 @@ impl Classpath {
             kept_params: None,
             call_sig: function.member_call_sig(),
             ret: metadata_return_info(function.ret_class, function.ret_nullable()),
+            is_operator: function.is_operator(),
         })
     }
 

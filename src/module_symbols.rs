@@ -525,6 +525,7 @@ fn fn_info(
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
             suspend: sig.is_suspend(),
+            operator: sig.is_operator(),
         },
         visibility: sig.visibility,
         ..FunctionInfo::plain(kind, receiver, callable)
