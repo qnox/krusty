@@ -575,14 +575,10 @@ pub fn facade_package_metadata(
             // name. Unresolvable references stay `Source` (the emitter degrades them to `Any`).
             context_count: sig.context_count,
             contract: sig.contract.as_ref().map(|c| {
-                // Source-level class name → JVM internal name: a module class first, then the
-                // known imports (same lookup as the checker's, kept local for module layering).
-                let resolve_class = |n: &str| {
-                    syms.classes
-                        .get(n)
-                        .map(|c| crate::types::type_name(&c.internal()))
-                        .or_else(|| syms.class_names.get(n))
-                };
+                // Source-level class name → JVM internal name — the SAME lookup the checker uses
+                // (`class_internal_resolver`, shared via `frontend`), so contract types resolve
+                // identically on both sides of the metadata boundary.
+                let resolve_class = crate::frontend::class_internal_resolver(syms);
                 std::sync::Arc::new(c.with_resolved_types(&mut |tref| {
                     if f.type_params.iter().any(|tp| tp == &tref.name) {
                         Some(Ty::ty_param(

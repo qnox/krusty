@@ -7834,8 +7834,11 @@ fn is_function_property_shape(ty: Ty) -> bool {
 /// A bound-name → JVM-internal resolver over a `SymbolTable`: a user-declared class by simple name, else
 /// the merged class-name map (which already carries the Kotlin built-in → JVM mapping, `CharSequence`
 /// → `java/lang/CharSequence`). Borrows only the (copied) `&SymbolTable`, so a caller can hold it while
-/// mutating `self.tparams`.
-fn class_internal_resolver(syms: &SymbolTable) -> impl Fn(&str) -> Option<TypeName> + '_ {
+/// mutating `self.tparams`. Shared with the jvm backend (via `frontend`) so the checker and the
+/// `@Metadata` emitter resolve contract type references through ONE lookup and cannot drift.
+pub(crate) fn class_internal_resolver(
+    syms: &SymbolTable,
+) -> impl Fn(&str) -> Option<TypeName> + '_ {
     move |n: &str| {
         syms.classes
             .get(n)
