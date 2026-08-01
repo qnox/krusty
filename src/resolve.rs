@@ -10071,6 +10071,48 @@ struct CaptureDiscoveryScope {
     declarations: std::collections::HashSet<DeclId>,
 }
 
+impl CaptureDiscoveryScope {
+    fn checks_function(&self, file: &File, function: &FunDecl) -> bool {
+        fun_contains_any(file, function, &self.constructions)
+    }
+
+    /// Instance and enum-entry methods share the checker's inferred-return cache. Preserve the
+    /// exact lexical checker state through the last method that can discover a capture, then stop:
+    /// later methods cannot affect an already-checked construction. If a construction is outside
+    /// that method sequence, retain the whole sequence because later class regions (notably the
+    /// companion) can consume its inferred returns.
+    fn method_check_prefix_len(&self, file: &File, class: &ClassDecl) -> usize {
+        let methods = class
+            .methods
+            .iter()
+            .chain(
+                class
+                    .enum_entries
+                    .iter()
+                    .flat_map(|entry| entry.methods.iter()),
+            )
+            .collect::<Vec<_>>();
+        let method_count = methods.len();
+        let has_class_construction_outside_methods =
+            self.constructions.iter().any(|construction| {
+                let target = std::collections::HashSet::from([*construction]);
+                class_contains_any(file, class, &target)
+                    && !methods
+                        .iter()
+                        .any(|method| fun_contains_any(file, method, &target))
+            });
+        if has_class_construction_outside_methods {
+            return method_count;
+        }
+        methods
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, method)| self.checks_function(file, method).then_some(index + 1))
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 /// Capture discovery needs lexical state from the declaration containing each anonymous-object
 /// construction, but declarations are checked in isolated top-level scopes. Find those owners once
 /// so the scratch checker does not re-check every unrelated declaration in the file.
@@ -10651,8 +10693,15 @@ fn check_file_at_impl_mode(
                         }
                     }
                 }
+                let method_check_prefix_len = capture_scope
+                    .as_ref()
+                    .map_or(usize::MAX, |scope| scope.method_check_prefix_len(file, cl));
+                let mut method_check_index = 0;
                 for m in &cl.methods {
-                    c.check_method(m, &props);
+                    if method_check_index < method_check_prefix_len {
+                        c.check_method(m, &props);
+                    }
+                    method_check_index += 1;
                 }
                 // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
                 // checked like a method of the enum — `this` is the enum type, the enum's properties AND
@@ -10696,7 +10745,10 @@ fn check_file_at_impl_mode(
                         c.pop_scope();
                     }
                     for bm in &entry.methods {
-                        c.check_method(bm, &entry_props);
+                        if method_check_index < method_check_prefix_len {
+                            c.check_method(bm, &entry_props);
+                        }
+                        method_check_index += 1;
                     }
                 }
                 // Secondary constructors: check and record one delegation target before the body.
@@ -11186,7 +11238,12 @@ fn check_file_at_impl_mode(
                         }
                     }
                     for m in &cl.companion_methods {
-                        c.check_fun(m, None);
+                        if capture_scope
+                            .as_ref()
+                            .is_none_or(|scope| scope.checks_function(file, m))
+                        {
+                            c.check_fun(m, None);
+                        }
                     }
                     c.companion_of = None;
                 }
@@ -32529,6 +32586,16 @@ class Owner {
         val captured = seed
         return object : Marker { fun value(): Int = captured }
     }
+    fun after(): Int = 3
+}
+class Factory {
+    companion object {
+        fun untouched(): Int = 5
+        fun build(seed: Int): Marker {
+            val captured = seed
+            return object : Marker { fun value(): Int = captured }
+        }
+    }
 }
 fun after(): Int = 3
 "#;
@@ -32552,7 +32619,35 @@ fun after(): Int = 3
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(named, vec!["top", "defaulted", "target", "Owner"]);
+        assert_eq!(
+            named,
+            vec!["top", "defaulted", "target", "Owner", "Factory"]
+        );
+
+        let owner = file
+            .decls
+            .iter()
+            .find_map(|declaration| match file.decl(*declaration) {
+                Decl::Class(class) if class.name == "Owner" => Some(class),
+                _ => None,
+            })
+            .expect("source should contain Owner");
+        let scope = capture_discovery_scope(&file);
+        assert_eq!(scope.method_check_prefix_len(&file, owner), 2);
+        assert!(!scope.checks_function(&file, &owner.methods[0]));
+        assert!(scope.checks_function(&file, &owner.methods[1]));
+        assert!(!scope.checks_function(&file, &owner.methods[2]));
+
+        let factory = file
+            .decls
+            .iter()
+            .find_map(|declaration| match file.decl(*declaration) {
+                Decl::Class(class) if class.name == "Factory" => Some(class),
+                _ => None,
+            })
+            .expect("source should contain Factory");
+        assert!(!scope.checks_function(&file, &factory.companion_methods[0]));
+        assert!(scope.checks_function(&file, &factory.companion_methods[1]));
     }
 
     #[test]

@@ -9,7 +9,9 @@ parallelism. The largest costs are global signature/type inference and repeated 
 classification. Parsing and construction of the final navigation indexes are comparatively small.
 The follow-up capture-discovery change confirms this directly: removing unrelated semantic checks
 from one serial inference pass reduces the current 1,000-file worker median by 38%, without adding
-workers.
+workers. Dependency-preserving narrowing inside selected classes removes another 16% from the
+resulting worker time. Together, the two serial improvements reduce the matching 11.89-second
+baseline to 6.44 seconds.
 
 On the original profiling base (`2fc95b4b`), the two measured compiler-side changes reduce the
 1,000-file analysis pass from 6.70 seconds to 3.86 seconds (42%) and peak RSS from 465 MiB to about
@@ -142,6 +144,34 @@ inclusive capture-discovery samples from 6,769/9,379 (72.2%) to 2,836/5,877 (48.
 cost is the necessary check of the enclosing declarations, especially large classes. This is a
 single-thread algorithmic improvement, not a parallel throughput result.
 
+### Dependency-preserving class capture discovery
+
+The next profile showed that selecting an enclosing class was still too coarse. Capture discovery
+checked every instance, enum-entry, and companion method in that class. Only methods at or before an
+anonymous-object construction can contribute lexical state, but the boundary is not simply the
+construction-bearing method: instance and enum-entry methods publish inferred returns into shared
+checker state which later methods and class regions can consume. On the sampled PR #438 binary,
+`Checker::check_method` beneath capture discovery accounted for 2,231 of 5,877 samples (38.0% of the
+entire process).
+
+The follow-up therefore retains the complete ordered instance/enum method prefix through the last
+construction-bearing method. If a construction occurs elsewhere in the class, it retains that whole
+method sequence so a constructor, property, init block, enum argument, or companion function sees
+the same inferred returns. Companion functions can be filtered individually because their checker
+path does not publish inferred returns into a cross-function cache. Declaration validation and class
+scope construction remain unchanged. Three interleaved, non-sampled A/B runs of the optimized PR
+#438 and final dependency-preserving binaries give:
+
+| Build | Median worker time | Median peak RSS |
+|---|---:|---:|
+| Top-level capture scoping (`353b6e5f`) | 7.64 s | 258,924 KiB |
+| Dependency-preserving class capture discovery | 6.44 s | 254,300 KiB |
+
+That is a further 15.7% worker-time reduction and 1.8% peak-RSS reduction. In the matching sampled
+run, capture discovery falls from 2,836/5,877 samples (48.3%) to 2,200/5,332 (41.3%), and its
+`check_method` subtree falls from 2,231 to 1,613 samples. The largest remaining direct serial pass is
+now `preinfer_returns_pass` at 1,664/5,332 samples (31.2%).
+
 ## Measured changes on the profiling base
 
 ### Share the compilation-wide class-name map
@@ -207,9 +237,9 @@ target/release/memprofile \
    which inferred callable returns depend on which unresolved calls, and revisit only affected
    callables. For an editor request, eagerly infer open files and lazily infer support bodies reached
    by those files.
-   Cache the resulting declaration/return snapshot by source fingerprint. After focused capture
-   discovery, `preinfer_module_returns_impl` still contains 73.9% of inclusive samples and remains
-   the largest serial optimization target.
+   Cache the resulting declaration/return snapshot by source fingerprint. After dependency-preserving
+   class-method capture scoping, `preinfer_returns_pass` contains 31.2% of inclusive samples and is
+   the largest remaining direct serial optimization target.
 2. Separate declaration/type-position names from arbitrary expression names during signature
    collection. `collect_file_type_names` intentionally over-approximates `Expr::Name`, including
    locals and parameters, causing useless import and classpath probes. A lexical local-name filter
@@ -260,3 +290,4 @@ remove repeated work on one thread.
 - CPU-profiler feature build/test: passed.
 - Full `./run-tests.sh` after rebasing onto current `master`: all test binaries passed.
 - Full `./run-tests.sh` after focused capture discovery: all test binaries passed.
+- Full `./run-tests.sh` after dependency-preserving class capture discovery: all test binaries passed.
