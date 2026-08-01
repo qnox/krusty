@@ -170,27 +170,11 @@ fn first_error_blocks(
         return Err(d.diags[0].msg.clone());
     }
 
-    for (i, file) in files.iter().enumerate() {
-        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
-        for &decl in &file.decls {
-            match file.decl(decl) {
-                krusty::ast::Decl::Fun(f) if syms.emits_fn_facade(file, i as u32, decl, f) => {
-                    let facade_name = krusty::types::type_name(&facade);
-                    syms.fn_facades_by_decl
-                        .insert((i as u32, decl.0), facade_name);
-                    syms.fn_facades.insert(f.name.clone(), facade_name);
-                }
-                krusty::ast::Decl::Property(p) if p.receiver.is_none() => {
-                    if let Some(&(ty, is_var, is_const)) = syms.props.get(&p.name) {
-                        let facade_name = krusty::types::type_name(&facade);
-                        syms.prop_facades
-                            .insert(p.name.clone(), (facade_name, ty, is_var, is_const));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    // Use the production registrar for both positive facade owners and explicit splice-only
+    // outcomes. Keeping a survey-local copy previously let extension functions and backend
+    // emittability policy drift from the CLI and conformance harness.
+    let stems: Vec<String> = blocks.iter().map(|(stem, _)| stem.clone()).collect();
+    krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
 
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
