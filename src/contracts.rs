@@ -111,7 +111,8 @@ impl InvocationKind {
     }
 
     /// The inverse of [`InvocationKind::from_wire`]; `None` for `Unknown`, which emit OMITS
-    /// (a kindless CALLS effect reads back as `Unknown`).
+    /// (the reader defaults a missing kind to wire 0, so a kindless effect reads back as
+    /// `AtMostOnce` — the kindless form does not round-trip).
     pub fn to_wire(self) -> Option<u64> {
         match self {
             InvocationKind::AtMostOnce => Some(0),

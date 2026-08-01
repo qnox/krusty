@@ -8,24 +8,24 @@ The indexing problem is primarily single-threaded algorithmic work, not insuffic
 parallelism. The largest costs are global signature/type inference and repeated source-to-module
 classification. Parsing and construction of the final navigation indexes are comparatively small.
 The follow-up capture-discovery change confirms this directly: removing unrelated semantic checks
-from one serial inference pass reduces the current 1,000-file worker median by 38%, without adding
-workers. Dependency-preserving narrowing inside selected classes removes another 16% from the
-resulting worker time. Together, the two serial improvements reduce the matching 11.89-second
-baseline to 6.44 seconds.
+from one serial inference pass reduced the `acee6cd0` 1,000-file worker median by 38%, without
+adding workers. The measured stacked prototype for dependency-preserving narrowing inside selected
+classes removed another 15.7% from the resulting worker time, reducing the matching 7.64-second
+median to 6.44 seconds.
 
 On the original profiling base (`2fc95b4b`), the two measured compiler-side changes reduce the
 1,000-file analysis pass from 6.70 seconds to 3.86 seconds (42%) and peak RSS from 465 MiB to about
 238 MiB (49%). On that same base, a project-model source-root trie reduces 10,000 source-to-module
 lookups from 5.17 seconds to 0.01 seconds. These exact values are historical evidence from the
-profiling branch, not fresh measurements of current `master`, which advanced substantially before
-this change was rebased. The fresh profile below confirms global return pre-inference remains
-dominant and should be addressed before adding analysis workers.
+profiling branch, not fresh measurements of current `master`. The later `acee6cd0` validation below
+confirms global return pre-inference remained dominant at that point and should be addressed before
+adding analysis workers.
 
 ## Workload and host
 
 - Repository: JetBrains `intellij-community`, commit
   `3cbdad9ee6c8a5135fc0f01cc90114fc25c0655c`.
-- Checkout: `/home/qnox/external-projects/intellij-community`.
+- Checkout: a local worktree at the commit above; its machine-specific absolute path was not retained.
 - Kotlin inventory: 80,475 `.kt` files (164.1 MiB) and 1,449 `.kts` files.
 - Java inventory: 91,542 `.java` files.
 - Static `.idea` inventory: 2,143 module references, 4,020 `sourceFolder` entries, and
@@ -37,7 +37,7 @@ dominant and should be addressed before adding analysis workers.
 
 Unless explicitly described as rebased validation, timing, RSS, allocation, and sampled-CPU values
 below were captured on `2fc95b4b` and its incremental profiling changes. The branch was later rebased
-across 64 upstream commits onto `acee6cd0`; current-master performance must be measured again before
+across 64 upstream commits onto `acee6cd0`; newer-master performance must be measured again before
 using these values as a present-day baseline.
 
 The analysis microbenchmarks use the first 1,000 or 2,000 Kotlin files below `platform`. They bypass
@@ -103,10 +103,10 @@ the next target clear: `preinfer_module_returns` repeatedly checks function bodi
 inferred module until a fixpoint and accounted for nearly half of sampled CPU. Current `master` has
 since changed inference behavior, so the next iteration must confirm this hotspot before modifying it.
 
-### Current-master confirmation after rebase
+### Later-base confirmation
 
-The principal analysis profile was repeated after rebasing onto `acee6cd0`, including the final
-classifier and source-root changes:
+The principal analysis profile was repeated on `acee6cd0`, including the final classifier and
+source-root changes:
 
 | Workload | Worker time | Peak RSS |
 |---|---:|---:|
@@ -117,8 +117,9 @@ The sampled 1,000-file profile attributes 82.3% inclusive CPU to
 `preinfer_module_returns_impl`, including 67.6% in
 `discover_anonymous_object_captures_at`. Signature collection is 9.7%, classifier import resolution
 5.0%, workspace-symbol indexing 1.7%, and definition-symbol indexing 1.3%. This confirms that global
-pre-inference remains the next single-thread target on current `master`; it has become more dominant,
-not less. Sampling itself changes wall time and RSS, so the table uses the matching non-sampled run.
+pre-inference remained the next single-thread target on that validation base; it had become more
+dominant, not less. Sampling itself changes wall time and RSS, so the table uses the matching
+non-sampled run.
 
 ### Focused capture-discovery iteration
 
@@ -150,7 +151,7 @@ The next profile showed that selecting an enclosing class was still too coarse. 
 checked every instance, enum-entry, and companion method in that class. Only methods at or before an
 anonymous-object construction can contribute lexical state, but the boundary is not simply the
 construction-bearing method: instance and enum-entry methods publish inferred returns into shared
-checker state which later methods and class regions can consume. On the sampled PR #438 binary,
+checker state which later methods and class regions can consume. On the sampled focused-capture binary,
 `Checker::check_method` beneath capture discovery accounted for 2,231 of 5,877 samples (38.0% of the
 entire process).
 
@@ -159,18 +160,21 @@ construction-bearing method. If a construction occurs elsewhere in the class, it
 method sequence so a constructor, property, init block, enum argument, or companion function sees
 the same inferred returns. Companion functions can be filtered individually because their checker
 path does not publish inferred returns into a cross-function cache. Declaration validation and class
-scope construction remain unchanged. Three interleaved, non-sampled A/B runs of the optimized PR
-#438 and final dependency-preserving binaries give:
+scope construction remain unchanged. Three interleaved, non-sampled A/B runs of the focused
+capture-discovery and original dependency-preserving prototype binaries give:
 
 | Build | Median worker time | Median peak RSS |
 |---|---:|---:|
 | Top-level capture scoping (`353b6e5f`) | 7.64 s | 258,924 KiB |
-| Dependency-preserving class capture discovery | 6.44 s | 254,300 KiB |
+| Original dependency-preserving prototype | 6.44 s | 254,300 KiB |
 
-That is a further 15.7% worker-time reduction and 1.8% peak-RSS reduction. In the matching sampled
-run, capture discovery falls from 2,836/5,877 samples (48.3%) to 2,200/5,332 (41.3%), and its
-`check_method` subtree falls from 2,231 to 1,613 samples. The largest remaining direct serial pass is
-now `preinfer_returns_pass` at 1,664/5,332 samples (31.2%).
+That prototype showed a further 15.7% worker-time reduction and 1.8% peak-RSS reduction. In the
+matching sampled run, capture discovery fell from 2,836/5,877 samples (48.3%) to 2,200/5,332
+(41.3%), and its `check_method` subtree fell from 2,231 to 1,613 samples. The largest remaining
+direct serial pass was `preinfer_returns_pass` at 1,664/5,332 samples (31.2%). Review integration
+later replaced the prototype's resolver-local ownership rescans with the generic AST declaration
+and function-root traversal. That exact integrated implementation has not been re-profiled, so the
+measurements above establish the optimization direction but are not a current-tree timing claim.
 
 ## Measured changes on the profiling base
 
@@ -178,7 +182,7 @@ now `preinfer_returns_pass` at 1,664/5,332 samples (31.2%).
 
 An equivalent `ClassNames::into_shared` implementation landed on `master` while this profiling
 branch was in progress. It is included here to attribute the measured improvement, but is not
-duplicated by this change set after rebasing onto current `master`.
+duplicated by this change set on the later validation base.
 
 `ClassNames` already had an immutable `Rc<HashMap>` base plus a small per-file overlay, but the
 compilation-wide project classes and consensus imports remained in the overlay. Cloning a per-file
@@ -205,14 +209,14 @@ result is 17.18 seconds / 389 MiB, versus 22.47 seconds / 1,270 MiB at baseline.
 linearly scanned every module and source root to find the longest prefix. On the real JPS model,
 10,000 lookups took 5.17 seconds and accounted for 90% of that CPU profile. A component trie built
 with `SourceModuleGraph` preserves longest-prefix, duplicate-root, and exact owning-root semantics and
-reduces the same lookup set to 0.01 seconds. The rebased implementation also returns the owning
+reduces the same lookup set to 0.01 seconds. The later implementation also returns the owning
 `SourceRoot`, so Java package-prefix handling does not fall back to a per-file linear scan. Project
 model parsing itself took only 0.21-0.54 seconds on the profiling base.
 
-The current-master rerun parses the 2,486-unit JPS model in 0.16 seconds and builds the graph/trie in
+The `acee6cd0` rerun parses the 2,486-unit JPS model in 0.16 seconds and builds the graph/trie in
 0.04 seconds. It maps 10,000 Kotlin paths to modules in less than 0.01 seconds and 10,000 Java paths
 to their exact owning roots in 0.01 seconds. The owning-root lookup preserves `package_prefix` while
-eliminating the rebased code's remaining per-Java-file linear root scan.
+eliminating the earlier code's remaining per-Java-file linear root scan.
 
 ### Reproducible profiler
 
@@ -221,25 +225,30 @@ The `memprofile` tool now supports sampled CPU flamegraphs and direct JPS-model 
 ```sh
 cargo build --release -p krusty-lsp --bin memprofile --features cpu-profile
 
+INTELLIJ_COMMUNITY=/path/to/intellij-community
+
 target/release/memprofile \
-  --module /home/qnox/external-projects/intellij-community/platform \
+  --module "$INTELLIJ_COMMUNITY/platform" \
   --max 1000 --open 0 --stage 1 \
   --flamegraph /tmp/platform-1000.svg
 
 target/release/memprofile \
-  --jps-root /home/qnox/external-projects/intellij-community \
+  --jps-root "$INTELLIJ_COMMUNITY" \
   --max 10000 --flamegraph /tmp/intellij-jps.svg
 ```
+
+Flamegraphs intentionally contain exact compiled Rust symbol names and may retain build-machine
+details supplied by debug information. Keep generated SVGs outside the repository and inspect or
+redact them before sharing; only aggregate measurements belong in committed documentation.
 
 ## Prioritized next improvements
 
 1. Replace the remaining module-wide return pre-inference passes with a dependency worklist. Record
-   which inferred callable returns depend on which unresolved calls, and revisit only affected
-   callables. For an editor request, eagerly infer open files and lazily infer support bodies reached
-   by those files.
-   Cache the resulting declaration/return snapshot by source fingerprint. After dependency-preserving
-   class-method capture scoping, `preinfer_returns_pass` contains 31.2% of inclusive samples and is
-   the largest remaining direct serial optimization target.
+   which callable returns depend on which unresolved calls, and revisit only affected callables. For an
+   editor request, eagerly infer open files and lazily infer support bodies reached by those files.
+   Cache the resulting declaration/return snapshot by source fingerprint. In the sampled
+   dependency-preserving prototype, `preinfer_returns_pass` contained 31.2% of inclusive samples and
+   was the largest remaining direct serial optimization target.
 2. Separate declaration/type-position names from arbitrary expression names during signature
    collection. `collect_file_type_names` intentionally over-approximates `Expr::Name`, including
    locals and parameters, causing useless import and classpath probes. A lexical local-name filter
@@ -285,9 +294,9 @@ remove repeated work on one thread.
 ## Validation
 
 - `cargo fmt --all -- --check`: passed.
-- Resolver unit tests: 145 passed on the rebased change.
-- LSP project-model and project-source tests: 129 passed on the rebased change.
+- Resolver unit tests: 145 passed on the `acee6cd0` validation base.
+- LSP project-model and project-source tests: 129 passed on the `acee6cd0` validation base.
 - CPU-profiler feature build/test: passed.
-- Full `./run-tests.sh` after rebasing onto current `master`: all test binaries passed.
+- Full `./run-tests.sh` on the `acee6cd0` validation base: all test binaries passed.
 - Full `./run-tests.sh` after focused capture discovery: all test binaries passed.
-- Full `./run-tests.sh` after dependency-preserving class capture discovery: all test binaries passed.
+- Full `./run-tests.sh` on the original dependency-preserving prototype: all test binaries passed.

@@ -25,7 +25,9 @@ pub(crate) use crate::resolve::{
     ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall, ResolvedMember,
     ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
 };
-use crate::source::{SourceInput, SourceKind};
+/// Types carried by the public source-set analysis signatures, re-exported here so process
+/// adapters do not have to reach through the frontend boundary into source classification.
+pub use crate::source::{SourceInput, SourceKind};
 
 /// A single parsed file together with the frontend facts needed by a backend.
 pub struct CheckedFile<'a> {
