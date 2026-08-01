@@ -1,6 +1,7 @@
 //! Source roots, classpath, module graph, and JDK for one worktree.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -181,7 +182,60 @@ impl SourceModuleRelations {
 pub struct SourceModuleGraph {
     model: Arc<ProjectModel>,
     relations: Arc<[SourceModuleRelations]>,
+    source_roots: Arc<SourceRootIndex>,
     cache_key: SourceModuleGraphKey,
+}
+
+#[derive(Debug, Default)]
+struct SourceRootIndex {
+    nodes: Vec<SourceRootIndexNode>,
+}
+
+#[derive(Debug, Default)]
+struct SourceRootIndexNode {
+    children: HashMap<OsString, usize>,
+    owner: Option<(usize, usize)>,
+}
+
+impl SourceRootIndex {
+    fn new(modules: &[Module]) -> Self {
+        let mut index = Self {
+            nodes: vec![SourceRootIndexNode::default()],
+        };
+        for (module_index, module) in modules.iter().enumerate() {
+            for (root_index, root) in module.source_roots.iter().enumerate() {
+                let mut node_index = 0;
+                for component in root.path.components() {
+                    let component = component.as_os_str().to_os_string();
+                    let child = index.nodes[node_index].children.get(&component).copied();
+                    node_index = match child {
+                        Some(child) => child,
+                        None => {
+                            let child = index.nodes.len();
+                            index.nodes.push(SourceRootIndexNode::default());
+                            index.nodes[node_index].children.insert(component, child);
+                            child
+                        }
+                    };
+                }
+                index.nodes[node_index].owner = Some((module_index, root_index));
+            }
+        }
+        index
+    }
+
+    fn module_source_root_for_source(&self, path: &Path) -> Option<(usize, usize)> {
+        let mut node_index = 0;
+        let mut owner = self.nodes[node_index].owner;
+        for component in path.components() {
+            let Some(child) = self.nodes[node_index].children.get(component.as_os_str()) else {
+                break;
+            };
+            node_index = *child;
+            owner = self.nodes[node_index].owner.or(owner);
+        }
+        owner
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,6 +265,7 @@ impl SourceModuleGraph {
     }
 
     fn new_with(model: ProjectModel, canonicalize: &dyn Fn(&Path) -> Option<PathBuf>) -> Self {
+        let source_roots = SourceRootIndex::new(&model.modules);
         let mut module_ids = HashMap::<&ModuleId, Vec<usize>>::new();
         let mut outputs = HashMap::<&Path, Vec<usize>>::new();
         for (index, module) in model.modules.iter().enumerate() {
@@ -297,6 +352,7 @@ impl SourceModuleGraph {
         Self {
             model: Arc::new(model),
             relations: relations.into(),
+            source_roots: Arc::new(source_roots),
             cache_key,
         }
     }
@@ -307,6 +363,23 @@ impl SourceModuleGraph {
 
     pub fn get(&self, module_index: usize) -> Option<&SourceModuleRelations> {
         self.relations.get(module_index)
+    }
+
+    pub fn module_index_for_source(&self, path: &Path) -> Option<usize> {
+        self.source_roots
+            .module_source_root_for_source(path)
+            .map(|(module_index, _)| module_index)
+    }
+
+    pub fn module_source_root_for_source(&self, path: &Path) -> Option<(usize, &SourceRoot)> {
+        let (module_index, root_index) = self.source_roots.module_source_root_for_source(path)?;
+        let root = self
+            .model
+            .modules
+            .get(module_index)?
+            .source_roots
+            .get(root_index)?;
+        Some((module_index, root))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &SourceModuleRelations> {
@@ -489,30 +562,72 @@ mod tests {
             SourceRoot::source("/p/shared").with_package_prefix("second"),
             SourceRoot::source("/p/shared/generated"),
         ]);
+        let graph = model.clone().into_source_module_graph();
+        let test_source = Path::new("/p/app/src/test/kotlin/Example.kt");
 
         assert_eq!(
             model
-                .module_for_source(Path::new("/p/app/src/test/kotlin/Example.kt"))
+                .module_for_source(test_source)
                 .and_then(|module| module.id.as_ref())
                 .map(ModuleId::as_str),
             Some(":app:test")
         );
+        assert_eq!(model.module_index_for_source(test_source), Some(3));
+        assert_eq!(graph.module_index_for_source(test_source), Some(3));
         assert_eq!(
-            model.module_index_for_source(Path::new("/p/app/src/test/kotlin/Example.kt")),
-            Some(3)
+            graph.module_index_for_source(Path::new("/p/app/src/main/kotlin/Example.kt")),
+            Some(2)
+        );
+        assert_eq!(
+            graph.module_index_for_source(Path::new("/p/unowned/Example.kt")),
+            None
         );
         let (module_index, root) = model
             .module_source_root_for_source(Path::new("/p/shared/Example.java"))
             .unwrap();
         assert_eq!(module_index, 3);
         assert_eq!(root.package_prefix, "second");
+        assert_eq!(
+            graph.module_source_root_for_source(Path::new("/p/shared/Example.java")),
+            Some((module_index, root))
+        );
         let (_, root) = model
             .module_source_root_for_source(Path::new("/p/shared/generated/Example.java"))
             .unwrap();
         assert!(root.package_prefix.is_empty());
+        assert_eq!(
+            graph.module_source_root_for_source(Path::new("/p/shared/generated/Example.java")),
+            Some((3, root))
+        );
         assert!(model
             .module_for_source(Path::new("/p/unowned/Example.kt"))
             .is_none());
+    }
+
+    #[test]
+    fn source_root_index_matches_linear_lookup_for_duplicate_and_nested_roots() {
+        let mut model = model();
+        let mut duplicate = Module::new(ModuleId::new(":duplicate", "main"), "/p/core");
+        duplicate.source_roots = vec![SourceRoot::source("/p/core/src/main/kotlin")];
+        model.modules.push(duplicate);
+        let graph = model.clone().into_source_module_graph();
+
+        for path in [
+            "/p/core/src/main/kotlin/Core.kt",
+            "/p/app/src/main/kotlin/App.kt",
+            "/p/app/src/test/kotlin/AppTest.kt",
+            "/p/unowned/Other.kt",
+        ] {
+            let path = Path::new(path);
+            assert_eq!(
+                graph.module_index_for_source(path),
+                model.module_index_for_source(path)
+            );
+            assert_eq!(
+                graph.module_source_root_for_source(path),
+                model.module_source_root_for_source(path)
+            );
+        }
     }
 
     #[test]
