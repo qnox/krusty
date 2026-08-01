@@ -5322,6 +5322,16 @@ struct TailrecCtx {
     label: String,
 }
 
+/// Outcome of resolving an implicit-`this` member-property reference (`::p`) for lowering: emit it,
+/// leave it to the other ref arms (not a member property), or bail the file (a member property was
+/// found but isn't lowerable — binding a shadowed same-named top-level/extension property instead
+/// would miscompile).
+enum MemberPropRef {
+    Lowered(u32),
+    NotMember,
+    Bail,
+}
+
 /// Options for the iterator-protocol for-each lowering: the `forEachIndexed` index-counter name,
 /// the loop label, and whether the loop is a spliced stdlib HOF (`forEach`/`forEachIndexed`) —
 /// which binds kotlinc's inline `$iv` locals (receiver, element, parameter) into the spill scope.
@@ -11604,36 +11614,6 @@ impl<'a> Lower<'a> {
         // UNBOUND: `Type::p` — the `Name` is a class, and the reference takes the receiver as its
         // `get` argument. `capture` holds the captured-receiver expression for the bound forms.
         let source_extension = self.info.source_extension_property(e).cloned();
-        let source_getter_descriptor = if let Some(property) = source_extension.as_ref() {
-            let receiver = property.receiver?;
-            Some(format!(
-                "({}){}",
-                self.runtime.type_descriptor(receiver)?,
-                self.runtime.type_descriptor(stored_value_ty(property.ty))?
-            ))
-        } else {
-            None
-        };
-        let source_setter_descriptor = if let Some(property) = source_extension
-            .as_ref()
-            .filter(|property| property.setter.is_some())
-        {
-            let receiver = property.receiver?;
-            Some(format!(
-                "({}{})V",
-                self.runtime.type_descriptor(receiver)?,
-                self.runtime.type_descriptor(stored_value_ty(property.ty))?
-            ))
-        } else {
-            None
-        };
-        let source_getter_name = source_extension
-            .as_ref()
-            .map(|property| property.getter.name.clone());
-        let source_setter_name = source_extension
-            .as_ref()
-            .and_then(|property| property.setter.as_ref())
-            .map(|setter| setter.name.clone());
         let selected_owner = source_extension
             .as_ref()
             .and_then(|property| property.receiver)
@@ -11682,6 +11662,50 @@ impl<'a> Lower<'a> {
                 (owner, Some(self.expr(recv)?))
             }
         };
+        self.finish_prop_ref(name, owner, capture, source_extension)
+    }
+
+    /// Shared tail of [`Self::lower_prop_ref`] and [`Self::lower_implicit_this_prop_ref`]:
+    /// synthesize the `(Mutable)PropertyReference{0,1}Impl` subclass dispatching `get`/`set` for
+    /// `name` on `owner`, capturing `capture` (the bound receiver) when present. Side-effect-free
+    /// until it commits (every decline path returns before `ir.add_class`).
+    fn finish_prop_ref(
+        &mut self,
+        name: &str,
+        owner: TypeName,
+        capture: Option<u32>,
+        source_extension: Option<crate::libraries::PropertyInfo>,
+    ) -> Option<u32> {
+        let source_getter_descriptor = if let Some(property) = source_extension.as_ref() {
+            let receiver = property.receiver?;
+            Some(format!(
+                "({}){}",
+                self.runtime.type_descriptor(receiver)?,
+                self.runtime.type_descriptor(stored_value_ty(property.ty))?
+            ))
+        } else {
+            None
+        };
+        let source_setter_descriptor = if let Some(property) = source_extension
+            .as_ref()
+            .filter(|property| property.setter.is_some())
+        {
+            let receiver = property.receiver?;
+            Some(format!(
+                "({}{})V",
+                self.runtime.type_descriptor(receiver)?,
+                self.runtime.type_descriptor(stored_value_ty(property.ty))?
+            ))
+        } else {
+            None
+        };
+        let source_getter_name = source_extension
+            .as_ref()
+            .map(|property| property.getter.name.clone());
+        let source_setter_name = source_extension
+            .as_ref()
+            .and_then(|property| property.setter.as_ref())
+            .map(|setter| setter.name.clone());
         // A member field property dispatches through the instance `getName()`/`setName()`; an EXTENSION
         // property (`val A.ext`, not a field) dispatches through the static `getName(A)`/`setName(A, v)`
         // on the facade — `ext_facade = Some(())` selects that emit shape.
@@ -12531,6 +12555,103 @@ impl<'a> Lower<'a> {
             Some(this_e),
             None,
         )
+    }
+
+    /// An unqualified `::p` inside a class is a BOUND reference to the enclosing receiver's member
+    /// PROPERTY (`this::p`) — mirrors [`Self::lower_implicit_this_method_ref`] for fns, capturing
+    /// `this` (slot 0). The checker resolves it only where this lowering is valid (never in a
+    /// `super(…)` argument, never `private`/`protected`), so a `::p` that resolved to something
+    /// else (a top-level property, a member of an OUTER class, …) falls through to the other ref
+    /// arms — but a member property that was FOUND yet isn't lowerable (a computed,
+    /// backing-field-less one) must BAIL the file: a member shadows any same-named
+    /// top-level/extension property, so binding those instead would miscompile.
+    fn lower_implicit_this_prop_ref(&mut self, e: AstExprId, name: &str) -> MemberPropRef {
+        // A property-reference type (`KProperty0`/`KMutableProperty0`) — a `Ty::Fun` here is a
+        // function ref (the method-ref arms' case).
+        if matches!(self.info.ty(e), Ty::Fun(_)) {
+            return MemberPropRef::NotMember;
+        }
+        let Some(internal) = self.cur_class else {
+            return MemberPropRef::NotMember;
+        };
+        // The member property must resolve on the enclosing class (incl. inherited), mirroring the
+        // checker's `lookup_prop_name`; otherwise the ref resolved to something else — leave it to
+        // those arms.
+        let mut pending = vec![internal];
+        let mut seen = std::collections::HashSet::new();
+        let mut found = false;
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let Some(class) = self.syms.class_by_type_name(current) else {
+                continue;
+            };
+            if class.props.iter().any(|(n, _, _)| n == name) {
+                found = true;
+                break;
+            }
+            if let Some(s) = class.super_internal_name() {
+                pending.push(s);
+            }
+            pending.extend(class.interface_names());
+        }
+        if !found {
+            return MemberPropRef::NotMember;
+        }
+        // A `private`/`protected` accessor (incl. an anonymous object's CAPTURE pseudo-property)
+        // isn't reachable from the synthetic reference class — bail rather than emit an illegal
+        // access. Mirrors the checker's gate; needed independently because the checker's `this_ty`
+        // doesn't cover every context the lowerer's `cur_class` does (e.g. anonymous objects).
+        {
+            let accessible = |v: crate::types::Visibility| {
+                matches!(
+                    v,
+                    crate::types::Visibility::Public | crate::types::Visibility::Internal
+                )
+            };
+            // Visibility as DECLARED, resolved through flattened same-file base properties.
+            let (prop_vis, setter_vis) = self
+                .syms
+                .member_prop_visibility(internal, name)
+                .unwrap_or((crate::types::Visibility::Public, None));
+            let is_var = self
+                .syms
+                .class_by_type_name(internal)
+                .and_then(|class| class.prop(name))
+                .map(|(_, is_var)| is_var)
+                .unwrap_or_default();
+            if !accessible(prop_vis) || (is_var && !setter_vis.is_none_or(accessible)) {
+                return MemberPropRef::Bail;
+            }
+        }
+        // A member property exists — the checker typed the reference against it. It lowers only
+        // with a BACKING FIELD on the IR class chain (a computed property would mis-bind the
+        // extension-getter fallback in `finish_prop_ref`); anything else bails the file.
+        let field_exists = {
+            let mut cur = self.class_info_name(internal).map(|info| info.id);
+            let mut exists = false;
+            while let Some(cid) = cur {
+                let cls = &self.ir.classes[cid as usize];
+                if cls.fields.iter().any(|f| f.name == *name) {
+                    exists = true;
+                    break;
+                }
+                cur = cls
+                    .has_non_top_superclass()
+                    .then(|| self.class_info_name(cls.superclass).map(|c| c.id))
+                    .flatten();
+            }
+            exists
+        };
+        if !field_exists {
+            return MemberPropRef::Bail;
+        }
+        let this_e = self.emit_get_value(0);
+        match self.finish_prop_ref(name, internal, Some(this_e), None) {
+            Some(pr) => MemberPropRef::Lowered(pr),
+            None => MemberPropRef::Bail,
+        }
     }
 
     /// Bound callable reference on an arbitrary EXPRESSION receiver (`"abc"::get`, `1::foo`, `mk()::m`):
@@ -20319,6 +20440,15 @@ impl<'a> Lower<'a> {
             if receiver.is_none() {
                 if let Some(r) = self.lower_implicit_this_method_ref(e, &name) {
                     return Some(r);
+                }
+            }
+            // An unqualified `::p` inside a class binds to the enclosing receiver's member PROPERTY
+            // (`this::p`), after member fns and before top-level decls (matches the checker).
+            if receiver.is_none() {
+                match self.lower_implicit_this_prop_ref(e, &name) {
+                    MemberPropRef::Lowered(pr) => return Some(pr),
+                    MemberPropRef::NotMember => {}
+                    MemberPropRef::Bail => return None,
                 }
             }
             // Top-level property reference `::foo` lowers to a `(Mutable)PropertyReference0Impl`

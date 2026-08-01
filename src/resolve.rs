@@ -1675,6 +1675,37 @@ impl SymbolTable {
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.values().find(|sig| sig.internal == internal)
     }
+
+    /// The `(visibility, setter_visibility)` of a member property as DECLARED, walking the
+    /// supertype chain to the class whose `declared_props` actually holds the entry. Needed
+    /// because collect flattens a same-file base class's properties into the subclass's `props`
+    /// WITHOUT the `declared_props` entry — attributing visibility to the flattened copy would
+    /// default a `private` base property to `Public` (an illegal-access miscompile). `None` when
+    /// no class on the chain declares the property (callers then treat it as `Public`).
+    pub fn member_prop_visibility(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<(crate::types::Visibility, Option<crate::types::Visibility>)> {
+        let mut pending = vec![internal];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let Some(class) = self.class_by_type_name(current) else {
+                continue;
+            };
+            if let Some(declared) = class.declared_props.get(name) {
+                return Some((declared.visibility, declared.setter_visibility));
+            }
+            if let Some(s) = class.super_internal_name() {
+                pending.push(s);
+            }
+            pending.extend(class.interface_names());
+        }
+        None
+    }
 }
 
 /// Shapes that lower correctly ONLY when an `inline` body is spliced into a caller — the checker
@@ -9619,6 +9650,7 @@ fn make_checker<'a>(
         tparams: Default::default(),
         reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
+        this_unavailable: false,
         this_extension_receiver: None,
         this_narrow: None,
         this_labels: Vec::new(),
@@ -10518,9 +10550,18 @@ fn check_file_at_impl_mode(
                     for p in &sc.params {
                         if let Some(default) = p.default {
                             let ty = c.secondary_ctor_param_ty(p);
+                            // A ctor-param default is evaluated in the CALLER's context — no `this`.
+                            let prev_this_unavailable = c.this_unavailable;
+                            c.this_unavailable = true;
                             c.check_default_arg(&p.ty, default, ty);
+                            c.this_unavailable = prev_this_unavailable;
                         }
                     }
+                    // Delegation-call args (`this(…)`/`super(…)`) run before the delegated
+                    // constructor — `this` is UNINITIALIZED there (same guard as the primary
+                    // `super(…)` clause below).
+                    let prev_this_unavailable = c.this_unavailable;
+                    c.this_unavailable = true;
                     match &sc.delegation {
                         CtorDelegation::This(delegation) => {
                             for &argument in &delegation.args {
@@ -10585,6 +10626,8 @@ fn check_file_at_impl_mode(
                         }
                         CtorDelegation::None => {}
                     }
+                    // Restore before the ctor BODY — `this` is initialized there (delegation ran).
+                    c.this_unavailable = prev_this_unavailable;
                     if let Some(body) = sc.body {
                         c.with_ret(Ty::Unit, |c| {
                             c.expr_statement(body);
@@ -10604,7 +10647,11 @@ fn check_file_at_impl_mode(
                 for p in &cl.props {
                     if let Some(dx) = p.default {
                         let pty = c.resolve_ty(&p.ty);
+                        // A ctor-param default is evaluated in the CALLER's context — no `this`.
+                        let prev_this_unavailable = c.this_unavailable;
+                        c.this_unavailable = true;
                         c.check_default_arg(&p.ty, dx, pty);
+                        c.this_unavailable = prev_this_unavailable;
                     }
                 }
                 c.pop_scope();
@@ -10643,6 +10690,10 @@ fn check_file_at_impl_mode(
                 // checked below once the ctor is resolved; anything else is typed up front.
                 let file = c.file;
                 let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
+                // `this` is UNINITIALIZED inside `super(…)` args — an implicit-`this` callable ref
+                // there must not resolve (see `this_unavailable`).
+                let prev_this_unavailable = c.this_unavailable;
+                c.this_unavailable = true;
                 for &arg in &cl.base_args {
                     if !is_lambda(arg) {
                         c.expr(arg);
@@ -10703,6 +10754,7 @@ fn check_file_at_impl_mode(
                         }
                     }
                 }
+                c.this_unavailable = prev_this_unavailable;
                 // Interface-delegation expressions (`: I by mk(x)`) are evaluated in the constructor too,
                 // so they're typed here — with the ctor params and `this` in scope.
                 for (_iface, e) in &cl.delegation_exprs {
@@ -11538,6 +11590,12 @@ struct Checker<'a> {
     reified_tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
+    /// `true` while checking expressions where `this` is unavailable or uninitialized — a class's
+    /// `super(…)`/delegation-call arguments and constructor-parameter defaults (the latter are
+    /// evaluated in the CALLER's context): an implicit-`this` callable ref (`::p`) must NOT
+    /// resolve, since lowering it would capture the wrong/uninitialized receiver (never
+    /// miscompile).
+    this_unavailable: bool,
     this_extension_receiver: Option<Span>,
     /// A flow-narrowing of the implicit receiver established by `if (this is B)`: `this` is known to
     /// be `B` (a subtype of `this_ty`) inside the guarded branch, so a bare member of `B` resolves.
@@ -21581,15 +21639,57 @@ impl<'a> Checker<'a> {
                 // An unqualified `::m` inside a class is a BOUND reference to the enclosing receiver's
                 // member FUNCTION — `this::m`. Resolved before the top-level fallbacks (a member takes
                 // precedence over a same-named top-level decl), exactly matching the lowerer's
-                // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return — a
-                // member-property implicit ref isn't lowered, so it's NOT resolved here either, to keep
-                // the checker and lowerer in agreement).
+                // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return); the
+                // member-PROPERTY case (`::p`) follows, matching `lower_implicit_this_prop_ref`.
                 if let Some(Ty::Obj(internal, _)) = self.this_ty {
                     if let Some(sig) = self.syms.method_of_name(internal, &name) {
                         if sig.requires_all_args() && sig.ret != Ty::Nothing {
                             self.mark_current_extension_receiver_used(e);
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
+                    }
+                    // An unqualified `::p` inside a class is a BOUND reference to the enclosing
+                    // receiver's member PROPERTY (`this::p`) — resolved after member fns (a fn
+                    // takes precedence). A member SHADOWS a same-named top-level decl, so once
+                    // found here the reference NEVER falls through to the top-level arms: it is
+                    // typed only where the lowering (`lower_implicit_this_prop_ref`, capturing the
+                    // dispatch `this` at slot 0) is valid —
+                    //   * not where `this` is unavailable/uninitialized (super-ctor args,
+                    //     ctor-param defaults — `this_unavailable`);
+                    //   * not in a member-EXTENSION context, where `this` is the extension
+                    //     receiver but slot 0 is the DISPATCH receiver;
+                    //   * not a `private`/`protected` property, nor a `var` with a `private`
+                    //     setter (the synthetic reference class can't reach such an accessor —
+                    //     an illegal-access miscompile);
+                    //   * a computed (backing-field-less) property IS typed here but declined by
+                    //     the lowerer — a sound skip, never a mis-bind.
+                    if let Some((_owner, _, is_var, _setter_visibility)) =
+                        self.lookup_prop_with_owner_name(internal, &name)
+                    {
+                        // Visibility as DECLARED, resolved through flattened same-file base
+                        // properties (a `private` base property flattened into the subclass's
+                        // `props` must NOT default to `Public`).
+                        let (visibility, setter_visibility) = self
+                            .syms
+                            .member_prop_visibility(internal, &name)
+                            .unwrap_or((Visibility::Public, None));
+                        let accessible =
+                            |v: Visibility| matches!(v, Visibility::Public | Visibility::Internal);
+                        if !self.this_unavailable
+                            && self.this_extension_receiver.is_none()
+                            && accessible(visibility)
+                            && (!is_var || setter_visibility.is_none_or(accessible))
+                        {
+                            if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                self.mark_current_extension_receiver_used(e);
+                                return self.set(e, ty);
+                            }
+                        }
+                        self.diags.error(
+                            self.span(e),
+                            "krusty: callable references are not supported",
+                        );
+                        return self.set(e, Ty::Error);
                     }
                 }
                 if let Some(receiver) = self.this_ty {

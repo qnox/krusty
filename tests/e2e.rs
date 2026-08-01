@@ -484,6 +484,8 @@ mod generic_suspend_member_return_e2e;
 mod generic_vararg_inference_e2e;
 #[path = "implicit_receiver_named_args_e2e.rs"]
 mod implicit_receiver_named_args_e2e;
+#[path = "implicit_this_callable_ref_e2e.rs"]
+mod implicit_this_callable_ref_e2e;
 #[path = "implicit_this_member_hof_lambda_e2e.rs"]
 mod implicit_this_member_hof_lambda_e2e;
 #[path = "implicit_this_method_ref_e2e.rs"]
