@@ -92,7 +92,15 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         Some(ir) => ir,
         None => return Some(format!("lower: {}", lower_bail.borrow())),
     };
-    emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp).err()
+    let emitted = match emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp) {
+        Ok(o) => o,
+        Err(e) => return Some(e),
+    };
+    // Mirror the gate's single-file skip: nothing emitted, nothing to run.
+    if emitted.is_empty() {
+        return Some(EMITTED_NO_CLASSES.to_string());
+    }
+    None
 }
 
 fn emit_checked_ir(
@@ -132,13 +140,22 @@ fn emit_checked_ir(
         &opts,
         &run,
     ) {
-        Some(o) if !o.is_empty() => Ok(o),
-        _ => Err(run
+        // `Some([])` is NOT a bail: an all-`expect` file (decls stripped) or a typealias-only file
+        // legitimately emits zero classes (the gate's per-file acceptance, mirrored). Emptiness at
+        // the whole-file-set level is reported by the callers.
+        Some(o) => Ok(o),
+        None => Err(run
             .inline_bail()
             .map(|r| format!("emit: {r}"))
             .unwrap_or_else(|| "emit: emit_all bailed (unsupported codegen)".into())),
     }
 }
+
+/// Skip reason for a file/module that lowers cleanly but emits zero classes — an all-`expect`
+/// source set or typealias-only file (the gate skips these too; kotlinc accepts them, there is
+/// just nothing to run).
+const EMITTED_NO_CLASSES: &str =
+    "emit: emitted no classes (all declarations expect-stripped or typealias-only)";
 
 /// The survey twin of the gate's `compile_blocks`: compile a set of already-split `(stem, content)`
 /// source blocks as ONE module, reporting the FIRST error (the gate only knows pass/skip). Returns
@@ -216,6 +233,11 @@ fn first_error_blocks(
         all.extend(emit_checked_ir(
             &mut ir, file, i as u32, &facade, &syms, cp,
         )?);
+    }
+    // Mirror the gate's whole-module skip: every file emitted nothing (an all-`expect` or
+    // typealias-only module).
+    if all.is_empty() {
+        return Err(EMITTED_NO_CLASSES.into());
     }
     Ok(all)
 }
@@ -451,5 +473,65 @@ fn run() {
         for (k, v) in &sorted {
             println!("  {:4}  {k}", v.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stdlib + JDK `lib/modules` compile classpath, or `None` → skip (toolchain unprovisioned).
+    fn test_cp() -> Option<Rc<Classpath>> {
+        let stdlib = krusty::toolchain::stdlib_jar()?;
+        let mut paths = vec![stdlib];
+        if let Some(j) = krusty::toolchain::jdk_modules() {
+            paths.push(j);
+        }
+        Some(Rc::new(Classpath::new(paths)))
+    }
+
+    /// An all-`expect` common FILE legitimately emits ZERO classes after `strip_matched_expects`
+    /// (kotlinc's JVM-MPP model) — the block set must still compile, mirroring the gate's
+    /// per-file-empty acceptance. Regression pin: the survey used to misreport this as
+    /// `emit: emit_all bailed`, its top skip-bucket (~68 corpus files).
+    #[test]
+    fn all_expect_file_in_set_is_not_an_emit_bail() {
+        let Some(cp) = test_cp() else { return };
+        let blocks = vec![
+            (
+                "Common".to_string(),
+                "expect class S\nexpect fun make(): S\n".to_string(),
+            ),
+            (
+                "Main".to_string(),
+                "actual typealias S = String\nactual fun make(): S = \"OK\"\nfun box(): String = make()\n"
+                    .to_string(),
+            ),
+        ];
+        let features =
+            krusty::features::LangFeatures::from_source("// LANGUAGE: +MultiPlatformProjects");
+        let out = first_error_blocks(&blocks, &cp, &features);
+        assert!(
+            out.is_ok(),
+            "an all-expect file must not bail the whole set: {out:?}"
+        );
+    }
+
+    /// A block set whose files emit NOTHING (a typealias-only file lowers to no classes) is a skip
+    /// with its PRECISE reason — not the `emit_all bailed` catch-all (mirrors the gate's
+    /// whole-module-empty skip).
+    #[test]
+    fn typealias_only_set_reports_precise_reason() {
+        let Some(cp) = test_cp() else { return };
+        let blocks = vec![(
+            "Alias".to_string(),
+            "typealias Greeting = String\n".to_string(),
+        )];
+        let features = krusty::features::LangFeatures::from_source("");
+        let out = first_error_blocks(&blocks, &cp, &features);
+        assert_eq!(
+            out.err().as_deref(),
+            Some("emit: emitted no classes (all declarations expect-stripped or typealias-only)")
+        );
     }
 }
