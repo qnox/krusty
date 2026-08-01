@@ -1680,13 +1680,38 @@ impl SymbolTable {
 /// Shapes that lower correctly ONLY when an `inline` body is spliced into a caller — the checker
 /// analyses the body with splice assumptions, so emitting it standalone (a facade static for
 /// cross-file calls) would miscompile: nested lambdas / anonymous objects (capture analysis +
-/// synthetic numbering), `try` / `break` / `continue` / expression-position `return` (inline-frame
-/// control flow), and `is`/`as` on a type parameter (splicing substitutes the call-site type
-/// argument; a standalone body can only erase to the bound). Conservative: the file just skips.
-fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
-    fn bad_expr(file: &File, e: ExprId, tparams: &[String]) -> bool {
+/// synthetic numbering), `try` / `break` / `continue` / a LABELED or expression-position `return`
+/// (inline-frame control flow — a plain unlabeled value-`return` is just a method return), and
+/// `is`/`as` on a type parameter (splicing substitutes the call-site type argument; a standalone
+/// body can only erase to the bound). A `contract { … }` block is erased, not a closure.
+/// Conservative: the file just skips.
+fn inline_body_has_splice_only_shape(
+    file: &File,
+    f: &FunDecl,
+    module_declares_contract: bool,
+) -> bool {
+    fn bad_expr(file: &File, e: ExprId, tparams: &[String], shadowed: bool) -> bool {
         if file.anonymous_object_classes.contains_key(&e) {
             return true;
+        }
+        // A `contract { … }` DSL block is erased before lowering — its DSL lambda never becomes
+        // a closure. Walk the DSL body (and any other arguments) for genuinely splice-only
+        // shapes instead of flagging the lambda itself. A module-declared `contract` SHADOWS the
+        // intrinsic: the call is a real function and its lambda is a real closure (flag it).
+        if !shadowed {
+            if let Expr::Call { callee, args } = file.expr(e) {
+                if matches!(file.expr(*callee), Expr::Name(n) if n == "contract") {
+                    let mut bad = false;
+                    for (i, &arg) in args.iter().enumerate() {
+                        let lambda_body = match file.expr(arg) {
+                            Expr::Lambda { body, .. } if i + 1 == args.len() => Some(*body),
+                            _ => None,
+                        };
+                        bad |= bad_expr(file, lambda_body.unwrap_or(arg), tparams, shadowed);
+                    }
+                    return bad;
+                }
+            }
         }
         match file.expr(e) {
             Expr::Lambda { .. }
@@ -1697,22 +1722,24 @@ fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
             Expr::Is { ty, .. } | Expr::As { ty, .. } if tparams.contains(&ty.name) => true,
             _ => file.any_child_expr(
                 e,
-                &mut |child| bad_expr(file, child, tparams),
-                &mut |stmt| bad_stmt(file, stmt, tparams),
+                &mut |child| bad_expr(file, child, tparams, shadowed),
+                &mut |stmt| bad_stmt(file, stmt, tparams, shadowed),
             ),
         }
     }
-    fn bad_stmt(file: &File, s: StmtId, tparams: &[String]) -> bool {
+    fn bad_stmt(file: &File, s: StmtId, tparams: &[String], shadowed: bool) -> bool {
         if matches!(
             file.stmt(s),
             Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(_, Some(_))
         ) {
             return true;
         }
-        file.any_child_stmt(s, &mut |child| bad_expr(file, child, tparams))
+        file.any_child_stmt(s, &mut |child| bad_expr(file, child, tparams, shadowed))
     }
     match &f.body {
-        FunBody::Expr(body) | FunBody::Block(body) => bad_expr(file, *body, &f.type_params),
+        FunBody::Expr(body) | FunBody::Block(body) => {
+            bad_expr(file, *body, &f.type_params, module_declares_contract)
+        }
         FunBody::None => true,
     }
 }
@@ -1741,7 +1768,7 @@ impl SymbolTable {
         };
         !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
             && !self.ty_mentions_value_class(sig.ret)
-            && !inline_body_has_splice_only_shape(file, f)
+            && !inline_body_has_splice_only_shape(file, f, self.funs.contains_key("contract"))
     }
 
     /// Whether a top-level function is lowered + emitted as a facade static, so a CROSS-FILE call

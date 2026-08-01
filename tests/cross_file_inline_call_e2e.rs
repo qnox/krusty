@@ -214,3 +214,45 @@ fn same_file_inline_still_splices() {
                        }\n";
     common::expect_box_ok_with_stdlib(SRC, "same_file_inline_splice_kept");
 }
+
+/// The `contracts/kt47168.kt` shape: an inline fn whose body carries a `contract { }` block
+/// (erased, not a closure) and a TAIL value-return is safe standalone — it lowers + emits as a
+/// facade static, so the cross-file call links. The `callsInPlace` contract is decoded but
+/// unneeded for codegen here.
+#[test]
+fn contract_and_tail_return_inline_fun_called_cross_file() {
+    const LIB: &str = "// OPT_IN: kotlin.contracts.ExperimentalContracts\n\
+                       import kotlin.contracts.*\n\
+                       inline fun foo(x: () -> String, y: () -> String): String {\n\
+                       \x20   contract {\n\
+                       \x20       callsInPlace(x, InvocationKind.EXACTLY_ONCE)\n\
+                       \x20       callsInPlace(y, InvocationKind.EXACTLY_ONCE)\n\
+                       \x20   }\n\
+                       \x20   return x() + y()\n\
+                       }\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val y = { \"K\" }\n\
+                        \x20   return foo({ \"O\" }, y)\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_contract_tail_return_inline",
+    );
+}
+
+/// A function-typed VARIABLE argument to a cross-file inline facade static: the variable's value
+/// is a real closure, read at the call site and `invoke`d by the static like any other object.
+#[test]
+fn fun_typed_variable_arg_to_cross_file_inline() {
+    const LIB: &str =
+        "inline fun applyBoth(x: () -> String, y: () -> String): String = x() + y()\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val a = { \"O\" }\n\
+                        \x20   val b = { \"K\" }\n\
+                        \x20   return applyBoth(a, b)\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_inline_fun_typed_var_arg",
+    );
+}
