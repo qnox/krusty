@@ -38,7 +38,7 @@ const I32_MIN: i32 = i32::MIN;
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
 type Branches = Vec<(Option<ExprId>, ExprId)>;
 /// A direct suspension at a statement: `(optional bound local + type, the call ExprId)`. The call (a
-/// `Call` or `MethodCall`) is reused — the continuation is threaded into it by `emit_call`.
+/// `Call` or `MethodCall`) is reused — the continuation is threaded into it by `emit_suspension`.
 type Suspension = (Option<(u32, Ty)>, ExprId);
 #[derive(Clone, Default)]
 struct SuspensionScope {
@@ -205,7 +205,7 @@ pub fn lower_suspend(
         let has_susp =
             forward.is_none() && body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
         // A `suspendCoroutineUninterceptedOrReturn` block that reads its continuation is a
-        // first-class suspension point (ir_lower registered it in `ir.suspend_calls`): the
+        // first-class suspension point (ir_lower registered it separately from callable nodes): the
         // machine passes ITSELF as the continuation, so `it.resume(v)` re-enters this machine at
         // the resume label — kotlinc's protocol (coroutines/tailCallToNothing).
         crate::trace_compiler!(
@@ -340,6 +340,42 @@ pub fn lower_suspend(
 /// Only a value-bearing block is spliced (a value-less / divergent block is left alone). Re-runs until
 /// settled, so nested blocks (safe-call inside elvis) fully unfold; lifted statements are reprocessed.
 fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
+    // Normalize lexical child blocks before their parent. A return/value wrapper can sit inside an
+    // `if`/`when` or catch body just as legitimately as at the function body's top level; making the
+    // transform depend on that container was the source of a private conditional-tail regression.
+    // Stop the discovery walk at each nested block and recurse from there, so every block is processed
+    // exactly within its own lexical boundary: statements may move inside that block, never out through
+    // a branch/try owner. `Lambda` and `While` are LOWERING boundaries, not merely nested lexical
+    // regions: a lambda's `inline_body` is a substitution template and collection HOFs have already
+    // expanded their template into a loop by this phase. Descending into either here can reshape the
+    // loop body before the dedicated loop/state-machine flattening establishes its labels and spills;
+    // that made otherwise-supported suspending `map`/`flatMap` bodies decline emission. Their own
+    // lowering path presents the relevant blocks to this normalizer when it is safe to do so. The
+    // visited set also makes shared arena nodes and malformed cycles safe.
+    let mut nested_blocks = Vec::new();
+    let mut pending = Vec::new();
+    let mut seen = HashSet::from([b]);
+    for_each_child(&ir.exprs, b, &mut |child| pending.push(child));
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        if matches!(
+            ir.exprs[node as usize],
+            IrExpr::Lambda { .. } | IrExpr::While { .. }
+        ) {
+            continue;
+        }
+        if matches!(ir.exprs[node as usize], IrExpr::Block { .. }) {
+            nested_blocks.push(node);
+            continue;
+        }
+        for_each_child(&ir.exprs, node, &mut |child| pending.push(child));
+    }
+    for nested in nested_blocks {
+        splice_return_blocks(ir, nested);
+    }
+
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
     };
@@ -361,8 +397,8 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
         } = ir.exprs[s as usize].clone()
         {
             // A `suspendCoroutineUninterceptedOrReturn` block is a registered suspension point,
-            // not grouping — splicing it would orphan the call id.
-            if ir.suspend_calls.contains_key(&s) {
+            // not grouping — splicing it would orphan the suspension-point id.
+            if ir.intrinsic_suspension_points.contains_key(&s) {
                 new_stmts.push(s);
                 continue;
             }
@@ -379,7 +415,7 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
         }
         let spliced = match ir.exprs[s as usize].clone() {
             IrExpr::Return(Some(inner)) => value_block(ir, inner)
-                .filter(|_| !ir.suspend_calls.contains_key(&inner))
+                .filter(|_| !ir.intrinsic_suspension_points.contains_key(&inner))
                 .map(|(bs, bv)| {
                     new_stmts.extend(bs);
                     ir.add_expr(IrExpr::Return(Some(bv)))
@@ -390,7 +426,7 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
                 init: Some(inner),
                 named,
             } => value_block(ir, inner)
-                .filter(|_| !ir.suspend_calls.contains_key(&inner))
+                .filter(|_| !ir.intrinsic_suspension_points.contains_key(&inner))
                 .map(|(bs, bv)| {
                     new_stmts.extend(bs);
                     ir.add_expr(IrExpr::Variable {
@@ -401,7 +437,7 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
                     })
                 }),
             IrExpr::SetValue { var, value: inner } => value_block(ir, inner)
-                .filter(|_| !ir.suspend_calls.contains_key(&inner))
+                .filter(|_| !ir.intrinsic_suspension_points.contains_key(&inner))
                 .map(|(bs, bv)| {
                     new_stmts.extend(bs);
                     ir.add_expr(IrExpr::SetValue { var, value: bv })
@@ -460,7 +496,7 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
     let mut changed = false;
     for s in stmts {
         if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            if is_suspend_call(ir, e, suspend_set) {
+            if is_suspension_point(ir, e, suspend_set) {
                 let tmp = max_value_index(ir) + 1;
                 let var = ir.add_expr(IrExpr::Variable {
                     index: tmp,
@@ -858,7 +894,7 @@ fn hoist_stmt(
             out.push(stmt);
             return;
         }
-        IrExpr::Variable { init: Some(i), .. } if is_suspend_call(ir, *i, suspend_set) => {
+        IrExpr::Variable { init: Some(i), .. } if is_suspension_point(ir, *i, suspend_set) => {
             out.push(stmt);
             return;
         }
@@ -887,7 +923,7 @@ fn hoist_stmt(
             }
             return;
         }
-        _ if is_suspend_call(ir, stmt, suspend_set) => {
+        _ if is_suspension_point(ir, stmt, suspend_set) => {
             out.push(stmt);
             return;
         }
@@ -908,7 +944,7 @@ fn hoist_expr(
     orig_rets: &[Ty],
     prelude: &mut Vec<ExprId>,
 ) -> ExprId {
-    if is_suspend_call(ir, e, suspend_set) {
+    if is_suspension_point(ir, e, suspend_set) {
         // Hoist nested suspensions in the receiver/arguments first (they evaluate before the call).
         match ir.exprs[e as usize].clone() {
             IrExpr::Call { args, .. } => {
@@ -938,12 +974,9 @@ fn hoist_expr(
             }
             _ => {}
         }
-        // Logical return type of the suspension: from ir_lower for a cross-unit call, else the callee's
-        // `orig_rets` entry (a same-file callee), else `Object`.
-        let ty = ir
-            .suspend_calls
-            .get(&e)
-            .cloned()
+        // Logical return type of the suspension: from ir_lower for a cross-unit call or intrinsic
+        // point, else the callee's `orig_rets` entry (a same-file callee), else `Object`.
+        let ty = recorded_suspension_result(ir, e)
             .or_else(|| {
                 suspend_call_fid(ir, e, suspend_set)
                     .and_then(|fid| orig_rets.get(fid as usize).cloned())
@@ -1204,11 +1237,24 @@ fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Optio
     }
 }
 
-/// Whether `e` is a DIRECT call to a suspend function — same-file (in `suspend_set`, via
-/// [`suspend_call_fid`]) OR cross-unit (an `ExprId` recorded in `ir.suspend_calls` by ir_lower from the
-/// resolver). The flattener threads the continuation into every such call uniformly.
-fn is_suspend_call(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    suspend_call_fid(ir, e, suspend_set).is_some() || ir.suspend_calls.contains_key(&e)
+/// Whether evaluating `e` is one atomic SUSPENSION POINT: either a direct suspend-function call
+/// (same-file via [`suspend_call_fid`], or cross-unit via `ir.suspend_calls`) or an inlined intrinsic
+/// expression recorded in `ir.intrinsic_suspension_points`. The latter already contains its
+/// continuation behavior, so [`append_continuation`] deliberately leaves its non-call node unchanged.
+fn is_suspension_point(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    suspend_call_fid(ir, e, suspend_set).is_some()
+        || ir.suspend_calls.contains_key(&e)
+        || ir.intrinsic_suspension_points.contains_key(&e)
+}
+
+/// The logical source result of a non-local call or intrinsic suspension point. Same-file calls use
+/// `orig_rets` through [`suspend_call_fid`]; the two side maps cover only nodes whose result cannot be
+/// recovered from a local `FunId`.
+fn recorded_suspension_result(ir: &IrFile, e: ExprId) -> Option<Ty> {
+    ir.suspend_calls
+        .get(&e)
+        .or_else(|| ir.intrinsic_suspension_points.get(&e))
+        .cloned()
 }
 
 /// Peel a single `TypeOp::Cast`/`ImplicitCoercion` off `e` when its arg is a suspend call, returning
@@ -1234,17 +1280,17 @@ fn unwrap_suspend_cast(
         &[IrTypeOp::Cast, IrTypeOp::ImplicitCoercion]
     };
     if let IrExpr::TypeOp { op, arg, .. } = ir.exprs[e as usize] {
-        if ops.contains(&op) && is_suspend_call(ir, arg, suspend_set) {
+        if ops.contains(&op) && is_suspension_point(ir, arg, suspend_set) {
             return arg;
         }
     }
     e
 }
 
-/// Whether EXACTLY ONE suspend call is reachable from `e`. Iterative with a visited set (the expr arena
+/// Whether EXACTLY ONE suspension point is reachable from `e`. Iterative with a visited set (the expr arena
 /// can share/deeply-nest nodes — a recursive walk overflows the stack) and early-exits once a second is
 /// seen (the caller only needs the "== 1" answer).
-fn exactly_one_suspend_call(ir: &IrFile, e: ExprId, set: &HashSet<u32>) -> bool {
+fn exactly_one_suspension_point(ir: &IrFile, e: ExprId, set: &HashSet<u32>) -> bool {
     let mut seen: HashSet<ExprId> = HashSet::new();
     let mut stack = vec![e];
     let mut count = 0usize;
@@ -1252,7 +1298,7 @@ fn exactly_one_suspend_call(ir: &IrFile, e: ExprId, set: &HashSet<u32>) -> bool 
         if !seen.insert(cur) {
             continue;
         }
-        if is_suspend_call(ir, cur, set) {
+        if is_suspension_point(ir, cur, set) {
             count += 1;
             if count > 1 {
                 return false;
@@ -1263,12 +1309,12 @@ fn exactly_one_suspend_call(ir: &IrFile, e: ExprId, set: &HashSet<u32>) -> bool 
     count == 1
 }
 
-/// If the suspend body is a pure TAIL-CALL forward — its result is a single suspend call in tail position
-/// and NOTHING else in the body suspends — return that call's `ExprId`. kotlinc emits NO state machine /
-/// continuation class for such a function: it forwards its own `$completion` to the callee and returns the
-/// callee's `Object` result directly. Detected BEFORE `desugar_tail_suspend` (which would otherwise bind
-/// the tail into a resume point and force a state machine). Conservative — only the plain
-/// `return <suspend call>` / trailing-value shapes, never an `if`/`when`/multi-return body.
+/// If the suspend body is a pure TAIL suspension — its result is one direct point in tail position and
+/// NOTHING else in the body suspends — return that point's `ExprId`. A callable point forwards its own
+/// `$completion` to the callee; an inlined intrinsic point already uses that completion internally. Both
+/// return the resulting `Object` directly without a continuation class. Detected before
+/// `desugar_tail_suspend`, which would otherwise bind the tail into a resume point and force a machine.
+/// Conservative: only a plain `return <point>` / trailing-value shape, never `if`/`when`/multi-return.
 fn tail_forward_call(
     ir: &IrFile,
     b: ExprId,
@@ -1276,7 +1322,7 @@ fn tail_forward_call(
     unit_ret: bool,
     orig_rets: &[Ty],
 ) -> Option<ExprId> {
-    if !exactly_one_suspend_call(ir, b, set) {
+    if !exactly_one_suspension_point(ir, b, set) {
         return None;
     }
     let tail = match &ir.exprs[b as usize] {
@@ -1292,8 +1338,8 @@ fn tail_forward_call(
                 // (`areturn` the callee's Object result: COROUTINE_SUSPENDED or the boxed `Unit`). Gated
                 // on the CALLEE returning `Unit` too, so the forwarded value is what the caller expects.
                 _ if unit_ret
-                    && is_suspend_call(ir, last, set)
-                    && callee_ret_unit(ir, last, set, orig_rets) =>
+                    && is_suspension_point(ir, last, set)
+                    && suspension_ret_unit(ir, last, set, orig_rets) =>
                 {
                     last
                 }
@@ -1306,16 +1352,16 @@ fn tail_forward_call(
     // A generic suspend call's erased result is cast to the declared type at the call site; a
     // tail-forward returns the callee's Object result verbatim (no checkcast), so peel the wrapper.
     let tail = unwrap_suspend_cast(ir, tail, set, /* ref_only */ true);
-    is_suspend_call(ir, tail, set).then_some(tail)
+    is_suspension_point(ir, tail, set).then_some(tail)
 }
 
-/// Whether the suspend call `e`'s LOGICAL return is `Unit` — a same-file callee via its declared return,
-/// a cross-unit one via `ir.suspend_calls`.
-fn callee_ret_unit(ir: &IrFile, e: ExprId, set: &HashSet<u32>, orig_rets: &[Ty]) -> bool {
+/// Whether suspension point `e`'s LOGICAL result is `Unit` — a same-file callee via its declared return,
+/// or a recorded cross-unit/intrinsic point via its semantic side map.
+fn suspension_ret_unit(ir: &IrFile, e: ExprId, set: &HashSet<u32>, orig_rets: &[Ty]) -> bool {
     if let Some(fid) = suspend_call_fid(ir, e, set) {
         return orig_rets.get(fid as usize) == Some(&Ty::Unit);
     }
-    ir.suspend_calls.get(&e) == Some(&Ty::Unit)
+    recorded_suspension_result(ir, e).as_ref() == Some(&Ty::Unit)
 }
 
 /// Rewrite the body's tail so it `return`s the forwarded suspend call directly — the CPS `Object` result,
@@ -1450,7 +1496,7 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
                 value: inner_val,
             } = ir.exprs[init as usize].clone()
             {
-                if ir.suspend_calls.contains_key(&init) {
+                if ir.intrinsic_suspension_points.contains_key(&init) {
                     // A registered suspension point (a `suspendCoroutineUninterceptedOrReturn`
                     // block), not an elvis/safe-call grouping — leave bound.
                     out.push(s);
@@ -1485,7 +1531,7 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
 /// Whether `e`'s subtree contains any call to a suspend function (used to reject shapes this pass can't
 /// restructure — a suspend call nested in an expression, a branch, a loop, etc.).
 fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    if is_suspend_call(ir, e, suspend_set) {
+    if is_suspension_point(ir, e, suspend_set) {
         return true;
     }
     let mut found = false;
@@ -1721,7 +1767,7 @@ fn build_state_machine(
         ..
     } = &ir.exprs[stmts[last_susp] as usize]
     {
-        if is_suspend_call(ir, *init, &suspend_set) {
+        if is_suspension_point(ir, *init, &suspend_set) {
             let idx = *index;
             let mut earlier: Vec<u32> = Vec::new();
             for &s in &stmts[..last_susp] {
@@ -1845,7 +1891,7 @@ fn build_state_machine(
     // body — a desugared-away call's captured list must not size the class (kotlinc's field count
     // reflects the suspensions its machine actually has).
     let mut live_calls: HashSet<ExprId> = HashSet::new();
-    collect_suspend_calls(ir, b, &suspend_set, &mut live_calls);
+    collect_suspension_points(ir, b, &suspend_set, &mut live_calls);
     let mut layout = SpillLayout::default();
     for (call, scope) in &susp_scopes {
         if live_calls.contains(call) {
@@ -1882,7 +1928,7 @@ fn build_state_machine(
         scopes: susp_scopes,
         layout: layout.clone(),
         states: vec![Vec::new()],
-        resume_calls: Vec::new(),
+        resume_points: Vec::new(),
         state_handlers: vec![None],
         state_scope: vec![None],
         cur_handler: None,
@@ -1902,7 +1948,7 @@ fn build_state_machine(
         );
         return false;
     }
-    let resume_calls = std::mem::take(&mut flat.resume_calls);
+    let resume_points = std::mem::take(&mut flat.resume_points);
     {
         let ir = &*flat.ir;
         let mut slot_name: std::collections::HashMap<u32, String> =
@@ -1917,7 +1963,7 @@ fn build_state_machine(
         let mut s = Vec::new();
         let mut n = Vec::new();
         let mut state_indices = Vec::new();
-        for (state_idx, call) in resume_calls.iter().enumerate() {
+        for (state_idx, call) in resume_points.iter().enumerate() {
             let scope = &flat.scopes[call];
             let mut positions = kind_positions(&scope.values);
             positions.sort_by_key(|&(_, _, kind, pos)| {
@@ -1956,8 +2002,8 @@ fn build_state_machine(
                 .unwrap_or_default() as i32;
             (line, line)
         };
-        let l: Vec<i32> = resume_calls.iter().map(|&call| line_of(call).0).collect();
-        let nl: Vec<i32> = resume_calls.iter().map(|&call| line_of(call).1).collect();
+        let l: Vec<i32> = resume_points.iter().map(|&call| line_of(call).0).collect();
+        let nl: Vec<i32> = resume_points.iter().map(|&call| line_of(call).1).collect();
         let metadata = ContinuationMetadata {
             l,
             nl,
@@ -2309,7 +2355,7 @@ fn build_lambda_state_machine(
         w.out
     });
     let mut live_calls: HashSet<ExprId> = HashSet::new();
-    collect_suspend_calls(ir, b, &suspend_set, &mut live_calls);
+    collect_suspension_points(ir, b, &suspend_set, &mut live_calls);
     let mut layout = SpillLayout::default();
     for (call, scope) in &susp_scopes {
         if live_calls.contains(call) {
@@ -2348,7 +2394,7 @@ fn build_lambda_state_machine(
         scopes: susp_scopes,
         layout: layout.clone(),
         states: vec![Vec::new()],
-        resume_calls: Vec::new(),
+        resume_points: Vec::new(),
         state_handlers: vec![None],
         state_scope: vec![None],
         cur_handler: None,
@@ -2599,7 +2645,7 @@ struct Flat<'a> {
     field_base: u32,
     spilled: Vec<(u32, Ty)>,
     states: Vec<Vec<ExprId>>,
-    resume_calls: Vec<ExprId>,
+    resume_points: Vec<ExprId>,
     /// Parallel to `states`: the handler state (a `catch` body's entry) whose `try` region covers this
     /// state, if any. A suspension inside a `try { … } catch { … }` marks the try-body states with their
     /// handler; the assembly then routes an exception thrown while `this.label` is such a state to the
@@ -2712,22 +2758,22 @@ impl Flat<'_> {
     /// Emit the suspend-call sequence into `out`, transferring to state `resume` (the loop re-dispatches
     /// `resume` on synchronous completion; on `COROUTINE_SUSPENDED` the function returns and a later
     /// resume re-enters at `resume`).
-    fn emit_call(&mut self, out: &mut Vec<ExprId>, call: ExprId, resume: usize) {
+    fn emit_suspension(&mut self, out: &mut Vec<ExprId>, point: ExprId, resume: usize) {
         crate::trace_compiler!(
             "suspend",
-            "emit_call {call}:{:?}",
-            &self.ir.exprs[call as usize]
+            "emit_suspension {point}:{:?}",
+            &self.ir.exprs[point as usize]
         );
-        let Some(list) = self.scope_list_for(call) else {
+        let Some(list) = self.scope_list_for(point) else {
             crate::trace_compiler!(
                 "suspend",
-                "emit_call BAIL: no scope snapshot for suspend call {call}"
+                "emit_suspension BAIL: no scope snapshot for suspension point {point}"
             );
             self.failed = true;
             return;
         };
         self.spill_scope(out, &list);
-        self.resume_calls.push(call);
+        self.resume_points.push(point);
         if let Some(sc) = self.state_scope.get_mut(resume) {
             *sc = Some(list);
         }
@@ -2740,14 +2786,14 @@ impl Flat<'_> {
                 type_operand: continuation_ty(),
             })
         };
-        // Thread the continuation into the call (a static `Call` or a member `MethodCall`) — the CPS
-        // parameter the callee now expects.
-        append_continuation(self.ir, call, cont_arg);
+        // Callable points receive the CPS continuation argument. An intrinsic block already embeds
+        // its continuation placeholder and is intentionally unchanged by `append_continuation`.
+        append_continuation(self.ir, point, cont_arg);
         let vv = self.fresh();
         let var = self.add(IrExpr::Variable {
             index: vv,
             ty: object_ty(),
-            init: Some(call),
+            init: Some(point),
             named: false,
         });
         out.push(var);
@@ -2881,10 +2927,10 @@ impl Flat<'_> {
                 // declared `ty`, so the wrapper is redundant; bind the raw suspend call underneath it.
                 let call =
                     unwrap_suspend_cast(self.ir, *init, self.suspend, /* ref_only */ false);
-                is_suspend_call(self.ir, call, self.suspend)
+                is_suspension_point(self.ir, call, self.suspend)
                     .then(|| (Some((*index, ty.clone())), call))
             }
-            _ => is_suspend_call(self.ir, stmt, self.suspend).then_some((None, stmt)),
+            _ => is_suspension_point(self.ir, stmt, self.suspend).then_some((None, stmt)),
         }
     }
     /// If `stmt` is `val L = when { … }` where a branch value is a direct suspension, return
@@ -2910,7 +2956,7 @@ impl Flat<'_> {
         // returns `Object` and `bind_from_r` unboxes to the DECLARED ty, so the wrapper is
         // redundant — see through it here and in `emit_cond`.
         let any_susp = branches.iter().any(|(_, v)| {
-            is_suspend_call(
+            is_suspension_point(
                 self.ir,
                 unwrap_suspend_cast(self.ir, *v, self.suspend, /* ref_only */ false),
                 self.suspend,
@@ -2947,7 +2993,7 @@ impl Flat<'_> {
                 IrExpr::Break { .. } | IrExpr::Continue { .. }
             );
             let uv = unwrap_suspend_cast(self.ir, *v, self.suspend, /* ref_only */ false);
-            if !is_suspend_call(self.ir, uv, self.suspend)
+            if !is_suspension_point(self.ir, uv, self.suspend)
                 && !direct_jump
                 && (expr_calls_suspend(self.ir, *v, self.suspend) || self.expr_has_loop_jump(*v))
             {
@@ -2984,9 +3030,9 @@ impl Flat<'_> {
                     .loop_jump_target(label.as_deref(), is_break)
                     .unwrap_or(merge);
                 self.goto(&mut bb, target);
-            } else if is_suspend_call(self.ir, uvalue, self.suspend) {
+            } else if is_suspension_point(self.ir, uvalue, self.suspend) {
                 let br_resume = self.new_state();
-                self.emit_call(&mut bb, uvalue, br_resume);
+                self.emit_suspension(&mut bb, uvalue, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();
                 self.bind_from_r(&mut rs, local, ty, br_resume);
                 self.goto(&mut rs, merge);
@@ -3115,7 +3161,7 @@ impl Flat<'_> {
                     value: Some(bv),
                 } = self.ir.exprs[init as usize].clone()
                 {
-                    if !self.ir.suspend_calls.contains_key(&init)
+                    if !self.ir.intrinsic_suspension_points.contains_key(&init)
                         && (self.expr_has_loop_jump(stmt)
                             || expr_calls_suspend(self.ir, stmt, self.suspend)
                             || self.expr_jumps_to_active_frame(stmt))
@@ -3147,7 +3193,7 @@ impl Flat<'_> {
             }
             if let Some((bind, call)) = self.stmt_suspension(stmt) {
                 let resume = self.new_state();
-                self.emit_call(&mut out, call, resume);
+                self.emit_suspension(&mut out, call, resume);
                 self.states[cur] = out;
                 let mut rs: Vec<ExprId> = Vec::new();
                 if let Some((local, ty)) = bind {
@@ -3616,7 +3662,7 @@ fn reads_only_in_suspension_args(
     suspend_set: &HashSet<u32>,
 ) -> bool {
     fn walk(ir: &IrFile, e: ExprId, idx: u32, suspend_set: &HashSet<u32>, outside: &mut bool) {
-        if is_suspend_call(ir, e, suspend_set) {
+        if is_suspension_point(ir, e, suspend_set) {
             // Everything below evaluates before the suspension — reads here are safe.
             return;
         }
@@ -3665,7 +3711,7 @@ fn find_var_init(ir: &IrFile, e: ExprId, idx: u32) -> Option<ExprId> {
 
 /// The number of suspend-call nodes in the subtree under `e`.
 fn count_suspensions(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> usize {
-    let mut n = usize::from(is_suspend_call(ir, e, suspend_set));
+    let mut n = usize::from(is_suspension_point(ir, e, suspend_set));
     for_each_child(&ir.exprs, e, &mut |c| {
         n += count_suspensions(ir, c, suspend_set);
     });
@@ -3748,7 +3794,7 @@ impl ScopeWalk<'_> {
         self.scope.truncate(base);
     }
     fn walk(&mut self, e: ExprId) {
-        if is_suspend_call(self.ir, e, self.suspend_set) {
+        if is_suspension_point(self.ir, e, self.suspend_set) {
             self.snapshot(e);
         }
         match self.ir.exprs[e as usize].clone() {
@@ -3836,17 +3882,17 @@ impl ScopeWalk<'_> {
 }
 
 /// Collect every suspend-call expression id reachable under `e` (the final, post-transform body).
-fn collect_suspend_calls(
+fn collect_suspension_points(
     ir: &IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
     out: &mut HashSet<ExprId>,
 ) {
-    if is_suspend_call(ir, e, suspend_set) {
+    if is_suspension_point(ir, e, suspend_set) {
         out.insert(e);
     }
     for_each_child(&ir.exprs, e, &mut |c| {
-        collect_suspend_calls(ir, c, suspend_set, out)
+        collect_suspension_points(ir, c, suspend_set, out)
     });
 }
 
@@ -3972,7 +4018,7 @@ fn collect_suspension_lines(
     fall_through: Option<u32>,
     out: &mut std::collections::HashMap<ExprId, (u32, u32)>,
 ) {
-    if is_suspend_call(ir, expr, suspend_set) {
+    if is_suspension_point(ir, expr, suspend_set) {
         if let Some(line) = expression_source_line(ir, expr) {
             let resume = fall_through.unwrap_or(line);
             out.entry(expr).or_insert((line, resume));
@@ -4067,12 +4113,12 @@ fn collect_suspension_lines(
         {
             collect_suspension_lines(ir, *init, suspend_set, fall_through, out);
         }
-        IrExpr::Return(Some(value)) if is_suspend_call(ir, *value, suspend_set) => {
+        IrExpr::Return(Some(value)) if is_suspension_point(ir, *value, suspend_set) => {
             collect_suspension_lines(ir, *value, suspend_set, Some(u32::MAX), out);
         }
         IrExpr::Return(Some(value)) => {
             let mut calls = HashSet::new();
-            collect_suspend_calls(ir, *value, suspend_set, &mut calls);
+            collect_suspension_points(ir, *value, suspend_set, &mut calls);
             for call in calls {
                 if resumes_into_inline_call(ir, *value, call) {
                     if let Some(line) = expression_source_line(ir, call) {
@@ -5138,7 +5184,7 @@ fn tail_suspending_loop(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32
 fn consecutive_temp_suspensions(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32>) -> bool {
     let temp_susp = |s: ExprId| {
         matches!(&ir.exprs[s as usize], IrExpr::Variable { named: false, init: Some(i), .. }
-            if is_suspend_call(ir, unwrap_suspend_cast(ir, *i, suspend_set, false), suspend_set))
+            if is_suspension_point(ir, unwrap_suspend_cast(ir, *i, suspend_set, false), suspend_set))
     };
     stmts.windows(2).any(|w| temp_susp(w[0]) && temp_susp(w[1]))
 }
@@ -5155,7 +5201,7 @@ fn binds_value_class_suspension(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u3
         ..
     } = &ir.exprs[e as usize]
     {
-        if is_suspend_call(ir, *init, suspend_set)
+        if is_suspension_point(ir, *init, suspend_set)
             && ir
                 .classes
                 .iter()

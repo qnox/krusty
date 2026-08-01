@@ -1467,6 +1467,13 @@ pub struct SymbolTable {
     /// Top-level function source declaration → declaring facade. This is the declaration-keyed
     /// equivalent of [`Self::fn_facades`], used once the checker has selected a concrete overload.
     pub fn_facades_by_decl: HashMap<(u32, u32), TypeName>,
+    /// Source functions the JVM module-registration pass deliberately omitted from
+    /// [`Self::fn_facades_by_decl`]. An absent positive entry is otherwise ambiguous: it can mean
+    /// either "splice-only, never emitted" or simply "this checker-only pipeline did not run JVM
+    /// registration". Keeping the authoritative negative result beside the positive map lets the
+    /// checker diagnose only the former without reimplementing backend emission policy or accepting
+    /// a facade class name leaked through a generic symbol origin.
+    unemitted_fn_facades_by_decl: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands keyed by source declaration.
     pub source_generic_value_operand_slots: HashMap<(u32, u32), Vec<u32>>,
     /// Bare generic value operands for source members.
@@ -1505,6 +1512,7 @@ impl Default for SymbolTable {
             class_names: ClassNames::default(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
+            unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
             source_generic_value_operand_slots: HashMap::new(),
             source_generic_member_value_operand_slots: HashMap::new(),
             source_projected_return_hazards: std::collections::HashSet::new(),
@@ -1515,6 +1523,34 @@ impl Default for SymbolTable {
 }
 
 impl SymbolTable {
+    /// Record the JVM module registrar's complete answer for one source function. `Some` is the
+    /// concrete facade static the lowerer may reference; `None` is an explicit promise that no
+    /// callable is emitted. The two declaration-keyed collections are maintained as complements so
+    /// rerunning registration cannot leave a stale positive/negative answer behind.
+    pub(crate) fn record_fn_facade(
+        &mut self,
+        file: u32,
+        declaration: DeclId,
+        facade: Option<TypeName>,
+    ) {
+        let key = (file, declaration.0);
+        if let Some(facade) = facade {
+            self.unemitted_fn_facades_by_decl.remove(&key);
+            self.fn_facades_by_decl.insert(key, facade);
+        } else {
+            self.fn_facades_by_decl.remove(&key);
+            self.unemitted_fn_facades_by_decl.insert(key);
+        }
+    }
+
+    /// Whether JVM registration explicitly decided that this declaration has no callable facade.
+    /// `false` does not imply emission: callers must check the positive map separately because an
+    /// analysis-only pipeline records neither outcome.
+    pub(crate) fn fn_facade_is_explicitly_unemitted(&self, file: u32, declaration: u32) -> bool {
+        self.unemitted_fn_facades_by_decl
+            .contains(&(file, declaration))
+    }
+
     pub(crate) fn offset_source_files(&mut self, offset: u32) {
         let offset_signature = |signature: &mut Signature| {
             if let Some(file) = &mut signature.source_file {
@@ -1742,16 +1778,6 @@ impl SymbolTable {
         !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
             && !self.ty_mentions_value_class(sig.ret)
             && !inline_body_has_splice_only_shape(file, f)
-    }
-
-    /// Whether a top-level function is lowered + emitted as a facade static, so a CROSS-FILE call
-    /// links against a plain `invokestatic`: every non-inline top-level fun, plus an `inline` one
-    /// that is safe standalone (`inline_fn_facade_emittable`). Splice-only inline funs emit
-    /// nothing. Shared by every module-symbol registration driver (backend, survey, conformance
-    /// harness) so the three registration sites can't drift apart.
-    pub fn emits_fn_facade(&self, file: &File, file_index: u32, decl: DeclId, f: &FunDecl) -> bool {
-        f.receiver.is_none()
-            && (!f.is_inline() || self.inline_fn_facade_emittable(file, file_index, decl, f))
     }
 
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
@@ -3293,14 +3319,15 @@ fn resolve_name_against_imports_name(
         }
     }
     for level in levels {
-        // The CLASSIFIER namespace of the shared unqualified-name resolution loop: each in-scope package
-        // yields a candidate fqn's namespace record; a type position consumes only its `classifier`. The
-        // level-precedence + within-level ambiguity is applied HERE (the caller's own rule), the record
-        // keeping classifier separate from callables so a coexisting `fun`/`val` never perturbs it.
+        // This is a classifier-only pass. Resolving the complete namespace record also discovers and
+        // decodes every same-named top-level callable in the package, even though none of that data can
+        // affect a type-position result. Probe the classifier directly and leave callable discovery to
+        // the checker paths that consume it.
         let mut hits: Vec<TypeName> = Vec::new();
-        for (fqn, r) in crate::symbol_resolver::resolve_symbols_in_scope(source, name, level) {
-            if let Some(t) = &r.classifier {
-                let internal = t.alias_target.unwrap_or(fqn);
+        for &package in level {
+            let fqn = crate::types::type_name_child(package, name);
+            if let Some(classifier) = source.resolve_type_name(fqn) {
+                let internal = classifier.alias_target.unwrap_or(fqn);
                 if !hits.contains(&internal) {
                     hits.push(internal);
                 }
@@ -9212,6 +9239,20 @@ enum BoundSourceExtensionRef<'a> {
     },
     Ambiguous(Vec<(Ty, &'a Signature)>),
     Inaccessible,
+    /// Every matching candidate is a sibling-file fn with no facade entry — an inline fn that
+    /// is lowered per call site and cannot be referenced.
+    Unemitted,
+}
+
+/// The outcome of resolving a cross-file fn reference's owner facade (see
+/// [`Checker::sibling_fn_facade`]).
+enum SiblingFnFacade {
+    /// The fn is emitted as a facade static — the reference lowers to it.
+    Emitted(TypeName),
+    /// A splice-only inline fn the driver never emits — the reference cannot lower; name it.
+    Unemitted,
+    /// No registration data (a checker-only pipeline): decline silently, as before.
+    Unknown,
 }
 
 #[derive(Clone)]
@@ -9896,6 +9937,188 @@ fn install_anonymous_object_captures(
     }
 }
 
+/// Walk expression/statement arenas iteratively from already-identified declaration roots and
+/// record every anonymous-object construction encountered. Keeping the arena walk separate from
+/// `File::any_decl_expr` lets the AST layer describe generic containment while this pass supplies
+/// capture-specific targets and completeness accounting.
+fn record_capture_targets(
+    file: &File,
+    targets: &std::collections::HashSet<ExprId>,
+    roots: impl IntoIterator<Item = ExprId>,
+    discovered: &mut std::collections::HashSet<ExprId>,
+) -> bool {
+    let mut expressions = roots.into_iter().collect::<Vec<_>>();
+    let mut statements = Vec::new();
+    let mut owns_target = false;
+    loop {
+        if let Some(expression) = expressions.pop() {
+            if targets.contains(&expression) {
+                discovered.insert(expression);
+                owns_target = true;
+            }
+            file.any_child_expr(
+                expression,
+                &mut |child| {
+                    expressions.push(child);
+                    false
+                },
+                &mut |statement| {
+                    statements.push(statement);
+                    false
+                },
+            );
+        } else if let Some(statement) = statements.pop() {
+            file.any_child_stmt(statement, &mut |child| {
+                expressions.push(child);
+                false
+            });
+        } else {
+            return owns_target;
+        }
+    }
+}
+
+fn record_function_capture_targets(
+    file: &File,
+    function: &FunDecl,
+    targets: &std::collections::HashSet<ExprId>,
+    discovered: &mut std::collections::HashSet<ExprId>,
+) -> bool {
+    let mut roots = Vec::new();
+    file.any_fun_expr(function, &mut |expression| {
+        roots.push(expression);
+        false
+    });
+    record_capture_targets(file, targets, roots, discovered)
+}
+
+struct ClassCapturePlan {
+    method_check_prefix_len: usize,
+    companion_methods: Vec<bool>,
+}
+
+impl ClassCapturePlan {
+    /// Refine one already-selected class without reintroducing a resolver-owned inventory of class
+    /// fields. `declaration_targets` came from the generic `File::any_decl_expr` walk above; this
+    /// method only asks the corresponding generic function seam which ordered method owns each
+    /// target.
+    ///
+    /// Instance and enum-entry methods publish inferred returns into shared checker state. Keep the
+    /// exact prefix through the last capture-bearing method. A target in any other class region
+    /// keeps the complete prefix because constructors, properties, init blocks, enum arguments, and
+    /// companion functions may consume those published returns. Companion functions themselves do
+    /// not publish into that cross-function cache, so they can be selected independently.
+    fn for_class(
+        file: &File,
+        class: &ClassDecl,
+        targets: &std::collections::HashSet<ExprId>,
+        declaration_targets: &std::collections::HashSet<ExprId>,
+    ) -> Self {
+        let methods = class
+            .methods
+            .iter()
+            .chain(
+                class
+                    .enum_entries
+                    .iter()
+                    .flat_map(|entry| entry.methods.iter()),
+            )
+            .collect::<Vec<_>>();
+        let mut method_targets = std::collections::HashSet::new();
+        let mut method_check_prefix_len = 0;
+        for (index, method) in methods.iter().enumerate() {
+            if record_function_capture_targets(file, method, targets, &mut method_targets) {
+                method_check_prefix_len = index + 1;
+            }
+        }
+        if declaration_targets
+            .iter()
+            .any(|target| !method_targets.contains(target))
+        {
+            method_check_prefix_len = methods.len();
+        }
+
+        let mut companion_targets = std::collections::HashSet::new();
+        let companion_methods = class
+            .companion_methods
+            .iter()
+            .map(|method| {
+                record_function_capture_targets(file, method, targets, &mut companion_targets)
+            })
+            .collect();
+        Self {
+            method_check_prefix_len,
+            companion_methods,
+        }
+    }
+}
+
+struct CaptureDiscoveryScope {
+    declarations: std::collections::HashSet<DeclId>,
+    script_body: bool,
+    class_plans: std::collections::HashMap<DeclId, ClassCapturePlan>,
+}
+
+/// Capture discovery needs lexical state from the declaration containing each anonymous-object
+/// construction, but declarations are checked in isolated top-level scopes. Find those owners once
+/// so the scratch checker does not re-check every unrelated declaration in the file.
+fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
+    let targets = file
+        .anonymous_object_classes
+        .keys()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut discovered = std::collections::HashSet::with_capacity(targets.len());
+    let mut class_plans = std::collections::HashMap::new();
+    let declarations = file
+        .decls
+        .iter()
+        .copied()
+        .filter(|declaration| {
+            let mut roots = Vec::new();
+            file.any_decl_expr(*declaration, &mut |expression| {
+                roots.push(expression);
+                false
+            });
+            let mut declaration_targets = std::collections::HashSet::new();
+            let owns_target =
+                record_capture_targets(file, &targets, roots, &mut declaration_targets);
+            if owns_target {
+                if let Decl::Class(class) = file.decl(*declaration) {
+                    class_plans.insert(
+                        *declaration,
+                        ClassCapturePlan::for_class(file, class, &targets, &declaration_targets),
+                    );
+                }
+                discovered.extend(declaration_targets);
+            }
+            owns_target
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let script_body = file
+        .script_body
+        .is_some_and(|body| record_capture_targets(file, &targets, [body], &mut discovered));
+    // Keep capture analysis conservative as the AST evolves. If a parser change retains an
+    // anonymous construction outside the generic declaration-root inventory, retain the old
+    // full-file semantic pass rather than silently treating that construction as capture-free.
+    let complete = discovered.len() == targets.len();
+    CaptureDiscoveryScope {
+        declarations: if complete {
+            declarations
+        } else {
+            file.decls.iter().copied().collect()
+        },
+        script_body: script_body || !complete,
+        // An unknown expression-bearing parser field invalidates not only declaration selection but
+        // every narrower class plan. An empty map makes callers preserve the full semantic walk.
+        class_plans: if complete {
+            class_plans
+        } else {
+            std::collections::HashMap::new()
+        },
+    }
+}
+
 fn discover_anonymous_object_captures_at(file: &File, file_index: u32, syms: &mut SymbolTable) {
     let declarations = file
         .anonymous_object_classes
@@ -10151,7 +10374,14 @@ fn check_file_at_impl_mode(
     // notably a function's locals must NOT be visible to a hoisted local class (`hoist_local_classes`)
     // checked afterward, or a captured outer name would wrongly resolve instead of skipping the file.
     let base_scope_depth = c.scopes.len();
+    let capture_scope = capture_discovery.then(|| capture_discovery_scope(file));
     for &d in &file.decls {
+        if capture_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.declarations.contains(&d))
+        {
+            continue;
+        }
         c.scopes.truncate(base_scope_depth);
         match file.decl(d) {
             Decl::Fun(f) => {
@@ -10432,8 +10662,16 @@ fn check_file_at_impl_mode(
                         }
                     }
                 }
+                let method_check_prefix_len = capture_scope
+                    .as_ref()
+                    .and_then(|scope| scope.class_plans.get(&d))
+                    .map_or(usize::MAX, |plan| plan.method_check_prefix_len);
+                let mut method_check_index = 0;
                 for m in &cl.methods {
-                    c.check_method(m, &props);
+                    if method_check_index < method_check_prefix_len {
+                        c.check_method(m, &props);
+                    }
+                    method_check_index += 1;
                 }
                 // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
                 // checked like a method of the enum — `this` is the enum type, the enum's properties AND
@@ -10477,7 +10715,10 @@ fn check_file_at_impl_mode(
                         c.pop_scope();
                     }
                     for bm in &entry.methods {
-                        c.check_method(bm, &entry_props);
+                        if method_check_index < method_check_prefix_len {
+                            c.check_method(bm, &entry_props);
+                        }
+                        method_check_index += 1;
                     }
                 }
                 // Secondary constructors: check and record one delegation target before the body.
@@ -10966,8 +11207,21 @@ fn check_file_at_impl_mode(
                             }
                         }
                     }
-                    for m in &cl.companion_methods {
-                        c.check_fun(m, None);
+                    for (method_index, m) in cl.companion_methods.iter().enumerate() {
+                        if capture_scope
+                            .as_ref()
+                            .and_then(|scope| scope.class_plans.get(&d))
+                            // A missing plan means completeness fell back to the full semantic walk;
+                            // an unexpected length mismatch must fail conservative for the same reason.
+                            .is_none_or(|plan| {
+                                plan.companion_methods
+                                    .get(method_index)
+                                    .copied()
+                                    .unwrap_or(true)
+                            })
+                        {
+                            c.check_fun(m, None);
+                        }
                     }
                     c.companion_of = None;
                 }
@@ -11097,7 +11351,12 @@ fn check_file_at_impl_mode(
             }
         }
     }
-    if let Some(body) = file.script_body {
+    if let Some(body) = file.script_body.filter(|_| {
+        !capture_discovery
+            || capture_scope
+                .as_ref()
+                .is_some_and(|scope| scope.script_body)
+    }) {
         c.scopes.truncate(base_scope_depth);
         c.reset_body_mutations(Some(body));
         c.push_local_funs();
@@ -11108,8 +11367,10 @@ fn check_file_at_impl_mode(
         c.in_script_body = false;
         c.pop_local_funs();
     }
-    for reference in &file.detached_type_refs {
-        c.resolve_ty(reference);
+    if !capture_discovery {
+        for reference in &file.detached_type_refs {
+            c.resolve_ty(reference);
+        }
     }
     let Checker {
         expr_types,
@@ -12182,6 +12443,7 @@ impl<'a> Checker<'a> {
         expected: Option<&'static crate::types::FnSig>,
     ) -> BoundSourceExtensionRef<'_> {
         let mut inaccessible = false;
+        let mut unemitted = false;
         let mut candidates = self
             .resolver()
             .resolve_symbol(
@@ -12224,22 +12486,23 @@ impl<'a> Checker<'a> {
                     None if signature.requires_all_args() => {}
                     None => return None,
                 }
-                let facade = self
-                    .syms
-                    .fn_facades_by_decl
-                    .get(&(file, declaration))
-                    .copied()
-                    .or(match function.callable.origin {
-                        crate::libraries::Origin::Module { facade } => Some(facade),
-                        _ => None,
-                    });
                 let owner = if file == self.file_index {
                     None
                 } else {
-                    Some(facade?)
+                    // A sibling-file fn with no facade entry is an unemitted inline fn — the
+                    // reference cannot lower. Decline the candidate; if no other candidate
+                    // survives, the caller reports WHY.
+                    match self.sibling_fn_facade(file, declaration) {
+                        SiblingFnFacade::Emitted(facade) => Some(facade),
+                        SiblingFnFacade::Unemitted => {
+                            unemitted = true;
+                            return None;
+                        }
+                        SiblingFnFacade::Unknown => return None,
+                    }
                 };
                 let mut target = function.callable.clone();
-                if let Some(facade) = facade {
+                if let Some(facade) = owner {
                     target.owner = facade;
                     target.origin = crate::libraries::Origin::Module { facade };
                 }
@@ -12247,7 +12510,9 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
-            return if inaccessible {
+            return if unemitted {
+                BoundSourceExtensionRef::Unemitted
+            } else if inaccessible {
                 BoundSourceExtensionRef::Inaccessible
             } else {
                 BoundSourceExtensionRef::None
@@ -12447,6 +12712,43 @@ impl<'a> Checker<'a> {
         ))
     }
 
+    /// Report a reference to a sibling-file fn that is never emitted as a callable (see
+    /// [`Checker::sibling_fn_facade`]).
+    fn unemitted_inline_ref_error(&mut self, expression: ExprId, name: &str) -> Ty {
+        self.diags.error(
+            self.member_name_span(expression, name),
+            format!(
+                "cannot reference '{name}': the inline function is not emitted as a callable, \
+                 so it cannot be referenced from another file"
+            ),
+        );
+        Ty::Error
+    }
+
+    /// The facade a cross-file fn REFERENCE can target. Both emitted and deliberately-unemitted
+    /// answers come from the JVM module registrar; the checker does not duplicate its emission
+    /// predicate and does not treat an `Origin::Module` facade spelling as proof that a class or
+    /// method exists. With neither answer, this is a checker-only pipeline (LSP/unit tests), so the
+    /// reference declines silently and the ordinary type-only fallbacks remain available.
+    fn sibling_fn_facade(&self, file: u32, declaration: u32) -> SiblingFnFacade {
+        if let Some(facade) = self
+            .syms
+            .fn_facades_by_decl
+            .get(&(file, declaration))
+            .copied()
+        {
+            return SiblingFnFacade::Emitted(facade);
+        }
+        if self
+            .syms
+            .fn_facade_is_explicitly_unemitted(file, declaration)
+        {
+            SiblingFnFacade::Unemitted
+        } else {
+            SiblingFnFacade::Unknown
+        }
+    }
+
     /// Select a same-module top-level callable reference from its expected function type. Calls have
     /// argument expressions for overload resolution; `::name` instead uses the expected parameter and
     /// return shape. Kotlin also permits a value-returning target where `Unit` is expected.
@@ -12553,21 +12855,13 @@ impl<'a> Checker<'a> {
         let owner = if source_file == self.file_index {
             None
         } else {
-            Some(
-                self.syms
-                    .fn_facades_by_decl
-                    .get(&(source_file, source_declaration))
-                    .copied()
-                    .or(match selected.callable.origin {
-                        // An EMPTY facade is the "unrecorded" fallback, not a real class — for a
-                        // sibling-file function it means the target is not emitted anywhere
-                        // (a non-callable inline fn), so the reference cannot lower: decline.
-                        crate::libraries::Origin::Module { facade } => {
-                            Some(facade).filter(|f| !f.render().is_empty())
-                        }
-                        _ => None,
-                    })?,
-            )
+            match self.sibling_fn_facade(source_file, source_declaration) {
+                SiblingFnFacade::Emitted(facade) => Some(facade),
+                SiblingFnFacade::Unemitted => {
+                    return Some(self.unemitted_inline_ref_error(expression, name));
+                }
+                SiblingFnFacade::Unknown => return None,
+            }
         };
         self.resolved_source_calls
             .insert(expression, (source_file, source_declaration));
@@ -13234,22 +13528,19 @@ impl<'a> Checker<'a> {
         };
         let selected = &candidates[*selected];
         let (source_file, source_decl) = selected.source_key?;
-        let facade = self
-            .syms
-            .fn_facades_by_decl
-            .get(&(source_file, source_decl))
-            .copied()
-            .or_else(|| match &selected.callable.origin {
-                Origin::Module { facade } if !facade.render().is_empty() => Some(*facade),
-                _ => None,
-            });
         let owner = if source_file == self.file_index {
             None
         } else {
-            Some(facade?)
+            match self.sibling_fn_facade(source_file, source_decl) {
+                SiblingFnFacade::Emitted(facade) => Some(facade),
+                SiblingFnFacade::Unemitted => {
+                    return Some(self.unemitted_inline_ref_error(expression, name));
+                }
+                SiblingFnFacade::Unknown => return None,
+            }
         };
         let mut target = selected.callable.clone();
-        if let Some(facade) = facade {
+        if let Some(facade) = owner {
             target.owner = facade;
             target.origin = Origin::Module { facade };
         }
@@ -19447,16 +19738,13 @@ impl<'a> Checker<'a> {
         let owner = if selected.source_file == self.file_index {
             None
         } else {
-            Some(
-                self.syms
-                    .fn_facades_by_decl
-                    .get(&(selected.source_file, selected.source_decl))
-                    .copied()
-                    .or(match selected.function.callable.origin {
-                        crate::libraries::Origin::Module { facade } => Some(facade),
-                        _ => None,
-                    })?,
-            )
+            match self.sibling_fn_facade(selected.source_file, selected.source_decl) {
+                SiblingFnFacade::Emitted(facade) => Some(facade),
+                SiblingFnFacade::Unemitted => {
+                    return Some(self.unemitted_inline_ref_error(ref_expr, name));
+                }
+                SiblingFnFacade::Unknown => return None,
+            }
         };
         *generic_bindings = selected.bindings;
         let resolved_type = crate::symbol_resolver::ty_subst(Ty::Fun(exp), generic_bindings);
@@ -21962,6 +22250,10 @@ impl<'a> Checker<'a> {
                             format!("cannot access '{name}': it is private in its file"),
                         );
                         return self.set(e, Ty::Error);
+                    }
+                    BoundSourceExtensionRef::Unemitted => {
+                        let ty = self.unemitted_inline_ref_error(e, &name);
+                        return self.set(e, ty);
                     }
                     BoundSourceExtensionRef::None => {}
                 }
@@ -32163,7 +32455,300 @@ mod tests {
     use super::*;
     use crate::features::LangFeatures;
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_with_features};
+    use crate::parser::{parse, parse_script_with_features, parse_with_features};
+
+    #[test]
+    fn capture_discovery_selects_only_enclosing_top_level_declarations() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+interface Marker
+fun before(): Int = 1
+val top: Marker = object : Marker { fun value(): Int = 4 }
+fun defaulted(value: Marker = object : Marker {}): Marker = value
+fun target(seed: Int): Marker {
+    val captured = seed
+    return object : Marker { fun value(): Int = captured }
+}
+class MethodHost {
+    fun untouched(): Int = 2
+    fun build(seed: Int): Marker {
+        val captured = seed
+        return object : Marker { fun value(): Int = captured }
+    }
+    fun defaulted(value: Marker = object : Marker {}): Marker = value
+    fun after(): Int = 3
+}
+class CompanionHost {
+    fun dependency(): Int = 4
+    fun later(): Int = 5
+    companion object {
+        fun untouched(): Int = 6
+        fun build(seed: Int): Marker {
+            val captured = seed
+            return object : Marker { fun value(): Int = captured }
+        }
+    }
+}
+fun after(): Int = 3
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty());
+
+        let selected = capture_discovery_scope(&file).declarations;
+        let named = file
+            .decls
+            .iter()
+            .filter_map(|declaration| match file.decl(*declaration) {
+                Decl::Fun(function) if selected.contains(declaration) => {
+                    Some(function.name.as_str())
+                }
+                Decl::Class(class) if selected.contains(declaration) => Some(class.name.as_str()),
+                Decl::Property(property) if selected.contains(declaration) => {
+                    Some(property.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            named,
+            vec!["top", "defaulted", "target", "MethodHost", "CompanionHost"]
+        );
+
+        let class = |name: &str| {
+            file.decls
+                .iter()
+                .find_map(|declaration| match file.decl(*declaration) {
+                    Decl::Class(class) if class.name == name => Some((*declaration, class)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("source should contain {name}"))
+        };
+        let scope = capture_discovery_scope(&file);
+        let (method_host, _) = class("MethodHost");
+        let method_plan = scope
+            .class_plans
+            .get(&method_host)
+            .expect("selected class should have a complete plan");
+        // The last target is in a parameter default, proving the generic function-root seam is not
+        // a body-only shortcut. The unrelated suffix remains outside the semantic capture walk.
+        assert_eq!(method_plan.method_check_prefix_len, 3);
+
+        let (companion_host, _) = class("CompanionHost");
+        let companion_plan = scope
+            .class_plans
+            .get(&companion_host)
+            .expect("selected class should have a complete plan");
+        // A target in a companion function lies outside the ordered instance-method sequence, so
+        // both instance methods are retained while companion functions remain independently scoped.
+        assert_eq!(companion_plan.method_check_prefix_len, 2);
+        assert_eq!(companion_plan.companion_methods, vec![false, true]);
+    }
+
+    #[test]
+    fn capture_discovery_uses_generic_declaration_expression_roots() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+interface Marker
+open class Base(val marker: Marker)
+fun before(): Int = 1
+class Primary(val marker: Marker = object : Marker {})
+class Derived : Base(object : Marker {})
+class Delegated : Marker by object : Marker {}
+class Container {
+    init { val initialized = object : Marker {} }
+    val member = object : Marker {}
+    companion object : Base(object : Marker {}) {
+        fun make(): Marker = object : Marker {}
+        val value = object : Marker {}
+    }
+    constructor(marker: Marker = object : Marker {}) {
+        val constructed = object : Marker {}
+    }
+}
+enum class Choice(val marker: Marker) {
+    FIRST(object : Marker {})
+}
+val custom: Marker get() = object : Marker {}
+val delegated: Marker by object {
+    operator fun getValue(owner: Any?, property: Any?): Marker = object : Marker {}
+}
+fun after(): Int = 2
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+        let selected = capture_discovery_scope(&file).declarations;
+        let synthesized = file
+            .anonymous_object_classes
+            .values()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let named = file
+            .decls
+            .iter()
+            // A construction inside an anonymous object's member correctly selects that synthesized
+            // class too. Compare only source-level owners here so the regression neither depends on
+            // nor prints parser-generated internal class names.
+            .filter(|declaration| !synthesized.contains(declaration))
+            .filter_map(|declaration| match file.decl(*declaration) {
+                Decl::Fun(function) if selected.contains(declaration) => {
+                    Some(function.name.as_str())
+                }
+                Decl::Class(class) if selected.contains(declaration) => Some(class.name.as_str()),
+                Decl::Property(property) if selected.contains(declaration) => {
+                    Some(property.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        // `before`, `after`, `Marker`, and `Base` are sentinels: if a future parser field falls
+        // outside `File::any_decl_expr`, completeness detection selects every declaration and makes
+        // this assertion fail instead of silently losing capture information.
+        assert_eq!(
+            named,
+            vec![
+                "Primary",
+                "Derived",
+                "Delegated",
+                "Container",
+                "Choice",
+                "custom",
+                "delegated",
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_discovery_selects_script_body() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+val captured = "OK"
+val result = object { fun value(): String = captured }
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file =
+            parse_script_with_features(source, &tokens, &mut diagnostics, &LangFeatures::default());
+        assert!(diagnostics.diags.is_empty());
+
+        let scope = capture_discovery_scope(&file);
+        assert!(scope.declarations.is_empty());
+        assert!(scope.script_body);
+    }
+
+    struct ClassifierImportSource;
+
+    fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
+        crate::libraries::LibraryType {
+            is_public: true,
+            kind: crate::libraries::TypeKind::Class,
+            supertypes: crate::types::TypeNameList::new(),
+            constructors: Vec::new(),
+            members: Vec::new(),
+            companion: Vec::new(),
+            companion_consts: HashMap::new(),
+            sam_method: None,
+            companion_object: None,
+            value_companion_fns: Vec::new(),
+            value_underlying: None,
+            alias_target,
+            type_params: Vec::new(),
+            sealed_subclasses: crate::types::TypeNameList::new(),
+            enum_entries: Vec::new(),
+            value_ctor_has_default: false,
+            ctor_named_params: Vec::new(),
+            value_class_properties: Vec::new(),
+            retention: None,
+        }
+    }
+
+    impl crate::symbol_source::SymbolSource for ClassifierImportSource {
+        fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
+            match internal {
+                "fallback/Thing" | "distinct_a/Thing" | "distinct_b/Thing" => {
+                    Some(import_test_classifier(None))
+                }
+                "alias_a/Thing" | "alias_b/Thing" => Some(import_test_classifier(Some(
+                    crate::types::type_name("target/Thing"),
+                ))),
+                _ => None,
+            }
+        }
+
+        fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+            if fqn == "callable/Thing" {
+                let callable = crate::libraries::LibraryCallable::library(
+                    "callable/ThingKt",
+                    "Thing",
+                    Vec::new(),
+                    Ty::Unit,
+                    Ty::Unit,
+                    "()V",
+                );
+                return crate::libraries::ResolvedSymbols {
+                    classifier: None,
+                    callables: crate::libraries::Callables::Functions(
+                        crate::libraries::FunctionSet {
+                            overloads: vec![crate::libraries::FunctionInfo::plain(
+                                crate::libraries::FnKind::TopLevel,
+                                None,
+                                callable,
+                            )],
+                        },
+                    ),
+                };
+            }
+            crate::libraries::ResolvedSymbols {
+                classifier: self.resolve_type(fqn).map(std::rc::Rc::new),
+                callables: crate::libraries::Callables::None,
+            }
+        }
+    }
+
+    #[test]
+    fn classifier_import_resolution_ignores_callable_only_higher_precedence_candidates() {
+        let resolved = resolve_name_against_imports_name(
+            "Thing",
+            &HashMap::new(),
+            &[
+                vec![crate::types::type_name("callable")],
+                vec![crate::types::type_name("fallback")],
+            ],
+            &ClassifierImportSource,
+        );
+        assert_eq!(resolved, Some(crate::types::type_name("fallback/Thing")));
+    }
+
+    #[test]
+    fn classifier_import_resolution_collapses_aliases_to_the_same_target() {
+        let resolved = resolve_name_against_imports_name(
+            "Thing",
+            &HashMap::new(),
+            &[vec![
+                crate::types::type_name("alias_a"),
+                crate::types::type_name("alias_b"),
+            ]],
+            &ClassifierImportSource,
+        );
+        assert_eq!(resolved, Some(crate::types::type_name("target/Thing")));
+    }
+
+    #[test]
+    fn classifier_import_resolution_rejects_distinct_same_level_candidates() {
+        let resolved = resolve_name_against_imports_name(
+            "Thing",
+            &HashMap::new(),
+            &[vec![
+                crate::types::type_name("distinct_a"),
+                crate::types::type_name("distinct_b"),
+            ]],
+            &ClassifierImportSource,
+        );
+        assert_eq!(resolved, None);
+    }
 
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {
         let mut d = DiagSink::new();
