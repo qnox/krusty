@@ -184,6 +184,8 @@ mod classpath_qualified_nested_named_ctor_e2e;
 mod classpath_receiver_lambda_e2e;
 #[path = "classpath_runblocking_e2e.rs"]
 mod classpath_runblocking_e2e;
+#[path = "classpath_runtest_e2e.rs"]
+mod classpath_runtest_e2e;
 #[path = "classpath_static_call_inference_e2e.rs"]
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]

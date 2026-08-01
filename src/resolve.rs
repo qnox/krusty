@@ -13395,17 +13395,6 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         self.resolver().resolve_super_instance(internal, name, args)
     }
-    fn resolve_companion(
-        &self,
-        internal: &str,
-        name: &str,
-        args: &[Ty],
-    ) -> Option<crate::libraries::LibraryMember> {
-        use crate::symbol_resolver::{SymRecv, Symbol};
-        self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), name, args, &[])
-            .and_then(Symbol::companion)
-    }
     fn resolve_companion_with_literal_args(
         &self,
         internal: &str,
@@ -30894,9 +30883,18 @@ impl<'a> Checker<'a> {
                             .map(|(o, m)| (o.to_string(), m.to_string()))
                     }) {
                         if let Some(owner_internal) = self.nested_internal(&owner_path) {
-                            if let Some(m) =
-                                self.resolve_companion(&owner_internal, &member, &arg_tys)
-                            {
+                            // Lambda args must stay LAMBDA literals here (`assertThrows(T::class.java)
+                            // { … }`): as plain typed `FunctionN` args the Java SAM-interface parameter
+                            // (`Executable`, `Runnable`) never matches and the imported static is
+                            // reported unresolved.
+                            let arg_kinds = self.call_arg_kinds(args);
+                            let call_targs = self.resolved_explicit_type_args(call);
+                            if let Some(m) = self.resolve_companion_with_literal_args(
+                                &owner_internal,
+                                &member,
+                                &arg_kinds,
+                                &call_targs,
+                            ) {
                                 let owner = m.owner_name_or(&owner_internal);
                                 let phys =
                                     m.physical_name.clone().unwrap_or_else(|| m.name.clone());
@@ -30920,6 +30918,17 @@ impl<'a> Checker<'a> {
                                     let fixed = m.params.len() - 1;
                                     for (i, &a) in args.iter().enumerate() {
                                         let pt = if i < fixed { m.params[i] } else { elem };
+                                        if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                                            if let Some(sam) =
+                                                crate::symbol_resolver::classpath_sam_signature(
+                                                    &*self.syms.libraries,
+                                                    pt,
+                                                )
+                                            {
+                                                self.check_lambda_with_types(a, &sam.params);
+                                                continue;
+                                            }
+                                        }
                                         self.expect_assignable(
                                             pt,
                                             arg_tys[i],
@@ -30928,7 +30937,30 @@ impl<'a> Checker<'a> {
                                         );
                                     }
                                 } else {
-                                    self.expect_call_args(&m.params, false, args, &arg_tys);
+                                    // A lambda argument converts to a Java SAM-interface parameter
+                                    // (`assertThrows(T::class.java) { … }` → `Executable`): check the
+                                    // lambda against the SAM method's parameter types, not against the
+                                    // interface type itself.
+                                    for (i, (p, a)) in m.params.iter().zip(args.iter()).enumerate()
+                                    {
+                                        if matches!(self.file.expr(*a), Expr::Lambda { .. }) {
+                                            if let Some(sam) =
+                                                crate::symbol_resolver::classpath_sam_signature(
+                                                    &*self.syms.libraries,
+                                                    *p,
+                                                )
+                                            {
+                                                self.check_lambda_with_types(*a, &sam.params);
+                                                continue;
+                                            }
+                                        }
+                                        self.expect_assignable(
+                                            *p,
+                                            arg_tys[i],
+                                            self.span(*a),
+                                            "argument",
+                                        );
+                                    }
                                 }
                                 self.resolved_calls
                                     .insert(call, ResolvedCall::TopLevel(callable));

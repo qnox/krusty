@@ -2672,16 +2672,13 @@ impl<'a> SymbolResolver<'a> {
     ) -> Option<LibraryCallable> {
         // Direct scope resolution, not `resolve_symbol(TopLevel)`: runs inside `pick_top_level` (see
         // `resolve_top_level_default_callable`) — routing back through `resolve_symbol` would recurse.
-        let fsd = function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default")));
-        for o in fsd.top_level() {
+        let try_default = |o: &FunctionInfo| -> Option<LibraryCallable> {
             let c = &o.callable;
             if !o.public() && !o.flags.inline.must_inline() {
-                continue;
+                return None;
             }
             let params = &c.params;
-            let Some(mapping) = self.default_arg_mapping(o, params, args) else {
-                continue;
-            };
+            let mapping = self.default_arg_mapping(o, params, args)?;
             // A `$default` synthetic usually carries NO generic `Signature` (it isn't API), so binding the
             // return type parameter off it fails and the erased `Object` return leaks (`runBlocking { … }`
             // → `Any`, losing the block's result type). Fall back to the BASE function's gsig — its leading
@@ -2727,7 +2724,36 @@ impl<'a> SymbolResolver<'a> {
             let ret_ty = o.ret.apply(ret_ty);
             let mut callable = callable_with_return(c, ret_ty, true);
             record_default_vararg_slot(&mut callable, o.call_sig.vararg_index, params, args);
-            return Some(callable);
+            Some(callable)
+        };
+        let fsd = function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default")));
+        for o in fsd.top_level() {
+            if let Some(callable) = try_default(o) {
+                return Some(callable);
+            }
+        }
+        // A `@JvmName`/value-class-mangled base (`runTest` → `runTest-8Mi8wO0`) mangles its `$default`
+        // synthetic too. The import scope only knows the SOURCE spelling (`{name}$default` maps through
+        // the explicit import), so resolve each mangled synthetic directly in its base candidate's
+        // facade package. Probed LAST: an unmangled name never reaches this (the common case pays no
+        // extra scope query).
+        let mut seen_spellings = std::collections::HashSet::new();
+        for base in function_set_from_symbols(self.symbols_in_scope(name)).into_top_level() {
+            let spelling = base.callable.name.clone();
+            if spelling == name || !seen_spellings.insert(spelling.clone()) {
+                continue;
+            }
+            let Some(pkg) = base.callable.owner.parent() else {
+                continue;
+            };
+            let fqn = crate::types::type_name_child(pkg, &format!("{spelling}$default"));
+            let record = self.src.resolve_symbols_name(fqn);
+            let fs = function_set_from_symbols(std::iter::once((fqn, record)));
+            for o in fs.top_level() {
+                if let Some(callable) = try_default(o) {
+                    return Some(callable);
+                }
+            }
         }
         None
     }
