@@ -170,27 +170,11 @@ fn first_error_blocks(
         return Err(d.diags[0].msg.clone());
     }
 
-    for (i, file) in files.iter().enumerate() {
-        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
-        for &decl in &file.decls {
-            match file.decl(decl) {
-                krusty::ast::Decl::Fun(f) if syms.emits_fn_facade(file, i as u32, decl, f) => {
-                    let facade_name = krusty::types::type_name(&facade);
-                    syms.fn_facades_by_decl
-                        .insert((i as u32, decl.0), facade_name);
-                    syms.fn_facades.insert(f.name.clone(), facade_name);
-                }
-                krusty::ast::Decl::Property(p) if p.receiver.is_none() => {
-                    if let Some(&(ty, is_var, is_const)) = syms.props.get(&p.name) {
-                        let facade_name = krusty::types::type_name(&facade);
-                        syms.prop_facades
-                            .insert(p.name.clone(), (facade_name, ty, is_var, is_const));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    // Use the production registrar for both positive facade owners and explicit splice-only
+    // outcomes. Keeping a survey-local copy previously let extension functions and backend
+    // emittability policy drift from the CLI and conformance harness.
+    let stems: Vec<String> = blocks.iter().map(|(stem, _)| stem.clone()).collect();
+    krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
 
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
@@ -293,7 +277,21 @@ fn first_error_module(
     result
 }
 
+/// Copy at most `limit` Unicode scalar values from a diagnostic.
+///
+/// Survey input can contain source-defined Unicode identifiers. Byte slicing at an arbitrary display
+/// limit can panic in the reporting path, so every fallback bucket uses this shared safe truncation.
+fn truncate_chars(message: &str, limit: usize) -> String {
+    message.chars().take(limit).collect()
+}
+
 fn categorize(err: &str) -> String {
+    // Backend (`lower:`/`emit:`) diagnostics are already curated, precise reasons — keep them
+    // verbatim rather than re-bucketing on a substring coincidence (e.g. a `lower:` reason that
+    // happens to contain "bridge").
+    if err.starts_with("lower:") || err.starts_with("emit:") {
+        return truncate_chars(err, 70);
+    }
     if err.contains("class bodies support") {
         return "nested decl in class body".into();
     }
@@ -318,17 +316,14 @@ fn categorize(err: &str) -> String {
     if err.contains("conflicting declarations") {
         return "conflicting declarations".into();
     }
-    if err.starts_with("lower:") || err.starts_with("emit:") {
-        return err[..err.len().min(70)].to_string();
-    }
     if err.contains("krusty: ") {
         let m = err.trim_start_matches("krusty: ");
-        return format!("krusty: {}", &m[..m.len().min(60)]);
+        return format!("krusty: {}", truncate_chars(m, 60));
     }
     if err.contains("expected") {
-        return format!("parse: {}", &err[..err.len().min(60)]);
+        return format!("parse: {}", truncate_chars(err, 60));
     }
-    format!("other: {}", &err[..err.len().min(60)])
+    format!("other: {}", truncate_chars(err, 60))
 }
 
 fn collect_kt(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -451,5 +446,30 @@ fn run() {
         for (k, v) in &sorted {
             println!("  {:4}  {k}", v.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod categorize_tests {
+    use super::{categorize, truncate_chars};
+
+    #[test]
+    fn backend_categories_are_not_rebucketed_by_incidental_words() {
+        assert_eq!(
+            categorize("lower: gate:suspend-erasure-bridge"),
+            "lower: gate:suspend-erasure-bridge"
+        );
+        assert_eq!(
+            categorize("emit: inline splice failed"),
+            "emit: inline splice failed"
+        );
+    }
+
+    #[test]
+    fn diagnostic_truncation_respects_unicode_boundaries() {
+        let message = "é".repeat(80);
+        let truncated = truncate_chars(&message, 60);
+        assert_eq!(truncated.chars().count(), 60);
+        assert!(message.starts_with(&truncated));
     }
 }

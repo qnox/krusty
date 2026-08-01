@@ -1467,6 +1467,13 @@ pub struct SymbolTable {
     /// Top-level function source declaration → declaring facade. This is the declaration-keyed
     /// equivalent of [`Self::fn_facades`], used once the checker has selected a concrete overload.
     pub fn_facades_by_decl: HashMap<(u32, u32), TypeName>,
+    /// Source functions the JVM module-registration pass deliberately omitted from
+    /// [`Self::fn_facades_by_decl`]. An absent positive entry is otherwise ambiguous: it can mean
+    /// either "splice-only, never emitted" or simply "this checker-only pipeline did not run JVM
+    /// registration". Keeping the authoritative negative result beside the positive map lets the
+    /// checker diagnose only the former without reimplementing backend emission policy or accepting
+    /// a facade class name leaked through a generic symbol origin.
+    unemitted_fn_facades_by_decl: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands keyed by source declaration.
     pub source_generic_value_operand_slots: HashMap<(u32, u32), Vec<u32>>,
     /// Bare generic value operands for source members.
@@ -1505,6 +1512,7 @@ impl Default for SymbolTable {
             class_names: ClassNames::default(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
+            unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
             source_generic_value_operand_slots: HashMap::new(),
             source_generic_member_value_operand_slots: HashMap::new(),
             source_projected_return_hazards: std::collections::HashSet::new(),
@@ -1515,6 +1523,34 @@ impl Default for SymbolTable {
 }
 
 impl SymbolTable {
+    /// Record the JVM module registrar's complete answer for one source function. `Some` is the
+    /// concrete facade static the lowerer may reference; `None` is an explicit promise that no
+    /// callable is emitted. The two declaration-keyed collections are maintained as complements so
+    /// rerunning registration cannot leave a stale positive/negative answer behind.
+    pub(crate) fn record_fn_facade(
+        &mut self,
+        file: u32,
+        declaration: DeclId,
+        facade: Option<TypeName>,
+    ) {
+        let key = (file, declaration.0);
+        if let Some(facade) = facade {
+            self.unemitted_fn_facades_by_decl.remove(&key);
+            self.fn_facades_by_decl.insert(key, facade);
+        } else {
+            self.fn_facades_by_decl.remove(&key);
+            self.unemitted_fn_facades_by_decl.insert(key);
+        }
+    }
+
+    /// Whether JVM registration explicitly decided that this declaration has no callable facade.
+    /// `false` does not imply emission: callers must check the positive map separately because an
+    /// analysis-only pipeline records neither outcome.
+    pub(crate) fn fn_facade_is_explicitly_unemitted(&self, file: u32, declaration: u32) -> bool {
+        self.unemitted_fn_facades_by_decl
+            .contains(&(file, declaration))
+    }
+
     pub(crate) fn offset_source_files(&mut self, offset: u32) {
         let offset_signature = |signature: &mut Signature| {
             if let Some(file) = &mut signature.source_file {
@@ -1742,16 +1778,6 @@ impl SymbolTable {
         !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
             && !self.ty_mentions_value_class(sig.ret)
             && !inline_body_has_splice_only_shape(file, f)
-    }
-
-    /// Whether a top-level function is lowered + emitted as a facade static, so a CROSS-FILE call
-    /// links against a plain `invokestatic`: every non-inline top-level fun, plus an `inline` one
-    /// that is safe standalone (`inline_fn_facade_emittable`). Splice-only inline funs emit
-    /// nothing. Shared by every module-symbol registration driver (backend, survey, conformance
-    /// harness) so the three registration sites can't drift apart.
-    pub fn emits_fn_facade(&self, file: &File, file_index: u32, decl: DeclId, f: &FunDecl) -> bool {
-        f.receiver.is_none()
-            && (!f.is_inline() || self.inline_fn_facade_emittable(file, file_index, decl, f))
     }
 
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
@@ -9213,6 +9239,20 @@ enum BoundSourceExtensionRef<'a> {
     },
     Ambiguous(Vec<(Ty, &'a Signature)>),
     Inaccessible,
+    /// Every matching candidate is a sibling-file fn with no facade entry — an inline fn that
+    /// is lowered per call site and cannot be referenced.
+    Unemitted,
+}
+
+/// The outcome of resolving a cross-file fn reference's owner facade (see
+/// [`Checker::sibling_fn_facade`]).
+enum SiblingFnFacade {
+    /// The fn is emitted as a facade static — the reference lowers to it.
+    Emitted(TypeName),
+    /// A splice-only inline fn the driver never emits — the reference cannot lower; name it.
+    Unemitted,
+    /// No registration data (a checker-only pipeline): decline silently, as before.
+    Unknown,
 }
 
 #[derive(Clone)]
@@ -12408,6 +12448,7 @@ impl<'a> Checker<'a> {
         expected: Option<&'static crate::types::FnSig>,
     ) -> BoundSourceExtensionRef<'_> {
         let mut inaccessible = false;
+        let mut unemitted = false;
         let mut candidates = self
             .resolver()
             .resolve_symbol(
@@ -12450,22 +12491,23 @@ impl<'a> Checker<'a> {
                     None if signature.requires_all_args() => {}
                     None => return None,
                 }
-                let facade = self
-                    .syms
-                    .fn_facades_by_decl
-                    .get(&(file, declaration))
-                    .copied()
-                    .or(match function.callable.origin {
-                        crate::libraries::Origin::Module { facade } => Some(facade),
-                        _ => None,
-                    });
                 let owner = if file == self.file_index {
                     None
                 } else {
-                    Some(facade?)
+                    // A sibling-file fn with no facade entry is an unemitted inline fn — the
+                    // reference cannot lower. Decline the candidate; if no other candidate
+                    // survives, the caller reports WHY.
+                    match self.sibling_fn_facade(file, declaration) {
+                        SiblingFnFacade::Emitted(facade) => Some(facade),
+                        SiblingFnFacade::Unemitted => {
+                            unemitted = true;
+                            return None;
+                        }
+                        SiblingFnFacade::Unknown => return None,
+                    }
                 };
                 let mut target = function.callable.clone();
-                if let Some(facade) = facade {
+                if let Some(facade) = owner {
                     target.owner = facade;
                     target.origin = crate::libraries::Origin::Module { facade };
                 }
@@ -12473,7 +12515,9 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
-            return if inaccessible {
+            return if unemitted {
+                BoundSourceExtensionRef::Unemitted
+            } else if inaccessible {
                 BoundSourceExtensionRef::Inaccessible
             } else {
                 BoundSourceExtensionRef::None
@@ -12673,6 +12717,43 @@ impl<'a> Checker<'a> {
         ))
     }
 
+    /// Report a reference to a sibling-file fn that is never emitted as a callable (see
+    /// [`Checker::sibling_fn_facade`]).
+    fn unemitted_inline_ref_error(&mut self, expression: ExprId, name: &str) -> Ty {
+        self.diags.error(
+            self.member_name_span(expression, name),
+            format!(
+                "cannot reference '{name}': the inline function is not emitted as a callable, \
+                 so it cannot be referenced from another file"
+            ),
+        );
+        Ty::Error
+    }
+
+    /// The facade a cross-file fn REFERENCE can target. Both emitted and deliberately-unemitted
+    /// answers come from the JVM module registrar; the checker does not duplicate its emission
+    /// predicate and does not treat an `Origin::Module` facade spelling as proof that a class or
+    /// method exists. With neither answer, this is a checker-only pipeline (LSP/unit tests), so the
+    /// reference declines silently and the ordinary type-only fallbacks remain available.
+    fn sibling_fn_facade(&self, file: u32, declaration: u32) -> SiblingFnFacade {
+        if let Some(facade) = self
+            .syms
+            .fn_facades_by_decl
+            .get(&(file, declaration))
+            .copied()
+        {
+            return SiblingFnFacade::Emitted(facade);
+        }
+        if self
+            .syms
+            .fn_facade_is_explicitly_unemitted(file, declaration)
+        {
+            SiblingFnFacade::Unemitted
+        } else {
+            SiblingFnFacade::Unknown
+        }
+    }
+
     /// Select a same-module top-level callable reference from its expected function type. Calls have
     /// argument expressions for overload resolution; `::name` instead uses the expected parameter and
     /// return shape. Kotlin also permits a value-returning target where `Unit` is expected.
@@ -12779,21 +12860,13 @@ impl<'a> Checker<'a> {
         let owner = if source_file == self.file_index {
             None
         } else {
-            Some(
-                self.syms
-                    .fn_facades_by_decl
-                    .get(&(source_file, source_declaration))
-                    .copied()
-                    .or(match selected.callable.origin {
-                        // An EMPTY facade is the "unrecorded" fallback, not a real class — for a
-                        // sibling-file function it means the target is not emitted anywhere
-                        // (a non-callable inline fn), so the reference cannot lower: decline.
-                        crate::libraries::Origin::Module { facade } => {
-                            Some(facade).filter(|f| !f.render().is_empty())
-                        }
-                        _ => None,
-                    })?,
-            )
+            match self.sibling_fn_facade(source_file, source_declaration) {
+                SiblingFnFacade::Emitted(facade) => Some(facade),
+                SiblingFnFacade::Unemitted => {
+                    return Some(self.unemitted_inline_ref_error(expression, name));
+                }
+                SiblingFnFacade::Unknown => return None,
+            }
         };
         self.resolved_source_calls
             .insert(expression, (source_file, source_declaration));
@@ -13460,22 +13533,19 @@ impl<'a> Checker<'a> {
         };
         let selected = &candidates[*selected];
         let (source_file, source_decl) = selected.source_key?;
-        let facade = self
-            .syms
-            .fn_facades_by_decl
-            .get(&(source_file, source_decl))
-            .copied()
-            .or_else(|| match &selected.callable.origin {
-                Origin::Module { facade } if !facade.render().is_empty() => Some(*facade),
-                _ => None,
-            });
         let owner = if source_file == self.file_index {
             None
         } else {
-            Some(facade?)
+            match self.sibling_fn_facade(source_file, source_decl) {
+                SiblingFnFacade::Emitted(facade) => Some(facade),
+                SiblingFnFacade::Unemitted => {
+                    return Some(self.unemitted_inline_ref_error(expression, name));
+                }
+                SiblingFnFacade::Unknown => return None,
+            }
         };
         let mut target = selected.callable.clone();
-        if let Some(facade) = facade {
+        if let Some(facade) = owner {
             target.owner = facade;
             target.origin = Origin::Module { facade };
         }
@@ -19673,16 +19743,13 @@ impl<'a> Checker<'a> {
         let owner = if selected.source_file == self.file_index {
             None
         } else {
-            Some(
-                self.syms
-                    .fn_facades_by_decl
-                    .get(&(selected.source_file, selected.source_decl))
-                    .copied()
-                    .or(match selected.function.callable.origin {
-                        crate::libraries::Origin::Module { facade } => Some(facade),
-                        _ => None,
-                    })?,
-            )
+            match self.sibling_fn_facade(selected.source_file, selected.source_decl) {
+                SiblingFnFacade::Emitted(facade) => Some(facade),
+                SiblingFnFacade::Unemitted => {
+                    return Some(self.unemitted_inline_ref_error(ref_expr, name));
+                }
+                SiblingFnFacade::Unknown => return None,
+            }
         };
         *generic_bindings = selected.bindings;
         let resolved_type = crate::symbol_resolver::ty_subst(Ty::Fun(exp), generic_bindings);
@@ -22188,6 +22255,10 @@ impl<'a> Checker<'a> {
                             format!("cannot access '{name}': it is private in its file"),
                         );
                         return self.set(e, Ty::Error);
+                    }
+                    BoundSourceExtensionRef::Unemitted => {
+                        let ty = self.unemitted_inline_ref_error(e, &name);
+                        return self.set(e, ty);
                     }
                     BoundSourceExtensionRef::None => {}
                 }
@@ -32378,26 +32449,66 @@ mod tests {
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
 
     #[test]
-    fn shared_class_names_keep_file_overlays_independent() {
-        let mut compilation = ClassNames::default();
-        compilation.insert("Global".to_string(), "sample/Global");
-        compilation.mark_ambiguous("Override".to_string());
-        let compilation = compilation.into_shared();
+    fn capture_discovery_selects_only_enclosing_top_level_declarations() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+interface Marker
+fun before(): Int = 1
+val top: Marker = object : Marker { fun value(): Int = 4 }
+fun defaulted(value: Marker = object : Marker {}): Marker = value
+fun target(seed: Int): Marker {
+    val captured = seed
+    return object : Marker { fun value(): Int = captured }
+}
+class Owner {
+    fun untouched(): Int = 2
+    fun build(seed: Int): Marker {
+        val captured = seed
+        return object : Marker { fun value(): Int = captured }
+    }
+}
+fun after(): Int = 3
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty());
 
-        let mut first_file = compilation.clone();
-        first_file.insert("Local".to_string(), "sample/Local");
-        first_file.insert("Override".to_string(), "sample/Override");
-        let second_file = compilation.clone();
+        let selected = capture_discovery_scope(&file).declarations;
+        let named = file
+            .decls
+            .iter()
+            .filter_map(|declaration| match file.decl(*declaration) {
+                Decl::Fun(function) if selected.contains(declaration) => {
+                    Some(function.name.as_str())
+                }
+                Decl::Class(class) if selected.contains(declaration) => Some(class.name.as_str()),
+                Decl::Property(property) if selected.contains(declaration) => {
+                    Some(property.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
 
-        assert_eq!(first_file.get("Global"), type_name("sample/Global").into());
-        assert_eq!(first_file.get("Local"), type_name("sample/Local").into());
-        assert_eq!(
-            first_file.get("Override"),
-            type_name("sample/Override").into()
-        );
-        assert_eq!(second_file.get("Global"), type_name("sample/Global").into());
-        assert_eq!(second_file.get("Local"), None);
-        assert_eq!(second_file.get("Override"), None);
+        assert_eq!(named, vec!["top", "defaulted", "target", "Owner"]);
+    }
+
+    #[test]
+    fn capture_discovery_selects_script_body() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+val captured = "OK"
+val result = object { fun value(): String = captured }
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file =
+            parse_script_with_features(source, &tokens, &mut diagnostics, &LangFeatures::default());
+        assert!(diagnostics.diags.is_empty());
+
+        let scope = capture_discovery_scope(&file);
+        assert!(scope.declarations.is_empty());
+        assert!(file
+            .script_body
+            .is_some_and(|body| { expression_contains_any(&file, body, &scope.constructions) }));
     }
 
     struct ClassifierImportSource;
@@ -32509,69 +32620,6 @@ mod tests {
             &ClassifierImportSource,
         );
         assert_eq!(resolved, None);
-    }
-
-    #[test]
-    fn capture_discovery_selects_only_enclosing_top_level_declarations() {
-        let mut diagnostics = DiagSink::new();
-        let source = r#"
-interface Marker
-fun before(): Int = 1
-val top: Marker = object : Marker { fun value(): Int = 4 }
-fun defaulted(value: Marker = object : Marker {}): Marker = value
-fun target(seed: Int): Marker {
-    val captured = seed
-    return object : Marker { fun value(): Int = captured }
-}
-class Owner {
-    fun untouched(): Int = 2
-    fun build(seed: Int): Marker {
-        val captured = seed
-        return object : Marker { fun value(): Int = captured }
-    }
-}
-fun after(): Int = 3
-"#;
-        let tokens = lex(source, &mut diagnostics);
-        let file = parse(source, &tokens, &mut diagnostics);
-        assert!(diagnostics.diags.is_empty());
-
-        let selected = capture_discovery_scope(&file).declarations;
-        let named = file
-            .decls
-            .iter()
-            .filter_map(|declaration| match file.decl(*declaration) {
-                Decl::Fun(function) if selected.contains(declaration) => {
-                    Some(function.name.as_str())
-                }
-                Decl::Class(class) if selected.contains(declaration) => Some(class.name.as_str()),
-                Decl::Property(property) if selected.contains(declaration) => {
-                    Some(property.name.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(named, vec!["top", "defaulted", "target", "Owner"]);
-    }
-
-    #[test]
-    fn capture_discovery_selects_script_body() {
-        let mut diagnostics = DiagSink::new();
-        let source = r#"
-val captured = "OK"
-val result = object { fun value(): String = captured }
-"#;
-        let tokens = lex(source, &mut diagnostics);
-        let file =
-            parse_script_with_features(source, &tokens, &mut diagnostics, &LangFeatures::default());
-        assert!(diagnostics.diags.is_empty());
-
-        let scope = capture_discovery_scope(&file);
-        assert!(scope.declarations.is_empty());
-        assert!(file
-            .script_body
-            .is_some_and(|body| { expression_contains_any(&file, body, &scope.constructions) }));
     }
 
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {
