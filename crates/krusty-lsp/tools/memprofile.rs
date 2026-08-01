@@ -9,7 +9,49 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use krusty::jvm::classpath::platform_jdk_modules;
+use krusty_lsp::project::jps::JpsProvider;
+use krusty_lsp::project::{ProcessRunner, ProjectProvider};
 use krusty_lsp::run_analysis_worker;
+
+#[cfg(feature = "cpu-profile")]
+fn write_cpu_profile(guard: pprof::ProfilerGuard<'_>, path: &Path) {
+    let report = guard.report().build().expect("build CPU profile");
+    let file = std::fs::File::create(path).expect("create CPU flamegraph");
+    report.flamegraph(file).expect("write CPU flamegraph");
+
+    let mut leaf = std::collections::HashMap::<String, isize>::new();
+    let mut total = 0isize;
+    for (frames, count) in &report.data {
+        total += *count;
+        let names = frames
+            .frames
+            .iter()
+            .rev()
+            .flat_map(|frames| frames.iter().rev())
+            .map(|frame| frame.name())
+            .collect::<Vec<_>>();
+        let krusty_frame = names
+            .iter()
+            .find(|name| name.starts_with("krusty::"))
+            .or_else(|| names.iter().find(|name| name.starts_with("krusty_lsp::")));
+        if let Some(name) = krusty_frame {
+            *leaf.entry((*name).clone()).or_default() += *count;
+        }
+    }
+    let mut hotspots = leaf.into_iter().collect::<Vec<_>>();
+    hotspots.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    eprintln!(
+        "CPU profile: {} samples, flamegraph={}",
+        total,
+        path.display()
+    );
+    for (name, count) in hotspots.into_iter().take(25) {
+        eprintln!(
+            "  {:>5.1}%  {name}",
+            100.0 * count as f64 / total.max(1) as f64
+        );
+    }
+}
 
 fn rss_kb() -> u64 {
     let output = std::process::Command::new("/bin/ps")
@@ -22,7 +64,7 @@ fn rss_kb() -> u64 {
         .unwrap_or(0)
 }
 
-fn collect_kt(root: &Path, out: &mut Vec<PathBuf>) {
+fn collect_with_extension(root: &Path, extension: &str, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -30,11 +72,15 @@ fn collect_kt(root: &Path, out: &mut Vec<PathBuf>) {
     entries.sort();
     for path in entries {
         if path.is_dir() {
-            collect_kt(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "kt") {
+            collect_with_extension(&path, extension, out);
+        } else if path.extension().is_some_and(|ext| ext == extension) {
             out.push(path);
         }
     }
+}
+
+fn collect_kt(root: &Path, out: &mut Vec<PathBuf>) {
+    collect_with_extension(root, "kt", out);
 }
 
 fn collect_jars(root: &Path, out: &mut Vec<PathBuf>) {
@@ -117,6 +163,8 @@ fn main() {
     let mut stage = 1usize;
     let mut batch = 0usize;
     let mut repeat = 1usize;
+    let mut flamegraph = None;
+    let mut jps_root = None;
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -132,8 +180,93 @@ fn main() {
             "--stage" => stage = value().parse().unwrap(),
             "--batch" => batch = value().parse().unwrap(),
             "--repeat" => repeat = value().parse().unwrap(),
+            "--flamegraph" => flamegraph = Some(PathBuf::from(value())),
+            "--jps-root" => jps_root = Some(PathBuf::from(value())),
             other => panic!("unknown flag {other}"),
         }
+    }
+
+    #[cfg(feature = "cpu-profile")]
+    let cpu_profile = flamegraph.as_ref().map(|_| {
+        pprof::ProfilerGuardBuilder::default()
+            .frequency(997)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .expect("start CPU profiler")
+    });
+    #[cfg(not(feature = "cpu-profile"))]
+    if flamegraph.is_some() {
+        panic!("--flamegraph requires --features cpu-profile");
+    }
+
+    if let Some(root) = jps_root {
+        let baseline = rss_kb();
+        let started = Instant::now();
+        let model = JpsProvider::new(&root)
+            .probe(&ProcessRunner)
+            .expect("JPS project model probe failed");
+        let probe_elapsed = started.elapsed();
+        let source_roots = model
+            .modules
+            .iter()
+            .map(|module| module.source_roots.len())
+            .sum::<usize>();
+        let dependencies = model
+            .modules
+            .iter()
+            .map(|module| module.depends_on.len())
+            .sum::<usize>();
+        eprintln!(
+            "JPS model: modules={}, source_roots={}, dependencies={}, probe={:.2}s, rss={} MiB (delta {} MiB)",
+            model.modules.len(),
+            source_roots,
+            dependencies,
+            probe_elapsed.as_secs_f64(),
+            rss_kb() / 1024,
+            rss_kb().saturating_sub(baseline) / 1024
+        );
+
+        let graph_started = Instant::now();
+        let graph = model.into_source_module_graph();
+        eprintln!(
+            "module graph: {:.2}s, rss={} MiB",
+            graph_started.elapsed().as_secs_f64(),
+            rss_kb() / 1024
+        );
+
+        let mut sources = Vec::new();
+        collect_kt(&root, &mut sources);
+        sources.truncate(max_files);
+        let lookup_started = Instant::now();
+        let matched = sources
+            .iter()
+            .filter(|path| graph.module_index_for_source(path).is_some())
+            .count();
+        eprintln!(
+            "source-to-module lookup: {matched}/{} files in {:.2}s",
+            sources.len(),
+            lookup_started.elapsed().as_secs_f64()
+        );
+
+        let mut java_sources = Vec::new();
+        collect_with_extension(&root, "java", &mut java_sources);
+        java_sources.truncate(max_files);
+        let root_lookup_started = Instant::now();
+        let matched_roots = java_sources
+            .iter()
+            .filter(|path| graph.module_source_root_for_source(path).is_some())
+            .count();
+        eprintln!(
+            "source-to-owning-root lookup: {matched_roots}/{} Java files in {:.2}s",
+            java_sources.len(),
+            root_lookup_started.elapsed().as_secs_f64()
+        );
+
+        #[cfg(feature = "cpu-profile")]
+        if let (Some(guard), Some(path)) = (cpu_profile, flamegraph.as_deref()) {
+            write_cpu_profile(guard, path);
+        }
+        return;
     }
 
     let mut classpath = Vec::new();
@@ -165,6 +298,10 @@ fn main() {
             rss_kb() / 1024,
             rss_kb().saturating_sub(baseline) / 1024
         );
+        #[cfg(feature = "cpu-profile")]
+        if let (Some(guard), Some(path)) = (cpu_profile, flamegraph.as_deref()) {
+            write_cpu_profile(guard, path);
+        }
         return;
     }
 
@@ -256,4 +393,9 @@ fn main() {
         final_rss.saturating_sub(baseline) / 1024,
         sink.bytes / 1024
     );
+
+    #[cfg(feature = "cpu-profile")]
+    if let (Some(guard), Some(path)) = (cpu_profile, flamegraph.as_deref()) {
+        write_cpu_profile(guard, path);
+    }
 }
