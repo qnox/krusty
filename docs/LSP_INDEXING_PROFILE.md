@@ -7,6 +7,9 @@ Profile date: 2026-08-01
 The indexing problem is primarily single-threaded algorithmic work, not insufficient
 parallelism. The largest costs are global signature/type inference and repeated source-to-module
 classification. Parsing and construction of the final navigation indexes are comparatively small.
+The follow-up capture-discovery change confirms this directly: removing unrelated semantic checks
+from one serial inference pass reduced the `acee6cd0` 1,000-file worker median by 38%, without
+adding workers.
 
 On the original profiling base (`2fc95b4b`), the two measured compiler-side changes reduce the
 1,000-file analysis pass from 6.70 seconds to 3.86 seconds (42%) and peak RSS from 465 MiB to about
@@ -116,6 +119,30 @@ pre-inference remained the next single-thread target on that validation base; it
 dominant, not less. Sampling itself changes wall time and RSS, so the table uses the matching
 non-sampled run.
 
+### Focused capture-discovery iteration
+
+The rebased profile showed why anonymous-object capture discovery was unexpectedly expensive: if a
+file contained any anonymous object, the scratch capture pass semantically checked every top-level
+declaration in that file before return inference. Top-level declarations already use isolated
+checker scopes, so declarations that do not lexically enclose an anonymous-object construction
+cannot contribute a capture.
+
+The follow-up pass structurally identifies the enclosing top-level functions, classes, and
+properties and checks only those declarations. It still performs the complete ordered lexical walk
+inside each selected declaration, preserving locals and types established before the construction.
+On three interleaved, non-sampled A/B runs of the same optimized binaries and sorted 1,000-file
+`platform` slice:
+
+| Build | Median worker time | Median peak RSS |
+|---|---:|---:|
+| Rebased change (`26176907`) | 11.89 s | 266,228 KiB |
+| Focused capture discovery | 7.42 s | 258,956 KiB |
+
+That is a 37.6% worker-time reduction and a 2.7% peak-RSS reduction. Matching sampled runs reduced
+inclusive capture-discovery samples from 6,769/9,379 (72.2%) to 2,836/5,877 (48.3%); the remaining
+cost is the necessary check of the enclosing declarations, especially large classes. This is a
+single-thread algorithmic improvement, not a parallel throughput result.
+
 ## Measured changes on the profiling base
 
 ### Share the compilation-wide class-name map
@@ -183,11 +210,12 @@ redact them before sharing; only aggregate measurements belong in committed docu
 
 ## Prioritized next improvements
 
-1. Replace module-wide return pre-inference passes with a dependency worklist. Record which inferred
+1. Replace the remaining module-wide return pre-inference passes with a dependency worklist. Record
    callable returns depend on which unresolved calls, and revisit only affected callables. For an
    editor request, eagerly infer open files and lazily infer support bodies reached by those files.
-   Cache the resulting declaration/return snapshot by source fingerprint. The `acee6cd0` rerun
-   confirms this targets the 82.3% CPU center.
+   Cache the resulting declaration/return snapshot by source fingerprint. After focused capture
+   discovery on `acee6cd0`, `preinfer_module_returns_impl` still contained 73.9% of inclusive samples
+   and remained the largest serial optimization target.
 2. Separate declaration/type-position names from arbitrary expression names during signature
    collection. `collect_file_type_names` intentionally over-approximates `Expr::Name`, including
    locals and parameters, causing useless import and classpath probes. A lexical local-name filter
@@ -237,3 +265,4 @@ remove repeated work on one thread.
 - LSP project-model and project-source tests: 129 passed on the `acee6cd0` validation base.
 - CPU-profiler feature build/test: passed.
 - Full `./run-tests.sh` on the `acee6cd0` validation base: all test binaries passed.
+- Full `./run-tests.sh` after focused capture discovery: all test binaries passed.
