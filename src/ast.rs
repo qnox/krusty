@@ -1396,6 +1396,19 @@ impl File {
         id
     }
 
+    /// Whether `declaration` is the synthetic class structurally owned by an anonymous-object
+    /// construction in this file.
+    ///
+    /// Consumers must use declaration identity rather than inspecting the parser's generated class
+    /// name. The name is an emission detail and may contain source-derived or sequence text; this map
+    /// is the AST's canonical ownership relation and cannot confuse an ordinary user class that happens
+    /// to resemble a synthetic naming convention.
+    pub fn is_anonymous_object_class(&self, declaration: DeclId) -> bool {
+        self.anonymous_object_classes
+            .values()
+            .any(|candidate| *candidate == declaration)
+    }
+
     /// Whether the predicate accepts any expression root structurally owned by `declaration`.
     ///
     /// This is the declaration-level counterpart to [`Self::any_child_expr`]: it is the single

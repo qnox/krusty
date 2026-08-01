@@ -68,30 +68,11 @@ fn gated_corpus_cases_report_precise_lower_bail() {
     }
 }
 
-/// Backend outcome for an inline source (the same checked-file → JVM-backend pipeline as the CLI),
-/// or `None` when the toolchain is absent / the front end rejects the source.
-fn outcome(src: &str) -> Option<common::BackendOutcome> {
-    let jdk = common::jdk_modules()?;
-    let cp = krusty::toolchain::classpath_jars_for(src);
-    common::backend_outcome_in_process(src, "P", &cp, Some(&jdk))
-}
-
-fn assert_lower_bail(src: &str, reason: &str) {
-    if !common::stdlib_toolchain_ready() {
-        return;
-    }
-    assert_eq!(
-        outcome(src),
-        Some(common::BackendOutcome::LowerBail(reason.to_string())),
-        "source must stop at its precise unsupported lowering boundary:\n{src}"
-    );
-}
-
 #[test]
 fn companion_with_explicit_base_args_reports_companion_synth() {
     // `companion object : Base(args)` with explicit base args isn't modeled in the synthesized
     // `C$Companion` registration — a pass-1a bail that must keep its phase label.
-    assert_lower_bail(
+    common::assert_inline_source_lower_bail(
         r#"
 open class Base(val x: Int)
 class C {
@@ -109,7 +90,7 @@ fn non_suspend_body_referencing_suspend_fn_reports_gate() {
     // is only modeled inside a suspend body. The gate is a conservative TEXTUAL scan — here `sum`
     // is a local variable shadowing the suspend fn, a false positive the gate still declines on
     // (sound: it skips rather than risks a miscompile).
-    assert_lower_bail(
+    common::assert_inline_source_lower_bail(
         r#"
 suspend fun sum(x: Int): Int = x
 fun box(): String {
@@ -126,7 +107,7 @@ fun box(): String {
 fn member_delegate_with_provide_delegate_reports_gate() {
     // A member property whose delegate declares `provideDelegate` isn't modeled by the inline
     // accessor.
-    assert_lower_bail(
+    common::assert_inline_source_lower_bail(
         r#"
 import kotlin.reflect.KProperty
 
@@ -150,7 +131,7 @@ fn unsupported_call_bucket_uses_ast_shape_not_source_name() {
     // The expression fallback used to publish the concrete callee (`call suspendCoroutine`). Keep
     // only its generic AST shape so local, module, and classpath call failures share one category and
     // neither source names nor generated JVM owners escape into the survey.
-    assert_lower_bail(
+    common::assert_inline_source_lower_bail(
         r#"
 import kotlin.coroutines.suspendCoroutine
 
