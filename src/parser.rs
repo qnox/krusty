@@ -52,6 +52,7 @@ fn parse_with_features_and_script(
         multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
         explicit_backing_fields: features.has("ExplicitBackingFields"),
         no_trailing_lambda: false,
+        in_lambda_body: false,
         lexical_type_params: Vec::new(),
         lexical_type_param_bounds: Vec::new(),
         pending_annotations: Vec::new(),
@@ -733,6 +734,11 @@ struct Parser<'a> {
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
     no_trailing_lambda: bool,
+    /// Set while parsing a LAMBDA body's statement list: there an inc/dec as the last statement is
+    /// the body's VALUE (`{ -> p.fst++ }` is `() -> Int`), so it must not be re-routed to a
+    /// discarded-value statement. Named-fn/nested blocks (parsed via `parse_block_expr`) keep the
+    /// statement route.
+    in_lambda_body: bool,
     /// Type parameters in the current lexical parser context. Synthetic anonymous classes are hoisted
     /// to file-level declarations, so they must carry the generic names they mention in supertypes or
     /// member signatures; otherwise checking the hoisted class reports `T` as unresolved.
@@ -4631,6 +4637,8 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         let mut stmts = Vec::new();
+        let saved_lambda_body = self.in_lambda_body;
+        self.in_lambda_body = true;
         loop {
             self.skip_newlines();
             if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
@@ -4638,6 +4646,7 @@ impl<'a> Parser<'a> {
             }
             stmts.push(self.parse_stmt());
         }
+        self.in_lambda_body = saved_lambda_body;
         // Prepend `val (a, b) = <synthetic-param>` for each destructured parameter (reversed so the
         // first parameter's binding ends up first).
         for (synth, entries, source_props, sp) in destructures.into_iter().rev() {
@@ -4744,6 +4753,9 @@ impl<'a> Parser<'a> {
     fn parse_block_expr(&mut self) -> ExprId {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
+        // A named-fn/nested block is NOT a lambda body (the inc/dec trailing rule is lambda-only).
+        let saved_lambda_body = self.in_lambda_body;
+        self.in_lambda_body = false;
         let mut stmts = Vec::new();
         loop {
             self.skip_newlines();
@@ -4752,6 +4764,7 @@ impl<'a> Parser<'a> {
             }
             stmts.push(self.parse_stmt());
         }
+        self.in_lambda_body = saved_lambda_body;
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
         // A trailing bare expression is the block's value.
@@ -4791,6 +4804,103 @@ impl<'a> Parser<'a> {
         target: Span,
     ) -> StmtId {
         self.finish_assignment_stmt(Stmt::IncDec { name, dec, prefix }, start, target)
+    }
+
+    /// A member/index `target++` / `++target` as a LAMBDA body's TRAILING value: postfix desugars
+    /// to `{ val $$old = target; target = $$old.inc(); $$old }`, prefix to `{ target = target.inc();
+    /// target }`. Like [`Parser::incdec_target`], the receiver/index must be side-effect-free (the
+    /// desugar re-evaluates it); a non-lvalue or impure target is an honest parse error, not a
+    /// double evaluation.
+    fn incdec_trailing_value(
+        &mut self,
+        e: ExprId,
+        target: ExprId,
+        dec: bool,
+        prefix: bool,
+        start: Span,
+    ) -> StmtId {
+        let target_span = self.file.expr_spans[target.0 as usize];
+        let op_name = if dec { "dec" } else { "inc" };
+        let pure = match self.file.expr(target) {
+            Expr::Member { receiver, .. } => self.is_pure_path(*receiver),
+            Expr::Index { array, indices } => {
+                self.is_pure_path(*array) && indices.iter().all(|&i| self.is_pure_path(i))
+            }
+            _ => false,
+        };
+        if !pure {
+            self.diags.error(
+                start,
+                "krusty: an inc/dec with a non-lvalue or side-effecting target in trailing position is not supported",
+            );
+            return self.finish_stmt(Stmt::Expr(e), start);
+        }
+        let assign = |s: &mut Self, value: ExprId| -> StmtId {
+            match s.file.expr(target).clone() {
+                Expr::Member { receiver, name } => s.finish_assignment_stmt(
+                    Stmt::AssignMember {
+                        receiver,
+                        name,
+                        value,
+                    },
+                    start,
+                    target_span,
+                ),
+                Expr::Index { array, indices } => s.finish_assignment_stmt(
+                    Stmt::AssignIndex {
+                        array,
+                        indices,
+                        value,
+                    },
+                    start,
+                    target_span,
+                ),
+                _ => unreachable!("guarded by the purity check above"),
+            }
+        };
+        let (stmts, trailing) = if prefix {
+            // `{ target = target.inc(); target }`
+            let read = self
+                .file
+                .add_expr(self.file.expr(target).clone(), target_span);
+            let call = self.build_inc_dec_call(read, op_name, target_span);
+            let assign = assign(self, call);
+            let read2 = self
+                .file
+                .add_expr(self.file.expr(target).clone(), target_span);
+            (vec![assign], read2)
+        } else {
+            // `{ val $$old = target; target = $$old.inc(); $$old }`
+            let read = self
+                .file
+                .add_expr(self.file.expr(target).clone(), target_span);
+            let local = self.file.add_stmt(
+                Stmt::Local {
+                    is_var: false,
+                    name: "$$old".to_string(),
+                    ty: None,
+                    init: read,
+                },
+                start,
+            );
+            let old_read = self
+                .file
+                .add_expr(Expr::Name("$$old".to_string()), target_span);
+            let call = self.build_inc_dec_call(old_read, op_name, target_span);
+            let assign = assign(self, call);
+            let old_read2 = self
+                .file
+                .add_expr(Expr::Name("$$old".to_string()), target_span);
+            (vec![local, assign], old_read2)
+        };
+        let block = self.file.add_expr(
+            Expr::Block {
+                stmts,
+                trailing: Some(trailing),
+            },
+            Span::new(start.lo, self.file.expr_spans[e.0 as usize].hi),
+        );
+        self.finish_stmt(Stmt::Expr(block), start)
     }
 
     /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
@@ -5237,15 +5347,30 @@ impl<'a> Parser<'a> {
                 // Increment/decrement *statement* (`target++` / `++target`): `parse_prefix`/
                 // `parse_postfix` built an `Expr::IncDec`; in statement position the value is
                 // discarded, so re-route to the statement helper (which desugars a `Name` to
-                // `Stmt::IncDec` and a member/index target to an assignment).
+                // `Stmt::IncDec` and a member/index target to an assignment). As the block's LAST
+                // statement the inc/dec is the block's VALUE (`{ -> p.fst++ }` is `() -> Int`),
+                // so keep it as a `Stmt::Expr` for the trailing-value extraction to pick up.
                 if let Expr::IncDec {
                     target,
                     dec,
                     prefix,
                 } = self.file.expr(e).clone()
                 {
-                    let op_span = self.file.expr_spans[e.0 as usize];
-                    return self.incdec_target(target, dec, prefix, op_span, start);
+                    // Peek WITHOUT consuming: only a `}` (after newlines) makes this the body's last
+                    // statement — consuming the newlines here would shift the statement's spans.
+                    let after_nl = (self.i..self.t.len())
+                        .find(|&i| self.t[i].kind != TokenKind::Newline)
+                        .map(|i| self.t[i].kind);
+                    if after_nl != Some(TokenKind::RBrace) || !self.in_lambda_body {
+                        let op_span = self.file.expr_spans[e.0 as usize];
+                        return self.incdec_target(target, dec, prefix, op_span, start);
+                    }
+                    // A LAMBDA body's trailing statement: the inc/dec is the body's VALUE
+                    // (`{ -> p.fst++ }` is `() -> Int`). A `Name` target lowers directly as an
+                    // expression; a member/index target needs the temp-block desugar below.
+                    if !matches!(self.file.expr(target), Expr::Name(_)) {
+                        return self.incdec_trailing_value(e, target, dec, prefix, start);
+                    }
                 }
                 // assignment: `name = value` or `receiver.name = value`.
                 if self.at(TokenKind::Eq) {
