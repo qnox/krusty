@@ -1419,6 +1419,20 @@ impl File {
         }
     }
 
+    /// Whether the predicate accepts any expression root structurally owned by `function`.
+    ///
+    /// This narrower companion to [`Self::any_decl_expr`] deliberately reuses the same generic
+    /// function inventory. Passes that need function-level ownership (rather than only top-level
+    /// declaration ownership) therefore include parameter defaults and annotation arguments as
+    /// well as the body without recreating that field list in resolver-specific code.
+    pub fn any_fun_expr(
+        &self,
+        function: &FunDecl,
+        predicate: &mut impl FnMut(ExprId) -> bool,
+    ) -> bool {
+        any_fun_decl_expr(function, predicate)
+    }
+
     /// Whether any *direct* child expression or child statement of `e` satisfies the given predicate
     /// — the single structural definition of "what an expression contains", with `||`/`.any()`
     /// short-circuiting. Tree walks (free-variable / capture / `try` / `break`-context checks)

@@ -70,3 +70,41 @@ fn anon_object_plain_backing_body_prop_captured() {
         fun box(): String = if (A(21).foo().r() == 42) \"OK\" else \"no\"\n";
     assert_eq!(run(SRC).expect("plain backing prop captured"), "OK");
 }
+
+#[test]
+fn anon_object_capture_ignores_unrelated_enclosing_class_methods() {
+    const SRC: &str = "interface T { fun result(): String }\n\
+        class A {\n\
+        \x20 fun helper() = later()\n\
+        \x20 fun make(): T {\n\
+        \x20   val captured = helper()\n\
+        \x20   return object : T { override fun result(): String = captured }\n\
+        \x20 }\n\
+        \x20 fun later() = \"OK\"\n\
+        }\n\
+        fun box(): String = A().make().result()\n";
+    assert_eq!(
+        run(SRC).expect("anon capture with unrelated class methods"),
+        "OK"
+    );
+}
+
+#[test]
+fn companion_capture_preserves_prior_instance_return_inference() {
+    const SRC: &str = "interface T { fun result(): String }\n\
+        class A {\n\
+        \x20 fun helper() = later()\n\
+        \x20 fun later() = \"OK\"\n\
+        \x20 companion object {\n\
+        \x20   fun make(): T {\n\
+        \x20     val captured = A().helper()\n\
+        \x20     return object : T { override fun result(): String = captured }\n\
+        \x20   }\n\
+        \x20 }\n\
+        }\n\
+        fun box(): String = A.make().result()\n";
+    assert_eq!(
+        run(SRC).expect("companion capture uses inferred instance return"),
+        "OK"
+    );
+}

@@ -9978,9 +9978,85 @@ fn record_capture_targets(
     }
 }
 
+fn record_function_capture_targets(
+    file: &File,
+    function: &FunDecl,
+    targets: &std::collections::HashSet<ExprId>,
+    discovered: &mut std::collections::HashSet<ExprId>,
+) -> bool {
+    let mut roots = Vec::new();
+    file.any_fun_expr(function, &mut |expression| {
+        roots.push(expression);
+        false
+    });
+    record_capture_targets(file, targets, roots, discovered)
+}
+
+struct ClassCapturePlan {
+    method_check_prefix_len: usize,
+    companion_methods: Vec<bool>,
+}
+
+impl ClassCapturePlan {
+    /// Refine one already-selected class without reintroducing a resolver-owned inventory of class
+    /// fields. `declaration_targets` came from the generic `File::any_decl_expr` walk above; this
+    /// method only asks the corresponding generic function seam which ordered method owns each
+    /// target.
+    ///
+    /// Instance and enum-entry methods publish inferred returns into shared checker state. Keep the
+    /// exact prefix through the last capture-bearing method. A target in any other class region
+    /// keeps the complete prefix because constructors, properties, init blocks, enum arguments, and
+    /// companion functions may consume those published returns. Companion functions themselves do
+    /// not publish into that cross-function cache, so they can be selected independently.
+    fn for_class(
+        file: &File,
+        class: &ClassDecl,
+        targets: &std::collections::HashSet<ExprId>,
+        declaration_targets: &std::collections::HashSet<ExprId>,
+    ) -> Self {
+        let methods = class
+            .methods
+            .iter()
+            .chain(
+                class
+                    .enum_entries
+                    .iter()
+                    .flat_map(|entry| entry.methods.iter()),
+            )
+            .collect::<Vec<_>>();
+        let mut method_targets = std::collections::HashSet::new();
+        let mut method_check_prefix_len = 0;
+        for (index, method) in methods.iter().enumerate() {
+            if record_function_capture_targets(file, method, targets, &mut method_targets) {
+                method_check_prefix_len = index + 1;
+            }
+        }
+        if declaration_targets
+            .iter()
+            .any(|target| !method_targets.contains(target))
+        {
+            method_check_prefix_len = methods.len();
+        }
+
+        let mut companion_targets = std::collections::HashSet::new();
+        let companion_methods = class
+            .companion_methods
+            .iter()
+            .map(|method| {
+                record_function_capture_targets(file, method, targets, &mut companion_targets)
+            })
+            .collect();
+        Self {
+            method_check_prefix_len,
+            companion_methods,
+        }
+    }
+}
+
 struct CaptureDiscoveryScope {
     declarations: std::collections::HashSet<DeclId>,
     script_body: bool,
+    class_plans: std::collections::HashMap<DeclId, ClassCapturePlan>,
 }
 
 /// Capture discovery needs lexical state from the declaration containing each anonymous-object
@@ -9993,6 +10069,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
         .copied()
         .collect::<std::collections::HashSet<_>>();
     let mut discovered = std::collections::HashSet::with_capacity(targets.len());
+    let mut class_plans = std::collections::HashMap::new();
     let declarations = file
         .decls
         .iter()
@@ -10003,7 +10080,19 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
                 roots.push(expression);
                 false
             });
-            record_capture_targets(file, &targets, roots, &mut discovered)
+            let mut declaration_targets = std::collections::HashSet::new();
+            let owns_target =
+                record_capture_targets(file, &targets, roots, &mut declaration_targets);
+            if owns_target {
+                if let Decl::Class(class) = file.decl(*declaration) {
+                    class_plans.insert(
+                        *declaration,
+                        ClassCapturePlan::for_class(file, class, &targets, &declaration_targets),
+                    );
+                }
+                discovered.extend(declaration_targets);
+            }
+            owns_target
         })
         .collect::<std::collections::HashSet<_>>();
     let script_body = file
@@ -10020,6 +10109,13 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
             file.decls.iter().copied().collect()
         },
         script_body: script_body || !complete,
+        // An unknown expression-bearing parser field invalidates not only declaration selection but
+        // every narrower class plan. An empty map makes callers preserve the full semantic walk.
+        class_plans: if complete {
+            class_plans
+        } else {
+            std::collections::HashMap::new()
+        },
     }
 }
 
@@ -10566,8 +10662,16 @@ fn check_file_at_impl_mode(
                         }
                     }
                 }
+                let method_check_prefix_len = capture_scope
+                    .as_ref()
+                    .and_then(|scope| scope.class_plans.get(&d))
+                    .map_or(usize::MAX, |plan| plan.method_check_prefix_len);
+                let mut method_check_index = 0;
                 for m in &cl.methods {
-                    c.check_method(m, &props);
+                    if method_check_index < method_check_prefix_len {
+                        c.check_method(m, &props);
+                    }
+                    method_check_index += 1;
                 }
                 // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
                 // checked like a method of the enum — `this` is the enum type, the enum's properties AND
@@ -10611,7 +10715,10 @@ fn check_file_at_impl_mode(
                         c.pop_scope();
                     }
                     for bm in &entry.methods {
-                        c.check_method(bm, &entry_props);
+                        if method_check_index < method_check_prefix_len {
+                            c.check_method(bm, &entry_props);
+                        }
+                        method_check_index += 1;
                     }
                 }
                 // Secondary constructors: check and record one delegation target before the body.
@@ -11100,8 +11207,21 @@ fn check_file_at_impl_mode(
                             }
                         }
                     }
-                    for m in &cl.companion_methods {
-                        c.check_fun(m, None);
+                    for (method_index, m) in cl.companion_methods.iter().enumerate() {
+                        if capture_scope
+                            .as_ref()
+                            .and_then(|scope| scope.class_plans.get(&d))
+                            // A missing plan means completeness fell back to the full semantic walk;
+                            // an unexpected length mismatch must fail conservative for the same reason.
+                            .is_none_or(|plan| {
+                                plan.companion_methods
+                                    .get(method_index)
+                                    .copied()
+                                    .unwrap_or(true)
+                            })
+                        {
+                            c.check_fun(m, None);
+                        }
                     }
                     c.companion_of = None;
                 }
@@ -32335,11 +32455,24 @@ fun target(seed: Int): Marker {
     val captured = seed
     return object : Marker { fun value(): Int = captured }
 }
-class Owner {
+class MethodHost {
     fun untouched(): Int = 2
     fun build(seed: Int): Marker {
         val captured = seed
         return object : Marker { fun value(): Int = captured }
+    }
+    fun defaulted(value: Marker = object : Marker {}): Marker = value
+    fun after(): Int = 3
+}
+class CompanionHost {
+    fun dependency(): Int = 4
+    fun later(): Int = 5
+    companion object {
+        fun untouched(): Int = 6
+        fun build(seed: Int): Marker {
+            val captured = seed
+            return object : Marker { fun value(): Int = captured }
+        }
     }
 }
 fun after(): Int = 3
@@ -32364,7 +32497,39 @@ fun after(): Int = 3
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(named, vec!["top", "defaulted", "target", "Owner"]);
+        assert_eq!(
+            named,
+            vec!["top", "defaulted", "target", "MethodHost", "CompanionHost"]
+        );
+
+        let class = |name: &str| {
+            file.decls
+                .iter()
+                .find_map(|declaration| match file.decl(*declaration) {
+                    Decl::Class(class) if class.name == name => Some((*declaration, class)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("source should contain {name}"))
+        };
+        let scope = capture_discovery_scope(&file);
+        let (method_host, _) = class("MethodHost");
+        let method_plan = scope
+            .class_plans
+            .get(&method_host)
+            .expect("selected class should have a complete plan");
+        // The last target is in a parameter default, proving the generic function-root seam is not
+        // a body-only shortcut. The unrelated suffix remains outside the semantic capture walk.
+        assert_eq!(method_plan.method_check_prefix_len, 3);
+
+        let (companion_host, _) = class("CompanionHost");
+        let companion_plan = scope
+            .class_plans
+            .get(&companion_host)
+            .expect("selected class should have a complete plan");
+        // A target in a companion function lies outside the ordered instance-method sequence, so
+        // both instance methods are retained while companion functions remain independently scoped.
+        assert_eq!(companion_plan.method_check_prefix_len, 2);
+        assert_eq!(companion_plan.companion_methods, vec![false, true]);
     }
 
     #[test]
