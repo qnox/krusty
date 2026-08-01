@@ -178,7 +178,11 @@ fn first_error_blocks(
                     let facade_name = krusty::types::type_name(&facade);
                     syms.fn_facades_by_decl
                         .insert((i as u32, decl.0), facade_name);
-                    syms.fn_facades.insert(f.name.clone(), facade_name);
+                    // The by-name map is receiver-less only (its consumer is a `SymRecv::TopLevel`
+                    // call) — an extension entry would mis-own a plain call (backend parity).
+                    if f.receiver.is_none() {
+                        syms.fn_facades.insert(f.name.clone(), facade_name);
+                    }
                 }
                 krusty::ast::Decl::Property(p) if p.receiver.is_none() => {
                     if let Some(&(ty, is_var, is_const)) = syms.props.get(&p.name) {

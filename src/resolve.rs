@@ -1679,12 +1679,13 @@ impl SymbolTable {
 
 /// Shapes that lower correctly ONLY when an `inline` body is spliced into a caller — the checker
 /// analyses the body with splice assumptions, so emitting it standalone (a facade static for
-/// cross-file calls) would miscompile: nested lambdas / anonymous objects (capture analysis +
-/// synthetic numbering), `try` / `break` / `continue` / a LABELED or expression-position `return`
-/// (inline-frame control flow — a plain unlabeled value-`return` is just a method return), and
-/// `is`/`as` on a type parameter (splicing substitutes the call-site type argument; a standalone
-/// body can only erase to the bound). A `contract { … }` block is erased, not a closure.
-/// Conservative: the file just skips.
+/// cross-file calls) would miscompile: a lambda that is STORED or returned rather than passed to
+/// a call (capture analysis + synthetic numbering assume the caller's file), anonymous objects,
+/// `try` / `break` / `continue` / a LABELED or expression-position `return` (inline-frame control
+/// flow — a plain unlabeled value-`return` is just a method return), and `is`/`as` on a type
+/// parameter (splicing substitutes the call-site type argument; a standalone body can only erase
+/// to the bound). A `contract { … }` block is erased, not a closure. Conservative: the file
+/// just skips.
 fn inline_body_has_splice_only_shape(
     file: &File,
     f: &FunDecl,
@@ -1697,7 +1698,8 @@ fn inline_body_has_splice_only_shape(
         // A `contract { … }` DSL block is erased before lowering — its DSL lambda never becomes
         // a closure. Walk the DSL body (and any other arguments) for genuinely splice-only
         // shapes instead of flagging the lambda itself. A module-declared `contract` SHADOWS the
-        // intrinsic: the call is a real function and its lambda is a real closure (flag it).
+        // intrinsic: the call is a real function and its lambda gets the normal call-argument
+        // screening (not the free pass).
         if !shadowed {
             if let Expr::Call { callee, args } = file.expr(e) {
                 if matches!(file.expr(*callee), Expr::Name(n) if n == "contract") {
@@ -1720,6 +1722,20 @@ fn inline_body_has_splice_only_shape(
             | Expr::Continue { .. }
             | Expr::Return { .. } => true,
             Expr::Is { ty, .. } | Expr::As { ty, .. } if tparams.contains(&ty.name) => true,
+            // A lambda in DIRECT call-argument position is safe standalone: it splices with an
+            // inline callee or closes over like any fn body. Its BODY is screened (a stored or
+            // returned lambda stays rejected above), and a `return` inside it — a non-local
+            // return through the inline frame — keeps the fn splice-only.
+            Expr::Call { callee, args } => {
+                bad_expr(file, *callee, tparams, shadowed)
+                    || args.iter().any(|&arg| match file.expr(arg) {
+                        Expr::Lambda { body, .. } => {
+                            lambda_body_has_return(file, *body)
+                                || bad_expr(file, *body, tparams, shadowed)
+                        }
+                        _ => bad_expr(file, arg, tparams, shadowed),
+                    })
+            }
             _ => file.any_child_expr(
                 e,
                 &mut |child| bad_expr(file, child, tparams, shadowed),
@@ -1736,6 +1752,17 @@ fn inline_body_has_splice_only_shape(
         }
         file.any_child_stmt(s, &mut |child| bad_expr(file, child, tparams, shadowed))
     }
+    /// Any `return` inside a lambda argument's body (non-local through the inline frame — its
+    /// framing only holds when spliced into a caller, not emitted standalone).
+    fn lambda_body_has_return(file: &File, e: ExprId) -> bool {
+        if matches!(file.expr(e), Expr::Return { .. }) {
+            return true;
+        }
+        file.any_child_expr(e, &mut |c| lambda_body_has_return(file, c), &mut |s| {
+            matches!(file.stmt(s), Stmt::Return(..))
+                || file.any_child_stmt(s, &mut |c| lambda_body_has_return(file, c))
+        })
+    }
     match &f.body {
         FunBody::Expr(body) | FunBody::Block(body) => {
             bad_expr(file, *body, &f.type_params, module_declares_contract)
@@ -1746,10 +1773,11 @@ fn inline_body_has_splice_only_shape(
 
 impl SymbolTable {
     /// Whether an `inline fun` may be lowered + emitted as a callable facade static for CROSS-FILE
-    /// calls: [`FunDecl::has_emittable_inline_body`] syntactically, its signature mentions no value
-    /// class (a cross-file `invokestatic` applies no value-class mangling/erasure), and its body
-    /// carries no splice-only shape (the checker analyses an `inline` body with splice
-    /// assumptions). Anything else stays splice-only — a cross-file call keeps the file skipped.
+    /// calls: syntactically (inline, non-reified, non-suspend), its signature — receiver included
+    /// for an extension — mentions no value class (a cross-file `invokestatic` applies no
+    /// value-class mangling/erasure), and its body carries no splice-only shape (the checker
+    /// analyses an `inline` body with splice assumptions). Anything else stays splice-only — a
+    /// cross-file call keeps the file skipped.
     pub fn inline_fn_facade_emittable(
         &self,
         file: &File,
@@ -1757,28 +1785,43 @@ impl SymbolTable {
         decl: DeclId,
         f: &FunDecl,
     ) -> bool {
-        if !f.has_emittable_inline_body() {
+        if !f.is_inline() || !f.reified_type_params.is_empty() || f.is_suspend() {
             return false;
         }
-        let Some(sig) = self.funs.get(&f.name).and_then(|sigs| {
-            sigs.iter()
-                .find(|s| s.source_file == Some(file_index) && s.source_decl == Some(decl))
-        }) else {
-            return false;
+        // The signature to screen for value classes: a top-level fn's own record, or an
+        // extension's (receiver included — it rides arg0 of the static).
+        let value_class_free = if f.receiver.is_none() {
+            let Some(sig) = self.funs.get(&f.name).and_then(|sigs| {
+                sigs.iter()
+                    .find(|s| s.source_file == Some(file_index) && s.source_decl == Some(decl))
+            }) else {
+                return false;
+            };
+            !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
+                && !self.ty_mentions_value_class(sig.ret)
+        } else {
+            let Some((recv, sig)) = self.source_extension_signature(&f.name, file_index, decl)
+            else {
+                return false;
+            };
+            !self.ty_mentions_value_class(recv)
+                && !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
+                && !self.ty_mentions_value_class(sig.ret)
         };
-        !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
-            && !self.ty_mentions_value_class(sig.ret)
+        value_class_free
             && !inline_body_has_splice_only_shape(file, f, self.funs.contains_key("contract"))
     }
 
-    /// Whether a top-level function is lowered + emitted as a facade static, so a CROSS-FILE call
-    /// links against a plain `invokestatic`: every non-inline top-level fun, plus an `inline` one
-    /// that is safe standalone (`inline_fn_facade_emittable`). Splice-only inline funs emit
-    /// nothing. Shared by every module-symbol registration driver (backend, survey, conformance
-    /// harness) so the three registration sites can't drift apart.
+    /// Whether a function is lowered + emitted as a facade static, so a CROSS-FILE call links
+    /// against a plain `invokestatic` (an extension rides the static's arg0): every non-inline
+    /// fun, a callable inline extension (`has_callable_inline_extension_body`), plus an `inline`
+    /// one that is safe standalone (`inline_fn_facade_emittable`). Splice-only inline funs emit
+    /// nothing — the exact `prepare_module_symbols` predicate, shared by every module-symbol
+    /// registration driver (backend, survey, conformance harness) so the sites can't drift apart.
     pub fn emits_fn_facade(&self, file: &File, file_index: u32, decl: DeclId, f: &FunDecl) -> bool {
-        f.receiver.is_none()
-            && (!f.is_inline() || self.inline_fn_facade_emittable(file, file_index, decl, f))
+        !f.is_inline()
+            || f.has_callable_inline_extension_body()
+            || self.inline_fn_facade_emittable(file, file_index, decl, f)
     }
 
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
