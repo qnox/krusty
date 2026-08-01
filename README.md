@@ -118,6 +118,7 @@ tests/                            differential + round-trip harness vs real kotl
 docs/SPEC.md                      language subset + Kotlin-semantics decisions
 docs/IMPLEMENTATION_PLAN.md       phased plan (each phase ends green)
 docs/METADATA_NOTES.md            reverse-engineered @Metadata schema
+docs/CONTRACTS.md                 contract IR + @Metadata wire notes
 ```
 
 ## Build & test
