@@ -92,7 +92,9 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         Some(ir) => ir,
         None => return Some(format!("lower: {}", lower_bail.borrow())),
     };
-    emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp).err()
+    emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp)
+        .and_then(require_compilation_output)
+        .err()
 }
 
 fn emit_checked_ir(
@@ -132,11 +134,39 @@ fn emit_checked_ir(
         &opts,
         &run,
     ) {
-        Some(o) if !o.is_empty() => Ok(o),
-        _ => Err(run
+        // `Some([])` is NOT a bail: an all-`expect` file (decls stripped) or a typealias-only file
+        // legitimately emits zero classes (the gate's per-file acceptance, mirrored). Emptiness at
+        // the whole-file-set level is reported by the callers.
+        Some(o) => Ok(o),
+        None => Err(run
             .inline_bail()
             .map(|r| format!("emit: {r}"))
             .unwrap_or_else(|| "emit: emit_all bailed (unsupported codegen)".into())),
+    }
+}
+
+/// Skip reason for any compilation unit that lowers cleanly but has no loadable JVM output.
+///
+/// The examples are intentionally illustrative, not an exhaustive syntax classification: this
+/// survey should classify the generic emission result instead of acquiring special cases for
+/// individual source forms.
+const EMITTED_NO_CLASSES: &str =
+    "emit: compilation unit emitted no classes (for example expect-stripped or typealias-only sources)";
+
+/// Enforce the conformance harness's output postcondition at the compilation-unit boundary.
+///
+/// `emit_checked_ir` accepts `Some([])` for an individual file because another file compiled in
+/// the same source set may provide the module's runnable classes. Only the aggregate output can
+/// decide whether there is anything for the gate to load. Keeping that decision here gives
+/// single-file and multi-file inputs the same rule without file-, module-, or syntax-specific
+/// branches in the emission path.
+fn require_compilation_output(
+    emitted: Vec<(String, Vec<u8>)>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    if emitted.is_empty() {
+        Err(EMITTED_NO_CLASSES.into())
+    } else {
+        Ok(emitted)
     }
 }
 
@@ -201,7 +231,7 @@ fn first_error_blocks(
             &mut ir, file, i as u32, &facade, &syms, cp,
         )?);
     }
-    Ok(all)
+    require_compilation_output(all)
 }
 
 /// Survey a `// MODULE:` test the way the gate's `compile_module_test` builds it: each build unit
@@ -450,8 +480,77 @@ fn run() {
 }
 
 #[cfg(test)]
-mod categorize_tests {
-    use super::{categorize, truncate_chars};
+mod tests {
+    use super::*;
+
+    /// Stdlib + JDK `lib/modules` compile classpath, or `None` → skip (toolchain unprovisioned).
+    fn test_cp() -> Option<Rc<Classpath>> {
+        let stdlib = krusty::toolchain::stdlib_jar()?;
+        let mut paths = vec![stdlib];
+        if let Some(j) = krusty::toolchain::jdk_modules() {
+            paths.push(j);
+        }
+        Some(Rc::new(Classpath::new(paths)))
+    }
+
+    /// An all-`expect` common FILE legitimately emits ZERO classes after `strip_matched_expects`
+    /// (kotlinc's JVM-MPP model) — the block set must still compile, mirroring the gate's
+    /// per-file-empty acceptance. Regression pin: the survey used to misreport this as
+    /// `emit: emit_all bailed`, its top skip-bucket (~68 corpus files).
+    #[test]
+    fn all_expect_file_in_set_is_not_an_emit_bail() {
+        let Some(cp) = test_cp() else { return };
+        let blocks = vec![
+            (
+                "Common".to_string(),
+                "expect class S\nexpect fun make(): S\n".to_string(),
+            ),
+            (
+                "Main".to_string(),
+                "actual typealias S = String\nactual fun make(): S = \"OK\"\nfun box(): String = make()\n"
+                    .to_string(),
+            ),
+        ];
+        let features =
+            krusty::features::LangFeatures::from_source("// LANGUAGE: +MultiPlatformProjects");
+        let out = first_error_blocks(&blocks, &cp, &features);
+        assert!(
+            out.is_ok(),
+            "an all-expect file must not bail the whole set: {out:?}"
+        );
+    }
+
+    /// A block set whose files emit NOTHING (a typealias-only file lowers to no classes) is a skip
+    /// with its PRECISE reason — not the `emit_all bailed` catch-all (mirrors the gate's
+    /// whole-module-empty skip).
+    #[test]
+    fn typealias_only_set_reports_precise_reason() {
+        let Some(cp) = test_cp() else { return };
+        let blocks = vec![(
+            "Alias".to_string(),
+            "typealias Greeting = String\n".to_string(),
+        )];
+        let features = krusty::features::LangFeatures::from_source("");
+        let out = first_error_blocks(&blocks, &cp, &features);
+        assert_eq!(
+            out.err().as_deref(),
+            Some(
+                "emit: compilation unit emitted no classes (for example expect-stripped or typealias-only sources)"
+            )
+        );
+    }
+
+    /// A single-file survey goes through the same compilation-unit postcondition as a block set.
+    /// This prevents the two entry points from drifting back to separate file/module rules while
+    /// still requiring both to report a successful-but-empty emission precisely.
+    #[test]
+    fn typealias_only_file_uses_compilation_unit_empty_reason() {
+        let Some(cp) = test_cp() else { return };
+        assert_eq!(
+            first_error("typealias Greeting = String\n", &cp, "Alias").as_deref(),
+            Some(EMITTED_NO_CLASSES)
+        );
+    }
 
     #[test]
     fn backend_categories_are_not_rebucketed_by_incidental_words() {
