@@ -36,7 +36,7 @@ fun box(): String {\n\
 }
 
 // A NON-nullable fn-typed middle default (`chk: (Int) -> Unit = {}`) now passes the CHECKER with the
-// same mapping, but the omitted-default LOWERING can't fill a lambda default yet (`lower: call ef`)
+// same mapping, but the omitted-default LOWERING can't fill a lambda default yet (`lower: call Name`)
 // — that's a separate gap; no test until it lands (this file's cases stay runnable end-to-end).
 
 #[test]

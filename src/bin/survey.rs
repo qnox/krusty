@@ -92,15 +92,9 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         Some(ir) => ir,
         None => return Some(format!("lower: {}", lower_bail.borrow())),
     };
-    let emitted = match emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp) {
-        Ok(o) => o,
-        Err(e) => return Some(e),
-    };
-    // Mirror the gate's single-file skip: nothing emitted, nothing to run.
-    if emitted.is_empty() {
-        return Some(EMITTED_NO_CLASSES.to_string());
-    }
-    None
+    emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp)
+        .and_then(require_compilation_output)
+        .err()
 }
 
 fn emit_checked_ir(
@@ -151,11 +145,30 @@ fn emit_checked_ir(
     }
 }
 
-/// Skip reason for a file/module that lowers cleanly but emits zero classes — an all-`expect`
-/// source set or typealias-only file (the gate skips these too; kotlinc accepts them, there is
-/// just nothing to run).
+/// Skip reason for any compilation unit that lowers cleanly but has no loadable JVM output.
+///
+/// The examples are intentionally illustrative, not an exhaustive syntax classification: this
+/// survey should classify the generic emission result instead of acquiring special cases for
+/// individual source forms.
 const EMITTED_NO_CLASSES: &str =
-    "emit: emitted no classes (all declarations expect-stripped or typealias-only)";
+    "emit: compilation unit emitted no classes (for example expect-stripped or typealias-only sources)";
+
+/// Enforce the conformance harness's output postcondition at the compilation-unit boundary.
+///
+/// `emit_checked_ir` accepts `Some([])` for an individual file because another file compiled in
+/// the same source set may provide the module's runnable classes. Only the aggregate output can
+/// decide whether there is anything for the gate to load. Keeping that decision here gives
+/// single-file and multi-file inputs the same rule without file-, module-, or syntax-specific
+/// branches in the emission path.
+fn require_compilation_output(
+    emitted: Vec<(String, Vec<u8>)>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    if emitted.is_empty() {
+        Err(EMITTED_NO_CLASSES.into())
+    } else {
+        Ok(emitted)
+    }
+}
 
 /// The survey twin of the gate's `compile_blocks`: compile a set of already-split `(stem, content)`
 /// source blocks as ONE module, reporting the FIRST error (the gate only knows pass/skip). Returns
@@ -187,27 +200,11 @@ fn first_error_blocks(
         return Err(d.diags[0].msg.clone());
     }
 
-    for (i, file) in files.iter().enumerate() {
-        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
-        for &decl in &file.decls {
-            match file.decl(decl) {
-                krusty::ast::Decl::Fun(f) if syms.emits_fn_facade(file, i as u32, decl, f) => {
-                    let facade_name = krusty::types::type_name(&facade);
-                    syms.fn_facades_by_decl
-                        .insert((i as u32, decl.0), facade_name);
-                    syms.fn_facades.insert(f.name.clone(), facade_name);
-                }
-                krusty::ast::Decl::Property(p) if p.receiver.is_none() => {
-                    if let Some(&(ty, is_var, is_const)) = syms.props.get(&p.name) {
-                        let facade_name = krusty::types::type_name(&facade);
-                        syms.prop_facades
-                            .insert(p.name.clone(), (facade_name, ty, is_var, is_const));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    // Use the production registrar for both positive facade owners and explicit splice-only
+    // outcomes. Keeping a survey-local copy previously let extension functions and backend
+    // emittability policy drift from the CLI and conformance harness.
+    let stems: Vec<String> = blocks.iter().map(|(stem, _)| stem.clone()).collect();
+    krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
 
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
@@ -234,12 +231,7 @@ fn first_error_blocks(
             &mut ir, file, i as u32, &facade, &syms, cp,
         )?);
     }
-    // Mirror the gate's whole-module skip: every file emitted nothing (an all-`expect` or
-    // typealias-only module).
-    if all.is_empty() {
-        return Err(EMITTED_NO_CLASSES.into());
-    }
-    Ok(all)
+    require_compilation_output(all)
 }
 
 /// Survey a `// MODULE:` test the way the gate's `compile_module_test` builds it: each build unit
@@ -315,7 +307,21 @@ fn first_error_module(
     result
 }
 
+/// Copy at most `limit` Unicode scalar values from a diagnostic.
+///
+/// Survey input can contain source-defined Unicode identifiers. Byte slicing at an arbitrary display
+/// limit can panic in the reporting path, so every fallback bucket uses this shared safe truncation.
+fn truncate_chars(message: &str, limit: usize) -> String {
+    message.chars().take(limit).collect()
+}
+
 fn categorize(err: &str) -> String {
+    // Backend (`lower:`/`emit:`) diagnostics are already curated, precise reasons — keep them
+    // verbatim rather than re-bucketing on a substring coincidence (e.g. a `lower:` reason that
+    // happens to contain "bridge").
+    if err.starts_with("lower:") || err.starts_with("emit:") {
+        return truncate_chars(err, 70);
+    }
     if err.contains("class bodies support") {
         return "nested decl in class body".into();
     }
@@ -340,17 +346,14 @@ fn categorize(err: &str) -> String {
     if err.contains("conflicting declarations") {
         return "conflicting declarations".into();
     }
-    if err.starts_with("lower:") || err.starts_with("emit:") {
-        return err[..err.len().min(70)].to_string();
-    }
     if err.contains("krusty: ") {
         let m = err.trim_start_matches("krusty: ");
-        return format!("krusty: {}", &m[..m.len().min(60)]);
+        return format!("krusty: {}", truncate_chars(m, 60));
     }
     if err.contains("expected") {
-        return format!("parse: {}", &err[..err.len().min(60)]);
+        return format!("parse: {}", truncate_chars(err, 60));
     }
-    format!("other: {}", &err[..err.len().min(60)])
+    format!("other: {}", truncate_chars(err, 60))
 }
 
 fn collect_kt(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -531,7 +534,41 @@ mod tests {
         let out = first_error_blocks(&blocks, &cp, &features);
         assert_eq!(
             out.err().as_deref(),
-            Some("emit: emitted no classes (all declarations expect-stripped or typealias-only)")
+            Some(
+                "emit: compilation unit emitted no classes (for example expect-stripped or typealias-only sources)"
+            )
         );
+    }
+
+    /// A single-file survey goes through the same compilation-unit postcondition as a block set.
+    /// This prevents the two entry points from drifting back to separate file/module rules while
+    /// still requiring both to report a successful-but-empty emission precisely.
+    #[test]
+    fn typealias_only_file_uses_compilation_unit_empty_reason() {
+        let Some(cp) = test_cp() else { return };
+        assert_eq!(
+            first_error("typealias Greeting = String\n", &cp, "Alias").as_deref(),
+            Some(EMITTED_NO_CLASSES)
+        );
+    }
+
+    #[test]
+    fn backend_categories_are_not_rebucketed_by_incidental_words() {
+        assert_eq!(
+            categorize("lower: gate:suspend-erasure-bridge"),
+            "lower: gate:suspend-erasure-bridge"
+        );
+        assert_eq!(
+            categorize("emit: inline splice failed"),
+            "emit: inline splice failed"
+        );
+    }
+
+    #[test]
+    fn diagnostic_truncation_respects_unicode_boundaries() {
+        let message = "é".repeat(80);
+        let truncated = truncate_chars(&message, 60);
+        assert_eq!(truncated.chars().count(), 60);
+        assert!(message.starts_with(&truncated));
     }
 }
