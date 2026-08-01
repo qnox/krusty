@@ -1307,6 +1307,14 @@ pub struct IrFile {
     /// dependency — whose `FunId` is absent from this file's `suspend_funs`. Same-file/member suspend
     /// calls are caught by `suspend_funs`; this is the cross-unit complement.
     pub suspend_calls: std::collections::HashMap<u32, Ty>,
+    /// Non-call expressions whose evaluation is a coroutine SUSPENSION POINT → their logical result
+    /// type. Unlike [`Self::suspend_calls`], these nodes do not name a callee and must not have a
+    /// continuation argument appended by the coroutine pass. The motivating intrinsic is an inlined
+    /// `suspendCoroutineUninterceptedOrReturn` block: lowering has already materialized its continuation
+    /// use inside the block, while the coroutine pass still needs to split and resume around the block as
+    /// one atomic point. Keeping this semantic category separate prevents a structural block from being
+    /// mistaken for a cross-unit call merely because both can suspend.
+    pub intrinsic_suspension_points: std::collections::HashMap<u32, Ty>,
     /// A `suspend` LAMBDA's `invokeSuspend` that contains MULTIPLE suspensions / control flow and needs
     /// a state machine with the lambda instance itself as the continuation — `(invokeSuspend FunId,
     /// lambda ClassId, field_base)`. `field_base` is the first free field index on the lambda class
