@@ -278,6 +278,12 @@ fn first_error_module(
 }
 
 fn categorize(err: &str) -> String {
+    // Backend (`lower:`/`emit:`) diagnostics are already curated, precise reasons — keep them
+    // verbatim rather than re-bucketing on a substring coincidence (e.g. a `lower:` reason that
+    // happens to contain "bridge").
+    if err.starts_with("lower:") || err.starts_with("emit:") {
+        return err[..err.len().min(70)].to_string();
+    }
     if err.contains("class bodies support") {
         return "nested decl in class body".into();
     }
@@ -301,9 +307,6 @@ fn categorize(err: &str) -> String {
     }
     if err.contains("conflicting declarations") {
         return "conflicting declarations".into();
-    }
-    if err.starts_with("lower:") || err.starts_with("emit:") {
-        return err[..err.len().min(70)].to_string();
     }
     if err.contains("krusty: ") {
         let m = err.trim_start_matches("krusty: ");

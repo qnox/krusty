@@ -415,6 +415,7 @@ fn lower_file_at_reporting_impl(
         })
     });
     if uses_yield_builder {
+        lo.set_bail("gate:yield-builder");
         return None;
     }
 
@@ -454,6 +455,7 @@ fn lower_file_at_reporting_impl(
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
                 if f.is_suspend() && f.receiver.is_some() {
+                    lo.set_bail("gate:extension-suspend-fn");
                     return None;
                 }
             }
@@ -546,6 +548,7 @@ fn lower_file_at_reporting_impl(
                         || c.base_class.as_deref().is_some_and(super_has_generic)))
         });
         if suspend_member_needs_bridge {
+            lo.set_bail("gate:suspend-erasure-bridge");
             return None;
         }
         // A NON-suspend body may not call any suspend fn (top-level or member): call-site continuation
@@ -559,6 +562,7 @@ fn lower_file_at_reporting_impl(
                     .chain(member_suspend.iter())
                     .any(|n| file.expr_uses_name(e, n))
             {
+                lo.set_bail("gate:suspend-call-from-non-suspend");
                 return None;
             }
         }
@@ -572,6 +576,7 @@ fn lower_file_at_reporting_impl(
     let mut pending_iface_defaults: Vec<PendingIfaceDefault> = Vec::new();
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
+            lo.set_bail("deep:class-register"); // pass 1a phase marker (survey diagnostic only)
             let internal = class_internal(file, &c.name);
             let anonymous_captures = info
                 .anonymous_object_captures_by_class
@@ -682,15 +687,23 @@ fn lower_file_at_reporting_impl(
             // accessor doesn't emit). Anything else skips the file rather than miscompile.
             for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
                 let dt = info.ty(p.delegate.unwrap());
-                let di = dt.obj_internal()?;
+                let Some(di) = dt.obj_internal() else {
+                    lo.set_bail("gate:member-delegate-shape");
+                    return None;
+                };
                 let is_value_cls = |internal: TypeName| {
                     syms.class_by_type_name(internal)
                         .is_some_and(|cs| cs.value_field.is_some())
                 };
                 if is_value_cls(di) || syms.method_of_name(di, "provideDelegate").is_some() {
+                    lo.set_bail("gate:member-delegate-shape");
                     return None;
                 }
-                let (_, _, gv_ret, _, _) = lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
+                let Some((_, _, gv_ret, _, _)) = lo.delegate_getvalue_info(p.delegate.unwrap(), di)
+                else {
+                    lo.set_bail("gate:member-delegate-shape");
+                    return None;
+                };
                 let prop_ty = syms
                     .classes
                     .get(&c.name)
@@ -705,9 +718,11 @@ fn lower_file_at_reporting_impl(
                 // `coerce_erased`. Only an erased-REFERENCE return is bridgeable — a concrete mismatched
                 // return isn't, so bail on that.
                 if gv_ret != prop_ty && !gv_ret.is_reference() {
+                    lo.set_bail("gate:member-delegate-shape");
                     return None;
                 }
                 if prop_ty.obj_internal().is_some_and(is_value_cls) {
+                    lo.set_bail("gate:member-delegate-shape");
                     return None;
                 }
             }
@@ -851,7 +866,10 @@ fn lower_file_at_reporting_impl(
                         {
                             Some(resolved)
                         }
-                        _ => return None,
+                        _ => {
+                            lo.set_bail("gate:class-supertype-shape");
+                            return None;
+                        }
                     }
                 }
                 None => None,
@@ -874,6 +892,7 @@ fn lower_file_at_reporting_impl(
                 {
                     iface_internals.push(resolved);
                 } else {
+                    lo.set_bail("gate:class-supertype-shape");
                     return None;
                 }
             }
@@ -1834,6 +1853,10 @@ fn lower_file_at_reporting_impl(
                 || !c.companion_supertypes.is_empty()
                 || !c.companion_props.is_empty()
             {
+                // Refined phase marker for the whole synthesized-companion region; reset to the
+                // pass-1a marker on success so a LATER bail in this class iteration isn't
+                // misattributed (the sink is last-wins).
+                lo.set_bail("deep:companion-synth");
                 let comp_fq = format!("{internal}$Companion");
                 // The companion's declared supertypes (`companion object : Base, I`): make the synthesized
                 // companion implement its declared INTERFACES so it is genuinely an `I` at runtime. The
@@ -2041,6 +2064,7 @@ fn lower_file_at_reporting_impl(
                 );
                 lo.companions
                     .insert(type_name(&internal), type_name(&comp_fq));
+                lo.set_bail("deep:class-register"); // companion synthesis survived; restore phase
             }
             // A `data class`'s equals/hashCode/toString/componentN are Kotlin language semantics —
             // synthesize them here as ordinary IR methods (backend-agnostic), registered so calls
@@ -2059,8 +2083,13 @@ fn lower_file_at_reporting_impl(
             // (`box-impl`/`unbox-impl`/`constructor-impl`/`equals-impl0`/`equals`/`hashCode`/`toString`).
             // Interface delegation `: I by d` is sugar — synthesize a forwarder for each of `I`'s
             // methods that calls `this.d.method(args)`. Bails the file if a delegate can't be modeled.
-            if !c.delegations.is_empty() || !c.delegation_exprs.is_empty() {
-                lo.synth_delegation_forwarders(file, c, &internal, id)?;
+            if (!c.delegations.is_empty() || !c.delegation_exprs.is_empty())
+                && lo
+                    .synth_delegation_forwarders(file, c, &internal, id)
+                    .is_none()
+            {
+                lo.set_bail("gate:delegation-forwarders");
+                return None;
             }
         }
     }
@@ -2135,6 +2164,7 @@ fn lower_file_at_reporting_impl(
     // Pass 1b: register callable top-level and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
+            lo.set_bail("deep:fun-register"); // pass 1b phase marker (survey diagnostic only)
             if splice_only_inline(f, d) {
                 continue;
             }
@@ -2231,6 +2261,7 @@ fn lower_file_at_reporting_impl(
     // resulting `FunId` in pass 2.
     for (i, s) in file.stmt_arena.iter().enumerate() {
         if let Stmt::LocalFun(_) = s {
+            lo.set_bail("deep:local-fun-register"); // pass 1b' phase marker (survey diagnostic only)
             let stmt_id = crate::ast::StmtId(i as u32);
             if let Some(local_fun) = info.local_fun(stmt_id) {
                 // Captured outer locals become extra leading parameters: runtime holder first when the
@@ -2265,6 +2296,8 @@ fn lower_file_at_reporting_impl(
     let static_base = lo.ir.statics.len() as u32;
     for &d in &file.decls {
         if let Decl::Property(p) = file.decl(d) {
+            // Pass 1c phase marker (survey diagnostic only).
+            lo.set_bail("deep:property-register");
             // A top-level delegated property (`val x: T by Del()`): register a `getX()` accessor so reads
             // route to it (like a computed property), and RESERVE the two synthetic backing-field static
             // slots (`x$delegate`, `x$kprop`) in declaration order so later non-delegated statics get the
@@ -2273,14 +2306,20 @@ fn lower_file_at_reporting_impl(
                 // An EXTENSION delegated property (`val Recv.x by …`) isn't modeled — skip the file
                 // (pass 2 would otherwise treat it as an extension property and find no getter).
                 if p.receiver.is_some() {
+                    lo.set_bail("gate:extension-delegated-property");
                     return None;
                 }
                 let ty = if let Some(tref) = p.ty.as_ref() {
                     ty_of(file, tref, &*syms.libraries)
                 } else {
+                    // Inferring the property type from the delegate's `getValue` return is only
+                    // modeled for simple source delegates; anything else skips here.
+                    lo.set_bail("gate:delegated-property-inferred-type");
                     let delegate_ty = info.ty(p.delegate?);
                     let internal = delegate_ty.obj_internal()?;
-                    lo.delegate_getvalue_info(p.delegate?, internal)?.2
+                    let ty = lo.delegate_getvalue_info(p.delegate?, internal)?.2;
+                    lo.set_bail("deep:property-register"); // survived; restore the phase marker
+                    ty
                 };
                 let fid = lo.ir.add_fun(IrFunction {
                     name: property_getter_name(&p.name),
@@ -2309,6 +2348,7 @@ fn lower_file_at_reporting_impl(
             // needs an explicit `set(v) { … }` body (no backing field to default to).
             if p.receiver.is_some() {
                 if p.getter.is_none() || p.delegate.is_some() {
+                    lo.set_bail("gate:extension-property-shape");
                     return None;
                 }
                 let has_set_body = p
@@ -2316,6 +2356,7 @@ fn lower_file_at_reporting_impl(
                     .as_ref()
                     .is_some_and(|s| s.body.is_some() && s.param.is_some());
                 if p.is_var && !has_set_body {
+                    lo.set_bail("gate:extension-property-shape");
                     return None;
                 }
                 let signature = syms.source_extension_property((file_index, d.0))?;
