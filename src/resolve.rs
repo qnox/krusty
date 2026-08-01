@@ -29040,8 +29040,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Coroutine intrinsics type their lambda with the current Continuation and yield the
-                // enclosing suspend function's return type.
+                // Coroutine intrinsics type their lambda with the current Continuation; the call
+                // yields the intrinsic's `T` (see below).
                 let one_lambda_arg = match args {
                     [arg] if matches!(self.file.expr(*arg), Expr::Lambda { .. }) => Some(*arg),
                     _ => None,
@@ -29061,7 +29061,21 @@ impl<'a> Checker<'a> {
                 ) {
                     let cont = Ty::obj("kotlin/coroutines/Continuation");
                     self.check_lambda_with_types(lambda, &[cont]);
-                    let r = self.ret_ty;
+                    // The call's type is the intrinsic's `T`: an explicit type argument
+                    // (`suspendCoroutineUninterceptedOrReturn<Unit> { … }`) when present, else
+                    // the enclosing suspend function's return type — but NEVER `Nothing`: the
+                    // intrinsic does not diverge locally (kotlinc infers the free `T` as `Unit`
+                    // in statement position), so in a `(): Nothing` fn the statements after it
+                    // still run, on the resumed activation.
+                    let explicit = self
+                        .file
+                        .call_type_args
+                        .get(&call.0)
+                        .and_then(|args| args.first())
+                        .map(|r| self.resolve_ty_no_diag(r))
+                        .filter(|t| *t != Ty::Error);
+                    let r = explicit.unwrap_or(self.ret_ty);
+                    let r = if r == Ty::Nothing { Ty::Unit } else { r };
                     return self.set(call, r);
                 }
                 // SAM conversion `Pred { lambda }`: type the lambda from the SAM method parameters.

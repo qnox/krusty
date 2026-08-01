@@ -8483,24 +8483,6 @@ impl<'a> Lower<'a> {
         // A `suspend { … }` literal (parser-marked): build the `SuspendLambda` state machine
         // instead of a plain `FunctionN` closure (which `lower_lambda_sam` would bail on).
         if self.afile.suspend_lambdas.contains(&e.0) {
-            // Conservative v1 gate: a body with MEMBER accesses (`c.bar()`, `c.x`) hits latent
-            // suspend+delegation/state-machine gaps (silent resume loss) — bail (skip the file)
-            // rather than miscompile. Bare calls (incl. suspend function PARAMETERS, the
-            // `runBlocking`/`contract` shape) are supported.
-            fn has_member_access(lo: &Lower, e: AstExprId) -> bool {
-                if matches!(lo.afile.expr(e), Expr::Member { .. }) {
-                    return true;
-                }
-                lo.afile
-                    .any_child_expr(e, &mut |c| has_member_access(lo, c), &mut |s| {
-                        lo.afile
-                            .any_child_stmt(s, &mut |c| has_member_access(lo, c))
-                    })
-            }
-            let has_member_call = has_member_access(self, body);
-            if has_member_call {
-                return None;
-            }
             let Ty::Fun(sig) = self.info.ty(e) else {
                 return None;
             };
@@ -8960,10 +8942,29 @@ impl<'a> Lower<'a> {
         collect_calls(self.afile, body, &callees);
         callees.into_inner().into_iter().any(|call| {
             let method_suspends = |internal: TypeName, name: &str| {
-                self.syms
-                    .class_by_type_name(internal)
-                    .map(|c| c.methods_named(name))
-                    .is_some_and(|sigs| sigs.iter().any(|s| s.is_suspend()))
+                // A class may expose a suspend method only through a super-INTERFACE
+                // (interface delegation `: I by d` synthesizes the forwarder at lowering, so
+                // the class's own method table doesn't list it) — walk the super hierarchy.
+                // Module classes only (same boundary as `forward_iface_methods`): a classpath
+                // super-interface is out of scope. Over-approximating is SAFE (see above).
+                let mut queue = vec![internal];
+                let mut seen = std::collections::HashSet::new();
+                while let Some(cur) = queue.pop() {
+                    if !seen.insert(cur) {
+                        continue;
+                    }
+                    let Some(cs) = self.syms.class_by_type_name(cur) else {
+                        continue;
+                    };
+                    if cs.methods_named(name).iter().any(|s| s.is_suspend()) {
+                        return true;
+                    }
+                    queue.extend(cs.interface_names());
+                    if let Some(sup) = cs.super_internal_name() {
+                        queue.push(sup);
+                    }
+                }
+                false
             };
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
@@ -9627,7 +9628,7 @@ impl<'a> Lower<'a> {
         // module-`ClassSig` super-interface graph breadth-first, deduping methods by signature and
         // properties by source name. The property entry retains its declaring owner because an inherited
         // accessor must dispatch against the interface that actually declares that JVM method.
-        let mut methods: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
+        let mut methods: Vec<(String, Vec<Ty>, Ty, bool)> = Vec::new();
         // Retain only the declaration facts lowering consumes. In particular, do not carry the
         // resolver's `DeclaredPropertySig` across this boundary: `ir_lower` depends on the semantic
         // symbol handoff, not the resolver implementation that originally populated it.
@@ -9645,8 +9646,11 @@ impl<'a> Lower<'a> {
             let cs = self.syms.class_by_type_name(cur)?;
             for (n, sigs) in &cs.methods {
                 for s in sigs {
-                    if !methods.iter().any(|(on, op, _)| on == n && *op == s.params) {
-                        methods.push((n.clone(), s.params.clone(), s.ret));
+                    if !methods
+                        .iter()
+                        .any(|(on, op, _, _)| on == n && *op == s.params)
+                    {
+                        methods.push((n.clone(), s.params.clone(), s.ret, s.is_suspend()));
                     }
                 }
             }
@@ -9672,7 +9676,7 @@ impl<'a> Lower<'a> {
                 queue.push(sup);
             }
         }
-        for (mname, params, ret) in methods {
+        for (mname, params, ret, suspend) in methods {
             let params_ir = tys_to_ir(&params);
             let descriptor = self.runtime.method_descriptor(&params, ret)?;
             let field = self.this_field(class_id, delegate_idx);
@@ -9687,13 +9691,28 @@ impl<'a> Lower<'a> {
                 field,
                 args,
             );
+            // A SUSPEND interface method: the forwarder must be a CPS tail-forward too —
+            // registered as a suspend fn (the coroutine pass appends its `$completion`
+            // parameter and erases the return to `Object`, matching the interface's JVM
+            // method it overrides) and its delegate call recorded as a suspend call (the
+            // pass threads that continuation into it and returns the result verbatim, so
+            // `COROUTINE_SUSPENDED` propagates instead of being swallowed).
+            if suspend {
+                self.ir.suspend_calls.insert(call, ret);
+            }
             let body = if ret == Ty::Unit {
                 self.emit_block(vec![call], None)
             } else {
                 let ret_stmt = self.emit_return(Some(call));
                 self.emit_block(vec![ret_stmt], None)
             };
-            self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
+            let fid =
+                self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
+            if suspend {
+                if let Some(fid) = fid {
+                    self.ir.suspend_funs.push(fid);
+                }
+            }
         }
         for (owner, _name, getter_name, setter_name, property_ty) in properties {
             let field = self.this_field(class_id, delegate_idx);
@@ -19438,9 +19457,8 @@ impl<'a> Lower<'a> {
             // intrinsic (recognized via the registry). The block runs with the enclosing suspend
             // function's own `Continuation` bound as its parameter; kotlinc inlines the block and returns
             // its `Any?` result. The leaf shape `{ COROUTINE_SUSPENDED }` (and any block that does NOT
-            // read its continuation parameter) inlines to just the block body. A block that DOES read the
-            // continuation needs the (post-CPS) continuation slot threaded in — not modeled here, so it
-            // bails (skip the file) rather than binding a wrong slot.
+            // read its continuation parameter) inlines to just the block body. A block that DOES read
+            // the continuation is a first-class suspension point (see below).
             Expr::Call { callee, args }
                 if args.len() == 1
                     && matches!(self.afile.expr(callee), ast::Expr::Name(n)
@@ -19455,6 +19473,9 @@ impl<'a> Lower<'a> {
                     // The block reads its continuation (`c.resume(t)`): bind `c` to the enclosing suspend
                     // function's own `Continuation` via the `CurrentContinuation` placeholder — the CPS
                     // pass rewrites it to the real continuation value once the trailing parameter exists.
+                    // The whole intrinsic is a SUSPENSION POINT: registered so the coroutine pass splits
+                    // a state machine around it (`it.resume(v)` then re-enters THIS machine at the resume
+                    // label, exactly kotlinc's protocol).
                     let slot = self.fresh_value();
                     let cont = self.ir.add_expr(IrExpr::CurrentContinuation);
                     let cont_ty = Ty::obj("kotlin/coroutines/Continuation");
@@ -19464,7 +19485,18 @@ impl<'a> Lower<'a> {
                     let body_val = self.expr(body);
                     self.scope.truncate(depth);
                     let body_val = body_val?;
-                    self.emit_block(vec![var], Some(body_val))
+                    let block = self.emit_block(vec![var], Some(body_val));
+                    let logical_ret = ty_to_ir(self.info.ty(e));
+                    self.ir.suspend_calls.insert(block, logical_ret);
+                    // Bind the block to a temp: in any position (statement, value, tail) the
+                    // block-splicing transforms dissolve the OUTER grouping but preserve the
+                    // `Variable { init: <suspend call> }` — the exact bound-local suspension shape
+                    // the flattener handles. A bare registered block would be spliced away,
+                    // orphaning the call id (the suspension silently lost).
+                    let tmp = self.fresh_value();
+                    let decl = self.emit_variable(tmp, logical_ret, Some(block));
+                    let tmp_read = self.emit_get_value(tmp);
+                    self.emit_block(vec![decl], Some(tmp_read))
                 } else {
                     self.expr(body)?
                 }

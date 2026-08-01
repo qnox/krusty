@@ -204,14 +204,10 @@ pub fn lower_suspend(
         }
         let has_susp =
             forward.is_none() && body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
-        // A body that combines a real suspension STATE with a `suspendCoroutineUninterceptedOrReturn`
-        // whose block runs STATEMENTS (parks the continuation for an external resume) is not modeled:
-        // the machine's re-entry after the intrinsic's resume misdrives the label and the coroutine
-        // never completes (corpus coroutines/suspendCoroutineFromStateMachine.kt loops forever under
-        // its driver). Skip, never miscompile.
-        if has_susp && body.is_some_and(|b| contains_current_continuation(ir, b)) {
-            return false;
-        }
+        // A `suspendCoroutineUninterceptedOrReturn` block that reads its continuation is a
+        // first-class suspension point (ir_lower registered it in `ir.suspend_calls`): the
+        // machine passes ITSELF as the continuation, so `it.resume(v)` re-enters this machine at
+        // the resume label — kotlinc's protocol (coroutines/tailCallToNothing).
         crate::trace_compiler!(
             "suspend",
             "fn fid={fid} name={} has_susp={has_susp}",
@@ -250,10 +246,14 @@ pub fn lower_suspend(
             ir.functions[fid as usize].params.len() as u32 - 1 + if is_static { 0 } else { 1 };
         if let Some(b) = body {
             shift_locals(ir, b, p_old);
-            // `suspendCoroutineUninterceptedOrReturn { c -> … }` bound `c` to a `CurrentContinuation`
-            // placeholder; now that the trailing `Continuation` parameter exists at value-index `p_old`,
-            // resolve the placeholder to read it.
-            rewrite_current_continuation(ir, b, p_old);
+            // A `suspendCoroutineUninterceptedOrReturn { c -> … }` in a body that gets NO machine
+            // (a leaf or a tail-forward) keeps the placeholder semantics: `c` is the trailing
+            // `Continuation` parameter itself. A body that DOES get a machine resolves the
+            // placeholder to the machine WRAPPER inside `build_state_machine` (cont_v), so
+            // `c.resume(v)` re-enters this machine.
+            if !has_susp {
+                rewrite_current_continuation(ir, b, p_old);
+            }
             // The pre-splice scope lists (captured above) hold PRE-shift local indices — shift them
             // identically so they match the machine's value numbering.
             if let Some(scopes) = pre_splice_scopes.get_mut(&fid) {
@@ -360,6 +360,12 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
             value: bv,
         } = ir.exprs[s as usize].clone()
         {
+            // A `suspendCoroutineUninterceptedOrReturn` block is a registered suspension point,
+            // not grouping — splicing it would orphan the call id.
+            if ir.suspend_calls.contains_key(&s) {
+                new_stmts.push(s);
+                continue;
+            }
             new_stmts.extend(bs);
             if let Some(v) = bv {
                 if i + 1 == n && value.is_none() {
@@ -372,28 +378,34 @@ fn splice_return_blocks(ir: &mut IrFile, b: ExprId) {
             continue;
         }
         let spliced = match ir.exprs[s as usize].clone() {
-            IrExpr::Return(Some(inner)) => value_block(ir, inner).map(|(bs, bv)| {
-                new_stmts.extend(bs);
-                ir.add_expr(IrExpr::Return(Some(bv)))
-            }),
+            IrExpr::Return(Some(inner)) => value_block(ir, inner)
+                .filter(|_| !ir.suspend_calls.contains_key(&inner))
+                .map(|(bs, bv)| {
+                    new_stmts.extend(bs);
+                    ir.add_expr(IrExpr::Return(Some(bv)))
+                }),
             IrExpr::Variable {
                 index,
                 ty,
                 init: Some(inner),
                 named,
-            } => value_block(ir, inner).map(|(bs, bv)| {
-                new_stmts.extend(bs);
-                ir.add_expr(IrExpr::Variable {
-                    index,
-                    ty,
-                    init: Some(bv),
-                    named,
-                })
-            }),
-            IrExpr::SetValue { var, value: inner } => value_block(ir, inner).map(|(bs, bv)| {
-                new_stmts.extend(bs);
-                ir.add_expr(IrExpr::SetValue { var, value: bv })
-            }),
+            } => value_block(ir, inner)
+                .filter(|_| !ir.suspend_calls.contains_key(&inner))
+                .map(|(bs, bv)| {
+                    new_stmts.extend(bs);
+                    ir.add_expr(IrExpr::Variable {
+                        index,
+                        ty,
+                        init: Some(bv),
+                        named,
+                    })
+                }),
+            IrExpr::SetValue { var, value: inner } => value_block(ir, inner)
+                .filter(|_| !ir.suspend_calls.contains_key(&inner))
+                .map(|(bs, bv)| {
+                    new_stmts.extend(bs);
+                    ir.add_expr(IrExpr::SetValue { var, value: bv })
+                }),
             _ => None,
         };
         match spliced {
@@ -1438,6 +1450,12 @@ fn normalize_block_inits(ir: &mut IrFile, b: ExprId) {
                 value: inner_val,
             } = ir.exprs[init as usize].clone()
             {
+                if ir.suspend_calls.contains_key(&init) {
+                    // A registered suspension point (a `suspendCoroutineUninterceptedOrReturn`
+                    // block), not an elvis/safe-call grouping — leave bound.
+                    out.push(s);
+                    continue;
+                }
                 // Bind to the block's value; a value-less `Unit` block (`val x: Unit = { …stmts… }`, e.g.
                 // a lambda whose tail expression is an assignment) runs its statements then binds the
                 // `Unit` singleton — so the binding always leaves a value for its `astore`.
@@ -1845,6 +1863,12 @@ fn build_state_machine(
         &real_params,
     );
 
+    // A `suspendCoroutineUninterceptedOrReturn { c -> … }` block inside this body reads its
+    // continuation parameter: bind it to the machine WRAPPER (`cont_v`) so `c.resume(v)`
+    // re-enters THIS machine at the resume label (kotlinc's protocol; the raw incoming
+    // `$completion` would resume the CALLER instead).
+    rewrite_current_continuation(ir, b, cont_v);
+
     // Flatten the body into a state graph.
     let mut flat = Flat {
         ir,
@@ -1967,19 +1991,6 @@ fn build_state_machine(
         })
     };
     let state_scopes = std::mem::take(&mut flat.state_scope);
-    if std::env::var("KRUSTY_DBG").is_ok() {
-        eprintln!(
-            "DBG sm fid={fid} name={} scopes_map={} state_scopes={:?}",
-            flat.ir.functions[fid as usize].name,
-            flat.scopes.len(),
-            state_scopes
-                .iter()
-                .map(|s| s
-                    .as_ref()
-                    .map(|l| l.iter().map(|(i, _)| *i).collect::<Vec<_>>()))
-                .collect::<Vec<_>>()
-        );
-    }
     // Value parameters are the stable PREFIX of every scope list — their per-kind positions (and
     // so their fields) are identical across states; the constructor captures them there.
     let param_positions: Vec<(u32, Ty, char, u32)> = kind_positions(&param_caps);
@@ -2185,6 +2196,10 @@ fn build_lambda_state_machine(
     normalize_block_inits(ir, b);
     split_unit_conditional_returns(ir, b, orig_rets.get(fid as usize) == Some(&Ty::Unit));
     hoist_suspensions(ir, b, &suspend_set, orig_rets);
+    // A `suspendCoroutineUninterceptedOrReturn { c -> … }` block reads its continuation parameter:
+    // bind it to the lambda machine itself (`this` = value-index 0) so `c.resume(v)` re-enters
+    // THIS machine at the resume label.
+    rewrite_current_continuation(ir, b, 0);
     if binds_value_class_suspension(ir, b, &suspend_set) {
         crate::trace_compiler!(
             "suspend",
@@ -3100,9 +3115,10 @@ impl Flat<'_> {
                     value: Some(bv),
                 } = self.ir.exprs[init as usize].clone()
                 {
-                    if self.expr_has_loop_jump(stmt)
-                        || expr_calls_suspend(self.ir, stmt, self.suspend)
-                        || self.expr_jumps_to_active_frame(stmt)
+                    if !self.ir.suspend_calls.contains_key(&init)
+                        && (self.expr_has_loop_jump(stmt)
+                            || expr_calls_suspend(self.ir, stmt, self.suspend)
+                            || self.expr_jumps_to_active_frame(stmt))
                     {
                         let rebind = self.add(IrExpr::Variable {
                             index,
@@ -4501,13 +4517,17 @@ fn build_continuation_class(
                 aargs.extend(reentry_args);
                 add_static_call(ir, &owner_internal, &access_name, &adesc, aargs)
             } else {
+                // A suspend DEFAULT method lives on an interface: the re-entry call must be an
+                // `invokeinterface` — an `invokevirtual` on an interface methodref fails linkage
+                // with `IncompatibleClassChangeError` (coroutines/suspendDefaultImpl).
+                let interface = owner_cid.is_some_and(|cid| ir.classes[cid].is_interface);
                 ir.add_expr(IrExpr::Call {
                     callee: Callee::Virtual {
                         owner,
                         name,
                         descriptor,
                         params: None,
-                        interface: false,
+                        interface,
                     },
                     dispatch_receiver: Some(recv),
                     args: reentry_args,
@@ -5382,24 +5402,6 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
     // from 0 to 1, leaving `GetValue(1)` unallocated in the extracted lambda method (a class method escaped
     // because its lambda `it`=0 was below the threshold 1).
     crate::ir::shift_value_indices(ir, e, threshold, 1);
-}
-
-/// Whether `e`'s subtree contains a `CurrentContinuation` placeholder — the marker `ir_lower` leaves
-/// for the lambda parameter of `suspendCoroutineUninterceptedOrReturn { c -> … }`. Iterative walk with
-/// a visited set (the arena shares nodes; recursion overflows on deep bodies).
-fn contains_current_continuation(ir: &IrFile, e: ExprId) -> bool {
-    let mut seen: HashSet<ExprId> = HashSet::new();
-    let mut stack = vec![e];
-    while let Some(cur) = stack.pop() {
-        if !seen.insert(cur) {
-            continue;
-        }
-        if matches!(ir.exprs[cur as usize], IrExpr::CurrentContinuation) {
-            return true;
-        }
-        for_each_child(&ir.exprs, cur, &mut |c| stack.push(c));
-    }
-    false
 }
 
 /// Resolve every `CurrentContinuation` placeholder in `e` to read the continuation value at `slot` (the
