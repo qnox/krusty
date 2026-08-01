@@ -11665,6 +11665,7 @@ struct MemberExtensionFunctionCandidate {
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
     is_operator: bool,
+    is_inline: bool,
     owner: TypeName,
 }
 
@@ -25390,6 +25391,7 @@ impl<'a> Checker<'a> {
                 argument_parameters: instantiated.argument_parameters,
                 visibility: shape.function.signature.visibility,
                 is_operator: shape.is_operator,
+                is_inline: shape.function.signature.is_inline(),
                 owner: shape.owner,
             });
         }
@@ -25486,14 +25488,45 @@ impl<'a> Checker<'a> {
                         self.call_callee_name_span(call),
                     );
                 }
-                if let Some(names) = arg_names.as_deref() {
+                // Named, trailing-lambda, or omitted-argument calls: record the argument→parameter
+                // slot map so lowering can route through the `$default` stub (a positional
+                // omitted-default call has no names but still needs the map — mirrors the plain
+                // member path's condition).
+                let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                if candidate.call_sig.has_param_names()
+                    && (arg_names.is_some()
+                        || trailing_lambda
+                        || (!candidate.call_sig.vararg
+                            && args.len() != candidate.params.len()
+                            && candidate.call_sig.required < candidate.params.len()))
+                {
                     if let Ok(slots) = map_call_sig_args_with_trailing(
                         args,
-                        Some(names),
+                        arg_names.as_deref(),
                         &candidate.call_sig,
-                        self.file.call_has_trailing_lambda.contains(&call.0),
+                        trailing_lambda,
                     ) {
-                        self.resolved_call_arg_slots.insert(call, slots);
+                        // An omitted VARARG slot gets its empty-array default synthesized only
+                        // when SOME param carries an explicit default; with none, no `$default`
+                        // stub exists and routing there would dangle (NoSuchMethodError) — and
+                        // the positional fallback mis-packs the empty vararg. Reject the call
+                        // (skip the file, never miscompile). An INLINE callee is exempt: the
+                        // splice synthesizes the empty vararg at the call site.
+                        let vararg_omitted = candidate
+                            .call_sig
+                            .vararg_index
+                            .is_some_and(|i| slots.get(i).is_some_and(|s| s.is_none()));
+                        if vararg_omitted
+                            && !candidate.is_inline
+                            && !candidate.call_sig.param_defaults.iter().any(|d| *d)
+                        {
+                            self.diags.error(
+                                self.span(call),
+                                "krusty: an omitted vararg with no default arguments is not supported",
+                            );
+                        } else {
+                            self.resolved_call_arg_slots.insert(call, slots);
+                        }
                     }
                 }
                 let interface = self
@@ -26764,17 +26797,36 @@ impl<'a> Checker<'a> {
         {
             match map_call_sig_args_with_trailing(args, arg_names, cs, trailing_lambda) {
                 Ok(slots) => {
-                    for (i, slot) in slots.iter().enumerate() {
-                        if let Some(a) = slot {
-                            self.expect_assignable(
-                                params[i],
-                                self.expr_types[a.0 as usize],
-                                self.span(*a),
-                                "argument",
-                            );
+                    // An omitted VARARG slot gets its empty-array default synthesized only when
+                    // SOME param carries an explicit default; with none, no `$default` stub
+                    // exists and routing there would dangle (NoSuchMethodError) — and the
+                    // positional fallback mis-packs the empty vararg. Reject the call (skip the
+                    // file, never miscompile). An INLINE callee is exempt: the splice
+                    // synthesizes the empty vararg at the call site.
+                    let vararg_omitted = cs
+                        .vararg_index
+                        .is_some_and(|i| slots.get(i).is_some_and(|s| s.is_none()));
+                    if vararg_omitted
+                        && fi.inline == crate::libraries::InlineKind::None
+                        && !cs.param_defaults.iter().any(|d| *d)
+                    {
+                        self.diags.error(
+                            self.span(call),
+                            "krusty: an omitted vararg with no default arguments is not supported",
+                        );
+                    } else {
+                        for (i, slot) in slots.iter().enumerate() {
+                            if let Some(a) = slot {
+                                self.expect_assignable(
+                                    params[i],
+                                    self.expr_types[a.0 as usize],
+                                    self.span(*a),
+                                    "argument",
+                                );
+                            }
                         }
+                        mapped_slots = Some(slots);
                     }
-                    mapped_slots = Some(slots);
                 }
                 Err(error) => self.report_call_arg_mapping_error(call, args, error),
             }
