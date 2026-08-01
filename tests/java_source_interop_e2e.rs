@@ -396,6 +396,72 @@ fn run_mixed(java: &[(&str, &str)], kotlin: &str) {
 }
 
 #[test]
+fn inferred_return_worklist_tracks_java_synthetic_property_name() {
+    let Some((javadir, _)) = compile_java(&[
+        (
+            "demo/BaseEntry.java",
+            "package demo; public class BaseEntry {}",
+        ),
+        (
+            "demo/JavaCatalog.java",
+            "package demo; public class JavaCatalog { public BaseEntry[] getEntries() { return new BaseEntry[0]; } }",
+        ),
+    ]) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        eprintln!("skipping: JDK modules unavailable");
+        return;
+    };
+    let sources = [
+        "package demo\nfun box(): String = entryName()",
+        "package demo\nfun entryName() = RefinedCatalog().entries[0].name",
+        "package demo\nclass RefinedEntry(val name: String) : BaseEntry()\nclass RefinedCatalog : JavaCatalog() { override fun getEntries() = values(); fun values() = arrayOf(RefinedEntry(\"OK\")) }",
+    ];
+    let mut classpath = common::classpath_jars_for(&sources.join("\n"));
+    classpath.push(javadir.clone());
+    let diagnostics = common::front_end_diagnostics_files(&sources, &classpath, Some(&jdk));
+    if let Some(root) = javadir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn inferred_return_worklist_tracks_unicode_java_synthetic_property_name() {
+    let Some((javadir, _)) = compile_java(&[
+        (
+            "demo/BaseEntry.java",
+            "package demo; public class BaseEntry {}",
+        ),
+        (
+            "demo/UnicodeCatalog.java",
+            "package demo; public class UnicodeCatalog { public BaseEntry[] getÄpfel() { return new BaseEntry[0]; } }",
+        ),
+    ]) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        eprintln!("skipping: JDK modules unavailable");
+        return;
+    };
+    let sources = [
+        "package demo\nfun unicodeBox(): String = unicodeEntryName()",
+        "package demo\nfun unicodeEntryName() = UnicodeRefinedCatalog().äpfel[0].name",
+        "package demo\nclass UnicodeRefinedEntry(val name: String) : BaseEntry()\nclass UnicodeRefinedCatalog : UnicodeCatalog() { override fun getÄpfel() = values(); fun values() = arrayOf(UnicodeRefinedEntry(\"OK\")) }",
+    ];
+    let mut classpath = common::classpath_jars_for(&sources.join("\n"));
+    classpath.push(javadir.clone());
+    let diagnostics = common::front_end_diagnostics_files(&sources, &classpath, Some(&jdk));
+    if let Some(root) = javadir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn same_package_java_package_classifier_keeps_public_member_access() {
     run_mixed(
         &[(
