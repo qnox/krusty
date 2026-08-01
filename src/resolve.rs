@@ -3319,14 +3319,15 @@ fn resolve_name_against_imports_name(
         }
     }
     for level in levels {
-        // The CLASSIFIER namespace of the shared unqualified-name resolution loop: each in-scope package
-        // yields a candidate fqn's namespace record; a type position consumes only its `classifier`. The
-        // level-precedence + within-level ambiguity is applied HERE (the caller's own rule), the record
-        // keeping classifier separate from callables so a coexisting `fun`/`val` never perturbs it.
+        // This is a classifier-only pass. Resolving the complete namespace record also discovers and
+        // decodes every same-named top-level callable in the package, even though none of that data can
+        // affect a type-position result. Probe the classifier directly and leave callable discovery to
+        // the checker paths that consume it.
         let mut hits: Vec<TypeName> = Vec::new();
-        for (fqn, r) in crate::symbol_resolver::resolve_symbols_in_scope(source, name, level) {
-            if let Some(t) = &r.classifier {
-                let internal = t.alias_target.unwrap_or(fqn);
+        for &package in level {
+            let fqn = crate::types::type_name_child(package, name);
+            if let Some(classifier) = source.resolve_type_name(fqn) {
+                let internal = classifier.alias_target.unwrap_or(fqn);
                 if !hits.contains(&internal) {
                     hits.push(internal);
                 }
@@ -32221,6 +32222,117 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::lexer::lex;
     use crate::parser::{parse, parse_with_features};
+
+    struct ClassifierImportSource;
+
+    fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
+        crate::libraries::LibraryType {
+            is_public: true,
+            kind: crate::libraries::TypeKind::Class,
+            supertypes: crate::types::TypeNameList::new(),
+            constructors: Vec::new(),
+            members: Vec::new(),
+            companion: Vec::new(),
+            companion_consts: HashMap::new(),
+            sam_method: None,
+            companion_object: None,
+            value_companion_fns: Vec::new(),
+            value_underlying: None,
+            alias_target,
+            type_params: Vec::new(),
+            sealed_subclasses: crate::types::TypeNameList::new(),
+            enum_entries: Vec::new(),
+            value_ctor_has_default: false,
+            ctor_named_params: Vec::new(),
+            value_class_properties: Vec::new(),
+            retention: None,
+        }
+    }
+
+    impl crate::symbol_source::SymbolSource for ClassifierImportSource {
+        fn resolve_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
+            match internal {
+                "fallback/Thing" | "distinct_a/Thing" | "distinct_b/Thing" => {
+                    Some(import_test_classifier(None))
+                }
+                "alias_a/Thing" | "alias_b/Thing" => Some(import_test_classifier(Some(
+                    crate::types::type_name("target/Thing"),
+                ))),
+                _ => None,
+            }
+        }
+
+        fn resolve_symbols(&self, fqn: &str) -> crate::libraries::ResolvedSymbols {
+            if fqn == "callable/Thing" {
+                let callable = crate::libraries::LibraryCallable::library(
+                    "callable/ThingKt",
+                    "Thing",
+                    Vec::new(),
+                    Ty::Unit,
+                    Ty::Unit,
+                    "()V",
+                );
+                return crate::libraries::ResolvedSymbols {
+                    classifier: None,
+                    callables: crate::libraries::Callables::Functions(
+                        crate::libraries::FunctionSet {
+                            overloads: vec![crate::libraries::FunctionInfo::plain(
+                                crate::libraries::FnKind::TopLevel,
+                                None,
+                                callable,
+                            )],
+                        },
+                    ),
+                };
+            }
+            crate::libraries::ResolvedSymbols {
+                classifier: self.resolve_type(fqn).map(std::rc::Rc::new),
+                callables: crate::libraries::Callables::None,
+            }
+        }
+    }
+
+    #[test]
+    fn classifier_import_resolution_ignores_callable_only_higher_precedence_candidates() {
+        let resolved = resolve_name_against_imports_name(
+            "Thing",
+            &HashMap::new(),
+            &[
+                vec![crate::types::type_name("callable")],
+                vec![crate::types::type_name("fallback")],
+            ],
+            &ClassifierImportSource,
+        );
+        assert_eq!(resolved, Some(crate::types::type_name("fallback/Thing")));
+    }
+
+    #[test]
+    fn classifier_import_resolution_collapses_aliases_to_the_same_target() {
+        let resolved = resolve_name_against_imports_name(
+            "Thing",
+            &HashMap::new(),
+            &[vec![
+                crate::types::type_name("alias_a"),
+                crate::types::type_name("alias_b"),
+            ]],
+            &ClassifierImportSource,
+        );
+        assert_eq!(resolved, Some(crate::types::type_name("target/Thing")));
+    }
+
+    #[test]
+    fn classifier_import_resolution_rejects_distinct_same_level_candidates() {
+        let resolved = resolve_name_against_imports_name(
+            "Thing",
+            &HashMap::new(),
+            &[vec![
+                crate::types::type_name("distinct_a"),
+                crate::types::type_name("distinct_b"),
+            ]],
+            &ClassifierImportSource,
+        );
+        assert_eq!(resolved, None);
+    }
 
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {
         let mut d = DiagSink::new();
