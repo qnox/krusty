@@ -9897,6 +9897,217 @@ fn install_anonymous_object_captures(
     }
 }
 
+fn expression_contains_any(
+    file: &File,
+    expression: ExprId,
+    targets: &std::collections::HashSet<ExprId>,
+) -> bool {
+    if targets.contains(&expression) {
+        return true;
+    }
+    file.any_child_expr(
+        expression,
+        &mut |child| expression_contains_any(file, child, targets),
+        &mut |statement| {
+            file.any_child_stmt(statement, &mut |child| {
+                expression_contains_any(file, child, targets)
+            })
+        },
+    )
+}
+
+fn expressions_contain_any(
+    file: &File,
+    expressions: impl IntoIterator<Item = ExprId>,
+    targets: &std::collections::HashSet<ExprId>,
+) -> bool {
+    expressions
+        .into_iter()
+        .any(|expression| expression_contains_any(file, expression, targets))
+}
+
+fn params_contain_any(
+    file: &File,
+    params: &[Param],
+    targets: &std::collections::HashSet<ExprId>,
+) -> bool {
+    expressions_contain_any(
+        file,
+        params.iter().flat_map(|parameter| {
+            parameter
+                .default
+                .into_iter()
+                .chain(parameter.annotation_args.iter().flatten().copied())
+        }),
+        targets,
+    )
+}
+
+fn fun_contains_any(
+    file: &File,
+    function: &FunDecl,
+    targets: &std::collections::HashSet<ExprId>,
+) -> bool {
+    params_contain_any(file, &function.params, targets)
+        || fun_body_expr(&function.body)
+            .is_some_and(|body| expression_contains_any(file, body, targets))
+}
+
+fn property_contains_any(
+    file: &File,
+    property: &PropDecl,
+    targets: &std::collections::HashSet<ExprId>,
+) -> bool {
+    params_contain_any(file, &property.context_params, targets)
+        || expressions_contain_any(
+            file,
+            property
+                .init
+                .into_iter()
+                .chain(property.delegate)
+                .chain(property.getter.as_ref().and_then(fun_body_expr))
+                .chain(
+                    property
+                        .setter
+                        .as_ref()
+                        .and_then(|setter| setter.body.as_ref())
+                        .and_then(fun_body_expr),
+                ),
+            targets,
+        )
+}
+
+fn class_contains_any(
+    file: &File,
+    class: &ClassDecl,
+    targets: &std::collections::HashSet<ExprId>,
+) -> bool {
+    expressions_contain_any(
+        file,
+        class
+            .annotation_args
+            .iter()
+            .flatten()
+            .copied()
+            .chain(class.props.iter().flat_map(|property| {
+                property
+                    .default
+                    .into_iter()
+                    .chain(property.annotation_args.iter().flatten().copied())
+            }))
+            .chain(class.companion_base_args.iter().copied())
+            .chain(class.base_args.iter().copied())
+            .chain(
+                class
+                    .delegation_exprs
+                    .iter()
+                    .map(|(_, expression)| *expression),
+            )
+            .chain(class.init_order.iter().filter_map(|step| match step {
+                ClassInit::Block(body) => Some(*body),
+                ClassInit::PropInit(_) => None,
+            }))
+            .chain(class.enum_entries.iter().flat_map(|entry| {
+                entry
+                    .annotation_args
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .chain(entry.args.iter().copied())
+            }))
+            .chain(class.secondary_ctors.iter().flat_map(|constructor| {
+                let delegation = match &constructor.delegation {
+                    CtorDelegation::None => &[][..],
+                    CtorDelegation::This(call) | CtorDelegation::Super(call) => &call.args,
+                };
+                constructor
+                    .body
+                    .into_iter()
+                    .chain(delegation.iter().copied())
+            })),
+        targets,
+    ) || class
+        .methods
+        .iter()
+        .chain(&class.companion_methods)
+        .chain(
+            class
+                .enum_entries
+                .iter()
+                .flat_map(|entry| entry.methods.iter()),
+        )
+        .any(|function| fun_contains_any(file, function, targets))
+        || class
+            .body_props
+            .iter()
+            .chain(&class.companion_props)
+            .chain(
+                class
+                    .enum_entries
+                    .iter()
+                    .flat_map(|entry| entry.props.iter()),
+            )
+            .any(|property| property_contains_any(file, property, targets))
+        || class
+            .secondary_ctors
+            .iter()
+            .any(|constructor| params_contain_any(file, &constructor.params, targets))
+}
+
+fn declaration_contains_any(
+    file: &File,
+    declaration: DeclId,
+    targets: &std::collections::HashSet<ExprId>,
+) -> bool {
+    match file.decl(declaration) {
+        Decl::Fun(function) => fun_contains_any(file, function, targets),
+        Decl::Class(class) => class_contains_any(file, class, targets),
+        Decl::Property(property) => property_contains_any(file, property, targets),
+    }
+}
+
+struct CaptureDiscoveryScope {
+    constructions: std::collections::HashSet<ExprId>,
+    declarations: std::collections::HashSet<DeclId>,
+}
+
+/// Capture discovery needs lexical state from the declaration containing each anonymous-object
+/// construction, but declarations are checked in isolated top-level scopes. Find those owners once
+/// so the scratch checker does not re-check every unrelated declaration in the file.
+fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
+    let targets = file
+        .anonymous_object_classes
+        .keys()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let declarations = file
+        .decls
+        .iter()
+        .copied()
+        .filter(|declaration| declaration_contains_any(file, *declaration, &targets))
+        .collect::<std::collections::HashSet<_>>();
+    let complete = targets.iter().all(|target| {
+        let target = std::collections::HashSet::from([*target]);
+        file.script_body
+            .is_some_and(|body| expression_contains_any(file, body, &target))
+            || declarations
+                .iter()
+                .any(|declaration| declaration_contains_any(file, *declaration, &target))
+    });
+    // Keep capture analysis conservative as the AST evolves. If a new expression-bearing
+    // declaration field is not yet listed above, retain the old full-file semantic pass rather than
+    // silently treating its anonymous object as capture-free.
+    let declarations = if complete {
+        declarations
+    } else {
+        file.decls.iter().copied().collect()
+    };
+    CaptureDiscoveryScope {
+        constructions: targets,
+        declarations,
+    }
+}
+
 fn discover_anonymous_object_captures_at(file: &File, file_index: u32, syms: &mut SymbolTable) {
     let declarations = file
         .anonymous_object_classes
@@ -10152,7 +10363,14 @@ fn check_file_at_impl_mode(
     // notably a function's locals must NOT be visible to a hoisted local class (`hoist_local_classes`)
     // checked afterward, or a captured outer name would wrongly resolve instead of skipping the file.
     let base_scope_depth = c.scopes.len();
+    let capture_scope = capture_discovery.then(|| capture_discovery_scope(file));
     for &d in &file.decls {
+        if capture_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.declarations.contains(&d))
+        {
+            continue;
+        }
         c.scopes.truncate(base_scope_depth);
         match file.decl(d) {
             Decl::Fun(f) => {
@@ -11098,7 +11316,12 @@ fn check_file_at_impl_mode(
             }
         }
     }
-    if let Some(body) = file.script_body {
+    if let Some(body) = file.script_body.filter(|body| {
+        !capture_discovery
+            || capture_scope
+                .as_ref()
+                .is_some_and(|scope| expression_contains_any(file, *body, &scope.constructions))
+    }) {
         c.scopes.truncate(base_scope_depth);
         c.reset_body_mutations(Some(body));
         c.push_local_funs();
@@ -11109,8 +11332,10 @@ fn check_file_at_impl_mode(
         c.in_script_body = false;
         c.pop_local_funs();
     }
-    for reference in &file.detached_type_refs {
-        c.resolve_ty(reference);
+    if !capture_discovery {
+        for reference in &file.detached_type_refs {
+            c.resolve_ty(reference);
+        }
     }
     let Checker {
         expr_types,
@@ -32150,7 +32375,7 @@ mod tests {
     use super::*;
     use crate::features::LangFeatures;
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_with_features};
+    use crate::parser::{parse, parse_script_with_features, parse_with_features};
 
     #[test]
     fn shared_class_names_keep_file_overlays_independent() {
@@ -32284,6 +32509,69 @@ mod tests {
             &ClassifierImportSource,
         );
         assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn capture_discovery_selects_only_enclosing_top_level_declarations() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+interface Marker
+fun before(): Int = 1
+val top: Marker = object : Marker { fun value(): Int = 4 }
+fun defaulted(value: Marker = object : Marker {}): Marker = value
+fun target(seed: Int): Marker {
+    val captured = seed
+    return object : Marker { fun value(): Int = captured }
+}
+class Owner {
+    fun untouched(): Int = 2
+    fun build(seed: Int): Marker {
+        val captured = seed
+        return object : Marker { fun value(): Int = captured }
+    }
+}
+fun after(): Int = 3
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty());
+
+        let selected = capture_discovery_scope(&file).declarations;
+        let named = file
+            .decls
+            .iter()
+            .filter_map(|declaration| match file.decl(*declaration) {
+                Decl::Fun(function) if selected.contains(declaration) => {
+                    Some(function.name.as_str())
+                }
+                Decl::Class(class) if selected.contains(declaration) => Some(class.name.as_str()),
+                Decl::Property(property) if selected.contains(declaration) => {
+                    Some(property.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(named, vec!["top", "defaulted", "target", "Owner"]);
+    }
+
+    #[test]
+    fn capture_discovery_selects_script_body() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+val captured = "OK"
+val result = object { fun value(): String = captured }
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file =
+            parse_script_with_features(source, &tokens, &mut diagnostics, &LangFeatures::default());
+        assert!(diagnostics.diags.is_empty());
+
+        let scope = capture_discovery_scope(&file);
+        assert!(scope.declarations.is_empty());
+        assert!(file
+            .script_body
+            .is_some_and(|body| { expression_contains_any(&file, body, &scope.constructions) }));
     }
 
     fn check(src: &str) -> (Vec<String>, Option<TypeInfo>) {
