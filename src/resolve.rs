@@ -1467,6 +1467,13 @@ pub struct SymbolTable {
     /// Top-level function source declaration → declaring facade. This is the declaration-keyed
     /// equivalent of [`Self::fn_facades`], used once the checker has selected a concrete overload.
     pub fn_facades_by_decl: HashMap<(u32, u32), TypeName>,
+    /// Source functions the JVM module-registration pass deliberately omitted from
+    /// [`Self::fn_facades_by_decl`]. An absent positive entry is otherwise ambiguous: it can mean
+    /// either "splice-only, never emitted" or simply "this checker-only pipeline did not run JVM
+    /// registration". Keeping the authoritative negative result beside the positive map lets the
+    /// checker diagnose only the former without reimplementing backend emission policy or accepting
+    /// a facade class name leaked through a generic symbol origin.
+    unemitted_fn_facades_by_decl: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands keyed by source declaration.
     pub source_generic_value_operand_slots: HashMap<(u32, u32), Vec<u32>>,
     /// Bare generic value operands for source members.
@@ -1505,6 +1512,7 @@ impl Default for SymbolTable {
             class_names: ClassNames::default(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
+            unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
             source_generic_value_operand_slots: HashMap::new(),
             source_generic_member_value_operand_slots: HashMap::new(),
             source_projected_return_hazards: std::collections::HashSet::new(),
@@ -1515,6 +1523,34 @@ impl Default for SymbolTable {
 }
 
 impl SymbolTable {
+    /// Record the JVM module registrar's complete answer for one source function. `Some` is the
+    /// concrete facade static the lowerer may reference; `None` is an explicit promise that no
+    /// callable is emitted. The two declaration-keyed collections are maintained as complements so
+    /// rerunning registration cannot leave a stale positive/negative answer behind.
+    pub(crate) fn record_fn_facade(
+        &mut self,
+        file: u32,
+        declaration: DeclId,
+        facade: Option<TypeName>,
+    ) {
+        let key = (file, declaration.0);
+        if let Some(facade) = facade {
+            self.unemitted_fn_facades_by_decl.remove(&key);
+            self.fn_facades_by_decl.insert(key, facade);
+        } else {
+            self.fn_facades_by_decl.remove(&key);
+            self.unemitted_fn_facades_by_decl.insert(key);
+        }
+    }
+
+    /// Whether JVM registration explicitly decided that this declaration has no callable facade.
+    /// `false` does not imply emission: callers must check the positive map separately because an
+    /// analysis-only pipeline records neither outcome.
+    pub(crate) fn fn_facade_is_explicitly_unemitted(&self, file: u32, declaration: u32) -> bool {
+        self.unemitted_fn_facades_by_decl
+            .contains(&(file, declaration))
+    }
+
     pub(crate) fn offset_source_files(&mut self, offset: u32) {
         let offset_signature = |signature: &mut Signature| {
             if let Some(file) = &mut signature.source_file {
@@ -1742,16 +1778,6 @@ impl SymbolTable {
         !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
             && !self.ty_mentions_value_class(sig.ret)
             && !inline_body_has_splice_only_shape(file, f)
-    }
-
-    /// Whether a top-level function is lowered + emitted as a facade static, so a CROSS-FILE call
-    /// links against a plain `invokestatic`: every non-inline top-level fun, plus an `inline` one
-    /// that is safe standalone (`inline_fn_facade_emittable`). Splice-only inline funs emit
-    /// nothing. Shared by every module-symbol registration driver (backend, survey, conformance
-    /// harness) so the three registration sites can't drift apart.
-    pub fn emits_fn_facade(&self, file: &File, file_index: u32, decl: DeclId, f: &FunDecl) -> bool {
-        f.receiver.is_none()
-            && (!f.is_inline() || self.inline_fn_facade_emittable(file, file_index, decl, f))
     }
 
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
@@ -12245,7 +12271,7 @@ impl<'a> Checker<'a> {
                     // A sibling-file fn with no facade entry is an unemitted inline fn — the
                     // reference cannot lower. Decline the candidate; if no other candidate
                     // survives, the caller reports WHY.
-                    match self.sibling_fn_facade(file, declaration, &function.callable.origin) {
+                    match self.sibling_fn_facade(file, declaration) {
                         SiblingFnFacade::Emitted(facade) => Some(facade),
                         SiblingFnFacade::Unemitted => {
                             unemitted = true;
@@ -12478,18 +12504,12 @@ impl<'a> Checker<'a> {
         Ty::Error
     }
 
-    /// The facade a cross-file fn REFERENCE can target. Registration in `fn_facades_by_decl` is
-    /// authoritative; the `Origin::Module` facade is only a fallback for checker-only pipelines
-    /// that never ran `prepare_module_symbols` (LSP, unit tests). A fn the driver WOULD NOT
-    /// register (the `prepare_module_symbols` predicate: splice-only inline fns) is lowered per
-    /// call site and emitted NOWHERE — its origin facade names a method that does not exist, so
-    /// the reference cannot lower no matter the pipeline.
-    fn sibling_fn_facade(
-        &self,
-        file: u32,
-        declaration: u32,
-        origin: &crate::libraries::Origin,
-    ) -> SiblingFnFacade {
+    /// The facade a cross-file fn REFERENCE can target. Both emitted and deliberately-unemitted
+    /// answers come from the JVM module registrar; the checker does not duplicate its emission
+    /// predicate and does not treat an `Origin::Module` facade spelling as proof that a class or
+    /// method exists. With neither answer, this is a checker-only pipeline (LSP/unit tests), so the
+    /// reference declines silently and the ordinary type-only fallbacks remain available.
+    fn sibling_fn_facade(&self, file: u32, declaration: u32) -> SiblingFnFacade {
         if let Some(facade) = self
             .syms
             .fn_facades_by_decl
@@ -12498,28 +12518,13 @@ impl<'a> Checker<'a> {
         {
             return SiblingFnFacade::Emitted(facade);
         }
-        let emittable = self
-            .source_files
-            .and_then(|files| files.get(file as usize))
-            .is_none_or(|ast| match ast.decl(DeclId(declaration)) {
-                Decl::Fun(f) => {
-                    !f.is_inline()
-                        || f.has_callable_inline_extension_body()
-                        || self
-                            .syms
-                            .inline_fn_facade_emittable(ast, file, DeclId(declaration), f)
-                }
-                _ => true,
-            });
-        if !emittable {
-            return SiblingFnFacade::Unemitted;
-        }
-        match origin {
-            // An EMPTY facade is the "unrecorded" fallback, not a real class.
-            crate::libraries::Origin::Module { facade } if !facade.render().is_empty() => {
-                SiblingFnFacade::Emitted(*facade)
-            }
-            _ => SiblingFnFacade::Unknown,
+        if self
+            .syms
+            .fn_facade_is_explicitly_unemitted(file, declaration)
+        {
+            SiblingFnFacade::Unemitted
+        } else {
+            SiblingFnFacade::Unknown
         }
     }
 
@@ -12629,8 +12634,7 @@ impl<'a> Checker<'a> {
         let owner = if source_file == self.file_index {
             None
         } else {
-            match self.sibling_fn_facade(source_file, source_declaration, &selected.callable.origin)
-            {
+            match self.sibling_fn_facade(source_file, source_declaration) {
                 SiblingFnFacade::Emitted(facade) => Some(facade),
                 SiblingFnFacade::Unemitted => {
                     return Some(self.unemitted_inline_ref_error(expression, name));
@@ -13306,7 +13310,7 @@ impl<'a> Checker<'a> {
         let owner = if source_file == self.file_index {
             None
         } else {
-            match self.sibling_fn_facade(source_file, source_decl, &selected.callable.origin) {
+            match self.sibling_fn_facade(source_file, source_decl) {
                 SiblingFnFacade::Emitted(facade) => Some(facade),
                 SiblingFnFacade::Unemitted => {
                     return Some(self.unemitted_inline_ref_error(expression, name));
@@ -19513,11 +19517,7 @@ impl<'a> Checker<'a> {
         let owner = if selected.source_file == self.file_index {
             None
         } else {
-            match self.sibling_fn_facade(
-                selected.source_file,
-                selected.source_decl,
-                &selected.function.callable.origin,
-            ) {
+            match self.sibling_fn_facade(selected.source_file, selected.source_decl) {
                 SiblingFnFacade::Emitted(facade) => Some(facade),
                 SiblingFnFacade::Unemitted => {
                     return Some(self.unemitted_inline_ref_error(ref_expr, name));

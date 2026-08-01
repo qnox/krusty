@@ -258,6 +258,27 @@ fn cross_file_bound_ref_to_unemitted_inline_extension_names_the_reason() {
     );
 }
 
+/// The UNBOUND extension-reference route (`Type::extension`) has its own candidate selection before
+/// it reaches the shared facade outcome. Keep it covered separately from `value::extension` so a
+/// future resolver refactor cannot restore the old silent decline on only one syntax form.
+#[test]
+fn cross_file_unbound_ref_to_unemitted_inline_extension_names_the_reason() {
+    const LIB: &str = "inline fun <T> T.tag(f: () -> String): String = f()\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val g: (String, () -> String) -> String = String::tag\n\
+                        \x20   return g(\"x\") { \"OK\" }\n\
+                        }\n";
+    let Some(diags) = common::module_front_end_diagnostics(&[("Lib.kt", LIB), ("Main.kt", MAIN)])
+    else {
+        return;
+    };
+    assert!(
+        diags.iter().any(|d| d
+            .contains("cannot reference 'tag': the inline function is not emitted as a callable")),
+        "expected the unemitted-inline diagnostic, got: {diags:?}"
+    );
+}
+
 /// Guard against over-firing: references to fns that ARE facade-emitted (a plain fn, and an
 /// inline fn eligible for the facade-static path) still resolve clean cross-file.
 #[test]
