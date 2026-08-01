@@ -1396,6 +1396,29 @@ impl File {
         id
     }
 
+    /// Whether the predicate accepts any expression root structurally owned by `declaration`.
+    ///
+    /// This is the declaration-level counterpart to [`Self::any_child_expr`]: it is the single
+    /// inventory of expression-bearing declaration fields. Callers decide how (or whether) to walk
+    /// below each returned root, so capture analysis, source tooling, and future structural queries
+    /// do not each grow their own class/function/property field list as the AST evolves.
+    ///
+    /// Nested member declarations are included. A local class stored in a statement is deliberately
+    /// not descended here: parser normalization also hoists that class into `File::decls`, where it
+    /// is visited as an isolated declaration just like the semantic checker visits it. No evaluation
+    /// order is promised; this method describes containment only and may short-circuit.
+    pub fn any_decl_expr(
+        &self,
+        declaration: DeclId,
+        predicate: &mut impl FnMut(ExprId) -> bool,
+    ) -> bool {
+        match self.decl(declaration) {
+            Decl::Fun(function) => any_fun_decl_expr(function, predicate),
+            Decl::Class(class) => any_class_decl_expr(class, predicate),
+            Decl::Property(property) => any_property_decl_expr(property, predicate),
+        }
+    }
+
     /// Whether any *direct* child expression or child statement of `e` satisfies the given predicate
     /// — the single structural definition of "what an expression contains", with `||`/`.any()`
     /// short-circuiting. Tree walks (free-variable / capture / `try` / `break`-context checks)
@@ -1520,6 +1543,130 @@ impl File {
         let names: std::collections::HashSet<&str> = std::iter::once(name).collect();
         expr_refs_name_inner(self, e, &names, true)
     }
+}
+
+fn any_fun_body_expr(body: &FunBody, predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
+    match body {
+        FunBody::Expr(expression) | FunBody::Block(expression) => predicate(*expression),
+        FunBody::None => false,
+    }
+}
+
+fn any_param_expr(params: &[Param], predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
+    for parameter in params {
+        if parameter.default.is_some_and(&mut *predicate)
+            || parameter
+                .annotation_args
+                .iter()
+                .flatten()
+                .copied()
+                .any(&mut *predicate)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn any_fun_decl_expr(function: &FunDecl, predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
+    any_param_expr(&function.params, predicate) || any_fun_body_expr(&function.body, predicate)
+}
+
+fn any_property_decl_expr(property: &PropDecl, predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
+    any_param_expr(&property.context_params, predicate)
+        || property.init.is_some_and(&mut *predicate)
+        || property.delegate.is_some_and(&mut *predicate)
+        || property
+            .getter
+            .as_ref()
+            .is_some_and(|body| any_fun_body_expr(body, predicate))
+        || property
+            .setter
+            .as_ref()
+            .and_then(|setter| setter.body.as_ref())
+            .is_some_and(|body| any_fun_body_expr(body, predicate))
+}
+
+fn any_class_decl_expr(class: &ClassDecl, predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
+    if class
+        .annotation_args
+        .iter()
+        .flatten()
+        .copied()
+        .any(&mut *predicate)
+        || class.props.iter().any(|parameter| {
+            parameter.default.is_some_and(&mut *predicate)
+                || parameter
+                    .annotation_args
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .any(&mut *predicate)
+        })
+        || class
+            .companion_base_args
+            .iter()
+            .copied()
+            .any(&mut *predicate)
+        || class.base_args.iter().copied().any(&mut *predicate)
+        || class
+            .delegation_exprs
+            .iter()
+            .any(|(_, expression)| predicate(*expression))
+        || class.init_order.iter().any(|step| match step {
+            ClassInit::Block(body) => predicate(*body),
+            // The corresponding `body_props` entry is visited below; following the index here
+            // would report the same initializer twice.
+            ClassInit::PropInit(_) => false,
+        })
+        || class.enum_entries.iter().any(|entry| {
+            entry
+                .annotation_args
+                .iter()
+                .flatten()
+                .copied()
+                .chain(entry.args.iter().copied())
+                .any(&mut *predicate)
+        })
+    {
+        return true;
+    }
+
+    for constructor in &class.secondary_ctors {
+        let delegation_args = match &constructor.delegation {
+            CtorDelegation::None => &[][..],
+            CtorDelegation::This(call) | CtorDelegation::Super(call) => call.args.as_slice(),
+        };
+        if any_param_expr(&constructor.params, predicate)
+            || delegation_args.iter().copied().any(&mut *predicate)
+            || constructor.body.is_some_and(&mut *predicate)
+        {
+            return true;
+        }
+    }
+
+    class
+        .methods
+        .iter()
+        .chain(&class.companion_methods)
+        .chain(
+            class
+                .enum_entries
+                .iter()
+                .flat_map(|entry| entry.methods.iter()),
+        )
+        .any(|function| any_fun_decl_expr(function, predicate))
+        || class
+            .body_props
+            .iter()
+            .chain(&class.companion_props)
+            .chain(
+                class
+                    .enum_entries
+                    .iter()
+                    .flat_map(|entry| entry.props.iter()),
+            )
+            .any(|property| any_property_decl_expr(property, predicate))
 }
 
 fn expr_refs_name(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {

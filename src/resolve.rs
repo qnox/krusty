@@ -9937,6 +9937,92 @@ fn install_anonymous_object_captures(
     }
 }
 
+/// Walk expression/statement arenas iteratively from already-identified declaration roots and
+/// record every anonymous-object construction encountered. Keeping the arena walk separate from
+/// `File::any_decl_expr` lets the AST layer describe generic containment while this pass supplies
+/// capture-specific targets and completeness accounting.
+fn record_capture_targets(
+    file: &File,
+    targets: &std::collections::HashSet<ExprId>,
+    roots: impl IntoIterator<Item = ExprId>,
+    discovered: &mut std::collections::HashSet<ExprId>,
+) -> bool {
+    let mut expressions = roots.into_iter().collect::<Vec<_>>();
+    let mut statements = Vec::new();
+    let mut owns_target = false;
+    loop {
+        if let Some(expression) = expressions.pop() {
+            if targets.contains(&expression) {
+                discovered.insert(expression);
+                owns_target = true;
+            }
+            file.any_child_expr(
+                expression,
+                &mut |child| {
+                    expressions.push(child);
+                    false
+                },
+                &mut |statement| {
+                    statements.push(statement);
+                    false
+                },
+            );
+        } else if let Some(statement) = statements.pop() {
+            file.any_child_stmt(statement, &mut |child| {
+                expressions.push(child);
+                false
+            });
+        } else {
+            return owns_target;
+        }
+    }
+}
+
+struct CaptureDiscoveryScope {
+    declarations: std::collections::HashSet<DeclId>,
+    script_body: bool,
+}
+
+/// Capture discovery needs lexical state from the declaration containing each anonymous-object
+/// construction, but declarations are checked in isolated top-level scopes. Find those owners once
+/// so the scratch checker does not re-check every unrelated declaration in the file.
+fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
+    let targets = file
+        .anonymous_object_classes
+        .keys()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut discovered = std::collections::HashSet::with_capacity(targets.len());
+    let declarations = file
+        .decls
+        .iter()
+        .copied()
+        .filter(|declaration| {
+            let mut roots = Vec::new();
+            file.any_decl_expr(*declaration, &mut |expression| {
+                roots.push(expression);
+                false
+            });
+            record_capture_targets(file, &targets, roots, &mut discovered)
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let script_body = file
+        .script_body
+        .is_some_and(|body| record_capture_targets(file, &targets, [body], &mut discovered));
+    // Keep capture analysis conservative as the AST evolves. If a parser change retains an
+    // anonymous construction outside the generic declaration-root inventory, retain the old
+    // full-file semantic pass rather than silently treating that construction as capture-free.
+    let complete = discovered.len() == targets.len();
+    CaptureDiscoveryScope {
+        declarations: if complete {
+            declarations
+        } else {
+            file.decls.iter().copied().collect()
+        },
+        script_body: script_body || !complete,
+    }
+}
+
 fn discover_anonymous_object_captures_at(file: &File, file_index: u32, syms: &mut SymbolTable) {
     let declarations = file
         .anonymous_object_classes
@@ -10192,7 +10278,14 @@ fn check_file_at_impl_mode(
     // notably a function's locals must NOT be visible to a hoisted local class (`hoist_local_classes`)
     // checked afterward, or a captured outer name would wrongly resolve instead of skipping the file.
     let base_scope_depth = c.scopes.len();
+    let capture_scope = capture_discovery.then(|| capture_discovery_scope(file));
     for &d in &file.decls {
+        if capture_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.declarations.contains(&d))
+        {
+            continue;
+        }
         c.scopes.truncate(base_scope_depth);
         match file.decl(d) {
             Decl::Fun(f) => {
@@ -11138,7 +11231,12 @@ fn check_file_at_impl_mode(
             }
         }
     }
-    if let Some(body) = file.script_body {
+    if let Some(body) = file.script_body.filter(|_| {
+        !capture_discovery
+            || capture_scope
+                .as_ref()
+                .is_some_and(|scope| scope.script_body)
+    }) {
         c.scopes.truncate(base_scope_depth);
         c.reset_body_mutations(Some(body));
         c.push_local_funs();
@@ -11149,8 +11247,10 @@ fn check_file_at_impl_mode(
         c.in_script_body = false;
         c.pop_local_funs();
     }
-    for reference in &file.detached_type_refs {
-        c.resolve_ty(reference);
+    if !capture_discovery {
+        for reference in &file.detached_type_refs {
+            c.resolve_ty(reference);
+        }
     }
     let Checker {
         expr_types,
@@ -32221,7 +32321,144 @@ mod tests {
     use super::*;
     use crate::features::LangFeatures;
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_with_features};
+    use crate::parser::{parse, parse_script_with_features, parse_with_features};
+
+    #[test]
+    fn capture_discovery_selects_only_enclosing_top_level_declarations() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+interface Marker
+fun before(): Int = 1
+val top: Marker = object : Marker { fun value(): Int = 4 }
+fun defaulted(value: Marker = object : Marker {}): Marker = value
+fun target(seed: Int): Marker {
+    val captured = seed
+    return object : Marker { fun value(): Int = captured }
+}
+class Owner {
+    fun untouched(): Int = 2
+    fun build(seed: Int): Marker {
+        val captured = seed
+        return object : Marker { fun value(): Int = captured }
+    }
+}
+fun after(): Int = 3
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty());
+
+        let selected = capture_discovery_scope(&file).declarations;
+        let named = file
+            .decls
+            .iter()
+            .filter_map(|declaration| match file.decl(*declaration) {
+                Decl::Fun(function) if selected.contains(declaration) => {
+                    Some(function.name.as_str())
+                }
+                Decl::Class(class) if selected.contains(declaration) => Some(class.name.as_str()),
+                Decl::Property(property) if selected.contains(declaration) => {
+                    Some(property.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(named, vec!["top", "defaulted", "target", "Owner"]);
+    }
+
+    #[test]
+    fn capture_discovery_uses_generic_declaration_expression_roots() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+interface Marker
+open class Base(val marker: Marker)
+fun before(): Int = 1
+class Primary(val marker: Marker = object : Marker {})
+class Derived : Base(object : Marker {})
+class Delegated : Marker by object : Marker {}
+class Container {
+    init { val initialized = object : Marker {} }
+    val member = object : Marker {}
+    companion object : Base(object : Marker {}) {
+        fun make(): Marker = object : Marker {}
+        val value = object : Marker {}
+    }
+    constructor(marker: Marker = object : Marker {}) {
+        val constructed = object : Marker {}
+    }
+}
+enum class Choice(val marker: Marker) {
+    FIRST(object : Marker {})
+}
+val custom: Marker get() = object : Marker {}
+val delegated: Marker by object {
+    operator fun getValue(owner: Any?, property: Any?): Marker = object : Marker {}
+}
+fun after(): Int = 2
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+        let selected = capture_discovery_scope(&file).declarations;
+        let synthesized = file
+            .anonymous_object_classes
+            .values()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let named = file
+            .decls
+            .iter()
+            // A construction inside an anonymous object's member correctly selects that synthesized
+            // class too. Compare only source-level owners here so the regression neither depends on
+            // nor prints parser-generated internal class names.
+            .filter(|declaration| !synthesized.contains(declaration))
+            .filter_map(|declaration| match file.decl(*declaration) {
+                Decl::Fun(function) if selected.contains(declaration) => {
+                    Some(function.name.as_str())
+                }
+                Decl::Class(class) if selected.contains(declaration) => Some(class.name.as_str()),
+                Decl::Property(property) if selected.contains(declaration) => {
+                    Some(property.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        // `before`, `after`, `Marker`, and `Base` are sentinels: if a future parser field falls
+        // outside `File::any_decl_expr`, completeness detection selects every declaration and makes
+        // this assertion fail instead of silently losing capture information.
+        assert_eq!(
+            named,
+            vec![
+                "Primary",
+                "Derived",
+                "Delegated",
+                "Container",
+                "Choice",
+                "custom",
+                "delegated",
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_discovery_selects_script_body() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+val captured = "OK"
+val result = object { fun value(): String = captured }
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file =
+            parse_script_with_features(source, &tokens, &mut diagnostics, &LangFeatures::default());
+        assert!(diagnostics.diags.is_empty());
+
+        let scope = capture_discovery_scope(&file);
+        assert!(scope.declarations.is_empty());
+        assert!(scope.script_body);
+    }
 
     struct ClassifierImportSource;
 
