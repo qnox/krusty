@@ -59,8 +59,11 @@ impl EmitRun {
     pub fn inline_bail(&self) -> Option<String> {
         self.inline_bail.borrow().clone()
     }
-    fn set_inline_bail(&self, reason: String) {
-        *self.inline_bail.borrow_mut() = Some(reason);
+    /// Record a stable public failure category. Concrete owners, callable names, and descriptors are
+    /// deliberately excluded here because this value reaches CLI diagnostics and survey buckets;
+    /// those identities are emitted through opt-in compiler traces at the failure site instead.
+    fn set_inline_bail(&self, reason: &'static str) {
+        *self.inline_bail.borrow_mut() = Some(reason.to_string());
     }
 }
 
@@ -8721,11 +8724,13 @@ impl<'a> Emitter<'a> {
                 // unverifiable call: bail the file (the gate SKIPS it), pushing a typed zero so the
                 // dead code that follows still assembles.
                 if call_args.len() != param_tys.len() {
-                    self.run.set_inline_bail(format!(
+                    crate::trace_compiler!(
+                        "emit",
                         "call arity mismatch for {owner}.{name} ({} args vs {} params)",
                         call_args.len(),
                         param_tys.len()
-                    ));
+                    );
+                    self.run.set_inline_bail("call arity mismatch");
                     if ret != Ty::Unit {
                         push_zero(ret, code, self.cw);
                     }
@@ -8783,12 +8788,14 @@ impl<'a> Emitter<'a> {
                     // (the CPS transform appended a `Continuation` param this site never passes)
                     // must bail the file, never emit an unverifiable call.
                     if args.len() != param_tys.len() {
-                        self.run.set_inline_bail(format!(
+                        crate::trace_compiler!(
+                            "emit",
                             "call arity mismatch for {}.{name} ({} args vs {} params)",
                             self.facade,
                             args.len(),
                             param_tys.len()
-                        ));
+                        );
+                        self.run.set_inline_bail("call arity mismatch");
                         if ret != Ty::Unit {
                             push_zero(ret, code, self.cw);
                         }
@@ -8913,9 +8920,11 @@ impl<'a> Emitter<'a> {
                         // `throwUndefinedForReified` when invoked directly, so a direct-call fallback is a
                         // miscompile, not a legal call. Bail (skip the file) instead.
                         if inline.must_inline() || !self.reified_type_map(e).is_empty() {
-                            self.run.set_inline_bail(format!(
+                            crate::trace_compiler!(
+                                "emit",
                                 "inline splice failed for {owner}.{name}{descriptor}"
-                            ));
+                            );
+                            self.run.set_inline_bail("inline splice failed");
                         }
                     }
                     self.emit_operands(&args, code);
@@ -12096,7 +12105,7 @@ fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Op
 #[cfg(test)]
 mod fail_soft_tests {
     use super::*;
-    use crate::ir::{IrExpr, IrFile, IrFunction};
+    use crate::ir::{Callee, IrExpr, IrFile, IrFunction};
     use crate::jvm::classreader::MethodCode;
     use crate::jvm::inline::MethodBodies;
     use crate::types::Ty;
@@ -12125,5 +12134,51 @@ mod fail_soft_tests {
             param_checks: vec![],
         });
         assert!(emit_all(&ir, "TestKt", &NoBodies, None).is_none());
+    }
+
+    #[test]
+    fn arity_failure_exposes_category_without_owner_or_callable_name() {
+        let mut ir = IrFile::default();
+        let unit = ir.add_expr(IrExpr::Block {
+            stmts: vec![],
+            value: None,
+        });
+        let callee = ir.add_fun(IrFunction {
+            name: "realCallableName".into(),
+            params: vec![Ty::Int],
+            ret: Ty::Unit,
+            body: Some(unit),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+        let mismatched_call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(callee),
+            dispatch_receiver: None,
+            args: vec![],
+        });
+        ir.add_fun(IrFunction {
+            name: "box".into(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: Some(mismatched_call),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+
+        // The trace may identify `SensitiveFacade.realCallableName`, but the result read by the CLI
+        // and survey is deliberately a stable category with neither source nor JVM owner spelling.
+        let run = EmitRun::default();
+        assert!(emit_all_with_opts(
+            &ir,
+            "SensitiveFacade",
+            &NoBodies,
+            None,
+            &EmitOptions::default(),
+            &run,
+        )
+        .is_none());
+        assert_eq!(run.inline_bail().as_deref(), Some("call arity mismatch"));
     }
 }
