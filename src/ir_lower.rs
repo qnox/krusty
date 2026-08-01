@@ -13975,6 +13975,19 @@ impl<'a> Lower<'a> {
         // A NON-nullable primitive stored in its `Obj("kotlin/…")` value-class form is a JVM primitive
         // (e.g. a non-null `Int` parameter is `int`), so its zero is the primitive `0`, not a null ref.
         let t = t.unboxed_primitive().unwrap_or(t);
+        // A value CLASS's placeholder is the zero of its ERASED underlying — a `$default` stub's
+        // descriptor erases value-class params (`z: Z` → `int`), so a `null` here wouldn't verify.
+        // Only for a NON-nullable value class: a `Z?` slot stays BOXED (its zero is `null`).
+        let t = if t.is_nullable() {
+            t
+        } else {
+            t.non_null()
+                .obj_internal()
+                .and_then(|n| self.syms.class_by_type_name(n))
+                .and_then(|cs| cs.value_field.clone())
+                .map(|(_, underlying)| underlying)
+                .unwrap_or(t)
+        };
         let c = match t {
             Ty::Long => IrConst::Long(0),
             Ty::Double => IrConst::Double(0.0),

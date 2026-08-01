@@ -1012,6 +1012,8 @@ mod val_backing_field_getter_e2e;
 mod value_class_branch_repr_e2e;
 #[path = "value_class_classpath_ctor_e2e.rs"]
 mod value_class_classpath_ctor_e2e;
+#[path = "value_class_default_param_e2e.rs"]
+mod value_class_default_param_e2e;
 #[path = "value_class_e2e.rs"]
 mod value_class_e2e;
 #[path = "value_class_init_validate_e2e.rs"]
