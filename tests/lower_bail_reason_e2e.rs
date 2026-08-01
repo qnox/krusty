@@ -144,3 +144,19 @@ fun box(): String = C().x
         "gate:member-delegate-shape",
     );
 }
+
+#[test]
+fn unsupported_call_bucket_uses_ast_shape_not_source_name() {
+    // The expression fallback used to publish the concrete callee (`call suspendCoroutine`). Keep
+    // only its generic AST shape so local, module, and classpath call failures share one category and
+    // neither source names nor generated JVM owners escape into the survey.
+    assert_lower_bail(
+        r#"
+import kotlin.coroutines.suspendCoroutine
+
+suspend fun pause(): Unit = suspendCoroutine { }
+fun box(): String = "OK"
+"#,
+        "call Name",
+    );
+}

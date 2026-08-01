@@ -285,8 +285,7 @@ fn lower_file_at_reporting_impl(
             Decl::Fun(_) => false,
         });
     if has_context_property {
-        lo.set_bail("gate:context-property");
-        return None;
+        return lo.bail("gate:context-property");
     }
 
     // Suspend lowering cannot yet specialize generic value-class operands.
@@ -336,14 +335,12 @@ fn lower_file_at_reporting_impl(
         }
     }
     if has_suspend_generic_value_class_specialization {
-        lo.set_bail("gate:suspend-generic-value-class-specialization");
-        return None;
+        return lo.bail("gate:suspend-generic-value-class-specialization");
     }
 
     // Projected return inference is not represented in the resolved type yet.
     if has_projected_generic_return_call {
-        lo.set_bail("gate:projected-generic-return-inference");
-        return None;
+        return lo.bail("gate:projected-generic-return-inference");
     }
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -372,7 +369,7 @@ fn lower_file_at_reporting_impl(
                     || p.delegate.is_some()
                     || p.receiver.is_some() => {}
             other => {
-                lo.set_bail(match other {
+                return lo.bail(match other {
                     Decl::Class(c) if c.is_object() => "gate:object",
                     Decl::Class(c) if c.is_interface() => "gate:interface",
                     Decl::Class(c) if c.is_enum() => "gate:enum",
@@ -380,7 +377,6 @@ fn lower_file_at_reporting_impl(
                     Decl::Property(_) => "gate:property",
                     _ => "gate:other",
                 });
-                return None;
             }
         }
     }
@@ -415,8 +411,7 @@ fn lower_file_at_reporting_impl(
         })
     });
     if uses_yield_builder {
-        lo.set_bail("gate:yield-builder");
-        return None;
+        return lo.bail("gate:yield-builder");
     }
 
     // --- suspend (coroutines) lowerability gate ---------------------------------------------------
@@ -455,8 +450,7 @@ fn lower_file_at_reporting_impl(
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
                 if f.is_suspend() && f.receiver.is_some() {
-                    lo.set_bail("gate:extension-suspend-fn");
-                    return None;
+                    return lo.bail("gate:extension-suspend-fn");
                 }
             }
         }
@@ -548,8 +542,7 @@ fn lower_file_at_reporting_impl(
                         || c.base_class.as_deref().is_some_and(super_has_generic)))
         });
         if suspend_member_needs_bridge {
-            lo.set_bail("gate:suspend-erasure-bridge");
-            return None;
+            return lo.bail("gate:suspend-erasure-bridge");
         }
         // A NON-suspend body may not call any suspend fn (top-level or member): call-site continuation
         // threading is only modeled inside a suspend body (and calling a suspend fn from a non-suspend
@@ -562,8 +555,7 @@ fn lower_file_at_reporting_impl(
                     .chain(member_suspend.iter())
                     .any(|n| file.expr_uses_name(e, n))
             {
-                lo.set_bail("gate:suspend-call-from-non-suspend");
-                return None;
+                return lo.bail("gate:suspend-call-from-non-suspend");
             }
         }
     }
@@ -685,46 +677,49 @@ fn lower_file_at_reporting_impl(
             // (non-value-class, no `provideDelegate`) delegate whose `getValue` return type matches the
             // property type exactly (generic erasure / value-class unboxing would need a cast the inline
             // accessor doesn't emit). Anything else skips the file rather than miscompile.
-            for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
-                let dt = info.ty(p.delegate.unwrap());
-                let Some(di) = dt.obj_internal() else {
-                    lo.set_bail("gate:member-delegate-shape");
-                    return None;
-                };
-                let is_value_cls = |internal: TypeName| {
-                    syms.class_by_type_name(internal)
-                        .is_some_and(|cs| cs.value_field.is_some())
-                };
-                if is_value_cls(di) || syms.method_of_name(di, "provideDelegate").is_some() {
-                    lo.set_bail("gate:member-delegate-shape");
-                    return None;
+            if c.body_props
+                .iter()
+                .any(|property| property.delegate.is_some())
+            {
+                // Treat the validation as one named gate. Setting the marker before the region makes
+                // every `?` and explicit rejection below report the same stable feature boundary,
+                // instead of duplicating a reason at each exit and eventually missing a new one.
+                lo.set_bail("gate:member-delegate-shape");
+                for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
+                    let dt = info.ty(p.delegate.unwrap());
+                    let di = dt.obj_internal()?;
+                    let is_value_cls = |internal: TypeName| {
+                        syms.class_by_type_name(internal)
+                            .is_some_and(|cs| cs.value_field.is_some())
+                    };
+                    if is_value_cls(di) || syms.method_of_name(di, "provideDelegate").is_some() {
+                        return None;
+                    }
+                    let (_, _, gv_ret, _, _) =
+                        lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
+                    let prop_ty = syms
+                        .classes
+                        .get(&c.name)
+                        .and_then(|cs| {
+                            cs.props
+                                .iter()
+                                .find_map(|(n, t, _)| (n == &p.name).then_some(*t))
+                        })
+                        .unwrap_or(Ty::Error);
+                    // A generic delegate's `getValue` returns the ERASED `Object` (`<T> getValue(): T`); the
+                    // getter inserts a `checkcast`/unbox to the property type (kotlinc does the same), bridged by
+                    // `coerce_erased`. Only an erased-REFERENCE return is bridgeable — a concrete mismatched
+                    // return isn't, so bail on that.
+                    if gv_ret != prop_ty && !gv_ret.is_reference() {
+                        return None;
+                    }
+                    if prop_ty.obj_internal().is_some_and(is_value_cls) {
+                        return None;
+                    }
                 }
-                let Some((_, _, gv_ret, _, _)) = lo.delegate_getvalue_info(p.delegate.unwrap(), di)
-                else {
-                    lo.set_bail("gate:member-delegate-shape");
-                    return None;
-                };
-                let prop_ty = syms
-                    .classes
-                    .get(&c.name)
-                    .and_then(|cs| {
-                        cs.props
-                            .iter()
-                            .find_map(|(n, t, _)| (n == &p.name).then_some(*t))
-                    })
-                    .unwrap_or(Ty::Error);
-                // A generic delegate's `getValue` returns the ERASED `Object` (`<T> getValue(): T`); the
-                // getter inserts a `checkcast`/unbox to the property type (kotlinc does the same), bridged by
-                // `coerce_erased`. Only an erased-REFERENCE return is bridgeable — a concrete mismatched
-                // return isn't, so bail on that.
-                if gv_ret != prop_ty && !gv_ret.is_reference() {
-                    lo.set_bail("gate:member-delegate-shape");
-                    return None;
-                }
-                if prop_ty.obj_internal().is_some_and(is_value_cls) {
-                    lo.set_bail("gate:member-delegate-shape");
-                    return None;
-                }
+                // The scoped gate survived. Restore the containing phase so a later, unrelated class
+                // registration failure is not attributed to delegated-property validation.
+                lo.set_bail("deep:class-register");
             }
             // Synthetic `x$delegate` instance fields for delegated member properties — one per delegated
             // body property, in declaration order, placed AFTER the real backing-field props (so the
@@ -866,10 +861,7 @@ fn lower_file_at_reporting_impl(
                         {
                             Some(resolved)
                         }
-                        _ => {
-                            lo.set_bail("gate:class-supertype-shape");
-                            return None;
-                        }
+                        _ => return lo.bail("gate:class-supertype-shape"),
                     }
                 }
                 None => None,
@@ -892,8 +884,7 @@ fn lower_file_at_reporting_impl(
                 {
                     iface_internals.push(resolved);
                 } else {
-                    lo.set_bail("gate:class-supertype-shape");
-                    return None;
+                    return lo.bail("gate:class-supertype-shape");
                 }
             }
             // Per-field finality aligned to `fields`: `this$0` is final; a property field is final unless
@@ -2088,8 +2079,7 @@ fn lower_file_at_reporting_impl(
                     .synth_delegation_forwarders(file, c, &internal, id)
                     .is_none()
             {
-                lo.set_bail("gate:delegation-forwarders");
-                return None;
+                return lo.bail("gate:delegation-forwarders");
             }
         }
     }
@@ -2306,8 +2296,7 @@ fn lower_file_at_reporting_impl(
                 // An EXTENSION delegated property (`val Recv.x by …`) isn't modeled — skip the file
                 // (pass 2 would otherwise treat it as an extension property and find no getter).
                 if p.receiver.is_some() {
-                    lo.set_bail("gate:extension-delegated-property");
-                    return None;
+                    return lo.bail("gate:extension-delegated-property");
                 }
                 let ty = if let Some(tref) = p.ty.as_ref() {
                     ty_of(file, tref, &*syms.libraries)
@@ -2348,16 +2337,14 @@ fn lower_file_at_reporting_impl(
             // needs an explicit `set(v) { … }` body (no backing field to default to).
             if p.receiver.is_some() {
                 if p.getter.is_none() || p.delegate.is_some() {
-                    lo.set_bail("gate:extension-property-shape");
-                    return None;
+                    return lo.bail("gate:extension-property-shape");
                 }
                 let has_set_body = p
                     .setter
                     .as_ref()
                     .is_some_and(|s| s.body.is_some() && s.param.is_some());
                 if p.is_var && !has_set_body {
-                    lo.set_bail("gate:extension-property-shape");
-                    return None;
+                    return lo.bail("gate:extension-property-shape");
                 }
                 let signature = syms.source_extension_property((file_index, d.0))?;
                 let recv_ty = signature.receiver;
@@ -5571,6 +5558,17 @@ impl<'a> Lower<'a> {
     /// internal `deep*`-phase refinement). Replaces the former free `set_bail` thread-local write.
     fn set_bail(&self, reason: &str) {
         *self.bail.borrow_mut() = reason.to_string();
+    }
+
+    /// Stop lowering at a named, source-independent feature boundary.
+    ///
+    /// Keeping the sink update and `None` return in one operation prevents a new gate exit from
+    /// accidentally inheriting a coarse phase marker. Requiring a static category also keeps source
+    /// declaration names and JVM owner spellings out of survey buckets and user-visible backend
+    /// diagnostics; detailed identities belong in opt-in compiler traces instead.
+    fn bail<T>(&self, reason: &'static str) -> Option<T> {
+        self.set_bail(reason);
+        None
     }
 
     fn can_access_source_private(&self, owner: TypeName) -> bool {
@@ -19214,19 +19212,17 @@ impl<'a> Lower<'a> {
         }
         // Survey diagnostic: tag the innermost unsupported expression that caused the bail (the first
         // `None` to bubble up wins, since deeper frames run first and a tag is only refined from a
-        // coarse `deep*` phase). A `Call` is tagged by its callee name — the single most useful signal.
+        // coarse `deep*` phase). Calls retain the callee AST SHAPE (`Name`, `Member`, …), not its source
+        // spelling. This gives one generic taxonomy across local/module/classpath resolution and keeps
+        // source identifiers or generated JVM class names from leaking into survey buckets.
         if r.is_none() && self.bail.borrow().starts_with("deep") {
             let reason = match self.afile.expr(e).clone() {
                 Expr::Call { callee, .. } => {
-                    let name = match self.afile.expr(callee) {
-                        Expr::Name(n) => n.clone(),
-                        Expr::Member { name, .. } => format!(".{name}"),
-                        o => bail_variant(&format!("{o:?}")).to_string(),
-                    };
-                    format!("call {name}")
+                    format!(
+                        "call {}",
+                        bail_variant(&format!("{:?}", self.afile.expr(callee)))
+                    )
                 }
-                Expr::Name(n) => format!("name {n}"),
-                Expr::Member { name, .. } => format!("member .{name}"),
                 o => format!("expr {}", bail_variant(&format!("{o:?}"))),
             };
             self.set_bail(&reason);
@@ -24220,12 +24216,16 @@ impl<'a> Lower<'a> {
                             let non_suspend_fun =
                                 matches!(self.info.ty(arg), Ty::Fun(s) if !s.suspend);
                             if non_suspend_fun && self.ast_body_suspends(*body) {
-                                self.set_bail(&format!(
-                                    "suspend-inline HOF lambda suspends: {}.{}",
+                                // Owner and callable identities are useful when tracing a compiler
+                                // failure, but the public bail category must remain stable and must
+                                // not expose a real class name through survey/backend diagnostics.
+                                crate::trace_compiler!(
+                                    "lower",
+                                    "suspend-inline HOF lambda suspends at {}.{}",
                                     c.owner.render(),
                                     c.name,
-                                ));
-                                return None;
+                                );
+                                return self.bail("suspend-inline HOF lambda suspends");
                             }
                         }
                     }
@@ -24328,8 +24328,10 @@ impl<'a> Lower<'a> {
                 // A private `@InlineOnly` extension (scope fn / `String.uppercase()`) is recorded
                 // as an [`Extension`] by the checker and handled by the general branch above (its
                 // `inline` metadata makes the backend splice). Nothing left to resolve here.
-                self.set_bail(&format!("unrecorded qualified call target '{name}'"));
-                return None;
+                // Keep the source spelling in opt-in trace output only; survey buckets and backend
+                // diagnostics consume the stable reason recorded by `bail`.
+                crate::trace_compiler!("lower", "unrecorded qualified call target '{name}'");
+                return self.bail("unrecorded qualified call target");
             }
         };
         Some(t)
