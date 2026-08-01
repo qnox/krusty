@@ -2545,6 +2545,7 @@ fn lower_file_at_reporting_impl(
                             if m.params.iter().any(|p| bound_tp(&p.ty))
                                 || m.ret.as_ref().is_some_and(bound_tp)
                             {
+                                lo.set_bail("gate:bound-type-param-override");
                                 return None;
                             }
                             let own_idx =
@@ -2565,6 +2566,7 @@ fn lower_file_at_reporting_impl(
                                 // coroutine pass rewrites the concrete method to CPS afterwards but never
                                 // fixes up the bridge) — skip the file rather than emit a broken bridge.
                                 if m.is_suspend() {
+                                    lo.set_bail("gate:suspend-override-erasure");
                                     return None;
                                 }
                                 // Generic/covariant override → synthesize an `ACC_BRIDGE` method with
@@ -2619,6 +2621,7 @@ fn lower_file_at_reporting_impl(
                                     })
                             });
                             if unsafe_base {
+                                lo.set_bail("gate:base-reads-override-internally");
                                 return None;
                             }
                         }
@@ -3040,6 +3043,7 @@ fn lower_file_at_reporting_impl(
                                 continue;
                             }
                             if impl_fid.is_some_and(|fid| lo.ir.suspend_funs.contains(&fid)) {
+                                lo.set_bail("gate:suspend-override-erasure");
                                 return None;
                             }
                             if seen.insert((name.clone(), erased_params.clone(), erased_ret)) {
@@ -3102,6 +3106,7 @@ fn lower_file_at_reporting_impl(
                     // A `tailrec` MEMBER method isn't loop-transformed (only top-level functions are) —
                     // skip the file rather than emit stack-overflowing recursion.
                     if m.is_tailrec() && !matches!(m.body, FunBody::None) {
+                        lo.set_bail("gate:tailrec-member");
                         return None;
                     }
                     let method_index = c.methods[..mi]
@@ -3402,7 +3407,10 @@ fn lower_file_at_reporting_impl(
                         else {
                             continue;
                         };
-                        let sv = lo.syms.method_of_name(delegate_internal, "setValue")?;
+                        let Some(sv) = lo.syms.method_of_name(delegate_internal, "setValue") else {
+                            lo.set_bail("gate:delegate-extension-setvalue");
+                            return None;
+                        };
                         let sv_desc = lo.runtime.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.emit_get_value(0);
                         let dele = lo.emit_get_field(this_e, class_id, field_idx);
@@ -3448,6 +3456,7 @@ fn lower_file_at_reporting_impl(
                         // are) — skip the file rather than emit stack-overflowing recursion (mirrors the
                         // instance-method guard).
                         if m.is_tailrec() {
+                            lo.set_bail("gate:tailrec-companion");
                             return None;
                         }
                         let overload_idx = c.companion_methods[..cmi]
@@ -3499,6 +3508,7 @@ fn lower_file_at_reporting_impl(
                         if defaults_ok {
                             super_default_fill = true;
                         } else {
+                            lo.set_bail("gate:super-ctor-arity");
                             return None;
                         }
                     }
@@ -3526,6 +3536,7 @@ fn lower_file_at_reporting_impl(
                                 )
                             });
                         if !capture_free {
+                            lo.set_bail("gate:anon-object-outer-capture");
                             return None;
                         }
                     }
@@ -3566,7 +3577,13 @@ fn lower_file_at_reporting_impl(
                 // params in scope (`this`=0, params 1..N), coerced to the super's parameter types.
                 // Reorder NAMED super-constructor arguments (`: Base(name = …, addr = …)`) to the base
                 // constructor's parameter order; positional args are unchanged. `None` bails the file.
-                let base_args = reordered_base_args(file, c)?;
+                let base_args = match reordered_base_args(file, c) {
+                    Some(a) => a,
+                    None => {
+                        lo.set_bail("gate:super-named-args");
+                        return None;
+                    }
+                };
                 if !base_args.is_empty() {
                     let class_id = lo.class_info(&internal)?.id;
                     lo.scope.clear();
@@ -3605,7 +3622,10 @@ fn lower_file_at_reporting_impl(
                             Some(cs) if !cs.super_ctor_params.is_empty() => {
                                 cs.super_ctor_params.clone()
                             }
-                            _ => return None,
+                            _ => {
+                                lo.set_bail("gate:super-ctor-params-unresolved");
+                                return None;
+                            }
                         }
                     } else {
                         super_field_tys
@@ -3624,6 +3644,7 @@ fn lower_file_at_reporting_impl(
                                 && at != Ty::Error
                         })
                     {
+                        lo.set_bail("gate:super-ctor-arg-mismatch");
                         return None;
                     }
                     let mut sargs = Vec::new();
@@ -3877,6 +3898,7 @@ fn lower_file_at_reporting_impl(
                                         | Expr::Block { .. }
                                         | Expr::Try { .. }
                                 ) {
+                                    lo.set_bail("gate:branchy-field-initializer");
                                     return None;
                                 }
                                 // A `var` declared inside the initializer and captured+mutated by a
@@ -3916,6 +3938,7 @@ fn lower_file_at_reporting_impl(
                                         _ => false,
                                     };
                                     if branchy {
+                                        lo.set_bail("gate:branchy-field-initializer");
                                         return None;
                                     }
                                 }
@@ -4121,7 +4144,9 @@ fn lower_file_at_reporting_impl(
                             Decl::Class(ic) if ic.name == *st && ic.is_interface() => Some(ic),
                             _ => None,
                         }) else {
-                            return None; // non-file / non-interface supertype on an enum — skip
+                            // non-file / non-interface supertype on an enum — skip
+                            lo.set_bail("gate:enum-classpath-supertype");
+                            return None;
                         };
                         let generic = !ic.type_params.is_empty();
                         let mut abstract_members: Vec<String> = ic
@@ -4146,13 +4171,16 @@ fn lower_file_at_reporting_impl(
                                     .iter()
                                     .all(|e| e.methods.iter().any(|bm| bm.name == m));
                             if !enum_has && !all_entries_override {
-                                return None; // unsatisfied abstract interface member — skip
+                                // unsatisfied abstract interface member — skip
+                                lo.set_bail("gate:enum-unsatisfied-interface-member");
+                                return None;
                             }
                             // A GENERIC interface needs an erased bridge (`foo(Object)`→`foo(String)`).
                             // The bridge is computed for the ENUM class (an enum-level override) — so a
                             // generic method satisfied only by PER-ENTRY overrides (bridge would belong on
                             // each entry subclass, not modeled) skips rather than miscompiles.
                             if generic && !enum_has {
+                                lo.set_bail("gate:enum-entry-override-erasure");
                                 return None;
                             }
                         }
@@ -4238,6 +4266,7 @@ fn lower_file_at_reporting_impl(
                                 || p.delegate.is_some()
                                 || p.is_lateinit
                             {
+                                lo.set_bail("gate:enum-entry-property-shape");
                                 return None;
                             }
                             let ty = match &p.ty {
@@ -4344,10 +4373,17 @@ fn lower_file_at_reporting_impl(
                                 .and_then(|cs| cs.method(&bm.name))
                             {
                                 Some(s) => s.clone(),
-                                None => syms
+                                None => match syms
                                     .supertype_methods(&internal)
                                     .into_iter()
-                                    .find_map(|(n, s)| (n == bm.name).then_some(s))?,
+                                    .find_map(|(n, s)| (n == bm.name).then_some(s))
+                                {
+                                    Some(s) => s,
+                                    None => {
+                                        lo.set_bail("gate:enum-entry-non-override");
+                                        return None;
+                                    }
+                                },
                             };
                             let params = tys_to_ir(&sig.params);
                             let fid = lo.ir.add_fun(IrFunction {
@@ -9052,6 +9088,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let arity = params.len();
         if self.cur_class.is_some() {
+            self.set_bail("gate:suspend-lambda-in-class");
             return None;
         }
         // Repeated implicit receiver names need distinct storage fields.
