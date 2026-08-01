@@ -9212,6 +9212,20 @@ enum BoundSourceExtensionRef<'a> {
     },
     Ambiguous(Vec<(Ty, &'a Signature)>),
     Inaccessible,
+    /// Every matching candidate is a sibling-file fn with no facade entry — an inline fn that
+    /// is lowered per call site and cannot be referenced.
+    Unemitted,
+}
+
+/// The outcome of resolving a cross-file fn reference's owner facade (see
+/// [`Checker::sibling_fn_facade`]).
+enum SiblingFnFacade {
+    /// The fn is emitted as a facade static — the reference lowers to it.
+    Emitted(TypeName),
+    /// A splice-only inline fn the driver never emits — the reference cannot lower; name it.
+    Unemitted,
+    /// No registration data (a checker-only pipeline): decline silently, as before.
+    Unknown,
 }
 
 #[derive(Clone)]
@@ -12182,6 +12196,7 @@ impl<'a> Checker<'a> {
         expected: Option<&'static crate::types::FnSig>,
     ) -> BoundSourceExtensionRef<'_> {
         let mut inaccessible = false;
+        let mut unemitted = false;
         let mut candidates = self
             .resolver()
             .resolve_symbol(
@@ -12224,22 +12239,23 @@ impl<'a> Checker<'a> {
                     None if signature.requires_all_args() => {}
                     None => return None,
                 }
-                let facade = self
-                    .syms
-                    .fn_facades_by_decl
-                    .get(&(file, declaration))
-                    .copied()
-                    .or(match function.callable.origin {
-                        crate::libraries::Origin::Module { facade } => Some(facade),
-                        _ => None,
-                    });
                 let owner = if file == self.file_index {
                     None
                 } else {
-                    Some(facade?)
+                    // A sibling-file fn with no facade entry is an unemitted inline fn — the
+                    // reference cannot lower. Decline the candidate; if no other candidate
+                    // survives, the caller reports WHY.
+                    match self.sibling_fn_facade(file, declaration, &function.callable.origin) {
+                        SiblingFnFacade::Emitted(facade) => Some(facade),
+                        SiblingFnFacade::Unemitted => {
+                            unemitted = true;
+                            return None;
+                        }
+                        SiblingFnFacade::Unknown => return None,
+                    }
                 };
                 let mut target = function.callable.clone();
-                if let Some(facade) = facade {
+                if let Some(facade) = owner {
                     target.owner = facade;
                     target.origin = crate::libraries::Origin::Module { facade };
                 }
@@ -12247,7 +12263,9 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
-            return if inaccessible {
+            return if unemitted {
+                BoundSourceExtensionRef::Unemitted
+            } else if inaccessible {
                 BoundSourceExtensionRef::Inaccessible
             } else {
                 BoundSourceExtensionRef::None
@@ -12447,6 +12465,64 @@ impl<'a> Checker<'a> {
         ))
     }
 
+    /// Report a reference to a sibling-file fn that is never emitted as a callable (see
+    /// [`Checker::sibling_fn_facade`]).
+    fn unemitted_inline_ref_error(&mut self, expression: ExprId, name: &str) -> Ty {
+        self.diags.error(
+            self.member_name_span(expression, name),
+            format!(
+                "cannot reference '{name}': the inline function is not emitted as a callable, \
+                 so it cannot be referenced from another file"
+            ),
+        );
+        Ty::Error
+    }
+
+    /// The facade a cross-file fn REFERENCE can target. Registration in `fn_facades_by_decl` is
+    /// authoritative; the `Origin::Module` facade is only a fallback for checker-only pipelines
+    /// that never ran `prepare_module_symbols` (LSP, unit tests). A fn the driver WOULD NOT
+    /// register (the `prepare_module_symbols` predicate: splice-only inline fns) is lowered per
+    /// call site and emitted NOWHERE — its origin facade names a method that does not exist, so
+    /// the reference cannot lower no matter the pipeline.
+    fn sibling_fn_facade(
+        &self,
+        file: u32,
+        declaration: u32,
+        origin: &crate::libraries::Origin,
+    ) -> SiblingFnFacade {
+        if let Some(facade) = self
+            .syms
+            .fn_facades_by_decl
+            .get(&(file, declaration))
+            .copied()
+        {
+            return SiblingFnFacade::Emitted(facade);
+        }
+        let emittable = self
+            .source_files
+            .and_then(|files| files.get(file as usize))
+            .is_none_or(|ast| match ast.decl(DeclId(declaration)) {
+                Decl::Fun(f) => {
+                    !f.is_inline()
+                        || f.has_callable_inline_extension_body()
+                        || self
+                            .syms
+                            .inline_fn_facade_emittable(ast, file, DeclId(declaration), f)
+                }
+                _ => true,
+            });
+        if !emittable {
+            return SiblingFnFacade::Unemitted;
+        }
+        match origin {
+            // An EMPTY facade is the "unrecorded" fallback, not a real class.
+            crate::libraries::Origin::Module { facade } if !facade.render().is_empty() => {
+                SiblingFnFacade::Emitted(*facade)
+            }
+            _ => SiblingFnFacade::Unknown,
+        }
+    }
+
     /// Select a same-module top-level callable reference from its expected function type. Calls have
     /// argument expressions for overload resolution; `::name` instead uses the expected parameter and
     /// return shape. Kotlin also permits a value-returning target where `Unit` is expected.
@@ -12553,21 +12629,14 @@ impl<'a> Checker<'a> {
         let owner = if source_file == self.file_index {
             None
         } else {
-            Some(
-                self.syms
-                    .fn_facades_by_decl
-                    .get(&(source_file, source_declaration))
-                    .copied()
-                    .or(match selected.callable.origin {
-                        // An EMPTY facade is the "unrecorded" fallback, not a real class — for a
-                        // sibling-file function it means the target is not emitted anywhere
-                        // (a non-callable inline fn), so the reference cannot lower: decline.
-                        crate::libraries::Origin::Module { facade } => {
-                            Some(facade).filter(|f| !f.render().is_empty())
-                        }
-                        _ => None,
-                    })?,
-            )
+            match self.sibling_fn_facade(source_file, source_declaration, &selected.callable.origin)
+            {
+                SiblingFnFacade::Emitted(facade) => Some(facade),
+                SiblingFnFacade::Unemitted => {
+                    return Some(self.unemitted_inline_ref_error(expression, name));
+                }
+                SiblingFnFacade::Unknown => return None,
+            }
         };
         self.resolved_source_calls
             .insert(expression, (source_file, source_declaration));
@@ -13234,22 +13303,19 @@ impl<'a> Checker<'a> {
         };
         let selected = &candidates[*selected];
         let (source_file, source_decl) = selected.source_key?;
-        let facade = self
-            .syms
-            .fn_facades_by_decl
-            .get(&(source_file, source_decl))
-            .copied()
-            .or_else(|| match &selected.callable.origin {
-                Origin::Module { facade } if !facade.render().is_empty() => Some(*facade),
-                _ => None,
-            });
         let owner = if source_file == self.file_index {
             None
         } else {
-            Some(facade?)
+            match self.sibling_fn_facade(source_file, source_decl, &selected.callable.origin) {
+                SiblingFnFacade::Emitted(facade) => Some(facade),
+                SiblingFnFacade::Unemitted => {
+                    return Some(self.unemitted_inline_ref_error(expression, name));
+                }
+                SiblingFnFacade::Unknown => return None,
+            }
         };
         let mut target = selected.callable.clone();
-        if let Some(facade) = facade {
+        if let Some(facade) = owner {
             target.owner = facade;
             target.origin = Origin::Module { facade };
         }
@@ -19447,16 +19513,17 @@ impl<'a> Checker<'a> {
         let owner = if selected.source_file == self.file_index {
             None
         } else {
-            Some(
-                self.syms
-                    .fn_facades_by_decl
-                    .get(&(selected.source_file, selected.source_decl))
-                    .copied()
-                    .or(match selected.function.callable.origin {
-                        crate::libraries::Origin::Module { facade } => Some(facade),
-                        _ => None,
-                    })?,
-            )
+            match self.sibling_fn_facade(
+                selected.source_file,
+                selected.source_decl,
+                &selected.function.callable.origin,
+            ) {
+                SiblingFnFacade::Emitted(facade) => Some(facade),
+                SiblingFnFacade::Unemitted => {
+                    return Some(self.unemitted_inline_ref_error(ref_expr, name));
+                }
+                SiblingFnFacade::Unknown => return None,
+            }
         };
         *generic_bindings = selected.bindings;
         let resolved_type = crate::symbol_resolver::ty_subst(Ty::Fun(exp), generic_bindings);
@@ -21962,6 +22029,10 @@ impl<'a> Checker<'a> {
                             format!("cannot access '{name}': it is private in its file"),
                         );
                         return self.set(e, Ty::Error);
+                    }
+                    BoundSourceExtensionRef::Unemitted => {
+                        let ty = self.unemitted_inline_ref_error(e, &name);
+                        return self.set(e, ty);
                     }
                     BoundSourceExtensionRef::None => {}
                 }

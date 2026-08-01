@@ -719,6 +719,45 @@ pub fn front_end_diagnostics_files(
     diags.diags.iter().map(|d| d.msg.clone()).collect()
 }
 
+/// Multi-file checker diagnostics WITH module facade registration (`prepare_module_symbols`,
+/// which the backend drivers run before checking) — cross-file resolution then sees the same
+/// facade map a real compile uses, unlike [`front_end_diagnostics_files`]. For asserting the
+/// message of a cross-file resolution error. `None` (→ skip) when the toolchain is absent.
+#[allow(dead_code)]
+pub fn module_front_end_diagnostics(sources: &[(&str, &str)]) -> Option<Vec<String>> {
+    use krusty::frontend::{
+        check_file_in_source_set, collect_signatures_with_cp, preinfer_module_returns,
+    };
+
+    let stdlib = stdlib_jar()?;
+    let jdk = jdk_modules();
+    let mut diags = krusty::diag::DiagSink::new();
+    let source_texts = sources
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>();
+    let files = parse_source_set(&source_texts, &mut diags)?;
+    if !diags.has_errors() {
+        let cp = cached_classpath(&[stdlib], jdk.as_deref());
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+        let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
+        if !diags.has_errors() {
+            preinfer_module_returns(&files, &mut syms, &mut diags);
+            let stems = sources
+                .iter()
+                .map(|(stem, _)| (*stem).to_string())
+                .collect::<Vec<_>>();
+            krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
+            for index in 0..files.len() {
+                diags.set_file(index as u32);
+                let _ = check_file_in_source_set(&files, index as u32, &mut syms, &mut diags);
+            }
+        }
+    }
+    diags.collapse_duplicates();
+    Some(diags.diags.iter().map(|d| d.msg.clone()).collect())
+}
+
 /// Run a JavaScript source string on Node and return its stdout (trimmed), or `None` if `node` is
 /// not on `PATH` (caller skips, exactly like a missing JVM). Used by the `js` backend e2e tests.
 #[allow(dead_code)]
