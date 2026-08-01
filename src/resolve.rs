@@ -10071,9 +10071,22 @@ struct CaptureDiscoveryScope {
     declarations: std::collections::HashSet<DeclId>,
 }
 
+fn method_may_publish_inferred_return(function: &FunDecl) -> bool {
+    let fixed_object_contract = function.receiver.is_none()
+        && matches!(
+            (function.name.as_str(), function.params.len()),
+            ("compareTo", 1) | ("equals", 1) | ("hashCode" | "toString", 0)
+        );
+    function.ret.is_none() && !fixed_object_contract && matches!(function.body, FunBody::Expr(_))
+}
+
 impl CaptureDiscoveryScope {
     fn checks_function(&self, file: &File, function: &FunDecl) -> bool {
         fun_contains_any(file, function, &self.constructions)
+    }
+
+    fn checks_method(&self, file: &File, method: &FunDecl) -> bool {
+        self.checks_function(file, method) || method_may_publish_inferred_return(method)
     }
 
     /// Instance and enum-entry methods share the checker's inferred-return cache. Preserve the
@@ -10110,6 +10123,26 @@ impl CaptureDiscoveryScope {
             .filter_map(|(index, method)| self.checks_function(file, method).then_some(index + 1))
             .max()
             .unwrap_or(0)
+    }
+
+    /// Preserve methods that can publish an inferred return for a later selected region, while
+    /// skipping unrelated declared-return and block-body methods. A construction-bearing method is
+    /// always checked so capture discovery still walks the complete lexical scope around it.
+    #[cfg(test)]
+    fn method_check_plan(&self, file: &File, class: &ClassDecl) -> Vec<bool> {
+        let prefix_len = self.method_check_prefix_len(file, class);
+        class
+            .methods
+            .iter()
+            .chain(
+                class
+                    .enum_entries
+                    .iter()
+                    .flat_map(|entry| entry.methods.iter()),
+            )
+            .enumerate()
+            .map(|(index, method)| index < prefix_len && self.checks_method(file, method))
+            .collect()
     }
 }
 
@@ -10856,7 +10889,16 @@ fn check_file_at_impl_mode(
                 let mut method_check_index = 0;
                 for m in &cl.methods {
                     if method_check_index < method_check_prefix_len {
-                        c.check_method(m, &props);
+                        if capture_scope
+                            .as_ref()
+                            .is_none_or(|scope| scope.checks_method(file, m))
+                        {
+                            c.check_method(m, &props);
+                        } else {
+                            // `check_method` resets these lexical mutation sets before doing semantic
+                            // work. Preserve that cheap ordered state for a later class-region capture.
+                            c.reset_body_mutations(fun_body_expr(&m.body));
+                        }
                     }
                     method_check_index += 1;
                 }
@@ -10903,7 +10945,14 @@ fn check_file_at_impl_mode(
                     }
                     for bm in &entry.methods {
                         if method_check_index < method_check_prefix_len {
-                            c.check_method(bm, &entry_props);
+                            if capture_scope
+                                .as_ref()
+                                .is_none_or(|scope| scope.checks_method(file, bm))
+                            {
+                                c.check_method(bm, &entry_props);
+                            } else {
+                                c.reset_body_mutations(fun_body_expr(&bm.body));
+                            }
                         }
                         method_check_index += 1;
                     }
@@ -32816,12 +32865,20 @@ fun target(seed: Int): Marker {
     return object : Marker { fun value(): Int = captured }
 }
 class Owner {
-    fun untouched(): Int = 2
+    fun declared(): Int = 2
+    fun inferred() = source()
+    fun block(): Int { return 2 }
     fun build(seed: Int): Marker {
         val captured = seed
         return object : Marker { fun value(): Int = captured }
     }
     fun after(): Int = 3
+}
+class PropertyOwner {
+    fun declared(): Int = 2
+    fun inferred() = source()
+    val target: Marker = object : Marker { fun value(): Int = 4 }
+    fun laterInferred() = source()
 }
 class Factory {
     companion object {
@@ -32856,7 +32913,14 @@ fun after(): Int = 3
 
         assert_eq!(
             named,
-            vec!["top", "defaulted", "target", "Owner", "Factory"]
+            vec![
+                "top",
+                "defaulted",
+                "target",
+                "Owner",
+                "PropertyOwner",
+                "Factory"
+            ]
         );
 
         let owner = file
@@ -32868,10 +32932,29 @@ fun after(): Int = 3
             })
             .expect("source should contain Owner");
         let scope = capture_discovery_scope(&file);
-        assert_eq!(scope.method_check_prefix_len(&file, owner), 2);
+        assert_eq!(scope.method_check_prefix_len(&file, owner), 4);
         assert!(!scope.checks_function(&file, &owner.methods[0]));
-        assert!(scope.checks_function(&file, &owner.methods[1]));
+        assert!(!scope.checks_function(&file, &owner.methods[1]));
         assert!(!scope.checks_function(&file, &owner.methods[2]));
+        assert!(scope.checks_function(&file, &owner.methods[3]));
+        assert!(!scope.checks_function(&file, &owner.methods[4]));
+        assert_eq!(
+            scope.method_check_plan(&file, owner),
+            vec![false, true, false, true, false]
+        );
+
+        let property_owner = file
+            .decls
+            .iter()
+            .find_map(|declaration| match file.decl(*declaration) {
+                Decl::Class(class) if class.name == "PropertyOwner" => Some(class),
+                _ => None,
+            })
+            .expect("source should contain PropertyOwner");
+        assert_eq!(
+            scope.method_check_plan(&file, property_owner),
+            vec![false, true, true]
+        );
 
         let factory = file
             .decls
