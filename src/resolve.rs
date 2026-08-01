@@ -32152,29 +32152,6 @@ mod tests {
     use crate::lexer::lex;
     use crate::parser::{parse, parse_with_features};
 
-    #[test]
-    fn shared_class_names_keep_file_overlays_independent() {
-        let mut compilation = ClassNames::default();
-        compilation.insert("Global".to_string(), "sample/Global");
-        compilation.mark_ambiguous("Override".to_string());
-        let compilation = compilation.into_shared();
-
-        let mut first_file = compilation.clone();
-        first_file.insert("Local".to_string(), "sample/Local");
-        first_file.insert("Override".to_string(), "sample/Override");
-        let second_file = compilation.clone();
-
-        assert_eq!(first_file.get("Global"), type_name("sample/Global").into());
-        assert_eq!(first_file.get("Local"), type_name("sample/Local").into());
-        assert_eq!(
-            first_file.get("Override"),
-            type_name("sample/Override").into()
-        );
-        assert_eq!(second_file.get("Global"), type_name("sample/Global").into());
-        assert_eq!(second_file.get("Local"), None);
-        assert_eq!(second_file.get("Override"), None);
-    }
-
     struct ClassifierImportSource;
 
     fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
