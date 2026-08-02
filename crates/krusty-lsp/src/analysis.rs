@@ -8,9 +8,9 @@ use crate::compiler_analysis::analyze_standalone_source_set;
 use crate::compiler_analysis::java;
 use crate::compiler_analysis::{
     analyze_standalone_source_inputs, document_symbol_occurrences, folding_range_occurrences,
-    hover_wire_cost, CompletionDetails, CompletionKind, CompletionSymbols, DefinitionOccurrence,
-    DefinitionSymbols, DefinitionTarget, DocumentSymbolOccurrence, FileAnalysis,
-    FoldingRangeOccurrence, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
+    hover_wire_cost, parsed_file_symbols, CompletionDetails, CompletionKind, CompletionSymbols,
+    DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, DocumentSymbolOccurrence,
+    FileAnalysis, FoldingRangeOccurrence, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
     HoverOccurrence, LibraryRef, SemanticLimits, SignatureCandidate, SignatureHelpCall,
     SignatureHelpSymbols, FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION,
     MAX_LIBRARY_DEFINITION_BYTES, TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC,
@@ -74,7 +74,23 @@ const MAX_SOURCE_SET_HOVER_WIRE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_DOCUMENT_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_WORKSPACE_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
+/// Ceiling on symbols in one response, on top of the byte ceiling above.
+///
+/// A broad query over a project-wide index matches tens of thousands of declarations, and encoding
+/// them is the dominant cost of answering -- for a client that keeps 100 (Zed's `MAX_MATCHES`) and
+/// re-sorts what it keeps. Results are emitted strongest rung first, so the cap keeps the best of
+/// them and, because encoding stops when it is reached, the weakest rungs are never even scanned.
+pub const MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS: usize = 512;
 const MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 8 * 1024 * 1024;
+/// Ceiling on the retained project-wide index, which is a different thing from the source-set
+/// budget above: that one bounds a single worker message, while this one bounds everything the
+/// session knows about the workspace.
+///
+/// Sized from the reference corpora -- 698,516 declarations over 64,648 files in the kotlin repo,
+/// 38.3 MiB retained. Wire-byte accounting charges a worst-case ~167 bytes per entry against a real
+/// ~52, so 192 MiB of budget admits roughly 1.2M declarations. Neither corpus comes close; a
+/// pathological workspace stops growing the index instead of the process.
+const MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 192 * 1024 * 1024;
 const MAX_WORKSPACE_SYMBOL_QUERY_BYTES: usize = 1024;
 const MAX_WORKSPACE_SYMBOL_CONTAINER_DEPTH: usize = 128;
 /// A leading-wildcard query scans the retained index. Bound the greedy matcher's total transitions
@@ -87,6 +103,10 @@ const WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES: usize =
     2 + 13 * JSON_U32_MAX_BYTES + 12 + 1 + 2 * (JSON_U32_MAX_BYTES + 1);
 // Object keys, collection delimiters, and completeness.
 const WORKSPACE_SYMBOL_INDEX_FIXED_WIRE_BYTES: usize = 256;
+/// Per-file ceiling on parse-only workspace indexing. A generated or sparse source past this size
+/// costs tens of seconds to parse for symbols nobody searches for, and the engine thread that runs
+/// the build also serves requests.
+pub const MAX_INDEXED_FILE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_SET_FOLDING_RANGE_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_FOLDING_RANGE_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const FOLDING_RANGE_WIRE_FIXED_BYTES: usize = 192;
@@ -156,12 +176,13 @@ impl WorkspaceSymbolBudget {
         }
     }
 
-    fn from_index(index: &WorkspaceSymbolIndex) -> Self {
-        let mut budget = Self::new();
+    fn from_index_within(index: &WorkspaceSymbolIndex, max_wire_bytes: usize) -> Self {
+        let mut budget = Self::with_limit(max_wire_bytes);
         let string_bytes = index
             .packages
             .iter()
             .chain(&index.names)
+            .chain(&index.files)
             .fold(0usize, |bytes, value| {
                 bytes.saturating_add(workspace_symbol_string_wire_cost(value))
             });
@@ -188,6 +209,18 @@ impl WorkspaceSymbolBudget {
         package: &str,
         new_package: bool,
     ) -> bool {
+        self.reserve_merged_entry_in_file(name, new_name, package, new_package, "", false)
+    }
+
+    fn reserve_merged_entry_in_file(
+        &mut self,
+        name: &str,
+        new_name: bool,
+        package: &str,
+        new_package: bool,
+        file: &str,
+        new_file: bool,
+    ) -> bool {
         let bytes = WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES
             .saturating_add(if new_name {
                 workspace_symbol_string_wire_cost(name)
@@ -196,6 +229,11 @@ impl WorkspaceSymbolBudget {
             })
             .saturating_add(if new_package {
                 workspace_symbol_string_wire_cost(package)
+            } else {
+                0
+            })
+            .saturating_add(if new_file {
+                workspace_symbol_string_wire_cost(file)
             } else {
                 0
             });
@@ -463,6 +501,12 @@ pub struct DocumentSymbolIndex {
 type WorkspaceSymbolEntry = [u32; 13];
 
 /// Bounded, searchable declarations retained from one assembled source set.
+///
+/// `entry[0]` addresses the index's own `files` table, so an entry describes a file whose text
+/// nothing else retains. The builder runs where only source *positions* are known — the analysis
+/// worker is handed sources, never URIs — so a freshly built index numbers entries by their
+/// position in the analyzed source set and [`WorkspaceSymbolIndex::assign_uris`] converts those
+/// positions into file ids at the one boundary that knows the mapping.
 #[derive(Clone, Serialize)]
 pub struct WorkspaceSymbolIndex {
     entries: Vec<WorkspaceSymbolEntry>,
@@ -470,7 +514,16 @@ pub struct WorkspaceSymbolIndex {
     by_name: Vec<u32>,
     by_initials: Vec<u32>,
     names: Vec<String>,
+    files: Vec<String>,
     complete: bool,
+    /// Per-name-id match keys, derived from `names` and rebuilt with the search order. Held rather
+    /// than recomputed because both fallback rungs test every name on every query: allocating a
+    /// lowercase copy and a camel-hump expansion per entry is what made a project-wide index cost
+    /// over a tenth of a second per keystroke on the thread that also serves edits.
+    #[serde(skip)]
+    lowercase_names: Vec<String>,
+    #[serde(skip)]
+    initials: Vec<String>,
 }
 
 impl Default for WorkspaceSymbolIndex {
@@ -481,7 +534,10 @@ impl Default for WorkspaceSymbolIndex {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: Vec::new(),
+            files: Vec::new(),
             complete: true,
+            lowercase_names: Vec::new(),
+            initials: Vec::new(),
         }
     }
 }
@@ -496,6 +552,8 @@ struct WorkspaceSymbolIndexWire {
     by_initials: Vec<u32>,
     #[serde(default)]
     names: Vec<String>,
+    #[serde(default)]
+    files: Vec<String>,
     #[serde(default = "workspace_symbol_index_complete")]
     complete: bool,
 }
@@ -512,7 +570,10 @@ impl<'de> Deserialize<'de> for WorkspaceSymbolIndex {
             by_name: wire.by_name,
             by_initials: wire.by_initials,
             names: wire.names,
+            files: wire.files,
             complete: wire.complete,
+            lowercase_names: Vec::new(),
+            initials: Vec::new(),
         };
         index.drop_invalid_entries();
         index.rebuild_search_order();
@@ -882,106 +943,327 @@ impl DocumentSymbolIndex {
     }
 }
 
+/// The project-wide symbol layer, held as size-tiered segments.
+///
+/// One index would be simpler, but splicing a chunk into it costs a pass over everything already
+/// there: the interning tables are rebuilt and both rank orders re-sorted. At the scale this exists
+/// for -- 700k declarations over 64k files -- paying that per 128-file chunk is hundreds of full
+/// re-sorts on the thread that also serves requests.
+///
+/// So a chunk becomes its own segment, and adjacent segments merge only while their sizes are
+/// within a factor of two. Each declaration is therefore rewritten a logarithmic number of times
+/// rather than once per later chunk, and the segment count stays around `log2(entries / chunk)` --
+/// under a dozen for either reference corpus. Segments are disjoint by file, so a query reads them
+/// in sequence with no reconciliation beyond the shadowing every layer already does.
+pub struct ProjectSymbolIndex {
+    /// Oldest and largest first; the newest chunk is last.
+    segments: Vec<WorkspaceSymbolIndex>,
+    /// Tracked here rather than read back off the segments, because a chunk whose every file was
+    /// skipped contributes no segment to carry the flag.
+    complete: bool,
+}
+
+impl Default for ProjectSymbolIndex {
+    fn default() -> Self {
+        Self {
+            segments: Vec::new(),
+            complete: true,
+        }
+    }
+}
+
+impl ProjectSymbolIndex {
+    /// Re-index `uris` from `segment`, dropping whatever any segment held for them.
+    pub fn replace_files(&mut self, uris: &[String], segment: WorkspaceSymbolIndex) {
+        self.replace_files_within(uris, segment, MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES);
+    }
+
+    /// The budgeted implementation behind [`Self::replace_files`]. Keeping the ceiling here, at
+    /// the aggregate that owns every segment, prevents an unmerged tail from sitting outside a
+    /// limit that was previously checked only when two adjacent segments happened to coalesce.
+    fn replace_files_within(
+        &mut self,
+        uris: &[String],
+        mut segment: WorkspaceSymbolIndex,
+        max_wire_bytes: usize,
+    ) {
+        for existing in &mut self.segments {
+            existing.remove_files(uris);
+        }
+        self.segments.retain(|segment| segment.entry_count() > 0);
+
+        // Spend every untouched segment before admitting the replacement. The accounting is the
+        // same conservative entry/string accounting used by merge budgets, so adding a small tail
+        // cannot exceed the whole-layer ceiling merely because its neighbour is more than twice
+        // its size and therefore does not merge yet.
+        let reserved = self
+            .segments
+            .iter()
+            .map(WorkspaceSymbolIndex::retained_wire_bytes)
+            .sum::<usize>();
+        segment.retain_accounted_wire_budget(max_wire_bytes.saturating_sub(reserved));
+        self.complete &= segment.is_complete();
+        if segment.entry_count() == 0 {
+            return;
+        }
+        self.segments.push(segment);
+        while self.segments.len() >= 2 {
+            let last = self.segments[self.segments.len() - 1].entry_count();
+            let previous = self.segments[self.segments.len() - 2].entry_count();
+            if previous > last.saturating_mul(2) {
+                break;
+            }
+            let merged = self
+                .segments
+                .pop()
+                .expect("two segments were just observed");
+            // The ceiling is on the whole layer, so what the untouched segments already hold is
+            // spent before this merge starts -- their string tables as well as their entries, or
+            // the layer settles above its ceiling by whatever those tables weigh.
+            let reserved = self.segments[..self.segments.len() - 1]
+                .iter()
+                .map(WorkspaceSymbolIndex::retained_wire_bytes)
+                .sum::<usize>();
+            self.segments
+                .last_mut()
+                .expect("two segments were just observed")
+                .merge_within(merged, max_wire_bytes.saturating_sub(reserved));
+        }
+    }
+
+    /// Newest first, which is the order a query must shadow them in.
+    pub fn layers(&self) -> Vec<&WorkspaceSymbolIndex> {
+        self.segments.iter().rev().collect()
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.segments
+            .iter()
+            .map(WorkspaceSymbolIndex::entry_count)
+            .sum()
+    }
+
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// Whether every declaration the sweep offered is actually in here. False once a file was too
+    /// large to parse or the layer reached its retention ceiling.
+    pub fn is_complete(&self) -> bool {
+        self.complete && self.segments.iter().all(WorkspaceSymbolIndex::is_complete)
+    }
+}
+
+/// The match qualities the ladder walks, strongest first.
+#[derive(Clone, Copy)]
+enum WorkspaceSymbolRung {
+    /// An empty query asks for everything.
+    Every,
+    Glob,
+    NamePrefix,
+    InitialsPrefix,
+    InitialsSubsequence,
+    NameSubsequence,
+}
+
+/// One query's shape plus the files a higher layer already answers for.
+struct EncodeScope<'a> {
+    query: &'a WorkspaceQuery,
+    suppressed: &'a HashSet<u32>,
+}
+
+/// Interning tables shared across the files one index build visits.
+#[derive(Default)]
+struct WorkspaceSymbolInterning {
+    packages: HashMap<String, u32>,
+    names: HashMap<String, u32>,
+    files: HashMap<String, u32>,
+}
+
 impl WorkspaceSymbolIndex {
     pub(crate) fn from_source_set(sources: &[&str], files: &[FileAnalysis]) -> Self {
         let mut result = Self::default();
         let mut budget = WorkspaceSymbolBudget::new();
-        let mut package_ids = HashMap::<String, u32>::new();
-        let mut name_ids = HashMap::<String, u32>::new();
+        let mut interning = WorkspaceSymbolInterning::default();
 
-        'files: for (file_index, (source, analysis)) in sources.iter().zip(files).enumerate() {
-            let package = analysis.file.package.as_deref().unwrap_or("");
-            let entry_capacity = budget.remaining_entry_capacity();
-            let mut occurrences =
-                document_symbol_occurrences(source, analysis, entry_capacity.saturating_add(1));
-            let truncated = occurrences.len() > entry_capacity;
-            occurrences.truncate(entry_capacity);
-            let mut retained = Vec::with_capacity(occurrences.len());
-            let mut retained_indices = vec![None; occurrences.len()];
-            for (occurrence_index, occurrence) in occurrences.iter().enumerate() {
-                let Some(name) = source
-                    .get(occurrence.selection.lo as usize..occurrence.selection.hi as usize)
-                    .map(|name| name.trim_matches('`'))
-                    .filter(|name| !name.is_empty())
-                else {
-                    continue;
-                };
-                if name != occurrence.name {
-                    continue;
-                }
-                let parent = match occurrence.parent {
-                    Some(parent) => {
-                        let Some(parent) = retained_indices.get(parent).copied().flatten() else {
-                            continue;
-                        };
-                        Some(parent)
-                    }
-                    None => None,
-                };
-                retained_indices[occurrence_index] = Some(retained.len());
-                retained.push((occurrence, parent));
-            }
-            let positions = selected_positions(
+        for (file_index, (source, analysis)) in sources.iter().zip(files).enumerate() {
+            let capacity = budget.remaining_entry_capacity();
+            let occurrences =
+                document_symbol_occurrences(source, &analysis.file, capacity.saturating_add(1));
+            if !result.push_file(
+                file_index as u32,
                 source,
-                retained
-                    .iter()
-                    .flat_map(|(occurrence, _)| [occurrence.selection.lo, occurrence.selection.hi]),
-            );
-            let position = |offset| {
-                let index = positions
-                    .binary_search_by_key(&offset, |(offset, _)| *offset)
-                    .expect("workspace-symbol offset must be positioned");
-                positions[index].1
-            };
-            let entry_offset = result.entries.len();
-
-            for (occurrence, parent) in retained {
-                let Some(declared) = source
-                    .get(occurrence.selection.lo as usize..occurrence.selection.hi as usize)
-                    .map(|name| name.trim_matches('`'))
-                    .filter(|name| !name.is_empty())
-                else {
-                    continue;
-                };
-                let new_package = !package_ids.contains_key(package);
-                let new_name = !name_ids.contains_key(declared);
-                if !budget.reserve_merged_entry(declared, new_name, package, new_package) {
-                    result.complete = false;
-                    break 'files;
-                }
-                let package_id =
-                    intern_workspace_string(package, &mut result.packages, &mut package_ids);
-                let name_id = intern_workspace_string(declared, &mut result.names, &mut name_ids);
-                let start = position(occurrence.selection.lo);
-                let end = position(occurrence.selection.hi);
-                let parent = parent
-                    .and_then(|parent| entry_offset.checked_add(parent))
-                    .and_then(|parent| u32::try_from(parent).ok())
-                    .and_then(|parent| parent.checked_add(1))
-                    .unwrap_or(0);
-                result.entries.push([
-                    file_index as u32,
-                    occurrence.selection.lo,
-                    occurrence.selection.hi,
-                    start[0],
-                    start[1],
-                    end[0],
-                    end[1],
-                    u32::from(occurrence.kind),
-                    parent,
-                    package_id,
-                    name_id,
-                    occurrence.range.lo,
-                    occurrence.range.hi,
-                ]);
-            }
-            if truncated {
-                result.complete = false;
+                analysis.file.package.as_deref().unwrap_or(""),
+                occurrences,
+                &mut budget,
+                &mut interning,
+            ) {
                 break;
             }
         }
         result.rebuild_search_order();
         result
+    }
+
+    /// Index files nobody has opened, from their text on disk.
+    ///
+    /// Parse-only: nothing here needs resolution, and full analysis of a whole project would cost
+    /// orders of magnitude more than the search it serves. A file past
+    /// [`MAX_INDEXED_FILE_BYTES`] is skipped rather than parsed -- a single generated or sparse
+    /// multi-megabyte source otherwise stalls the build for tens of seconds -- and marks the index
+    /// incomplete so callers can report the gap.
+    pub fn from_disk_sources(files: &[(&str, &str)]) -> Self {
+        Self::from_uri_sources(files.iter().copied())
+    }
+
+    /// Build from any URI/source iterator, consuming and dropping each source after its parse.
+    ///
+    /// The disk adapter yields owned `String`s lazily, while tests usually borrow string slices.
+    /// Keeping both origins on this one ingestion path prevents the file reader from retaining a
+    /// whole 128-file chunk (up to roughly 512 MiB at the per-file ceiling) before parsing begins.
+    pub(crate) fn from_uri_sources<I, U, S>(files: I) -> Self
+    where
+        I: IntoIterator<Item = (U, S)>,
+        U: AsRef<str>,
+        S: AsRef<str>,
+    {
+        let mut result = Self::default();
+        let mut budget = WorkspaceSymbolBudget::new();
+        let mut interning = WorkspaceSymbolInterning::default();
+
+        for (uri, source) in files {
+            let uri = uri.as_ref();
+            let source = source.as_ref();
+            if source.len() > MAX_INDEXED_FILE_BYTES {
+                result.complete = false;
+                continue;
+            }
+            if !interning.files.contains_key(uri)
+                && !budget.reserve(workspace_symbol_string_wire_cost(uri))
+            {
+                result.complete = false;
+                break;
+            }
+            let capacity = budget.remaining_entry_capacity();
+            let parsed = parsed_file_symbols(source, capacity.saturating_add(1));
+            let file = intern_workspace_string(uri, &mut result.files, &mut interning.files);
+            if !result.push_file(
+                file,
+                source,
+                parsed.package.as_deref().unwrap_or(""),
+                parsed.occurrences,
+                &mut budget,
+                &mut interning,
+            ) {
+                break;
+            }
+        }
+        result.rebuild_search_order();
+        result
+    }
+
+    /// Append one file's declarations. Returns false once the retention budget is spent, at which
+    /// point the index is marked incomplete and the caller must stop.
+    /// `occurrences` is extracted against `budget.remaining_entry_capacity() + 1`, so one entry
+    /// past the ceiling is what tells this index it was truncated.
+    fn push_file(
+        &mut self,
+        file: u32,
+        source: &str,
+        package: &str,
+        mut occurrences: Vec<DocumentSymbolOccurrence>,
+        budget: &mut WorkspaceSymbolBudget,
+        interning: &mut WorkspaceSymbolInterning,
+    ) -> bool {
+        let result = self;
+        let entry_capacity = budget.remaining_entry_capacity();
+        let truncated = occurrences.len() > entry_capacity;
+        occurrences.truncate(entry_capacity);
+        let mut retained = Vec::with_capacity(occurrences.len());
+        let mut retained_indices = vec![None; occurrences.len()];
+        for (occurrence_index, occurrence) in occurrences.iter().enumerate() {
+            let Some(name) = source
+                .get(occurrence.selection.lo as usize..occurrence.selection.hi as usize)
+                .map(|name| name.trim_matches('`'))
+                .filter(|name| !name.is_empty())
+            else {
+                continue;
+            };
+            if name != occurrence.name {
+                continue;
+            }
+            let parent = match occurrence.parent {
+                Some(parent) => {
+                    let Some(parent) = retained_indices.get(parent).copied().flatten() else {
+                        continue;
+                    };
+                    Some(parent)
+                }
+                None => None,
+            };
+            retained_indices[occurrence_index] = Some(retained.len());
+            retained.push((occurrence, parent));
+        }
+        let positions = selected_positions(
+            source,
+            retained
+                .iter()
+                .flat_map(|(occurrence, _)| [occurrence.selection.lo, occurrence.selection.hi]),
+        );
+        let position = |offset| {
+            let index = positions
+                .binary_search_by_key(&offset, |(offset, _)| *offset)
+                .expect("workspace-symbol offset must be positioned");
+            positions[index].1
+        };
+        let entry_offset = result.entries.len();
+
+        for (occurrence, parent) in retained {
+            let Some(declared) = source
+                .get(occurrence.selection.lo as usize..occurrence.selection.hi as usize)
+                .map(|name| name.trim_matches('`'))
+                .filter(|name| !name.is_empty())
+            else {
+                continue;
+            };
+            let new_package = !interning.packages.contains_key(package);
+            let new_name = !interning.names.contains_key(declared);
+            if !budget.reserve_merged_entry(declared, new_name, package, new_package) {
+                result.complete = false;
+                return false;
+            }
+            let package_id =
+                intern_workspace_string(package, &mut result.packages, &mut interning.packages);
+            let name_id =
+                intern_workspace_string(declared, &mut result.names, &mut interning.names);
+            let start = position(occurrence.selection.lo);
+            let end = position(occurrence.selection.hi);
+            let parent = parent
+                .and_then(|parent| entry_offset.checked_add(parent))
+                .and_then(|parent| u32::try_from(parent).ok())
+                .and_then(|parent| parent.checked_add(1))
+                .unwrap_or(0);
+            result.entries.push([
+                file,
+                occurrence.selection.lo,
+                occurrence.selection.hi,
+                start[0],
+                start[1],
+                end[0],
+                end[1],
+                u32::from(occurrence.kind),
+                parent,
+                package_id,
+                name_id,
+                occurrence.range.lo,
+                occurrence.range.hi,
+            ]);
+        }
+        if truncated {
+            result.complete = false;
+            return false;
+        }
+        true
     }
 
     pub fn remap_files(&mut self, remaps: &[(u32, u32)], retained_file_count: usize) {
@@ -1009,6 +1291,145 @@ impl WorkspaceSymbolIndex {
         self.rebuild_search_order();
     }
 
+    /// Re-index `uris` from `replacement`, so a file re-read from disk or re-analyzed in a buffer
+    /// replaces what this index held for it rather than accumulating a second copy.
+    pub fn replace_files(&mut self, uris: &[String], replacement: Self) {
+        self.remove_files(uris);
+        self.merge_from(replacement);
+    }
+
+    /// Forget everything this index holds for `uris`.
+    ///
+    /// Callers pass what a producer *attempted*, not what it returned: a file it could not read is
+    /// deleted or unreadable, and its stale entries have to go either way. Costs nothing when the
+    /// index names none of them, which is the common case while a first sweep is still filling in.
+    pub fn remove_files(&mut self, uris: &[String]) {
+        if uris.is_empty() || self.files.is_empty() {
+            return;
+        }
+        let dropped = uris.iter().map(String::as_str).collect::<HashSet<&str>>();
+        let removed = self
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, uri)| dropped.contains(uri.as_str()))
+            .map(|(id, _)| id as u32)
+            .collect::<HashSet<u32>>();
+        if removed.is_empty() {
+            return;
+        }
+        self.retain_entries(|entry| !removed.contains(&entry[0]));
+    }
+
+    /// Drop every entry `keep` rejects, renumbering the parent links that survive and forgetting
+    /// any file no surviving entry references.
+    ///
+    /// Compacting the URI table is not just housekeeping: naming a file is what makes a layer
+    /// shadow the layers under it, so a file left named with nothing to say would go on hiding the
+    /// copy below it.
+    ///
+    /// A parent always precedes its children, so a retained child's parent link either points at a
+    /// retained entry or is detached to zero.
+    fn retain_entries(&mut self, keep: impl Fn(&WorkspaceSymbolEntry) -> bool) {
+        let mut retained = Vec::with_capacity(self.entries.len());
+        let mut retained_indices = Vec::with_capacity(self.entries.len());
+        let mut files = Vec::new();
+        let mut file_ids = vec![None; self.files.len()];
+        for mut entry in self.entries.drain(..) {
+            if !keep(&entry) {
+                retained_indices.push(None);
+                continue;
+            }
+            if let Some(slot) = file_ids.get_mut(entry[0] as usize) {
+                entry[0] = *slot.get_or_insert_with(|| {
+                    let id = files.len() as u32;
+                    files.push(std::mem::take(&mut self.files[entry[0] as usize]));
+                    id
+                });
+            }
+            entry[8] = entry[8]
+                .checked_sub(1)
+                .and_then(|parent| retained_indices.get(parent as usize).copied().flatten())
+                .and_then(|parent: u32| parent.checked_add(1))
+                .unwrap_or(0);
+            let index = retained.len() as u32;
+            retained.push(entry);
+            retained_indices.push(Some(index));
+        }
+        self.entries = retained;
+        self.files = files;
+        // Dropping entries preserves the relative order of the ones that survive, so both rank
+        // orders can be filtered and renumbered in one pass. Re-sorting them is what made
+        // re-indexing a single edited file cost a pass over the whole segment holding it.
+        self.retain_search_order(&retained_indices);
+    }
+
+    fn retain_search_order(&mut self, retained_indices: &[Option<u32>]) {
+        for order in [&mut self.by_name, &mut self.by_initials] {
+            let mut renumbered = Vec::with_capacity(order.len());
+            for index in order.iter() {
+                if let Some(Some(retained)) = retained_indices.get(*index as usize) {
+                    renumbered.push(*retained);
+                }
+            }
+            *order = renumbered;
+        }
+    }
+
+    /// Replace positional `entry[0]` file indices with ids in the index's own URI table.
+    ///
+    /// `uris[position]` is the document the builder saw at that position in the analyzed source
+    /// set. Only URIs an entry actually references are interned, so a source set whose support
+    /// documents declared nothing costs no retained bytes. An entry whose position is past the end
+    /// of `uris` describes a file this index cannot name, and is dropped as incomplete rather than
+    /// kept pointing at nothing.
+    ///
+    /// Call once, on an index the builder just produced: binding is what ends the positional
+    /// phase, and re-binding an already-bound index would read file ids as positions.
+    pub fn assign_uris(&mut self, uris: &[&str]) {
+        if !self.files.is_empty() {
+            // A non-empty URI table proves this index is already bound. Its entry file values are
+            // IDs in that table, not positions in `uris`; interpreting them a second time silently
+            // moves declarations to unrelated files in the gate and release profiles where a
+            // debug assertion would not exist. Preserve the valid original locations, reject the
+            // phase violation through completeness, and let the caller report the shortfall.
+            self.complete = false;
+            return;
+        }
+        let mut file_ids = HashMap::<&str, u32>::new();
+        let mut files = Vec::new();
+        let mut retained = Vec::with_capacity(self.entries.len());
+        let mut retained_indices = Vec::with_capacity(self.entries.len());
+        for mut entry in self.entries.drain(..) {
+            let Some(uri) = uris.get(entry[0] as usize).copied() else {
+                self.complete = false;
+                retained_indices.push(None);
+                continue;
+            };
+            entry[0] = *file_ids.entry(uri).or_insert_with(|| {
+                let id = files.len() as u32;
+                files.push(uri.to_string());
+                id
+            });
+            entry[8] = entry[8]
+                .checked_sub(1)
+                .and_then(|parent| retained_indices.get(parent as usize).copied().flatten())
+                .and_then(|parent: u32| parent.checked_add(1))
+                .unwrap_or(0);
+            let index = retained.len() as u32;
+            retained.push(entry);
+            retained_indices.push(Some(index));
+        }
+        self.entries = retained;
+        self.files = files;
+        self.rebuild_search_order();
+    }
+
+    /// Every file this index can name, in file-id order.
+    pub fn file_uris(&self) -> &[String] {
+        &self.files
+    }
+
     fn drop_invalid_entries(&mut self) {
         let entries = std::mem::take(&mut self.entries);
         let mut retained = Vec::with_capacity(entries.len());
@@ -1017,6 +1438,10 @@ impl WorkspaceSymbolIndex {
             if !workspace_symbol_entry_is_valid(&entry)
                 || self.packages.get(entry[9] as usize).is_none()
                 || self.names.get(entry[10] as usize).is_none()
+                // An empty file table is the legitimate worker-side positional phase. Once the
+                // table is non-empty, every value is a bound file id and must resolve; retaining a
+                // dangling id would make queries silently skip a corrupted declaration.
+                || (!self.files.is_empty() && self.files.get(entry[0] as usize).is_none())
             {
                 self.complete = false;
                 retained_indices.push(None);
@@ -1043,16 +1468,18 @@ impl WorkspaceSymbolIndex {
     }
 
     fn rebuild_search_order(&mut self) {
-        let lowercase_names = self
+        self.lowercase_names = self
             .names
             .iter()
             .map(|name| name.to_lowercase())
             .collect::<Vec<_>>();
-        let initials = self
+        self.initials = self
             .names
             .iter()
             .map(|name| camel_hump_initials(name))
             .collect::<Vec<_>>();
+        let lowercase_names = &self.lowercase_names;
+        let initials = &self.initials;
         let name_id = |entry_index: u32| {
             self.entries
                 .get(entry_index as usize)
@@ -1090,8 +1517,11 @@ impl WorkspaceSymbolIndex {
         self.by_initials = by_initials;
     }
 
-    fn lowercase_name(&self, entry_index: u32) -> Option<String> {
-        Some(self.source_name(entry_index)?.to_lowercase())
+    fn lowercase_name(&self, entry_index: u32) -> Option<&str> {
+        let entry = self.entries.get(entry_index as usize)?;
+        self.lowercase_names
+            .get(entry[10] as usize)
+            .map(String::as_str)
     }
 
     fn source_name(&self, entry_index: u32) -> Option<&str> {
@@ -1099,15 +1529,17 @@ impl WorkspaceSymbolIndex {
         self.names.get(entry[10] as usize).map(String::as_str)
     }
 
-    fn entry_initials(&self, entry_index: u32) -> String {
-        self.source_name(entry_index)
-            .map(camel_hump_initials)
+    fn entry_initials(&self, entry_index: u32) -> &str {
+        self.entries
+            .get(entry_index as usize)
+            .and_then(|entry| self.initials.get(entry[10] as usize))
+            .map(String::as_str)
             .unwrap_or_default()
     }
 
     fn prefix_matches(&self, lowercase_query: &str) -> &[u32] {
         let start = self.by_name.partition_point(|&index| {
-            self.lowercase_name(index).unwrap_or_default().as_str() < lowercase_query
+            self.lowercase_name(index).unwrap_or_default() < lowercase_query
         });
         let count = self.by_name[start..].partition_point(|&index| {
             self.lowercase_name(index)
@@ -1120,7 +1552,7 @@ impl WorkspaceSymbolIndex {
     fn initials_matches(&self, lowercase_query: &str) -> &[u32] {
         let start = self
             .by_initials
-            .partition_point(|&index| self.entry_initials(index).as_str() < lowercase_query);
+            .partition_point(|&index| self.entry_initials(index) < lowercase_query);
         let count = self.by_initials[start..]
             .partition_point(|&index| self.entry_initials(index).starts_with(lowercase_query));
         &self.by_initials[start..start + count]
@@ -1130,6 +1562,21 @@ impl WorkspaceSymbolIndex {
         if self.wire_bytes() <= max_wire_bytes {
             return;
         }
+        self.retain_entries_within(max_wire_bytes);
+    }
+
+    /// Retain against the conservative accounting used by the segmented project layer. JSON wire
+    /// size is intentionally not the trigger here: `retained_wire_bytes` also reserves both search
+    /// permutations at their worst-case integer width, and mixing those two measures would let the
+    /// aggregate exceed the ceiling even though each segment passed its own exact-wire check.
+    fn retain_accounted_wire_budget(&mut self, max_wire_bytes: usize) {
+        if self.retained_wire_bytes() <= max_wire_bytes {
+            return;
+        }
+        self.retain_entries_within(max_wire_bytes);
+    }
+
+    fn retain_entries_within(&mut self, max_wire_bytes: usize) {
         let old = std::mem::take(self);
         let mut retained = Self {
             complete: false,
@@ -1138,6 +1585,7 @@ impl WorkspaceSymbolIndex {
         let mut budget = WorkspaceSymbolBudget::with_limit(max_wire_bytes);
         let mut package_ids = HashMap::<String, u32>::new();
         let mut name_ids = HashMap::<String, u32>::new();
+        let mut file_ids = HashMap::<String, u32>::new();
         let mut retained_indices = Vec::with_capacity(old.entries.len());
         for mut entry in old.entries {
             let Some(package) = old.packages.get(entry[9] as usize) else {
@@ -1148,16 +1596,35 @@ impl WorkspaceSymbolIndex {
                 retained_indices.push(None);
                 continue;
             };
+            let uri = match old.files.get(entry[0] as usize) {
+                Some(uri) => Some(uri.as_str()),
+                None if old.files.is_empty() => None,
+                None => {
+                    retained_indices.push(None);
+                    continue;
+                }
+            };
             let Some(parent) = remap_workspace_parent(entry[8], &retained_indices) else {
                 retained_indices.push(None);
                 continue;
             };
             let new_package = !package_ids.contains_key(package);
             let new_name = !name_ids.contains_key(name);
-            if !budget.reserve_merged_entry(name, new_name, package, new_package) {
+            let new_file = uri.is_some_and(|uri| !file_ids.contains_key(uri));
+            if !budget.reserve_merged_entry_in_file(
+                name,
+                new_name,
+                package,
+                new_package,
+                uri.unwrap_or(""),
+                new_file,
+            ) {
                 break;
             }
             entry[8] = parent;
+            if let Some(uri) = uri {
+                entry[0] = intern_workspace_string(uri, &mut retained.files, &mut file_ids);
+            }
             entry[9] = intern_workspace_string(package, &mut retained.packages, &mut package_ids);
             entry[10] = intern_workspace_string(name, &mut retained.names, &mut name_ids);
             let index = retained.entries.len() as u32;
@@ -1173,7 +1640,25 @@ impl WorkspaceSymbolIndex {
     }
 
     pub fn merge_from(&mut self, other: Self) {
-        let mut budget = WorkspaceSymbolBudget::from_index(self);
+        self.merge_within(other, MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES);
+    }
+
+    /// Merge under an explicit retention ceiling. The source-set default bounds one worker message;
+    /// the project-wide index is retained by the session and gets its own, larger, ceiling.
+    pub fn merge_within(&mut self, other: Self, max_wire_bytes: usize) {
+        let self_is_bound = !self.files.is_empty();
+        let other_is_bound = !other.files.is_empty();
+        if !self.entries.is_empty() && !other.entries.is_empty() && self_is_bound != other_is_bound
+        {
+            // `entry[0]` has two meanings across the worker boundary: a source position before
+            // `assign_uris`, and a file-table id afterwards. Merging either non-empty phase into
+            // the other cannot be repaired by choosing one interpretation; both commonly start at
+            // zero. Refuse symmetrically and retain the target's still-valid entries. Empty indexes
+            // are phase-agnostic and remain useful as merge accumulators/tombstones.
+            self.complete = false;
+            return;
+        }
+        let mut budget = WorkspaceSymbolBudget::from_index_within(self, max_wire_bytes);
         let mut package_ids = self
             .packages
             .iter()
@@ -1182,6 +1667,12 @@ impl WorkspaceSymbolIndex {
             .collect::<HashMap<_, _>>();
         let mut name_ids = self
             .names
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.clone(), index as u32))
+            .collect::<HashMap<_, _>>();
+        let mut file_ids = self
+            .files
             .iter()
             .enumerate()
             .map(|(index, value)| (value.clone(), index as u32))
@@ -1195,9 +1686,37 @@ impl WorkspaceSymbolIndex {
         self.complete &= other.complete;
         let mut remapped_entries = Vec::with_capacity(other.entries.len());
         for mut entry in other.entries {
-            if let Some(&index) = identities.get(&workspace_symbol_identity(&entry)) {
-                remapped_entries.push(Some(index));
-                continue;
+            // A bound index names its files; an unbound one still numbers them by position and
+            // shares that numbering with the index it is merging into. Either way `entry[0]` has to
+            // reach its final value before the identity check, or the same declaration merged from
+            // two source sets would not recognise itself.
+            let uri = match other.files.get(entry[0] as usize) {
+                Some(uri) => Some(uri.as_str()),
+                // A positional index shares its numbering with the index it merges into, so this
+                // is only meaningful while neither side has bound its URIs. Reading a file id as a
+                // position would silently report declarations against the wrong file, and the
+                // debug assertion below compiles out of both the gate and release profiles, so
+                // refuse the entry rather than trust it.
+                None if other.files.is_empty() && self.files.is_empty() => None,
+                None => {
+                    debug_assert!(
+                        other.files.is_empty(),
+                        "workspace symbol entry names a file its index does not hold"
+                    );
+                    self.complete = false;
+                    remapped_entries.push(None);
+                    continue;
+                }
+            };
+            let known_file = uri.and_then(|uri| file_ids.get(uri).copied());
+            if let Some(file) = known_file {
+                entry[0] = file;
+            }
+            if uri.is_none() || known_file.is_some() {
+                if let Some(&index) = identities.get(&workspace_symbol_identity(&entry)) {
+                    remapped_entries.push(Some(index));
+                    continue;
+                }
             }
             let Some(package) = other.packages.get(entry[9] as usize) else {
                 self.complete = false;
@@ -1211,9 +1730,19 @@ impl WorkspaceSymbolIndex {
             };
             let new_package = !package_ids.contains_key(package);
             let new_name = !name_ids.contains_key(name);
-            if !budget.reserve_merged_entry(name, new_name, package, new_package) {
+            if !budget.reserve_merged_entry_in_file(
+                name,
+                new_name,
+                package,
+                new_package,
+                uri.unwrap_or(""),
+                uri.is_some() && known_file.is_none(),
+            ) {
                 self.complete = false;
                 break;
+            }
+            if let Some(uri) = uri {
+                entry[0] = intern_workspace_string(uri, &mut self.files, &mut file_ids);
             }
             let package_id = intern_workspace_string(package, &mut self.packages, &mut package_ids);
             let name_id = intern_workspace_string(name, &mut self.names, &mut name_ids);
@@ -1232,9 +1761,48 @@ impl WorkspaceSymbolIndex {
         self.rebuild_search_order();
     }
 
-    pub fn encode(&self, query: &str, source_set: &[(String, String)]) -> Vec<Value> {
+    pub fn encode(&self, query: &str) -> Vec<Value> {
+        Self::encode_layers(query, &[self], &HashSet::new())
+    }
+
+    /// Answer a query from this index layered over `base`.
+    ///
+    /// This index is the live one -- open buffers and the sources analysis pulled in with them --
+    /// and `base` is what lies under it, outermost layer first.
+    ///
+    /// `open` is every document the session holds a buffer for. Shadowing is the union of that and
+    /// the files the live layer names, and it needs both: the live layer alone misses a buffer
+    /// edited down to no declarations at all, which would leave the project layer answering with
+    /// the file's text from disk, and `open` alone misses the support sources analysis pulled in
+    /// beside the open ones, which would report those declarations from two layers at once.
+    pub fn encode_over(&self, query: &str, base: &[&Self], open: &HashSet<&str>) -> Vec<Value> {
+        let mut layers = Vec::with_capacity(base.len() + 1);
+        layers.push(self);
+        layers.extend(base.iter().copied());
+        Self::encode_layers(query, &layers, open)
+    }
+
+    /// Rank across every layer at once, rung by rung.
+    ///
+    /// Layer order decides shadowing, not rank: running a whole layer's ladder before the next
+    /// layer's would let a subsequence match in a newly indexed chunk outrank an exact prefix match
+    /// in the segment beside it, and spend the response budget on it.
+    fn encode_layers(query: &str, layers: &[&Self], open: &HashSet<&str>) -> Vec<Value> {
+        Self::encode_layers_with_glob_steps(query, layers, open, MAX_WORKSPACE_SYMBOL_GLOB_STEPS)
+    }
+
+    /// Budgeted query implementation. The transition budget belongs to the request, not an index
+    /// segment: a project query walks every layer and may also try a keyboard-layout translation,
+    /// so resetting inside either loop multiplies attacker-controlled work by both dimensions.
+    fn encode_layers_with_glob_steps(
+        query: &str,
+        layers: &[&Self],
+        open: &HashSet<&str>,
+        mut remaining_glob_steps: usize,
+    ) -> Vec<Value> {
+        let mut result = Vec::new();
         if query.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
-            return Vec::new();
+            return result;
         }
         // A query typed without switching keyboard layout is searched in both forms, so `зфкыу`
         // finds what `parse` would.
@@ -1246,106 +1814,196 @@ impl WorkspaceSymbolIndex {
             }
         }
 
-        let mut result = Vec::new();
+        let mut shadowed = open.clone();
+        let mut suppressed = Vec::with_capacity(layers.len());
+        for (index, layer) in layers.iter().enumerate() {
+            // The outermost layer answers for its own files; it is what everything below shadows
+            // against, not something to shadow itself.
+            suppressed.push(if index == 0 {
+                HashSet::new()
+            } else {
+                layer.shadowed_files(&shadowed)
+            });
+            shadowed.extend(layer.files.iter().map(String::as_str));
+        }
+
         let mut wire_bytes = 2usize;
         // Two query forms can reach the same entry, so ranks are deduplicated across them.
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = vec![HashSet::new(); layers.len()];
         for query in &parsed {
-            if !self.encode_ranked(query, source_set, &mut result, &mut wire_bytes, &mut seen) {
-                break;
+            let rungs: &[WorkspaceSymbolRung] = if query.is_empty() {
+                &[WorkspaceSymbolRung::Every]
+            } else if query.globbed {
+                &[WorkspaceSymbolRung::Glob]
+            } else {
+                &[
+                    WorkspaceSymbolRung::NamePrefix,
+                    WorkspaceSymbolRung::InitialsPrefix,
+                    WorkspaceSymbolRung::InitialsSubsequence,
+                    WorkspaceSymbolRung::NameSubsequence,
+                ]
+            };
+            for rung in rungs {
+                for (index, layer) in layers.iter().enumerate() {
+                    let scope = EncodeScope {
+                        query,
+                        suppressed: &suppressed[index],
+                    };
+                    if !layer.encode_rung(
+                        *rung,
+                        &scope,
+                        &mut result,
+                        &mut wire_bytes,
+                        &mut seen[index],
+                        &mut remaining_glob_steps,
+                    ) {
+                        return result;
+                    }
+                }
             }
         }
         result
     }
 
-    /// Rank and encode matches for one parsed query. Returns false once the wire budget is spent.
-    fn encode_ranked(
+    /// File ids in this index whose URI a higher layer already answers for.
+    fn shadowed_files(&self, shadowed: &HashSet<&str>) -> HashSet<u32> {
+        if shadowed.is_empty() {
+            return HashSet::new();
+        }
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, uri)| shadowed.contains(uri.as_str()))
+            .map(|(id, _)| id as u32)
+            .collect()
+    }
+
+    /// Which interned names satisfy a fallback rung.
+    ///
+    /// Both fallback rungs are scans, and a project-wide index holds several entries per distinct
+    /// name -- 698,516 declarations over 173,551 names on the reference corpus. Testing the name
+    /// table once and reducing the per-entry work to an array read is what keeps a scan affordable
+    /// on the request thread.
+    /// `predicate` receives the name already lowercased and its camel-hump initials, both cached,
+    /// so a rung never lowercases or re-derives anything per name.
+    fn matching_names(&self, predicate: impl Fn(&str, &str) -> bool) -> Vec<bool> {
+        self.lowercase_names
+            .iter()
+            .enumerate()
+            .map(|(id, name)| {
+                let initials = self
+                    .initials
+                    .get(id)
+                    .map(String::as_str)
+                    .unwrap_or_default();
+                predicate(name, initials)
+            })
+            .collect()
+    }
+
+    fn name_matches(&self, entry_index: u32, matching: &[bool]) -> bool {
+        self.entries
+            .get(entry_index as usize)
+            .and_then(|entry| matching.get(entry[10] as usize))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Encode one rung of the ladder. Returns false once the wire budget is spent.
+    fn encode_rung(
         &self,
-        query: &WorkspaceQuery,
-        source_set: &[(String, String)],
+        rung: WorkspaceSymbolRung,
+        scope: &EncodeScope<'_>,
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
-        seen: &mut std::collections::HashSet<u32>,
+        seen: &mut HashSet<u32>,
+        remaining_glob_steps: &mut usize,
     ) -> bool {
+        let query = scope.query;
         let lowercase_query = &query.pattern;
-        if query.is_empty() {
-            for index in 0..self.entries.len() as u32 {
-                if !self.admit(index, query, source_set, result, wire_bytes, seen) {
-                    return false;
+        match rung {
+            WorkspaceSymbolRung::Every => {
+                for index in 0..self.entries.len() as u32 {
+                    if !self.admit(index, scope, result, wire_bytes, seen) {
+                        return false;
+                    }
                 }
             }
-            return true;
-        }
-
-        if query.globbed {
-            // A literal prefix still narrows through the sorted array; `*foo*` has none and falls
-            // back to a scan, which is the cost of a leading wildcard.
-            let prefix = query.literal_prefix();
-            return if prefix.is_empty() {
-                self.encode_glob_candidates(
-                    0..self.entries.len() as u32,
-                    query,
-                    source_set,
-                    result,
-                    wire_bytes,
-                    seen,
-                )
-            } else {
-                self.encode_glob_candidates(
-                    self.prefix_matches(prefix).iter().copied(),
-                    query,
-                    source_set,
-                    result,
-                    wire_bytes,
-                    seen,
-                )
-            };
-        }
-
-        for &index in self.prefix_matches(lowercase_query) {
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
-                return false;
+            WorkspaceSymbolRung::Glob => {
+                // A literal prefix still narrows through the sorted array; `*foo*` has none and
+                // falls back to a scan, which is the cost of a leading wildcard.
+                let prefix = query.literal_prefix();
+                return if prefix.is_empty() {
+                    self.encode_glob_candidates(
+                        0..self.entries.len() as u32,
+                        scope,
+                        result,
+                        wire_bytes,
+                        seen,
+                        remaining_glob_steps,
+                    )
+                } else {
+                    self.encode_glob_candidates(
+                        self.prefix_matches(prefix).iter().copied(),
+                        scope,
+                        result,
+                        wire_bytes,
+                        seen,
+                        remaining_glob_steps,
+                    )
+                };
             }
-        }
-        for &index in self.initials_matches(lowercase_query) {
-            if self
-                .source_name(index)
-                .is_some_and(|name| starts_with_lowercase(name, lowercase_query))
-            {
-                continue;
+            WorkspaceSymbolRung::NamePrefix => {
+                for &index in self.prefix_matches(lowercase_query) {
+                    if !self.admit(index, scope, result, wire_bytes, seen) {
+                        return false;
+                    }
+                }
             }
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
-                return false;
+            WorkspaceSymbolRung::InitialsPrefix => {
+                for &index in self.initials_matches(lowercase_query) {
+                    if self
+                        .source_name(index)
+                        .is_some_and(|name| starts_with_lowercase(name, lowercase_query))
+                    {
+                        continue;
+                    }
+                    if !self.admit(index, scope, result, wire_bytes, seen) {
+                        return false;
+                    }
+                }
             }
-        }
-        for &index in &self.by_initials {
-            let Some(name) = self.source_name(index) else {
-                continue;
-            };
-            let initials = camel_hump_initials(name);
-            if starts_with_lowercase(name, lowercase_query)
-                || initials.starts_with(lowercase_query)
-                || !is_ordered_subsequence_lowercase(&initials, lowercase_query)
-            {
-                continue;
+            WorkspaceSymbolRung::InitialsSubsequence => {
+                // The rung's own condition is the selective one; the exclusions only decide
+                // whether an earlier rung already claimed the name, so test them second.
+                let matching = self.matching_names(|name, initials| {
+                    is_ordered_subsequence_lowercase(initials, lowercase_query)
+                        && !initials.starts_with(lowercase_query)
+                        && !name.starts_with(lowercase_query)
+                });
+                for &index in &self.by_initials {
+                    if !self.name_matches(index, &matching) {
+                        continue;
+                    }
+                    if !self.admit(index, scope, result, wire_bytes, seen) {
+                        return false;
+                    }
+                }
             }
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
-                return false;
-            }
-        }
-        for index in 0..self.entries.len() as u32 {
-            let Some(name) = self.source_name(index) else {
-                continue;
-            };
-            let initials = camel_hump_initials(name);
-            if starts_with_lowercase(name, lowercase_query)
-                || is_ordered_subsequence_lowercase(&initials, lowercase_query)
-                || !is_ordered_subsequence_lowercase(name, lowercase_query)
-            {
-                continue;
-            }
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
-                return false;
+            WorkspaceSymbolRung::NameSubsequence => {
+                let matching = self.matching_names(|name, initials| {
+                    is_ordered_subsequence_lowercase(name, lowercase_query)
+                        && !name.starts_with(lowercase_query)
+                        && !is_ordered_subsequence_lowercase(initials, lowercase_query)
+                });
+                for index in 0..self.entries.len() as u32 {
+                    if !self.name_matches(index, &matching) {
+                        continue;
+                    }
+                    if !self.admit(index, scope, result, wire_bytes, seen) {
+                        return false;
+                    }
+                }
             }
         }
         true
@@ -1357,46 +2015,52 @@ impl WorkspaceSymbolIndex {
     fn encode_glob_candidates(
         &self,
         candidates: impl IntoIterator<Item = u32>,
-        query: &WorkspaceQuery,
-        source_set: &[(String, String)],
+        scope: &EncodeScope<'_>,
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
         seen: &mut std::collections::HashSet<u32>,
+        remaining_steps: &mut usize,
     ) -> bool {
-        let mut remaining_steps = MAX_WORKSPACE_SYMBOL_GLOB_STEPS;
         for index in candidates {
             let Some(name) = self.source_name(index) else {
                 continue;
             };
-            match matches_glob(&name.to_lowercase(), &query.pattern, &mut remaining_steps) {
+            match matches_glob(&name.to_lowercase(), &scope.query.pattern, remaining_steps) {
                 Some(true) => {}
                 Some(false) => continue,
                 None => return false,
             }
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+            if !self.admit(index, scope, result, wire_bytes, seen) {
                 return false;
             }
         }
         true
     }
 
-    /// Encode one entry if its package satisfies the query and no earlier rung claimed it.
+    /// Encode one entry if a higher layer does not already answer for its file, its package
+    /// satisfies the query, and no earlier rung claimed it.
     fn admit(
         &self,
         index: u32,
-        query: &WorkspaceQuery,
-        source_set: &[(String, String)],
+        scope: &EncodeScope<'_>,
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
         seen: &mut std::collections::HashSet<u32>,
     ) -> bool {
-        if !self.package_matches(index, query.package.as_deref()) {
+        if self
+            .entries
+            .get(index as usize)
+            .is_some_and(|entry| scope.suppressed.contains(&entry[0]))
+        {
+            return true;
+        }
+        if !self.package_matches(index, scope.query.package.as_deref()) {
             return true;
         }
         if !seen.insert(index) {
             return true;
         }
-        self.push_encoded(index, query, source_set, result, wire_bytes)
+        self.push_encoded(index, scope.query, result, wire_bytes)
     }
 
     /// Whether an entry's package satisfies a qualified query. An unqualified query admits every
@@ -1421,9 +2085,38 @@ impl WorkspaceSymbolIndex {
             })
     }
 
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// What this index costs against a retention budget: its entries plus every string table.
+    fn retained_wire_bytes(&self) -> usize {
+        self.entries
+            .len()
+            .saturating_mul(WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES)
+            .saturating_add(
+                self.packages
+                    .iter()
+                    .chain(&self.names)
+                    .chain(&self.files)
+                    .fold(0usize, |bytes, value| {
+                        bytes.saturating_add(workspace_symbol_string_wire_cost(value))
+                    }),
+            )
+    }
+
     /// Whether every indexable declaration fit in the retained snapshot budget.
     pub fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    /// Record a producer-side omission discovered before source text reached the generic builder.
+    ///
+    /// The disk adapter checks metadata before allocating a file. An oversized file is therefore
+    /// absent from `from_disk_sources` entirely, so only this explicit channel can distinguish the
+    /// bounded omission from a genuinely empty chunk.
+    pub(crate) fn mark_incomplete(&mut self) {
+        self.complete = false;
     }
 
     fn clear_incomplete(&mut self) {
@@ -1437,14 +2130,13 @@ impl WorkspaceSymbolIndex {
         &self,
         entry_index: u32,
         query: &WorkspaceQuery,
-        source_set: &[(String, String)],
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
     ) -> bool {
         let Some(entry) = self.entries.get(entry_index as usize).copied() else {
             return true;
         };
-        let Some((uri, _)) = source_set.get(entry[0] as usize) else {
+        let Some(uri) = self.files.get(entry[0] as usize) else {
             return true;
         };
         let Some(source_name) = self.source_name(entry_index) else {
@@ -1475,7 +2167,9 @@ impl WorkspaceSymbolIndex {
         });
         let symbol_bytes = serialized_json_wire_bytes(&symbol).unwrap_or(usize::MAX);
         let next_bytes = wire_bytes.saturating_add(symbol_bytes).saturating_add(1);
-        if next_bytes > MAX_WORKSPACE_SYMBOL_WIRE_BYTES {
+        if next_bytes > MAX_WORKSPACE_SYMBOL_WIRE_BYTES
+            || result.len() >= MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS
+        {
             return false;
         }
         *wire_bytes = next_bytes;
@@ -2804,7 +3498,7 @@ impl DocumentAnalysis {
             source,
             document_symbol_occurrences(
                 source,
-                &analysis,
+                &analysis.file,
                 budgets.document_symbol.remaining_entries(),
             ),
             &mut budgets.document_symbol,
@@ -3246,25 +3940,17 @@ mod tests {
         );
     }
 
-    fn indexed(sources: &[&str], uris: &[&str]) -> (WorkspaceSymbolIndex, Vec<(String, String)>) {
+    fn indexed(sources: &[&str], uris: &[&str]) -> WorkspaceSymbolIndex {
         let analysis = analyze_standalone_source_set(sources);
         // from_source_set already establishes the search order.
-        let index = WorkspaceSymbolIndex::from_source_set(sources, &analysis.files);
-        let source_set = uris
-            .iter()
-            .zip(sources)
-            .map(|(uri, source)| ((*uri).to_string(), (*source).to_string()))
-            .collect();
-        (index, source_set)
+        let mut index = WorkspaceSymbolIndex::from_source_set(sources, &analysis.files);
+        index.assign_uris(uris);
+        index
     }
 
-    fn encoded_names(
-        index: &WorkspaceSymbolIndex,
-        query: &str,
-        set: &[(String, String)],
-    ) -> Vec<String> {
+    fn encoded_names(index: &WorkspaceSymbolIndex, query: &str) -> Vec<String> {
         index
-            .encode(query, set)
+            .encode(query)
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect()
@@ -3272,27 +3958,56 @@ mod tests {
 
     #[test]
     fn workspace_symbols_match_wildcard_queries() {
-        let (index, set) = indexed(
+        let index = indexed(
             &["class KotlinParser\nclass Lexer\nfun parseAll(): Int = 1\n"],
             &["file:///W.kt"],
         );
 
         // Leading wildcard: no literal prefix to binary-search, so this exercises the scan path.
-        let mut interior = encoded_names(&index, "*parse*", &set);
+        let mut interior = encoded_names(&index, "*parse*");
         interior.sort();
         assert_eq!(interior, vec!["KotlinParser", "parseAll"]);
 
         // A literal prefix narrows through the sorted array before the glob verifies.
-        assert_eq!(encoded_names(&index, "Kotlin*", &set), vec!["KotlinParser"]);
+        assert_eq!(encoded_names(&index, "Kotlin*"), vec!["KotlinParser"]);
 
         // `?` spans exactly one character.
-        assert_eq!(encoded_names(&index, "Lexe?", &set), vec!["Lexer"]);
-        assert!(encoded_names(&index, "Lexe??", &set).is_empty());
+        assert_eq!(encoded_names(&index, "Lexe?"), vec!["Lexer"]);
+        assert!(encoded_names(&index, "Lexe??").is_empty());
+    }
+
+    #[test]
+    fn wildcard_transition_budget_is_shared_across_project_layers() {
+        let first = WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///First.kt",
+            "package demo\nclass RepeatedTarget\n",
+        )]);
+        let second = WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///Second.kt",
+            "package demo\nclass RepeatedTarget\n",
+        )]);
+        let query = WorkspaceQuery::parse("*target");
+        let mut probe_steps = usize::MAX;
+        assert_eq!(
+            matches_glob("repeatedtarget", &query.pattern, &mut probe_steps),
+            Some(true)
+        );
+        let one_match_steps = usize::MAX - probe_steps;
+
+        let encoded = WorkspaceSymbolIndex::encode_layers_with_glob_steps(
+            "*target",
+            &[&first, &second],
+            &HashSet::new(),
+            one_match_steps,
+        );
+
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0]["location"]["uri"], "file:///First.kt");
     }
 
     #[test]
     fn workspace_symbols_match_package_qualified_queries() {
-        let (index, set) = indexed(
+        let index = indexed(
             &[
                 "package kotlin.collections\nfun listOf(): Int = 1\n",
                 "package demo.app\nfun listOf(): Int = 2\n",
@@ -3308,27 +4023,27 @@ mod tests {
         );
 
         // Unqualified finds every declaration and keeps the compact source spelling.
-        assert_eq!(encoded_names(&index, "listOf", &set).len(), 3);
+        assert_eq!(encoded_names(&index, "listOf").len(), 3);
 
         // Qualifying by package selects one. The response name preserves that qualification so
         // clients that re-filter server results do not discard it as a non-match.
-        let qualified = index.encode("kotlin.collections.listOf", &set);
+        let qualified = index.encode("kotlin.collections.listOf");
         assert_eq!(qualified.len(), 1);
         assert_eq!(qualified[0]["name"], "kotlin.collections.listOf");
         assert_eq!(qualified[0]["containerName"], "kotlin.collections");
-        let slashed = index.encode("demo/app/listOf", &set);
+        let slashed = index.encode("demo/app/listOf");
         assert_eq!(slashed.len(), 1);
         assert_eq!(slashed[0]["name"], "demo/app/listOf");
 
         // A package that matches nothing yields nothing, rather than falling back to the bare name.
-        assert!(index.encode("nosuch.pkg.listOf", &set).is_empty());
+        assert!(index.encode("nosuch.pkg.listOf").is_empty());
         assert_eq!(
-            encoded_names(&index, "collections.listOf", &set),
+            encoded_names(&index, "collections.listOf"),
             vec!["kotlin.collections.listOf"],
             "a package suffix must match on a segment boundary, not inside another segment"
         );
         assert_eq!(
-            encoded_names(&index, "δοκιμή.app.findMe", &set),
+            encoded_names(&index, "δοκιμή.app.findMe"),
             vec!["Δοκιμή.app.findMe"],
             "qualified package matching must fold Unicode source identifiers, not ASCII bytes only"
         );
@@ -3336,23 +4051,20 @@ mod tests {
 
     #[test]
     fn workspace_symbols_match_a_wrong_layout_query() {
-        let (index, set) = indexed(&["fun parse(): Int = 1\n"], &["file:///L.kt"]);
+        let index = indexed(&["fun parse(): Int = 1\n"], &["file:///L.kt"]);
 
         // `зфкыу` is `parse` typed on a Cyrillic layout; the Latin form still matches too.
-        assert_eq!(encoded_names(&index, "зфкыу", &set), vec!["parse"]);
-        assert_eq!(encoded_names(&index, "parse", &set), vec!["parse"]);
+        assert_eq!(encoded_names(&index, "зфкыу"), vec!["parse"]);
+        assert_eq!(encoded_names(&index, "parse"), vec!["parse"]);
     }
 
     #[test]
     fn a_trailing_double_colon_is_stripped_before_matching() {
-        let (index, set) = indexed(&["class KotlinParser\n"], &["file:///E.kt"]);
+        let index = indexed(&["class SyntheticParser\n"], &["file:///E.kt"]);
 
         // Zed keeps only the text after the last `::` for its own filter, so a trailing marker
         // disables client filtering; the server must not try to match the marker itself.
-        assert_eq!(
-            encoded_names(&index, "*parser*::", &set),
-            vec!["KotlinParser"]
-        );
+        assert_eq!(encoded_names(&index, "*parser*::"), vec!["SyntheticParser"]);
     }
 
     #[test]
@@ -3439,10 +4151,10 @@ mod tests {
     fn workspace_symbol_names_survive_without_the_source_text() {
         let source = "class DetachedMarker\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Detached.kt".to_string(), String::new())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Detached.kt"]);
         let names = index
-            .encode("DetachedMarker", &source_set)
+            .encode("DetachedMarker")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
@@ -3453,10 +4165,10 @@ mod tests {
     fn workspace_symbols_match_camel_hump_initials() {
         let source = "class StructuredSourceFile\nfun drawrect(): Int = 1\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Humps.kt".to_string(), source.to_string())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Humps.kt"]);
         let names = index
-            .encode("ssf", &source_set)
+            .encode("ssf")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
@@ -3467,14 +4179,11 @@ mod tests {
     fn workspace_symbols_match_acronym_camel_boundaries() {
         let source = "class APIResponseCache\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Acronym.kt".to_string(), source.to_string())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Acronym.kt"]);
 
-        assert_eq!(
-            index.encode("arc", &source_set)[0]["name"],
-            "APIResponseCache"
-        );
-        assert_eq!(index.encode("a", &source_set).len(), 1);
+        assert_eq!(index.encode("arc")[0]["name"], "APIResponseCache");
+        assert_eq!(index.encode("a").len(), 1);
     }
 
     #[test]
@@ -3482,29 +4191,23 @@ mod tests {
         let source =
             "class StructuredSourceFile\nclass ÄtherMarker\nfun preResolvedValue(): Int = 1\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = [("file:///Search.kt".into(), source.into())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Search.kt"]);
 
-        assert_eq!(
-            index.encode("sf", &source_set)[0]["name"],
-            "StructuredSourceFile"
-        );
-        assert_eq!(index.encode("äm", &source_set)[0]["name"], "ÄtherMarker");
-        assert_eq!(
-            index.encode("rsv", &source_set)[0]["name"],
-            "preResolvedValue"
-        );
+        assert_eq!(index.encode("sf")[0]["name"], "StructuredSourceFile");
+        assert_eq!(index.encode("äm")[0]["name"], "ÄtherMarker");
+        assert_eq!(index.encode("rsv")[0]["name"], "preResolvedValue");
     }
 
     #[test]
     fn workspace_symbol_prefix_matches_lead_substring_matches() {
         let source = "fun preresolveAll(): Int = 1\nfun resolve(): Int = 2\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Rank.kt".to_string(), source.to_string())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Rank.kt"]);
 
         let names = index
-            .encode("resolve", &source_set)
+            .encode("resolve")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
@@ -3515,29 +4218,23 @@ mod tests {
     fn workspace_symbols_preserve_unicode_lowercase_matching_for_interior_matches() {
         let source = "class PrefixÄtherMarker\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Unicode.kt".to_string(), source.to_string())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Unicode.kt"]);
 
-        assert_eq!(
-            index.encode("äther", &source_set)[0]["name"],
-            "PrefixÄtherMarker"
-        );
+        assert_eq!(index.encode("äther")[0]["name"], "PrefixÄtherMarker");
     }
 
     #[test]
     fn workspace_symbols_keep_unicode_lowercase_equivalence_boundaries() {
         let source = "class StraßeMarker\nclass ΣigmaMarker\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = [("file:///Unicode.kt".into(), source.into())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Unicode.kt"]);
 
-        assert_eq!(
-            index.encode("straße", &source_set)[0]["name"],
-            "StraßeMarker"
-        );
-        assert!(index.encode("strasse", &source_set).is_empty());
-        assert_eq!(index.encode("σm", &source_set)[0]["name"], "ΣigmaMarker");
-        assert!(index.encode("ςm", &source_set).is_empty());
+        assert_eq!(index.encode("straße")[0]["name"], "StraßeMarker");
+        assert!(index.encode("strasse").is_empty());
+        assert_eq!(index.encode("σm")[0]["name"], "ΣigmaMarker");
+        assert!(index.encode("ςm").is_empty());
     }
 
     #[test]
@@ -3567,6 +4264,9 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
+            files: vec!["file:///Merged.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
         let mut other = WorkspaceSymbolIndex {
@@ -3575,6 +4275,9 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
+            files: vec!["file:///Merged.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
         index.rebuild_search_order();
@@ -3600,14 +4303,11 @@ mod tests {
                       fun `when`(): Int = 4\n\
                       class Constructed(val value: Int)\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![(
-            "file:///WorkspaceSymbols.kt".to_string(),
-            source.to_string(),
-        )];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///WorkspaceSymbols.kt"]);
 
         assert_eq!(
-            index.encode("KrustyWorkspaceParityBox", &source_set),
+            index.encode("KrustyWorkspaceParityBox"),
             vec![json!({
                 "name": "KrustyWorkspaceParityBox",
                 "kind": 5,
@@ -3621,13 +4321,10 @@ mod tests {
                 },
             })]
         );
+        assert_eq!(index.encode("krustyworkspaceparitybox").len(), 1);
+        assert_eq!(index.encode("KWPB").len(), 1);
         assert_eq!(
-            index.encode("krustyworkspaceparitybox", &source_set).len(),
-            1
-        );
-        assert_eq!(index.encode("KWPB", &source_set).len(), 1);
-        assert_eq!(
-            index.encode("nestedNeedle", &source_set),
+            index.encode("nestedNeedle"),
             vec![json!({
                 "name": "nestedNeedle",
                 "kind": 6,
@@ -3641,30 +4338,426 @@ mod tests {
                 },
             })]
         );
-        assert_eq!(
-            index
-                .encode("krustyWorkspaceParityNeedle", &source_set)
-                .len(),
-            1
-        );
-        assert_eq!(
-            index
-                .encode("krustyWorkspaceParityValue", &source_set)
-                .len(),
-            1
-        );
-        assert_eq!(index.encode("when", &source_set)[0]["name"], "when");
-        assert_eq!(index.encode("Constructed", &source_set).len(), 1);
+        assert_eq!(index.encode("krustyWorkspaceParityNeedle").len(), 1);
+        assert_eq!(index.encode("krustyWorkspaceParityValue").len(), 1);
+        assert_eq!(index.encode("when")[0]["name"], "when");
+        assert_eq!(index.encode("Constructed").len(), 1);
 
         let default_source = "class DefaultPackageMarker\n";
         let default_analysis = analyze_standalone_source_set(&[default_source]);
-        let default_index =
+        let mut default_index =
             WorkspaceSymbolIndex::from_source_set(&[default_source], &default_analysis.files);
-        let encoded = default_index.encode(
-            "DefaultPackageMarker",
-            &[("file:///Default.kt".into(), default_source.into())],
-        );
+        default_index.assign_uris(&["file:///Default.kt"]);
+        let encoded = default_index.encode("DefaultPackageMarker");
         assert_eq!(encoded[0]["containerName"], "");
+    }
+
+    #[test]
+    fn replacing_a_file_drops_what_the_index_held_for_it() {
+        let mut index = WorkspaceSymbolIndex::from_disk_sources(&[
+            ("file:///Kept.kt", "package demo\nclass KeptType\n"),
+            ("file:///Edited.kt", "package demo\nclass OldType\n"),
+        ]);
+
+        index.replace_files(
+            &["file:///Edited.kt".to_string()],
+            WorkspaceSymbolIndex::from_disk_sources(&[(
+                "file:///Edited.kt",
+                "package demo\nclass NewType\n",
+            )]),
+        );
+
+        assert_eq!(index.encode("KeptType").len(), 1);
+        assert_eq!(index.encode("NewType").len(), 1);
+        assert!(
+            index.encode("OldType").is_empty(),
+            "a re-indexed file must not keep its previous declarations"
+        );
+    }
+
+    #[test]
+    fn replacing_an_unreadable_file_removes_it_without_a_replacement() {
+        let mut index = WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///Deleted.kt",
+            "package demo\nclass DeletedType\n",
+        )]);
+
+        // The producer attempted the file and returned nothing: it is gone, not unchanged.
+        index.replace_files(
+            &["file:///Deleted.kt".to_string()],
+            WorkspaceSymbolIndex::default(),
+        );
+
+        assert!(index.encode("DeletedType").is_empty());
+    }
+
+    fn project_chunk(chunk: usize, files: usize) -> (Vec<String>, WorkspaceSymbolIndex) {
+        let sources: Vec<(String, String)> = (0..files)
+            .map(|index| {
+                let n = chunk * files + index;
+                (
+                    format!("file:///src/File{n}.kt"),
+                    format!("package sample.pkg{n}\nclass TypeNumber{n} {{\n  fun member{n}(): Int = 1\n}}\n"),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> = sources
+            .iter()
+            .map(|(uri, text)| (uri.as_str(), text.as_str()))
+            .collect();
+        let uris = sources.iter().map(|(uri, _)| uri.clone()).collect();
+        (uris, WorkspaceSymbolIndex::from_disk_sources(&borrowed))
+    }
+
+    #[test]
+    fn the_project_layer_keeps_every_chunk_in_a_logarithmic_number_of_segments() {
+        let mut project = ProjectSymbolIndex::default();
+        const CHUNKS: usize = 64;
+        const FILES: usize = 8;
+        for chunk in 0..CHUNKS {
+            let (uris, segment) = project_chunk(chunk, FILES);
+            project.replace_files(&uris, segment);
+        }
+
+        // A class and its member per file, none dropped.
+        assert_eq!(project.entry_count(), CHUNKS * FILES * 2);
+        // Segments merge only while their sizes are within a factor of two, so their count grows
+        // with the logarithm of the corpus rather than with the number of chunks. Re-merging into
+        // one index per chunk is what this structure exists to avoid.
+        assert!(
+            project.segment_count() <= 8,
+            "segments grew to {} over {CHUNKS} chunks",
+            project.segment_count()
+        );
+
+        let live = WorkspaceSymbolIndex::default();
+        let layers = project.layers();
+        assert_eq!(
+            live.encode_over("TypeNumber0", &layers, &HashSet::new())[0]["name"],
+            "TypeNumber0"
+        );
+        let last = CHUNKS * FILES - 1;
+        assert_eq!(
+            live.encode_over(&format!("TypeNumber{last}"), &layers, &HashSet::new())[0]["location"]
+                ["uri"],
+            format!("file:///src/File{last}.kt")
+        );
+    }
+
+    #[test]
+    fn the_project_budget_covers_unmerged_segments_as_one_layer() {
+        let mut project = ProjectSymbolIndex::default();
+        let (first_uris, first) = project_chunk(0, 8);
+        let first_cost = first.retained_wire_bytes();
+        let limit = first_cost.saturating_add(first_cost / 2);
+        project.replace_files_within(&first_uris, first, limit);
+
+        let (second_uris, second) = project_chunk(1, 8);
+        project.replace_files_within(&second_uris, second, limit);
+
+        let retained = project
+            .segments
+            .iter()
+            .map(WorkspaceSymbolIndex::retained_wire_bytes)
+            .sum::<usize>();
+        assert!(retained <= limit, "retained {retained} bytes over {limit}");
+        assert!(
+            !project.is_complete(),
+            "admitting only part of the second unmerged segment must be observable"
+        );
+    }
+
+    #[test]
+    fn a_broad_query_is_bounded_by_the_response_symbol_cap() {
+        let sources: Vec<(String, String)> = (0..MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS * 2)
+            .map(|n| {
+                (
+                    format!("file:///Broad{n}.kt"),
+                    format!("package demo\nclass BroadType{n}\n"),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> = sources
+            .iter()
+            .map(|(uri, text)| (uri.as_str(), text.as_str()))
+            .collect();
+        let index = WorkspaceSymbolIndex::from_disk_sources(&borrowed);
+
+        // Every one of these matches on the strongest rung, so the cap decides the count.
+        let encoded = index.encode("BroadType");
+        assert_eq!(encoded.len(), MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS);
+        assert!(encoded
+            .iter()
+            .all(|symbol| symbol["location"]["range"]["start"]["line"].is_number()));
+    }
+
+    #[test]
+    fn removing_a_file_keeps_the_remaining_rank_order() {
+        let mut index = WorkspaceSymbolIndex::from_disk_sources(&[
+            ("file:///A.kt", "package demo\nclass RankAlpha\n"),
+            ("file:///B.kt", "package demo\nclass RankBeta\n"),
+            ("file:///C.kt", "package demo\nclass RankGamma\n"),
+        ]);
+        let before = index
+            .encode("rank")
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(before, vec!["RankAlpha", "RankBeta", "RankGamma"]);
+
+        // Removal renumbers the rank orders rather than re-sorting them; the survivors must keep
+        // both their order and their identity.
+        index.remove_files(&["file:///B.kt".to_string()]);
+
+        let after = index
+            .encode("rank")
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(after, vec!["RankAlpha", "RankGamma"]);
+        assert_eq!(index.encode("rg")[0]["name"], "RankGamma");
+        assert_eq!(index.file_uris(), ["file:///A.kt", "file:///C.kt"]);
+    }
+
+    #[test]
+    fn rank_crosses_layers_rung_by_rung() {
+        let mut project = ProjectSymbolIndex::default();
+        // Indexed first, so it ends up in the older, lower segment.
+        project.replace_files(
+            &["file:///Exact.kt".to_string()],
+            WorkspaceSymbolIndex::from_disk_sources(&[(
+                "file:///Exact.kt",
+                "package demo\nclass Parser\n",
+            )]),
+        );
+        project.replace_files(
+            &["file:///Weak.kt".to_string()],
+            WorkspaceSymbolIndex::from_disk_sources(&[(
+                "file:///Weak.kt",
+                "package demo\nclass PlaceholderAdapterServiceRenderer\n",
+            )]),
+        );
+
+        let live = WorkspaceSymbolIndex::default();
+        let names = live
+            .encode_over("parser", &project.layers(), &HashSet::new())
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+
+        // The deliberately synthetic long name matches `parser` only as a subsequence on the
+        // weakest rung, and sits in a newer segment. Ranking a whole layer at a time would put it
+        // first.
+        assert_eq!(names.first().map(String::as_str), Some("Parser"));
+    }
+
+    #[test]
+    fn re_indexing_a_file_replaces_it_in_whichever_segment_holds_it() {
+        let mut project = ProjectSymbolIndex::default();
+        for chunk in 0..16 {
+            let (uris, segment) = project_chunk(chunk, 8);
+            project.replace_files(&uris, segment);
+        }
+        let stale_uri = "file:///src/File3.kt".to_string();
+
+        project.replace_files(
+            std::slice::from_ref(&stale_uri),
+            WorkspaceSymbolIndex::from_disk_sources(&[(
+                stale_uri.as_str(),
+                "package sample.pkg3\nclass RewrittenType\n",
+            )]),
+        );
+
+        let live = WorkspaceSymbolIndex::default();
+        let layers = project.layers();
+        assert_eq!(
+            live.encode_over("RewrittenType", &layers, &HashSet::new())
+                .len(),
+            1
+        );
+        // `TypeNumber3` is a prefix of `TypeNumber30`, so ask the location, not the name: nothing
+        // the rewritten file used to declare may survive in an older segment.
+        assert!(
+            live.encode_over("TypeNumber", &layers, &HashSet::new())
+                .iter()
+                .all(|symbol| symbol["location"]["uri"] != stale_uri.as_str()),
+            "the declarations the file used to hold must not survive in an older segment"
+        );
+        // Its neighbours in the same original chunk are untouched.
+        assert_eq!(
+            live.encode_over("TypeNumber4", &layers, &HashSet::new())[0]["location"]["uri"],
+            "file:///src/File4.kt"
+        );
+    }
+
+    #[test]
+    fn the_live_layer_shadows_the_project_layer_for_files_it_names() {
+        let project = WorkspaceSymbolIndex::from_disk_sources(&[
+            ("file:///Open.kt", "package demo\nclass SavedShape\n"),
+            ("file:///Closed.kt", "package demo\nclass ClosedShape\n"),
+        ]);
+        let live_source = "package demo\nclass EditedShape\n";
+        let analysis = analyze_standalone_source_set(&[live_source]);
+        let mut live = WorkspaceSymbolIndex::from_source_set(&[live_source], &analysis.files);
+        live.assign_uris(&["file:///Open.kt"]);
+
+        let names = |query: &str| {
+            live.encode_over(query, &[&project], &HashSet::new())
+                .into_iter()
+                .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // The buffer's current text wins over what its file says on disk...
+        assert_eq!(names("EditedShape"), vec!["EditedShape"]);
+        assert!(names("SavedShape").is_empty());
+        // ...while every unopened file stays searchable.
+        assert_eq!(names("ClosedShape"), vec!["ClosedShape"]);
+    }
+
+    #[test]
+    fn parse_only_indexing_matches_the_analyzed_source_set() {
+        let source = "package demo\n\
+                      class DiskType {\n\
+                      \u{20}\u{20}fun diskMember(): Int = 1\n\
+                      }\n\
+                      fun diskFunction(): Int = 2\n\
+                      typealias DiskAlias = Int\n";
+        let analysis = analyze_standalone_source_set(&[source]);
+        let mut analyzed = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        analyzed.assign_uris(&["file:///Disk.kt"]);
+
+        // Nobody opened this file, so it is only parsed. The declarations must be the same ones a
+        // fully analyzed source set produces, or search results would depend on what is open.
+        let indexed = WorkspaceSymbolIndex::from_disk_sources(&[("file:///Disk.kt", source)]);
+
+        for query in ["DiskType", "diskMember", "diskFunction", "DiskAlias"] {
+            assert_eq!(
+                indexed.encode(query),
+                analyzed.encode(query),
+                "parse-only extraction diverged for {query}"
+            );
+        }
+        assert!(indexed.is_complete());
+    }
+
+    #[test]
+    fn parse_only_indexing_skips_files_past_the_per_file_cap() {
+        let small = "package demo\nclass SmallDiskType\n";
+        let large = format!(
+            "package demo\nclass LargeDiskType\n// {}\n",
+            "x".repeat(MAX_INDEXED_FILE_BYTES)
+        );
+        let indexed = WorkspaceSymbolIndex::from_disk_sources(&[
+            ("file:///Small.kt", small),
+            ("file:///Large.kt", large.as_str()),
+        ]);
+
+        assert_eq!(indexed.encode("SmallDiskType").len(), 1);
+        assert!(
+            indexed.encode("LargeDiskType").is_empty(),
+            "an oversized file must be skipped before it is parsed"
+        );
+        assert!(!indexed.is_complete());
+    }
+
+    #[test]
+    fn workspace_symbols_name_their_own_files_after_binding() {
+        let first = "package demo\nclass BoundFirst\n";
+        let second = "package demo\nclass BoundSecond\n";
+        let analysis = analyze_standalone_source_set(&[first, second]);
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[first, second], &analysis.files);
+        index.assign_uris(&["file:///First.kt", "file:///Second.kt"]);
+
+        // Nothing outside the index holds these sources any more, and a location still resolves.
+        assert_eq!(
+            index.encode("BoundSecond")[0]["location"]["uri"],
+            "file:///Second.kt"
+        );
+        assert_eq!(index.file_uris(), ["file:///First.kt", "file:///Second.kt"]);
+        assert!(index.is_complete());
+    }
+
+    #[test]
+    fn binding_drops_entries_no_uri_names_and_reports_incompleteness() {
+        let source = "package demo\nclass Named\n";
+        let other = "package demo\nclass Unnamed\n";
+        let analysis = analyze_standalone_source_set(&[source, other]);
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source, other], &analysis.files);
+        index.assign_uris(&["file:///Named.kt"]);
+
+        assert_eq!(index.encode("Named").len(), 1);
+        assert!(index.encode("Unnamed").is_empty());
+        assert!(!index.is_complete());
+    }
+
+    #[test]
+    fn merging_bound_indexes_unions_their_file_tables() {
+        let first_source = "package demo\nclass MergedFirst\n";
+        let second_source = "package demo\nclass MergedSecond\n";
+        let first_analysis = analyze_standalone_source_set(&[first_source]);
+        let second_analysis = analyze_standalone_source_set(&[second_source]);
+        let mut first =
+            WorkspaceSymbolIndex::from_source_set(&[first_source], &first_analysis.files);
+        let mut second =
+            WorkspaceSymbolIndex::from_source_set(&[second_source], &second_analysis.files);
+        // Both number their only file 0; the union has to keep them apart.
+        first.assign_uris(&["file:///MergedFirst.kt"]);
+        second.assign_uris(&["file:///MergedSecond.kt"]);
+        first.merge_from(second);
+
+        assert_eq!(
+            first.encode("MergedFirst")[0]["location"]["uri"],
+            "file:///MergedFirst.kt"
+        );
+        assert_eq!(
+            first.encode("MergedSecond")[0]["location"]["uri"],
+            "file:///MergedSecond.kt"
+        );
+        assert!(first.is_complete());
+    }
+
+    #[test]
+    fn a_positional_index_refuses_a_bound_merge_before_uri_assignment() {
+        let positional_source = "package demo\nclass PositionalType\n";
+        let analysis = analyze_standalone_source_set(&[positional_source]);
+        let mut positional =
+            WorkspaceSymbolIndex::from_source_set(&[positional_source], &analysis.files);
+        let bound = WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///Bound.kt",
+            "package demo\nclass BoundType\n",
+        )]);
+
+        // Both indexes use entry[0] == 0, but one means source position zero and the other means
+        // file-table id zero. Combining them before the positional side is bound must not make
+        // either interpretation win accidentally.
+        positional.merge_from(bound);
+        positional.assign_uris(&["file:///Positional.kt"]);
+
+        assert_eq!(
+            positional.encode("PositionalType")[0]["location"]["uri"],
+            "file:///Positional.kt"
+        );
+        assert!(positional.encode("BoundType").is_empty());
+        assert!(!positional.is_complete());
+    }
+
+    #[test]
+    fn assigning_uris_twice_keeps_the_original_bound_locations() {
+        let mut index = WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///Original.kt",
+            "package demo\nclass BoundOnce\n",
+        )]);
+
+        // A second assignment would read file id zero as source position zero. Production gate and
+        // release profiles disable debug assertions, so correctness must not depend on one.
+        index.assign_uris(&["file:///Wrong.kt"]);
+
+        assert_eq!(
+            index.encode("BoundOnce")[0]["location"]["uri"],
+            "file:///Original.kt"
+        );
+        assert!(!index.is_complete());
     }
 
     #[test]
@@ -3674,20 +4767,23 @@ mod tests {
         let second_analysis = analyze_standalone_source_set(&[source]);
         let mut first = WorkspaceSymbolIndex::from_source_set(&[source], &first_analysis.files);
         let mut second = WorkspaceSymbolIndex::from_source_set(&[source], &second_analysis.files);
+        let uris = [
+            "file:///unused.kt",
+            "file:///unused2.kt",
+            "file:///unused3.kt",
+            "file:///Shared.kt",
+        ];
         first.remap_files(&[(0, 3)], 4);
         second.remap_files(&[(0, 3)], 4);
+        first.assign_uris(&uris);
+        second.assign_uris(&uris);
         first.merge_from(second);
-        let mut source_set = vec![
-            ("file:///unused.kt".to_string(), String::new()),
-            ("file:///unused2.kt".to_string(), String::new()),
-            ("file:///unused3.kt".to_string(), String::new()),
-            ("file:///Shared.kt".to_string(), source.to_string()),
-        ];
 
-        assert_eq!(first.encode("OverlapType", &source_set).len(), 1);
-        assert_eq!(first.encode("sharedFunction", &source_set).len(), 1);
-        source_set.truncate(3);
-        assert!(first.encode("OverlapType", &source_set).is_empty());
+        assert_eq!(first.encode("OverlapType").len(), 1);
+        assert_eq!(first.encode("sharedFunction").len(), 1);
+        // Only the file an entry actually names is retained, so the merged index no longer depends
+        // on the source set it was assembled from.
+        assert_eq!(first.file_uris(), ["file:///Shared.kt"]);
     }
 
     #[test]
@@ -3701,30 +4797,20 @@ mod tests {
         let mut second =
             WorkspaceSymbolIndex::from_source_set(&[second_source], &second_analysis.files);
         second.remap_files(&[(0, 1)], 2);
+        let uris = ["file:///First.kt", "file:///Second.kt"];
+        first.assign_uris(&uris);
+        second.assign_uris(&uris);
 
-        assert_eq!(
-            first.encode(
-                "target",
-                &[("file:///First.kt".into(), first_source.into())]
-            )[0]["name"],
-            "pretargetResult"
-        );
+        assert_eq!(first.encode("target")[0]["name"], "pretargetResult");
         first.merge_from(second);
-        let source_set = vec![
-            ("file:///First.kt".into(), first_source.into()),
-            ("file:///Second.kt".into(), second_source.into()),
-        ];
         let names = first
-            .encode("target", &source_set)
+            .encode("target")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["targetResult", "pretargetResult"]);
-        assert_eq!(
-            first.encode("arc", &source_set)[0]["name"],
-            "APIResponseCache"
-        );
+        assert_eq!(first.encode("arc")[0]["name"], "APIResponseCache");
     }
 
     #[test]
@@ -3739,6 +4825,9 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec![name],
+            files: vec!["file:///Long.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
 
@@ -3754,24 +4843,21 @@ mod tests {
         let source =
             "fun pretargetValue(): Int = 1\nfun targetValue(): Int = 2\nclass APIResultStore\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Ranked.kt"]);
         let mut wire = serde_json::to_value(index).unwrap();
         wire["by_name"] = json!([0]);
         wire["by_initials"] = json!([0]);
 
         let rebuilt = serde_json::from_value::<WorkspaceSymbolIndex>(wire).unwrap();
-        let source_set = [("file:///Ranked.kt".into(), source.into())];
         let names = rebuilt
-            .encode("target", &source_set)
+            .encode("target")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["targetValue", "pretargetValue"]);
-        assert_eq!(
-            rebuilt.encode("ars", &source_set)[0]["name"],
-            "APIResultStore"
-        );
+        assert_eq!(rebuilt.encode("ars")[0]["name"], "APIResultStore");
         assert!(rebuilt.is_complete());
     }
 
@@ -3791,26 +4877,20 @@ mod tests {
             "by_name": [],
             "by_initials": [],
             "names": ["Root", "Child", "CrossFile", "Outside", "Orphan", "Malformed"],
+            "files": ["file:///Symbols.kt", "file:///Other.kt"],
             "complete": true
         });
 
         let index = serde_json::from_value::<WorkspaceSymbolIndex>(wire).unwrap();
-        let source_set = [
-            ("file:///Symbols.kt".into(), String::new()),
-            ("file:///Other.kt".into(), String::new()),
-        ];
 
         assert_eq!(index.entries.len(), 5);
         assert!(!index.is_complete());
-        assert_eq!(index.encode("Root", &source_set)[0]["name"], "Root");
-        assert_eq!(
-            index.encode("Child", &source_set)[0]["containerName"],
-            "Root"
-        );
+        assert_eq!(index.encode("Root")[0]["name"], "Root");
+        assert_eq!(index.encode("Child")[0]["containerName"], "Root");
         for name in ["CrossFile", "Outside", "Orphan"] {
-            assert_eq!(index.encode(name, &source_set)[0]["containerName"], "");
+            assert_eq!(index.encode(name)[0]["containerName"], "");
         }
-        assert!(index.encode("Malformed", &source_set).is_empty());
+        assert!(index.encode("Malformed").is_empty());
     }
 
     #[test]
@@ -3824,6 +4904,9 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Kept".into(), "Removed".into()],
+            files: vec!["file:///Kept.kt".into(), "file:///Removed.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
         index.rebuild_search_order();
@@ -3832,13 +4915,8 @@ mod tests {
 
         assert!(!index.is_complete());
         assert_eq!(index.entries.len(), 1);
-        assert_eq!(
-            index.encode("kept", &[("file:///Kept.kt".into(), String::new())])[0]["name"],
-            "Kept"
-        );
-        assert!(index
-            .encode("removed", &[("file:///Kept.kt".into(), String::new())])
-            .is_empty());
+        assert_eq!(index.encode("kept")[0]["name"], "Kept");
+        assert!(index.encode("removed").is_empty());
     }
 
     #[test]
@@ -3847,7 +4925,14 @@ mod tests {
         let capacity = budget.remaining_entry_capacity();
         let mut entries = Vec::with_capacity(capacity);
         for line in 0..capacity {
-            if !budget.reserve_merged_entry("Needle", line == 0, "package", line == 0) {
+            if !budget.reserve_merged_entry_in_file(
+                "Needle",
+                line == 0,
+                "package",
+                line == 0,
+                "file:///Needle.kt",
+                line == 0,
+            ) {
                 break;
             }
             let lo = (line * 7) as u32;
@@ -3869,13 +4954,15 @@ mod tests {
         }
         assert!(!budget.reserve_merged_entry("Needle", false, "package", false));
         let entry_count = entries.len();
-        let source = "Needle\n".repeat(entry_count);
         let mut index = WorkspaceSymbolIndex {
             entries,
             packages: vec!["package".into()],
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
+            files: vec!["file:///Needle.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: false,
         };
         index.rebuild_search_order();
@@ -3894,9 +4981,7 @@ mod tests {
         );
         assert!(!analysis.workspace_symbols.entries.is_empty());
         assert!(!analysis.workspace_symbols.is_complete());
-        let long_uri = format!("file:///{}.kt", "u".repeat(2048));
-        let source_set = [(long_uri, source)];
-        let encoded = index.encode("needle", &source_set);
+        let encoded = index.encode("needle");
         assert!(encoded.len() < entry_count);
         assert!(
             serialized_json_wire_bytes(&encoded).unwrap() <= MAX_WORKSPACE_SYMBOL_WIRE_BYTES,
@@ -5076,6 +6161,9 @@ mod tests {
             by_name: vec![0],
             by_initials: vec![0],
             names: vec!["Result".repeat(1024)],
+            files: vec!["file:///Result.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: false,
         };
         let non_workspace_bytes = analysis.non_workspace_semantic_wire_bytes();
@@ -5122,6 +6210,9 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
+            files: vec!["file:///Merged.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
         index.rebuild_search_order();

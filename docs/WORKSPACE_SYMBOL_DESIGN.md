@@ -17,20 +17,27 @@ Landed since:
 - Declaration names interned into the index rather than sliced out of retained source text (#403).
 - Query forms beyond a bare substring: wildcards, package-qualified queries, wrong-keyboard-layout
   mapping, and the trailing-`::` client-filter escape.
+- **Project-wide, in-memory coverage.** The index has its own URI table, so `entry[0]` names a file
+  rather than addressing a position in the retained source set; `document_symbol_occurrences` takes
+  the parsed `File`, so an unopened file is indexed by a parse alone; the engine raises a parse-only
+  symbol pass over the project model's source inventory; that index persists across analysis
+  batches; and the live analysis layer shadows it per file, so an edited buffer wins over its text
+  on disk. This retired
+  `workspace_symbols_do_not_observe_the_snapshot_after_the_last_document_closes`.
 
-**Still outstanding, and the reason this document exists:** the index is built from the analyzed
-source set, so it only covers modules loaded for currently-open documents. On a project the size of
-the kotlin repo that is a small fraction of the whole — the query forms above search correctly, but
-over a fraction of the codebase. Everything from "Composite index" onward is design for that
-remaining work, not a description of current behaviour.
+**Still outstanding:** everything from "Composite index" onward — persistence across restarts,
+dependency indices, and git-driven discovery — is design for remaining work, not a description of
+current behaviour. Coverage itself is in place; what is missing is making a cold start cheap and
+extending the index past the workspace's own sources.
 
 ## Problem
 
-Symbol search covers only what the live analysis snapshot holds. `textDocument/documentSymbol` reads
-`self.documents`, which is open files alone; `WorkspaceSymbolIndex` widens that to the analyzed
-source set, which is the modules `ProjectSources` loaded for those open documents. Neither reaches a
-file nobody has opened, so a project-wide picker still cannot find most declarations in a large
-repository.
+Symbol search used to cover only what the live analysis snapshot held. `textDocument/documentSymbol`
+reads `self.documents`, which is open files alone; `WorkspaceSymbolIndex` widened that to the
+analyzed source set, which is the modules `ProjectSources` loaded for those open documents. Neither
+reached a file nobody had opened, so a project-wide picker could not find most declarations in a
+large repository. The project layer described below is what closed that gap; the rest of this
+document is the design it came from and the work still ahead of it.
 
 ## Client behaviour we must design against
 
@@ -146,16 +153,25 @@ not a branch-switching one.
 
 ## Index structure
 
-`WorkspaceSymbolIndex` holds `entries: Vec<[u32; 11]>` (file, byte span, pre-resolved start/end line
-and character, kind, parent, package id, name id), interned `names` and `packages` tables, two
+`WorkspaceSymbolIndex` holds `entries: Vec<[u32; 13]>` (file, selection span, pre-resolved start/end
+line and character, kind, parent, package id, name id, declaration span), interned `names` and
+`packages` tables, two
 permutations of entry indices (`by_name`, `by_initials`) that make the cheap rungs binary searches,
 and a `complete` flag.
 
-Project-wide coverage needs one more table and one changed meaning:
+It also holds a `files` table: `entry[0]` addresses the index's own files rather than a position in
+the retained source set, which is what lets an entry describe a file whose text nothing holds. Names
+were interned first; the URI table was the other half of that coupling.
 
-- a URI table, so `entry[0]` addresses the index's own files rather than a position in the retained
-  source set — that is what lets an entry describe a file whose text is not held;
-- names already interned, which was the other half of that coupling and is done.
+A freshly built index is still positional — the builder runs in the analysis worker, which is handed
+sources and never sees a URI. `assign_uris` ends that phase at the batch the server applies, the one
+place that knows which document each position was. `merge_from` unions file tables by URI, so two
+indexes built from different source sets merge without either one's numbering leaking into the
+other. Those phases are a runtime invariant rather than a debug-only convention: URI assignment is
+one-shot, and a merge refuses either direction when one non-empty side is positional and the other
+is bound. In both cases the valid entries are preserved and the index becomes incomplete. This is
+necessary because `entry[0] == 0` is valid in both representations, so inspecting an individual
+entry cannot recover which meaning was intended after an invalid merge.
 
 The layout stays pointer-free and `u32`-addressed, matching the AST/IR convention and, not
 coincidentally, what a memory-mapped format would require.
@@ -165,10 +181,20 @@ coincidentally, what a memory-mapped format would require.
 `document_symbol_occurrences` (`crates/krusty-lsp/src/compiler_analysis/document_symbols.rs`) is
 shared by `documentSymbol` and `workspace/symbol`, so kinds and ranges agree between them.
 
-Indexing unopened files needs a parse without resolution:
-`krusty::frontend::parse_source_with_detected_features` feeds the same extractor. Guard it with a
-per-file byte cap — a multi-megabyte generated or sparse file otherwise stalls the build for tens of
-seconds, which is how a 32 MiB test fixture once starved the request loop.
+Indexing unopened files needs a parse without resolution, so `document_symbol_occurrences` takes the
+parsed `File` rather than a `FileAnalysis`; nothing in it reads resolved types. `parsed_file_symbols`
+feeds it from `krusty::frontend::parse_source_with_detected_features`, and lives in
+`compiler_analysis` so the retained-index layer above never depends on the AST — the architecture
+test enforces that boundary.
+
+It is guarded by `MAX_INDEXED_FILE_BYTES`, checked against file metadata before the read so an
+oversized file costs a `stat` rather than a parse. A multi-megabyte generated or sparse file
+otherwise stalls the build for tens of seconds, which is how a 32 MiB test fixture once starved the
+request loop. The disk adapter feeds that metadata-filtered iterator directly into the same generic
+URI/source builder used by borrowed test inputs, so only one file's owned text is retained at a
+time. Because a metadata rejection happens before that builder can observe the source, the adapter
+also marks the resulting index incomplete explicitly; an oversized-only chunk must not look like a
+complete empty chunk.
 
 ## Query language
 
@@ -203,12 +229,31 @@ The same mechanism explains why rust-analyzer's own `#` and `*` markers are brok
 durable fix is upstream — Zed already special-cases `::`, so honouring a server-declared "do not
 re-filter" is a small, precedented change. Worth filing regardless of what ships here.
 
+### Cost of answering
+
+Both fallback rungs are scans, so a project-wide index has to keep the per-entry work to nothing:
+the lowercase name and camel-hump expansion are derived once per interned name and held beside the
+name table, and a rung tests the name table (173,551) rather than the entries (698,516).
+
+The response is capped by symbol count as well as by bytes. A broad query matches tens of thousands
+of declarations, and encoding them was the dominant cost of answering — for a client that keeps 100.
+Results are emitted strongest rung first, so the cap keeps the best of them, and because encoding
+stops at the cap the weakest rungs are never scanned at all.
+
+Measured on a synthetic corpus of the reference shape (698,880 declarations, 6 segments, release
+build): 20–30 ms per query, against 123–526 ms before those two changes, and 81 ms for a query that
+matched nothing. Re-indexing one edited file is 12.7 ms, against 132 ms when removal re-sorted both
+rank orders instead of renumbering them.
+
 ### Cost against the index
 
 - **Wildcards** — extract the literal prefix before the first metacharacter, binary-search that
   range, then glob-verify inside it. `Foo*` is sub-microsecond; `*Foo*` degrades to the 4 ms
   substring scan. `?` consumes one Unicode scalar rather than one UTF-8 byte, and a shared
-  transition budget bounds adversarial wildcard backtracking. No new index structure.
+  transition budget bounds adversarial wildcard backtracking. The budget is owned by the whole
+  request and is spent across every project segment, live layer, ranking rung, and translated query;
+  resetting it at any inner loop would multiply the bound by attacker-controlled index structure.
+  No new index structure.
 - **Keyboard layout** — a ЙЦУКЕН→QWERTY positional table applied to the *query*; search both forms
   and union. The explicit mapping touches Cyrillic characters only, so ordinary qualified-query
   punctuation does not spuriously create a translated query. ~200 bytes, zero index cost.
@@ -224,6 +269,33 @@ commit deltas    segments per commit since the baseline  small, mmap'd
 baseline         full snapshot at commit C               mmap'd, ~38 MiB
 dependencies     one index per artifact                  mmap'd, shared across workspaces
 ```
+
+Two of these exist today, both in memory. The edit overlay is the live analysis index. The baseline
+is `ProjectSymbolIndex`, and it is already segmented rather than singular: each chunk becomes a
+segment, and adjacent segments merge only while their sizes are within a factor of two, so a
+declaration is rewritten a logarithmic number of times instead of once per later chunk. Measured on
+the corpus shape, folding every chunk into one index cost 54 ms at 20k entries and grew from there,
+on the thread that also serves requests; segmenting holds the median splice near 5 ms with under a
+dozen resident segments. The 192 MiB project budget belongs to the aggregate rather than an
+individual merge: `replace_files` reserves the conservative retained cost of every untouched
+segment before admitting a replacement, including a tail too differently sized to merge. This
+keeps the promised whole-layer ceiling true between compactions as well as immediately after one.
+
+Shadowing is per file, and layer order decides shadowing only — ranking walks rung by rung across
+every layer, or a subsequence match in a newly indexed chunk would outrank an exact prefix match in
+the segment beside it. `replace_files` is the tombstone: every URI a chunk *attempted* is
+re-indexed, so a file that was deleted or became unreadable loses its entries rather than keeping
+them forever.
+
+The shadow set is the union of the open documents and the files the live layer names, and it needs
+both halves. The live layer names only files some entry references, so a buffer edited down to no
+declarations names nothing and would let the project layer answer with the file's text from disk;
+the open set alone misses the support sources analysis pulls in beside the open ones, which would be
+reported from two layers at once. `didClose` drops the closed file from the live layer, because a
+layer that names a file is a layer that hides the one below it.
+
+What is missing is making any of it survive a restart, and compaction is currently unbounded in the
+sense that it only ever merges — there is no eviction.
 
 This is the segment model Lucene uses (immutable segments, tombstones, background compaction) and
 the milestone model IntelliJ's shared indexes use — a prebuilt index for a nearby commit, with local
@@ -286,13 +358,24 @@ milestones instead of thrashing. Affordable precisely because the pages are file
   (`implementation.rs:1118`). Do **not** advertise `resolveProvider`.
 - Add `"workspace/symbol" => self.workspace_symbols(id, params)` to the dispatch
   (`implementation.rs:1190`).
-- Add `EngineCommand::IndexSymbols`, submitted after `set_workspace_root` and on project refresh;
-  the build runs on the engine thread.
-- Use `git ls-files` for discovery when the root is a git repository (0.77s versus a 7.9s cold
-  walk), falling back to the existing `find_sources` walker (`project/sources.rs:674`) otherwise.
-- Answer inline when the index is ready. When it is not, park the request id against a token and
-  answer on completion — the pattern already used for `pending_materializations`
-  (`implementation.rs:1717`).
+- `EngineCommand::IndexSymbols` carries one chunk of the inventory; the build runs on the engine
+  thread. It is raised alongside the diagnostic sweep, from the same `workspace_index_candidates`
+  walk, once an interactive analysis has been served — enumerating a 64k-file tree ahead of the
+  first open document delayed its diagnostics past two minutes.
+- Its chunks are drained after interactive work and ahead of both diagnostic levels. Sharing the
+  diagnostic queue would be wrong in both directions: a symbol chunk is a parse per file, and a
+  diagnostic chunk is a full analysis, so one queue paces search behind a sweep that runs for hours.
+- Chunks are larger than diagnostic chunks (128 files against 32) because a parse returns to the
+  command loop fast enough for an interactive request to overtake it anyway.
+- They sit *between* the two diagnostic levels, not ahead of both. Ahead of the sweep, which is a
+  full analysis per chunk; behind the neighbourhood level, which is the fast lane for a file the
+  user just saved and must not queue behind a whole project's worth of parses.
+- Still to do: use `git ls-files` for discovery when the root is a git repository (0.77s versus a
+  7.9s cold walk), falling back to the existing `find_sources` walker (`project/sources.rs:674`)
+  otherwise.
+- A query is answered inline from whatever is published. It waits only while a document is open and
+  its analysis is in flight; with nothing open there is nothing to revalidate, because the project
+  layer already covers the file.
 
 ### Partial results
 
@@ -309,9 +392,12 @@ within the 3–5 s build without any client-side coordination.
 
 ### Invalidation
 
-- `didChange` / `didSave` on an open document, and watched-file changes: re-parse that one file and
-  splice its entries.
-- Project model refresh: rebuild the baseline.
+- `didChange` / `didSave` on an open document: the next analysis batch rebuilds the live layer, and
+  it shadows the project layer for that file, so no splice is needed. Watched-file changes queue a
+  symbol re-index of exactly the changed files, spliced by `replace_files`.
+- Project model refresh: the generation changes, the project layer is dropped, and the replacement
+  sweep refills it. A batch carrying an older generation describes a model that no longer exists and
+  is rejected.
 - Branch switch: diff against the baseline commit, re-index the changed set into a delta segment.
 - Staleness is keyed on **content hash, not mtime** — `git checkout` rewrites mtimes wholesale,
   which would invalidate everything on exactly the operation we care about. Hashing 129 MiB costs
@@ -322,8 +408,18 @@ within the 3–5 s build without any client-side coordination.
 Following the existing `MAX_*` conventions, set high enough that neither reference corpus trips
 them — truncating a 700k-symbol index to save 20 MiB defeats the feature's purpose.
 
-- max indexed files, max entries, max retained name bytes
-- max symbols per response
+- max indexed files, max entries, max retained name bytes. The project layer's ceiling is separate
+  from the source set's: `MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES` bounds one worker
+  message at 8 MiB, and inheriting it capped project-wide coverage at roughly 30k declarations.
+  `MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES` is 192 MiB of wire budget, which at the ~167
+  worst-case bytes this accounting charges per entry admits about 1.2M declarations against the
+  698,516 the largest reference corpus holds. Admission subtracts every retained segment from that
+  aggregate budget before accepting a new one; the conservative accounting includes both search
+  permutations rather than relying only on the smaller serialized JSON size.
+- `MAX_INDEXED_FILE_BYTES` per file, checked against metadata before the read
+- `MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS` per response, alongside the byte ceiling
+- Reaching any of them is reported to the client once per generation. A symbol the picker never
+  shows is indistinguishable from one that does not exist, so silent truncation reads as absence.
 - max library materialisations per query: 32
 - dependency cache size cap with LRU eviction
 
@@ -335,9 +431,13 @@ Unit:
 - extractor produces identical output through the `&File` signature change
 - index build, each query rung, and the ladder's fallthrough order
 - wildcard prefix extraction and glob verification
+- one wildcard transition budget shared across all query layers
 - keyboard-layout transliteration
 - adaptive qualified-vs-simple naming
 - budget truncation
+- aggregate project-budget enforcement before differently sized segments merge
+- positional/bound phase violations preserve valid locations and report incompleteness
+- metadata-rejected disk sources report incompleteness through the production adapter
 - per-file invalidation splices correctly
 - layer shadowing and tombstone resolution
 
@@ -357,13 +457,18 @@ Done:
 
 - Uncapped index, ranked matching, interned names.
 - Query forms: wildcards, package-qualified, wrong keyboard layout, `::` escape.
+- **Project-wide, in-memory index** — URI table, a parse-only pass over the model's own source
+  inventory (the same bounded ignore-aware walk the diagnostic sweep uses, rather than a second
+  definition of what counts as a workspace source), an index that persists across analysis batches,
+  and an open-buffer overlay so an edited file's current text wins over what is on disk.
 
-1. **Project-wide, in-memory index** — URI table, a bounded ignore-aware walk of the model's source
-   roots, an index that persists across analysis batches instead of being rebuilt per batch, and an
-   open-buffer overlay so an edited file's current text wins over what is on disk. This is what makes
-   coverage real, and it retires
-   `workspace_symbols_do_not_observe_the_snapshot_after_the_last_document_closes`, which asserts that
-   a query waits for a fresh snapshot rather than serving anything analysis has not revalidated.
+  Two things fell out of building it. Symbol indexing gets its own queue rather than riding the
+  diagnostic sweep: a symbol chunk is a parse per file and a diagnostic chunk is a full analysis, so
+  sharing a queue would pace project-wide search behind a sweep that runs for hours. And binding
+  URIs happens at the batch the server applies, not in the builder — the analysis worker is handed
+  sources and never sees a URI, so the builder numbers entries positionally and one `assign_uris`
+  call at that boundary converts positions into file ids. Nothing has to cross the worker wire.
+
 2. **Git-driven discovery** — the largest single startup win (7.9s → 0.77s), independent of
    persistence, low risk.
 3. **Dependency indices** — content-addressed, shared across workspaces. Immutable, so the lowest
