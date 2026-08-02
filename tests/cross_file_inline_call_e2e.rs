@@ -215,16 +215,18 @@ fn same_file_inline_still_splices() {
     common::expect_box_ok_with_stdlib(SRC, "same_file_inline_splice_kept");
 }
 
-/// The `contracts/kt47168.kt` shape: an inline fn whose body carries a `contract { }` block
-/// (erased, not a closure) and a TAIL value-return is safe standalone — it lowers + emits as a
-/// facade static, so the cross-file call links. The `callsInPlace` contract is decoded but
-/// unneeded for codegen here.
+/// The `contracts/kt47168.kt` shape: an inline fn whose body carries an ALIASED contract intrinsic
+/// (erased, not a closure) and a tail value-return is safe standalone — it lowers + emits as a
+/// facade static, so the cross-file call links. Resolving the alias to semantic callable identity
+/// keeps inline eligibility consistent with checker erasure; the effects themselves are unneeded
+/// for codegen here.
 #[test]
 fn contract_and_tail_return_inline_fun_called_cross_file() {
     const LIB: &str = "// OPT_IN: kotlin.contracts.ExperimentalContracts\n\
-                       import kotlin.contracts.*\n\
+                       import kotlin.contracts.InvocationKind\n\
+                       import kotlin.contracts.contract as declareContract\n\
                        inline fun foo(x: () -> String, y: () -> String): String {\n\
-                       \x20   contract {\n\
+                       \x20   declareContract {\n\
                        \x20       callsInPlace(x, InvocationKind.EXACTLY_ONCE)\n\
                        \x20       callsInPlace(y, InvocationKind.EXACTLY_ONCE)\n\
                        \x20   }\n\
@@ -237,6 +239,55 @@ fn contract_and_tail_return_inline_fun_called_cross_file() {
     common::expect_box_ok_files_with_stdlib(
         &[("Lib.kt", LIB), ("Main.kt", MAIN)],
         "cross_file_contract_tail_return_inline",
+    );
+}
+
+/// A same-named declaration in an UNRELATED package must not globally disable contract erasure or
+/// facade emission. The federated resolver applies the defining file's package/import scope first;
+/// the unrelated source remains present in the module symbol table but is not a candidate here.
+#[test]
+fn unrelated_package_contract_name_does_not_shadow_intrinsic() {
+    const UNRELATED: &str = "package unrelated\n\
+                             fun contract(block: () -> Unit) { block() }\n";
+    const LIB: &str = "// OPT_IN: kotlin.contracts.ExperimentalContracts\n\
+                       package target\n\
+                       import kotlin.contracts.*\n\
+                       inline fun combine(x: () -> String, y: () -> String): String {\n\
+                       \x20   contract {\n\
+                       \x20       callsInPlace(x, InvocationKind.EXACTLY_ONCE)\n\
+                       \x20       callsInPlace(y, InvocationKind.EXACTLY_ONCE)\n\
+                       \x20   }\n\
+                       \x20   return x() + y()\n\
+                       }\n";
+    const MAIN: &str = "package target\n\
+                        fun box(): String = combine({ \"O\" }, { \"K\" })\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Unrelated.kt", UNRELATED),
+            ("Lib.kt", LIB),
+            ("Main.kt", MAIN),
+        ],
+        "cross_file_contract_scope_isolation",
+    );
+}
+
+/// The inverse precedence case: a LOCAL function shadows an imported intrinsic inside this inline
+/// body. Its directly passed lambda is safe in an emitted body, but it must execute normally rather
+/// than be erased as contract DSL. Requiring the runtime result proves facade pre-check and checker
+/// erasure agree on lexical identity; merely accepting the source would not catch accidental erasure.
+#[test]
+fn local_contract_shadow_executes_in_cross_file_inline_facade() {
+    const LIB: &str = "import kotlin.contracts.*\n\
+                       var localContractResult = \"\"\n\
+                       inline fun runLocalContract(): String {\n\
+                       \x20   fun contract(block: () -> Unit) { block() }\n\
+                       \x20   contract { localContractResult = \"OK\" }\n\
+                       \x20   return localContractResult\n\
+                       }\n";
+    const MAIN: &str = "fun box(): String = runLocalContract()\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_local_contract_shadow_executes",
     );
 }
 
@@ -449,5 +500,119 @@ fn suspend_inline_extension_cross_file_still_rejects() {
         )
         .is_none(),
         "cross-file call to a suspend inline extension must be rejected, never emitted"
+    );
+}
+
+/// A `::ref` to a sibling-file inline fn that is NOT emitted (reified — it specializes per call
+/// site) used to decline silently: the reference fell through to unrelated overloads or the file
+/// died with the generic backend error. The checker now names the real problem at the reference.
+#[test]
+fn cross_file_ref_to_unemitted_inline_fn_names_the_reason() {
+    const LIB: &str = "inline fun <reified T> tag(): String = \"t\"\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val f: () -> String = ::tag\n\
+                        \x20   return f()\n\
+                        }\n";
+    let Some(diags) = common::module_front_end_diagnostics(&[("Lib.kt", LIB), ("Main.kt", MAIN)])
+    else {
+        return;
+    };
+    assert!(
+        diags.iter().any(|d| d
+            .contains("cannot reference 'tag': the inline function is not emitted as a callable")),
+        "expected the unemitted-inline diagnostic, got: {diags:?}"
+    );
+}
+
+/// A bound reference must follow the same declaration-keyed facade decision as a direct call.
+/// Generic inline extensions with safe bodies are now emitted even when they accept a function;
+/// executing the reference verifies that resolution and lowering agree on the static receiver ABI.
+#[test]
+fn cross_file_bound_ref_to_emitted_inline_extension_executes() {
+    const LIB: &str = "inline fun <T> T.tag(f: () -> String): String = f()\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val g: (() -> String) -> String = \"x\"::tag\n\
+                        \x20   return g { \"OK\" }\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_bound_ref_emitted_inline_extension",
+    );
+}
+
+/// The UNBOUND extension-reference route (`Type::extension`) has its own candidate selection before
+/// it reaches the shared facade outcome. Execute it separately from `value::extension` so both
+/// syntax forms prove that an emitted extension exposes its receiver as argument zero.
+#[test]
+fn cross_file_unbound_ref_to_emitted_inline_extension_executes() {
+    const LIB: &str = "inline fun <T> T.tag(f: () -> String): String = f()\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val g: (String, () -> String) -> String = String::tag\n\
+                        \x20   return g(\"x\") { \"OK\" }\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_unbound_ref_emitted_inline_extension",
+    );
+}
+
+/// Guard against over-firing: references to fns that ARE facade-emitted (a plain fn, and an
+/// inline fn eligible for the facade-static path) still resolve clean cross-file.
+#[test]
+fn cross_file_ref_to_emitted_fns_stays_clean() {
+    const LIB: &str = "fun plain(x: Int): Int = x + 1\n\
+                       inline fun twice(x: Int, block: (Int) -> Int): Int = block(block(x))\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val p: (Int) -> Int = ::plain\n\
+                        \x20   val t: (Int, (Int) -> Int) -> Int = ::twice\n\
+                        \x20   return \"OK\"\n\
+                        }\n";
+    let Some(diags) = common::module_front_end_diagnostics(&[("Lib.kt", LIB), ("Main.kt", MAIN)])
+    else {
+        return;
+    };
+    assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+}
+
+/// A checker-only pipeline (the LSP path — no `prepare_module_symbols` registration) must NOT
+/// report the unemitted-inline diagnostic for a cross-file reference to a plain fn: without
+/// registration data the reference declines silently and types through the fallbacks, as before.
+#[test]
+fn checker_only_pipeline_cross_file_ref_to_plain_fn_stays_clean() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let jdk = common::jdk_modules();
+    let diags = common::front_end_diagnostics_files(
+        &[
+            "fun plain(x: Int): Int = x + 1\n",
+            "fun box(): String {\n\
+             \x20   val p: (Int) -> Int = ::plain\n\
+             \x20   return \"OK\"\n\
+             }\n",
+        ],
+        &[stdlib],
+        jdk.as_deref(),
+    );
+    assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+}
+
+/// The ADAPTED-reference form (default-parameter adaptation): `::tag` passed to a
+/// function-typed parameter of smaller arity resolves through `select_adapted_source_ref`,
+/// which must name the same reason for an unemitted sibling inline fn rather than decline
+/// silently.
+#[test]
+fn cross_file_adapted_ref_to_unemitted_inline_fn_names_the_reason() {
+    const LIB: &str = "inline fun <reified T> tag(x: String, y: Char = 'K'): String = x + y\n";
+    const MAIN: &str = "fun <T, U> call(f: (T) -> U, x: T): U = f(x)\n\
+                        fun box(): String = call(::tag, \"O\")\n";
+    let Some(diags) = common::module_front_end_diagnostics(&[("Lib.kt", LIB), ("Main.kt", MAIN)])
+    else {
+        return;
+    };
+    assert!(
+        diags.iter().any(|d| d
+            .contains("cannot reference 'tag': the inline function is not emitted as a callable")),
+        "expected the unemitted-inline diagnostic, got: {diags:?}"
     );
 }

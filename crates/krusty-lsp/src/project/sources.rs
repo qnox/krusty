@@ -105,7 +105,7 @@ impl ProjectSources {
         let mut visible_module_indices = HashSet::new();
         let mut module_indices = HashSet::new();
         for source_path in &source_paths {
-            if let Some(module_index) = model.module_index_for_source(source_path) {
+            if let Some(module_index) = module_relations.module_index_for_source(source_path) {
                 module_indices.insert(module_index);
                 inferred_module_indices.insert(module_index);
                 visible_module_indices.insert(module_index);
@@ -186,7 +186,7 @@ impl ProjectSources {
         }
         paths.retain(|path| self.excluded_paths.binary_search(path).is_err());
         paths.retain(|path| {
-            model
+            module_relations
                 .module_index_for_source(path)
                 .is_some_and(|index| visible_module_indices.contains(&index))
         });
@@ -194,7 +194,7 @@ impl ProjectSources {
         paths.dedup();
         let mut newest_dependency_source: BTreeMap<usize, std::time::SystemTime> = BTreeMap::new();
         for path in &paths {
-            let Some(index) = model
+            let Some(index) = module_relations
                 .module_index_for_source(path)
                 .filter(|index| !inferred_module_indices.contains(index))
             else {
@@ -226,7 +226,7 @@ impl ProjectSources {
             .map(|(&index, _)| index)
             .collect::<HashSet<_>>();
         paths.retain(|path| {
-            !model
+            !module_relations
                 .module_index_for_source(path)
                 .is_some_and(|index| covered_modules.contains(&index))
         });
@@ -236,7 +236,7 @@ impl ProjectSources {
         let java_paths = java_paths
             .into_iter()
             .map(|path| {
-                let (_, root) = model
+                let (_, root) = module_relations
                     .module_source_root_for_source(&path)
                     .expect("inventoried source must have an owning source root");
                 let relative = path
@@ -253,7 +253,7 @@ impl ProjectSources {
             .collect::<Vec<_>>();
         let (mut inferred_paths, dependency_paths): (Vec<_>, Vec<_>) =
             kotlin_paths.into_iter().partition(|path| {
-                model
+                module_relations
                     .module_index_for_source(path)
                     .is_some_and(|index| inferred_module_indices.contains(&index))
             });

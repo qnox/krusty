@@ -628,6 +628,7 @@ dependencies = [
  "dhat",
  "fs2",
  "krusty",
+ "pprof",
  "roxmltree",
  "serde",
  "serde_json",

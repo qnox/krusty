@@ -92,7 +92,9 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         Some(ir) => ir,
         None => return Some(format!("lower: {}", lower_bail.borrow())),
     };
-    emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp).err()
+    emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp)
+        .and_then(require_compilation_output)
+        .err()
 }
 
 fn emit_checked_ir(
@@ -132,11 +134,39 @@ fn emit_checked_ir(
         &opts,
         &run,
     ) {
-        Some(o) if !o.is_empty() => Ok(o),
-        _ => Err(run
+        // `Some([])` is NOT a bail: an all-`expect` file (decls stripped) or a typealias-only file
+        // legitimately emits zero classes (the gate's per-file acceptance, mirrored). Emptiness at
+        // the whole-file-set level is reported by the callers.
+        Some(o) => Ok(o),
+        None => Err(run
             .inline_bail()
             .map(|r| format!("emit: {r}"))
             .unwrap_or_else(|| "emit: emit_all bailed (unsupported codegen)".into())),
+    }
+}
+
+/// Skip reason for any compilation unit that lowers cleanly but has no loadable JVM output.
+///
+/// The examples are intentionally illustrative, not an exhaustive syntax classification: this
+/// survey should classify the generic emission result instead of acquiring special cases for
+/// individual source forms.
+const EMITTED_NO_CLASSES: &str =
+    "emit: compilation unit emitted no classes (for example expect-stripped or typealias-only sources)";
+
+/// Enforce the conformance harness's output postcondition at the compilation-unit boundary.
+///
+/// `emit_checked_ir` accepts `Some([])` for an individual file because another file compiled in
+/// the same source set may provide the module's runnable classes. Only the aggregate output can
+/// decide whether there is anything for the gate to load. Keeping that decision here gives
+/// single-file and multi-file inputs the same rule without file-, module-, or syntax-specific
+/// branches in the emission path.
+fn require_compilation_output(
+    emitted: Vec<(String, Vec<u8>)>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    if emitted.is_empty() {
+        Err(EMITTED_NO_CLASSES.into())
+    } else {
+        Ok(emitted)
     }
 }
 
@@ -170,31 +200,11 @@ fn first_error_blocks(
         return Err(d.diags[0].msg.clone());
     }
 
-    for (i, file) in files.iter().enumerate() {
-        let facade = file_class_name(&blocks[i].0, file.package.as_deref());
-        for &decl in &file.decls {
-            match file.decl(decl) {
-                krusty::ast::Decl::Fun(f) if syms.emits_fn_facade(file, i as u32, decl, f) => {
-                    let facade_name = krusty::types::type_name(&facade);
-                    syms.fn_facades_by_decl
-                        .insert((i as u32, decl.0), facade_name);
-                    // The by-name map is receiver-less only (its consumer is a `SymRecv::TopLevel`
-                    // call) — an extension entry would mis-own a plain call (backend parity).
-                    if f.receiver.is_none() {
-                        syms.fn_facades.insert(f.name.clone(), facade_name);
-                    }
-                }
-                krusty::ast::Decl::Property(p) if p.receiver.is_none() => {
-                    if let Some(&(ty, is_var, is_const)) = syms.props.get(&p.name) {
-                        let facade_name = krusty::types::type_name(&facade);
-                        syms.prop_facades
-                            .insert(p.name.clone(), (facade_name, ty, is_var, is_const));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    // Use the production registrar for both positive facade owners and explicit splice-only
+    // outcomes. Keeping a survey-local copy previously let extension functions and backend
+    // emittability policy drift from the CLI and conformance harness.
+    let stems: Vec<String> = blocks.iter().map(|(stem, _)| stem.clone()).collect();
+    krusty::jvm::prepare_module_symbols(&files, &stems, &mut syms);
 
     let mut all = Vec::new();
     for (i, file) in files.iter().enumerate() {
@@ -221,7 +231,7 @@ fn first_error_blocks(
             &mut ir, file, i as u32, &facade, &syms, cp,
         )?);
     }
-    Ok(all)
+    require_compilation_output(all)
 }
 
 /// Survey a `// MODULE:` test the way the gate's `compile_module_test` builds it: each build unit
@@ -297,7 +307,21 @@ fn first_error_module(
     result
 }
 
+/// Copy at most `limit` Unicode scalar values from a diagnostic.
+///
+/// Survey input can contain source-defined Unicode identifiers. Byte slicing at an arbitrary display
+/// limit can panic in the reporting path, so every fallback bucket uses this shared safe truncation.
+fn truncate_chars(message: &str, limit: usize) -> String {
+    message.chars().take(limit).collect()
+}
+
 fn categorize(err: &str) -> String {
+    // Backend (`lower:`/`emit:`) diagnostics are already curated, precise reasons — keep them
+    // verbatim rather than re-bucketing on a substring coincidence (e.g. a `lower:` reason that
+    // happens to contain "bridge").
+    if err.starts_with("lower:") || err.starts_with("emit:") {
+        return truncate_chars(err, 70);
+    }
     if err.contains("class bodies support") {
         return "nested decl in class body".into();
     }
@@ -322,17 +346,14 @@ fn categorize(err: &str) -> String {
     if err.contains("conflicting declarations") {
         return "conflicting declarations".into();
     }
-    if err.starts_with("lower:") || err.starts_with("emit:") {
-        return err[..err.len().min(70)].to_string();
-    }
     if err.contains("krusty: ") {
         let m = err.trim_start_matches("krusty: ");
-        return format!("krusty: {}", &m[..m.len().min(60)]);
+        return format!("krusty: {}", truncate_chars(m, 60));
     }
     if err.contains("expected") {
-        return format!("parse: {}", &err[..err.len().min(60)]);
+        return format!("parse: {}", truncate_chars(err, 60));
     }
-    format!("other: {}", &err[..err.len().min(60)])
+    format!("other: {}", truncate_chars(err, 60))
 }
 
 fn collect_kt(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -455,5 +476,99 @@ fn run() {
         for (k, v) in &sorted {
             println!("  {:4}  {k}", v.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stdlib + JDK `lib/modules` compile classpath, or `None` → skip (toolchain unprovisioned).
+    fn test_cp() -> Option<Rc<Classpath>> {
+        let stdlib = krusty::toolchain::stdlib_jar()?;
+        let mut paths = vec![stdlib];
+        if let Some(j) = krusty::toolchain::jdk_modules() {
+            paths.push(j);
+        }
+        Some(Rc::new(Classpath::new(paths)))
+    }
+
+    /// An all-`expect` common FILE legitimately emits ZERO classes after `strip_matched_expects`
+    /// (kotlinc's JVM-MPP model) — the block set must still compile, mirroring the gate's
+    /// per-file-empty acceptance. Regression pin: the survey used to misreport this as
+    /// `emit: emit_all bailed`, its top skip-bucket (~68 corpus files).
+    #[test]
+    fn all_expect_file_in_set_is_not_an_emit_bail() {
+        let Some(cp) = test_cp() else { return };
+        let blocks = vec![
+            (
+                "Common".to_string(),
+                "expect class S\nexpect fun make(): S\n".to_string(),
+            ),
+            (
+                "Main".to_string(),
+                "actual typealias S = String\nactual fun make(): S = \"OK\"\nfun box(): String = make()\n"
+                    .to_string(),
+            ),
+        ];
+        let features =
+            krusty::features::LangFeatures::from_source("// LANGUAGE: +MultiPlatformProjects");
+        let out = first_error_blocks(&blocks, &cp, &features);
+        assert!(
+            out.is_ok(),
+            "an all-expect file must not bail the whole set: {out:?}"
+        );
+    }
+
+    /// A block set whose files emit NOTHING (a typealias-only file lowers to no classes) is a skip
+    /// with its PRECISE reason — not the `emit_all bailed` catch-all (mirrors the gate's
+    /// whole-module-empty skip).
+    #[test]
+    fn typealias_only_set_reports_precise_reason() {
+        let Some(cp) = test_cp() else { return };
+        let blocks = vec![(
+            "Alias".to_string(),
+            "typealias Greeting = String\n".to_string(),
+        )];
+        let features = krusty::features::LangFeatures::from_source("");
+        let out = first_error_blocks(&blocks, &cp, &features);
+        assert_eq!(
+            out.err().as_deref(),
+            Some(
+                "emit: compilation unit emitted no classes (for example expect-stripped or typealias-only sources)"
+            )
+        );
+    }
+
+    /// A single-file survey goes through the same compilation-unit postcondition as a block set.
+    /// This prevents the two entry points from drifting back to separate file/module rules while
+    /// still requiring both to report a successful-but-empty emission precisely.
+    #[test]
+    fn typealias_only_file_uses_compilation_unit_empty_reason() {
+        let Some(cp) = test_cp() else { return };
+        assert_eq!(
+            first_error("typealias Greeting = String\n", &cp, "Alias").as_deref(),
+            Some(EMITTED_NO_CLASSES)
+        );
+    }
+
+    #[test]
+    fn backend_categories_are_not_rebucketed_by_incidental_words() {
+        assert_eq!(
+            categorize("lower: gate:suspend-erasure-bridge"),
+            "lower: gate:suspend-erasure-bridge"
+        );
+        assert_eq!(
+            categorize("emit: inline splice failed"),
+            "emit: inline splice failed"
+        );
+    }
+
+    #[test]
+    fn diagnostic_truncation_respects_unicode_boundaries() {
+        let message = "é".repeat(80);
+        let truncated = truncate_chars(&message, 60);
+        assert_eq!(truncated.chars().count(), 60);
+        assert!(message.starts_with(&truncated));
     }
 }
