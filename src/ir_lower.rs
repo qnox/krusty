@@ -2143,19 +2143,16 @@ fn lower_file_at_reporting_impl(
     }
 
     // A splice-only inline fun is registered/lowered NOWHERE (its body is expanded at each call
-    // site); an `inline_fn_facade_emittable` one ALSO emits a facade static for cross-file calls,
-    // so it goes through registration and body lowering like a plain fun.
-    let splice_only_inline = |f: &FunDecl, d: DeclId| {
-        f.is_inline()
-            && !f.has_callable_inline_extension_body()
-            && !syms.inline_fn_facade_emittable(file, file_index, d, f)
-    };
+    // site). Consume the same declaration-keyed semantic answer as backend registration so adding
+    // a callable source shape cannot make one layer emit an owner while the other omits its body.
+    let has_callable_body =
+        |f: &FunDecl, d: DeclId| syms.source_fn_has_callable_body(file, file_index, d, f);
 
     // Pass 1b: register callable top-level and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
             lo.set_bail("deep:fun-register"); // pass 1b phase marker (survey diagnostic only)
-            if splice_only_inline(f, d) {
+            if !has_callable_body(f, d) {
                 continue;
             }
             if let Some(recv_ref) = &f.receiver {
@@ -2433,7 +2430,7 @@ fn lower_file_at_reporting_impl(
     // Pass 2: lower bodies.
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) if splice_only_inline(f, d) => {}
+            Decl::Fun(f) if !has_callable_body(f, d) => {}
             Decl::Fun(f) => {
                 lo.set_bail("deep:fun");
                 lo.scope.clear();
@@ -2573,6 +2570,7 @@ fn lower_file_at_reporting_impl(
                             if m.params.iter().any(|p| bound_tp(&p.ty))
                                 || m.ret.as_ref().is_some_and(bound_tp)
                             {
+                                lo.set_bail("gate:bound-type-param-override");
                                 return None;
                             }
                             let own_idx =
@@ -2593,6 +2591,7 @@ fn lower_file_at_reporting_impl(
                                 // coroutine pass rewrites the concrete method to CPS afterwards but never
                                 // fixes up the bridge) — skip the file rather than emit a broken bridge.
                                 if m.is_suspend() {
+                                    lo.set_bail("gate:suspend-override-erasure");
                                     return None;
                                 }
                                 // Generic/covariant override → synthesize an `ACC_BRIDGE` method with
@@ -2647,6 +2646,7 @@ fn lower_file_at_reporting_impl(
                                     })
                             });
                             if unsafe_base {
+                                lo.set_bail("gate:base-reads-override-internally");
                                 return None;
                             }
                         }
@@ -3068,6 +3068,7 @@ fn lower_file_at_reporting_impl(
                                 continue;
                             }
                             if impl_fid.is_some_and(|fid| lo.ir.suspend_funs.contains(&fid)) {
+                                lo.set_bail("gate:suspend-override-erasure");
                                 return None;
                             }
                             if seen.insert((name.clone(), erased_params.clone(), erased_ret)) {
@@ -3130,6 +3131,7 @@ fn lower_file_at_reporting_impl(
                     // A `tailrec` MEMBER method isn't loop-transformed (only top-level functions are) —
                     // skip the file rather than emit stack-overflowing recursion.
                     if m.is_tailrec() && !matches!(m.body, FunBody::None) {
+                        lo.set_bail("gate:tailrec-member");
                         return None;
                     }
                     let method_index = c.methods[..mi]
@@ -3430,7 +3432,14 @@ fn lower_file_at_reporting_impl(
                         else {
                             continue;
                         };
-                        let sv = lo.syms.method_of_name(delegate_internal, "setValue")?;
+                        let Some(sv) = lo.syms.method_of_name(delegate_internal, "setValue") else {
+                            // A missing member is the source-agnostic fact this guard observes. The
+                            // corpus example happens to provide an extension `setValue`, but absence
+                            // can also mean an unavailable or otherwise unresolved declaration; do not
+                            // encode an assumed provider/implementation shape in the survey reason.
+                            lo.set_bail("gate:delegate-setvalue-unresolved");
+                            return None;
+                        };
                         let sv_desc = lo.runtime.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.emit_get_value(0);
                         let dele = lo.emit_get_field(this_e, class_id, field_idx);
@@ -3476,6 +3485,7 @@ fn lower_file_at_reporting_impl(
                         // are) — skip the file rather than emit stack-overflowing recursion (mirrors the
                         // instance-method guard).
                         if m.is_tailrec() {
+                            lo.set_bail("gate:tailrec-companion");
                             return None;
                         }
                         let overload_idx = c.companion_methods[..cmi]
@@ -3527,6 +3537,7 @@ fn lower_file_at_reporting_impl(
                         if defaults_ok {
                             super_default_fill = true;
                         } else {
+                            lo.set_bail("gate:super-ctor-arity");
                             return None;
                         }
                     }
@@ -3536,7 +3547,10 @@ fn lower_file_at_reporting_impl(
                     // outer-instance capture, so it would resolve such a name to the inherited field
                     // and miscompile (KT-3684). Bail those; SAM-style anon objects over interfaces or
                     // no-argument classes are unaffected.
-                    if internal.contains("$anon$") && sup_params > 0 {
+                    // Anonymous-ness is an AST ownership fact, not a property of the generated JVM
+                    // class name. Using declaration identity avoids coupling this soundness gate (and
+                    // its diagnostics) to a synthetic naming convention or a user-chosen class name.
+                    if file.is_anonymous_object_class(d) && sup_params > 0 {
                         let capture_free = c.methods.is_empty()
                             && c.body_props.is_empty()
                             && c.init_order.is_empty()
@@ -3554,6 +3568,7 @@ fn lower_file_at_reporting_impl(
                                 )
                             });
                         if !capture_free {
+                            lo.set_bail("gate:anon-object-outer-capture");
                             return None;
                         }
                     }
@@ -3594,7 +3609,13 @@ fn lower_file_at_reporting_impl(
                 // params in scope (`this`=0, params 1..N), coerced to the super's parameter types.
                 // Reorder NAMED super-constructor arguments (`: Base(name = …, addr = …)`) to the base
                 // constructor's parameter order; positional args are unchanged. `None` bails the file.
-                let base_args = reordered_base_args(file, c)?;
+                let base_args = match reordered_base_args(file, c) {
+                    Some(a) => a,
+                    None => {
+                        lo.set_bail("gate:super-named-args");
+                        return None;
+                    }
+                };
                 if !base_args.is_empty() {
                     let class_id = lo.class_info(&internal)?.id;
                     lo.scope.clear();
@@ -3633,7 +3654,10 @@ fn lower_file_at_reporting_impl(
                             Some(cs) if !cs.super_ctor_params.is_empty() => {
                                 cs.super_ctor_params.clone()
                             }
-                            _ => return None,
+                            _ => {
+                                lo.set_bail("gate:super-ctor-params-unresolved");
+                                return None;
+                            }
                         }
                     } else {
                         super_field_tys
@@ -3652,6 +3676,7 @@ fn lower_file_at_reporting_impl(
                                 && at != Ty::Error
                         })
                     {
+                        lo.set_bail("gate:super-ctor-arg-mismatch");
                         return None;
                     }
                     let mut sargs = Vec::new();
@@ -3905,6 +3930,7 @@ fn lower_file_at_reporting_impl(
                                         | Expr::Block { .. }
                                         | Expr::Try { .. }
                                 ) {
+                                    lo.set_bail("gate:branchy-field-initializer");
                                     return None;
                                 }
                                 // A `var` declared inside the initializer and captured+mutated by a
@@ -3944,6 +3970,7 @@ fn lower_file_at_reporting_impl(
                                         _ => false,
                                     };
                                     if branchy {
+                                        lo.set_bail("gate:branchy-field-initializer");
                                         return None;
                                     }
                                 }
@@ -4022,6 +4049,11 @@ fn lower_file_at_reporting_impl(
                         if source_args.len() != resolved.argument_slots.len()
                             || source_args.len() != resolved.argument_types.len()
                         {
+                            // The checker owns constructor selection and argument placement. A
+                            // disagreement between that generic semantic plan and the source list is
+                            // a consistency boundary, regardless of whether either declaration came
+                            // from this file or another module.
+                            lo.set_bail("gate:secondary-ctor-delegation-shape");
                             return None;
                         }
                         let target_tys = tys_to_ir(resolved.target.params());
@@ -4078,6 +4110,10 @@ fn lower_file_at_reporting_impl(
                             } else if supplied.is_empty() && resolved.omitted.contains(&slot) {
                                 delegate_args.push(lo.zero_placeholder(parameter));
                             } else {
+                                // A non-vararg target slot must receive exactly one value, or be a
+                                // checker-approved omission. Keep the same reason as the parallel
+                                // vector check above: both reject an inconsistent delegation plan.
+                                lo.set_bail("gate:secondary-ctor-delegation-shape");
                                 return None;
                             }
                         }
@@ -4141,15 +4177,19 @@ fn lower_file_at_reporting_impl(
                     // satisfied — by a concrete enum method of that name, or by an override in EVERY
                     // entry body. Otherwise the JVM throws `AbstractMethodError`/`IncompatibleClassChange`
                     // at an interface-typed call (e.g. an interface `val ordinal` mapped to `getOrdinal`
-                    // that the enum doesn't provide). A classpath-interface supertype (abstractness not
-                    // checked here) bails conservatively.
+                    // that the enum doesn't provide). Abstract-obligation metadata is currently complete
+                    // only for an interface declaration in this AST. Another source file/module, a
+                    // library provider, or a non-interface declaration all take the same conservative
+                    // boundary below; the reason intentionally names the unavailable semantic fact rather
+                    // than guessing which provider supplied the type.
                     for st_ref in &c.supertypes {
                         let st = &st_ref.name;
                         let Some(ic) = file.decls.iter().find_map(|&d| match file.decl(d) {
                             Decl::Class(ic) if ic.name == *st && ic.is_interface() => Some(ic),
                             _ => None,
                         }) else {
-                            return None; // non-file / non-interface supertype on an enum — skip
+                            lo.set_bail("gate:enum-supertype-obligations-unavailable");
+                            return None;
                         };
                         let generic = !ic.type_params.is_empty();
                         let mut abstract_members: Vec<String> = ic
@@ -4174,13 +4214,16 @@ fn lower_file_at_reporting_impl(
                                     .iter()
                                     .all(|e| e.methods.iter().any(|bm| bm.name == m));
                             if !enum_has && !all_entries_override {
-                                return None; // unsatisfied abstract interface member — skip
+                                // unsatisfied abstract interface member — skip
+                                lo.set_bail("gate:enum-unsatisfied-interface-member");
+                                return None;
                             }
                             // A GENERIC interface needs an erased bridge (`foo(Object)`→`foo(String)`).
                             // The bridge is computed for the ENUM class (an enum-level override) — so a
                             // generic method satisfied only by PER-ENTRY overrides (bridge would belong on
                             // each entry subclass, not modeled) skips rather than miscompiles.
                             if generic && !enum_has {
+                                lo.set_bail("gate:enum-entry-override-erasure");
                                 return None;
                             }
                         }
@@ -4213,7 +4256,15 @@ fn lower_file_at_reporting_impl(
                         let mut next_pos = 0usize;
                         for (j, &a) in entry.args.iter().enumerate() {
                             let idx = match entry.arg_names.get(j).and_then(|n| n.as_ref()) {
-                                Some(name) => param_meta.iter().position(|(pn, ..)| pn == name)?,
+                                Some(name) => {
+                                    let Some(index) =
+                                        param_meta.iter().position(|(pn, ..)| pn == name)
+                                    else {
+                                        lo.set_bail("gate:enum-entry-ctor-arguments");
+                                        return None;
+                                    };
+                                    index
+                                }
                                 None => {
                                     let p = next_pos;
                                     next_pos += 1;
@@ -4221,6 +4272,9 @@ fn lower_file_at_reporting_impl(
                                 }
                             };
                             if idx >= positional.len() || positional[idx].is_some() {
+                                // Unknown, duplicate, and over-arity arguments all mean the source
+                                // list cannot be mapped one-to-one onto the resolved enum constructor.
+                                lo.set_bail("gate:enum-entry-ctor-arguments");
                                 return None;
                             }
                             positional[idx] = Some(a);
@@ -4238,7 +4292,12 @@ fn lower_file_at_reporting_impl(
                                     let zero = lo.emit_const(IrConst::Int(0));
                                     lowered.push(lo.emit_new_array(ty_to_ir(*ft), zero));
                                 }
-                                None => return None,
+                                None => {
+                                    // The generic placement step found neither a supplied value nor a
+                                    // declared default/vararg representation for this required slot.
+                                    lo.set_bail("gate:enum-entry-ctor-arguments");
+                                    return None;
+                                }
                             }
                         }
                         lo.ir.classes[class_id as usize].enum_entries[ei].args = lowered;
@@ -4266,6 +4325,7 @@ fn lower_file_at_reporting_impl(
                                 || p.delegate.is_some()
                                 || p.is_lateinit
                             {
+                                lo.set_bail("gate:enum-entry-property-shape");
                                 return None;
                             }
                             let ty = match &p.ty {
@@ -4372,10 +4432,17 @@ fn lower_file_at_reporting_impl(
                                 .and_then(|cs| cs.method(&bm.name))
                             {
                                 Some(s) => s.clone(),
-                                None => syms
+                                None => match syms
                                     .supertype_methods(&internal)
                                     .into_iter()
-                                    .find_map(|(n, s)| (n == bm.name).then_some(s))?,
+                                    .find_map(|(n, s)| (n == bm.name).then_some(s))
+                                {
+                                    Some(s) => s,
+                                    None => {
+                                        lo.set_bail("gate:enum-entry-non-override");
+                                        return None;
+                                    }
+                                },
                             };
                             let params = tys_to_ir(&sig.params);
                             let fid = lo.ir.add_fun(IrFunction {
@@ -7275,16 +7342,14 @@ impl<'a> Lower<'a> {
         match self.afile.expr(e) {
             Expr::CallableRef { .. } => true,
             // An anonymous-function argument is only ever lowered splice-style (a standalone
-            // closure of one mis-emits its return); a function-typed VARIABLE argument aliases a
-            // lambda whose capture/reassignment analysis assumed splicing — both stay rejected.
+            // closure of one mis-emits its return); stays rejected.
             Expr::Lambda { .. } if self.afile.anon_fun_lambdas.contains(&e.0) => true,
             // A name bound to an ENCLOSING inline call's lambda parameter (`inner(block)`) is a
             // splice-registered lambda passed as a value — it has no closure value at all, so it
             // must reject rather than bind a same-named module-level symbol (or mis-lower).
+            // An ORDINARY function-typed variable is fine: its value is a real closure, read at
+            // the call site and `invoke`d by the facade static like any other object.
             Expr::Name(n) if self.inline_lambdas.iter().any(|lambda| lambda.name == *n) => true,
-            Expr::Name(n) => self
-                .lookup(n)
-                .is_some_and(|(_, ty)| matches!(ty.non_null(), Ty::Fun(_))),
             Expr::Lambda { body, .. } => {
                 let assigned: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
                 if visit_expr(self.afile, *body, fname, &assigned) {
@@ -8169,6 +8234,10 @@ impl<'a> Lower<'a> {
             .class_by_type_name(internal)
             .and_then(|c| c.value_field.as_ref())
             .map(|(_, u)| *u)
+            // Dependency value classes have no source declaration in `FrontendSymbols`; their semantic
+            // metadata is exposed through the same platform oracle used by resolution. Keeping that
+            // fallback here gives every lowering caller one location-independent representation query.
+            .or_else(|| self.syms.libraries.value_underlying(t))
     }
 
     /// Forward a resolved extension callable's DECLARED source receiver onto the emitted call, verbatim —
@@ -8522,24 +8591,6 @@ impl<'a> Lower<'a> {
         // A `suspend { … }` literal (parser-marked): build the `SuspendLambda` state machine
         // instead of a plain `FunctionN` closure (which `lower_lambda_sam` would bail on).
         if self.afile.suspend_lambdas.contains(&e.0) {
-            // Conservative v1 gate: a body with MEMBER accesses (`c.bar()`, `c.x`) hits latent
-            // suspend+delegation/state-machine gaps (silent resume loss) — bail (skip the file)
-            // rather than miscompile. Bare calls (incl. suspend function PARAMETERS, the
-            // `runBlocking`/`contract` shape) are supported.
-            fn has_member_access(lo: &Lower, e: AstExprId) -> bool {
-                if matches!(lo.afile.expr(e), Expr::Member { .. }) {
-                    return true;
-                }
-                lo.afile
-                    .any_child_expr(e, &mut |c| has_member_access(lo, c), &mut |s| {
-                        lo.afile
-                            .any_child_stmt(s, &mut |c| has_member_access(lo, c))
-                    })
-            }
-            let has_member_call = has_member_access(self, body);
-            if has_member_call {
-                return None;
-            }
             let Ty::Fun(sig) = self.info.ty(e) else {
                 return None;
             };
@@ -8997,12 +9048,19 @@ impl<'a> Lower<'a> {
         // resolve each callee's type + method `is_suspend` so the body isn't misclassified as leaf.
         let callees = std::cell::RefCell::new(Vec::new());
         collect_calls(self.afile, body, &callees);
+        let module_symbols = crate::module_symbols::ModuleSymbols::new(self.syms);
         callees.into_inner().into_iter().any(|call| {
-            let method_suspends = |internal: TypeName, name: &str| {
-                self.syms
-                    .class_by_type_name(internal)
-                    .map(|c| c.methods_named(name))
-                    .is_some_and(|sigs| sigs.iter().any(|s| s.is_suspend()))
+            // Resolved call metadata below is provider-neutral and is the primary source of truth.
+            // Some source calls intentionally have no recorded target at this early classification
+            // point, so their fallback goes through ModuleSymbols' canonical inherited-member walk.
+            // That walk already handles classes, interfaces, delegation-visible members, cycles, and
+            // precedence; duplicating a second hierarchy traversal here previously made this scan drift
+            // from resolver behavior.
+            let source_method_suspends = |internal: TypeName, name: &str| {
+                module_symbols
+                    .instance_members(Ty::obj_name(internal), name)
+                    .iter()
+                    .any(|member| member.suspend())
             };
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
@@ -9015,7 +9073,7 @@ impl<'a> Lower<'a> {
                         member: None,
                     } if receiver_ty
                         .obj_internal()
-                        .is_some_and(|i| method_suspends(i, "invoke")) =>
+                        .is_some_and(|i| source_method_suspends(i, "invoke")) =>
                     {
                         return true
                     }
@@ -9033,8 +9091,8 @@ impl<'a> Lower<'a> {
             {
                 return true;
             }
-            // A classpath top-level `suspend fun` called by name (`delay(…)`): the CHECKER recorded
-            // the resolved callable with its suspend flag.
+            // A resolved top-level `suspend fun` called by name: the checker records the same semantic
+            // suspend flag regardless of which symbol provider supplied the callable.
             if self
                 .info
                 .resolved_top_level(call)
@@ -9060,14 +9118,15 @@ impl<'a> Lower<'a> {
             {
                 return true;
             }
-            // A plain member call `recv.m(args)` to a suspend USER class method (its suspend flag is
-            // in `syms`, keyed by the receiver's static type).
+            // Fallback for a plain source member call whose resolved target was not recorded above.
+            // Query the canonical module hierarchy rather than the receiver class's own method table:
+            // delegation/inheritance can expose a suspend method declared only on an interface.
             if let ast::Expr::Call { callee, .. } = self.afile.expr(call) {
                 if let ast::Expr::Member { receiver, name } = self.afile.expr(*callee) {
                     let recv_ty = self.info.ty(*receiver);
                     if recv_ty
                         .obj_internal()
-                        .is_some_and(|i| method_suspends(i, name))
+                        .is_some_and(|i| source_method_suspends(i, name))
                     {
                         return true;
                     }
@@ -9091,6 +9150,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let arity = params.len();
         if self.cur_class.is_some() {
+            self.set_bail("gate:suspend-lambda-in-class");
             return None;
         }
         // Repeated implicit receiver names need distinct storage fields.
@@ -9666,7 +9726,7 @@ impl<'a> Lower<'a> {
         // module-`ClassSig` super-interface graph breadth-first, deduping methods by signature and
         // properties by source name. The property entry retains its declaring owner because an inherited
         // accessor must dispatch against the interface that actually declares that JVM method.
-        let mut methods: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
+        let mut methods: Vec<(String, Vec<Ty>, Ty, bool)> = Vec::new();
         // Retain only the declaration facts lowering consumes. In particular, do not carry the
         // resolver's `DeclaredPropertySig` across this boundary: `ir_lower` depends on the semantic
         // symbol handoff, not the resolver implementation that originally populated it.
@@ -9684,8 +9744,11 @@ impl<'a> Lower<'a> {
             let cs = self.syms.class_by_type_name(cur)?;
             for (n, sigs) in &cs.methods {
                 for s in sigs {
-                    if !methods.iter().any(|(on, op, _)| on == n && *op == s.params) {
-                        methods.push((n.clone(), s.params.clone(), s.ret));
+                    if !methods
+                        .iter()
+                        .any(|(on, op, _, _)| on == n && *op == s.params)
+                    {
+                        methods.push((n.clone(), s.params.clone(), s.ret, s.is_suspend()));
                     }
                 }
             }
@@ -9711,7 +9774,7 @@ impl<'a> Lower<'a> {
                 queue.push(sup);
             }
         }
-        for (mname, params, ret) in methods {
+        for (mname, params, ret, suspend) in methods {
             let params_ir = tys_to_ir(&params);
             let descriptor = self.runtime.method_descriptor(&params, ret)?;
             let field = self.this_field(class_id, delegate_idx);
@@ -9726,13 +9789,28 @@ impl<'a> Lower<'a> {
                 field,
                 args,
             );
+            // A SUSPEND interface method: the forwarder must be a CPS tail-forward too —
+            // registered as a suspend fn (the coroutine pass appends its `$completion`
+            // parameter and erases the return to `Object`, matching the interface's JVM
+            // method it overrides) and its delegate call recorded as a suspend call (the
+            // pass threads that continuation into it and returns the result verbatim, so
+            // `COROUTINE_SUSPENDED` propagates instead of being swallowed).
+            if suspend {
+                self.ir.suspend_calls.insert(call, ret);
+            }
             let body = if ret == Ty::Unit {
                 self.emit_block(vec![call], None)
             } else {
                 let ret_stmt = self.emit_return(Some(call));
                 self.emit_block(vec![ret_stmt], None)
             };
-            self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
+            let fid =
+                self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
+            if suspend {
+                if let Some(fid) = fid {
+                    self.ir.suspend_funs.push(fid);
+                }
+            }
         }
         for (owner, _name, getter_name, setter_name, property_ty) in properties {
             let field = self.this_field(class_id, delegate_idx);
@@ -11643,36 +11721,6 @@ impl<'a> Lower<'a> {
         // UNBOUND: `Type::p` — the `Name` is a class, and the reference takes the receiver as its
         // `get` argument. `capture` holds the captured-receiver expression for the bound forms.
         let source_extension = self.info.source_extension_property(e).cloned();
-        let source_getter_descriptor = if let Some(property) = source_extension.as_ref() {
-            let receiver = property.receiver?;
-            Some(format!(
-                "({}){}",
-                self.runtime.type_descriptor(receiver)?,
-                self.runtime.type_descriptor(stored_value_ty(property.ty))?
-            ))
-        } else {
-            None
-        };
-        let source_setter_descriptor = if let Some(property) = source_extension
-            .as_ref()
-            .filter(|property| property.setter.is_some())
-        {
-            let receiver = property.receiver?;
-            Some(format!(
-                "({}{})V",
-                self.runtime.type_descriptor(receiver)?,
-                self.runtime.type_descriptor(stored_value_ty(property.ty))?
-            ))
-        } else {
-            None
-        };
-        let source_getter_name = source_extension
-            .as_ref()
-            .map(|property| property.getter.name.clone());
-        let source_setter_name = source_extension
-            .as_ref()
-            .and_then(|property| property.setter.as_ref())
-            .map(|setter| setter.name.clone());
         let selected_owner = source_extension
             .as_ref()
             .and_then(|property| property.receiver)
@@ -11721,6 +11769,50 @@ impl<'a> Lower<'a> {
                 (owner, Some(self.expr(recv)?))
             }
         };
+        self.finish_prop_ref(name, owner, capture, source_extension)
+    }
+
+    /// Shared tail of [`Self::lower_prop_ref`] and [`Self::lower_implicit_this_prop_ref`]:
+    /// synthesize the `(Mutable)PropertyReference{0,1}Impl` subclass dispatching `get`/`set` for
+    /// `name` on `owner`, capturing `capture` (the bound receiver) when present. Side-effect-free
+    /// until it commits (every decline path returns before `ir.add_class`).
+    fn finish_prop_ref(
+        &mut self,
+        name: &str,
+        owner: TypeName,
+        capture: Option<u32>,
+        source_extension: Option<crate::libraries::PropertyInfo>,
+    ) -> Option<u32> {
+        let source_getter_descriptor = if let Some(property) = source_extension.as_ref() {
+            let receiver = property.receiver?;
+            Some(format!(
+                "({}){}",
+                self.runtime.type_descriptor(receiver)?,
+                self.runtime.type_descriptor(stored_value_ty(property.ty))?
+            ))
+        } else {
+            None
+        };
+        let source_setter_descriptor = if let Some(property) = source_extension
+            .as_ref()
+            .filter(|property| property.setter.is_some())
+        {
+            let receiver = property.receiver?;
+            Some(format!(
+                "({}{})V",
+                self.runtime.type_descriptor(receiver)?,
+                self.runtime.type_descriptor(stored_value_ty(property.ty))?
+            ))
+        } else {
+            None
+        };
+        let source_getter_name = source_extension
+            .as_ref()
+            .map(|property| property.getter.name.clone());
+        let source_setter_name = source_extension
+            .as_ref()
+            .and_then(|property| property.setter.as_ref())
+            .map(|setter| setter.name.clone());
         // A member field property dispatches through the instance `getName()`/`setName()`; an EXTENSION
         // property (`val A.ext`, not a field) dispatches through the static `getName(A)`/`setName(A, v)`
         // on the facade — `ext_facade = Some(())` selects that emit shape.
@@ -12528,12 +12620,17 @@ impl<'a> Lower<'a> {
         )
     }
 
-    /// An unqualified member-function reference `::m` inside a class — a BOUND ref to the enclosing
-    /// receiver (`this::m`): capture `this` (value 0) and emit the same `FunctionReferenceImpl` the
-    /// `obj::m` form does. Member-property and extension implicit refs aren't modeled here (the type
-    /// isn't `Ty::Fun` / there's no member method), so they fall through.
+    /// An unqualified member-function reference `::m` — a BOUND ref to the current semantic receiver
+    /// (`this::m`). The checker supplies the exact declaring owner; capture the scoped `this` value
+    /// instead of assuming JVM slot zero. That distinction is observable for a member extension,
+    /// whose dispatch receiver is slot zero but whose extension `this` is the following value.
     fn lower_implicit_this_method_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
-        let internal = self.cur_class?;
+        let Some(ExprLowering::ImplicitThisMemberFunctionRef { owner }) =
+            self.info.expr_lowers.get(&e)
+        else {
+            return None;
+        };
+        let internal = *owner;
         let (_, _, target_fid, _) = self.resolve_method_name(internal, name)?;
         let Ty::Fun(sig) = self.info.ty(e) else {
             return None;
@@ -12552,7 +12649,8 @@ impl<'a> Lower<'a> {
         let call_interface = self
             .class_info_name(internal)
             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
-        let this_e = self.emit_get_value(0);
+        let (this_value, _) = self.lookup("this")?;
+        let this_e = self.emit_get_value(this_value);
         let param_tys = tys_to_ir(&sig.params);
         self.make_func_ref(
             e.0,
@@ -12570,6 +12668,47 @@ impl<'a> Lower<'a> {
             Some(this_e),
             None,
         )
+    }
+
+    /// An unqualified `::p` with an implicit receiver is a BOUND reference (`this::p`) — mirrors
+    /// [`Self::lower_implicit_this_method_ref`] for functions, capturing the scoped semantic `this`.
+    /// The checker records the exact source-member selection after owning hierarchy, visibility,
+    /// shadowing, and receiver-availability decisions. Lowering deliberately consumes that handoff
+    /// instead of re-resolving: an absent marker belongs to another callable-ref arm, while a present
+    /// marker that lacks a backing field fails the file rather than falling through to a same-named
+    /// top-level or extension property.
+    fn lower_implicit_this_prop_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
+        let Some(ExprLowering::ImplicitThisMemberPropertyRef { owner }) =
+            self.info.expr_lowers.get(&e)
+        else {
+            return None;
+        };
+        let internal = *owner;
+        // The checker selected a source member property. It lowers only
+        // with a BACKING FIELD on the IR class chain (a computed property would mis-bind the
+        // extension-getter fallback in `finish_prop_ref`); anything else bails the file.
+        let field_exists = {
+            let mut cur = self.class_info_name(internal).map(|info| info.id);
+            let mut exists = false;
+            while let Some(cid) = cur {
+                let cls = &self.ir.classes[cid as usize];
+                if cls.fields.iter().any(|f| f.name == *name) {
+                    exists = true;
+                    break;
+                }
+                cur = cls
+                    .has_non_top_superclass()
+                    .then(|| self.class_info_name(cls.superclass).map(|c| c.id))
+                    .flatten();
+            }
+            exists
+        };
+        if !field_exists {
+            return None;
+        }
+        let (this_value, _) = self.lookup("this")?;
+        let this_e = self.emit_get_value(this_value);
+        self.finish_prop_ref(name, internal, Some(this_e), None)
     }
 
     /// Bound callable reference on an arbitrary EXPRESSION receiver (`"abc"::get`, `1::foo`, `mk()::m`):
@@ -13975,6 +14114,14 @@ impl<'a> Lower<'a> {
         // A NON-nullable primitive stored in its `Obj("kotlin/…")` value-class form is a JVM primitive
         // (e.g. a non-null `Int` parameter is `int`), so its zero is the primitive `0`, not a null ref.
         let t = t.unboxed_primitive().unwrap_or(t);
+        // A value CLASS's placeholder is the zero of its ERASED underlying — a `$default` stub's
+        // descriptor erases value-class params (`z: Z` → `int`), so a `null` here wouldn't verify.
+        // Only for a NON-nullable value class: a `Z?` slot stays BOXED (its zero is `null`).
+        let t = if t.is_nullable() {
+            t
+        } else {
+            self.value_class_underlying(t).unwrap_or(t)
+        };
         let c = match t {
             Ty::Long => IrConst::Long(0),
             Ty::Double => IrConst::Double(0.0),
@@ -14357,6 +14504,35 @@ impl<'a> Lower<'a> {
         self.coerce_to_static(read, lt, pty)
     }
 
+    /// Whether a source property read needs boxing at an erased generic storage boundary that the
+    /// current property realization does not provide. A declaration such as `Base<T>(val x: T)`
+    /// stores and returns erased `Object`; when an inherited read specializes `T` to a value class
+    /// (`Base<Result<String>>.x`), Kotlin requires the value-class box at that boundary. Merely casting
+    /// the unboxed underlying value to the wrapper produces a `ClassCastException`.
+    ///
+    /// Keep this gate beside the shared source-property operation rather than teaching individual
+    /// file/member/implicit read branches about `Result` or any concrete value class. Once property
+    /// construction/accessor realization boxes generic value-class values, this single predicate can
+    /// be removed and every caller becomes supported together.
+    fn source_property_read_needs_generic_value_class_box(
+        &self,
+        owner: TypeName,
+        name: &str,
+        expression: AstExprId,
+    ) -> bool {
+        let declared_erased = self
+            .syms
+            .declared_member_prop(owner, name)
+            .is_some_and(|(_, property)| property.ty.is_erased_top());
+        let specialized_value_class = self.info.ty(expression).obj_internal().is_some_and(|ty| {
+            self.syms
+                .class_by_type_name(ty)
+                .is_some_and(|class| class.value_field.is_some())
+                || self.syms.libraries.value_underlying_name(ty).is_some()
+        });
+        declared_erased && specialized_value_class
+    }
+
     /// Read a backing-field property `recv.name` on an in-file class, given the ALREADY-LOWERED receiver
     /// and the receiver's internal name. A read from OUTSIDE the declaring class goes through the public
     /// `getX()` accessor (the backing field is private, matching kotlinc); inside, the field is read
@@ -14392,6 +14568,9 @@ impl<'a> Lower<'a> {
         name: &str,
         e: AstExprId,
     ) -> Option<u32> {
+        if self.source_property_read_needs_generic_value_class_box(owner, name, e) {
+            return None;
+        }
         // A class whose declarations are not tracked yet (an enum entry's body, an anonymous object)
         // still has the backing field; read that.
         let (declaring, ty, is_private) = match self.declared_property(owner, name) {
@@ -14469,6 +14648,9 @@ impl<'a> Lower<'a> {
             }
         };
         let owner_internal = self.ir.classes[class as usize].fq_name_id();
+        if self.source_property_read_needs_generic_value_class_box(owner_internal, name, e) {
+            return None;
+        }
         // Smartcast: a receiver slot wider than the owning class (an erased generic / `Any?` narrowed by
         // `is`) is narrowed to the owner. That is about the RECEIVER's type, not about how the property is
         // read, so it stays here.
@@ -14656,6 +14838,9 @@ impl<'a> Lower<'a> {
         if let Some(ExprLowering::MemberPropertyRead { owner, interface }) =
             self.info.expr_lowers.get(&e)
         {
+            if self.source_property_read_needs_generic_value_class_box(*owner, name, e) {
+                return None;
+            }
             return Some(self.ir.add_expr(IrExpr::PropertyRead {
                 receiver: recv,
                 owner: *owner,
@@ -19475,9 +19660,8 @@ impl<'a> Lower<'a> {
             // intrinsic (recognized via the registry). The block runs with the enclosing suspend
             // function's own `Continuation` bound as its parameter; kotlinc inlines the block and returns
             // its `Any?` result. The leaf shape `{ COROUTINE_SUSPENDED }` (and any block that does NOT
-            // read its continuation parameter) inlines to just the block body. A block that DOES read the
-            // continuation needs the (post-CPS) continuation slot threaded in — not modeled here, so it
-            // bails (skip the file) rather than binding a wrong slot.
+            // read its continuation parameter) inlines to just the block body. A block that DOES read
+            // the continuation is a first-class suspension point (see below).
             Expr::Call { callee, args }
                 if args.len() == 1
                     && matches!(self.afile.expr(callee), ast::Expr::Name(n)
@@ -19492,6 +19676,9 @@ impl<'a> Lower<'a> {
                     // The block reads its continuation (`c.resume(t)`): bind `c` to the enclosing suspend
                     // function's own `Continuation` via the `CurrentContinuation` placeholder — the CPS
                     // pass rewrites it to the real continuation value once the trailing parameter exists.
+                    // The whole intrinsic is a SUSPENSION POINT: registered so the coroutine pass splits
+                    // a state machine around it (`it.resume(v)` then re-enters THIS machine at the resume
+                    // label, exactly kotlinc's protocol).
                     let slot = self.fresh_value();
                     let cont = self.ir.add_expr(IrExpr::CurrentContinuation);
                     let cont_ty = Ty::obj("kotlin/coroutines/Continuation");
@@ -19501,7 +19688,24 @@ impl<'a> Lower<'a> {
                     let body_val = self.expr(body);
                     self.scope.truncate(depth);
                     let body_val = body_val?;
-                    self.emit_block(vec![var], Some(body_val))
+                    let block = self.emit_block(vec![var], Some(body_val));
+                    let logical_ret = ty_to_ir(self.info.ty(e));
+                    // This is an inlined intrinsic BLOCK, not a callable node. Record it in the
+                    // backend-neutral suspension-point channel so the coroutine pass state-splits
+                    // around the block without treating it like a cross-unit call that needs another
+                    // continuation argument appended.
+                    self.ir
+                        .intrinsic_suspension_points
+                        .insert(block, logical_ret);
+                    // Bind the block to a temp: in any position (statement, value, tail) the
+                    // block-splicing transforms dissolve the OUTER grouping but preserve the
+                    // `Variable { init: <suspension point> }` — the exact bound-local shape
+                    // the flattener handles. A bare registered block would be spliced away,
+                    // orphaning the point id (the suspension would be silently lost).
+                    let tmp = self.fresh_value();
+                    let decl = self.emit_variable(tmp, logical_ret, Some(block));
+                    let tmp_read = self.emit_get_value(tmp);
+                    self.emit_block(vec![decl], Some(tmp_read))
                 } else {
                     self.expr(body)?
                 }
@@ -20351,12 +20555,29 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // An unqualified `::m` inside a class binds to the enclosing receiver (`this::m`) — a
-            // member function takes precedence over a same-named top-level decl (matches the checker).
-            if receiver.is_none() {
-                if let Some(r) = self.lower_implicit_this_method_ref(e, &name) {
-                    return Some(r);
-                }
+            // An unqualified `::m` with an implicit receiver binds that semantic `this` — a member
+            // function takes precedence over a same-named top-level declaration (matches the checker).
+            if receiver.is_none()
+                && matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ImplicitThisMemberFunctionRef { .. })
+                )
+            {
+                // Presence is terminal for the same shadowing reason as member-property markers:
+                // if realization fails, do not silently bind a same-named top-level callable.
+                return self.lower_implicit_this_method_ref(e, &name);
+            }
+            // An unqualified `::p` with an implicit receiver binds its member property (`this::p`),
+            // after member functions and before top-level declarations. Presence of the checker's
+            // semantic marker is terminal: a failed emit must bail instead of rebinding a shadowed
+            // top-level/extension property.
+            if receiver.is_none()
+                && matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ImplicitThisMemberPropertyRef { .. })
+                )
+            {
+                return self.lower_implicit_this_prop_ref(e, &name);
             }
             // Top-level property reference `::foo` lowers to a `(Mutable)PropertyReference0Impl`
             // singleton whose `get`/`set` dispatch statically to the facade accessor.

@@ -1695,6 +1695,25 @@ impl SymbolTable {
         })
     }
 
+    /// Return one source declaration's callable signature and optional declared extension receiver.
+    /// The declaration key is authoritative: callers do not need file-, module-, or
+    /// classpath-specific lookup branches, and top-level versus extension storage remains an
+    /// indexing detail of the symbol table.
+    fn source_callable_signature(
+        &self,
+        name: &str,
+        file: u32,
+        declaration: DeclId,
+    ) -> Option<(Option<Ty>, &Signature)> {
+        if let Some((receiver, signature)) =
+            self.source_extension_signature(name, file, declaration)
+        {
+            return Some((Some(receiver), signature));
+        }
+        self.source_function_signature(name, file, declaration)
+            .map(|signature| (None, signature))
+    }
+
     fn fun_ret_by_erased_params(&self, name: &str, params: &[ErasedTypeKey]) -> Option<Ty> {
         let overloads = self.funs.get(name)?;
         overloads
@@ -1711,18 +1730,212 @@ impl SymbolTable {
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.values().find(|sig| sig.internal == internal)
     }
+
+    /// Find the source declaration that owns a member property across the complete module hierarchy.
+    /// Collected signatures flatten inherited property shapes into `ClassSig::props`, but declaration
+    /// facts such as visibility and setter visibility remain only in the owner's `declared_props`.
+    /// Keep this as the single graph walk for consumers that need declaration facts, so inherited
+    /// interface and superclass properties cannot acquire guessed visibility independently.
+    pub fn declared_member_prop(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<(TypeName, &DeclaredPropertySig)> {
+        let mut pending = vec![internal];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let Some(class) = self.class_by_type_name(current) else {
+                continue;
+            };
+            if let Some(declared) = class.declared_props.get(name) {
+                return Some((current, declared));
+            }
+            // A class member wins over an interface member. Push interfaces in reverse declaration
+            // order first and the superclass last because this is a LIFO worklist: the resulting
+            // search is current class -> complete superclass hierarchy -> declared interfaces. This
+            // is also the order used when source properties are brought into checker scope. Keeping
+            // the order here explicit prevents a visibility lookup from selecting an interface
+            // declaration while the ordinary property lookup selected a same-named superclass member.
+            let interfaces = class.interface_names().collect::<Vec<_>>();
+            pending.extend(interfaces.into_iter().rev());
+            if let Some(superclass) = class.super_internal_name() {
+                pending.push(superclass);
+            }
+        }
+        None
+    }
+}
+
+/// Whether the import-scoped top-level family selected for `e` consists solely of the platform's
+/// erased contract intrinsic. The ordinary federated resolver owns aliases, package precedence,
+/// same-module shadowing, and ambiguity; this helper owns only the final semantic classification.
+/// Requiring every surviving overload to be intrinsic is conservative when two star imports expose
+/// competing callables: an ambiguous/user family must remain executable and therefore splice-only.
+fn resolved_call_is_erased_contract(
+    file: &File,
+    e: ExprId,
+    resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+    platform: &dyn SemanticPlatform,
+) -> bool {
+    let Expr::Call { callee, .. } = file.expr(e) else {
+        return false;
+    };
+    let Expr::Name(name) = file.expr(*callee) else {
+        return false;
+    };
+    let overloads = resolver
+        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+        .map(crate::symbol_resolver::Symbol::overloads)
+        .unwrap_or_default();
+    let mut top_level = crate::libraries::FunctionSet { overloads }.into_top_level();
+    let Some(first) = top_level.next() else {
+        return false;
+    };
+    platform.is_erased_contract_callable(&first.callable)
+        && top_level.all(|candidate| platform.is_erased_contract_callable(&candidate.callable))
+}
+
+/// Names introduced anywhere below a function body. Facade eligibility runs before lexical
+/// checking, so it cannot reuse [`Checker::lexical_value_declares`]; conservatively treating a
+/// same-named call as shadowed whenever the function contains such a binding prevents an erased
+/// intrinsic classification from crossing a local/lambda/function boundary. The conservatism is
+/// limited to the very small set of callee names that otherwise resolve to the contract intrinsic.
+fn function_bound_names(file: &File, function: &FunDecl) -> std::collections::HashSet<String> {
+    fn expression(file: &File, e: ExprId, names: &mut std::collections::HashSet<String>) {
+        match file.expr(e) {
+            Expr::Lambda { params, .. } => {
+                if params.is_empty() {
+                    names.insert("it".to_string());
+                } else {
+                    names.extend(params.iter().cloned());
+                }
+            }
+            Expr::Try { catches, .. } => {
+                names.extend(catches.iter().map(|catch| catch.name.clone()));
+            }
+            _ => {}
+        }
+        let mut expressions = Vec::new();
+        let mut statements = Vec::new();
+        file.any_child_expr(
+            e,
+            &mut |child| {
+                expressions.push(child);
+                false
+            },
+            &mut |statement| {
+                statements.push(statement);
+                false
+            },
+        );
+        for child in expressions {
+            expression(file, child, names);
+        }
+        for child in statements {
+            statement(file, child, names);
+        }
+    }
+
+    fn statement(file: &File, s: StmtId, names: &mut std::collections::HashSet<String>) {
+        match file.stmt(s) {
+            Stmt::Local { name, .. }
+            | Stmt::LocalLateinit { name, .. }
+            | Stmt::LocalDelegate { name, .. }
+            | Stmt::For { name, .. }
+            | Stmt::ForEach { name, .. } => {
+                names.insert(name.clone());
+            }
+            Stmt::Destructure { entries, .. } => {
+                names.extend(
+                    entries
+                        .iter()
+                        .filter(|(name, _)| name != "_")
+                        .map(|(name, _)| name.clone()),
+                );
+            }
+            Stmt::LocalFun(function) => {
+                names.insert(function.name.clone());
+                names.extend(
+                    function
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.name.clone()),
+                );
+            }
+            Stmt::LocalClass(class) => {
+                names.insert(class.name.clone());
+            }
+            _ => {}
+        }
+        let mut expressions = Vec::new();
+        file.any_child_stmt(s, &mut |child| {
+            expressions.push(child);
+            false
+        });
+        for child in expressions {
+            expression(file, child, names);
+        }
+    }
+
+    let mut names = function
+        .params
+        .iter()
+        .map(|parameter| parameter.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    if let FunBody::Expr(body) | FunBody::Block(body) = function.body {
+        expression(file, body, &mut names);
+    }
+    names
 }
 
 /// Shapes that lower correctly ONLY when an `inline` body is spliced into a caller — the checker
 /// analyses the body with splice assumptions, so emitting it standalone (a facade static for
-/// cross-file calls) would miscompile: nested lambdas / anonymous objects (capture analysis +
-/// synthetic numbering), `try` / `break` / `continue` / expression-position `return` (inline-frame
-/// control flow), and `is`/`as` on a type parameter (splicing substitutes the call-site type
-/// argument; a standalone body can only erase to the bound). Conservative: the file just skips.
-fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
-    fn bad_expr(file: &File, e: ExprId, tparams: &[String]) -> bool {
+/// cross-file calls) would miscompile: a lambda that is STORED or returned rather than passed to
+/// a call (capture analysis + synthetic numbering assume the caller's file), anonymous objects,
+/// `try` / `break` / `continue` / a LABELED or expression-position `return` (inline-frame control
+/// flow — a plain unlabeled value-`return` is just a method return), and `is`/`as` on a type
+/// parameter (splicing substitutes the call-site type argument; a standalone body can only erase
+/// to the bound). A lambda passed directly to a call is screened by its body because it can be
+/// emitted as an ordinary closure; a semantically resolved contract-declaration block is erased,
+/// not a closure. Conservative: the file just skips.
+fn inline_body_has_splice_only_shape(
+    file: &File,
+    f: &FunDecl,
+    is_erased_contract: &impl Fn(ExprId) -> bool,
+) -> bool {
+    fn bad_expr(
+        file: &File,
+        e: ExprId,
+        tparams: &[String],
+        is_erased_contract: &impl Fn(ExprId) -> bool,
+    ) -> bool {
         if file.anonymous_object_classes.contains_key(&e) {
             return true;
+        }
+        // An erased contract DSL lambda never becomes a closure. Walk its BODY (and every ordinary
+        // argument) for genuinely splice-only shapes, but bypass only calls whose selected callable
+        // family has the provider-owned intrinsic identity. Aliases and source shadows therefore use
+        // exactly the same resolution seam as checker erasure below.
+        if is_erased_contract(e) {
+            if let Expr::Call { args, .. } = file.expr(e) {
+                let mut bad = false;
+                for (i, &arg) in args.iter().enumerate() {
+                    let lambda_body = match file.expr(arg) {
+                        Expr::Lambda { body, .. } if i + 1 == args.len() => Some(*body),
+                        _ => None,
+                    };
+                    bad |= bad_expr(
+                        file,
+                        lambda_body.unwrap_or(arg),
+                        tparams,
+                        is_erased_contract,
+                    );
+                }
+                return bad;
+            }
         }
         match file.expr(e) {
             Expr::Lambda { .. }
@@ -1731,34 +1944,69 @@ fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
             | Expr::Continue { .. }
             | Expr::Return { .. } => true,
             Expr::Is { ty, .. } | Expr::As { ty, .. } if tparams.contains(&ty.name) => true,
+            // A lambda in DIRECT call-argument position is safe standalone: it splices with an
+            // inline callee or closes over like any fn body. Its BODY is screened (a stored or
+            // returned lambda stays rejected above), and a `return` inside it — a non-local
+            // return through the inline frame — keeps the fn splice-only.
+            Expr::Call { callee, args } => {
+                bad_expr(file, *callee, tparams, is_erased_contract)
+                    || args.iter().any(|&arg| match file.expr(arg) {
+                        Expr::Lambda { body, .. } => {
+                            lambda_body_has_return(file, *body)
+                                || bad_expr(file, *body, tparams, is_erased_contract)
+                        }
+                        _ => bad_expr(file, arg, tparams, is_erased_contract),
+                    })
+            }
             _ => file.any_child_expr(
                 e,
-                &mut |child| bad_expr(file, child, tparams),
-                &mut |stmt| bad_stmt(file, stmt, tparams),
+                &mut |child| bad_expr(file, child, tparams, is_erased_contract),
+                &mut |stmt| bad_stmt(file, stmt, tparams, is_erased_contract),
             ),
         }
     }
-    fn bad_stmt(file: &File, s: StmtId, tparams: &[String]) -> bool {
+    fn bad_stmt(
+        file: &File,
+        s: StmtId,
+        tparams: &[String],
+        is_erased_contract: &impl Fn(ExprId) -> bool,
+    ) -> bool {
         if matches!(
             file.stmt(s),
             Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(_, Some(_))
         ) {
             return true;
         }
-        file.any_child_stmt(s, &mut |child| bad_expr(file, child, tparams))
+        file.any_child_stmt(s, &mut |child| {
+            bad_expr(file, child, tparams, is_erased_contract)
+        })
+    }
+    /// Any `return` inside a lambda argument's body (non-local through the inline frame — its
+    /// framing only holds when spliced into a caller, not emitted standalone).
+    fn lambda_body_has_return(file: &File, e: ExprId) -> bool {
+        if matches!(file.expr(e), Expr::Return { .. }) {
+            return true;
+        }
+        file.any_child_expr(e, &mut |c| lambda_body_has_return(file, c), &mut |s| {
+            matches!(file.stmt(s), Stmt::Return(..))
+                || file.any_child_stmt(s, &mut |c| lambda_body_has_return(file, c))
+        })
     }
     match &f.body {
-        FunBody::Expr(body) | FunBody::Block(body) => bad_expr(file, *body, &f.type_params),
+        FunBody::Expr(body) | FunBody::Block(body) => {
+            bad_expr(file, *body, &f.type_params, is_erased_contract)
+        }
         FunBody::None => true,
     }
 }
 
 impl SymbolTable {
     /// Whether an `inline fun` may be lowered + emitted as a callable facade static for CROSS-FILE
-    /// calls: [`FunDecl::has_emittable_inline_body`] syntactically, its signature mentions no value
-    /// class (a cross-file `invokestatic` applies no value-class mangling/erasure), and its body
-    /// carries no splice-only shape (the checker analyses an `inline` body with splice
-    /// assumptions). Anything else stays splice-only — a cross-file call keeps the file skipped.
+    /// calls: syntactically (inline, non-reified, non-suspend), its signature — receiver included
+    /// for an extension — mentions no value class (a cross-file `invokestatic` applies no
+    /// value-class mangling/erasure), and its body carries no splice-only shape (the checker
+    /// analyses an `inline` body with splice assumptions). Anything else stays splice-only — a
+    /// cross-file call keeps the file skipped.
     pub fn inline_fn_facade_emittable(
         &self,
         file: &File,
@@ -1766,18 +2014,68 @@ impl SymbolTable {
         decl: DeclId,
         f: &FunDecl,
     ) -> bool {
-        if !f.has_emittable_inline_body() {
+        if !f.is_inline() || !f.reified_type_params.is_empty() || f.is_suspend() {
             return false;
         }
-        let Some(sig) = self.funs.get(&f.name).and_then(|sigs| {
-            sigs.iter()
-                .find(|s| s.source_file == Some(file_index) && s.source_decl == Some(decl))
-        }) else {
+        // A source declaration has exactly one callable signature. Resolve it by declaration
+        // identity and screen the receiver, when present, as arg0 of the same static ABI instead of
+        // maintaining separate top-level and extension policy branches here.
+        let Some((receiver, sig)) = self.source_callable_signature(&f.name, file_index, decl)
+        else {
             return false;
         };
-        !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
-            && !self.ty_mentions_value_class(sig.ret)
-            && !inline_body_has_splice_only_shape(file, f)
+        let value_class_free = receiver
+            .into_iter()
+            .chain(sig.params.iter().copied())
+            .all(|ty| !self.ty_mentions_value_class(ty))
+            && !self.ty_mentions_value_class(sig.ret);
+        let module = crate::module_symbols::ModuleSymbols::for_file(self, file_index);
+        let import_scope = function_import_scope(file, self);
+        let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
+            &*self.libraries,
+            &module,
+            &import_scope,
+        );
+        let bound_names = function_bound_names(file, f);
+        // Contract identity depends on the import scope and callee NAME, not on call arguments.
+        // Memoize per name so a large inline body pays the federated lookup once per distinct name.
+        let contract_names = std::cell::RefCell::new(HashMap::<String, bool>::new());
+        let is_erased_contract = |expression| {
+            let Expr::Call { callee, .. } = file.expr(expression) else {
+                return false;
+            };
+            let Expr::Name(name) = file.expr(*callee) else {
+                return false;
+            };
+            if bound_names.contains(name) {
+                return false;
+            }
+            if let Some(resolved) = contract_names.borrow().get(name).copied() {
+                return resolved;
+            }
+            let resolved =
+                resolved_call_is_erased_contract(file, expression, &resolver, &*self.libraries);
+            contract_names.borrow_mut().insert(name.clone(), resolved);
+            resolved
+        };
+        value_class_free && !inline_body_has_splice_only_shape(file, f, &is_erased_contract)
+    }
+
+    /// Whether a source function has a standalone callable body in the checked program. Ordinary
+    /// functions always do; an inline function does only when its established callable-extension
+    /// path or the conservative standalone-body analysis supports it. This semantic answer is
+    /// shared by common IR lowering and target registration so neither layer reconstructs the
+    /// declaration-kind predicate or introduces file/module/classpath exceptions.
+    pub fn source_fn_has_callable_body(
+        &self,
+        file: &File,
+        file_index: u32,
+        declaration: DeclId,
+        function: &FunDecl,
+    ) -> bool {
+        !function.is_inline()
+            || function.has_callable_inline_extension_body()
+            || self.inline_fn_facade_emittable(file, file_index, declaration, function)
     }
 
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
@@ -9303,6 +9601,16 @@ pub enum ExprLowering {
     },
     /// An unbound classpath member or extension-property reference.
     ClasspathUnboundPropertyRef(Box<crate::symbol_resolver::ResolvedPropertyRef>),
+    /// An unqualified source member-property reference (`::p`) selected against the current
+    /// dispatch receiver. Lowering consumes this exact owner instead of repeating source hierarchy
+    /// and visibility resolution; presence also distinguishes a selected-but-unlowerable member
+    /// from a top-level property with the same name, so shadowing fails closed.
+    ImplicitThisMemberPropertyRef { owner: TypeName },
+    /// An unqualified source member-function reference (`::m`) selected against the current semantic
+    /// `this`. The owner is a semantic handoff, not a JVM-slot hint: top-level extensions bind `this`
+    /// at slot zero, member extensions bind it after the dispatch receiver, and nested receiver scopes
+    /// may bind it to a local value. Lowering captures the scoped value and dispatches on this owner.
+    ImplicitThisMemberFunctionRef { owner: TypeName },
     /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
     /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
     /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
@@ -9660,6 +9968,7 @@ fn make_checker<'a>(
         tparams: Default::default(),
         reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
+        this_unavailable: false,
         this_extension_receiver: None,
         this_narrow: None,
         this_labels: Vec::new(),
@@ -9992,8 +10301,35 @@ fn record_function_capture_targets(
     record_capture_targets(file, targets, roots, discovered)
 }
 
+/// Kotlin gives these unqualified instance methods a fixed return even when source omits the
+/// annotation. Keep this source-shape rule shared by method checking and any pass that predicts
+/// whether method checking can publish an inferred return: duplicating the list would let an
+/// optimization silently diverge from the semantic path when a contract is added or corrected.
+fn implicit_object_contract_return(function: &FunDecl) -> Option<Ty> {
+    match (
+        function.receiver.is_none(),
+        function.name.as_str(),
+        function.params.len(),
+    ) {
+        (true, "compareTo", 1) => Some(Ty::Int),
+        (true, "equals", 1) => Some(Ty::Boolean),
+        (true, "hashCode", 0) => Some(Ty::Int),
+        (true, "toString", 0) => Some(Ty::String),
+        _ => None,
+    }
+}
+
+fn method_may_publish_inferred_return(function: &FunDecl) -> bool {
+    function.ret.is_none()
+        && implicit_object_contract_return(function).is_none()
+        && matches!(function.body, FunBody::Expr(_))
+}
+
 struct ClassCapturePlan {
-    method_check_prefix_len: usize,
+    /// One decision per method in the retained instance/enum-entry prefix. A shorter vector means
+    /// the remaining suffix is irrelevant; `false` inside the vector means semantic checking may be
+    /// skipped but the checker's ordered mutation summary must still advance past that method.
+    methods: Vec<bool>,
     companion_methods: Vec<bool>,
 }
 
@@ -10003,11 +10339,13 @@ impl ClassCapturePlan {
     /// method only asks the corresponding generic function seam which ordered method owns each
     /// target.
     ///
-    /// Instance and enum-entry methods publish inferred returns into shared checker state. Keep the
-    /// exact prefix through the last capture-bearing method. A target in any other class region
-    /// keeps the complete prefix because constructors, properties, init blocks, enum arguments, and
-    /// companion functions may consume those published returns. Companion functions themselves do
-    /// not publish into that cross-function cache, so they can be selected independently.
+    /// Instance and enum-entry methods publish inferred returns into shared checker state. Retain
+    /// the exact prefix through the last capture-bearing method, but semantically check within that
+    /// prefix only methods that own a target or can publish such a return. A target in any other
+    /// class region keeps the complete prefix because constructors, properties, init blocks, enum
+    /// arguments, and companion functions may consume those published returns. Companion functions
+    /// themselves do not publish into that cross-function cache, so they can be selected
+    /// independently.
     fn for_class(
         file: &File,
         class: &ClassDecl,
@@ -10025,17 +10363,25 @@ impl ClassCapturePlan {
             )
             .collect::<Vec<_>>();
         let mut method_targets = std::collections::HashSet::new();
-        let mut method_check_prefix_len = 0;
-        for (index, method) in methods.iter().enumerate() {
-            if record_function_capture_targets(file, method, targets, &mut method_targets) {
-                method_check_prefix_len = index + 1;
-            }
-        }
+        let mut selected_methods = methods
+            .iter()
+            .map(|method| {
+                record_function_capture_targets(file, method, targets, &mut method_targets)
+            })
+            .collect::<Vec<_>>();
+        let mut method_check_prefix_len = selected_methods
+            .iter()
+            .rposition(|selected| *selected)
+            .map_or(0, |index| index + 1);
         if declaration_targets
             .iter()
             .any(|target| !method_targets.contains(target))
         {
             method_check_prefix_len = methods.len();
+        }
+        selected_methods.truncate(method_check_prefix_len);
+        for (selected, method) in selected_methods.iter_mut().zip(methods) {
+            *selected |= method_may_publish_inferred_return(method);
         }
 
         let mut companion_targets = std::collections::HashSet::new();
@@ -10047,7 +10393,7 @@ impl ClassCapturePlan {
             })
             .collect();
         Self {
-            method_check_prefix_len,
+            methods: selected_methods,
             companion_methods,
         }
     }
@@ -10149,18 +10495,140 @@ pub fn discover_anonymous_object_captures(files: &[File], syms: &mut SymbolTable
     }
 }
 
+#[derive(Default)]
+struct PreinferPassResult {
+    changed_names: std::collections::HashSet<String>,
+}
+
+impl PreinferPassResult {
+    fn changed(&self) -> bool {
+        !self.changed_names.is_empty()
+    }
+}
+
+/// The exact function shape consumed by [`preinfer_returns_pass`]. Keep the worklist candidate filter
+/// on this predicate too: adding another inferred function shape must not make the pass capable of
+/// checking it while later fixpoint rounds silently exclude its file.
+fn function_needs_return_preinfer(function: &FunDecl) -> bool {
+    function.ret.is_none() && matches!(function.body, FunBody::Expr(_))
+}
+
+/// Return the receiver and expression getter for the exact member-extension property shape consumed
+/// by [`preinfer_returns_pass`]. An `Option` carries the operands as well as the eligibility decision,
+/// avoiding a parallel boolean predicate that could drift from the pass's destructuring.
+fn member_extension_property_preinfer_body(property: &PropDecl) -> Option<(&TypeRef, ExprId)> {
+    match (&property.receiver, &property.ty, &property.getter) {
+        (Some(receiver), None, Some(FunBody::Expr(getter))) => Some((receiver, *getter)),
+        _ => None,
+    }
+}
+
+fn file_has_preinfer_candidates(file: &File) -> bool {
+    file.decls
+        .iter()
+        .any(|&declaration| match file.decl(declaration) {
+            Decl::Fun(function) => function_needs_return_preinfer(function),
+            Decl::Class(class) => {
+                class.methods.iter().any(function_needs_return_preinfer)
+                    || class
+                        .body_props
+                        .iter()
+                        .any(|property| member_extension_property_preinfer_body(property).is_some())
+            }
+            Decl::Property(_) => false,
+        })
+}
+
+/// Whether a callable can be invoked without its source name appearing in the AST. Start with the
+/// checker's canonical synthetic-operator registry so this dependency gate automatically follows
+/// additions such as the bracket-assignment `set`/`put` fallback instead of maintaining a second
+/// arithmetic/operator list. The remaining names belong to syntax protocols that use other resolver
+/// paths (compound assignment, invocation, iteration, delegation, destructuring, equality, and `..<`).
+/// Ordinary infix functions such as `until`, `downTo`, and `step` are intentionally absent: the parser
+/// retains those names in an ordinary `Call`, so the explicit-name scan below handles them precisely.
+fn callable_name_may_be_implicit_in_ast(name: &str) -> bool {
+    SyntheticOperatorCall::from_name(name).is_some()
+        || name == CALLABLE_INVOKE_OPERATOR
+        || matches!(
+            name,
+            "plusAssign"
+                | "minusAssign"
+                | "timesAssign"
+                | "divAssign"
+                | "remAssign"
+                | "rangeUntil"
+                | "equals"
+                | "iterator"
+                | "hasNext"
+                | "next"
+                | "getValue"
+                | "setValue"
+                | "provideDelegate"
+        )
+        || name.strip_prefix("component").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// Whether a file may read a return changed by the previous pre-inference round. This is deliberately
+/// name-conservative: overloads and unrelated declarations can cause extra work, but every explicit
+/// source call/property/reference retains its callable name in the AST. Operator/protocol calls do not,
+/// so any changed implicit-call name keeps every candidate file active for the next round.
+fn file_may_depend_on_preinfer_names(
+    file: &File,
+    changed_names: &std::collections::HashSet<String>,
+    libraries: &dyn SemanticPlatform,
+) -> bool {
+    if changed_names
+        .iter()
+        .any(|name| callable_name_may_be_implicit_in_ast(name))
+    {
+        return true;
+    }
+    let mut effective_names = changed_names.clone();
+    for (alias, target) in &file.import_aliases {
+        if target
+            .rsplit('.')
+            .next()
+            .is_some_and(|name| changed_names.contains(name))
+        {
+            effective_names.insert(alias.clone());
+        }
+    }
+    let mut mapped_names = std::collections::HashSet::new();
+    file.expr_arena.iter().any(|expression| {
+        let name = match expression {
+            Expr::Name(name)
+            | Expr::Member { name, .. }
+            | Expr::SafeCall { name, .. }
+            | Expr::CallableRef { name, .. } => name,
+            _ => return false,
+        };
+        effective_names.contains(name)
+            || (mapped_names.insert(name.as_str())
+                && libraries
+                    .physical_property_getter_names(name)
+                    .iter()
+                    .any(|getter| effective_names.contains(getter)))
+    })
+}
+
 /// One pre-inference pass over `file`: check every EXPRESSION-body top-level function / class method
 /// whose return type is not declared, and patch the inferred return into `syms` (funs, extension funs,
-/// class methods). Returns `true` if any signature's return type changed — so a caller can iterate to a
-/// fixpoint (a body that calls another expr-body decl declared later, or in another file). Runs on a
-/// scratch `DiagSink` (inference diagnostics are not the real check's).
-fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -> bool {
+/// class methods). Returns the names of changed signatures so the module fixpoint can revisit only
+/// files that may depend on them. Runs on a scratch `DiagSink` (inference diagnostics are not the real
+/// check's).
+fn preinfer_returns_pass(
+    file: &File,
+    file_index: u32,
+    syms: &mut SymbolTable,
+) -> PreinferPassResult {
     let mut scratch = DiagSink::new();
     let mut pre = make_checker(file, file_index, None, &*syms, &mut scratch);
     let mut inferred_member_ext_rets = Vec::new();
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
-            if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) {
+            if function_needs_return_preinfer(f) {
                 let resolve = class_internal_resolver(pre.syms);
                 pre.tparams =
                     TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
@@ -10194,8 +10662,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
             pre.this_labels.push((cl.name.clone(), dispatch_ty, true));
             let properties = pre.scoped_properties(internal_name);
             for (property_index, property) in cl.body_props.iter().enumerate() {
-                let (Some(receiver), None, Some(FunBody::Expr(getter))) =
-                    (&property.receiver, &property.ty, &property.getter)
+                let Some((receiver, getter)) = member_extension_property_preinfer_body(property)
                 else {
                     continue;
                 };
@@ -10223,7 +10690,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                     let parameter_type = pre.resolve_ty(&parameter.ty);
                     pre.declare(&parameter.name, parameter_type, false);
                 }
-                let inferred = pre.expr(*getter);
+                let inferred = pre.expr(getter);
                 pre.pop_scope();
                 pre.symbolic_signature_inference = false;
                 inferred_member_ext_rets.push((
@@ -10237,7 +10704,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                 pre.tparams.clear();
             }
             for m in &cl.methods {
-                if m.ret.is_none() && matches!(m.body, FunBody::Expr(_)) {
+                if function_needs_return_preinfer(m) {
                     pre.tparams = class_tparams.symbolic_extended_with(
                         &m.type_params,
                         &m.type_param_bounds,
@@ -10258,13 +10725,17 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
     let method_rets = std::mem::take(&mut pre.inferred_method_rets);
     let member_ext_fun_rets = std::mem::take(&mut pre.inferred_member_ext_fun_rets);
     drop(pre);
-    let mut changed = false;
+    let mut result = PreinferPassResult::default();
     for ((file, decl), ret) in fun_rets {
-        if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
+        if let Some((name, sig)) = syms.funs.iter_mut().find_map(|(name, sigs)| {
             sigs.iter_mut()
                 .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
+                .map(|signature| (name.as_str(), signature))
         }) {
-            changed |= sig.set_inferred_return(ret);
+            let function_changed = sig.set_inferred_return(ret);
+            if function_changed {
+                result.changed_names.insert(name.to_string());
+            }
         }
     }
     for ((file, decl, name), ret) in ext_rets {
@@ -10276,17 +10747,27 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                 })
             })
         }) {
-            changed |= sig.set_inferred_return(ret);
+            let function_changed = sig.set_inferred_return(ret);
+            if function_changed {
+                result.changed_names.insert(name);
+            }
         }
     }
     for ((internal, name, params), ret) in method_rets {
         if let Some(class) = syms.class_by_type_name_mut(internal) {
-            changed |= class.set_inferred_method_return(&name, &params, ret);
+            let method_changed = class.set_inferred_method_return(&name, &params, ret);
+            if method_changed {
+                result.changed_names.insert(name);
+            }
         }
     }
     for ((internal, name, receiver, params), ret) in member_ext_fun_rets {
         if let Some(class) = syms.class_by_type_name_mut(internal) {
-            changed |= class.set_inferred_member_extension_return(&name, receiver, &params, ret);
+            let function_changed =
+                class.set_inferred_member_extension_return(&name, receiver, &params, ret);
+            if function_changed {
+                result.changed_names.insert(name);
+            }
         }
     }
     for (internal, name, index, ret) in inferred_member_ext_rets {
@@ -10298,11 +10779,14 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
             .and_then(|class| class.member_ext_props.get_mut(&name))
             .and_then(|properties| properties.get_mut(index))
         {
-            changed |= signature.ret != ret;
+            let property_changed = signature.ret != ret;
+            if property_changed {
+                result.changed_names.insert(name.clone());
+            }
             signature.ret = ret;
         }
     }
-    changed
+    result
 }
 
 /// Pre-infer EXPRESSION-body return types across the WHOLE module (every file), patching `syms` before
@@ -10322,15 +10806,35 @@ pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &m
 fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
     discover_anonymous_object_captures(files, syms);
     let saved = diags.current_file();
+    let candidates = files
+        .iter()
+        .map(file_has_preinfer_candidates)
+        .collect::<Vec<_>>();
+    let mut active = candidates.clone();
     for _pass in 0..8 {
-        let mut changed = false;
+        let mut changed_names = std::collections::HashSet::new();
         for (i, file) in files.iter().enumerate() {
+            if !active[i] {
+                continue;
+            }
             diags.set_file(i as u32);
-            changed |= preinfer_returns_pass(file, i as u32, syms);
+            changed_names.extend(preinfer_returns_pass(file, i as u32, syms).changed_names);
         }
-        if !changed {
+        if changed_names.is_empty() {
             break;
         }
+        active = files
+            .iter()
+            .zip(&candidates)
+            .map(|(file, candidate)| {
+                *candidate
+                    && file_may_depend_on_preinfer_names(
+                        file,
+                        &changed_names,
+                        syms.libraries.as_ref(),
+                    )
+            })
+            .collect();
     }
     diags.set_file(saved);
 }
@@ -10356,7 +10860,7 @@ fn check_file_at_impl_mode(
     // dependency chain is shallow; an unresolvable case simply stops improving).
     if !capture_discovery {
         for _pass in 0..8 {
-            if !preinfer_returns_pass(file, file_index, syms) {
+            if !preinfer_returns_pass(file, file_index, syms).changed() {
                 break;
             }
         }
@@ -10662,15 +11166,17 @@ fn check_file_at_impl_mode(
                         }
                     }
                 }
-                let method_check_prefix_len = capture_scope
+                let method_capture_plan = capture_scope
                     .as_ref()
-                    .and_then(|scope| scope.class_plans.get(&d))
-                    .map_or(usize::MAX, |plan| plan.method_check_prefix_len);
+                    .and_then(|scope| scope.class_plans.get(&d));
                 let mut method_check_index = 0;
                 for m in &cl.methods {
-                    if method_check_index < method_check_prefix_len {
-                        c.check_method(m, &props);
-                    }
+                    c.check_method_in_capture_plan(
+                        m,
+                        &props,
+                        method_capture_plan,
+                        method_check_index,
+                    );
                     method_check_index += 1;
                 }
                 // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
@@ -10715,9 +11221,12 @@ fn check_file_at_impl_mode(
                         c.pop_scope();
                     }
                     for bm in &entry.methods {
-                        if method_check_index < method_check_prefix_len {
-                            c.check_method(bm, &entry_props);
-                        }
+                        c.check_method_in_capture_plan(
+                            bm,
+                            &entry_props,
+                            method_capture_plan,
+                            method_check_index,
+                        );
                         method_check_index += 1;
                     }
                 }
@@ -10759,10 +11268,16 @@ fn check_file_at_impl_mode(
                     for p in &sc.params {
                         if let Some(default) = p.default {
                             let ty = c.secondary_ctor_param_ty(p);
-                            c.check_default_arg(&p.ty, default, ty);
+                            // A ctor-param default is evaluated in the CALLER's context — no `this`.
+                            c.with_this_unavailable(|c| {
+                                c.check_default_arg(&p.ty, default, ty);
+                            });
                         }
                     }
-                    match &sc.delegation {
+                    // Delegation-call args (`this(…)`/`super(…)`) run before the delegated
+                    // constructor — `this` is UNINITIALIZED there (same guard as the primary
+                    // `super(…)` clause below).
+                    c.with_this_unavailable(|c| match &sc.delegation {
                         CtorDelegation::This(delegation) => {
                             for &argument in &delegation.args {
                                 // A delegation lambda is contextual: leave its initial `Error`
@@ -10825,7 +11340,7 @@ fn check_file_at_impl_mode(
                             );
                         }
                         CtorDelegation::None => {}
-                    }
+                    });
                     if let Some(body) = sc.body {
                         c.with_ret(Ty::Unit, |c| {
                             c.expr_statement(body);
@@ -10845,7 +11360,8 @@ fn check_file_at_impl_mode(
                 for p in &cl.props {
                     if let Some(dx) = p.default {
                         let pty = c.resolve_ty(&p.ty);
-                        c.check_default_arg(&p.ty, dx, pty);
+                        // A ctor-param default is evaluated in the CALLER's context — no `this`.
+                        c.with_this_unavailable(|c| c.check_default_arg(&p.ty, dx, pty));
                     }
                 }
                 c.pop_scope();
@@ -10884,66 +11400,71 @@ fn check_file_at_impl_mode(
                 // checked below once the ctor is resolved; anything else is typed up front.
                 let file = c.file;
                 let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
-                for &arg in &cl.base_args {
-                    if !is_lambda(arg) {
-                        c.expr(arg);
+                // `this` is UNINITIALIZED inside `super(…)` args — an implicit-`this` callable ref
+                // there must not resolve (see `this_unavailable`).
+                c.with_this_unavailable(|c| {
+                    for &arg in &cl.base_args {
+                        if !is_lambda(arg) {
+                            c.expr(arg);
+                        }
                     }
-                }
-                // Resolve the primary constructor's `Base(args)` clause through the SAME delegation
-                // candidates and argument-slot mapper used by secondary `super(args)` calls. Besides
-                // keeping same-file, sibling-module, and classpath bases on one path, the resulting
-                // source-order `argument_types` are essential for named/vararg arguments: zipping the
-                // source arguments with parameter order would contextually type the wrong lambda.
-                if !cl.base_args.is_empty() {
-                    let internal = class_internal(c.file, &cl.name);
-                    let names = cl
-                        .base_args
-                        .first()
-                        .and_then(|argument| c.file.base_arg_names.get(&argument.0))
-                        .cloned()
-                        .unwrap_or_else(|| vec![None; cl.base_args.len()]);
-                    let arguments = CtorDelegationCall {
-                        args: cl.base_args.clone(),
-                        names,
-                        trailing_lambda: false,
-                    };
-                    let candidates = c.super_ctor_delegation_candidates(cl);
-                    if let Some(selected) = c.select_source_constructor(&arguments, &candidates) {
-                        // A receiver lambda's implicit label is the source-level base class's SIMPLE
-                        // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
-                        // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
-                        let label = cl.base_class.as_deref().map(|base| {
-                            base.rsplit(['/', '.', '$'])
-                                .next()
-                                .unwrap_or(base)
-                                .to_string()
-                        });
-                        for ((&arg, &expected), &has_receiver) in cl
+                    // Resolve the primary constructor's `Base(args)` clause through the SAME delegation
+                    // candidates and argument-slot mapper used by secondary `super(args)` calls. Besides
+                    // keeping same-file, sibling-module, and classpath bases on one path, the resulting
+                    // source-order `argument_types` are essential for named/vararg arguments: zipping the
+                    // source arguments with parameter order would contextually type the wrong lambda.
+                    if !cl.base_args.is_empty() {
+                        let internal = class_internal(c.file, &cl.name);
+                        let names = cl
                             .base_args
-                            .iter()
-                            .zip(&selected.argument_types)
-                            .zip(&selected.argument_lambda_receivers)
+                            .first()
+                            .and_then(|argument| c.file.base_arg_names.get(&argument.0))
+                            .cloned()
+                            .unwrap_or_else(|| vec![None; cl.base_args.len()]);
+                        let arguments = CtorDelegationCall {
+                            args: cl.base_args.clone(),
+                            names,
+                            trailing_lambda: false,
+                        };
+                        let candidates = c.super_ctor_delegation_candidates(cl);
+                        if let Some(selected) = c.select_source_constructor(&arguments, &candidates)
                         {
-                            if is_lambda(arg) {
-                                c.check_argument_expected(
-                                    arg,
-                                    expected,
-                                    has_receiver,
-                                    label.as_deref(),
-                                );
+                            // A receiver lambda's implicit label is the source-level base class's SIMPLE
+                            // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
+                            // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
+                            let label = cl.base_class.as_deref().map(|base| {
+                                base.rsplit(['/', '.', '$'])
+                                    .next()
+                                    .unwrap_or(base)
+                                    .to_string()
+                            });
+                            for ((&arg, &expected), &has_receiver) in cl
+                                .base_args
+                                .iter()
+                                .zip(&selected.argument_types)
+                                .zip(&selected.argument_lambda_receivers)
+                            {
+                                if is_lambda(arg) {
+                                    c.check_argument_expected(
+                                        arg,
+                                        expected,
+                                        has_receiver,
+                                        label.as_deref(),
+                                    );
+                                }
                             }
-                        }
-                        c.super_ctor_params
-                            .insert(internal, selected.target.params().to_vec());
-                    } else {
-                        // No unique ctor match: type the deferred lambda args without an expected type.
-                        for &arg in &cl.base_args {
-                            if is_lambda(arg) {
-                                c.expr(arg);
+                            c.super_ctor_params
+                                .insert(internal, selected.target.params().to_vec());
+                        } else {
+                            // No unique ctor match: type the deferred lambda args without an expected type.
+                            for &arg in &cl.base_args {
+                                if is_lambda(arg) {
+                                    c.expr(arg);
+                                }
                             }
                         }
                     }
-                }
+                });
                 // Interface-delegation expressions (`: I by mk(x)`) are evaluated in the constructor too,
                 // so they're typed here — with the ctor params and `this` in scope.
                 for (_iface, e) in &cl.delegation_exprs {
@@ -11800,6 +12321,12 @@ struct Checker<'a> {
     reified_tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
+    /// `true` while checking expressions where implicit `this` is unavailable or uninitialized — a class's
+    /// `super(…)`/delegation-call arguments and constructor-parameter defaults (the latter are
+    /// evaluated in the CALLER's context). Every implicit-`this` callable-reference shape uses this
+    /// shared state; restricting it to properties would leave `::method` able to capture the same
+    /// unavailable or uninitialized semantic receiver.
+    this_unavailable: bool,
     this_extension_receiver: Option<Span>,
     /// A flow-narrowing of the implicit receiver established by `if (this is B)`: `this` is known to
     /// be `B` (a subtype of `this_ty`) inside the guarded branch, so a bare member of `B` resolves.
@@ -12124,6 +12651,30 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Apply one ordered class-capture method decision. A missing plan is the conservative full-walk
+    /// fallback used both outside capture discovery and when target-inventory completeness failed.
+    /// A missing entry in a present plan is instead the irrelevant suffix after the final target.
+    /// Skipped non-publishers inside the retained prefix still replace the mutation summary because
+    /// `check_method` normally performs that state transition before semantic work, and a later
+    /// selected class region reads these checker-wide sets while discovering mutable captures.
+    fn check_method_in_capture_plan(
+        &mut self,
+        function: &FunDecl,
+        properties: &[ScopedProperty],
+        plan: Option<&ClassCapturePlan>,
+        method_index: usize,
+    ) {
+        let Some(plan) = plan else {
+            self.check_method(function, properties);
+            return;
+        };
+        match plan.methods.get(method_index) {
+            Some(true) => self.check_method(function, properties),
+            Some(false) => self.reset_body_mutations(fun_body_expr(&function.body)),
+            None => {}
+        }
+    }
+
     fn resolved_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
         self.resolved_type_name(type_name(internal))
             .map(|classifier| (*classifier).clone())
@@ -12157,6 +12708,17 @@ impl<'a> Checker<'a> {
 
     fn with_ret<R>(&mut self, ret_ty: Ty, f: impl FnOnce(&mut Self) -> R) -> R {
         self.with_ret_allowed(ret_ty, true, f)
+    }
+
+    /// Evaluate a constructor-header region before a dispatch receiver exists. Centralizing the
+    /// save/restore transition keeps primary defaults, secondary defaults, and delegation arguments
+    /// on one rule and prevents an early return in one caller from leaking the state into a body where
+    /// `this` is initialized.
+    fn with_this_unavailable<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = std::mem::replace(&mut self.this_unavailable, true);
+        let result = f(self);
+        self.this_unavailable = previous;
+        result
     }
 
     fn with_ret_allowed<R>(
@@ -13616,17 +14178,6 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         self.resolver().resolve_super_instance(internal, name, args)
     }
-    fn resolve_companion(
-        &self,
-        internal: &str,
-        name: &str,
-        args: &[Ty],
-    ) -> Option<crate::libraries::LibraryMember> {
-        use crate::symbol_resolver::{SymRecv, Symbol};
-        self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), name, args, &[])
-            .and_then(Symbol::companion)
-    }
     fn resolve_companion_with_literal_args(
         &self,
         internal: &str,
@@ -13763,10 +14314,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// True when `e` is a call to the `kotlin.contracts.contract { … }` intrinsic — the erased
-    /// contract-declaration block. The callee name `contract` is confirmed to resolve to a
-    /// top-level function in `kotlin/contracts` through the symbol resolver, so a user function that
-    /// happens to be named `contract` is not mistaken for it.
+    /// True when `e` resolves to the platform's erased contract-declaration intrinsic. This is the
+    /// same import-scoped, module-federated identity query used by inline-facade eligibility, so an
+    /// alias, source shadow, or unrelated same-named declaration cannot make checking and emission
+    /// disagree about whether the DSL lambda exists at runtime.
     fn is_contract_call(&self, e: ExprId) -> bool {
         let Expr::Call { callee, .. } = self.file.expr(e) else {
             return false;
@@ -13774,29 +14325,13 @@ impl<'a> Checker<'a> {
         let Expr::Name(name) = self.file.expr(*callee) else {
             return false;
         };
-        if name != "contract" {
+        // Lexical values/local functions outrank every top-level import. They are intentionally kept
+        // outside SymbolResolver's package federation, so close that final precedence rung here
+        // before asking the shared top-level identity classifier.
+        if self.lexical_value_declares(name) {
             return false;
         }
-        // A user-declared top-level `fun contract(…)` in this module shadows the stdlib intrinsic —
-        // then the call is a real function and must NOT be erased.
-        if self.module_declares("contract") {
-            return false;
-        }
-        crate::libraries::FunctionSet {
-            overloads: self
-                .resolver()
-                .resolve_symbol(
-                    crate::symbol_resolver::SymRecv::TopLevel,
-                    "contract",
-                    &[],
-                    &[],
-                )
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .unwrap_or_default(),
-        }
-        .overloads
-        .iter()
-        .any(|o| o.callable.owner.starts_with("kotlin/contracts"))
+        resolved_call_is_erased_contract(self.file, e, &self.resolver(), &*self.syms.libraries)
     }
 
     /// Decode every top-level function's `contract { … }` block up front (see the call site in
@@ -17814,13 +18349,7 @@ impl<'a> Checker<'a> {
                 .push((label_index, recv_ref.span));
             self.this_extension_receiver = Some(recv_ref.span);
         }
-        let object_contract_ret = match (f.receiver.is_none(), f.name.as_str(), f.params.len()) {
-            (true, "compareTo", 1) => Some(Ty::Int),
-            (true, "equals", 1) => Some(Ty::Boolean),
-            (true, "hashCode", 0) => Some(Ty::Int),
-            (true, "toString", 0) => Some(Ty::String),
-            _ => None,
-        };
+        let object_contract_ret = implicit_object_contract_return(f);
         self.ret_ty = f
             .ret
             .as_ref()
@@ -18001,6 +18530,23 @@ impl<'a> Checker<'a> {
         internal: TypeName,
         name: &str,
     ) -> Option<(TypeName, Ty, bool, Option<Visibility>)> {
+        // Source declarations are authoritative for every semantic property fact. In particular,
+        // `ClassSig::props` contains inherited backing-field shapes flattened into subclasses, so a
+        // lookup through that cache cannot identify the actual declaring owner and can pair the
+        // selected type with visibility from a different branch of the hierarchy. Resolve the full
+        // declaration once and derive type, mutability, setter visibility, and owner together.
+        if let Some((owner, property)) = self.syms.declared_member_prop(internal, name) {
+            return property.context_params.is_empty().then_some((
+                owner,
+                property.ty,
+                property.setter_name.is_some(),
+                property.setter_visibility,
+            ));
+        }
+
+        // Retain the structural fallback for signatures that intentionally have no source
+        // declaration metadata (synthetic/module-populated `ClassSig::props`). It is deliberately
+        // secondary: source properties must never lose their declaring owner to the flattened cache.
         let mut pending = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(current) = pending.pop() {
@@ -18318,13 +18864,29 @@ impl<'a> Checker<'a> {
                 } else {
                     elem
                 };
-                self.expect_assignable(expected, *a, self.span(args[i]), "argument");
+                self.expect_call_arg(expected, args[i], *a);
             }
         } else {
             for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
-                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                self.expect_call_arg(*p, args[i], *a);
             }
         }
+    }
+
+    /// Validate one argument after overload selection. A lambda targeting a classpath SAM is checked
+    /// against the SAM method parameters here, at the common call-argument seam; import/member/vararg
+    /// paths must not each reimplement the conversion or accidentally compare `FunctionN` to the Java
+    /// interface type.
+    fn expect_call_arg(&mut self, expected: Ty, argument: ExprId, actual: Ty) {
+        if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+            if let Some(sam) =
+                crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, expected)
+            {
+                self.check_lambda_with_types(argument, &sam.params);
+                return;
+            }
+        }
+        self.expect_assignable(expected, actual, self.span(argument), "argument");
     }
 
     fn expect_source_constructor_args(
@@ -21870,15 +22432,80 @@ impl<'a> Checker<'a> {
                 // An unqualified `::m` inside a class is a BOUND reference to the enclosing receiver's
                 // member FUNCTION — `this::m`. Resolved before the top-level fallbacks (a member takes
                 // precedence over a same-named top-level decl), exactly matching the lowerer's
-                // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return — a
-                // member-property implicit ref isn't lowered, so it's NOT resolved here either, to keep
-                // the checker and lowerer in agreement).
+                // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return); the
+                // member-PROPERTY case (`::p`) follows, matching `lower_implicit_this_prop_ref`.
                 if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                    if let Some(sig) = self.syms.method_of_name(internal, &name) {
+                    if let Some((owner, sig)) = self.syms.method_of_with_owner_name(internal, &name)
+                    {
                         if sig.requires_all_args() && sig.ret != Ty::Nothing {
+                            // Constructor headers have no initialized semantic receiver to capture.
+                            // Other receiver shapes are safe because lowering consumes the exact
+                            // selected owner and captures its scoped `this` value; it does not assume
+                            // that every implicit receiver lives in JVM slot zero.
+                            if self.this_unavailable {
+                                self.diags.error(
+                                    self.span(e),
+                                    "krusty: callable references are not supported",
+                                );
+                                return self.set(e, Ty::Error);
+                            }
+                            self.expr_lowers
+                                .insert(e, ExprLowering::ImplicitThisMemberFunctionRef { owner });
                             self.mark_current_extension_receiver_used(e);
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
+                    }
+                    // An unqualified `::p` inside a class is a BOUND reference to the enclosing
+                    // receiver's member PROPERTY (`this::p`) — resolved after member fns (a fn
+                    // takes precedence). A member SHADOWS a same-named top-level decl, so once
+                    // found here the reference NEVER falls through to the top-level arms: it is
+                    // typed only where the lowering (`lower_implicit_this_prop_ref`, capturing the
+                    // dispatch `this` at slot 0) is valid —
+                    //   * not where `this` is unavailable/uninitialized (super-ctor args,
+                    //     ctor-param defaults — `this_unavailable`);
+                    //   * not a `private`/`protected` property, nor a `var` with a `private`
+                    //     setter (the synthetic reference class can't reach such an accessor —
+                    //     an illegal-access miscompile);
+                    //   * a computed (backing-field-less) property IS typed here but declined by
+                    //     the lowerer — a sound skip, never a mis-bind.
+                    if let Some((owner, _, is_var, setter_visibility)) =
+                        self.lookup_prop_with_owner_name(internal, &name)
+                    {
+                        // The same declaration resolver supplies every property fact. A private base
+                        // property flattened into the subclass's structural field cache must not
+                        // default to public or borrow visibility from a same-named interface member.
+                        let visibility = self
+                            .syms
+                            .declared_member_prop(internal, &name)
+                            .map(|(_, property)| property.visibility)
+                            // Only synthetic/module-populated structural properties reach this
+                            // fallback; they carry no source visibility and preserve the historical
+                            // public treatment.
+                            .unwrap_or(Visibility::Public);
+                        let accessible =
+                            |v: Visibility| matches!(v, Visibility::Public | Visibility::Internal);
+                        if !self.this_unavailable
+                            && accessible(visibility)
+                            && (!is_var || setter_visibility.is_none_or(accessible))
+                        {
+                            if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                // Record the semantic selection once. Lowering must not repeat the
+                                // hierarchy/visibility walk: this marker both supplies the exact
+                                // dispatch owner and makes a computed member fail closed instead of
+                                // falling through to a shadowed top-level/extension property.
+                                self.expr_lowers.insert(
+                                    e,
+                                    ExprLowering::ImplicitThisMemberPropertyRef { owner },
+                                );
+                                self.mark_current_extension_receiver_used(e);
+                                return self.set(e, ty);
+                            }
+                        }
+                        self.diags.error(
+                            self.span(e),
+                            "krusty: callable references are not supported",
+                        );
+                        return self.set(e, Ty::Error);
                     }
                 }
                 if let Some(receiver) = self.this_ty {
@@ -24836,15 +25463,9 @@ impl<'a> Checker<'a> {
         receiver: TypeName,
         name: &str,
     ) -> Option<(Visibility, TypeName)> {
-        let mut cur = Some(receiver);
-        while let Some(internal) = cur {
-            let cs = self.syms.class_by_type_name(internal)?;
-            if let Some(property) = cs.declared_props.get(name) {
-                return Some((property.visibility, internal));
-            }
-            cur = cs.super_internal_name();
-        }
-        None
+        self.syms
+            .declared_member_prop(receiver, name)
+            .map(|(owner, property)| (property.visibility, owner))
     }
 
     fn inaccessible_classifier(
@@ -29384,8 +30005,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                // Coroutine intrinsics type their lambda with the current Continuation and yield the
-                // enclosing suspend function's return type.
+                // Coroutine intrinsics type their lambda with the current Continuation; the call
+                // yields the intrinsic's `T` (see below).
                 let one_lambda_arg = match args {
                     [arg] if matches!(self.file.expr(*arg), Expr::Lambda { .. }) => Some(*arg),
                     _ => None,
@@ -29405,7 +30026,21 @@ impl<'a> Checker<'a> {
                 ) {
                     let cont = Ty::obj("kotlin/coroutines/Continuation");
                     self.check_lambda_with_types(lambda, &[cont]);
-                    let r = self.ret_ty;
+                    // The call's type is the intrinsic's `T`: an explicit type argument
+                    // (`suspendCoroutineUninterceptedOrReturn<Unit> { … }`) when present, else
+                    // the enclosing suspend function's return type — but NEVER `Nothing`: the
+                    // intrinsic does not diverge locally (kotlinc infers the free `T` as `Unit`
+                    // in statement position), so in a `(): Nothing` fn the statements after it
+                    // still run, on the resumed activation.
+                    let explicit = self
+                        .file
+                        .call_type_args
+                        .get(&call.0)
+                        .and_then(|args| args.first())
+                        .map(|r| self.resolve_ty_no_diag(r))
+                        .filter(|t| *t != Ty::Error);
+                    let r = explicit.unwrap_or(self.ret_ty);
+                    let r = if r == Ty::Nothing { Ty::Unit } else { r };
                     return self.set(call, r);
                 }
                 // SAM conversion `Pred { lambda }`: type the lambda from the SAM method parameters.
@@ -31166,9 +31801,18 @@ impl<'a> Checker<'a> {
                             .map(|(o, m)| (o.to_string(), m.to_string()))
                     }) {
                         if let Some(owner_internal) = self.nested_internal(&owner_path) {
-                            if let Some(m) =
-                                self.resolve_companion(&owner_internal, &member, &arg_tys)
-                            {
+                            // Lambda args must stay LAMBDA literals here (`assertThrows(T::class.java)
+                            // { … }`): as plain typed `FunctionN` args the Java SAM-interface parameter
+                            // (`Executable`, `Runnable`) never matches and the imported static is
+                            // reported unresolved.
+                            let arg_kinds = self.call_arg_kinds(args);
+                            let call_targs = self.resolved_explicit_type_args(call);
+                            if let Some(m) = self.resolve_companion_with_literal_args(
+                                &owner_internal,
+                                &member,
+                                &arg_kinds,
+                                &call_targs,
+                            ) {
                                 let owner = m.owner_name_or(&owner_internal);
                                 let phys =
                                     m.physical_name.clone().unwrap_or_else(|| m.name.clone());
@@ -31189,19 +31833,8 @@ impl<'a> Checker<'a> {
                                     .flatten();
                                 if let Some(elem) = vararg {
                                     callable.vararg_elem = Some(elem);
-                                    let fixed = m.params.len() - 1;
-                                    for (i, &a) in args.iter().enumerate() {
-                                        let pt = if i < fixed { m.params[i] } else { elem };
-                                        self.expect_assignable(
-                                            pt,
-                                            arg_tys[i],
-                                            self.span(a),
-                                            "argument",
-                                        );
-                                    }
-                                } else {
-                                    self.expect_call_args(&m.params, false, args, &arg_tys);
                                 }
+                                self.expect_call_args(&m.params, m.call_sig.vararg, args, &arg_tys);
                                 self.resolved_calls
                                     .insert(call, ResolvedCall::TopLevel(callable));
                                 return ret;
@@ -32496,6 +33129,108 @@ mod tests {
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
 
     #[test]
+    fn preinfer_worklist_finds_explicit_and_aliased_dependencies() {
+        let mut diagnostics = DiagSink::new();
+        let direct = parse_file("fun inferred() = owner.changed()", &mut diagnostics);
+        let aliased = parse_file(
+            "import sample.changed as renamed\nfun inferred() = renamed()",
+            &mut diagnostics,
+        );
+        let unrelated = parse_file("fun inferred() = owner.stable()", &mut diagnostics);
+        let synthetic_property = parse_file(
+            "fun inferred() = SyntheticCatalog().entries[0]",
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty());
+        let changed = std::collections::HashSet::from(["changed".to_string()]);
+        let changed_getter = std::collections::HashSet::from(["getEntries".to_string()]);
+        let changed_unicode_getter = std::collections::HashSet::from(["getÄpfel".to_string()]);
+        let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(Vec::new()),
+        ));
+
+        assert!(file_may_depend_on_preinfer_names(
+            &direct, &changed, &libraries
+        ));
+        assert!(file_may_depend_on_preinfer_names(
+            &aliased, &changed, &libraries
+        ));
+        assert!(!file_may_depend_on_preinfer_names(
+            &unrelated, &changed, &libraries
+        ));
+        assert!(file_may_depend_on_preinfer_names(
+            &synthetic_property,
+            &changed_getter,
+            &libraries
+        ));
+        let unicode_synthetic_property = parse_file(
+            "fun inferred() = UnicodeSyntheticCatalog().äpfel[0]",
+            &mut diagnostics,
+        );
+        assert!(file_may_depend_on_preinfer_names(
+            &unicode_synthetic_property,
+            &changed_unicode_getter,
+            &libraries
+        ));
+    }
+
+    #[test]
+    fn preinfer_worklist_keeps_implicit_operator_dependencies_conservative() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file("fun inferred() = stable()", &mut diagnostics);
+        assert!(diagnostics.diags.is_empty());
+
+        assert!(file_may_depend_on_preinfer_names(
+            &file,
+            &std::collections::HashSet::from(["plus".to_string()]),
+            &EmptySymbolSource
+        ));
+        // `put` is the checker-recorded fallback for indexed assignment. Deriving the worklist gate
+        // from `SyntheticOperatorCall` keeps this less-common hidden target in sync with `set`.
+        assert!(file_may_depend_on_preinfer_names(
+            &file,
+            &std::collections::HashSet::from(["put".to_string()]),
+            &EmptySymbolSource
+        ));
+        assert!(file_may_depend_on_preinfer_names(
+            &file,
+            &std::collections::HashSet::from(["component12".to_string()]),
+            &EmptySymbolSource
+        ));
+        // `until` is an ordinary infix call whose name remains in the AST. A file that does not
+        // mention it need not be scheduled globally merely because another file changed that name.
+        assert!(!file_may_depend_on_preinfer_names(
+            &file,
+            &std::collections::HashSet::from(["until".to_string()]),
+            &EmptySymbolSource
+        ));
+    }
+
+    #[test]
+    fn preinfer_candidate_filter_matches_inferred_expression_bodies() {
+        let mut diagnostics = DiagSink::new();
+        let top_level = parse_file("fun value() = source()", &mut diagnostics);
+        let class_method = parse_file(
+            "class Synthetic { fun value() = source() }",
+            &mut diagnostics,
+        );
+        let member_extension_property = parse_file(
+            "class Synthetic { val String.value get() = length }",
+            &mut diagnostics,
+        );
+        let declared = parse_file(
+            "class Synthetic { fun value(): String = source() }",
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty());
+
+        assert!(file_has_preinfer_candidates(&top_level));
+        assert!(file_has_preinfer_candidates(&class_method));
+        assert!(file_has_preinfer_candidates(&member_extension_property));
+        assert!(!file_has_preinfer_candidates(&declared));
+    }
+
+    #[test]
     fn capture_discovery_selects_only_enclosing_top_level_declarations() {
         let mut diagnostics = DiagSink::new();
         let source = r#"
@@ -32508,7 +33243,10 @@ fun target(seed: Int): Marker {
     return object : Marker { fun value(): Int = captured }
 }
 class MethodHost {
-    fun untouched(): Int = 2
+    fun declared(): Int = 2
+    fun inferred() = source()
+    override fun toString() = source()
+    fun block(): Int { return 2 }
     fun build(seed: Int): Marker {
         val captured = seed
         return object : Marker { fun value(): Int = captured }
@@ -32516,9 +33254,17 @@ class MethodHost {
     fun defaulted(value: Marker = object : Marker {}): Marker = value
     fun after(): Int = 3
 }
+class PropertyHost {
+    fun declared(): Int = 2
+    fun inferred() = source()
+    override fun toString() = source()
+    fun block(): Int { return 2 }
+    val target: Marker = object : Marker { fun value(): Int = 4 }
+    fun laterInferred() = source()
+}
 class CompanionHost {
-    fun dependency(): Int = 4
-    fun later(): Int = 5
+    fun dependency() = source()
+    fun declared(): Int = 5
     companion object {
         fun untouched(): Int = 6
         fun build(seed: Int): Marker {
@@ -32551,7 +33297,14 @@ fun after(): Int = 3
 
         assert_eq!(
             named,
-            vec!["top", "defaulted", "target", "MethodHost", "CompanionHost"]
+            vec![
+                "top",
+                "defaulted",
+                "target",
+                "MethodHost",
+                "PropertyHost",
+                "CompanionHost"
+            ]
         );
 
         let class = |name: &str| {
@@ -32570,8 +33323,23 @@ fun after(): Int = 3
             .get(&method_host)
             .expect("selected class should have a complete plan");
         // The last target is in a parameter default, proving the generic function-root seam is not
-        // a body-only shortcut. The unrelated suffix remains outside the semantic capture walk.
-        assert_eq!(method_plan.method_check_prefix_len, 3);
+        // a body-only shortcut. Within that prefix, only an inferred-return publisher and the two
+        // target owners require semantic checking; declared, block-body, and fixed-contract methods
+        // retain only the cheap mutation-summary transition. The unrelated suffix is omitted.
+        assert_eq!(
+            method_plan.methods,
+            vec![false, true, false, false, true, true]
+        );
+
+        let (property_host, _) = class("PropertyHost");
+        let property_plan = scope
+            .class_plans
+            .get(&property_host)
+            .expect("selected class should have a complete plan");
+        // A property target retains the complete ordered method sequence, including a publisher
+        // after the property. This is intentionally conservative because the checker processes
+        // method return publication before later class regions.
+        assert_eq!(property_plan.methods, vec![false, true, false, false, true]);
 
         let (companion_host, _) = class("CompanionHost");
         let companion_plan = scope
@@ -32579,8 +33347,9 @@ fun after(): Int = 3
             .get(&companion_host)
             .expect("selected class should have a complete plan");
         // A target in a companion function lies outside the ordered instance-method sequence, so
-        // both instance methods are retained while companion functions remain independently scoped.
-        assert_eq!(companion_plan.method_check_prefix_len, 2);
+        // the full sequence is represented, but only its inferred-return publisher is checked.
+        // Companion functions remain independently scoped.
+        assert_eq!(companion_plan.methods, vec![true, false]);
         assert_eq!(companion_plan.companion_methods, vec![false, true]);
     }
 
@@ -35139,6 +35908,40 @@ fun box(): String {
             ),
             "checker must record the declaring module owner for inherited member calls"
         );
+    }
+
+    #[test]
+    fn declared_property_resolution_prefers_the_class_hierarchy_over_interfaces() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "interface Contract { val value: String }\n\
+             open class Base {\n\
+                 var value: String = \"base\"\n\
+                     private set\n\
+             }\n\
+             class Child : Base(), Contract",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let symbols = collect_signatures(&files, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let child = symbols
+            .classes
+            .get("Child")
+            .expect("child signature")
+            .internal_name();
+        let (owner, property) = symbols
+            .declared_member_prop(child, "value")
+            .expect("inherited value declaration");
+
+        // `Base.value` is the concrete class member that satisfies `Contract.value`. Property
+        // lookup, callable-reference lowering, and access checks must therefore all retain Base's
+        // mutability and private-setter facts; selecting the interface declaration here would make
+        // an unsafe mutable reference appear publicly writable.
+        assert!(owner.matches("Base"), "selected owner: {}", owner.render());
+        assert!(property.setter_name.is_some());
+        assert_eq!(property.setter_visibility, Some(Visibility::Private));
     }
 
     #[test]

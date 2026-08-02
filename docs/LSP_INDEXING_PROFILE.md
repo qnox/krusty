@@ -10,8 +10,12 @@ classification. Parsing and construction of the final navigation indexes are com
 The follow-up capture-discovery change confirms this directly: removing unrelated semantic checks
 from one serial inference pass reduced the `acee6cd0` 1,000-file worker median by 38%, without
 adding workers. The measured stacked prototype for dependency-preserving narrowing inside selected
-classes removed another 15.7% from the resulting worker time, reducing the matching 7.64-second
-median to 6.44 seconds.
+classes removed another 15.7% from the resulting worker time. The return-inference dependency
+worklist was then measured directly against its `d5a7c332` stack base at 7.40 versus 6.79 seconds,
+an additional 8.3% reduction without adding workers. Finally, publisher-only method checks were
+measured directly against their `0f1eecb2` stack base at 6.47 versus 5.06 seconds, a further 21.8%
+reduction. These are anchored branch measurements rather than current-tree timings; absolute times
+vary with host load, and the integrated capture-discovery implementation has not been re-profiled.
 
 On the original profiling base (`2fc95b4b`), the two measured compiler-side changes reduce the
 1,000-file analysis pass from 6.70 seconds to 3.86 seconds (42%) and peak RSS from 465 MiB to about
@@ -176,6 +180,70 @@ later replaced the prototype's resolver-local ownership rescans with the generic
 and function-root traversal. That exact integrated implementation has not been re-profiled, so the
 measurements above establish the optimization direction but are not a current-tree timing claim.
 
+### Return-inference dependency worklist
+
+Tracing the fixpoint on the same 1,000-file slice found 125 files with inferred expression bodies.
+Every round checked 35 top-level and 288 method candidates, but the first round changed only 43
+signatures (31 methods, 10 top-level functions, and two member extensions), while the second changed
+none. The unconditional second semantic sweep was therefore verification work rather than useful
+inference for this workload.
+
+The follow-up keeps the complete first round, then carries the names of changed callables into a
+conservative file worklist. Only files with inferred expression bodies whose AST mentions a changed
+callable are revisited. Import aliases are expanded. Names from the checker's canonical synthetic
+operator registry and the remaining hidden syntax protocols retain every candidate file because
+those calls can be implicit in the AST; ordinary infix functions keep their names and use the normal
+AST scan. Java synthetic properties use the same platform getter-name mapping as resolution, cached
+once per distinct AST name in each file. Name collisions can schedule extra work but cannot omit an
+explicit or synthetic-property dependency.
+
+Five interleaved optimized A/B runs give:
+
+| Build | Median worker time | Median peak RSS |
+|---|---:|---:|
+| Dependency-preserving class capture discovery (`d5a7c332`) | 7.40 s | 254,060 KiB |
+| Return-inference dependency worklist | 6.79 s | 253,596 KiB |
+
+That is a further 8.3% worker-time reduction with effectively flat peak RSS. Median end-to-end time
+falls from 7.89 to 7.26 seconds (8.0%). In the matching sampled profile,
+`preinfer_returns_pass` falls from 1,664/5,332 samples (31.2%) to 1,162/5,373 (21.6%). The
+worklist reduces this repeated single-thread work; it does not introduce analysis workers.
+
+### Publisher-only method checks during capture discovery
+
+The next sampled profile showed that the retained capture-discovery prefix was still semantically
+checking ordinary method bodies that could not affect a later anonymous-object construction. The
+prefix itself is necessary because inferred expression-body returns are published into checker
+state and can be consumed by a later method, class-body property, enum region, or companion capture.
+A method with a declared return, a block body, or a fixed platform-contract return publishes no such
+state unless the method contains the construction itself.
+
+The capture plan therefore checks every construction-bearing method and every preceding
+expression-body method that can publish an inferred return, while skipping unrelated
+non-publishers. It preserves the cheap ordered mutation-name reset that `check_method` performs, so
+a later selected class region sees the same persistent lexical state. Instance and enum-entry
+methods consume one ordered plan; companion functions remain independently selected as before.
+
+Five order-balanced interleaved A/B pairs on the same optimized, sorted 1,000-file `platform` slice
+give:
+
+| Build | Median worker time | Median user CPU | Median peak RSS |
+|---|---:|---:|---:|
+| Return-inference dependency worklist (`0f1eecb2`) | 6.47 s | 6.50 s | 253,692 KiB |
+| Publisher-only capture-discovery methods | 5.06 s | 4.98 s | 250,592 KiB |
+
+Worker time falls 21.8%, user CPU falls 23.4%, and peak RSS falls 1.2%. Median end-to-end time falls
+from 6.92 to 5.48 seconds (20.8%). The candidate was faster in all five adjacent order-balanced
+pairs. In the matching sampled profiles, capture discovery falls from 48.1% to 33.2% of samples,
+its `check_method` subtree falls from 34.7% to 14.4%, and ordinary `check_fun_body` work beneath it
+falls from 32.3% to 12.4%.
+
+An earlier attempt to skip method return pre-inference when signature collection had already
+published an exact literal or fixed-Boolean result was deliberately rejected. Across ten
+order-balanced A/B pairs it changed median worker time from 6.362 to 6.320 seconds (0.7%), user CPU
+from 6.345 to 6.280 seconds (1.0%), and did not change memory. That signal was smaller than run
+variance, so the extra filtering and complexity were not retained.
+
 ## Measured changes on the profiling base
 
 ### Share the compilation-wide class-name map
@@ -243,12 +311,13 @@ redact them before sharing; only aggregate measurements belong in committed docu
 
 ## Prioritized next improvements
 
-1. Replace the remaining module-wide return pre-inference passes with a dependency worklist. Record
-   which callable returns depend on which unresolved calls, and revisit only affected callables. For an
-   editor request, eagerly infer open files and lazily infer support bodies reached by those files.
-   Cache the resulting declaration/return snapshot by source fingerprint. In the sampled
-   dependency-preserving prototype, `preinfer_returns_pass` contained 31.2% of inclusive samples and
-   was the largest remaining direct serial optimization target.
+1. Refine the return-inference worklist from conservative file/name dependencies to exact callable
+   keys and declaration-level dependencies. The first round still checks every inferred expression
+   body, and name collisions schedule unrelated second-round bodies. For an editor request, eagerly
+   infer open files and lazily infer support bodies reached by those files. Cache the resulting
+   declaration/return snapshot by source fingerprint. After the file worklist,
+   After the publisher-only capture-discovery prototype, `preinfer_returns_pass` contains
+   1,025/3,792 samples (27.0%).
 2. Separate declaration/type-position names from arbitrary expression names during signature
    collection. `collect_file_type_names` intentionally over-approximates `Expr::Name`, including
    locals and parameters, causing useless import and classpath probes. A lexical local-name filter
@@ -300,3 +369,7 @@ remove repeated work on one thread.
 - Full `./run-tests.sh` on the `acee6cd0` validation base: all test binaries passed.
 - Full `./run-tests.sh` after focused capture discovery: all test binaries passed.
 - Full `./run-tests.sh` on the original dependency-preserving prototype: all test binaries passed.
+- Full `./run-tests.sh` for the return-inference dependency worklist on its stacked validation base:
+  all test binaries passed.
+- Full `./run-tests.sh` for publisher-only capture-discovery method checks on its stacked validation
+  base: all test binaries passed.

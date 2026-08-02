@@ -22,6 +22,7 @@ fn kept(cp: &Classpath, name: &str, params: &[Ty]) -> Option<usize> {
         params,
         &Ty::obj("java/lang/Object"),
         false,
+        &|_| None,
     )
     .kept_params
 }

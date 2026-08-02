@@ -866,6 +866,32 @@ pub fn stdlib_toolchain_ready() -> bool {
     stdlib_jar().is_some() && krusty::toolchain::jdk_modules().is_some()
 }
 
+/// Run one front-end-valid inline source through the checked-file → JVM-backend pipeline.
+///
+/// Bail-reason suites deliberately share this helper instead of each rebuilding the checked-file →
+/// JVM-backend pipeline. Keeping the classpath and JDK setup here means a diagnostic test differs only
+/// in its source and expected reason; it cannot silently drift to a file-, module-, or provider-specific
+/// compilation path. As with the surrounding JVM tests, an unavailable provisioned toolchain skips the
+/// assertion rather than turning an environment limitation into a compiler failure.
+#[allow(dead_code)]
+pub fn inline_source_backend_outcome(src: &str) -> Option<BackendOutcome> {
+    let jdk = jdk_modules()?;
+    let cp = krusty::toolchain::classpath_jars_for(src);
+    backend_outcome_in_process(src, "P", &cp, Some(&jdk))
+}
+
+#[allow(dead_code)]
+pub fn assert_inline_source_lower_bail(src: &str, reason: &str) {
+    if !stdlib_toolchain_ready() {
+        return;
+    }
+    assert_eq!(
+        inline_source_backend_outcome(src),
+        Some(BackendOutcome::LowerBail(reason.to_string())),
+        "source must stop at its precise unsupported lowering boundary:\n{src}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Persistent JVM box-runner.
 //

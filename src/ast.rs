@@ -677,17 +677,6 @@ impl FunDecl {
                     && !parameter.ty.fun_suspend()
             })
     }
-    /// Top-level `inline` function whose body can ALSO be lowered + emitted as a facade static
-    /// (kotlinc's `public static synthetic` shape), so a call from ANOTHER source file of the same
-    /// module — where the body can't be spliced — links against a real `invokestatic`. `reified`
-    /// type parameters specialize per call site and `suspend` bodies CPS-lower per call, so those
-    /// stay splice-only: a cross-file call to one keeps the file safely skipped.
-    pub fn has_emittable_inline_body(&self) -> bool {
-        self.is_inline()
-            && self.receiver.is_none()
-            && self.reified_type_params.is_empty()
-            && !self.is_suspend()
-    }
     #[inline]
     pub fn is_inline(&self) -> bool {
         self.flags.has(FdFlags::IS_INLINE)
@@ -1394,6 +1383,19 @@ impl File {
         let id = DeclId(self.decl_arena.len() as u32);
         self.decl_arena.push(d);
         id
+    }
+
+    /// Whether `declaration` is the synthetic class structurally owned by an anonymous-object
+    /// construction in this file.
+    ///
+    /// Consumers must use declaration identity rather than inspecting the parser's generated class
+    /// name. The name is an emission detail and may contain source-derived or sequence text; this map
+    /// is the AST's canonical ownership relation and cannot confuse an ordinary user class that happens
+    /// to resemble a synthetic naming convention.
+    pub fn is_anonymous_object_class(&self, declaration: DeclId) -> bool {
+        self.anonymous_object_classes
+            .values()
+            .any(|candidate| *candidate == declaration)
     }
 
     /// Whether the predicate accepts any expression root structurally owned by `declaration`.

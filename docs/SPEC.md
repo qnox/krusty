@@ -875,19 +875,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ACC_PRIVATE` method/field is never spliced (the member is legal only inside the defining class;
   kotlinc rewrites to a synthetic `access$…` bridge krusty does not model — the fallback real call
   stays in the class).
-  **Cross-file source calls to top-level `inline fun`s link as facade statics.** A same-file call
+  **Cross-file source calls to `inline fun`s link as facade statics.** A same-file call
   splices the body; a call from ANOTHER file of the same module has no AST to splice, so the
   defining file lowers + emits the inline fun as a facade static (kotlinc's `public static
-  synthetic` shape) and the caller emits a plain `invokestatic` via the existing `Callee::CrossFile`
-  path. Emittability is gated twice — syntactically (`FunDecl::has_emittable_inline_body`:
-  top-level, non-reified, non-suspend) and semantically (`SymbolTable::inline_fn_facade_emittable`:
-  no value class in the signature — a cross-file `invokestatic` applies no mangling/erasure — and
-  no splice-only body shape: nested lambdas, anonymous objects, `try`/`break`/`continue`,
-  expression-position `return`, `is`/`as` on a type parameter) — with the shared registration
-  predicate `SymbolTable::emits_fn_facade` used by the backend, survey, and conformance drivers.
+  synthetic` shape — an extension rides the static's arg0) and the caller emits a plain
+  `invokestatic` via the existing `Callee::CrossFile` path. Emittability is gated twice —
+  syntactically (non-reified, non-suspend) and semantically
+  (`SymbolTable::inline_fn_facade_emittable`: no value class in the signature, receiver
+  included — a cross-file `invokestatic` applies no mangling/erasure — and no splice-only body
+  shape: a lambda that is stored or returned rather than passed to a call, anonymous objects,
+  `try`/`break`/`continue`, a labeled or expression-position `return`, `is`/`as` on a type
+  parameter; a `contract { … }` block is erased, not a closure) — with the shared registration
+  semantic predicate `SymbolTable::source_fn_has_callable_body` consumed by common IR lowering and
+  `jvm::prepare_module_symbols`; the latter is shared by backend, survey, and conformance drivers.
   Unsafe call sites BAIL rather than miscompile: an unregistered (unemittable) callee, a lambda
   argument with a non-local `return` or a mutating capture, a callable-reference/anonymous-function
-  argument, a function-typed variable, or an enclosing inline lambda parameter passed as a value
+  argument, or an enclosing inline lambda parameter passed as a value (an ordinary function-typed
+  variable is fine — its value is a real closure).
   (`tests/cross_file_inline_call_e2e.rs`).
 - **Collection `+=` (read-only vs mutable).** `coll += x` mutates in place when a `plusAssign` operator is
   applicable to the receiver, else reassigns (`coll = coll.plus(x)`) — exactly kotlinc's augmented-assignment
@@ -1350,6 +1354,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-suspending body, a tail suspend call, and a bound suspension (`val x = work(); …`); a suspension nested
   in an `if`/`when` CONDITION cleanly SKIPS (the pre-existing flattener limit), never miscompiles. Test:
   `tests/classpath_runblocking_e2e.rs`.
+- **`kotlinx.coroutines.test.runTest { … }` resolves, lowers, and RUNS** — the value-class-parametered
+  sibling of the `runBlocking` case. `runTest(timeout: kotlin.time.Duration = …, testBody)` mangles its
+  JVM name (`sourceName-<hash>`) AND its `$default` synthetic because of a value-class
+  parameter, which broke the call at TWO seams. METADATA ALIGNMENT (`classpath.rs`): `@Metadata` names
+  the value class while the descriptor carries its erased underlying (`J`), so `meta_param_compat` /
+  `meta_param_exact` now resolve the underlying through the platform's value-class knowledge
+  (`value_underlying_name`, threaded into `aligned_meta_index` / `metadata_call_facts_name` /
+  `aligned_generic_sig_name` / `is_inline_callable_name` for top-level/static callables and into
+  `aligned_member_metadata` / `metadata_member_shape_matches` / `metadata_member_descriptor` for
+  members; unsigned underlyings normalize like the mapped builtins, `UInt` → `Int`) — before, alignment failed and the function
+  silently lost its parameter names/defaults, making every under-applied call inapplicable. DEFAULT-CALL
+  LOOKUP (`symbol_resolver.rs`): `resolve_top_level_default_callable` probed only the SOURCE spelling
+  (`runTest$default` — the deprecated unmangled overload); it now also resolves each mangled spelling's
+  `$default` directly in its base candidate's facade package (the import scope only knows the source
+  name). Tests: `tests/classpath_runtest_e2e.rs`, `jvm::classpath` `metadata_param_matching_*`.
+- **An imported Java STATIC accepts a lambda for a SAM-interface parameter** (`import
+  org.junit.jupiter.api.Assertions.assertThrows`; `assertThrows(T::class.java) { … }`, `import
+  java.util.concurrent.CompletableFuture.runAsync`). Two gaps made the unqualified call unresolved.
+  RESOLUTION (`resolve.rs`): the imported-static path disambiguated overloads with TYPED argument
+  kinds, collapsing the lambda to a plain `FunctionN` that never matches a Java SAM parameter; it now
+  routes through `resolve_companion_with_literal_args` so the lambda stays a `LambdaLiteral` and the
+  `classpath_sam_arg_matches` rule in `best_companion_overload` applies. CHECKING: the selected
+  member's arguments were re-checked by raw assignability (`() -> Unit` vs `Runnable` → mismatch); a
+  lambda argument against a classpath SAM parameter is now checked against the SAM method's parameter
+  types (`check_lambda_with_types`), mirroring the qualified-call path. Test:
+  `tests/static_member_import_e2e.rs`.
 - **A generic classpath `suspend` member returning a TYPE PARAMETER binds it from the receiver's type
   argument** (`interface Repo<T> { suspend fun byId(): T? }` on a `Repo<Cfg>` receiver → `Cfg?`). The
   non-suspend member path binds `T` via `member_return` (substituting the receiver's args into the generic
