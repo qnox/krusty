@@ -1075,6 +1075,7 @@ mod tests {
                 ty: Ty::String,
                 storage_ty: None,
                 visibility: Visibility::Protected,
+                is_const: false,
                 getter_name: "getState".into(),
                 setter_name: Some("setState".into()),
                 setter_visibility: Some(Visibility::Protected),

@@ -1854,8 +1854,8 @@ mod tests {
             std::env::temp_dir().join(format!("krusty-worker-dump-bail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
-        // An interface property with a custom getter is checked fine but gates IR lowering.
-        let source = "interface Named {\n    val label: String\n        get() = \"value\"\n}\n\
+        // An interface `var` with a custom setter is checked fine but gates IR lowering.
+        let source = "interface Named {\n    var label: String\n        get() = \"value\"\n        set(v) {}\n}\n\
                       fun box(): String = \"OK\"\n";
         let request = serde_json::json!({
             "dump": {
