@@ -1262,6 +1262,15 @@ where
                 .into_iter()
                 .chain(batch.support_documents)
                 .collect();
+            // The builder numbers entries by their position in the analyzed source set; this is the
+            // first place that knows which document each position was. After binding the index
+            // names its own files and no longer depends on the source set being retained.
+            let uris = self
+                .source_set
+                .iter()
+                .map(|(uri, _)| uri.as_str())
+                .collect::<Vec<_>>();
+            workspace_symbols.assign_uris(&uris);
             self.workspace_symbols = workspace_symbols;
         }
         messages.extend(self.diagnostic_refresh());
@@ -1977,10 +1986,7 @@ where
         };
         Dispatch::messages(vec![rpc_result(
             id,
-            Value::Array(
-                self.workspace_symbols
-                    .encode(&params.query, &self.source_set),
-            ),
+            Value::Array(self.workspace_symbols.encode(&params.query)),
         )])
     }
 

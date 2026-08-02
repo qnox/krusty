@@ -162,6 +162,7 @@ impl WorkspaceSymbolBudget {
             .packages
             .iter()
             .chain(&index.names)
+            .chain(&index.files)
             .fold(0usize, |bytes, value| {
                 bytes.saturating_add(workspace_symbol_string_wire_cost(value))
             });
@@ -188,6 +189,18 @@ impl WorkspaceSymbolBudget {
         package: &str,
         new_package: bool,
     ) -> bool {
+        self.reserve_merged_entry_in_file(name, new_name, package, new_package, "", false)
+    }
+
+    fn reserve_merged_entry_in_file(
+        &mut self,
+        name: &str,
+        new_name: bool,
+        package: &str,
+        new_package: bool,
+        file: &str,
+        new_file: bool,
+    ) -> bool {
         let bytes = WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES
             .saturating_add(if new_name {
                 workspace_symbol_string_wire_cost(name)
@@ -196,6 +209,11 @@ impl WorkspaceSymbolBudget {
             })
             .saturating_add(if new_package {
                 workspace_symbol_string_wire_cost(package)
+            } else {
+                0
+            })
+            .saturating_add(if new_file {
+                workspace_symbol_string_wire_cost(file)
             } else {
                 0
             });
@@ -463,6 +481,12 @@ pub struct DocumentSymbolIndex {
 type WorkspaceSymbolEntry = [u32; 13];
 
 /// Bounded, searchable declarations retained from one assembled source set.
+///
+/// `entry[0]` addresses the index's own `files` table, so an entry describes a file whose text
+/// nothing else retains. The builder runs where only source *positions* are known — the analysis
+/// worker is handed sources, never URIs — so a freshly built index numbers entries by their
+/// position in the analyzed source set and [`WorkspaceSymbolIndex::assign_uris`] converts those
+/// positions into file ids at the one boundary that knows the mapping.
 #[derive(Clone, Serialize)]
 pub struct WorkspaceSymbolIndex {
     entries: Vec<WorkspaceSymbolEntry>,
@@ -470,6 +494,7 @@ pub struct WorkspaceSymbolIndex {
     by_name: Vec<u32>,
     by_initials: Vec<u32>,
     names: Vec<String>,
+    files: Vec<String>,
     complete: bool,
 }
 
@@ -481,6 +506,7 @@ impl Default for WorkspaceSymbolIndex {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: Vec::new(),
+            files: Vec::new(),
             complete: true,
         }
     }
@@ -496,6 +522,8 @@ struct WorkspaceSymbolIndexWire {
     by_initials: Vec<u32>,
     #[serde(default)]
     names: Vec<String>,
+    #[serde(default)]
+    files: Vec<String>,
     #[serde(default = "workspace_symbol_index_complete")]
     complete: bool,
 }
@@ -512,6 +540,7 @@ impl<'de> Deserialize<'de> for WorkspaceSymbolIndex {
             by_name: wire.by_name,
             by_initials: wire.by_initials,
             names: wire.names,
+            files: wire.files,
             complete: wire.complete,
         };
         index.drop_invalid_entries();
@@ -1009,6 +1038,55 @@ impl WorkspaceSymbolIndex {
         self.rebuild_search_order();
     }
 
+    /// Replace positional `entry[0]` file indices with ids in the index's own URI table.
+    ///
+    /// `uris[position]` is the document the builder saw at that position in the analyzed source
+    /// set. Only URIs an entry actually references are interned, so a source set whose support
+    /// documents declared nothing costs no retained bytes. An entry whose position is past the end
+    /// of `uris` describes a file this index cannot name, and is dropped as incomplete rather than
+    /// kept pointing at nothing.
+    ///
+    /// Call once, on an index the builder just produced: binding is what ends the positional
+    /// phase, and re-binding an already-bound index would read file ids as positions.
+    pub fn assign_uris(&mut self, uris: &[&str]) {
+        debug_assert!(
+            self.files.is_empty(),
+            "workspace symbol index binds its URI table once"
+        );
+        let mut file_ids = HashMap::<&str, u32>::new();
+        let mut files = Vec::new();
+        let mut retained = Vec::with_capacity(self.entries.len());
+        let mut retained_indices = Vec::with_capacity(self.entries.len());
+        for mut entry in self.entries.drain(..) {
+            let Some(uri) = uris.get(entry[0] as usize).copied() else {
+                self.complete = false;
+                retained_indices.push(None);
+                continue;
+            };
+            entry[0] = *file_ids.entry(uri).or_insert_with(|| {
+                let id = files.len() as u32;
+                files.push(uri.to_string());
+                id
+            });
+            entry[8] = entry[8]
+                .checked_sub(1)
+                .and_then(|parent| retained_indices.get(parent as usize).copied().flatten())
+                .and_then(|parent: u32| parent.checked_add(1))
+                .unwrap_or(0);
+            let index = retained.len() as u32;
+            retained.push(entry);
+            retained_indices.push(Some(index));
+        }
+        self.entries = retained;
+        self.files = files;
+        self.rebuild_search_order();
+    }
+
+    /// Every file this index can name, in file-id order.
+    pub fn file_uris(&self) -> &[String] {
+        &self.files
+    }
+
     fn drop_invalid_entries(&mut self) {
         let entries = std::mem::take(&mut self.entries);
         let mut retained = Vec::with_capacity(entries.len());
@@ -1138,6 +1216,7 @@ impl WorkspaceSymbolIndex {
         let mut budget = WorkspaceSymbolBudget::with_limit(max_wire_bytes);
         let mut package_ids = HashMap::<String, u32>::new();
         let mut name_ids = HashMap::<String, u32>::new();
+        let mut file_ids = HashMap::<String, u32>::new();
         let mut retained_indices = Vec::with_capacity(old.entries.len());
         for mut entry in old.entries {
             let Some(package) = old.packages.get(entry[9] as usize) else {
@@ -1148,16 +1227,35 @@ impl WorkspaceSymbolIndex {
                 retained_indices.push(None);
                 continue;
             };
+            let uri = match old.files.get(entry[0] as usize) {
+                Some(uri) => Some(uri.as_str()),
+                None if old.files.is_empty() => None,
+                None => {
+                    retained_indices.push(None);
+                    continue;
+                }
+            };
             let Some(parent) = remap_workspace_parent(entry[8], &retained_indices) else {
                 retained_indices.push(None);
                 continue;
             };
             let new_package = !package_ids.contains_key(package);
             let new_name = !name_ids.contains_key(name);
-            if !budget.reserve_merged_entry(name, new_name, package, new_package) {
+            let new_file = uri.is_some_and(|uri| !file_ids.contains_key(uri));
+            if !budget.reserve_merged_entry_in_file(
+                name,
+                new_name,
+                package,
+                new_package,
+                uri.unwrap_or(""),
+                new_file,
+            ) {
                 break;
             }
             entry[8] = parent;
+            if let Some(uri) = uri {
+                entry[0] = intern_workspace_string(uri, &mut retained.files, &mut file_ids);
+            }
             entry[9] = intern_workspace_string(package, &mut retained.packages, &mut package_ids);
             entry[10] = intern_workspace_string(name, &mut retained.names, &mut name_ids);
             let index = retained.entries.len() as u32;
@@ -1186,6 +1284,12 @@ impl WorkspaceSymbolIndex {
             .enumerate()
             .map(|(index, value)| (value.clone(), index as u32))
             .collect::<HashMap<_, _>>();
+        let mut file_ids = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.clone(), index as u32))
+            .collect::<HashMap<_, _>>();
         let mut identities = self
             .entries
             .iter()
@@ -1195,9 +1299,28 @@ impl WorkspaceSymbolIndex {
         self.complete &= other.complete;
         let mut remapped_entries = Vec::with_capacity(other.entries.len());
         for mut entry in other.entries {
-            if let Some(&index) = identities.get(&workspace_symbol_identity(&entry)) {
-                remapped_entries.push(Some(index));
-                continue;
+            // A bound index names its files; an unbound one still numbers them by position and
+            // shares that numbering with the index it is merging into. Either way `entry[0]` has to
+            // reach its final value before the identity check, or the same declaration merged from
+            // two source sets would not recognise itself.
+            let uri = match other.files.get(entry[0] as usize) {
+                Some(uri) => Some(uri.as_str()),
+                None if other.files.is_empty() => None,
+                None => {
+                    self.complete = false;
+                    remapped_entries.push(None);
+                    continue;
+                }
+            };
+            let known_file = uri.and_then(|uri| file_ids.get(uri).copied());
+            if let Some(file) = known_file {
+                entry[0] = file;
+            }
+            if uri.is_none() || known_file.is_some() {
+                if let Some(&index) = identities.get(&workspace_symbol_identity(&entry)) {
+                    remapped_entries.push(Some(index));
+                    continue;
+                }
             }
             let Some(package) = other.packages.get(entry[9] as usize) else {
                 self.complete = false;
@@ -1211,9 +1334,19 @@ impl WorkspaceSymbolIndex {
             };
             let new_package = !package_ids.contains_key(package);
             let new_name = !name_ids.contains_key(name);
-            if !budget.reserve_merged_entry(name, new_name, package, new_package) {
+            if !budget.reserve_merged_entry_in_file(
+                name,
+                new_name,
+                package,
+                new_package,
+                uri.unwrap_or(""),
+                uri.is_some() && known_file.is_none(),
+            ) {
                 self.complete = false;
                 break;
+            }
+            if let Some(uri) = uri {
+                entry[0] = intern_workspace_string(uri, &mut self.files, &mut file_ids);
             }
             let package_id = intern_workspace_string(package, &mut self.packages, &mut package_ids);
             let name_id = intern_workspace_string(name, &mut self.names, &mut name_ids);
@@ -1232,7 +1365,7 @@ impl WorkspaceSymbolIndex {
         self.rebuild_search_order();
     }
 
-    pub fn encode(&self, query: &str, source_set: &[(String, String)]) -> Vec<Value> {
+    pub fn encode(&self, query: &str) -> Vec<Value> {
         if query.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
             return Vec::new();
         }
@@ -1251,7 +1384,7 @@ impl WorkspaceSymbolIndex {
         // Two query forms can reach the same entry, so ranks are deduplicated across them.
         let mut seen = std::collections::HashSet::new();
         for query in &parsed {
-            if !self.encode_ranked(query, source_set, &mut result, &mut wire_bytes, &mut seen) {
+            if !self.encode_ranked(query, &mut result, &mut wire_bytes, &mut seen) {
                 break;
             }
         }
@@ -1262,7 +1395,6 @@ impl WorkspaceSymbolIndex {
     fn encode_ranked(
         &self,
         query: &WorkspaceQuery,
-        source_set: &[(String, String)],
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
         seen: &mut std::collections::HashSet<u32>,
@@ -1270,7 +1402,7 @@ impl WorkspaceSymbolIndex {
         let lowercase_query = &query.pattern;
         if query.is_empty() {
             for index in 0..self.entries.len() as u32 {
-                if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+                if !self.admit(index, query, result, wire_bytes, seen) {
                     return false;
                 }
             }
@@ -1285,7 +1417,6 @@ impl WorkspaceSymbolIndex {
                 self.encode_glob_candidates(
                     0..self.entries.len() as u32,
                     query,
-                    source_set,
                     result,
                     wire_bytes,
                     seen,
@@ -1294,7 +1425,6 @@ impl WorkspaceSymbolIndex {
                 self.encode_glob_candidates(
                     self.prefix_matches(prefix).iter().copied(),
                     query,
-                    source_set,
                     result,
                     wire_bytes,
                     seen,
@@ -1303,7 +1433,7 @@ impl WorkspaceSymbolIndex {
         }
 
         for &index in self.prefix_matches(lowercase_query) {
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+            if !self.admit(index, query, result, wire_bytes, seen) {
                 return false;
             }
         }
@@ -1314,7 +1444,7 @@ impl WorkspaceSymbolIndex {
             {
                 continue;
             }
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+            if !self.admit(index, query, result, wire_bytes, seen) {
                 return false;
             }
         }
@@ -1329,7 +1459,7 @@ impl WorkspaceSymbolIndex {
             {
                 continue;
             }
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+            if !self.admit(index, query, result, wire_bytes, seen) {
                 return false;
             }
         }
@@ -1344,7 +1474,7 @@ impl WorkspaceSymbolIndex {
             {
                 continue;
             }
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+            if !self.admit(index, query, result, wire_bytes, seen) {
                 return false;
             }
         }
@@ -1358,7 +1488,6 @@ impl WorkspaceSymbolIndex {
         &self,
         candidates: impl IntoIterator<Item = u32>,
         query: &WorkspaceQuery,
-        source_set: &[(String, String)],
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
         seen: &mut std::collections::HashSet<u32>,
@@ -1373,7 +1502,7 @@ impl WorkspaceSymbolIndex {
                 Some(false) => continue,
                 None => return false,
             }
-            if !self.admit(index, query, source_set, result, wire_bytes, seen) {
+            if !self.admit(index, query, result, wire_bytes, seen) {
                 return false;
             }
         }
@@ -1385,7 +1514,6 @@ impl WorkspaceSymbolIndex {
         &self,
         index: u32,
         query: &WorkspaceQuery,
-        source_set: &[(String, String)],
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
         seen: &mut std::collections::HashSet<u32>,
@@ -1396,7 +1524,7 @@ impl WorkspaceSymbolIndex {
         if !seen.insert(index) {
             return true;
         }
-        self.push_encoded(index, query, source_set, result, wire_bytes)
+        self.push_encoded(index, query, result, wire_bytes)
     }
 
     /// Whether an entry's package satisfies a qualified query. An unqualified query admits every
@@ -1437,14 +1565,13 @@ impl WorkspaceSymbolIndex {
         &self,
         entry_index: u32,
         query: &WorkspaceQuery,
-        source_set: &[(String, String)],
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
     ) -> bool {
         let Some(entry) = self.entries.get(entry_index as usize).copied() else {
             return true;
         };
-        let Some((uri, _)) = source_set.get(entry[0] as usize) else {
+        let Some(uri) = self.files.get(entry[0] as usize) else {
             return true;
         };
         let Some(source_name) = self.source_name(entry_index) else {
@@ -3246,25 +3373,17 @@ mod tests {
         );
     }
 
-    fn indexed(sources: &[&str], uris: &[&str]) -> (WorkspaceSymbolIndex, Vec<(String, String)>) {
+    fn indexed(sources: &[&str], uris: &[&str]) -> WorkspaceSymbolIndex {
         let analysis = analyze_standalone_source_set(sources);
         // from_source_set already establishes the search order.
-        let index = WorkspaceSymbolIndex::from_source_set(sources, &analysis.files);
-        let source_set = uris
-            .iter()
-            .zip(sources)
-            .map(|(uri, source)| ((*uri).to_string(), (*source).to_string()))
-            .collect();
-        (index, source_set)
+        let mut index = WorkspaceSymbolIndex::from_source_set(sources, &analysis.files);
+        index.assign_uris(uris);
+        index
     }
 
-    fn encoded_names(
-        index: &WorkspaceSymbolIndex,
-        query: &str,
-        set: &[(String, String)],
-    ) -> Vec<String> {
+    fn encoded_names(index: &WorkspaceSymbolIndex, query: &str) -> Vec<String> {
         index
-            .encode(query, set)
+            .encode(query)
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect()
@@ -3272,27 +3391,27 @@ mod tests {
 
     #[test]
     fn workspace_symbols_match_wildcard_queries() {
-        let (index, set) = indexed(
+        let index = indexed(
             &["class KotlinParser\nclass Lexer\nfun parseAll(): Int = 1\n"],
             &["file:///W.kt"],
         );
 
         // Leading wildcard: no literal prefix to binary-search, so this exercises the scan path.
-        let mut interior = encoded_names(&index, "*parse*", &set);
+        let mut interior = encoded_names(&index, "*parse*");
         interior.sort();
         assert_eq!(interior, vec!["KotlinParser", "parseAll"]);
 
         // A literal prefix narrows through the sorted array before the glob verifies.
-        assert_eq!(encoded_names(&index, "Kotlin*", &set), vec!["KotlinParser"]);
+        assert_eq!(encoded_names(&index, "Kotlin*"), vec!["KotlinParser"]);
 
         // `?` spans exactly one character.
-        assert_eq!(encoded_names(&index, "Lexe?", &set), vec!["Lexer"]);
-        assert!(encoded_names(&index, "Lexe??", &set).is_empty());
+        assert_eq!(encoded_names(&index, "Lexe?"), vec!["Lexer"]);
+        assert!(encoded_names(&index, "Lexe??").is_empty());
     }
 
     #[test]
     fn workspace_symbols_match_package_qualified_queries() {
-        let (index, set) = indexed(
+        let index = indexed(
             &[
                 "package kotlin.collections\nfun listOf(): Int = 1\n",
                 "package demo.app\nfun listOf(): Int = 2\n",
@@ -3308,27 +3427,27 @@ mod tests {
         );
 
         // Unqualified finds every declaration and keeps the compact source spelling.
-        assert_eq!(encoded_names(&index, "listOf", &set).len(), 3);
+        assert_eq!(encoded_names(&index, "listOf").len(), 3);
 
         // Qualifying by package selects one. The response name preserves that qualification so
         // clients that re-filter server results do not discard it as a non-match.
-        let qualified = index.encode("kotlin.collections.listOf", &set);
+        let qualified = index.encode("kotlin.collections.listOf");
         assert_eq!(qualified.len(), 1);
         assert_eq!(qualified[0]["name"], "kotlin.collections.listOf");
         assert_eq!(qualified[0]["containerName"], "kotlin.collections");
-        let slashed = index.encode("demo/app/listOf", &set);
+        let slashed = index.encode("demo/app/listOf");
         assert_eq!(slashed.len(), 1);
         assert_eq!(slashed[0]["name"], "demo/app/listOf");
 
         // A package that matches nothing yields nothing, rather than falling back to the bare name.
-        assert!(index.encode("nosuch.pkg.listOf", &set).is_empty());
+        assert!(index.encode("nosuch.pkg.listOf").is_empty());
         assert_eq!(
-            encoded_names(&index, "collections.listOf", &set),
+            encoded_names(&index, "collections.listOf"),
             vec!["kotlin.collections.listOf"],
             "a package suffix must match on a segment boundary, not inside another segment"
         );
         assert_eq!(
-            encoded_names(&index, "δοκιμή.app.findMe", &set),
+            encoded_names(&index, "δοκιμή.app.findMe"),
             vec!["Δοκιμή.app.findMe"],
             "qualified package matching must fold Unicode source identifiers, not ASCII bytes only"
         );
@@ -3336,23 +3455,20 @@ mod tests {
 
     #[test]
     fn workspace_symbols_match_a_wrong_layout_query() {
-        let (index, set) = indexed(&["fun parse(): Int = 1\n"], &["file:///L.kt"]);
+        let index = indexed(&["fun parse(): Int = 1\n"], &["file:///L.kt"]);
 
         // `зфкыу` is `parse` typed on a Cyrillic layout; the Latin form still matches too.
-        assert_eq!(encoded_names(&index, "зфкыу", &set), vec!["parse"]);
-        assert_eq!(encoded_names(&index, "parse", &set), vec!["parse"]);
+        assert_eq!(encoded_names(&index, "зфкыу"), vec!["parse"]);
+        assert_eq!(encoded_names(&index, "parse"), vec!["parse"]);
     }
 
     #[test]
     fn a_trailing_double_colon_is_stripped_before_matching() {
-        let (index, set) = indexed(&["class KotlinParser\n"], &["file:///E.kt"]);
+        let index = indexed(&["class KotlinParser\n"], &["file:///E.kt"]);
 
         // Zed keeps only the text after the last `::` for its own filter, so a trailing marker
         // disables client filtering; the server must not try to match the marker itself.
-        assert_eq!(
-            encoded_names(&index, "*parser*::", &set),
-            vec!["KotlinParser"]
-        );
+        assert_eq!(encoded_names(&index, "*parser*::"), vec!["KotlinParser"]);
     }
 
     #[test]
@@ -3439,10 +3555,10 @@ mod tests {
     fn workspace_symbol_names_survive_without_the_source_text() {
         let source = "class DetachedMarker\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Detached.kt".to_string(), String::new())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Detached.kt"]);
         let names = index
-            .encode("DetachedMarker", &source_set)
+            .encode("DetachedMarker")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
@@ -3453,10 +3569,10 @@ mod tests {
     fn workspace_symbols_match_camel_hump_initials() {
         let source = "class StructuredSourceFile\nfun drawrect(): Int = 1\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Humps.kt".to_string(), source.to_string())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Humps.kt"]);
         let names = index
-            .encode("ssf", &source_set)
+            .encode("ssf")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
@@ -3467,14 +3583,11 @@ mod tests {
     fn workspace_symbols_match_acronym_camel_boundaries() {
         let source = "class APIResponseCache\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Acronym.kt".to_string(), source.to_string())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Acronym.kt"]);
 
-        assert_eq!(
-            index.encode("arc", &source_set)[0]["name"],
-            "APIResponseCache"
-        );
-        assert_eq!(index.encode("a", &source_set).len(), 1);
+        assert_eq!(index.encode("arc")[0]["name"], "APIResponseCache");
+        assert_eq!(index.encode("a").len(), 1);
     }
 
     #[test]
@@ -3482,29 +3595,23 @@ mod tests {
         let source =
             "class StructuredSourceFile\nclass ÄtherMarker\nfun preResolvedValue(): Int = 1\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = [("file:///Search.kt".into(), source.into())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Search.kt"]);
 
-        assert_eq!(
-            index.encode("sf", &source_set)[0]["name"],
-            "StructuredSourceFile"
-        );
-        assert_eq!(index.encode("äm", &source_set)[0]["name"], "ÄtherMarker");
-        assert_eq!(
-            index.encode("rsv", &source_set)[0]["name"],
-            "preResolvedValue"
-        );
+        assert_eq!(index.encode("sf")[0]["name"], "StructuredSourceFile");
+        assert_eq!(index.encode("äm")[0]["name"], "ÄtherMarker");
+        assert_eq!(index.encode("rsv")[0]["name"], "preResolvedValue");
     }
 
     #[test]
     fn workspace_symbol_prefix_matches_lead_substring_matches() {
         let source = "fun preresolveAll(): Int = 1\nfun resolve(): Int = 2\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Rank.kt".to_string(), source.to_string())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Rank.kt"]);
 
         let names = index
-            .encode("resolve", &source_set)
+            .encode("resolve")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
@@ -3515,29 +3622,23 @@ mod tests {
     fn workspace_symbols_preserve_unicode_lowercase_matching_for_interior_matches() {
         let source = "class PrefixÄtherMarker\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![("file:///Unicode.kt".to_string(), source.to_string())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Unicode.kt"]);
 
-        assert_eq!(
-            index.encode("äther", &source_set)[0]["name"],
-            "PrefixÄtherMarker"
-        );
+        assert_eq!(index.encode("äther")[0]["name"], "PrefixÄtherMarker");
     }
 
     #[test]
     fn workspace_symbols_keep_unicode_lowercase_equivalence_boundaries() {
         let source = "class StraßeMarker\nclass ΣigmaMarker\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = [("file:///Unicode.kt".into(), source.into())];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Unicode.kt"]);
 
-        assert_eq!(
-            index.encode("straße", &source_set)[0]["name"],
-            "StraßeMarker"
-        );
-        assert!(index.encode("strasse", &source_set).is_empty());
-        assert_eq!(index.encode("σm", &source_set)[0]["name"], "ΣigmaMarker");
-        assert!(index.encode("ςm", &source_set).is_empty());
+        assert_eq!(index.encode("straße")[0]["name"], "StraßeMarker");
+        assert!(index.encode("strasse").is_empty());
+        assert_eq!(index.encode("σm")[0]["name"], "ΣigmaMarker");
+        assert!(index.encode("ςm").is_empty());
     }
 
     #[test]
@@ -3567,6 +3668,7 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
+            files: vec!["file:///Merged.kt".into()],
             complete: true,
         };
         let mut other = WorkspaceSymbolIndex {
@@ -3575,6 +3677,7 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
+            files: vec!["file:///Merged.kt".into()],
             complete: true,
         };
         index.rebuild_search_order();
@@ -3600,14 +3703,11 @@ mod tests {
                       fun `when`(): Int = 4\n\
                       class Constructed(val value: Int)\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
-        let source_set = vec![(
-            "file:///WorkspaceSymbols.kt".to_string(),
-            source.to_string(),
-        )];
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///WorkspaceSymbols.kt"]);
 
         assert_eq!(
-            index.encode("KrustyWorkspaceParityBox", &source_set),
+            index.encode("KrustyWorkspaceParityBox"),
             vec![json!({
                 "name": "KrustyWorkspaceParityBox",
                 "kind": 5,
@@ -3621,13 +3721,10 @@ mod tests {
                 },
             })]
         );
+        assert_eq!(index.encode("krustyworkspaceparitybox").len(), 1);
+        assert_eq!(index.encode("KWPB").len(), 1);
         assert_eq!(
-            index.encode("krustyworkspaceparitybox", &source_set).len(),
-            1
-        );
-        assert_eq!(index.encode("KWPB", &source_set).len(), 1);
-        assert_eq!(
-            index.encode("nestedNeedle", &source_set),
+            index.encode("nestedNeedle"),
             vec![json!({
                 "name": "nestedNeedle",
                 "kind": 6,
@@ -3641,30 +3738,74 @@ mod tests {
                 },
             })]
         );
-        assert_eq!(
-            index
-                .encode("krustyWorkspaceParityNeedle", &source_set)
-                .len(),
-            1
-        );
-        assert_eq!(
-            index
-                .encode("krustyWorkspaceParityValue", &source_set)
-                .len(),
-            1
-        );
-        assert_eq!(index.encode("when", &source_set)[0]["name"], "when");
-        assert_eq!(index.encode("Constructed", &source_set).len(), 1);
+        assert_eq!(index.encode("krustyWorkspaceParityNeedle").len(), 1);
+        assert_eq!(index.encode("krustyWorkspaceParityValue").len(), 1);
+        assert_eq!(index.encode("when")[0]["name"], "when");
+        assert_eq!(index.encode("Constructed").len(), 1);
 
         let default_source = "class DefaultPackageMarker\n";
         let default_analysis = analyze_standalone_source_set(&[default_source]);
-        let default_index =
+        let mut default_index =
             WorkspaceSymbolIndex::from_source_set(&[default_source], &default_analysis.files);
-        let encoded = default_index.encode(
-            "DefaultPackageMarker",
-            &[("file:///Default.kt".into(), default_source.into())],
-        );
+        default_index.assign_uris(&["file:///Default.kt"]);
+        let encoded = default_index.encode("DefaultPackageMarker");
         assert_eq!(encoded[0]["containerName"], "");
+    }
+
+    #[test]
+    fn workspace_symbols_name_their_own_files_after_binding() {
+        let first = "package demo\nclass BoundFirst\n";
+        let second = "package demo\nclass BoundSecond\n";
+        let analysis = analyze_standalone_source_set(&[first, second]);
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[first, second], &analysis.files);
+        index.assign_uris(&["file:///First.kt", "file:///Second.kt"]);
+
+        // Nothing outside the index holds these sources any more, and a location still resolves.
+        assert_eq!(
+            index.encode("BoundSecond")[0]["location"]["uri"],
+            "file:///Second.kt"
+        );
+        assert_eq!(index.file_uris(), ["file:///First.kt", "file:///Second.kt"]);
+        assert!(index.is_complete());
+    }
+
+    #[test]
+    fn binding_drops_entries_no_uri_names_and_reports_incompleteness() {
+        let source = "package demo\nclass Named\n";
+        let other = "package demo\nclass Unnamed\n";
+        let analysis = analyze_standalone_source_set(&[source, other]);
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source, other], &analysis.files);
+        index.assign_uris(&["file:///Named.kt"]);
+
+        assert_eq!(index.encode("Named").len(), 1);
+        assert!(index.encode("Unnamed").is_empty());
+        assert!(!index.is_complete());
+    }
+
+    #[test]
+    fn merging_bound_indexes_unions_their_file_tables() {
+        let first_source = "package demo\nclass MergedFirst\n";
+        let second_source = "package demo\nclass MergedSecond\n";
+        let first_analysis = analyze_standalone_source_set(&[first_source]);
+        let second_analysis = analyze_standalone_source_set(&[second_source]);
+        let mut first =
+            WorkspaceSymbolIndex::from_source_set(&[first_source], &first_analysis.files);
+        let mut second =
+            WorkspaceSymbolIndex::from_source_set(&[second_source], &second_analysis.files);
+        // Both number their only file 0; the union has to keep them apart.
+        first.assign_uris(&["file:///MergedFirst.kt"]);
+        second.assign_uris(&["file:///MergedSecond.kt"]);
+        first.merge_from(second);
+
+        assert_eq!(
+            first.encode("MergedFirst")[0]["location"]["uri"],
+            "file:///MergedFirst.kt"
+        );
+        assert_eq!(
+            first.encode("MergedSecond")[0]["location"]["uri"],
+            "file:///MergedSecond.kt"
+        );
+        assert!(first.is_complete());
     }
 
     #[test]
@@ -3674,20 +3815,23 @@ mod tests {
         let second_analysis = analyze_standalone_source_set(&[source]);
         let mut first = WorkspaceSymbolIndex::from_source_set(&[source], &first_analysis.files);
         let mut second = WorkspaceSymbolIndex::from_source_set(&[source], &second_analysis.files);
+        let uris = [
+            "file:///unused.kt",
+            "file:///unused2.kt",
+            "file:///unused3.kt",
+            "file:///Shared.kt",
+        ];
         first.remap_files(&[(0, 3)], 4);
         second.remap_files(&[(0, 3)], 4);
+        first.assign_uris(&uris);
+        second.assign_uris(&uris);
         first.merge_from(second);
-        let mut source_set = vec![
-            ("file:///unused.kt".to_string(), String::new()),
-            ("file:///unused2.kt".to_string(), String::new()),
-            ("file:///unused3.kt".to_string(), String::new()),
-            ("file:///Shared.kt".to_string(), source.to_string()),
-        ];
 
-        assert_eq!(first.encode("OverlapType", &source_set).len(), 1);
-        assert_eq!(first.encode("sharedFunction", &source_set).len(), 1);
-        source_set.truncate(3);
-        assert!(first.encode("OverlapType", &source_set).is_empty());
+        assert_eq!(first.encode("OverlapType").len(), 1);
+        assert_eq!(first.encode("sharedFunction").len(), 1);
+        // Only the file an entry actually names is retained, so the merged index no longer depends
+        // on the source set it was assembled from.
+        assert_eq!(first.file_uris(), ["file:///Shared.kt"]);
     }
 
     #[test]
@@ -3701,30 +3845,20 @@ mod tests {
         let mut second =
             WorkspaceSymbolIndex::from_source_set(&[second_source], &second_analysis.files);
         second.remap_files(&[(0, 1)], 2);
+        let uris = ["file:///First.kt", "file:///Second.kt"];
+        first.assign_uris(&uris);
+        second.assign_uris(&uris);
 
-        assert_eq!(
-            first.encode(
-                "target",
-                &[("file:///First.kt".into(), first_source.into())]
-            )[0]["name"],
-            "pretargetResult"
-        );
+        assert_eq!(first.encode("target")[0]["name"], "pretargetResult");
         first.merge_from(second);
-        let source_set = vec![
-            ("file:///First.kt".into(), first_source.into()),
-            ("file:///Second.kt".into(), second_source.into()),
-        ];
         let names = first
-            .encode("target", &source_set)
+            .encode("target")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["targetResult", "pretargetResult"]);
-        assert_eq!(
-            first.encode("arc", &source_set)[0]["name"],
-            "APIResponseCache"
-        );
+        assert_eq!(first.encode("arc")[0]["name"], "APIResponseCache");
     }
 
     #[test]
@@ -3739,6 +3873,7 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec![name],
+            files: vec!["file:///Long.kt".into()],
             complete: true,
         };
 
@@ -3754,24 +3889,21 @@ mod tests {
         let source =
             "fun pretargetValue(): Int = 1\nfun targetValue(): Int = 2\nclass APIResultStore\n";
         let analysis = analyze_standalone_source_set(&[source]);
-        let index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        let mut index = WorkspaceSymbolIndex::from_source_set(&[source], &analysis.files);
+        index.assign_uris(&["file:///Ranked.kt"]);
         let mut wire = serde_json::to_value(index).unwrap();
         wire["by_name"] = json!([0]);
         wire["by_initials"] = json!([0]);
 
         let rebuilt = serde_json::from_value::<WorkspaceSymbolIndex>(wire).unwrap();
-        let source_set = [("file:///Ranked.kt".into(), source.into())];
         let names = rebuilt
-            .encode("target", &source_set)
+            .encode("target")
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["targetValue", "pretargetValue"]);
-        assert_eq!(
-            rebuilt.encode("ars", &source_set)[0]["name"],
-            "APIResultStore"
-        );
+        assert_eq!(rebuilt.encode("ars")[0]["name"], "APIResultStore");
         assert!(rebuilt.is_complete());
     }
 
@@ -3791,26 +3923,20 @@ mod tests {
             "by_name": [],
             "by_initials": [],
             "names": ["Root", "Child", "CrossFile", "Outside", "Orphan", "Malformed"],
+            "files": ["file:///Symbols.kt", "file:///Other.kt"],
             "complete": true
         });
 
         let index = serde_json::from_value::<WorkspaceSymbolIndex>(wire).unwrap();
-        let source_set = [
-            ("file:///Symbols.kt".into(), String::new()),
-            ("file:///Other.kt".into(), String::new()),
-        ];
 
         assert_eq!(index.entries.len(), 5);
         assert!(!index.is_complete());
-        assert_eq!(index.encode("Root", &source_set)[0]["name"], "Root");
-        assert_eq!(
-            index.encode("Child", &source_set)[0]["containerName"],
-            "Root"
-        );
+        assert_eq!(index.encode("Root")[0]["name"], "Root");
+        assert_eq!(index.encode("Child")[0]["containerName"], "Root");
         for name in ["CrossFile", "Outside", "Orphan"] {
-            assert_eq!(index.encode(name, &source_set)[0]["containerName"], "");
+            assert_eq!(index.encode(name)[0]["containerName"], "");
         }
-        assert!(index.encode("Malformed", &source_set).is_empty());
+        assert!(index.encode("Malformed").is_empty());
     }
 
     #[test]
@@ -3824,6 +3950,7 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Kept".into(), "Removed".into()],
+            files: vec!["file:///Kept.kt".into(), "file:///Removed.kt".into()],
             complete: true,
         };
         index.rebuild_search_order();
@@ -3832,13 +3959,8 @@ mod tests {
 
         assert!(!index.is_complete());
         assert_eq!(index.entries.len(), 1);
-        assert_eq!(
-            index.encode("kept", &[("file:///Kept.kt".into(), String::new())])[0]["name"],
-            "Kept"
-        );
-        assert!(index
-            .encode("removed", &[("file:///Kept.kt".into(), String::new())])
-            .is_empty());
+        assert_eq!(index.encode("kept")[0]["name"], "Kept");
+        assert!(index.encode("removed").is_empty());
     }
 
     #[test]
@@ -3847,7 +3969,14 @@ mod tests {
         let capacity = budget.remaining_entry_capacity();
         let mut entries = Vec::with_capacity(capacity);
         for line in 0..capacity {
-            if !budget.reserve_merged_entry("Needle", line == 0, "package", line == 0) {
+            if !budget.reserve_merged_entry_in_file(
+                "Needle",
+                line == 0,
+                "package",
+                line == 0,
+                "file:///Needle.kt",
+                line == 0,
+            ) {
                 break;
             }
             let lo = (line * 7) as u32;
@@ -3869,13 +3998,13 @@ mod tests {
         }
         assert!(!budget.reserve_merged_entry("Needle", false, "package", false));
         let entry_count = entries.len();
-        let source = "Needle\n".repeat(entry_count);
         let mut index = WorkspaceSymbolIndex {
             entries,
             packages: vec!["package".into()],
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
+            files: vec!["file:///Needle.kt".into()],
             complete: false,
         };
         index.rebuild_search_order();
@@ -3894,9 +4023,7 @@ mod tests {
         );
         assert!(!analysis.workspace_symbols.entries.is_empty());
         assert!(!analysis.workspace_symbols.is_complete());
-        let long_uri = format!("file:///{}.kt", "u".repeat(2048));
-        let source_set = [(long_uri, source)];
-        let encoded = index.encode("needle", &source_set);
+        let encoded = index.encode("needle");
         assert!(encoded.len() < entry_count);
         assert!(
             serialized_json_wire_bytes(&encoded).unwrap() <= MAX_WORKSPACE_SYMBOL_WIRE_BYTES,
@@ -5076,6 +5203,7 @@ mod tests {
             by_name: vec![0],
             by_initials: vec![0],
             names: vec!["Result".repeat(1024)],
+            files: vec!["file:///Result.kt".into()],
             complete: false,
         };
         let non_workspace_bytes = analysis.non_workspace_semantic_wire_bytes();
@@ -5122,6 +5250,7 @@ mod tests {
             by_name: Vec::new(),
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
+            files: vec!["file:///Merged.kt".into()],
             complete: true,
         };
         index.rebuild_search_order();
