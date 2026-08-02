@@ -8,9 +8,9 @@ use crate::compiler_analysis::analyze_standalone_source_set;
 use crate::compiler_analysis::java;
 use crate::compiler_analysis::{
     analyze_standalone_source_inputs, document_symbol_occurrences, folding_range_occurrences,
-    hover_wire_cost, CompletionDetails, CompletionKind, CompletionSymbols, DefinitionOccurrence,
-    DefinitionSymbols, DefinitionTarget, DocumentSymbolOccurrence, FileAnalysis,
-    FoldingRangeOccurrence, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
+    hover_wire_cost, parsed_file_symbols, CompletionDetails, CompletionKind, CompletionSymbols,
+    DefinitionOccurrence, DefinitionSymbols, DefinitionTarget, DocumentSymbolOccurrence,
+    FileAnalysis, FoldingRangeOccurrence, FrontendSymbols, HighlightOccurrence, HighlightSymbols,
     HoverOccurrence, LibraryRef, SemanticLimits, SignatureCandidate, SignatureHelpCall,
     SignatureHelpSymbols, FOLDING_KIND_COMMENT, FOLDING_KIND_IMPORTS, FOLDING_KIND_REGION,
     MAX_LIBRARY_DEFINITION_BYTES, TEXT_BLOCK_COMMENT, TEXT_BRACES, TEXT_IMPORTS, TEXT_KDOC,
@@ -936,10 +936,14 @@ impl WorkspaceSymbolIndex {
         let mut interning = WorkspaceSymbolInterning::default();
 
         for (file_index, (source, analysis)) in sources.iter().zip(files).enumerate() {
+            let capacity = budget.remaining_entry_capacity();
+            let occurrences =
+                document_symbol_occurrences(source, &analysis.file, capacity.saturating_add(1));
             if !result.push_file(
                 file_index as u32,
                 source,
-                &analysis.file,
+                analysis.file.package.as_deref().unwrap_or(""),
+                occurrences,
                 &mut budget,
                 &mut interning,
             ) {
@@ -973,11 +977,17 @@ impl WorkspaceSymbolIndex {
                 result.complete = false;
                 break;
             }
-            let mut diagnostics = krusty::diag::DiagSink::new();
-            let parsed =
-                krusty::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+            let capacity = budget.remaining_entry_capacity();
+            let parsed = parsed_file_symbols(source, capacity.saturating_add(1));
             let file = intern_workspace_string(uri, &mut result.files, &mut interning.files);
-            if !result.push_file(file, source, &parsed, &mut budget, &mut interning) {
+            if !result.push_file(
+                file,
+                source,
+                parsed.package.as_deref().unwrap_or(""),
+                parsed.occurrences,
+                &mut budget,
+                &mut interning,
+            ) {
                 break;
             }
         }
@@ -987,19 +997,19 @@ impl WorkspaceSymbolIndex {
 
     /// Append one file's declarations. Returns false once the retention budget is spent, at which
     /// point the index is marked incomplete and the caller must stop.
+    /// `occurrences` is extracted against `budget.remaining_entry_capacity() + 1`, so one entry
+    /// past the ceiling is what tells this index it was truncated.
     fn push_file(
         &mut self,
         file: u32,
         source: &str,
-        parsed: &krusty::ast::File,
+        package: &str,
+        mut occurrences: Vec<DocumentSymbolOccurrence>,
         budget: &mut WorkspaceSymbolBudget,
         interning: &mut WorkspaceSymbolInterning,
     ) -> bool {
         let result = self;
-        let package = parsed.package.as_deref().unwrap_or("");
         let entry_capacity = budget.remaining_entry_capacity();
-        let mut occurrences =
-            document_symbol_occurrences(source, parsed, entry_capacity.saturating_add(1));
         let truncated = occurrences.len() > entry_capacity;
         occurrences.truncate(entry_capacity);
         let mut retained = Vec::with_capacity(occurrences.len());

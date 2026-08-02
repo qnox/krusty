@@ -26,7 +26,7 @@ use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
 use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
     AnalysisBatch, AnalysisEngine, AnalysisJob, DumpJob, DumpOutcome, DumpResult, EngineBackend,
-    EngineEvent, IndexBatch, MaterializeJob, MaterializeResult,
+    EngineEvent, IndexBatch, MaterializeJob, MaterializeResult, SymbolIndexBatch,
 };
 use crate::server::status::StatusReporter;
 use crate::uri::{file_uri_to_path, path_to_file_uri};
@@ -225,6 +225,15 @@ pub trait Analysis {
     /// default let the whole background path look wired while producing nothing.
     fn index_workspace_files(&mut self, uris: &[&str]) -> IndexOutcome;
 
+    /// Extract declarations from workspace files, whether or not anything has opened them.
+    ///
+    /// Defaulted, and the default reads and parses -- unlike [`Analysis::index_workspace_files`],
+    /// there is nothing a host has to configure for this to be correct: symbol extraction needs no
+    /// classpath, no module grouping, and no resolution, so every host gets real coverage.
+    fn index_workspace_symbols(&mut self, uris: &[&str]) -> WorkspaceSymbolIndex {
+        index_workspace_symbols_from_disk(uris)
+    }
+
     /// Workspace sources sharing a module with one of the open documents. These are the files a
     /// change to the open set is most likely to affect, so they index ahead of the sweep.
     fn neighborhood_index_candidates(&mut self, _open_uris: &[&str]) -> Vec<String> {
@@ -318,6 +327,31 @@ pub trait Analysis {
 
 /// URI-aware analysis for open Kotlin and Java documents.
 pub struct DocumentAnalyzer;
+
+/// Read `uris` and extract their declarations, skipping anything unreadable.
+///
+/// The read is bounded before the allocation: a file whose size already exceeds the per-file cap is
+/// never pulled into memory, so one generated multi-megabyte source costs a `stat` rather than a
+/// parse. An unreadable or deleted file simply contributes nothing; the caller knows which URIs it
+/// attempted and drops their stale entries.
+pub fn index_workspace_symbols_from_disk(uris: &[&str]) -> WorkspaceSymbolIndex {
+    let readable: Vec<(&str, String)> = uris
+        .iter()
+        .filter_map(|uri| {
+            let path = crate::uri::file_uri_to_path(uri)?;
+            let size = usize::try_from(std::fs::metadata(&path).ok()?.len()).ok()?;
+            if size > crate::analysis::MAX_INDEXED_FILE_BYTES {
+                return None;
+            }
+            Some((*uri, std::fs::read_to_string(path).ok()?))
+        })
+        .collect();
+    let sources: Vec<(&str, &str)> = readable
+        .iter()
+        .map(|(uri, text)| (*uri, text.as_str()))
+        .collect();
+    WorkspaceSymbolIndex::from_disk_sources(&sources)
+}
 
 /// FNV-1a over the file text. Only ever compared against another hash this process produced, so a
 /// non-cryptographic hash is the right trade.
@@ -932,6 +966,13 @@ pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
     workspace_symbols: WorkspaceSymbolIndex,
+    /// Declarations from every workspace file the background sweep has reached, opened or not.
+    /// Unlike `workspace_symbols` this survives analysis batches: coverage is what it is for, and
+    /// rebuilding it per batch would shrink it back to whatever happens to be open.
+    project_symbols: WorkspaceSymbolIndex,
+    /// Project-model generation `project_symbols` describes. A batch from an older generation is
+    /// about a model that no longer exists.
+    project_symbols_generation: u64,
     workspace_diagnostics: WorkspaceDiagnosticStore,
     backend: B,
     analysis_dirty: bool,
@@ -984,6 +1025,8 @@ where
             documents: HashMap::new(),
             source_set: Vec::new(),
             workspace_symbols: WorkspaceSymbolIndex::default(),
+            project_symbols: WorkspaceSymbolIndex::default(),
+            project_symbols_generation: 0,
             workspace_diagnostics: WorkspaceDiagnosticStore::default(),
             backend,
             analysis_dirty: false,
@@ -1328,7 +1371,21 @@ where
         messages
     }
 
+    /// Splice one chunk of the project-wide symbol index into what is already retained.
+    ///
+    /// Every attempted URI is re-indexed, so a file the chunk could not read loses its stale
+    /// entries instead of keeping them forever.
+    pub(crate) fn apply_symbol_index_batch(&mut self, batch: SymbolIndexBatch) {
+        if batch.generation < self.project_symbols_generation {
+            return;
+        }
+        self.project_symbols
+            .replace_files(&batch.attempted, batch.symbols);
+    }
+
     pub(crate) fn reset_workspace_index(&mut self, generation: u64) -> Vec<Value> {
+        self.project_symbols = WorkspaceSymbolIndex::default();
+        self.project_symbols_generation = generation;
         self.workspace_diagnostics.reset_to(generation);
         // Clearing old-model results is itself a diagnostic change. Pull clients must be told even
         // when the replacement model produces no files or its first analysis is still pending.
@@ -1427,7 +1484,12 @@ where
             };
         }
         let waits_for_analysis = if method == "workspace/symbol" {
-            (!self.documents.is_empty() || !self.source_set.is_empty())
+            // Only an open document is worth waiting for. The retained snapshot no longer has to be
+            // revalidated before it can be searched: the project-wide index covers files nothing
+            // has opened, and the live layer shadows it for the ones that are open. Waiting on a
+            // source set with no open documents left would park a query that the index can already
+            // answer -- which is exactly what closing the last file used to do.
+            !self.documents.is_empty()
                 && (self.analysis_dirty
                     || self.analysis_in_flight
                     || self.resubmit_pending
@@ -1986,7 +2048,10 @@ where
         };
         Dispatch::messages(vec![rpc_result(
             id,
-            Value::Array(self.workspace_symbols.encode(&params.query)),
+            Value::Array(
+                self.workspace_symbols
+                    .encode_over(&params.query, &self.project_symbols),
+            ),
         )])
     }
 
@@ -4011,6 +4076,9 @@ where
                 write_framed(writer, &encoded)?;
             }
         }
+        EngineEvent::SymbolIndexProgress(batch) => {
+            service.apply_symbol_index_batch(batch);
+        }
         EngineEvent::IndexReset(generation) => {
             for message in service.reset_workspace_index(generation) {
                 let encoded = serde_json::to_vec(&message).map_err(json_io)?;
@@ -5383,7 +5451,101 @@ mod tests {
     }
 
     #[test]
-    fn workspace_symbols_do_not_observe_the_snapshot_after_the_last_document_closes() {
+    fn the_project_symbol_index_survives_analysis_batches() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let swept_uri = "file:///Swept.kt";
+        let open_uri = "file:///Open.kt";
+        let open_source = "package demo\nclass OpenedType\n";
+        service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec![swept_uri.to_string()],
+            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
+                swept_uri,
+                "package demo\nclass SweptType\n",
+            )]),
+        });
+        service.open_document_for_test(open_uri, open_source, 1);
+
+        // The live index is rebuilt from each batch; the project index must not be.
+        let _ = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![(open_uri.into(), 1)],
+            analyses: crate::analysis::analyze_for_lsp(&[open_source]),
+            support_documents: Vec::new(),
+            pending: false,
+        });
+
+        let swept = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "swept",
+            "method": "workspace/symbol",
+            "params": {"query": "SweptType"}
+        }));
+        assert_eq!(
+            swept.messages[0]["result"][0]["location"]["uri"], swept_uri,
+            "an analysis batch must not narrow coverage back to what is open"
+        );
+        let opened = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "opened",
+            "method": "workspace/symbol",
+            "params": {"query": "OpenedType"}
+        }));
+        assert_eq!(opened.messages[0]["result"][0]["location"]["uri"], open_uri);
+    }
+
+    #[test]
+    fn an_open_buffer_shadows_what_its_file_says_on_disk() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///Edited.kt";
+        let edited = "package demo\nclass RenamedType\n";
+        service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
+                uri,
+                "package demo\nclass SavedType\n",
+            )]),
+        });
+        service.open_document_for_test(uri, edited, 1);
+        let _ = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![(uri.into(), 1)],
+            analyses: crate::analysis::analyze_for_lsp(&[edited]),
+            support_documents: Vec::new(),
+            pending: false,
+        });
+
+        let renamed = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "renamed",
+            "method": "workspace/symbol",
+            "params": {"query": "RenamedType"}
+        }));
+        assert_eq!(renamed.messages[0]["result"][0]["location"]["uri"], uri);
+        let saved = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "saved",
+            "method": "workspace/symbol",
+            "params": {"query": "SavedType"}
+        }));
+        assert_eq!(
+            saved.messages[0]["result"],
+            json!([]),
+            "the buffer's current text wins over the copy the sweep read from disk"
+        );
+    }
+
+    #[test]
+    fn workspace_symbols_answer_from_the_index_after_the_last_document_closes() {
         let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut service = LspService::with_backend(RecordingBackend {
             ready: true,
@@ -5392,6 +5554,11 @@ mod tests {
         service.force_initialized_for_test();
         let uri = "file:///Closed.kt";
         let source = "class ClosedMarker\n";
+        service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(uri, source)]),
+        });
         service.open_document_for_test(uri, source, 1);
         let _ = service.apply_analysis_batch(AnalysisBatch {
             analyzed: vec![(uri.into(), 1)],
@@ -5405,30 +5572,22 @@ mod tests {
             "method": "textDocument/didClose",
             "params": {"textDocument": {"uri": uri}}
         }));
-        let pending = service.handle(json!({
+        let answered = service.handle(json!({
             "jsonrpc": "2.0",
             "id": "workspace-after-close",
             "method": "workspace/symbol",
             "params": {"query": "ClosedMarker"}
         }));
-        assert!(
-            pending.messages.is_empty(),
-            "the request must wait rather than observe the closed snapshot"
-        );
 
-        let job = service
-            .dispatch_pending_analysis()
-            .expect("closing the final document schedules an empty replacement snapshot");
-        assert!(job.documents.is_empty());
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: Vec::new(),
-            analyses: Vec::new(),
-            support_documents: Vec::new(),
-            pending: false,
-        });
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["id"], "workspace-after-close");
-        assert_eq!(messages[0]["result"], json!([]));
+        // Closing the last document used to park the query until a replacement snapshot arrived.
+        // The project index covers the file whether or not anything has it open, so there is
+        // nothing left to wait for.
+        assert_eq!(answered.messages.len(), 1);
+        assert_eq!(answered.messages[0]["id"], "workspace-after-close");
+        assert_eq!(
+            answered.messages[0]["result"][0]["location"]["uri"], uri,
+            "the closed file must still be findable"
+        );
     }
 
     #[test]

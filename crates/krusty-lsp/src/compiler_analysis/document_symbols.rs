@@ -57,6 +57,26 @@ impl ExtractionBudget {
     }
 }
 
+/// Declarations of a file that was only parsed, with the package they sit in.
+pub(crate) struct ParsedFileSymbols {
+    pub package: Option<String>,
+    pub occurrences: Vec<DocumentSymbolOccurrence>,
+}
+
+/// Parse `source` and extract its declarations, without resolving anything.
+///
+/// This is how a file nobody has opened gets indexed. It keeps the compiler frontend behind
+/// `compiler_analysis`, where every other use of it lives, so the retained-index layer above never
+/// depends on the AST.
+pub(crate) fn parsed_file_symbols(source: &str, max_entries: usize) -> ParsedFileSymbols {
+    let mut diagnostics = DiagSink::new();
+    let file = krusty::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+    ParsedFileSymbols {
+        package: file.package.clone(),
+        occurrences: document_symbol_occurrences(source, &file, max_entries),
+    }
+}
+
 /// Extract the declaration hierarchy from a parsed file.
 ///
 /// Takes the parsed `File` rather than a `FileAnalysis`: nothing here reads resolved types, so a
