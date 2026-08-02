@@ -2,14 +2,12 @@
 //! `Companion.result`) from the outer class, nested classes, init blocks, lambdas, and the
 //! companion's own members.
 //!
-//! Companion properties are static fields on the OUTER class (kotlinc's layout); the qualified
-//! `Outer.X` read already emits `getstatic Outer.X`, but an unqualified read fell through every
-//! `expr_inner_name` branch (locals → statics → members → outer-this) and bailed the file. The
-//! lowering now walks the enclosing-class chain of the current class (`Outer$Nested$1` →
-//! `Outer$Nested` → `Outer`, stripping a trailing `$Companion`) and reads the same static field —
-//! AFTER real member lookups (a real member shadows a same-named companion member), and never for
-//! a `private` companion property (its field is emitted private; a cross-class read would be an
-//! IllegalAccessError without nestmate support).
+//! Companion properties are static fields on the outer class. The checker already traverses lexical
+//! source owners in language-level precedence order, so a successful property selection records that
+//! exact semantic owner for the generic static-field lowering path. This keeps nested classes and
+//! closures independent of backend-generated class names, while preserving real-member shadowing.
+//! A private property remains a conservative skip because direct cross-class field access needs an
+//! access bridge that Krusty does not yet synthesize.
 
 use super::common;
 
@@ -74,6 +72,28 @@ class Outer {
 fun box() = Outer().test()
 "#,
         "CompNested",
+    );
+}
+
+/// The innermost lexical companion owns the selected field. This exercises semantic owner
+/// selection directly: both declarations have the same property name, so a backend heuristic that
+/// merely searches enclosing physical classes could silently read the wrong field.
+#[test]
+fn innermost_companion_property_wins() {
+    run_box(
+        r#"
+class Outer {
+    companion object { val result = "outer" }
+
+    class Nested {
+        companion object { val result = "OK" }
+        fun read() = result
+    }
+}
+
+fun box() = Outer.Nested().read()
+"#,
+        "CompInnermostOwner",
     );
 }
 
