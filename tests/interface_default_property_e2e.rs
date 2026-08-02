@@ -101,7 +101,7 @@ fun box(): String {
 /// never dispatched as a public virtual. (A private COMPUTED PROPERTY is NOT on this path — its
 /// accessor would be registered `public`, so it stays gated; see the rejection guards below.)
 #[test]
-fn interface_private_accessor() {
+fn interface_private_default_method_remains_supported() {
     run_box(
         r#"
 interface Z {
@@ -123,6 +123,34 @@ fun box() : String {
 "#,
         "IfacePrivateAccessor",
     );
+}
+
+/// Module signatures, not a current-file class index, identify the declaring interface. Compile both
+/// source orders because the multi-file driver lowers each file separately after collecting symbols:
+/// either order must let the use-site class inherit and invoke the sibling file's default getter.
+#[test]
+fn interface_default_getter_from_sibling_file() {
+    const API: &str = r#"
+interface SharedDefault {
+    val result: String
+        get() = "OK"
+}
+"#;
+    const USE_SITE: &str = r#"
+class SharedDefaultImpl : SharedDefault
+
+fun box(): String = SharedDefaultImpl().result
+"#;
+
+    for sources in [
+        &[("SharedDefaultApi", API), ("SharedDefaultUse", USE_SITE)][..],
+        &[("SharedDefaultUse", USE_SITE), ("SharedDefaultApi", API)][..],
+    ] {
+        let Some(out) = common::compile_and_run_files_with_stdlib(sources) else {
+            panic!("sibling-file interface default getter must compile in either source order");
+        };
+        assert_eq!(out, "OK");
+    }
 }
 
 /// A class member beats an interface default at ANY depth (the JVM maximally-specific rule and
@@ -179,6 +207,35 @@ fun box(): String {
 }
 "#,
         "IfaceDelegateOverload",
+    );
+}
+
+/// An explicit override of a GENERIC delegated method has a concrete descriptor (`foo(String)`),
+/// while the interface obligation and its bridge use the erased descriptor (`foo(Object)`). The
+/// delegation pass must leave that erased slot to the bridge pass; synthesizing a delegate forwarder
+/// there would shadow the override for calls made through `I<String>` and return `"delegate"`.
+#[test]
+fn generic_override_beats_delegated_forwarder_after_erasure() {
+    run_box(
+        r#"
+interface I<T> {
+    fun foo(x: T): String
+}
+
+class D : I<String> {
+    override fun foo(x: String): String = "delegate"
+}
+
+class C(val delegate: I<String>) : I<String> by delegate {
+    override fun foo(x: String): String = "OK"
+}
+
+fun box(): String {
+    val throughInterface: I<String> = C(D())
+    return throughInterface.foo("x")
+}
+"#,
+        "IfaceGenericDelegateOverride",
     );
 }
 
