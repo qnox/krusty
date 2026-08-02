@@ -10071,13 +10071,28 @@ struct CaptureDiscoveryScope {
     declarations: std::collections::HashSet<DeclId>,
 }
 
+/// Kotlin gives these unqualified instance methods a fixed return even when source omits the
+/// annotation. Keep this source-shape rule shared by method checking and any pass that predicts
+/// whether method checking can publish an inferred return: duplicating the list would let an
+/// optimization silently diverge from the semantic path when a contract is added or corrected.
+fn implicit_object_contract_return(function: &FunDecl) -> Option<Ty> {
+    match (
+        function.receiver.is_none(),
+        function.name.as_str(),
+        function.params.len(),
+    ) {
+        (true, "compareTo", 1) => Some(Ty::Int),
+        (true, "equals", 1) => Some(Ty::Boolean),
+        (true, "hashCode", 0) => Some(Ty::Int),
+        (true, "toString", 0) => Some(Ty::String),
+        _ => None,
+    }
+}
+
 fn method_may_publish_inferred_return(function: &FunDecl) -> bool {
-    let fixed_object_contract = function.receiver.is_none()
-        && matches!(
-            (function.name.as_str(), function.params.len()),
-            ("compareTo", 1) | ("equals", 1) | ("hashCode" | "toString", 0)
-        );
-    function.ret.is_none() && !fixed_object_contract && matches!(function.body, FunBody::Expr(_))
+    function.ret.is_none()
+        && implicit_object_contract_return(function).is_none()
+        && matches!(function.body, FunBody::Expr(_))
 }
 
 impl CaptureDiscoveryScope {
@@ -10889,16 +10904,7 @@ fn check_file_at_impl_mode(
                 let mut method_check_index = 0;
                 for m in &cl.methods {
                     if method_check_index < method_check_prefix_len {
-                        if capture_scope
-                            .as_ref()
-                            .is_none_or(|scope| scope.checks_method(file, m))
-                        {
-                            c.check_method(m, &props);
-                        } else {
-                            // `check_method` resets these lexical mutation sets before doing semantic
-                            // work. Preserve that cheap ordered state for a later class-region capture.
-                            c.reset_body_mutations(fun_body_expr(&m.body));
-                        }
+                        c.check_method_in_capture_scope(m, &props, capture_scope.as_ref());
                     }
                     method_check_index += 1;
                 }
@@ -10945,14 +10951,11 @@ fn check_file_at_impl_mode(
                     }
                     for bm in &entry.methods {
                         if method_check_index < method_check_prefix_len {
-                            if capture_scope
-                                .as_ref()
-                                .is_none_or(|scope| scope.checks_method(file, bm))
-                            {
-                                c.check_method(bm, &entry_props);
-                            } else {
-                                c.reset_body_mutations(fun_body_expr(&bm.body));
-                            }
+                            c.check_method_in_capture_scope(
+                                bm,
+                                &entry_props,
+                                capture_scope.as_ref(),
+                            );
                         }
                         method_check_index += 1;
                     }
@@ -12348,6 +12351,25 @@ impl<'a> Checker<'a> {
         if let Some(body) = body {
             collect_all_reassigned(self.file, body, &mut self.fn_reassigned);
             collect_closure_reassigned(self.file, body, &mut self.fn_closure_reassigned);
+        }
+    }
+
+    /// Check a method when the active capture-discovery scope needs its body or inferred return.
+    /// A skipped method must still replace the mutation summary because `check_method` normally
+    /// performs that ordered reset before all semantic work; a later selected class region reads
+    /// these checker-wide sets while deciding how an anonymous object captures mutable locals.
+    /// Keeping this transition here gives instance and enum-entry methods exactly one selection
+    /// path and prevents their capture semantics from drifting apart.
+    fn check_method_in_capture_scope(
+        &mut self,
+        function: &FunDecl,
+        properties: &[ScopedProperty],
+        capture_scope: Option<&CaptureDiscoveryScope>,
+    ) {
+        if capture_scope.is_none_or(|scope| scope.checks_method(self.file, function)) {
+            self.check_method(function, properties);
+        } else {
+            self.reset_body_mutations(fun_body_expr(&function.body));
         }
     }
 
@@ -18011,13 +18033,7 @@ impl<'a> Checker<'a> {
                 .push((label_index, recv_ref.span));
             self.this_extension_receiver = Some(recv_ref.span);
         }
-        let object_contract_ret = match (f.receiver.is_none(), f.name.as_str(), f.params.len()) {
-            (true, "compareTo", 1) => Some(Ty::Int),
-            (true, "equals", 1) => Some(Ty::Boolean),
-            (true, "hashCode", 0) => Some(Ty::Int),
-            (true, "toString", 0) => Some(Ty::String),
-            _ => None,
-        };
+        let object_contract_ret = implicit_object_contract_return(f);
         self.ret_ty = f
             .ret
             .as_ref()
