@@ -23,9 +23,12 @@ mod tests {
 
     #[test]
     fn parser_uses_only_syntax_layer_dependencies() {
+        // `wide_stack` is cross-layer stack-growth infrastructure, not a semantic dependency: the
+        // parser's expression recursion is depth-bounded like the checker's and lowering's, and
+        // grows the same-thread stack per level so the bound survives any thread's stack size.
         assert_allowed_crate_modules(
             "src/parser.rs",
-            &["ast", "diag", "features", "token", "types"],
+            &["ast", "diag", "features", "token", "types", "wide_stack"],
         );
     }
 

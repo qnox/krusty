@@ -12478,9 +12478,11 @@ pub fn check_file_in_source_set(
     check_file_on_checker_stack(file, file_index, Some(files), syms, diags)
 }
 
-/// Run the check with enough same-thread stack for the `expr_depth` bound (500), so the depth guard
-/// — not the calling thread's stack — limits expression nesting in every build profile without
-/// moving non-`Send` symbols or caller-defined platform state (see [`crate::wide_stack`]).
+/// Enter the check on a same-thread grown stack segment; `expr_with_context` rechecks the remaining
+/// stack per recursion level so paths with large helper frames can chain further segments before
+/// reaching [`crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH`]. This keeps the explicit depth guard —
+/// not the calling thread's stack — authoritative without moving non-`Send` symbols or
+/// caller-defined platform state (see [`crate::wide_stack`]).
 fn check_file_on_checker_stack(
     file: &File,
     file_index: u32,
@@ -19965,7 +19967,7 @@ impl<'a> Checker<'a> {
         // Guard against a stack overflow on a pathologically deep expression: past the limit the
         // expression types as `Error` (the file is skipped, never crashed).
         self.expr_depth += 1;
-        if self.expr_depth > 500 {
+        if self.expr_depth > crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH {
             self.expr_depth -= 1;
             return self.set(e, Ty::Error);
         }
@@ -19973,7 +19975,12 @@ impl<'a> Checker<'a> {
         // subexpression sees `None` unless a propagation site re-arms it via `expr_expected`.
         let expected = self.expected.take();
         let value_required = value_required || expected.is_some();
-        let t = self.expr_inner(e, expected, value_required);
+        // Grow the stack per level, not only at the `check_file` entry: one nesting level of a
+        // CALL expression stacks `expr_inner` + `check_call` (far larger unoptimized frames than
+        // a `&&`-chain level), so 500 levels overrun any single grown segment. The per-call check
+        // is a stack-pointer read; `stacker` chains further segments only when the current one
+        // runs low (see [`crate::wide_stack`]).
+        let t = crate::wide_stack::on_wide_stack(|| self.expr_inner(e, expected, value_required));
         self.expr_depth -= 1;
         t
     }
