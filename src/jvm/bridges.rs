@@ -43,6 +43,18 @@ struct MethodShape {
     ret: Ty,
 }
 
+/// Symbol providers may expose the same physical declaration through several semantic aliases (most
+/// visibly Kotlin/Java builtin twins on `Any`). Those are one override candidate, not an overload
+/// ambiguity. Collapse only identical erased signatures; genuinely distinct overloads remain distinct
+/// and are still rejected when the override relation cannot select one uniquely.
+fn dedup_method_shapes(shapes: impl IntoIterator<Item = MethodShape>) -> Vec<MethodShape> {
+    let mut seen = std::collections::HashSet::new();
+    shapes
+        .into_iter()
+        .filter(|shape| seen.insert((shape.params.clone(), shape.ret)))
+        .collect()
+}
+
 /// Methods DECLARED on one semantic owner, normalized to the same erased shape regardless of where the
 /// owner came from. IR declarations are authoritative when present because later lowering may have
 /// refined their physical shape; module symbols cover a sibling source owner without IR in this file;
@@ -55,56 +67,62 @@ fn declared_method_shapes(
     name: &str,
 ) -> Vec<MethodShape> {
     if let Some(class) = class_of(ir, owner) {
-        return class
-            .methods
-            .iter()
-            .copied()
-            .filter_map(|fid| {
-                let function = &ir.functions[fid as usize];
-                (function.name == name).then(|| MethodShape {
-                    params: function
+        return dedup_method_shapes(
+            class
+                .methods
+                .iter()
+                .copied()
+                .filter_map(|fid| {
+                    let function = &ir.functions[fid as usize];
+                    (function.name == name).then(|| MethodShape {
+                        params: function
+                            .params
+                            .iter()
+                            .copied()
+                            .map(bridge_erasure)
+                            .collect(),
+                        ret: bridge_erasure(function.ret),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    if let Some(class) = syms.class_by_type_name(owner) {
+        return dedup_method_shapes(
+            class
+                .methods
+                .get(name)
+                .into_iter()
+                .flatten()
+                .map(|signature| MethodShape {
+                    params: signature
                         .params
                         .iter()
                         .copied()
                         .map(bridge_erasure)
                         .collect(),
-                    ret: bridge_erasure(function.ret),
+                    ret: bridge_erasure(signature.ret),
                 })
-            })
-            .collect();
+                .collect::<Vec<_>>(),
+        );
     }
-    if let Some(class) = syms.class_by_type_name(owner) {
-        return class
-            .methods
-            .get(name)
+    dedup_method_shapes(
+        syms.libraries
+            .resolve_type_name(owner)
             .into_iter()
-            .flatten()
-            .map(|signature| MethodShape {
-                params: signature
-                    .params
+            .flat_map(|class| {
+                class
+                    .members
                     .iter()
-                    .copied()
-                    .map(bridge_erasure)
-                    .collect(),
-                ret: bridge_erasure(signature.ret),
+                    .filter(move |member| member.name == name)
+                    .map(|member| MethodShape {
+                        params: member.params.iter().copied().map(bridge_erasure).collect(),
+                        ret: bridge_erasure(member.ret),
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect();
-    }
-    syms.libraries
-        .resolve_type_name(owner)
-        .into_iter()
-        .flat_map(|class| {
-            class
-                .members
-                .iter()
-                .filter(move |member| member.name == name)
-                .map(|member| MethodShape {
-                    params: member.params.iter().copied().map(bridge_erasure).collect(),
-                    ret: bridge_erasure(member.ret),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// The direct semantic superclass. Source and library symbol providers expose different storage

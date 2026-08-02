@@ -87,3 +87,20 @@ fun box(): String {
         Some("Sx")
     );
 }
+
+#[test]
+fn synthesized_data_class_any_overrides_tolerate_semantic_aliases() {
+    // Library symbols can expose the same physical `Any` member through Kotlin and Java semantic
+    // aliases. A data class's synthesized `equals`/`hashCode`/`toString` implementations must see one
+    // erased obligation per descriptor; treating identical aliases as overloaded declarations makes
+    // the bridge pass reject an otherwise ordinary data class.
+    let source = r#"
+data class Token(val active: Boolean)
+
+fun box(): String = if (Token(true).active) "OK" else "fail"
+"#;
+    assert_eq!(
+        common::compile_and_run_with_stdlib(source, "Main").as_deref(),
+        Some("OK")
+    );
+}
