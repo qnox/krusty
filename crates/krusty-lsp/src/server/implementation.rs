@@ -1978,6 +1978,11 @@ where
         if self.documents.remove(&uri).is_some() {
             self.note_document_identity_change(&uri);
         }
+        // The live layer describes a buffer, and there is no buffer any more. Leaving it in place
+        // would keep serving the abandoned text -- and keep shadowing the project layer's copy of
+        // the file on disk -- until the replacement batch lands.
+        self.workspace_symbols
+            .remove_files(std::slice::from_ref(&uri));
         self.analysis_dirty = true;
         let mut messages = if defer_analysis {
             Vec::new()
@@ -2049,10 +2054,11 @@ where
         };
         Dispatch::messages(vec![rpc_result(
             id,
-            Value::Array(
-                self.workspace_symbols
-                    .encode_over(&params.query, &self.project_symbols.layers()),
-            ),
+            Value::Array(self.workspace_symbols.encode_over(
+                &params.query,
+                &self.project_symbols.layers(),
+                &self.documents.keys().map(String::as_str).collect(),
+            )),
         )])
     }
 
@@ -5542,6 +5548,92 @@ mod tests {
             saved.messages[0]["result"],
             json!([]),
             "the buffer's current text wins over the copy the sweep read from disk"
+        );
+    }
+
+    /// Retain `uri` in the project layer with `disk`, then open it with `buffer` and analyze.
+    fn service_with_edited_buffer(
+        uri: &str,
+        disk: &str,
+        buffer: &str,
+    ) -> LspService<RecordingBackend> {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(uri, disk)]),
+        });
+        service.open_document_for_test(uri, buffer, 1);
+        let _ = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![(uri.into(), 1)],
+            analyses: crate::analysis::analyze_for_lsp(&[buffer]),
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        service
+    }
+
+    fn workspace_symbol_result(service: &mut LspService<RecordingBackend>, query: &str) -> Value {
+        service
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": "workspace-symbol",
+                "method": "workspace/symbol",
+                "params": {"query": query}
+            }))
+            .messages[0]["result"]
+            .clone()
+    }
+
+    #[test]
+    fn a_buffer_edited_down_to_no_declarations_still_shadows_its_file_on_disk() {
+        // The live index names only the files some entry references, so a buffer that declares
+        // nothing names nothing. Shadowing has to come from the open set too, or the copy the sweep
+        // read from disk answers for a file whose buffer no longer declares it.
+        let mut service = service_with_edited_buffer(
+            "file:///Gone.kt",
+            "package demo\nclass GoneType\n",
+            "package demo\n",
+        );
+
+        assert_eq!(
+            workspace_symbol_result(&mut service, "GoneType"),
+            json!([]),
+            "an open buffer must shadow its file on disk even when it declares nothing"
+        );
+    }
+
+    #[test]
+    fn closing_a_document_stops_serving_its_buffer_and_restores_the_file_on_disk() {
+        let uri = "file:///Edited.kt";
+        let mut service = service_with_edited_buffer(
+            uri,
+            "package demo\nclass SavedType\n",
+            "package demo\nclass RenamedType\n",
+        );
+
+        let _ = service.handle_deferred(json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": {"textDocument": {"uri": uri}}
+        }));
+
+        // Closing discards the buffer, so what it declared goes with it -- immediately, not once a
+        // replacement batch happens to land.
+        assert_eq!(
+            workspace_symbol_result(&mut service, "RenamedType"),
+            json!([]),
+            "an abandoned buffer must not keep answering after its document closes"
+        );
+        assert_eq!(
+            workspace_symbol_result(&mut service, "SavedType")[0]["location"]["uri"],
+            uri,
+            "and the file on disk must become visible again"
         );
     }
 

@@ -1248,17 +1248,31 @@ impl WorkspaceSymbolIndex {
         self.retain_entries(|entry| !removed.contains(&entry[0]));
     }
 
-    /// Drop every entry `keep` rejects, renumbering the parent links that survive.
+    /// Drop every entry `keep` rejects, renumbering the parent links that survive and forgetting
+    /// any file no surviving entry references.
     ///
-    /// Parents always precede their children within a file, and a file's entries are contiguous, so
-    /// dropping whole files never orphans a retained child.
+    /// Compacting the URI table is not just housekeeping: naming a file is what makes a layer
+    /// shadow the layers under it, so a file left named with nothing to say would go on hiding the
+    /// copy below it.
+    ///
+    /// A parent always precedes its children, so a retained child's parent link either points at a
+    /// retained entry or is detached to zero.
     fn retain_entries(&mut self, keep: impl Fn(&WorkspaceSymbolEntry) -> bool) {
         let mut retained = Vec::with_capacity(self.entries.len());
         let mut retained_indices = Vec::with_capacity(self.entries.len());
+        let mut files = Vec::new();
+        let mut file_ids = vec![None; self.files.len()];
         for mut entry in self.entries.drain(..) {
             if !keep(&entry) {
                 retained_indices.push(None);
                 continue;
+            }
+            if let Some(slot) = file_ids.get_mut(entry[0] as usize) {
+                entry[0] = *slot.get_or_insert_with(|| {
+                    let id = files.len() as u32;
+                    files.push(std::mem::take(&mut self.files[entry[0] as usize]));
+                    id
+                });
             }
             entry[8] = entry[8]
                 .checked_sub(1)
@@ -1270,6 +1284,7 @@ impl WorkspaceSymbolIndex {
             retained_indices.push(Some(index));
         }
         self.entries = retained;
+        self.files = files;
         self.rebuild_search_order();
     }
 
@@ -1607,20 +1622,24 @@ impl WorkspaceSymbolIndex {
     }
 
     pub fn encode(&self, query: &str) -> Vec<Value> {
-        Self::encode_layers(query, &[self])
+        Self::encode_layers(query, &[self], &HashSet::new())
     }
 
     /// Answer a query from this index layered over `base`.
     ///
     /// This index is the live one -- open buffers and the sources analysis pulled in with them --
-    /// and `base` is what lies under it, outermost layer first. A file a higher layer names is
-    /// suppressed in every lower one, so an edited buffer's declarations win over what its file
-    /// said on disk instead of appearing twice.
-    pub fn encode_over(&self, query: &str, base: &[&Self]) -> Vec<Value> {
+    /// and `base` is what lies under it, outermost layer first.
+    ///
+    /// `open` is every document the session holds a buffer for. Shadowing is the union of that and
+    /// the files the live layer names, and it needs both: the live layer alone misses a buffer
+    /// edited down to no declarations at all, which would leave the project layer answering with
+    /// the file's text from disk, and `open` alone misses the support sources analysis pulled in
+    /// beside the open ones, which would report those declarations from two layers at once.
+    pub fn encode_over(&self, query: &str, base: &[&Self], open: &HashSet<&str>) -> Vec<Value> {
         let mut layers = Vec::with_capacity(base.len() + 1);
         layers.push(self);
         layers.extend(base.iter().copied());
-        Self::encode_layers(query, &layers)
+        Self::encode_layers(query, &layers, open)
     }
 
     /// Rank across every layer at once, rung by rung.
@@ -1628,7 +1647,7 @@ impl WorkspaceSymbolIndex {
     /// Layer order decides shadowing, not rank: running a whole layer's ladder before the next
     /// layer's would let a subsequence match in a newly indexed chunk outrank an exact prefix match
     /// in the segment beside it, and spend the response budget on it.
-    fn encode_layers(query: &str, layers: &[&Self]) -> Vec<Value> {
+    fn encode_layers(query: &str, layers: &[&Self], open: &HashSet<&str>) -> Vec<Value> {
         let mut result = Vec::new();
         if query.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
             return result;
@@ -1643,10 +1662,16 @@ impl WorkspaceSymbolIndex {
             }
         }
 
-        let mut shadowed = HashSet::new();
+        let mut shadowed = open.clone();
         let mut suppressed = Vec::with_capacity(layers.len());
-        for layer in layers {
-            suppressed.push(layer.shadowed_files(&shadowed));
+        for (index, layer) in layers.iter().enumerate() {
+            // The outermost layer answers for its own files; it is what everything below shadows
+            // against, not something to shadow itself.
+            suppressed.push(if index == 0 {
+                HashSet::new()
+            } else {
+                layer.shadowed_files(&shadowed)
+            });
             shadowed.extend(layer.files.iter().map(String::as_str));
         }
 
@@ -4167,12 +4192,13 @@ mod tests {
         let live = WorkspaceSymbolIndex::default();
         let layers = project.layers();
         assert_eq!(
-            live.encode_over("TypeNumber0", &layers)[0]["name"],
+            live.encode_over("TypeNumber0", &layers, &HashSet::new())[0]["name"],
             "TypeNumber0"
         );
         let last = CHUNKS * FILES - 1;
         assert_eq!(
-            live.encode_over(&format!("TypeNumber{last}"), &layers)[0]["location"]["uri"],
+            live.encode_over(&format!("TypeNumber{last}"), &layers, &HashSet::new())[0]["location"]
+                ["uri"],
             format!("file:///src/File{last}.kt")
         );
     }
@@ -4198,7 +4224,7 @@ mod tests {
 
         let live = WorkspaceSymbolIndex::default();
         let names = live
-            .encode_over("parser", &project.layers())
+            .encode_over("parser", &project.layers(), &HashSet::new())
             .into_iter()
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
@@ -4227,18 +4253,22 @@ mod tests {
 
         let live = WorkspaceSymbolIndex::default();
         let layers = project.layers();
-        assert_eq!(live.encode_over("RewrittenType", &layers).len(), 1);
+        assert_eq!(
+            live.encode_over("RewrittenType", &layers, &HashSet::new())
+                .len(),
+            1
+        );
         // `TypeNumber3` is a prefix of `TypeNumber30`, so ask the location, not the name: nothing
         // the rewritten file used to declare may survive in an older segment.
         assert!(
-            live.encode_over("TypeNumber", &layers)
+            live.encode_over("TypeNumber", &layers, &HashSet::new())
                 .iter()
                 .all(|symbol| symbol["location"]["uri"] != stale_uri.as_str()),
             "the declarations the file used to hold must not survive in an older segment"
         );
         // Its neighbours in the same original chunk are untouched.
         assert_eq!(
-            live.encode_over("TypeNumber4", &layers)[0]["location"]["uri"],
+            live.encode_over("TypeNumber4", &layers, &HashSet::new())[0]["location"]["uri"],
             "file:///src/File4.kt"
         );
     }
@@ -4255,7 +4285,7 @@ mod tests {
         live.assign_uris(&["file:///Open.kt"]);
 
         let names = |query: &str| {
-            live.encode_over(query, &[&project])
+            live.encode_over(query, &[&project], &HashSet::new())
                 .into_iter()
                 .map(|symbol| symbol["name"].as_str().unwrap().to_string())
                 .collect::<Vec<_>>()
