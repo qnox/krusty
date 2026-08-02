@@ -3233,6 +3233,14 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
 /// `functions()` index). `inv` is unary; `shl`/`shr`/`ushr`/`and`/`or`/`xor` take one argument. The
 /// single source of truth shared by the checker and the signature-inference pre-pass.
 pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
+    // `Boolean` bitwise (`b.and(x)`/`or`/`xor`) — the JVM `iand`/`ior`/`ixor` intrinsics, like
+    // the `Int`/`Long` forms below.
+    if recv == Ty::Boolean {
+        return match (name, n_args) {
+            ("and" | "or" | "xor", 1) => Some(Ty::Boolean),
+            _ => None,
+        };
+    }
     if !matches!(recv, Ty::Int | Ty::Long) {
         return None;
     }
@@ -9166,7 +9174,7 @@ pub enum ResolvedCall {
 }
 
 impl ResolvedCall {
-    fn is_extension(&self) -> bool {
+    pub(crate) fn is_extension(&self) -> bool {
         matches!(
             self,
             Self::Extension(_) | Self::ModuleExtension { .. } | Self::ModuleMemberExtension { .. }
@@ -21750,32 +21758,6 @@ impl<'a> Checker<'a> {
             if rt == Ty::Error {
                 return Ty::Error;
             }
-            // User-defined extension on a non-nullable primitive receiver: safe call is a no-op
-            // (primitives can never be null), so emit as a direct static call.
-            if !rt.is_reference() {
-                if let Some(fi) = self
-                    .resolver()
-                    .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
-                    .map(crate::symbol_resolver::Symbol::overloads)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|o| o.is_extension() && o.receiver_rank == 0)
-                {
-                    let logical = fi.extension_value_params().to_vec();
-                    let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
-                    if logical.len() != arg_tys.len() {
-                        self.diags.error(
-                            self.span(e),
-                            format!(
-                                "extension '{name}' expects {} args, got {}",
-                                logical.len(),
-                                arg_tys.len()
-                            ),
-                        );
-                    }
-                    return self.set(e, fi.callable.ret);
-                }
-            }
             // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): the receiver is non-null
             // inside; type it like the non-safe form, then wrap the result nullable below.
             let result = if let Some(t) = self.safe_scope_call_result(rt, &name, &args) {
@@ -21786,6 +21768,24 @@ impl<'a> Checker<'a> {
                     Some(Ty::Error) => Ty::Error,
                     _ => t,
                 }
+            } else if !rt.is_reference() && !matches!(name.as_str(), "toString" | "hashCode") {
+                // A safe call on a NON-NULLABLE primitive receiver (`42?.foo()`): `?.` is vacuous
+                // (kotlinc warns "unnecessary safe call"), so the member resolves EXACTLY like
+                // the qualified call — member-first: a builtin operator member types (or
+                // rejects) before any extension is consulted, so a same-named user extension
+                // (invisible per Kotlin's members-win rule) can never be selected.
+                // `toString`/`hashCode` go through the general path instead: its special case
+                // types the BUILTIN member for every receiver type.
+                let arg_exprs = args.as_deref().unwrap_or_default();
+                let arg_tys = self.arg_tys(arg_exprs);
+                if let Some(ret) =
+                    self.check_builtin_operator_method(e, rt, &name, arg_exprs, &arg_tys, false)
+                {
+                    return self.set(e, ret);
+                }
+                let arg_kinds = self.checked_call_arg_kinds(arg_exprs);
+                self.record_source_extension_call(e, rt, &name, arg_exprs, &arg_tys, &arg_kinds)
+                    .unwrap_or(Ty::Error)
             } else {
                 match &args {
                     // After `?.` the receiver is non-null, so resolve the member against the NON-NULL
@@ -21960,7 +21960,18 @@ impl<'a> Checker<'a> {
                                 })
                                 .unwrap_or(Ty::Error)
                         } else {
-                            self.check_member_extension_function_call(e, recv, &name, a, &arg_tys)
+                            // A non-`String`, non-`Obj` receiver — e.g. the non-null primitive
+                            // behind a NULLABLE primitive (`i?.plus(3)` on `Int?`). Member-first,
+                            // exactly like the qualified call: a builtin operator member types
+                            // (or rejects) before any extension is consulted.
+                            if let Some(ret) = self
+                                .check_builtin_operator_method(e, recv, &name, a, &arg_tys, false)
+                            {
+                                ret
+                            } else {
+                                self.check_member_extension_function_call(
+                                    e, recv, &name, a, &arg_tys,
+                                )
                                 .or_else(|| {
                                     self.record_extension_call_with_slots(
                                         e, &name, recv, a, &type_args,
@@ -21972,6 +21983,7 @@ impl<'a> Checker<'a> {
                                     )
                                 })
                                 .unwrap_or(Ty::Error)
+                            }
                         }
                     }
                 }
@@ -21980,46 +21992,15 @@ impl<'a> Checker<'a> {
                 let arg_exprs = args.as_deref().unwrap_or_default();
                 let arg_tys = self.arg_tys(arg_exprs);
                 let arg_kinds = self.checked_call_arg_kinds(arg_exprs);
-                if let Some((selected, sig)) =
-                    self.selected_source_extension(rt.non_null(), &name, &arg_kinds)
-                {
-                    if !self.check_source_extension_call_args(
-                        e,
-                        &name,
-                        arg_exprs,
-                        &arg_tys,
-                        &selected,
-                        &sig.params,
-                    ) {
-                        Ty::Error
-                    } else {
-                        self.mark_source_call(e, selected.source_key);
-                        let owner =
-                            sig.source_file
-                                .zip(sig.source_decl)
-                                .and_then(|(file, declaration)| {
-                                    self.syms
-                                        .fn_facades_by_decl
-                                        .get(&(file, declaration.0))
-                                        .copied()
-                                });
-                        self.resolved_calls.insert(
-                            e,
-                            ResolvedCall::ModuleExtension {
-                                receiver: rt.non_null(),
-                                name: name.clone(),
-                                params: sig.params.clone(),
-                                ret: sig.ret,
-                                owner,
-                                source: selected.source_key,
-                                vararg: selected.call_sig.vararg,
-                            },
-                        );
-                        sig.ret
-                    }
-                } else {
-                    Ty::Error
-                }
+                self.record_source_extension_call(
+                    e,
+                    rt.non_null(),
+                    &name,
+                    arg_exprs,
+                    &arg_tys,
+                    &arg_kinds,
+                )
+                .unwrap_or(Ty::Error)
             } else {
                 result
             };
@@ -23506,6 +23487,132 @@ impl<'a> Checker<'a> {
                 Ty::Error
             }
         }
+    }
+
+    /// The type of a builtin operator-method call on a primitive receiver (`5.plus(2)`,
+    /// `a.compareTo(b)`, `a shl b`) — or `None` when the name/args aren't a builtin operation.
+    /// A builtin member BEATS any same-named user extension (Kotlin: members always win); an
+    /// unmodelled builtin (`mod` floor-semantics, `rangeTo`, `inc`/`dec`) REJECTS before
+    /// extensions are consulted, so an invisible shadowed extension can never be selected. The
+    /// arithmetic/compare/unary forms map directly to the equivalent operator bytecode (see the
+    /// mirror in `emit_call`). Shared by the qualified-call path and the safe-call path (whose
+    /// member resolves against the non-null receiver type). `skip_operator_arm` is the
+    /// qualified path's user-`infix`-shadows-builtin case (a safe call is never infix).
+    fn check_builtin_operator_method(
+        &mut self,
+        e: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        skip_operator_arm: bool,
+    ) -> Option<Ty> {
+        // Bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`, `a.inv()`),
+        // resolved via the shared `builtin_bitwise_ret` (also used by signature inference): a
+        // shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type.
+        if let Some(ret) = builtin_bitwise_ret(rt, name, arg_tys.len()) {
+            if let Some(arg0) = arg_tys.first() {
+                let expected = if matches!(name, "shl" | "shr" | "ushr") {
+                    Ty::Int
+                } else {
+                    rt
+                };
+                self.expect_assignable(expected, *arg0, self.span(args[0]), "argument");
+            }
+            return Some(ret);
+        }
+        // The builtin only applies when every argument is itself a numeric/char primitive (the
+        // operand types a builtin operator accepts). A non-numeric argument (`2 * V(3)` with a
+        // user `operator fun Int.times(v: V)`) means this is an EXTENSION operator — fall
+        // through to extension resolution rather than forcing (and rejecting) the builtin.
+        if skip_operator_arm
+            || !rt.is_numeric_or_char()
+            || !is_builtin_operator_method(name)
+            || !arg_tys.iter().all(|a| a.is_numeric_or_char())
+        {
+            return None;
+        }
+        let span = self.span(e);
+        if rt.is_numeric() {
+            // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
+            let bin = BinOp::from_arith_operator_name(name);
+            if let (Some(op), [at]) = (bin, arg_tys) {
+                return Some(self.check_binary(op, rt, *at, span));
+            }
+            // `a.compareTo(b)` → `Int` (emitted via `{Integer,Long,Float,Double}.compare`).
+            if name == "compareTo" {
+                if let [at] = arg_tys {
+                    if Ty::promote(rt, *at).is_some() {
+                        return Some(Ty::Int);
+                    }
+                }
+            }
+            if matches!(name, "unaryMinus" | "unaryPlus") && arg_tys.is_empty() {
+                return Some(match rt {
+                    Ty::Byte | Ty::Short => Ty::Int,
+                    _ => rt,
+                });
+            }
+        }
+        // `Char` arithmetic methods: `c.plus(n): Char`, `c.minus(n): Char`, `c.minus(c2): Int`.
+        // `Char` isn't `is_numeric` (no promotion), but these map to the operator form, which
+        // `check_binary` types with the correct `Char`/`Int` operand rules.
+        if rt == Ty::Char {
+            // `Char` has only `plus`/`minus` operator overloads (no `times`/`div`/`rem`).
+            let bin = BinOp::from_arith_operator_name(name)
+                .filter(|o| matches!(o, BinOp::Add | BinOp::Sub));
+            if let (Some(op), [at]) = (bin, arg_tys) {
+                return Some(self.check_binary(op, rt, *at, span));
+            }
+        }
+        self.diags.error(
+            span,
+            format!("krusty: builtin operator method '{name}' on a primitive is not supported"),
+        );
+        Some(Ty::Error)
+    }
+
+    /// Record `e` as a call to the selected SOURCE extension (`ResolvedCall::ModuleExtension`)
+    /// so lowering emits the direct static call, and return its return type. `None` when no
+    /// source extension applies or its arguments don't check. The single place this recording
+    /// happens; shared by the qualified path, the safe-call fallbacks, and the
+    /// non-null-primitive safe-call branch.
+    fn record_source_extension_call(
+        &mut self,
+        e: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        arg_kinds: &[CallArgKind],
+    ) -> Option<Ty> {
+        let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
+        if !self.check_source_extension_call_args(e, name, args, arg_tys, &selected, &sig.params) {
+            return None;
+        }
+        self.mark_source_call(e, selected.source_key);
+        let owner = sig
+            .source_file
+            .zip(sig.source_decl)
+            .and_then(|(file, declaration)| {
+                self.syms
+                    .fn_facades_by_decl
+                    .get(&(file, declaration.0))
+                    .copied()
+            });
+        self.resolved_calls.insert(
+            e,
+            ResolvedCall::ModuleExtension {
+                receiver: rt,
+                name: name.to_string(),
+                params: sig.params.clone(),
+                ret: sig.ret,
+                owner,
+                source: selected.source_key,
+                vararg: selected.call_sig.vararg,
+            },
+        );
+        Some(sig.ret)
     }
 
     fn check_binary(&mut self, op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
@@ -29530,76 +29637,19 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                // Builtin bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`,
-                // `a.inv()`) — the named primitive operators (no symbol form), resolved via the shared
-                // `builtin_bitwise_ret` (also used by signature inference). The arg-type rule is the
-                // checker's: a shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type.
-                if let Some(ret) = builtin_bitwise_ret(rt, &name, arg_tys.len()) {
-                    if let Some(arg0) = arg_tys.first() {
-                        let expected = if matches!(name.as_str(), "shl" | "shr" | "ushr") {
-                            Ty::Int
-                        } else {
-                            rt
-                        };
-                        self.expect_assignable(expected, *arg0, self.span(args[0]), "argument");
-                    }
+                // Builtin bitwise/shift/operator methods on a primitive receiver — the named
+                // forms of Kotlin's primitive operators, which BEAT any same-named user
+                // extension (Kotlin: members always win). Shared with the safe-call path via
+                // `check_builtin_operator_method`; the arg-type rule is the checker's.
+                if let Some(ret) = self.check_builtin_operator_method(
+                    call,
+                    rt,
+                    &name,
+                    args,
+                    &arg_tys,
+                    infix_shadows_builtin,
+                ) {
                     return ret;
-                }
-                // A builtin operator-method on a primitive (`5.rem(2)`, `5.plus(2)`) binds to the
-                // primitive operator, which *beats* any same-named user extension (in Kotlin a
-                // member/builtin wins over an extension). The arithmetic/compare/unary forms map
-                // directly to the equivalent operator bytecode (see the mirror in `emit_call`); the
-                // rest (`mod` floor-semantics, `rangeTo`, `inc`/`dec`) aren't modeled → reject rather
-                // than dispatch to a user extension, which would miscompile.
-                // The builtin only applies when every argument is itself a numeric/char primitive (the
-                // operand types a builtin operator accepts). A non-numeric argument (`2 * V(3)` with a
-                // user `operator fun Int.times(v: V)`) means this is an EXTENSION operator — fall through
-                // to extension resolution rather than forcing (and rejecting) the builtin.
-                if rt.is_numeric_or_char()
-                    && is_builtin_operator_method(&name)
-                    && arg_tys.iter().all(|a| a.is_numeric_or_char())
-                {
-                    // A user `infix` extension shadows the builtin for the infix form (see
-                    // `infix_shadows_builtin` above): skip every arm here and let extension resolution
-                    // downstream take the call.
-                    let infix_user_ext = infix_shadows_builtin;
-                    if !infix_user_ext && rt.is_numeric() {
-                        // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
-                        let bin = BinOp::from_arith_operator_name(&name);
-                        if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
-                            return self.check_binary(op, rt, *at, span);
-                        }
-                        // `a.compareTo(b)` → `Int` (emitted via `{Integer,Long,Float,Double}.compare`).
-                        if name == "compareTo" {
-                            if let [at] = arg_tys.as_slice() {
-                                if Ty::promote(rt, *at).is_some() {
-                                    return Ty::Int;
-                                }
-                            }
-                        }
-                        if matches!(name.as_str(), "unaryMinus" | "unaryPlus") && arg_tys.is_empty()
-                        {
-                            return match rt {
-                                Ty::Byte | Ty::Short => Ty::Int,
-                                _ => rt,
-                            };
-                        }
-                    }
-                    // `Char` arithmetic methods: `c.plus(n): Char`, `c.minus(n): Char`, `c.minus(c2): Int`.
-                    // `Char` isn't `is_numeric` (no promotion), but these map to the operator form, which
-                    // `check_binary` types with the correct `Char`/`Int` operand rules.
-                    if !infix_user_ext && rt == Ty::Char {
-                        // `Char` has only `plus`/`minus` operator overloads (no `times`/`div`/`rem`).
-                        let bin = BinOp::from_arith_operator_name(&name)
-                            .filter(|o| matches!(o, BinOp::Add | BinOp::Sub));
-                        if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
-                            return self.check_binary(op, rt, *at, span);
-                        }
-                    }
-                    if !infix_user_ext {
-                        self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
-                        return Ty::Error;
-                    }
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).

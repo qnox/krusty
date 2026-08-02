@@ -842,6 +842,8 @@ mod safe_call_let_destructure_e2e;
 mod safe_call_member_on_generic_result_e2e;
 #[path = "safe_call_prim_intrinsic_e2e.rs"]
 mod safe_call_prim_intrinsic_e2e;
+#[path = "safe_call_primitive_e2e.rs"]
+mod safe_call_primitive_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
 mod safe_cast_elvis_e2e;
 #[path = "sam_classpath_e2e.rs"]
