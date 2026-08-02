@@ -221,6 +221,22 @@ The same mechanism explains why rust-analyzer's own `#` and `*` markers are brok
 durable fix is upstream — Zed already special-cases `::`, so honouring a server-declared "do not
 re-filter" is a small, precedented change. Worth filing regardless of what ships here.
 
+### Cost of answering
+
+Both fallback rungs are scans, so a project-wide index has to keep the per-entry work to nothing:
+the lowercase name and camel-hump expansion are derived once per interned name and held beside the
+name table, and a rung tests the name table (173,551) rather than the entries (698,516).
+
+The response is capped by symbol count as well as by bytes. A broad query matches tens of thousands
+of declarations, and encoding them was the dominant cost of answering — for a client that keeps 100.
+Results are emitted strongest rung first, so the cap keeps the best of them, and because encoding
+stops at the cap the weakest rungs are never scanned at all.
+
+Measured on a synthetic corpus of the reference shape (698,880 declarations, 6 segments, release
+build): 20–30 ms per query, against 123–526 ms before those two changes, and 81 ms for a query that
+matched nothing. Re-indexing one edited file is 12.7 ms, against 132 ms when removal re-sorted both
+rank orders instead of renumbering them.
+
 ### Cost against the index
 
 - **Wildcards** — extract the literal prefix before the first metacharacter, binary-search that
@@ -256,6 +272,13 @@ every layer, or a subsequence match in a newly indexed chunk would outrank an ex
 the segment beside it. `replace_files` is the tombstone: every URI a chunk *attempted* is
 re-indexed, so a file that was deleted or became unreadable loses its entries rather than keeping
 them forever.
+
+The shadow set is the union of the open documents and the files the live layer names, and it needs
+both halves. The live layer names only files some entry references, so a buffer edited down to no
+declarations names nothing and would let the project layer answer with the file's text from disk;
+the open set alone misses the support sources analysis pulls in beside the open ones, which would be
+reported from two layers at once. `didClose` drops the closed file from the live layer, because a
+layer that names a file is a layer that hides the one below it.
 
 What is missing is making any of it survive a restart, and compaction is currently unbounded in the
 sense that it only ever merges — there is no eviction.
@@ -330,6 +353,9 @@ milestones instead of thrashing. Affordable precisely because the pages are file
   diagnostic chunk is a full analysis, so one queue paces search behind a sweep that runs for hours.
 - Chunks are larger than diagnostic chunks (128 files against 32) because a parse returns to the
   command loop fast enough for an interactive request to overtake it anyway.
+- They sit *between* the two diagnostic levels, not ahead of both. Ahead of the sweep, which is a
+  full analysis per chunk; behind the neighbourhood level, which is the fast lane for a file the
+  user just saved and must not queue behind a whole project's worth of parses.
 - Still to do: use `git ls-files` for discovery when the root is a git repository (0.77s versus a
   7.9s cold walk), falling back to the existing `find_sources` walker (`project/sources.rs:674`)
   otherwise.
@@ -375,7 +401,9 @@ them — truncating a 700k-symbol index to save 20 MiB defeats the feature's pur
   worst-case bytes this accounting charges per entry admits about 1.2M declarations against the
   698,516 the largest reference corpus holds.
 - `MAX_INDEXED_FILE_BYTES` per file, checked against metadata before the read
-- max symbols per response
+- `MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS` per response, alongside the byte ceiling
+- Reaching any of them is reported to the client once per generation. A symbol the picker never
+  shows is indistinguishable from one that does not exist, so silent truncation reads as absence.
 - max library materialisations per query: 32
 - dependency cache size cap with LRU eviction
 
