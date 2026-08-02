@@ -11720,36 +11720,6 @@ impl<'a> Lower<'a> {
         // UNBOUND: `Type::p` — the `Name` is a class, and the reference takes the receiver as its
         // `get` argument. `capture` holds the captured-receiver expression for the bound forms.
         let source_extension = self.info.source_extension_property(e).cloned();
-        let source_getter_descriptor = if let Some(property) = source_extension.as_ref() {
-            let receiver = property.receiver?;
-            Some(format!(
-                "({}){}",
-                self.runtime.type_descriptor(receiver)?,
-                self.runtime.type_descriptor(stored_value_ty(property.ty))?
-            ))
-        } else {
-            None
-        };
-        let source_setter_descriptor = if let Some(property) = source_extension
-            .as_ref()
-            .filter(|property| property.setter.is_some())
-        {
-            let receiver = property.receiver?;
-            Some(format!(
-                "({}{})V",
-                self.runtime.type_descriptor(receiver)?,
-                self.runtime.type_descriptor(stored_value_ty(property.ty))?
-            ))
-        } else {
-            None
-        };
-        let source_getter_name = source_extension
-            .as_ref()
-            .map(|property| property.getter.name.clone());
-        let source_setter_name = source_extension
-            .as_ref()
-            .and_then(|property| property.setter.as_ref())
-            .map(|setter| setter.name.clone());
         let selected_owner = source_extension
             .as_ref()
             .and_then(|property| property.receiver)
@@ -11798,6 +11768,50 @@ impl<'a> Lower<'a> {
                 (owner, Some(self.expr(recv)?))
             }
         };
+        self.finish_prop_ref(name, owner, capture, source_extension)
+    }
+
+    /// Shared tail of [`Self::lower_prop_ref`] and [`Self::lower_implicit_this_prop_ref`]:
+    /// synthesize the `(Mutable)PropertyReference{0,1}Impl` subclass dispatching `get`/`set` for
+    /// `name` on `owner`, capturing `capture` (the bound receiver) when present. Side-effect-free
+    /// until it commits (every decline path returns before `ir.add_class`).
+    fn finish_prop_ref(
+        &mut self,
+        name: &str,
+        owner: TypeName,
+        capture: Option<u32>,
+        source_extension: Option<crate::libraries::PropertyInfo>,
+    ) -> Option<u32> {
+        let source_getter_descriptor = if let Some(property) = source_extension.as_ref() {
+            let receiver = property.receiver?;
+            Some(format!(
+                "({}){}",
+                self.runtime.type_descriptor(receiver)?,
+                self.runtime.type_descriptor(stored_value_ty(property.ty))?
+            ))
+        } else {
+            None
+        };
+        let source_setter_descriptor = if let Some(property) = source_extension
+            .as_ref()
+            .filter(|property| property.setter.is_some())
+        {
+            let receiver = property.receiver?;
+            Some(format!(
+                "({}{})V",
+                self.runtime.type_descriptor(receiver)?,
+                self.runtime.type_descriptor(stored_value_ty(property.ty))?
+            ))
+        } else {
+            None
+        };
+        let source_getter_name = source_extension
+            .as_ref()
+            .map(|property| property.getter.name.clone());
+        let source_setter_name = source_extension
+            .as_ref()
+            .and_then(|property| property.setter.as_ref())
+            .map(|setter| setter.name.clone());
         // A member field property dispatches through the instance `getName()`/`setName()`; an EXTENSION
         // property (`val A.ext`, not a field) dispatches through the static `getName(A)`/`setName(A, v)`
         // on the facade — `ext_facade = Some(())` selects that emit shape.
@@ -12605,12 +12619,17 @@ impl<'a> Lower<'a> {
         )
     }
 
-    /// An unqualified member-function reference `::m` inside a class — a BOUND ref to the enclosing
-    /// receiver (`this::m`): capture `this` (value 0) and emit the same `FunctionReferenceImpl` the
-    /// `obj::m` form does. Member-property and extension implicit refs aren't modeled here (the type
-    /// isn't `Ty::Fun` / there's no member method), so they fall through.
+    /// An unqualified member-function reference `::m` — a BOUND ref to the current semantic receiver
+    /// (`this::m`). The checker supplies the exact declaring owner; capture the scoped `this` value
+    /// instead of assuming JVM slot zero. That distinction is observable for a member extension,
+    /// whose dispatch receiver is slot zero but whose extension `this` is the following value.
     fn lower_implicit_this_method_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
-        let internal = self.cur_class?;
+        let Some(ExprLowering::ImplicitThisMemberFunctionRef { owner }) =
+            self.info.expr_lowers.get(&e)
+        else {
+            return None;
+        };
+        let internal = *owner;
         let (_, _, target_fid, _) = self.resolve_method_name(internal, name)?;
         let Ty::Fun(sig) = self.info.ty(e) else {
             return None;
@@ -12629,7 +12648,8 @@ impl<'a> Lower<'a> {
         let call_interface = self
             .class_info_name(internal)
             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
-        let this_e = self.emit_get_value(0);
+        let (this_value, _) = self.lookup("this")?;
+        let this_e = self.emit_get_value(this_value);
         let param_tys = tys_to_ir(&sig.params);
         self.make_func_ref(
             e.0,
@@ -12647,6 +12667,47 @@ impl<'a> Lower<'a> {
             Some(this_e),
             None,
         )
+    }
+
+    /// An unqualified `::p` with an implicit receiver is a BOUND reference (`this::p`) — mirrors
+    /// [`Self::lower_implicit_this_method_ref`] for functions, capturing the scoped semantic `this`.
+    /// The checker records the exact source-member selection after owning hierarchy, visibility,
+    /// shadowing, and receiver-availability decisions. Lowering deliberately consumes that handoff
+    /// instead of re-resolving: an absent marker belongs to another callable-ref arm, while a present
+    /// marker that lacks a backing field fails the file rather than falling through to a same-named
+    /// top-level or extension property.
+    fn lower_implicit_this_prop_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
+        let Some(ExprLowering::ImplicitThisMemberPropertyRef { owner }) =
+            self.info.expr_lowers.get(&e)
+        else {
+            return None;
+        };
+        let internal = *owner;
+        // The checker selected a source member property. It lowers only
+        // with a BACKING FIELD on the IR class chain (a computed property would mis-bind the
+        // extension-getter fallback in `finish_prop_ref`); anything else bails the file.
+        let field_exists = {
+            let mut cur = self.class_info_name(internal).map(|info| info.id);
+            let mut exists = false;
+            while let Some(cid) = cur {
+                let cls = &self.ir.classes[cid as usize];
+                if cls.fields.iter().any(|f| f.name == *name) {
+                    exists = true;
+                    break;
+                }
+                cur = cls
+                    .has_non_top_superclass()
+                    .then(|| self.class_info_name(cls.superclass).map(|c| c.id))
+                    .flatten();
+            }
+            exists
+        };
+        if !field_exists {
+            return None;
+        }
+        let (this_value, _) = self.lookup("this")?;
+        let this_e = self.emit_get_value(this_value);
+        self.finish_prop_ref(name, internal, Some(this_e), None)
     }
 
     /// Bound callable reference on an arbitrary EXPRESSION receiver (`"abc"::get`, `1::foo`, `mk()::m`):
@@ -14434,6 +14495,35 @@ impl<'a> Lower<'a> {
         self.coerce_to_static(read, lt, pty)
     }
 
+    /// Whether a source property read needs boxing at an erased generic storage boundary that the
+    /// current property realization does not provide. A declaration such as `Base<T>(val x: T)`
+    /// stores and returns erased `Object`; when an inherited read specializes `T` to a value class
+    /// (`Base<Result<String>>.x`), Kotlin requires the value-class box at that boundary. Merely casting
+    /// the unboxed underlying value to the wrapper produces a `ClassCastException`.
+    ///
+    /// Keep this gate beside the shared source-property operation rather than teaching individual
+    /// file/member/implicit read branches about `Result` or any concrete value class. Once property
+    /// construction/accessor realization boxes generic value-class values, this single predicate can
+    /// be removed and every caller becomes supported together.
+    fn source_property_read_needs_generic_value_class_box(
+        &self,
+        owner: TypeName,
+        name: &str,
+        expression: AstExprId,
+    ) -> bool {
+        let declared_erased = self
+            .syms
+            .declared_member_prop(owner, name)
+            .is_some_and(|(_, property)| property.ty.is_erased_top());
+        let specialized_value_class = self.info.ty(expression).obj_internal().is_some_and(|ty| {
+            self.syms
+                .class_by_type_name(ty)
+                .is_some_and(|class| class.value_field.is_some())
+                || self.syms.libraries.value_underlying_name(ty).is_some()
+        });
+        declared_erased && specialized_value_class
+    }
+
     /// Read a backing-field property `recv.name` on an in-file class, given the ALREADY-LOWERED receiver
     /// and the receiver's internal name. A read from OUTSIDE the declaring class goes through the public
     /// `getX()` accessor (the backing field is private, matching kotlinc); inside, the field is read
@@ -14469,6 +14559,9 @@ impl<'a> Lower<'a> {
         name: &str,
         e: AstExprId,
     ) -> Option<u32> {
+        if self.source_property_read_needs_generic_value_class_box(owner, name, e) {
+            return None;
+        }
         // A class whose declarations are not tracked yet (an enum entry's body, an anonymous object)
         // still has the backing field; read that.
         let (declaring, ty, is_private) = match self.declared_property(owner, name) {
@@ -14546,6 +14639,9 @@ impl<'a> Lower<'a> {
             }
         };
         let owner_internal = self.ir.classes[class as usize].fq_name_id();
+        if self.source_property_read_needs_generic_value_class_box(owner_internal, name, e) {
+            return None;
+        }
         // Smartcast: a receiver slot wider than the owning class (an erased generic / `Any?` narrowed by
         // `is`) is narrowed to the owner. That is about the RECEIVER's type, not about how the property is
         // read, so it stays here.
@@ -14733,6 +14829,9 @@ impl<'a> Lower<'a> {
         if let Some(ExprLowering::MemberPropertyRead { owner, interface }) =
             self.info.expr_lowers.get(&e)
         {
+            if self.source_property_read_needs_generic_value_class_box(*owner, name, e) {
+                return None;
+            }
             return Some(self.ir.add_expr(IrExpr::PropertyRead {
                 receiver: recv,
                 owner: *owner,
@@ -20447,12 +20546,29 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // An unqualified `::m` inside a class binds to the enclosing receiver (`this::m`) — a
-            // member function takes precedence over a same-named top-level decl (matches the checker).
-            if receiver.is_none() {
-                if let Some(r) = self.lower_implicit_this_method_ref(e, &name) {
-                    return Some(r);
-                }
+            // An unqualified `::m` with an implicit receiver binds that semantic `this` — a member
+            // function takes precedence over a same-named top-level declaration (matches the checker).
+            if receiver.is_none()
+                && matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ImplicitThisMemberFunctionRef { .. })
+                )
+            {
+                // Presence is terminal for the same shadowing reason as member-property markers:
+                // if realization fails, do not silently bind a same-named top-level callable.
+                return self.lower_implicit_this_method_ref(e, &name);
+            }
+            // An unqualified `::p` with an implicit receiver binds its member property (`this::p`),
+            // after member functions and before top-level declarations. Presence of the checker's
+            // semantic marker is terminal: a failed emit must bail instead of rebinding a shadowed
+            // top-level/extension property.
+            if receiver.is_none()
+                && matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ImplicitThisMemberPropertyRef { .. })
+                )
+            {
+                return self.lower_implicit_this_prop_ref(e, &name);
             }
             // Top-level property reference `::foo` lowers to a `(Mutable)PropertyReference0Impl`
             // singleton whose `get`/`set` dispatch statically to the facade accessor.
