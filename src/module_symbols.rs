@@ -910,7 +910,7 @@ mod tests {
             tparam_names: vec![],
             tparam_bounds: vec![],
             generic_props: HashMap::new(),
-            generic_function_props: HashMap::new(),
+            generic_property_shapes: HashMap::new(),
             value_field: None,
             generic_methods: HashMap::new(),
         }
@@ -1078,6 +1078,8 @@ mod tests {
                 getter_name: "getState".into(),
                 setter_name: Some("setState".into()),
                 setter_visibility: Some(Visibility::Protected),
+                has_custom_getter: false,
+                is_open: false,
                 context_params: Vec::new(),
             },
         );
