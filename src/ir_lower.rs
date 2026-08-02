@@ -20170,11 +20170,16 @@ impl<'a> Lower<'a> {
             }
             // The receiver must be a reference (the `?.` null-check is on an object). The result may be
             // a reference OR a nullable-primitive (`s?.length` : `Int?`) — the assembly below boxes the
-            // primitive member value into the wrapper (`null` in the other branch).
+            // primitive member value into the wrapper (`null` in the other branch). The one scalar
+            // exception is a property read whose receiver and result were both proven non-null by flow
+            // analysis; it is lowered through the ordinary property path below, without a null branch.
+            let proven_nonnull_scalar_property =
+                args.is_none() && !rty.is_nullable() && self.has_scalar_value_repr(result_ty);
             if !rty.is_reference()
                 || (!result_ty.is_reference()
                     && result_ty.nullable_primitive().is_none()
-                    && result_ty != Ty::Unit)
+                    && result_ty != Ty::Unit
+                    && !proven_nonnull_scalar_property)
             {
                 return None;
             }
@@ -20195,6 +20200,22 @@ impl<'a> Lower<'a> {
                 return None;
             };
             let internal = internal_id.render();
+            // Flow analysis can prove the receiver non-null and a stable nullable-primitive property
+            // non-null in the same branch (`if (count?.n != null) { val n: Int = count?.n }`). At
+            // this read site `?.` is therefore semantically the ordinary property operation: retaining
+            // the unreachable null arm would force a primitive result to merge with `null`, while
+            // rejecting `result_ty` would make the checker accept code the backend then silently bails
+            // on. Reuse the same generic source/classpath property helpers as `.`; this is keyed only
+            // on the proven semantic types, never on a particular property, owner, file, or module.
+            if proven_nonnull_scalar_property {
+                let recv = self.expr(receiver)?;
+                return if let Some(read) = self.lower_field_read_on(recv, &internal, &name, e, None)
+                {
+                    Some(read)
+                } else {
+                    self.lower_member_read_on(recv, rty, &name, e)
+                };
+            }
             let rv = self.expr(receiver)?;
             let v = self.fresh_value();
             // The `?.` receiver is NULLABLE by construction — carry that into the temp's IrType (`Ty`

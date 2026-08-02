@@ -61,6 +61,44 @@ fun box(): String = if (B(Holder(\"abcde\")).s.length == 5) \"OK\" else \"FAIL\"
 }
 
 #[test]
+fn computed_getter_substitutes_nested_generic_property_shapes() {
+    // `Holder<T>.cell` is not a direct `T` slot: its declared shape is `Cell<T>`. Inference must
+    // substitute that complete shape to `Cell<String>`, then apply the same operation again to
+    // `Cell<String>.value`. This guards the generic-function-property branch, not only the simpler
+    // positional `val value: T` branch.
+    const SRC: &str = "class Cell<T>(val value: T)\n\
+class Holder<T>(val cell: Cell<T>)\n\
+class B(val holder: Holder<String>) {\n\
+    val value get() = holder.cell.value\n\
+}\n\
+fun box(): String = if (B(Holder(Cell(\"shape\"))).value.length == 5) \"OK\" else \"FAIL\"\n";
+    assert_source_ok(SRC);
+}
+
+#[test]
+fn computed_getter_keeps_direct_nullable_scalar_tparam_unsupported() {
+    // Specializing a directly stored `T?` to `Int?` requires a new erased-reference ↔ boxed-scalar
+    // storage boundary. The generic shape machinery must not silently claim that representation is
+    // supported; retain the conservative declaration type until that boxing path exists.
+    const SRC: &str = "class Holder<T>(val value: T?)\n\
+class B(val holder: Holder<Int>) {\n\
+    val value get() = holder.value\n\
+}\n\
+fun read(): Int {\n\
+    val b = B(Holder<Int>(1))\n\
+    val n: Int = b.value\n\
+    return n\n\
+}\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("type mismatch")),
+        "direct nullable type-parameter specialization must remain a checked skip; got {diagnostics:?}"
+    );
+}
+
+#[test]
 fn computed_getter_substitutes_inherited_generic_member() {
     // The property is declared on a generic SUPERCLASS: substitution must flow through the
     // hierarchy (`Leaf : Mid<String>` binds `T = String` on `Mid`).
