@@ -707,7 +707,10 @@ pub struct ClassSig {
     /// `Box<Int>` substitutes the argument at that index (`Int`) for the erased `Object`.
     pub generic_props: HashMap<String, (usize, bool)>,
     /// Function-property signatures that require class type-parameter substitution.
-    pub generic_function_props: HashMap<String, Ty>,
+    /// Declared property types that mention class parameters anywhere in their shape (`Cell<T>`,
+    /// `(T) -> R`, and similar). Read-site substitution consumes this uniformly; callable-specific
+    /// behavior is decided only after the resulting type is known.
+    pub generic_property_shapes: HashMap<String, Ty>,
     /// For a `@JvmInline value class X(val v: U)` — the sole underlying property's `(name, type U)`.
     /// A value-class value is represented unboxed as `U`; `X` carries static `box-impl`/`unbox-impl`/
     /// `constructor-impl` members for boxed contexts. `None` for an ordinary class.
@@ -1775,6 +1778,86 @@ impl SymbolTable {
             }
         }
         None
+    }
+
+    /// The type of member property `name` as seen AT A USE SITE on a receiver of type `recv`:
+    /// the declaration's type with the receiver's type arguments substituted (`Holder<A>.a` is
+    /// `A`, not the erased `T`; `Leaf : Mid<String>` binds `T = String` for `Mid.v`). The single
+    /// lookup-and-substitution entry point for consumers that do not already have declaration data,
+    /// notably signature-time computed-getter inference. Checker reads, probes, and stable-path
+    /// validation already resolve the declaration for visibility/stability and call the lower-level
+    /// [`Self::applied_declared_member_prop_ty`] operation with that SAME semantic owner.
+    pub fn applied_member_prop_ty(&self, recv: Ty, name: &str) -> Option<Ty> {
+        let recv = recv.non_null();
+        let internal = recv.obj_internal()?;
+        let Some((owner, property)) = self.declared_member_prop(internal, name) else {
+            // Preserve the structural fallback the pre-substitution inference used. Synthetic and
+            // module-populated class signatures can intentionally expose a property shape without a
+            // source `DeclaredPropertySig`; there is then no declaring generic metadata to apply, but
+            // the flattened type is still better than turning a previously inferable read into Error.
+            return self.prop_of_name(internal, name).map(|(ty, _)| ty);
+        };
+        if !property.context_params.is_empty() {
+            return None;
+        }
+        Some(self.applied_declared_member_prop_ty(recv, owner, name, property.ty))
+    }
+
+    /// Apply a source property declaration to one concrete receiver while retaining its semantic
+    /// declaring owner. This is the single substitution operation shared by signature inference,
+    /// ordinary reads, read-only probes, and stable-path checks. It depends only on semantic types
+    /// and hierarchy edges, never on source file/module/classpath origin or generated JVM names.
+    fn applied_declared_member_prop_ty(
+        &self,
+        recv: Ty,
+        owner: TypeName,
+        name: &str,
+        declared: Ty,
+    ) -> Ty {
+        let recv = recv.non_null();
+        let Some(internal) = recv.obj_internal() else {
+            return declared;
+        };
+        let Some(owner_class) = self.class_by_type_name(owner) else {
+            return declared;
+        };
+        // The applied form of the DECLARING class as seen from this receiver (`recv` itself when
+        // the property is declared right on it, else the ancestor's instantiation).
+        let applied = || {
+            if owner == internal {
+                Some(recv)
+            } else {
+                self.applied_type_hierarchy(recv)
+                    .into_iter()
+                    .find_map(|(o, applied, _)| (o == owner).then_some(applied))
+            }
+        };
+        if let Some(&(i, definitely_non_null)) = owner_class.generic_props.get(name) {
+            // A `val p: T`-shaped property: the type is the receiver's i-th type argument.
+            if let Some(&arg) = applied().and_then(|applied| applied.type_args().get(i)) {
+                return if definitely_non_null {
+                    arg.non_null()
+                } else {
+                    arg
+                };
+            } else if let Some(bound) = owner_class.tparam_bounds.get(i) {
+                if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
+                    return *bound;
+                }
+            }
+        } else if let Some(&shape) = owner_class.generic_property_shapes.get(name) {
+            // A property whose type MENTIONS type parameters (`val vs: List<T>`): substitute the
+            // bindings into the shape. If an inherited applied owner cannot be reconstructed,
+            // retain the conservative declaration type rather than guessing that the child
+            // receiver's type slots correspond positionally to the declaring class's parameters.
+            if let Some(applied) = applied() {
+                return crate::symbol_resolver::ty_subst(
+                    shape,
+                    &owner_class.type_parameter_bindings(applied),
+                );
+            }
+        }
+        declared
     }
 }
 
@@ -5720,6 +5803,16 @@ fn collect_signatures_with_cp_impl(
                             .position(|t| *t == r.name)
                             .map(|index| (index, r.definitely_non_null()))
                     };
+                    // A direct `T?` property is deliberately not specialized to `Int?`/etc.: that
+                    // changes an erased reference slot into a nullable-scalar wrapper boundary whose
+                    // boxing is not modeled here. Nested uses such as `Cell<T?>` remain reference
+                    // shapes and are safe to substitute as a whole.
+                    let is_direct_nullable_tparam = |r: &TypeRef| {
+                        r.nullable()
+                            && r.targs.is_empty()
+                            && r.arg.is_none()
+                            && tparam_names.iter().any(|parameter| parameter == &r.name)
+                    };
                     let mut generic_props: HashMap<String, (usize, bool)> = HashMap::new();
                     for p in c.props.iter().filter(|p| p.is_property) {
                         if let Some(i) = tparam_index(&p.ty) {
@@ -5733,13 +5826,13 @@ fn collect_signatures_with_cp_impl(
                             }
                         }
                     }
-                    let mut generic_function_props = HashMap::new();
+                    let mut generic_property_shapes = HashMap::new();
                     for property in c.props.iter().filter(|property| property.is_property) {
                         let shape = ty_of_ref_silent(&property.ty, &class_names, &symbolic_ctp);
-                        if is_function_property_shape(shape)
+                        if !is_direct_nullable_tparam(&property.ty)
                             && ty_mentions_param(shape, &tparam_names)
                         {
-                            generic_function_props.insert(property.name.clone(), shape);
+                            generic_property_shapes.insert(property.name.clone(), shape);
                         }
                     }
                     for property in c
@@ -5749,10 +5842,10 @@ fn collect_signatures_with_cp_impl(
                     {
                         if let Some(type_ref) = &property.ty {
                             let shape = ty_of_ref_silent(type_ref, &class_names, &symbolic_ctp);
-                            if is_function_property_shape(shape)
+                            if !is_direct_nullable_tparam(type_ref)
                                 && ty_mentions_param(shape, &tparam_names)
                             {
-                                generic_function_props.insert(property.name.clone(), shape);
+                                generic_property_shapes.insert(property.name.clone(), shape);
                             }
                         }
                     }
@@ -5865,7 +5958,7 @@ fn collect_signatures_with_cp_impl(
                             tparam_names,
                             tparam_bounds,
                             generic_props,
-                            generic_function_props,
+                            generic_property_shapes,
                             value_field,
                             generic_methods,
                         },
@@ -5919,7 +6012,7 @@ fn collect_signatures_with_cp_impl(
                                 tparam_names: Vec::new(),
                                 tparam_bounds: Vec::new(),
                                 generic_props: HashMap::new(),
-                                generic_function_props: HashMap::new(),
+                                generic_property_shapes: HashMap::new(),
                                 value_field: None,
                                 generic_methods: HashMap::new(),
                             },
@@ -7245,9 +7338,11 @@ fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty {
 /// cycle-guard set of expression bodies currently being inferred. Passed explicitly (formerly two of
 /// these were an ambient thread-local) so the guard is per-inference and cannot leak across calls.
 struct InferEnv<'a> {
-    /// Resolve a property of a module class currently being collected. The library source cannot see
-    /// module-local classes, so a `param.member` initializer needs this to infer its type.
-    up: &'a dyn Fn(&str, &str) -> Option<Ty>,
+    /// Resolve a property of a module class currently being collected, AS SEEN FROM its applied
+    /// receiver (type arguments substituted — `Holder<A>.a` is `A`, not the erased `T`). The
+    /// library source cannot see module-local classes, so a `param.member` initializer needs
+    /// this to infer its type.
+    up: &'a dyn Fn(Ty, &str) -> Option<Ty>,
     /// Expression-body ids currently on the inference stack — a companion method whose inferred return
     /// recurses back to itself (`a()=C.b(); b()=C.a()`) yields `Error` (skip) instead of looping.
     inferring: &'a std::cell::RefCell<std::collections::HashSet<u32>>,
@@ -7426,7 +7521,7 @@ fn infer_lit_ty_scoped(
     src: &dyn SemanticPlatform,
     table: &SymbolTable,
 ) -> Ty {
-    let up = |ci: &str, cn: &str| table.prop_of(ci, cn).map(|(pt, _)| pt);
+    let up = |recv: Ty, name: &str| table.applied_member_prop_ty(recv, name);
     let is_object = |name: &str| table.objects.contains(name);
     let static_classifier_value = |internal: TypeName, name: &str| {
         table
@@ -7582,10 +7677,10 @@ fn infer_lit_ty_p(
                 return g.ret;
             }
             // A property of a module class being collected, invisible to the library source.
-            if let Some(internal) = rt.obj_internal() {
-                if let Some(t) = (env.up)(&internal.render(), name) {
-                    return t;
-                }
+            // The shared applied-receiver substitution gives the type the READ sees (`Holder<A>.a`
+            // is `A`) — not the declaration's erased form.
+            if let Some(t) = (env.up)(rt, name) {
+                return t;
             }
             Ty::Error
         }
@@ -18186,7 +18281,9 @@ impl<'a> Checker<'a> {
             }
             // Use the same generic-property instantiation as ordinary member reads and probes; a
             // path proof is sound only when its declared and read-time types are identical.
-            ty = self.applied_declared_property_ty(recv, owner, segment, property.ty);
+            ty = self
+                .syms
+                .applied_declared_member_prop_ty(recv, owner, segment, property.ty);
         }
         Some(ty)
     }
@@ -18921,60 +19018,6 @@ impl<'a> Checker<'a> {
             pending.extend(class.interfaces.iter_ids());
         }
         None
-    }
-
-    /// Apply a source property's declaring-class type parameters to one concrete receiver type.
-    ///
-    /// Ordinary reads, read-only probes, and stable-path validation must agree on this result. A
-    /// separate copy in each consumer previously risked accepting a narrowing under one type while
-    /// checking the eventual read under another. The owner is semantic declaration data from
-    /// [`SymbolTable::declared_member_prop`]; same-class and inherited properties differ only in how
-    /// the receiver is viewed as that owner, never by source-file/module/classpath origin.
-    fn applied_declared_property_ty(
-        &self,
-        receiver: Ty,
-        owner: TypeName,
-        name: &str,
-        declared: Ty,
-    ) -> Ty {
-        let Some(receiver_internal) = receiver.obj_internal() else {
-            return declared;
-        };
-        let Some(class) = self.syms.class_by_type_name(owner) else {
-            return declared;
-        };
-        let applied_owner = || {
-            if owner == receiver_internal {
-                Some(receiver)
-            } else {
-                self.applied_source_supertype(receiver, owner)
-            }
-        };
-        if let Some(&(index, definitely_non_null)) = class.generic_props.get(name) {
-            if let Some(&argument) = applied_owner().and_then(|ty| ty.type_args().get(index)) {
-                return if definitely_non_null {
-                    argument.non_null()
-                } else {
-                    argument
-                };
-            }
-            if let Some(bound) = class.tparam_bounds.get(index) {
-                if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
-                    return *bound;
-                }
-            }
-        } else if let Some(&shape) = class.generic_function_props.get(name) {
-            // If an inherited applied owner cannot be reconstructed, retain the declaration's
-            // conservative type. Substituting the child receiver directly into the owner's formal
-            // parameters would guess a relationship that semantic supertype resolution did not find.
-            if let Some(applied) = applied_owner() {
-                return crate::symbol_resolver::ty_subst(
-                    shape,
-                    &class.type_parameter_bindings(applied),
-                );
-            }
-        }
-        declared
     }
 
     /// Resolve a bare property write through Kotlin's ordered implicit receivers. Source properties
@@ -26565,7 +26608,12 @@ impl<'a> Checker<'a> {
                         self.reject_if_inaccessible(vis, name, owner, span);
                     }
                 }
-                return Some(self.applied_declared_property_ty(rt, owner, name, ty));
+                // The declaration's type with the receiver's type arguments substituted — the
+                // shared applied-receiver computation (`Holder<A>.a` is `A`, not the erased `T`).
+                return Some(
+                    self.syms
+                        .applied_declared_member_prop_ty(rt, owner, name, ty),
+                );
             }
             if let Some(m) = self.resolve_external_inherited_property(internal_name, name) {
                 let ret = m.ret;
@@ -26681,7 +26729,9 @@ impl<'a> Checker<'a> {
     fn probe_property_read(&self, rt: Ty, name: &str) -> Option<PropertyReadProbe> {
         if let Ty::Obj(internal_name, _) = rt {
             if let Some((owner, ty, _, _)) = self.lookup_prop_with_owner_name(internal_name, name) {
-                let ty = self.applied_declared_property_ty(rt, owner, name, ty);
+                let ty = self
+                    .syms
+                    .applied_declared_member_prop_ty(rt, owner, name, ty);
                 return Some(PropertyReadProbe::Found {
                     ty,
                     access: self.effective_property_visibility(internal_name, name),

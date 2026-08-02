@@ -2388,6 +2388,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unchanged. The bound is the number of pending getters, so self/mutual cycles terminate as `Error` and
   receive the normal inference diagnostic (`computed_prop_e2e`, resolve unit regression).
 
+- **A member property's type at a use site substitutes the receiver's type arguments everywhere**
+  (`SymbolTable::applied_member_prop_ty`): `Holder<A>.a` is `A`, not the erased `T`; an inherited
+  declaration substitutes through the hierarchy (`Leaf : Mid<String>` binds `T = String` on `Mid.v`),
+  and a nested shape substitutes recursively (`Holder<String>.cell: Cell<T>` becomes `Cell<String>`).
+  Signature-time computed-getter inference uses the lookup entry point; ordinary checker reads,
+  read-only probes, and stable-path validation reuse its lower-level semantic-owner operation. This
+  keeps every consumer on one substitution rule — previously inference read the DECLARED (erased)
+  type, so
+  `class B(val holder: Holder<A>) { val a get() = holder.a }` collected `a: Any` and every member
+  read on it failed. A directly stored `T?` remains conservative because specializing it to a
+  nullable scalar requires an erased-reference/boxing boundary not modeled here
+  (`computed_prop_generic_return_e2e`).
+
 - **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
   Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc
   constructs `Id()` via the static `constructor-impl$default(dummy, mask, marker)`, which fills the
