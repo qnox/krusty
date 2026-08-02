@@ -19,7 +19,7 @@ use crate::libraries::{
 use crate::names::{nested_internal_name_candidates, property_getter_name, property_setter_name};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
-use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
+use crate::types::{existing_type_name, ty_mentions_param, type_name, Ty, TypeName, Visibility};
 
 mod source_fallback;
 pub(crate) use source_fallback::SourceFallbackPlatform;
@@ -512,6 +512,23 @@ pub struct MemberExtPropSig {
     type_param_bounds: Vec<Ty>,
     is_var: bool,
     visibility: Visibility,
+}
+
+impl MemberExtPropSig {
+    /// The DECLARED extension receiver (`Int` in `val Int.x: T`).
+    pub(crate) fn receiver_ty(&self) -> Ty {
+        self.receiver
+    }
+
+    /// The property's type (with getter-body inference already applied).
+    pub(crate) fn ret(&self) -> Ty {
+        self.ret
+    }
+
+    /// The property's own type parameters (`val <T> T.x`); empty for the supported shape.
+    pub(crate) fn type_params(&self) -> &[String] {
+        &self.type_params
+    }
 }
 
 /// Everything a caller needs about a declared Kotlin class.
@@ -1422,7 +1439,7 @@ type GenericMemberValueOperandSlots =
 
 type MappedNamedArgs = (Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>);
 
-type MemberExtensionProperty = (Ty, bool, Visibility, TypeName, ImplicitReceiver);
+type MemberExtensionProperty = (Ty, bool, Visibility, TypeName, ImplicitReceiver, Ty);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
@@ -8390,24 +8407,6 @@ fn unify_ref(
     }
 }
 
-fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
-    match ty {
-        Ty::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
-        Ty::Obj(_, arguments) => arguments
-            .iter()
-            .any(|argument| ty_mentions_param(*argument, names)),
-        Ty::Fun(signature) => {
-            signature
-                .params
-                .iter()
-                .any(|parameter| ty_mentions_param(*parameter, names))
-                || ty_mentions_param(signature.ret, names)
-        }
-        Ty::Nullable(inner) => ty_mentions_param(*inner, names),
-        _ => false,
-    }
-}
-
 fn is_function_property_shape(ty: Ty) -> bool {
     matches!(ty, Ty::Fun(_)) || matches!(ty, Ty::Nullable(inner) if matches!(*inner, Ty::Fun(_)))
 }
@@ -9949,6 +9948,16 @@ pub enum ExprLowering {
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
     },
+    /// `recv.name` resolved to a MEMBER EXTENSION PROPERTY (`class C { val Int.x: T }`) — the
+    /// read lowers to a call of the owner's `getX(Recv)` accessor: the dispatch receiver comes
+    /// from the implicit-receiver scope (like a member extension function call), and `recv` is
+    /// passed as JVM argument 0. `owner` declares the property; `receiver` is the DECLARED
+    /// (substituted) extension receiver the accessor takes; `ty` is the property's type.
+    MemberExtensionPropertyRead {
+        owner: TypeName,
+        receiver: Ty,
+        ty: Ty,
+    },
     /// A Kotlin invoke-operator call (`a(args)`, equivalently `a.invoke(args)`) selected by the
     /// checker. The one convention covers both a function VALUE receiver (`Ty::Fun`, lowered to a
     /// direct function invocation) and a non-function receiver carrying a member `operator fun invoke`
@@ -10042,6 +10051,14 @@ pub enum StmtLowering {
         owner: TypeName,
         ty: Ty,
         interface: bool,
+    },
+    /// `recv.name = value` resolved to a `var` MEMBER EXTENSION PROPERTY — the write analogue of
+    /// [`ExprLowering::MemberExtensionPropertyRead`]. Lowering calls the owner's
+    /// `setX(Recv, T)` accessor with the dispatch receiver as `this`.
+    MemberExtensionPropertyWrite {
+        owner: TypeName,
+        receiver: Ty,
+        ty: Ty,
     },
     /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
     /// bytecode (kotlinc drops it at codegen). The lowerer skips it entirely.
@@ -26144,7 +26161,14 @@ impl<'a> Checker<'a> {
                             declared_receiver,
                             generic_receiver,
                         },
-                        (ty, sig.is_var, sig.visibility, owner, dispatch_receiver),
+                        (
+                            ty,
+                            sig.is_var,
+                            sig.visibility,
+                            owner,
+                            dispatch_receiver,
+                            declared_receiver,
+                        ),
                     ));
                 }
             }
@@ -26775,12 +26799,20 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner, dispatch_receiver))) => {
+            Ok(Some((ty, _, visibility, owner, dispatch_receiver, declared_receiver))) => {
                 if visibility != Visibility::Public {
                     self.reject_if_inaccessible(visibility, name, owner, span);
                 }
                 if let Some(expression) = mexpr {
                     self.mark_extension_receiver_used(expression, dispatch_receiver);
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::MemberExtensionPropertyRead {
+                            owner,
+                            receiver: declared_receiver,
+                            ty,
+                        },
+                    );
                 }
                 return Some(ty);
             }
@@ -26856,7 +26888,7 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner, _))) => {
+            Ok(Some((ty, _, visibility, owner, _, _))) => {
                 return Some(PropertyReadProbe::Found {
                     ty,
                     access: Some((visibility, owner)),
@@ -33161,7 +33193,7 @@ impl<'a> Checker<'a> {
             return;
         }
         match member_extension {
-            Ok(Some((lty, is_var, visibility, owner, dispatch_receiver))) => {
+            Ok(Some((lty, is_var, visibility, owner, dispatch_receiver, declared_receiver))) => {
                 if visibility != Visibility::Public {
                     self.reject_if_inaccessible(visibility, &name, owner, span);
                 }
@@ -33175,6 +33207,14 @@ impl<'a> Checker<'a> {
                     vt,
                     self.value_diagnostic_span(value, vt),
                     "assignment",
+                );
+                self.stmt_lowers.insert(
+                    s,
+                    StmtLowering::MemberExtensionPropertyWrite {
+                        owner,
+                        receiver: declared_receiver,
+                        ty: lty,
+                    },
                 );
             }
             Err(()) => {
