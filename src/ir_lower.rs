@@ -154,9 +154,10 @@ pub fn lower_file_at(
 
 /// [`lower_file_at`] with a caller-owned `bail` sink (see [`lower_file_reporting`]).
 ///
-/// Ensures enough same-thread stack for the `expr_depth` bound (500), so the depth guard — not the
-/// calling thread's stack — limits expression nesting without moving non-`Send` compiler state
-/// (see [`crate::wide_stack`]).
+/// Enter lowering on a same-thread grown stack segment; `Lower::expr` rechecks the remaining stack
+/// per recursion level so paths with large helper frames can chain further segments before
+/// reaching [`crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH`]. This keeps the explicit depth guard —
+/// not the calling thread's stack — authoritative without moving non-`Send` compiler state.
 pub fn lower_file_at_reporting(
     file: &ast::File,
     file_index: u32,
@@ -18819,11 +18820,15 @@ impl<'a> Lower<'a> {
         // Guard against a stack overflow on a pathologically deep expression (a stress test with
         // thousands of nested operators): bail past the limit so the file is skipped, not crashed.
         self.expr_depth += 1;
-        if self.expr_depth > 500 {
+        if self.expr_depth > crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH {
             self.expr_depth -= 1;
             return None;
         }
-        let r = self.expr_inner(e);
+        // Grow the stack per level, not only at the pass entry: a deep genuine nesting (e.g. a
+        // 450-level call chain) stacks frames far larger per level than the `&&`-chain sizing the
+        // entry reserve was measured against, so 500 levels can overrun any single grown segment
+        // (see [`crate::wide_stack`]; the checker's `expr_with_context` grows the same way).
+        let r = crate::wide_stack::on_wide_stack(|| self.expr_inner(e));
         self.expr_depth -= 1;
         // Record the expression's LOGICAL (source) type verbatim, keyed by its IR id — the value-class
         // pass reads it to recover a value's representation when the IR node alone is ambiguous (a library

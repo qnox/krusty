@@ -1896,6 +1896,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   document shape; `crates/krusty-lsp/src/dump_cache.rs` covers identity, privacy, atomicity, and
   retention.
 
+- **Expression nesting is depth-bounded in every recursive pass — degrade, never crash.** The
+  checker and IR-lowering bound their expression recursion at 500 semantic nesting levels; the
+  parser bounds its recursion at 1000 `parse_bp` entries — one semantic level costs up to two
+  entries (a binary right operand plus a parenthesized re-entry), so the parser admits every shape
+  the later passes admit at up to two entries per level; redundant nesting (doubled parens) spends
+  entries faster and trips the parser first. Past its bound the parser emits `expression nesting too deep`, skips the
+  rest of the over-deep expression bracket-balanced (so error recovery does not rebuild it as
+  postfix-call nesting for the later passes to recurse over), and yields an error expression; the
+  checker types the expression as `Error`; lowering bails. kotlinc has no fixed documented bound
+  (it stack-overflows on pathological nesting); krusty deliberately trades acceptance of
+  pathologically deep nesting for a guaranteed diagnostic on any thread's stack. A left-leaning binary chain (`a && b && c`) parses
+  and checks iteratively and does not count toward the depth. The bounds are survivable on a
+  default 2 MiB thread stack in unoptimized builds via same-thread stack growth
+  (`src/wide_stack.rs`), applied PER RECURSION LEVEL in all three passes — a single entry-point
+  reserve was measured to overrun on one deep genuine nesting shape per pass (5–6 parser frames
+  per paren level; `check_call`-sized checker/lowering frames per call level). Tests:
+  `tests/deep_expression_nesting_check.rs` (400/700-operand chains, 400 and 1500 nested parens,
+  450-deep call chain) and `tests/deep_expression_nesting_check_e2e.rs` (450-level `0+(…)`
+  right-nesting through the checker and lowering, end-to-end).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
