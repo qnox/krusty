@@ -7345,16 +7345,14 @@ impl<'a> Lower<'a> {
         match self.afile.expr(e) {
             Expr::CallableRef { .. } => true,
             // An anonymous-function argument is only ever lowered splice-style (a standalone
-            // closure of one mis-emits its return); a function-typed VARIABLE argument aliases a
-            // lambda whose capture/reassignment analysis assumed splicing — both stay rejected.
+            // closure of one mis-emits its return); stays rejected.
             Expr::Lambda { .. } if self.afile.anon_fun_lambdas.contains(&e.0) => true,
             // A name bound to an ENCLOSING inline call's lambda parameter (`inner(block)`) is a
             // splice-registered lambda passed as a value — it has no closure value at all, so it
             // must reject rather than bind a same-named module-level symbol (or mis-lower).
+            // An ORDINARY function-typed variable is fine: its value is a real closure, read at
+            // the call site and `invoke`d by the facade static like any other object.
             Expr::Name(n) if self.inline_lambdas.iter().any(|lambda| lambda.name == *n) => true,
-            Expr::Name(n) => self
-                .lookup(n)
-                .is_some_and(|(_, ty)| matches!(ty.non_null(), Ty::Fun(_))),
             Expr::Lambda { body, .. } => {
                 let assigned: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
                 if visit_expr(self.afile, *body, fname, &assigned) {

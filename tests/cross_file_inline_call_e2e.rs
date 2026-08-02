@@ -215,6 +215,110 @@ fn same_file_inline_still_splices() {
     common::expect_box_ok_with_stdlib(SRC, "same_file_inline_splice_kept");
 }
 
+/// The `contracts/kt47168.kt` shape: an inline fn whose body carries an ALIASED contract intrinsic
+/// (erased, not a closure) and a tail value-return is safe standalone — it lowers + emits as a
+/// facade static, so the cross-file call links. Resolving the alias to semantic callable identity
+/// keeps inline eligibility consistent with checker erasure; the effects themselves are unneeded
+/// for codegen here.
+#[test]
+fn contract_and_tail_return_inline_fun_called_cross_file() {
+    const LIB: &str = "// OPT_IN: kotlin.contracts.ExperimentalContracts\n\
+                       import kotlin.contracts.InvocationKind\n\
+                       import kotlin.contracts.contract as declareContract\n\
+                       inline fun foo(x: () -> String, y: () -> String): String {\n\
+                       \x20   declareContract {\n\
+                       \x20       callsInPlace(x, InvocationKind.EXACTLY_ONCE)\n\
+                       \x20       callsInPlace(y, InvocationKind.EXACTLY_ONCE)\n\
+                       \x20   }\n\
+                       \x20   return x() + y()\n\
+                       }\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val y = { \"K\" }\n\
+                        \x20   return foo({ \"O\" }, y)\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_contract_tail_return_inline",
+    );
+}
+
+/// A same-named declaration in an UNRELATED package must not globally disable contract erasure or
+/// facade emission. The federated resolver applies the defining file's package/import scope first;
+/// the unrelated source remains present in the module symbol table but is not a candidate here.
+#[test]
+fn unrelated_package_contract_name_does_not_shadow_intrinsic() {
+    const UNRELATED: &str = "package unrelated\n\
+                             fun contract(block: () -> Unit) { block() }\n";
+    const LIB: &str = "// OPT_IN: kotlin.contracts.ExperimentalContracts\n\
+                       package target\n\
+                       import kotlin.contracts.*\n\
+                       inline fun combine(x: () -> String, y: () -> String): String {\n\
+                       \x20   contract {\n\
+                       \x20       callsInPlace(x, InvocationKind.EXACTLY_ONCE)\n\
+                       \x20       callsInPlace(y, InvocationKind.EXACTLY_ONCE)\n\
+                       \x20   }\n\
+                       \x20   return x() + y()\n\
+                       }\n";
+    const MAIN: &str = "package target\n\
+                        fun box(): String = combine({ \"O\" }, { \"K\" })\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            ("Unrelated.kt", UNRELATED),
+            ("Lib.kt", LIB),
+            ("Main.kt", MAIN),
+        ],
+        "cross_file_contract_scope_isolation",
+    );
+}
+
+/// The inverse precedence case: a LOCAL function shadows an imported intrinsic inside this inline
+/// body. Its lambda is executable, so the body remains splice-only and no cross-file facade may be
+/// emitted. Pre-check facade eligibility conservatively records bindings within this function only;
+/// it must agree with the checker's exact lexical-scope decision.
+#[test]
+fn local_contract_shadow_keeps_inline_body_splice_only() {
+    const LIB: &str = "import kotlin.contracts.*\n\
+                       inline fun runLocalContract(): String {\n\
+                       \x20   var result = \"\"\n\
+                       \x20   fun contract(block: () -> Unit) { block() }\n\
+                       \x20   contract { result = \"OK\" }\n\
+                       \x20   return result\n\
+                       }\n";
+    const MAIN: &str = "fun box(): String = runLocalContract()\n";
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    assert!(
+        common::compile_and_run_box_files(
+            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+            &[stdlib],
+            Some(&jdk),
+        )
+        .is_none(),
+        "a local contract shadow must keep the inline body splice-only"
+    );
+}
+
+/// A function-typed VARIABLE argument to a cross-file inline facade static: the variable's value
+/// is a real closure, read at the call site and `invoke`d by the static like any other object.
+#[test]
+fn fun_typed_variable_arg_to_cross_file_inline() {
+    const LIB: &str =
+        "inline fun applyBoth(x: () -> String, y: () -> String): String = x() + y()\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val a = { \"O\" }\n\
+                        \x20   val b = { \"K\" }\n\
+                        \x20   return applyBoth(a, b)\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "cross_file_inline_fun_typed_var_arg",
+    );
+}
+
 /// A `::ref` to a sibling-file inline fn that is NOT emitted (reified — it specializes per call
 /// site) used to decline silently: the reference fell through to unrelated overloads or the file
 /// died with the generic backend error. The checker now names the real problem at the reference.
