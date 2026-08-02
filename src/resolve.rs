@@ -2061,6 +2061,23 @@ impl SymbolTable {
         value_class_free && !inline_body_has_splice_only_shape(file, f, &is_erased_contract)
     }
 
+    /// Whether a source function has a standalone callable body in the checked program. Ordinary
+    /// functions always do; an inline function does only when its established callable-extension
+    /// path or the conservative standalone-body analysis supports it. This semantic answer is
+    /// shared by common IR lowering and target registration so neither layer reconstructs the
+    /// declaration-kind predicate or introduces file/module/classpath exceptions.
+    pub fn source_fn_has_callable_body(
+        &self,
+        file: &File,
+        file_index: u32,
+        declaration: DeclId,
+        function: &FunDecl,
+    ) -> bool {
+        !function.is_inline()
+            || function.has_callable_inline_extension_body()
+            || self.inline_fn_facade_emittable(file, file_index, declaration, function)
+    }
+
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
     /// anywhere inside a function type's parameters/return.
     fn ty_mentions_value_class(&self, t: Ty) -> bool {
