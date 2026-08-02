@@ -715,8 +715,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`u?.member ?: return` smart-casts the safe-call ROOT receiver** for the code that follows: the
   elvis only completes when every `?.` in the left side held, which proves the chain's root non-null.
   The root must be a stable `val`/parameter name; the same `var`/unsigned exclusions as the bare-name
-  form apply. (Intermediate results are not path-narrowed — only the root name is.)
+  form apply. (Intermediate chain links narrow too when they are stable property paths — see the
+  access-path entry below.) `tests/elvis_return_smartcast_e2e.rs`,
   `crates/krusty-lsp/src/compiler_analysis.rs::source_set_narrows_safe_call_root_after_elvis_return`.
+- **Smart casts apply to stable ACCESS PATHS, not only plain names** (`tests/path_smartcast_e2e.rs`).
+  `==`/`!=` null checks, `is`/`!is` type tests, and contract conclusions (`returns(false) implies
+  (this != null)` — `if (a.p.isNullOrBlank()) … else { a.p.length }`; `require(a.p != null)`) narrow
+  `this.p`, `a.p`, `a.b.c`, and `a?.p` reads in the guarded region, through one machinery: a
+  condition is folded to a set of `(NarrowPath, Ty)` facts — a root binding plus property segments —
+  applied at every site (`if`/`when`/`while` branches, `&&`/`||` right operands, early-return guards,
+  contract statements, elvis guards) by the same `apply_narrowings`. A root-only fact shadows the
+  binding (the classic mechanism); a segmented fact is recorded per scope frame and consulted when a
+  member read is typed, the lowerer emitting its generic `checkcast`/unbox from the recorded type.
+  kotlinc's stability rules gate every step: the root is `this` or a local `val`/parameter (never a
+  `var`); each segment is a `val` (no setter) without a custom getter or delegate whose getter cannot
+  be replaced at runtime — a final property is stable even on an open class, while an open property
+  requires a statically final receiver type. Its type is substituted like the member read
+  (`Box<T>(val v: T)` narrows through the receiver's actual type argument). A
+  safe-call chain's proof covers every prefix (`a?.b?.c != null` narrows `a`, `a.b`, and `a.b.c`);
+  a plain chain's covers the full path only; a safe-call chain ending in a METHOD (`u?.f() != null`)
+  narrows just the root. Soundness invalidations: a fresh declaration of the root name drops the
+  frame's narrowings rooted at it (a proof never transfers to a new binding); a `this`-rooted
+  narrowing applies only while `this` is still the receiver it was proven against (never inside a
+  receiver lambda or inner class); and the bare/`this.`-qualified forms of an own member `val`
+  share one narrowing.
 - **An `if`/`else if` chain of diverging guards narrows level by level** for the rest of the block:
   `if (x is A) return …; else if (x !is B) return …` proves `x !is A && x is B` afterwards, because
   falling through a level whose then-branch diverges means that level's condition was false. The walk
