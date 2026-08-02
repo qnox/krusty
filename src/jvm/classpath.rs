@@ -1706,15 +1706,13 @@ impl Classpath {
         let mut call_sig = if extension {
             CallSig::metadata_extension(end, names, defaults, vararg)
         } else {
-            CallSig::metadata_top_level(
+            let (lambda_receivers, lambda_receiver_params) = c.lambda_receiver_shape();
+            CallSig::metadata_function(
                 end,
                 names,
                 defaults,
-                c.value_params
-                    .iter()
-                    .map(|p| p.recv_fun_receiver.map(Ty::obj_name))
-                    .collect(),
-                c.value_params.iter().map(|p| p.recv_fun()).collect(),
+                lambda_receivers,
+                lambda_receiver_params,
                 c.value_params.iter().map(|p| p.materialized()).collect(),
                 vararg,
             )

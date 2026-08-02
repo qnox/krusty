@@ -842,8 +842,13 @@ impl CallSig {
         CallSig::metadata_base(param_count, Vec::new(), Vec::new(), None)
     }
 
+    /// Build the source call shape for a non-extension Kotlin function decoded from metadata.
+    /// Members and receiver-less top-level functions carry the same value-parameter semantics;
+    /// keeping one constructor prevents either origin from silently dropping receiver-lambda or
+    /// materialization facts. Extension functions first remove their callable receiver and are
+    /// handled by [`Self::metadata_extension`].
     #[allow(clippy::too_many_arguments)]
-    pub fn metadata_top_level(
+    pub fn metadata_function(
         param_count: usize,
         names: Vec<String>,
         defaults: Vec<bool>,
@@ -853,10 +858,24 @@ impl CallSig {
         vararg_index: Option<usize>,
     ) -> Self {
         let mut sig = CallSig::metadata_base(param_count, names, defaults, vararg_index);
-        sig.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
-        sig.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
+        sig.set_lambda_receiver_shape(param_count, lambda_receivers, lambda_receiver_params);
         sig.lambda_materialized = vec_for_arity(lambda_materialized, param_count);
         sig
+    }
+
+    /// Record which value parameters are RECEIVER function types (`Recv.() -> R`, from
+    /// `@Metadata`'s `@ExtensionFunctionType`): the receiver's type per parameter
+    /// (`lambda_receivers`) and the plain flag (`lambda_receiver_params`). Each list is kept only
+    /// when it aligns with `param_count`, so consumers can index positionally without
+    /// re-validating arity.
+    fn set_lambda_receiver_shape(
+        &mut self,
+        param_count: usize,
+        lambda_receivers: Vec<Option<Ty>>,
+        lambda_receiver_params: Vec<bool>,
+    ) {
+        self.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
+        self.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
     }
 
     pub fn metadata_extension(
@@ -865,6 +884,13 @@ impl CallSig {
         defaults: Vec<bool>,
         vararg_index: Option<usize>,
     ) -> Self {
+        // Do not route extension declarations through `metadata_function`. Their callable receiver
+        // is removed here, and extension resolution derives each lambda argument's full function
+        // shape from the selected extension signature. Publishing the receiver-lambda marks through
+        // this second channel would make one semantic fact origin-dependent and can re-check
+        // receiver blocks through the member path, where labeled `this` lowering has different
+        // ownership. Ordinary members and receiver-less top-level functions have no such competing
+        // channel, so they intentionally share `metadata_function` instead.
         // The physical param count includes the extension receiver; the source VALUE params (with their
         // default flags — an `inline fun Mutex.withLock(owner: Any? = null, action)` needs them so an
         // omitted-default trailing-lambda call resolves) follow it.

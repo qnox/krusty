@@ -569,15 +569,20 @@ pub(crate) fn classpath_sam_signature(
     })
 }
 
-pub(crate) fn specialized_sam_member_params(
+/// Specialize the selected member's lambda-parameter slots from concrete non-lambda arguments.
+///
+/// This is shared by Java SAM and Kotlin function-type expectations; naming it after either
+/// origin would encourage the checker to grow parallel specialization paths for semantically
+/// identical lambda arguments.
+pub(crate) fn specialized_lambda_member_params(
     member: &LibraryMember,
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    specialized_sam_params(&member.params, member.generic_sig.as_ref(), args, type_args)
+    specialized_lambda_params(&member.params, member.generic_sig.as_ref(), args, type_args)
 }
 
-fn specialized_sam_params(
+fn specialized_lambda_params(
     params: &[Ty],
     generic_sig: Option<&GenericSig>,
     args: &[CallArgKind],
@@ -1041,7 +1046,7 @@ fn best_companion_overload<'a>(
         }
     };
     let logical = |member: &LibraryMember| {
-        let params = specialized_sam_member_params(member, args, type_args);
+        let params = specialized_lambda_member_params(member, args, type_args);
         apply_platform_call_parameter_nullability(
             params,
             &member.call_sig.platform_nullable_params,
@@ -4253,7 +4258,7 @@ fn select_overload(
             continue;
         }
         let lp = logical_value_params(lib, o, binding_receiver, type_args);
-        let lp = specialized_sam_params(&lp, o.generic_sig.as_ref(), args, type_args);
+        let lp = specialized_lambda_params(&lp, o.generic_sig.as_ref(), args, type_args);
         let lp = apply_platform_call_parameter_nullability(
             lp,
             &o.call_sig.platform_nullable_params,
@@ -5109,7 +5114,7 @@ mod tests {
             ret: Ty::Unit,
         });
 
-        let params = specialized_sam_member_params(
+        let params = specialized_lambda_member_params(
             &member,
             &[
                 CallArgKind::Typed(Ty::obj_args(
