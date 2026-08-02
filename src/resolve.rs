@@ -5542,6 +5542,26 @@ fn collect_signatures_with_cp_impl(
                     // any synthetic signature (`serializer()`) into `static_methods`.
                     let companion_fun_names: std::collections::HashSet<String> =
                         c.companion_methods.iter().map(|m| m.name.clone()).collect();
+                    // Compute the companion value scope once and share it between expression-body
+                    // method inference and the class signature. Rebuilding this list inside every
+                    // method would duplicate both declaration type inference and allocation; more
+                    // importantly, the two consumers could drift to different lookup semantics.
+                    let companion_property_scope: Vec<(String, Ty, bool)> = c
+                        .companion_props
+                        .iter()
+                        .map(|p| {
+                            let ty = match &p.ty {
+                                Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
+                                None => p
+                                    .init
+                                    .map(|i| {
+                                        infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)
+                                    })
+                                    .unwrap_or(Ty::Error),
+                            };
+                            (p.name.clone(), ty, p.is_var)
+                        })
+                        .collect();
                     // `companion object` members → static methods/props on this class.
                     let mut static_methods: HashMap<String, Signature> = c
                         .companion_methods
@@ -5561,12 +5581,22 @@ fn collect_signatures_with_cp_impl(
                                 .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
                                 .unwrap_or_else(|| {
                                     if let FunBody::Expr(e) = &m.body {
-                                        let t = infer_lit_ty(
+                                        // A companion method's body resolves the companion's own
+                                        // properties unqualified — infer with them in scope so a
+                                        // `= result` body gets the property's type (not `Unit`).
+                                        // Use the shared scoped inference entry point rather than a
+                                        // companion-only `InferEnv`. Besides avoiding a second set of
+                                        // lookup rules, this preserves the normal module-property,
+                                        // object, static-classifier, and cycle-guard behavior while
+                                        // adding the companion properties as the lexical value scope.
+                                        let t = infer_lit_ty_scoped(
                                             file,
                                             *e,
                                             &class_names,
                                             &fun_rets,
+                                            &companion_property_scope,
                                             &*libraries,
+                                            &table,
                                         );
                                         if t != Ty::Error {
                                             t
@@ -5633,12 +5663,9 @@ fn collect_signatures_with_cp_impl(
                     let static_props: HashMap<String, (Ty, Visibility)> = c
                         .companion_props
                         .iter()
-                        .map(|p| {
-                            let ty = match &p.ty {
-                                Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)).unwrap_or(Ty::Error),
-                            };
-                            if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
+                        .zip(companion_property_scope.iter())
+                        .map(|(p, (name, ty, _))| {
+                            if *ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
                             }
                             // Custom accessors on a `companion object` property are emitted as the
@@ -5647,7 +5674,7 @@ fn collect_signatures_with_cp_impl(
                             if p.getter.is_some() || p.setter.is_some() {
                                 diags.error(p.span, "krusty: companion-object property custom accessors are not supported".to_string());
                             }
-                            (p.name.clone(), (ty, p.visibility))
+                            (name.clone(), (*ty, p.visibility))
                         })
                         .collect();
                     let lateinit_props: std::collections::HashSet<String> = c
@@ -6295,6 +6322,22 @@ fn map_call_sig_args_with_trailing(
         sig.vararg_index,
         trailing_lambda,
     )
+}
+
+/// Whether a selected call needs its source arguments mapped to semantic parameter slots for lowering.
+/// Keep this origin-neutral: plain members and class-body extensions have the same named/default/
+/// trailing-lambda rules, and a location-specific copy can silently stop recording positional omissions.
+fn call_requires_argument_slots(
+    signature: &CallSig,
+    argument_count: usize,
+    has_argument_names: bool,
+    trailing_lambda: bool,
+) -> bool {
+    signature.has_param_names()
+        && (has_argument_names
+            || trailing_lambda
+            || (argument_count != signature.param_names.len()
+                && signature.required < signature.param_names.len()))
 }
 
 /// The one mapping failure worth reporting, when every candidate failed for the SAME reason.
@@ -8865,7 +8908,9 @@ pub enum ResolvedCall {
         ret: Ty,
         inline: InlineKind,
         interface: bool,
-        vararg: bool,
+        /// The semantic vararg slot; `Some` subsumes the former duplicated `vararg` boolean and also
+        /// preserves the index needed for non-last varargs followed by a trailing lambda.
+        vararg_index: Option<usize>,
         suspend: bool,
         projected_return_hazard: bool,
     },
@@ -8880,7 +8925,8 @@ pub enum ResolvedCall {
         ret: Ty,
         physical_ret: Ty,
         interface: bool,
-        vararg: bool,
+        /// The semantic vararg slot. Its presence is the vararg flag and its value drives packing.
+        vararg_index: Option<usize>,
     },
     /// A same-module extension operator selected by the checker for a source expression.
     ModuleExtension {
@@ -9659,7 +9705,8 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: TypeName },
-    /// A static field read selected by a symbol provider.
+    /// A static field read selected semantically by resolution, independent of whether its symbol
+    /// came from the current file, another module file, or a platform/classpath provider.
     StaticFieldRead {
         owner: TypeName,
         name: String,
@@ -12246,7 +12293,7 @@ impl MemberExtensionFunctionCandidate {
             ret: self.ret,
             physical_ret: self.physical_ret,
             interface,
-            vararg: self.call_sig.vararg,
+            vararg_index: self.call_sig.vararg_index,
         }
     }
 }
@@ -14720,7 +14767,7 @@ impl<'a> Checker<'a> {
                                     .syms
                                     .class_by_type_name(owner)
                                     .is_some_and(|class| class.is_interface()),
-                                vararg: sig.vararg(),
+                                vararg_index: sig.vararg_index,
                                 suspend: sig.is_suspend(),
                                 projected_return_hazard: sig.projected_return_hazard,
                             },
@@ -14742,7 +14789,7 @@ impl<'a> Checker<'a> {
                             ret: sig.ret,
                             inline: InlineKind::from_flags(sig.is_inline(), false),
                             interface,
-                            vararg: sig.vararg(),
+                            vararg_index: sig.vararg_index,
                             suspend: sig.is_suspend(),
                             projected_return_hazard: sig.projected_return_hazard,
                         },
@@ -20988,7 +21035,7 @@ impl<'a> Checker<'a> {
                                 ret: sig.ret,
                                 inline: InlineKind::from_flags(sig.is_inline(), false),
                                 interface,
-                                vararg: sig.vararg(),
+                                vararg_index: sig.vararg_index,
                                 suspend: sig.is_suspend(),
                                 projected_return_hazard: sig.projected_return_hazard,
                             },
@@ -21931,11 +21978,10 @@ impl<'a> Checker<'a> {
                 let lexical_classes = self.lexical_source_class_names();
                 // A companion's own properties precede its enum entries.
                 if self.companion_of.is_some() {
-                    if let Some(&ty) = lexical_classes.first().and_then(|owner| {
-                        self.syms
-                            .class_by_type_name(*owner)
-                            .and_then(|class| class.static_props.get(&n).map(|(ty, _)| ty))
-                    }) {
+                    if let Some(ty) = lexical_classes
+                        .first()
+                        .and_then(|owner| self.record_class_static_property_read(e, *owner, &n))
+                    {
                         return self.set(e, ty);
                     }
                 }
@@ -21950,11 +21996,7 @@ impl<'a> Checker<'a> {
                     if self.companion_of.is_some() && index == 0 {
                         continue;
                     }
-                    if let Some(&ty) = self
-                        .syms
-                        .class_by_type_name(owner)
-                        .and_then(|class| class.static_props.get(&n).map(|(ty, _)| ty))
-                    {
+                    if let Some(ty) = self.record_class_static_property_read(e, owner, &n) {
                         return self.set(e, ty);
                     }
                 }
@@ -26414,14 +26456,27 @@ impl<'a> Checker<'a> {
                         self.call_callee_name_span(call),
                     );
                 }
-                if let Some(names) = arg_names.as_deref() {
-                    if let Ok(slots) = map_call_sig_args_with_trailing(
+                // Named, trailing-lambda, or omitted-argument calls: record the argument→parameter
+                // slot map so lowering can route through the `$default` stub (a positional
+                // omitted-default call has no names but still needs the map — mirrors the plain
+                // member path's condition).
+                let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                if call_requires_argument_slots(
+                    &candidate.call_sig,
+                    args.len(),
+                    arg_names.is_some(),
+                    trailing_lambda,
+                ) {
+                    match map_call_sig_args_with_trailing(
                         args,
-                        Some(names),
+                        arg_names.as_deref(),
                         &candidate.call_sig,
-                        self.file.call_has_trailing_lambda.contains(&call.0),
+                        trailing_lambda,
                     ) {
-                        self.resolved_call_arg_slots.insert(call, slots);
+                        Ok(slots) => {
+                            self.resolved_call_arg_slots.insert(call, slots);
+                        }
+                        Err(error) => self.report_call_arg_mapping_error(call, args, error),
                     }
                 }
                 let interface = self
@@ -26853,6 +26908,44 @@ impl<'a> Checker<'a> {
         field.ty
     }
 
+    /// Select a property stored on a class as a static field and hand its semantic owner to lowering.
+    ///
+    /// Lexical companion lookup belongs here in the checker: it already has source nesting and
+    /// shadowing information, whereas lowering must not infer an owner from a generated class name.
+    /// Recording the existing origin-neutral `StaticFieldRead` also gives source/module properties
+    /// the same backend path as provider-resolved static fields. The descriptor remains absent so the
+    /// backend derives it from the checked expression type, exactly as it does for imported source
+    /// companion properties.
+    ///
+    /// A private property is still returned for frontend type propagation, but deliberately receives
+    /// no direct-field lowering. Krusty does not yet synthesize the JVM access bridge required when a
+    /// nested class reads that field, and recording `getstatic` here would turn a conservative skip
+    /// into `IllegalAccessError`. This decision is based on declaration visibility, not on a guessed
+    /// physical class relationship.
+    fn record_class_static_property_read(
+        &mut self,
+        expression: ExprId,
+        owner: TypeName,
+        name: &str,
+    ) -> Option<Ty> {
+        let (ty, visibility) = *self
+            .syms
+            .class_by_type_name(owner)?
+            .static_props
+            .get(name)?;
+        if !visibility.is_private() {
+            self.expr_lowers.insert(
+                expression,
+                ExprLowering::StaticFieldRead {
+                    owner,
+                    name: name.to_string(),
+                    descriptor: None,
+                },
+            );
+        }
+        Some(ty)
+    }
+
     /// Probe a member read without emitting a diagnostic: returns `Some(ty)` if `recv.name` resolves,
     /// `None` otherwise (rolling back any error [`check_member`] would have reported). Used to resolve a
     /// bare name `length` inside a receiver-lambda body (`this`-relative) for an arbitrary receiver type.
@@ -27081,7 +27174,7 @@ impl<'a> Checker<'a> {
                     ret,
                     inline: fi.flags.inline,
                     interface,
-                    vararg: fi.call_sig.vararg,
+                    vararg_index: fi.call_sig.vararg_index,
                     suspend: fi.callable.suspend,
                     projected_return_hazard: fi.projected_return_hazard,
                 },
@@ -27685,17 +27778,26 @@ impl<'a> Checker<'a> {
         // names (honouring `required`), then type-check against THAT parameter — a NAMED call may reorder
         // (`z.test(b = …, a = …)`), so a positional check would pair each argument with the wrong
         // parameter. Fires for any named call, and for an omitted-argument call to a method with defaults.
-        } else if cs.has_param_names()
-            && (arg_names.is_some()
-                || trailing_lambda
-                || (!cs.vararg && arg_tys.len() != params.len() && cs.required < params.len()))
+        } else if call_requires_argument_slots(cs, args.len(), arg_names.is_some(), trailing_lambda)
         {
             match map_call_sig_args_with_trailing(args, arg_names, cs, trailing_lambda) {
                 Ok(slots) => {
                     for (i, slot) in slots.iter().enumerate() {
                         if let Some(a) = slot {
+                            // Slot mapping records the first positional vararg element in the array
+                            // parameter's semantic slot (subsequent elements remain source-order peers).
+                            // Check an ordinary element against the array's ELEMENT type; only an explicit
+                            // spread is an array-valued argument. This is the same representation-neutral
+                            // rule used by overload scoring, and keeps trailing-lambda mapping from turning
+                            // a valid `m(1, 2) {}` into an `Int`-versus-`IntArray` diagnostic.
+                            let expected =
+                                if cs.vararg_index == Some(i) && !self.file.is_spread_arg(*a) {
+                                    params[i].array_elem().unwrap_or(params[i])
+                                } else {
+                                    params[i]
+                                };
                             self.expect_assignable(
-                                params[i],
+                                expected,
                                 self.expr_types[a.0 as usize],
                                 self.span(*a),
                                 "argument",
@@ -27789,7 +27891,7 @@ impl<'a> Checker<'a> {
                 ret,
                 inline: fi.inline,
                 interface: fi.is_interface(),
-                vararg: cs.vararg,
+                vararg_index: cs.vararg_index,
                 suspend: fi.suspend(),
                 projected_return_hazard,
             },

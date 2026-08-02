@@ -222,6 +222,8 @@ mod collection_special_member_stub_e2e;
 mod companion_const_e2e;
 #[path = "companion_e2e.rs"]
 mod companion_e2e;
+#[path = "companion_member_read_e2e.rs"]
+mod companion_member_read_e2e;
 #[path = "companion_non_const_prop_e2e.rs"]
 mod companion_non_const_prop_e2e;
 #[path = "companion_supertype_e2e.rs"]
@@ -630,6 +632,8 @@ mod member_array_ctor_inference_e2e;
 mod member_ctrl_inference_e2e;
 #[path = "member_default_implicit_receiver_e2e.rs"]
 mod member_default_implicit_receiver_e2e;
+#[path = "member_extension_default_args_e2e.rs"]
+mod member_extension_default_args_e2e;
 #[path = "member_extension_function_e2e.rs"]
 mod member_extension_function_e2e;
 #[path = "member_extension_nested_hof_e2e.rs"]
