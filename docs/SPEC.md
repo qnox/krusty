@@ -1356,7 +1356,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/classpath_runblocking_e2e.rs`.
 - **`kotlinx.coroutines.test.runTest { … }` resolves, lowers, and RUNS** — the value-class-parametered
   sibling of the `runBlocking` case. `runTest(timeout: kotlin.time.Duration = …, testBody)` mangles its
-  JVM name (`runTest-8Mi8wO0`) AND its `$default` synthetic because of the `Duration` value-class
+  JVM name (`sourceName-<hash>`) AND its `$default` synthetic because of a value-class
   parameter, which broke the call at TWO seams. METADATA ALIGNMENT (`classpath.rs`): `@Metadata` names
   the value class while the descriptor carries its erased underlying (`J`), so `meta_param_compat` /
   `meta_param_exact` now resolve the underlying through the platform's value-class knowledge

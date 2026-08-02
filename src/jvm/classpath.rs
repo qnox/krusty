@@ -169,12 +169,30 @@ fn ty_erases_to_object(desc: Ty) -> bool {
     matches!(desc, Ty::Obj(n, _) if n == meta_ids().any || n == meta_ids().object)
 }
 
+/// The JVM representation recovered for a metadata-named value class. Keep unsigned normalization in
+/// this single semantic adapter so top-level, member, exact, and compatible alignment cannot drift.
+fn metadata_value_class_underlying(
+    name: TypeName,
+    nullable: bool,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> Option<Ty> {
+    if nullable {
+        return None;
+    }
+    value_underlying(name).map(|underlying| match underlying {
+        Ty::UInt => Ty::Int,
+        Ty::ULong => Ty::Long,
+        underlying => underlying,
+    })
+}
+
 /// Whether a `@Metadata` source value-parameter class name aligns with a JVM-descriptor parameter `Ty`.
 /// This keeps the hot overload-alignment path in borrowed names: mapped builtins compare through
 /// `to_jvm_internal`, arrays/functions use structural `Ty` facts, and no descriptor `String` is built just
 /// to decide whether two class names denote the same erased JVM parameter.
 fn meta_param_compat(
     name: Option<TypeName>,
+    nullable: bool,
     desc: &Ty,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> bool {
@@ -189,6 +207,11 @@ fn meta_param_compat(
         return desc.is_array();
     }
     if let Some(prim) = ids.prim.get(&name) {
+        if nullable {
+            return desc.obj_internal().is_some_and(|actual| {
+                crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(actual, name)
+            });
+        }
         return match prim {
             Ty::UInt => matches!(*desc, Ty::UInt | Ty::Int),
             Ty::ULong => matches!(*desc, Ty::ULong | Ty::Long),
@@ -207,20 +230,15 @@ fn meta_param_compat(
         crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
     }) {
         true
-    } else if let Some(underlying) = value_underlying(name) {
+    } else if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
         // A value class erases to its UNDERLYING in the JVM descriptor (`kotlin/time/Duration`
         // compiles to `J`), while `@Metadata` names the class itself — admit the underlying here
         // or every value-class-parametered function loses its metadata alignment (parameter names,
         // defaults, kept-param count). The underlying normalizes like the mapped builtins above
         // (`UInt` → `Int`); a reference underlying or an `Object`-erased descriptor stays
         // permissive, matching the erased-to-Object rule below.
-        let erased = match underlying {
-            Ty::UInt => Ty::Int,
-            Ty::ULong => Ty::Long,
-            u => u,
-        };
         erased.non_null() == desc.non_null()
-            || (underlying.is_reference() && desc.is_reference())
+            || (erased.is_reference() && desc.is_reference())
             || (ty_erases_to_object(*desc) && !desc.is_array())
     } else {
         ty_erases_to_object(*desc) && !desc.is_array()
@@ -229,6 +247,7 @@ fn meta_param_compat(
 
 fn meta_param_exact(
     name: Option<TypeName>,
+    nullable: bool,
     desc: &Ty,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> bool {
@@ -250,6 +269,11 @@ fn meta_param_exact(
             == Some(meta_desc);
     }
     if let Some(prim) = ids.prim.get(&name) {
+        if nullable {
+            return desc.obj_internal().is_some_and(|actual| {
+                crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(actual, name)
+            });
+        }
         return match prim {
             Ty::UInt => matches!(*desc, Ty::UInt | Ty::Int),
             Ty::ULong => matches!(*desc, Ty::ULong | Ty::Long),
@@ -270,14 +294,8 @@ fn meta_param_exact(
         // A value class erases to its underlying — `runTest(timeout: Duration)` aligns its
         // metadata against the erased `J` exactly only through it (unsigned underlyings
         // normalize like the mapped builtins: `UInt` → `Int`).
-        value_underlying(name).is_some_and(|underlying| {
-            let erased = match underlying {
-                Ty::UInt => Ty::Int,
-                Ty::ULong => Ty::Long,
-                u => u,
-            };
-            erased.non_null() == desc.non_null()
-        })
+        metadata_value_class_underlying(name, nullable, value_underlying)
+            .is_some_and(|erased| erased.non_null() == desc.non_null())
     }
 }
 
@@ -1007,7 +1025,7 @@ fn meta_callable_aligns(
     }
     let receiver_ok = !f.is_extension()
         || match f.receiver_class {
-            Some(rc) => meta_param_compat(Some(rc), &desc_params[0], value_underlying),
+            Some(rc) => meta_param_compat(Some(rc), false, &desc_params[0], value_underlying),
             None => desc_params[0].is_reference(),
         };
     if !receiver_ok
@@ -1015,7 +1033,7 @@ fn meta_callable_aligns(
             .value_params
             .iter()
             .zip(&desc_params[off + ctx..end])
-            .all(|(m, d)| meta_param_compat(m.ty, d, value_underlying))
+            .all(|(m, d)| meta_param_compat(m.ty, m.nullable(), d, value_underlying))
     {
         return None;
     }
@@ -1023,7 +1041,7 @@ fn meta_callable_aligns(
         .value_params
         .iter()
         .zip(&desc_params[off + ctx..end])
-        .filter(|(m, d)| meta_param_exact(m.ty, d, value_underlying))
+        .filter(|(m, d)| meta_param_exact(m.ty, m.nullable(), d, value_underlying))
         .count();
     Some((end, exact))
 }
@@ -1033,6 +1051,7 @@ fn meta_callable_aligns(
 /// which boxes to the class itself. `actual` is the JVM descriptor segment; both forms are admitted.
 fn member_param_desc_matches(
     class: TypeName,
+    nullable: bool,
     actual: &str,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> bool {
@@ -1040,13 +1059,8 @@ fn member_param_desc_matches(
     if class_desc == actual {
         return true;
     }
-    let Some(underlying) = value_underlying(class) else {
+    let Some(erased) = metadata_value_class_underlying(class, nullable, value_underlying) else {
         return false;
-    };
-    let erased = match underlying {
-        Ty::UInt => Ty::Int,
-        Ty::ULong => Ty::Long,
-        u => u,
     };
     type_descriptor(erased).replace('.', "$") == actual
 }
@@ -1058,11 +1072,8 @@ fn metadata_member_descriptor(
     let signature = function.generic_sig.as_ref()?;
     let erased = |p: &Ty| {
         p.obj_internal()
-            .and_then(value_underlying)
-            .map(|u| match u {
-                Ty::UInt => Ty::Int,
-                Ty::ULong => Ty::Long,
-                u => u,
+            .and_then(|name| {
+                metadata_value_class_underlying(name, p.is_nullable(), value_underlying)
             })
             .unwrap_or(*p)
     };
@@ -1094,7 +1105,9 @@ fn metadata_member_shape_matches(
         .iter()
         .zip(&params)
         .any(|(parameter, actual)| match parameter.ty {
-            Some(class) => !member_param_desc_matches(class, actual, value_underlying),
+            Some(class) => {
+                !member_param_desc_matches(class, parameter.nullable(), actual, value_underlying)
+            }
             None => !actual.starts_with('L') && !actual.starts_with('['),
         })
     {
@@ -1105,7 +1118,9 @@ fn metadata_member_shape_matches(
             && ret == "Ljava/lang/Object;";
     }
     match function.ret_class {
-        Some(class) => type_descriptor(kotlin_type_name_to_ty(class)).replace('.', "$") == ret,
+        Some(class) => {
+            member_param_desc_matches(class, function.ret_nullable(), ret, value_underlying)
+        }
         None => ret.starts_with('L') || ret.starts_with('['),
     }
 }
@@ -1152,9 +1167,9 @@ fn aligned_meta_index(
         .filter_map(|i| {
             let f = meta.fn_at(i as usize);
             let (end, exact) = meta_callable_aligns(f, desc_params, value_underlying)?;
-            let ret_match = f
-                .ret_class
-                .is_some_and(|rc| meta_param_compat(Some(rc), desc_ret, value_underlying));
+            let ret_match = f.ret_class.is_some_and(|rc| {
+                meta_param_compat(Some(rc), f.ret_nullable(), desc_ret, value_underlying)
+            });
             Some((end, exact, ret_match, i))
         })
         .max_by_key(|(end, exact, ret_match, _)| (*end, *exact, *ret_match))
@@ -2528,7 +2543,7 @@ impl Classpath {
                 && f.value_params
                     .iter()
                     .zip(&desc_params[off..end])
-                    .all(|(m, d)| meta_param_compat(m.ty, d, value_underlying))
+                    .all(|(m, d)| meta_param_compat(m.ty, m.nullable(), d, value_underlying))
         })
     }
 
@@ -4298,7 +4313,9 @@ mod fq_tests {
             value_params: vec![MetaValueParam {
                 ty: param.obj_internal(),
                 name: "value".to_string(),
-                flags: MvpFlags::default().with_has_default(has_default),
+                flags: MvpFlags::default()
+                    .with_has_default(has_default)
+                    .with_nullable(param.is_nullable()),
                 recv_fun_receiver: None,
             }],
             generic_sig: Some(GenericSig {
@@ -4370,6 +4387,22 @@ mod fq_tests {
             &|_| None,
         )
         .is_some());
+
+        let nullable_value_class = function(
+            Ty::nullable(Ty::obj("fixture/ScalarValue")),
+            Ty::Unit,
+            false,
+            false,
+        );
+        let scalar_underlying =
+            |name: TypeName| name.matches("fixture/ScalarValue").then_some(Ty::Long);
+        assert!(aligned_member_metadata(
+            &[nullable_value_class],
+            "emit",
+            "(J)V",
+            &scalar_underlying,
+        )
+        .is_none());
 
         let mut generic = function(Ty::obj("kotlin/Any"), Ty::String, true, false);
         generic.generic_sig = None;
@@ -4610,34 +4643,80 @@ mod fq_tests {
         let uint = type_name("kotlin/UInt");
         let ulong = type_name("kotlin/ULong");
         let no_value_classes = &|_| None;
-        assert!(meta_param_compat(Some(uint), &Ty::Int, no_value_classes));
-        assert!(meta_param_compat(Some(ulong), &Ty::Long, no_value_classes));
-        assert!(meta_param_exact(Some(uint), &Ty::Int, no_value_classes));
-        assert!(meta_param_exact(Some(ulong), &Ty::Long, no_value_classes));
+        assert!(meta_param_compat(
+            Some(uint),
+            false,
+            &Ty::Int,
+            no_value_classes
+        ));
+        assert!(meta_param_compat(
+            Some(ulong),
+            false,
+            &Ty::Long,
+            no_value_classes
+        ));
+        assert!(meta_param_exact(
+            Some(uint),
+            false,
+            &Ty::Int,
+            no_value_classes
+        ));
+        assert!(meta_param_exact(
+            Some(ulong),
+            false,
+            &Ty::Long,
+            no_value_classes
+        ));
 
-        assert!(!meta_param_compat(Some(uint), &Ty::Long, no_value_classes));
-        assert!(!meta_param_compat(Some(ulong), &Ty::Int, no_value_classes));
-        assert!(!meta_param_exact(Some(uint), &Ty::Long, no_value_classes));
-        assert!(!meta_param_exact(Some(ulong), &Ty::Int, no_value_classes));
+        assert!(!meta_param_compat(
+            Some(uint),
+            false,
+            &Ty::Long,
+            no_value_classes
+        ));
+        assert!(!meta_param_compat(
+            Some(ulong),
+            false,
+            &Ty::Int,
+            no_value_classes
+        ));
+        assert!(!meta_param_exact(
+            Some(uint),
+            false,
+            &Ty::Long,
+            no_value_classes
+        ));
+        assert!(!meta_param_exact(
+            Some(ulong),
+            false,
+            &Ty::Int,
+            no_value_classes
+        ));
+        assert!(!meta_param_compat(
+            Some(uint),
+            true,
+            &Ty::Int,
+            no_value_classes
+        ));
     }
 
     #[test]
     fn metadata_param_matching_erases_value_classes_to_their_underlying() {
-        // `kotlin/time/Duration` is a value class over `Long`: its JVM descriptor spells `J`
-        // while `@Metadata` names the class. Alignment must see through the erasure or the
-        // function loses its metadata (parameter names, defaults) — `runTest { }` then fails to
-        // resolve (kotlinx-coroutines-test).
-        let duration = type_name("kotlin/time/Duration");
-        let vc = &|name: TypeName| (name == duration).then_some(Ty::Long);
-        assert!(meta_param_compat(Some(duration), &Ty::Long, vc));
-        assert!(meta_param_exact(Some(duration), &Ty::Long, vc));
-        assert!(!meta_param_compat(Some(duration), &Ty::Int, vc));
-        assert!(!meta_param_exact(Some(duration), &Ty::Int, vc));
+        // A value class over `Long` has a primitive JVM descriptor while metadata names the class.
+        // Non-null alignment sees through erasure; nullable alignment must retain the boxed class.
+        let scalar_value = type_name("fixture/ScalarValue");
+        let vc = &|name: TypeName| (name == scalar_value).then_some(Ty::Long);
+        assert!(meta_param_compat(Some(scalar_value), false, &Ty::Long, vc));
+        assert!(meta_param_exact(Some(scalar_value), false, &Ty::Long, vc));
+        assert!(!meta_param_compat(Some(scalar_value), false, &Ty::Int, vc));
+        assert!(!meta_param_exact(Some(scalar_value), false, &Ty::Int, vc));
+        assert!(!meta_param_compat(Some(scalar_value), true, &Ty::Long, vc));
         // Without value-class knowledge the class name does not match the primitive (the old
         // behavior that dropped `runTest`'s metadata alignment).
         let no_value_classes = &|_| None;
         assert!(!meta_param_compat(
-            Some(duration),
+            Some(scalar_value),
+            false,
             &Ty::Long,
             no_value_classes
         ));
@@ -4646,9 +4725,9 @@ mod fq_tests {
         // normalizing exactly like the mapped builtins above.
         let id = type_name("sample/Id");
         let vc_uint = &|name: TypeName| (name == id).then_some(Ty::UInt);
-        assert!(meta_param_compat(Some(id), &Ty::Int, vc_uint));
-        assert!(meta_param_exact(Some(id), &Ty::Int, vc_uint));
-        assert!(!meta_param_compat(Some(id), &Ty::Long, vc_uint));
+        assert!(meta_param_compat(Some(id), false, &Ty::Int, vc_uint));
+        assert!(meta_param_exact(Some(id), false, &Ty::Int, vc_uint));
+        assert!(!meta_param_compat(Some(id), false, &Ty::Long, vc_uint));
     }
 
     /// The provisioned kotlin-stdlib jar via the project's single CI-safe resolver

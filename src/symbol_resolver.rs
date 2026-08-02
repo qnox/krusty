@@ -2732,8 +2732,8 @@ impl<'a> SymbolResolver<'a> {
                 return Some(callable);
             }
         }
-        // A `@JvmName`/value-class-mangled base (`runTest` → `runTest-8Mi8wO0`) mangles its `$default`
-        // synthetic too. The import scope only knows the SOURCE spelling (`{name}$default` maps through
+        // A `@JvmName`/value-class-mangled base (`sourceName` → `sourceName-<hash>`) mangles its
+        // `$default` synthetic too. The import scope only knows the SOURCE spelling (`{name}$default` maps through
         // the explicit import), so resolve each mangled synthetic directly in its base candidate's
         // facade package. Probed LAST: an unmangled name never reaches this (the common case pays no
         // extra scope query).

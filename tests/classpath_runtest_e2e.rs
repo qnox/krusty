@@ -1,6 +1,6 @@
 //! `kotlinx.coroutines.test.runTest { … }` — the coroutines-test entry point — resolves and RUNS
 //! end-to-end against the real runtime. `runTest` takes a value-class parameter
-//! (`timeout: kotlin.time.Duration`), so kotlinc mangles its JVM name (`runTest-8Mi8wO0`) and its
+//! (`timeout: kotlin.time.Duration`), so kotlinc mangles its JVM name (`runTest-<hash>`) and its
 //! `$default` synthetic. Two coordinated fixes made the trailing-lambda call resolve:
 //!
 //!  1. METADATA ALIGNMENT (`classpath.rs`): `@Metadata` names the value class while the JVM

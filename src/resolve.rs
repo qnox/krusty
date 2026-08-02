@@ -18863,13 +18863,29 @@ impl<'a> Checker<'a> {
                 } else {
                     elem
                 };
-                self.expect_assignable(expected, *a, self.span(args[i]), "argument");
+                self.expect_call_arg(expected, args[i], *a);
             }
         } else {
             for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
-                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                self.expect_call_arg(*p, args[i], *a);
             }
         }
+    }
+
+    /// Validate one argument after overload selection. A lambda targeting a classpath SAM is checked
+    /// against the SAM method parameters here, at the common call-argument seam; import/member/vararg
+    /// paths must not each reimplement the conversion or accidentally compare `FunctionN` to the Java
+    /// interface type.
+    fn expect_call_arg(&mut self, expected: Ty, argument: ExprId, actual: Ty) {
+        if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+            if let Some(sam) =
+                crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, expected)
+            {
+                self.check_lambda_with_types(argument, &sam.params);
+                return;
+            }
+        }
+        self.expect_assignable(expected, actual, self.span(argument), "argument");
     }
 
     fn expect_source_constructor_args(
@@ -31765,53 +31781,8 @@ impl<'a> Checker<'a> {
                                     .flatten();
                                 if let Some(elem) = vararg {
                                     callable.vararg_elem = Some(elem);
-                                    let fixed = m.params.len() - 1;
-                                    for (i, &a) in args.iter().enumerate() {
-                                        let pt = if i < fixed { m.params[i] } else { elem };
-                                        if matches!(self.file.expr(a), Expr::Lambda { .. }) {
-                                            if let Some(sam) =
-                                                crate::symbol_resolver::classpath_sam_signature(
-                                                    &*self.syms.libraries,
-                                                    pt,
-                                                )
-                                            {
-                                                self.check_lambda_with_types(a, &sam.params);
-                                                continue;
-                                            }
-                                        }
-                                        self.expect_assignable(
-                                            pt,
-                                            arg_tys[i],
-                                            self.span(a),
-                                            "argument",
-                                        );
-                                    }
-                                } else {
-                                    // A lambda argument converts to a Java SAM-interface parameter
-                                    // (`assertThrows(T::class.java) { … }` → `Executable`): check the
-                                    // lambda against the SAM method's parameter types, not against the
-                                    // interface type itself.
-                                    for (i, (p, a)) in m.params.iter().zip(args.iter()).enumerate()
-                                    {
-                                        if matches!(self.file.expr(*a), Expr::Lambda { .. }) {
-                                            if let Some(sam) =
-                                                crate::symbol_resolver::classpath_sam_signature(
-                                                    &*self.syms.libraries,
-                                                    *p,
-                                                )
-                                            {
-                                                self.check_lambda_with_types(*a, &sam.params);
-                                                continue;
-                                            }
-                                        }
-                                        self.expect_assignable(
-                                            *p,
-                                            arg_tys[i],
-                                            self.span(*a),
-                                            "argument",
-                                        );
-                                    }
                                 }
+                                self.expect_call_args(&m.params, m.call_sig.vararg, args, &arg_tys);
                                 self.resolved_calls
                                     .insert(call, ResolvedCall::TopLevel(callable));
                                 return ret;
