@@ -7800,6 +7800,15 @@ impl<'a> Emitter<'a> {
             .ir
             .property_accessor_jvm_realizations
             .get(&operation.expression);
+        // Resolution records a declaration type independently of where the owner was found. A JVM
+        // realization stamp is more specific (notably for a value-class-mangled accessor); otherwise
+        // the semantic declaration type supplies the descriptor and the node's logical type remains
+        // the value consumed by the surrounding expression.
+        let physical = stamped.map(|(_, physical)| physical).or_else(|| {
+            self.ir
+                .property_declaration_types
+                .get(&operation.expression)
+        });
         let access = self
             .bodies
             .property_read_access(operation.owner, operation.name)
@@ -7812,13 +7821,12 @@ impl<'a> Emitter<'a> {
                 name: stamped
                     .map(|(name, _)| name.clone())
                     .unwrap_or_else(|| crate::names::property_getter_name(operation.name)),
-                // The logical property type is intentionally retained on a read for later value-class
-                // analysis. A sibling accessor's descriptor needs the erased PHYSICAL type recorded by
-                // that pass, or a mangled `getId-…(): String` is emitted as `(): Id` and fails verification.
-                descriptor: method_descriptor(
-                    &[],
-                    ir_ty_to_jvm(stamped.map_or(operation.ty, |(_, physical)| physical)),
-                ),
+                // The logical property type is intentionally retained on the node for the surrounding
+                // expression. Its call boundary instead uses the most specific declaration fact: a JVM
+                // value-class realization when present, otherwise the semantic declaration type. Without
+                // that split a generic `getA(): Object` can be called as `getA(): A`, or a mangled
+                // `getId-…(): String` as `getId-…(): Id`; both are invalid descriptors.
+                descriptor: method_descriptor(&[], ir_ty_to_jvm(physical.unwrap_or(operation.ty))),
                 is_static: false,
                 // Resolution carries source-module shape because a sibling class is not in `bodies`.
                 // For classpath owners the body reader remains authoritative.
@@ -7842,6 +7850,11 @@ impl<'a> Emitter<'a> {
             .ir
             .property_accessor_jvm_realizations
             .get(&operation.expression);
+        let physical = stamped.map(|(_, physical)| physical).or_else(|| {
+            self.ir
+                .property_declaration_types
+                .get(&operation.expression)
+        });
         let access = self
             .declared_property_write_access(operation.owner, operation.name)
             .or_else(|| {
@@ -7854,9 +7867,7 @@ impl<'a> Emitter<'a> {
                     .map(|(name, _)| name.clone())
                     .unwrap_or_else(|| crate::names::property_setter_name(operation.name)),
                 descriptor: method_descriptor(
-                    &[ir_ty_to_jvm(
-                        stamped.map_or(operation.ty, |(_, physical)| physical),
-                    )],
+                    &[ir_ty_to_jvm(physical.unwrap_or(operation.ty))],
                     Ty::Unit,
                 ),
                 is_static: false,
