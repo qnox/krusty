@@ -1278,6 +1278,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Static access through `Outer.Nested.MEMBER` uses the same nested-name resolver in expression
   position, producing `<pkg>/Outer$Nested` before resolving the field.
 
+- **A classpath MEMBER taking a RECEIVER lambda (`Recv.() -> R`) binds the lambda's `this`.**
+  `@Metadata` marks such a value parameter with the `@ExtensionFunctionType` type annotation;
+  krusty always decoded it (`MetaValueParam.recv_fun`/`recv_fun_receiver`) but previously wired it
+  only into the call sig for TOP-LEVEL functions, so a member's
+  `Builder.() -> Unit` parameter was indistinguishable from a leading value parameter
+  `(Builder) -> Unit` and every lambda literal failed overload matching one arity short — a
+  companion-object factory reached through the type name (`FactoryApi.create { … }`) fell
+  through to the "unresolved Java static" catch-all. Member and receiver-less top-level metadata
+  now share `CallSig::metadata_function`, which records the same
+  `lambda_receivers`/`lambda_receiver_params`/`lambda_materialized` shape, and the checker's
+  pre-selection lambda hook
+  (`provider_member_lambda_expectations`, generalised from SAM-only) derives the expected shape of
+  ANY function-typed parameter — receiver split out per the call-sig mark — typing the literal with
+  `check_lambda_with_receiver_labeled`, mirroring the top-level HOF path; the hook's candidate
+  probe also sees through `Type → companion object`, the same fallback the call resolution
+  applies. EXTENSION call sigs stay unwired on purpose: extension calls already bind lambda
+  receivers through `extension_lambda_shape`, and a second channel re-routed scope-function blocks
+  (`run { this@C … }`) onto receiver-lambda paths whose lowering cannot resolve a labeled `this`.
+  A generic receiver (`block: T.() -> R`) names no receiver class in metadata, so the expectation
+  recovers it from the SUBSTITUTED parameter type. Expectations are mapped from source arguments
+  through the selected `CallSig`'s semantic parameter slots before specialization, so reordered
+  NAMED arguments and trailing/defaulted call shapes receive the declaration slot's lambda shape
+  instead of whichever parameter happens to share the source argument's position.
+  Test: `tests/classpath_companion_ext_lambda_e2e.rs`.
+
 - **Aliased imports (`import a.b.Member as Alias`).** The import map binds the alias directly to the
   full target for types and values. Ordinary lexical resolution handles local shadowing; lowering uses
   the resolved target member name.
@@ -1895,6 +1920,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   directory layout and same-named external files cannot alias. Tests: `src/dump.rs` cover the
   document shape; `crates/krusty-lsp/src/dump_cache.rs` covers identity, privacy, atomicity, and
   retention.
+
+- **Expression nesting is depth-bounded in every recursive pass — degrade, never crash.** The
+  checker and IR-lowering bound their expression recursion at 500 semantic nesting levels; the
+  parser bounds its recursion at 1000 `parse_bp` entries — one semantic level costs up to two
+  entries (a binary right operand plus a parenthesized re-entry), so the parser admits every shape
+  the later passes admit at up to two entries per level; redundant nesting (doubled parens) spends
+  entries faster and trips the parser first. Past its bound the parser emits `expression nesting too deep`, skips the
+  rest of the over-deep expression bracket-balanced (so error recovery does not rebuild it as
+  postfix-call nesting for the later passes to recurse over), and yields an error expression; the
+  checker types the expression as `Error`; lowering bails. kotlinc has no fixed documented bound
+  (it stack-overflows on pathological nesting); krusty deliberately trades acceptance of
+  pathologically deep nesting for a guaranteed diagnostic on any thread's stack. A left-leaning binary chain (`a && b && c`) parses
+  and checks iteratively and does not count toward the depth. The bounds are survivable on a
+  default 2 MiB thread stack in unoptimized builds via same-thread stack growth
+  (`src/wide_stack.rs`), applied PER RECURSION LEVEL in all three passes — a single entry-point
+  reserve was measured to overrun on one deep genuine nesting shape per pass (5–6 parser frames
+  per paren level; `check_call`-sized checker/lowering frames per call level). Tests:
+  `tests/deep_expression_nesting_check.rs` (400/700-operand chains, 400 and 1500 nested parens,
+  450-deep call chain) and `tests/deep_expression_nesting_check_e2e.rs` (450-level `0+(…)`
+  right-nesting through the checker and lowering, end-to-end).
 
 ## 8. Success criteria for the PoC
 
