@@ -399,12 +399,12 @@ fn run_mixed(java: &[(&str, &str)], kotlin: &str) {
 fn inferred_return_worklist_tracks_java_synthetic_property_name() {
     let Some((javadir, _)) = compile_java(&[
         (
-            "demo/BaseEntry.java",
-            "package demo; public class BaseEntry {}",
+            "demo/SyntheticBase.java",
+            "package demo; public class SyntheticBase {}",
         ),
         (
-            "demo/JavaCatalog.java",
-            "package demo; public class JavaCatalog { public BaseEntry[] getEntries() { return new BaseEntry[0]; } }",
+            "demo/SyntheticCatalog.java",
+            "package demo; public class SyntheticCatalog { public SyntheticBase[] getEntries() { return new SyntheticBase[0]; } }",
         ),
     ]) else {
         eprintln!("skipping: JDK unavailable");
@@ -416,8 +416,8 @@ fn inferred_return_worklist_tracks_java_synthetic_property_name() {
     };
     let sources = [
         "package demo\nfun box(): String = entryName()",
-        "package demo\nfun entryName() = RefinedCatalog().entries[0].name",
-        "package demo\nclass RefinedEntry(val name: String) : BaseEntry()\nclass RefinedCatalog : JavaCatalog() { override fun getEntries() = values(); fun values() = arrayOf(RefinedEntry(\"OK\")) }",
+        "package demo\nfun entryName() = SyntheticCatalogImpl().entries[0].name",
+        "package demo\nclass SyntheticEntry(val name: String) : SyntheticBase()\nclass SyntheticCatalogImpl : SyntheticCatalog() { override fun getEntries() = values(); fun values() = arrayOf(SyntheticEntry(\"OK\")) }",
     ];
     let mut classpath = common::classpath_jars_for(&sources.join("\n"));
     classpath.push(javadir.clone());
@@ -432,12 +432,12 @@ fn inferred_return_worklist_tracks_java_synthetic_property_name() {
 fn inferred_return_worklist_tracks_unicode_java_synthetic_property_name() {
     let Some((javadir, _)) = compile_java(&[
         (
-            "demo/BaseEntry.java",
-            "package demo; public class BaseEntry {}",
+            "demo/SyntheticBase.java",
+            "package demo; public class SyntheticBase {}",
         ),
         (
-            "demo/UnicodeCatalog.java",
-            "package demo; public class UnicodeCatalog { public BaseEntry[] getÄpfel() { return new BaseEntry[0]; } }",
+            "demo/UnicodeSyntheticCatalog.java",
+            "package demo; public class UnicodeSyntheticCatalog { public SyntheticBase[] getÄpfel() { return new SyntheticBase[0]; } }",
         ),
     ]) else {
         eprintln!("skipping: JDK unavailable");
@@ -449,8 +449,8 @@ fn inferred_return_worklist_tracks_unicode_java_synthetic_property_name() {
     };
     let sources = [
         "package demo\nfun unicodeBox(): String = unicodeEntryName()",
-        "package demo\nfun unicodeEntryName() = UnicodeRefinedCatalog().äpfel[0].name",
-        "package demo\nclass UnicodeRefinedEntry(val name: String) : BaseEntry()\nclass UnicodeRefinedCatalog : UnicodeCatalog() { override fun getÄpfel() = values(); fun values() = arrayOf(UnicodeRefinedEntry(\"OK\")) }",
+        "package demo\nfun unicodeEntryName() = UnicodeSyntheticCatalogImpl().äpfel[0].name",
+        "package demo\nclass UnicodeSyntheticEntry(val name: String) : SyntheticBase()\nclass UnicodeSyntheticCatalogImpl : UnicodeSyntheticCatalog() { override fun getÄpfel() = values(); fun values() = arrayOf(UnicodeSyntheticEntry(\"OK\")) }",
     ];
     let mut classpath = common::classpath_jars_for(&sources.join("\n"));
     classpath.push(javadir.clone());

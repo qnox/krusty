@@ -285,8 +285,7 @@ fn lower_file_at_reporting_impl(
             Decl::Fun(_) => false,
         });
     if has_context_property {
-        lo.set_bail("gate:context-property");
-        return None;
+        return lo.bail("gate:context-property");
     }
 
     // Suspend lowering cannot yet specialize generic value-class operands.
@@ -336,14 +335,12 @@ fn lower_file_at_reporting_impl(
         }
     }
     if has_suspend_generic_value_class_specialization {
-        lo.set_bail("gate:suspend-generic-value-class-specialization");
-        return None;
+        return lo.bail("gate:suspend-generic-value-class-specialization");
     }
 
     // Projected return inference is not represented in the resolved type yet.
     if has_projected_generic_return_call {
-        lo.set_bail("gate:projected-generic-return-inference");
-        return None;
+        return lo.bail("gate:projected-generic-return-inference");
     }
 
     // Only files of top-level functions + *simple* classes take the IR path.
@@ -372,7 +369,7 @@ fn lower_file_at_reporting_impl(
                     || p.delegate.is_some()
                     || p.receiver.is_some() => {}
             other => {
-                lo.set_bail(match other {
+                return lo.bail(match other {
                     Decl::Class(c) if c.is_object() => "gate:object",
                     Decl::Class(c) if c.is_interface() => "gate:interface",
                     Decl::Class(c) if c.is_enum() => "gate:enum",
@@ -380,7 +377,6 @@ fn lower_file_at_reporting_impl(
                     Decl::Property(_) => "gate:property",
                     _ => "gate:other",
                 });
-                return None;
             }
         }
     }
@@ -415,7 +411,7 @@ fn lower_file_at_reporting_impl(
         })
     });
     if uses_yield_builder {
-        return None;
+        return lo.bail("gate:yield-builder");
     }
 
     // --- suspend (coroutines) lowerability gate ---------------------------------------------------
@@ -454,7 +450,7 @@ fn lower_file_at_reporting_impl(
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
                 if f.is_suspend() && f.receiver.is_some() {
-                    return None;
+                    return lo.bail("gate:extension-suspend-fn");
                 }
             }
         }
@@ -546,7 +542,7 @@ fn lower_file_at_reporting_impl(
                         || c.base_class.as_deref().is_some_and(super_has_generic)))
         });
         if suspend_member_needs_bridge {
-            return None;
+            return lo.bail("gate:suspend-erasure-bridge");
         }
         // A NON-suspend body may not call any suspend fn (top-level or member): call-site continuation
         // threading is only modeled inside a suspend body (and calling a suspend fn from a non-suspend
@@ -559,7 +555,7 @@ fn lower_file_at_reporting_impl(
                     .chain(member_suspend.iter())
                     .any(|n| file.expr_uses_name(e, n))
             {
-                return None;
+                return lo.bail("gate:suspend-call-from-non-suspend");
             }
         }
     }
@@ -572,6 +568,7 @@ fn lower_file_at_reporting_impl(
     let mut pending_iface_defaults: Vec<PendingIfaceDefault> = Vec::new();
     for &d in &file.decls {
         if let Decl::Class(c) = file.decl(d) {
+            lo.set_bail("deep:class-register"); // pass 1a phase marker (survey diagnostic only)
             let internal = class_internal(file, &c.name);
             let anonymous_captures = info
                 .anonymous_object_captures_by_class
@@ -680,36 +677,49 @@ fn lower_file_at_reporting_impl(
             // (non-value-class, no `provideDelegate`) delegate whose `getValue` return type matches the
             // property type exactly (generic erasure / value-class unboxing would need a cast the inline
             // accessor doesn't emit). Anything else skips the file rather than miscompile.
-            for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
-                let dt = info.ty(p.delegate.unwrap());
-                let di = dt.obj_internal()?;
-                let is_value_cls = |internal: TypeName| {
-                    syms.class_by_type_name(internal)
-                        .is_some_and(|cs| cs.value_field.is_some())
-                };
-                if is_value_cls(di) || syms.method_of_name(di, "provideDelegate").is_some() {
-                    return None;
+            if c.body_props
+                .iter()
+                .any(|property| property.delegate.is_some())
+            {
+                // Treat the validation as one named gate. Setting the marker before the region makes
+                // every `?` and explicit rejection below report the same stable feature boundary,
+                // instead of duplicating a reason at each exit and eventually missing a new one.
+                lo.set_bail("gate:member-delegate-shape");
+                for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
+                    let dt = info.ty(p.delegate.unwrap());
+                    let di = dt.obj_internal()?;
+                    let is_value_cls = |internal: TypeName| {
+                        syms.class_by_type_name(internal)
+                            .is_some_and(|cs| cs.value_field.is_some())
+                    };
+                    if is_value_cls(di) || syms.method_of_name(di, "provideDelegate").is_some() {
+                        return None;
+                    }
+                    let (_, _, gv_ret, _, _) =
+                        lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
+                    let prop_ty = syms
+                        .classes
+                        .get(&c.name)
+                        .and_then(|cs| {
+                            cs.props
+                                .iter()
+                                .find_map(|(n, t, _)| (n == &p.name).then_some(*t))
+                        })
+                        .unwrap_or(Ty::Error);
+                    // A generic delegate's `getValue` returns the ERASED `Object` (`<T> getValue(): T`); the
+                    // getter inserts a `checkcast`/unbox to the property type (kotlinc does the same), bridged by
+                    // `coerce_erased`. Only an erased-REFERENCE return is bridgeable — a concrete mismatched
+                    // return isn't, so bail on that.
+                    if gv_ret != prop_ty && !gv_ret.is_reference() {
+                        return None;
+                    }
+                    if prop_ty.obj_internal().is_some_and(is_value_cls) {
+                        return None;
+                    }
                 }
-                let (_, _, gv_ret, _, _) = lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
-                let prop_ty = syms
-                    .classes
-                    .get(&c.name)
-                    .and_then(|cs| {
-                        cs.props
-                            .iter()
-                            .find_map(|(n, t, _)| (n == &p.name).then_some(*t))
-                    })
-                    .unwrap_or(Ty::Error);
-                // A generic delegate's `getValue` returns the ERASED `Object` (`<T> getValue(): T`); the
-                // getter inserts a `checkcast`/unbox to the property type (kotlinc does the same), bridged by
-                // `coerce_erased`. Only an erased-REFERENCE return is bridgeable — a concrete mismatched
-                // return isn't, so bail on that.
-                if gv_ret != prop_ty && !gv_ret.is_reference() {
-                    return None;
-                }
-                if prop_ty.obj_internal().is_some_and(is_value_cls) {
-                    return None;
-                }
+                // The scoped gate survived. Restore the containing phase so a later, unrelated class
+                // registration failure is not attributed to delegated-property validation.
+                lo.set_bail("deep:class-register");
             }
             // Synthetic `x$delegate` instance fields for delegated member properties — one per delegated
             // body property, in declaration order, placed AFTER the real backing-field props (so the
@@ -851,7 +861,7 @@ fn lower_file_at_reporting_impl(
                         {
                             Some(resolved)
                         }
-                        _ => return None,
+                        _ => return lo.bail("gate:class-supertype-shape"),
                     }
                 }
                 None => None,
@@ -874,7 +884,7 @@ fn lower_file_at_reporting_impl(
                 {
                     iface_internals.push(resolved);
                 } else {
-                    return None;
+                    return lo.bail("gate:class-supertype-shape");
                 }
             }
             // Per-field finality aligned to `fields`: `this$0` is final; a property field is final unless
@@ -1834,6 +1844,10 @@ fn lower_file_at_reporting_impl(
                 || !c.companion_supertypes.is_empty()
                 || !c.companion_props.is_empty()
             {
+                // Refined phase marker for the whole synthesized-companion region; reset to the
+                // pass-1a marker on success so a LATER bail in this class iteration isn't
+                // misattributed (the sink is last-wins).
+                lo.set_bail("deep:companion-synth");
                 let comp_fq = format!("{internal}$Companion");
                 // The companion's declared supertypes (`companion object : Base, I`): make the synthesized
                 // companion implement its declared INTERFACES so it is genuinely an `I` at runtime. The
@@ -2041,6 +2055,7 @@ fn lower_file_at_reporting_impl(
                 );
                 lo.companions
                     .insert(type_name(&internal), type_name(&comp_fq));
+                lo.set_bail("deep:class-register"); // companion synthesis survived; restore phase
             }
             // A `data class`'s equals/hashCode/toString/componentN are Kotlin language semantics —
             // synthesize them here as ordinary IR methods (backend-agnostic), registered so calls
@@ -2059,8 +2074,12 @@ fn lower_file_at_reporting_impl(
             // (`box-impl`/`unbox-impl`/`constructor-impl`/`equals-impl0`/`equals`/`hashCode`/`toString`).
             // Interface delegation `: I by d` is sugar — synthesize a forwarder for each of `I`'s
             // methods that calls `this.d.method(args)`. Bails the file if a delegate can't be modeled.
-            if !c.delegations.is_empty() || !c.delegation_exprs.is_empty() {
-                lo.synth_delegation_forwarders(file, c, &internal, id)?;
+            if (!c.delegations.is_empty() || !c.delegation_exprs.is_empty())
+                && lo
+                    .synth_delegation_forwarders(file, c, &internal, id)
+                    .is_none()
+            {
+                return lo.bail("gate:delegation-forwarders");
             }
         }
     }
@@ -2135,6 +2154,7 @@ fn lower_file_at_reporting_impl(
     // Pass 1b: register callable top-level and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
+            lo.set_bail("deep:fun-register"); // pass 1b phase marker (survey diagnostic only)
             if splice_only_inline(f, d) {
                 continue;
             }
@@ -2231,6 +2251,7 @@ fn lower_file_at_reporting_impl(
     // resulting `FunId` in pass 2.
     for (i, s) in file.stmt_arena.iter().enumerate() {
         if let Stmt::LocalFun(_) = s {
+            lo.set_bail("deep:local-fun-register"); // pass 1b' phase marker (survey diagnostic only)
             let stmt_id = crate::ast::StmtId(i as u32);
             if let Some(local_fun) = info.local_fun(stmt_id) {
                 // Captured outer locals become extra leading parameters: runtime holder first when the
@@ -2265,6 +2286,8 @@ fn lower_file_at_reporting_impl(
     let static_base = lo.ir.statics.len() as u32;
     for &d in &file.decls {
         if let Decl::Property(p) = file.decl(d) {
+            // Pass 1c phase marker (survey diagnostic only).
+            lo.set_bail("deep:property-register");
             // A top-level delegated property (`val x: T by Del()`): register a `getX()` accessor so reads
             // route to it (like a computed property), and RESERVE the two synthetic backing-field static
             // slots (`x$delegate`, `x$kprop`) in declaration order so later non-delegated statics get the
@@ -2273,14 +2296,19 @@ fn lower_file_at_reporting_impl(
                 // An EXTENSION delegated property (`val Recv.x by …`) isn't modeled — skip the file
                 // (pass 2 would otherwise treat it as an extension property and find no getter).
                 if p.receiver.is_some() {
-                    return None;
+                    return lo.bail("gate:extension-delegated-property");
                 }
                 let ty = if let Some(tref) = p.ty.as_ref() {
                     ty_of(file, tref, &*syms.libraries)
                 } else {
+                    // Inferring the property type from the delegate's `getValue` return is only
+                    // modeled for simple source delegates; anything else skips here.
+                    lo.set_bail("gate:delegated-property-inferred-type");
                     let delegate_ty = info.ty(p.delegate?);
                     let internal = delegate_ty.obj_internal()?;
-                    lo.delegate_getvalue_info(p.delegate?, internal)?.2
+                    let ty = lo.delegate_getvalue_info(p.delegate?, internal)?.2;
+                    lo.set_bail("deep:property-register"); // survived; restore the phase marker
+                    ty
                 };
                 let fid = lo.ir.add_fun(IrFunction {
                     name: property_getter_name(&p.name),
@@ -2309,14 +2337,14 @@ fn lower_file_at_reporting_impl(
             // needs an explicit `set(v) { … }` body (no backing field to default to).
             if p.receiver.is_some() {
                 if p.getter.is_none() || p.delegate.is_some() {
-                    return None;
+                    return lo.bail("gate:extension-property-shape");
                 }
                 let has_set_body = p
                     .setter
                     .as_ref()
                     .is_some_and(|s| s.body.is_some() && s.param.is_some());
                 if p.is_var && !has_set_body {
-                    return None;
+                    return lo.bail("gate:extension-property-shape");
                 }
                 let signature = syms.source_extension_property((file_index, d.0))?;
                 let recv_ty = signature.receiver;
@@ -2545,6 +2573,7 @@ fn lower_file_at_reporting_impl(
                             if m.params.iter().any(|p| bound_tp(&p.ty))
                                 || m.ret.as_ref().is_some_and(bound_tp)
                             {
+                                lo.set_bail("gate:bound-type-param-override");
                                 return None;
                             }
                             let own_idx =
@@ -2565,6 +2594,7 @@ fn lower_file_at_reporting_impl(
                                 // coroutine pass rewrites the concrete method to CPS afterwards but never
                                 // fixes up the bridge) — skip the file rather than emit a broken bridge.
                                 if m.is_suspend() {
+                                    lo.set_bail("gate:suspend-override-erasure");
                                     return None;
                                 }
                                 // Generic/covariant override → synthesize an `ACC_BRIDGE` method with
@@ -2619,6 +2649,7 @@ fn lower_file_at_reporting_impl(
                                     })
                             });
                             if unsafe_base {
+                                lo.set_bail("gate:base-reads-override-internally");
                                 return None;
                             }
                         }
@@ -3040,6 +3071,7 @@ fn lower_file_at_reporting_impl(
                                 continue;
                             }
                             if impl_fid.is_some_and(|fid| lo.ir.suspend_funs.contains(&fid)) {
+                                lo.set_bail("gate:suspend-override-erasure");
                                 return None;
                             }
                             if seen.insert((name.clone(), erased_params.clone(), erased_ret)) {
@@ -3102,6 +3134,7 @@ fn lower_file_at_reporting_impl(
                     // A `tailrec` MEMBER method isn't loop-transformed (only top-level functions are) —
                     // skip the file rather than emit stack-overflowing recursion.
                     if m.is_tailrec() && !matches!(m.body, FunBody::None) {
+                        lo.set_bail("gate:tailrec-member");
                         return None;
                     }
                     let method_index = c.methods[..mi]
@@ -3402,7 +3435,14 @@ fn lower_file_at_reporting_impl(
                         else {
                             continue;
                         };
-                        let sv = lo.syms.method_of_name(delegate_internal, "setValue")?;
+                        let Some(sv) = lo.syms.method_of_name(delegate_internal, "setValue") else {
+                            // A missing member is the source-agnostic fact this guard observes. The
+                            // corpus example happens to provide an extension `setValue`, but absence
+                            // can also mean an unavailable or otherwise unresolved declaration; do not
+                            // encode an assumed provider/implementation shape in the survey reason.
+                            lo.set_bail("gate:delegate-setvalue-unresolved");
+                            return None;
+                        };
                         let sv_desc = lo.runtime.method_descriptor(&sv.params, sv.ret)?;
                         let this_e = lo.emit_get_value(0);
                         let dele = lo.emit_get_field(this_e, class_id, field_idx);
@@ -3448,6 +3488,7 @@ fn lower_file_at_reporting_impl(
                         // are) — skip the file rather than emit stack-overflowing recursion (mirrors the
                         // instance-method guard).
                         if m.is_tailrec() {
+                            lo.set_bail("gate:tailrec-companion");
                             return None;
                         }
                         let overload_idx = c.companion_methods[..cmi]
@@ -3499,6 +3540,7 @@ fn lower_file_at_reporting_impl(
                         if defaults_ok {
                             super_default_fill = true;
                         } else {
+                            lo.set_bail("gate:super-ctor-arity");
                             return None;
                         }
                     }
@@ -3508,7 +3550,10 @@ fn lower_file_at_reporting_impl(
                     // outer-instance capture, so it would resolve such a name to the inherited field
                     // and miscompile (KT-3684). Bail those; SAM-style anon objects over interfaces or
                     // no-argument classes are unaffected.
-                    if internal.contains("$anon$") && sup_params > 0 {
+                    // Anonymous-ness is an AST ownership fact, not a property of the generated JVM
+                    // class name. Using declaration identity avoids coupling this soundness gate (and
+                    // its diagnostics) to a synthetic naming convention or a user-chosen class name.
+                    if file.is_anonymous_object_class(d) && sup_params > 0 {
                         let capture_free = c.methods.is_empty()
                             && c.body_props.is_empty()
                             && c.init_order.is_empty()
@@ -3526,6 +3571,7 @@ fn lower_file_at_reporting_impl(
                                 )
                             });
                         if !capture_free {
+                            lo.set_bail("gate:anon-object-outer-capture");
                             return None;
                         }
                     }
@@ -3566,7 +3612,13 @@ fn lower_file_at_reporting_impl(
                 // params in scope (`this`=0, params 1..N), coerced to the super's parameter types.
                 // Reorder NAMED super-constructor arguments (`: Base(name = …, addr = …)`) to the base
                 // constructor's parameter order; positional args are unchanged. `None` bails the file.
-                let base_args = reordered_base_args(file, c)?;
+                let base_args = match reordered_base_args(file, c) {
+                    Some(a) => a,
+                    None => {
+                        lo.set_bail("gate:super-named-args");
+                        return None;
+                    }
+                };
                 if !base_args.is_empty() {
                     let class_id = lo.class_info(&internal)?.id;
                     lo.scope.clear();
@@ -3605,7 +3657,10 @@ fn lower_file_at_reporting_impl(
                             Some(cs) if !cs.super_ctor_params.is_empty() => {
                                 cs.super_ctor_params.clone()
                             }
-                            _ => return None,
+                            _ => {
+                                lo.set_bail("gate:super-ctor-params-unresolved");
+                                return None;
+                            }
                         }
                     } else {
                         super_field_tys
@@ -3624,6 +3679,7 @@ fn lower_file_at_reporting_impl(
                                 && at != Ty::Error
                         })
                     {
+                        lo.set_bail("gate:super-ctor-arg-mismatch");
                         return None;
                     }
                     let mut sargs = Vec::new();
@@ -3877,6 +3933,7 @@ fn lower_file_at_reporting_impl(
                                         | Expr::Block { .. }
                                         | Expr::Try { .. }
                                 ) {
+                                    lo.set_bail("gate:branchy-field-initializer");
                                     return None;
                                 }
                                 // A `var` declared inside the initializer and captured+mutated by a
@@ -3916,6 +3973,7 @@ fn lower_file_at_reporting_impl(
                                         _ => false,
                                     };
                                     if branchy {
+                                        lo.set_bail("gate:branchy-field-initializer");
                                         return None;
                                     }
                                 }
@@ -3994,6 +4052,11 @@ fn lower_file_at_reporting_impl(
                         if source_args.len() != resolved.argument_slots.len()
                             || source_args.len() != resolved.argument_types.len()
                         {
+                            // The checker owns constructor selection and argument placement. A
+                            // disagreement between that generic semantic plan and the source list is
+                            // a consistency boundary, regardless of whether either declaration came
+                            // from this file or another module.
+                            lo.set_bail("gate:secondary-ctor-delegation-shape");
                             return None;
                         }
                         let target_tys = tys_to_ir(resolved.target.params());
@@ -4050,6 +4113,10 @@ fn lower_file_at_reporting_impl(
                             } else if supplied.is_empty() && resolved.omitted.contains(&slot) {
                                 delegate_args.push(lo.zero_placeholder(parameter));
                             } else {
+                                // A non-vararg target slot must receive exactly one value, or be a
+                                // checker-approved omission. Keep the same reason as the parallel
+                                // vector check above: both reject an inconsistent delegation plan.
+                                lo.set_bail("gate:secondary-ctor-delegation-shape");
                                 return None;
                             }
                         }
@@ -4113,15 +4180,19 @@ fn lower_file_at_reporting_impl(
                     // satisfied — by a concrete enum method of that name, or by an override in EVERY
                     // entry body. Otherwise the JVM throws `AbstractMethodError`/`IncompatibleClassChange`
                     // at an interface-typed call (e.g. an interface `val ordinal` mapped to `getOrdinal`
-                    // that the enum doesn't provide). A classpath-interface supertype (abstractness not
-                    // checked here) bails conservatively.
+                    // that the enum doesn't provide). Abstract-obligation metadata is currently complete
+                    // only for an interface declaration in this AST. Another source file/module, a
+                    // library provider, or a non-interface declaration all take the same conservative
+                    // boundary below; the reason intentionally names the unavailable semantic fact rather
+                    // than guessing which provider supplied the type.
                     for st_ref in &c.supertypes {
                         let st = &st_ref.name;
                         let Some(ic) = file.decls.iter().find_map(|&d| match file.decl(d) {
                             Decl::Class(ic) if ic.name == *st && ic.is_interface() => Some(ic),
                             _ => None,
                         }) else {
-                            return None; // non-file / non-interface supertype on an enum — skip
+                            lo.set_bail("gate:enum-supertype-obligations-unavailable");
+                            return None;
                         };
                         let generic = !ic.type_params.is_empty();
                         let mut abstract_members: Vec<String> = ic
@@ -4146,13 +4217,16 @@ fn lower_file_at_reporting_impl(
                                     .iter()
                                     .all(|e| e.methods.iter().any(|bm| bm.name == m));
                             if !enum_has && !all_entries_override {
-                                return None; // unsatisfied abstract interface member — skip
+                                // unsatisfied abstract interface member — skip
+                                lo.set_bail("gate:enum-unsatisfied-interface-member");
+                                return None;
                             }
                             // A GENERIC interface needs an erased bridge (`foo(Object)`→`foo(String)`).
                             // The bridge is computed for the ENUM class (an enum-level override) — so a
                             // generic method satisfied only by PER-ENTRY overrides (bridge would belong on
                             // each entry subclass, not modeled) skips rather than miscompiles.
                             if generic && !enum_has {
+                                lo.set_bail("gate:enum-entry-override-erasure");
                                 return None;
                             }
                         }
@@ -4185,7 +4259,15 @@ fn lower_file_at_reporting_impl(
                         let mut next_pos = 0usize;
                         for (j, &a) in entry.args.iter().enumerate() {
                             let idx = match entry.arg_names.get(j).and_then(|n| n.as_ref()) {
-                                Some(name) => param_meta.iter().position(|(pn, ..)| pn == name)?,
+                                Some(name) => {
+                                    let Some(index) =
+                                        param_meta.iter().position(|(pn, ..)| pn == name)
+                                    else {
+                                        lo.set_bail("gate:enum-entry-ctor-arguments");
+                                        return None;
+                                    };
+                                    index
+                                }
                                 None => {
                                     let p = next_pos;
                                     next_pos += 1;
@@ -4193,6 +4275,9 @@ fn lower_file_at_reporting_impl(
                                 }
                             };
                             if idx >= positional.len() || positional[idx].is_some() {
+                                // Unknown, duplicate, and over-arity arguments all mean the source
+                                // list cannot be mapped one-to-one onto the resolved enum constructor.
+                                lo.set_bail("gate:enum-entry-ctor-arguments");
                                 return None;
                             }
                             positional[idx] = Some(a);
@@ -4210,7 +4295,12 @@ fn lower_file_at_reporting_impl(
                                     let zero = lo.emit_const(IrConst::Int(0));
                                     lowered.push(lo.emit_new_array(ty_to_ir(*ft), zero));
                                 }
-                                None => return None,
+                                None => {
+                                    // The generic placement step found neither a supplied value nor a
+                                    // declared default/vararg representation for this required slot.
+                                    lo.set_bail("gate:enum-entry-ctor-arguments");
+                                    return None;
+                                }
                             }
                         }
                         lo.ir.classes[class_id as usize].enum_entries[ei].args = lowered;
@@ -4238,6 +4328,7 @@ fn lower_file_at_reporting_impl(
                                 || p.delegate.is_some()
                                 || p.is_lateinit
                             {
+                                lo.set_bail("gate:enum-entry-property-shape");
                                 return None;
                             }
                             let ty = match &p.ty {
@@ -4344,10 +4435,17 @@ fn lower_file_at_reporting_impl(
                                 .and_then(|cs| cs.method(&bm.name))
                             {
                                 Some(s) => s.clone(),
-                                None => syms
+                                None => match syms
                                     .supertype_methods(&internal)
                                     .into_iter()
-                                    .find_map(|(n, s)| (n == bm.name).then_some(s))?,
+                                    .find_map(|(n, s)| (n == bm.name).then_some(s))
+                                {
+                                    Some(s) => s,
+                                    None => {
+                                        lo.set_bail("gate:enum-entry-non-override");
+                                        return None;
+                                    }
+                                },
                             };
                             let params = tys_to_ir(&sig.params);
                             let fid = lo.ir.add_fun(IrFunction {
@@ -5530,6 +5628,17 @@ impl<'a> Lower<'a> {
     /// internal `deep*`-phase refinement). Replaces the former free `set_bail` thread-local write.
     fn set_bail(&self, reason: &str) {
         *self.bail.borrow_mut() = reason.to_string();
+    }
+
+    /// Stop lowering at a named, source-independent feature boundary.
+    ///
+    /// Keeping the sink update and `None` return in one operation prevents a new gate exit from
+    /// accidentally inheriting a coarse phase marker. Requiring a static category also keeps source
+    /// declaration names and JVM owner spellings out of survey buckets and user-visible backend
+    /// diagnostics; detailed identities belong in opt-in compiler traces instead.
+    fn bail<T>(&self, reason: &'static str) -> Option<T> {
+        self.set_bail(reason);
+        None
     }
 
     fn can_access_source_private(&self, owner: TypeName) -> bool {
@@ -8483,24 +8592,6 @@ impl<'a> Lower<'a> {
         // A `suspend { … }` literal (parser-marked): build the `SuspendLambda` state machine
         // instead of a plain `FunctionN` closure (which `lower_lambda_sam` would bail on).
         if self.afile.suspend_lambdas.contains(&e.0) {
-            // Conservative v1 gate: a body with MEMBER accesses (`c.bar()`, `c.x`) hits latent
-            // suspend+delegation/state-machine gaps (silent resume loss) — bail (skip the file)
-            // rather than miscompile. Bare calls (incl. suspend function PARAMETERS, the
-            // `runBlocking`/`contract` shape) are supported.
-            fn has_member_access(lo: &Lower, e: AstExprId) -> bool {
-                if matches!(lo.afile.expr(e), Expr::Member { .. }) {
-                    return true;
-                }
-                lo.afile
-                    .any_child_expr(e, &mut |c| has_member_access(lo, c), &mut |s| {
-                        lo.afile
-                            .any_child_stmt(s, &mut |c| has_member_access(lo, c))
-                    })
-            }
-            let has_member_call = has_member_access(self, body);
-            if has_member_call {
-                return None;
-            }
             let Ty::Fun(sig) = self.info.ty(e) else {
                 return None;
             };
@@ -8958,12 +9049,19 @@ impl<'a> Lower<'a> {
         // resolve each callee's type + method `is_suspend` so the body isn't misclassified as leaf.
         let callees = std::cell::RefCell::new(Vec::new());
         collect_calls(self.afile, body, &callees);
+        let module_symbols = crate::module_symbols::ModuleSymbols::new(self.syms);
         callees.into_inner().into_iter().any(|call| {
-            let method_suspends = |internal: TypeName, name: &str| {
-                self.syms
-                    .class_by_type_name(internal)
-                    .map(|c| c.methods_named(name))
-                    .is_some_and(|sigs| sigs.iter().any(|s| s.is_suspend()))
+            // Resolved call metadata below is provider-neutral and is the primary source of truth.
+            // Some source calls intentionally have no recorded target at this early classification
+            // point, so their fallback goes through ModuleSymbols' canonical inherited-member walk.
+            // That walk already handles classes, interfaces, delegation-visible members, cycles, and
+            // precedence; duplicating a second hierarchy traversal here previously made this scan drift
+            // from resolver behavior.
+            let source_method_suspends = |internal: TypeName, name: &str| {
+                module_symbols
+                    .instance_members(Ty::obj_name(internal), name)
+                    .iter()
+                    .any(|member| member.suspend())
             };
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
@@ -8976,7 +9074,7 @@ impl<'a> Lower<'a> {
                         member: None,
                     } if receiver_ty
                         .obj_internal()
-                        .is_some_and(|i| method_suspends(i, "invoke")) =>
+                        .is_some_and(|i| source_method_suspends(i, "invoke")) =>
                     {
                         return true
                     }
@@ -8994,8 +9092,8 @@ impl<'a> Lower<'a> {
             {
                 return true;
             }
-            // A classpath top-level `suspend fun` called by name (`delay(…)`): the CHECKER recorded
-            // the resolved callable with its suspend flag.
+            // A resolved top-level `suspend fun` called by name: the checker records the same semantic
+            // suspend flag regardless of which symbol provider supplied the callable.
             if self
                 .info
                 .resolved_top_level(call)
@@ -9021,14 +9119,15 @@ impl<'a> Lower<'a> {
             {
                 return true;
             }
-            // A plain member call `recv.m(args)` to a suspend USER class method (its suspend flag is
-            // in `syms`, keyed by the receiver's static type).
+            // Fallback for a plain source member call whose resolved target was not recorded above.
+            // Query the canonical module hierarchy rather than the receiver class's own method table:
+            // delegation/inheritance can expose a suspend method declared only on an interface.
             if let ast::Expr::Call { callee, .. } = self.afile.expr(call) {
                 if let ast::Expr::Member { receiver, name } = self.afile.expr(*callee) {
                     let recv_ty = self.info.ty(*receiver);
                     if recv_ty
                         .obj_internal()
-                        .is_some_and(|i| method_suspends(i, name))
+                        .is_some_and(|i| source_method_suspends(i, name))
                     {
                         return true;
                     }
@@ -9052,6 +9151,7 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         let arity = params.len();
         if self.cur_class.is_some() {
+            self.set_bail("gate:suspend-lambda-in-class");
             return None;
         }
         // Repeated implicit receiver names need distinct storage fields.
@@ -9627,7 +9727,7 @@ impl<'a> Lower<'a> {
         // module-`ClassSig` super-interface graph breadth-first, deduping methods by signature and
         // properties by source name. The property entry retains its declaring owner because an inherited
         // accessor must dispatch against the interface that actually declares that JVM method.
-        let mut methods: Vec<(String, Vec<Ty>, Ty)> = Vec::new();
+        let mut methods: Vec<(String, Vec<Ty>, Ty, bool)> = Vec::new();
         // Retain only the declaration facts lowering consumes. In particular, do not carry the
         // resolver's `DeclaredPropertySig` across this boundary: `ir_lower` depends on the semantic
         // symbol handoff, not the resolver implementation that originally populated it.
@@ -9645,8 +9745,11 @@ impl<'a> Lower<'a> {
             let cs = self.syms.class_by_type_name(cur)?;
             for (n, sigs) in &cs.methods {
                 for s in sigs {
-                    if !methods.iter().any(|(on, op, _)| on == n && *op == s.params) {
-                        methods.push((n.clone(), s.params.clone(), s.ret));
+                    if !methods
+                        .iter()
+                        .any(|(on, op, _, _)| on == n && *op == s.params)
+                    {
+                        methods.push((n.clone(), s.params.clone(), s.ret, s.is_suspend()));
                     }
                 }
             }
@@ -9672,7 +9775,7 @@ impl<'a> Lower<'a> {
                 queue.push(sup);
             }
         }
-        for (mname, params, ret) in methods {
+        for (mname, params, ret, suspend) in methods {
             let params_ir = tys_to_ir(&params);
             let descriptor = self.runtime.method_descriptor(&params, ret)?;
             let field = self.this_field(class_id, delegate_idx);
@@ -9687,13 +9790,28 @@ impl<'a> Lower<'a> {
                 field,
                 args,
             );
+            // A SUSPEND interface method: the forwarder must be a CPS tail-forward too —
+            // registered as a suspend fn (the coroutine pass appends its `$completion`
+            // parameter and erases the return to `Object`, matching the interface's JVM
+            // method it overrides) and its delegate call recorded as a suspend call (the
+            // pass threads that continuation into it and returns the result verbatim, so
+            // `COROUTINE_SUSPENDED` propagates instead of being swallowed).
+            if suspend {
+                self.ir.suspend_calls.insert(call, ret);
+            }
             let body = if ret == Ty::Unit {
                 self.emit_block(vec![call], None)
             } else {
                 let ret_stmt = self.emit_return(Some(call));
                 self.emit_block(vec![ret_stmt], None)
             };
-            self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
+            let fid =
+                self.add_synth_method(internal, class_id, &mname, params_ir, ret, body, false);
+            if suspend {
+                if let Some(fid) = fid {
+                    self.ir.suspend_funs.push(fid);
+                }
+            }
         }
         for (owner, _name, getter_name, setter_name, property_ty) in properties {
             let field = self.this_field(class_id, delegate_idx);
@@ -19173,19 +19291,17 @@ impl<'a> Lower<'a> {
         }
         // Survey diagnostic: tag the innermost unsupported expression that caused the bail (the first
         // `None` to bubble up wins, since deeper frames run first and a tag is only refined from a
-        // coarse `deep*` phase). A `Call` is tagged by its callee name — the single most useful signal.
+        // coarse `deep*` phase). Calls retain the callee AST SHAPE (`Name`, `Member`, …), not its source
+        // spelling. This gives one generic taxonomy across local/module/classpath resolution and keeps
+        // source identifiers or generated JVM class names from leaking into survey buckets.
         if r.is_none() && self.bail.borrow().starts_with("deep") {
             let reason = match self.afile.expr(e).clone() {
                 Expr::Call { callee, .. } => {
-                    let name = match self.afile.expr(callee) {
-                        Expr::Name(n) => n.clone(),
-                        Expr::Member { name, .. } => format!(".{name}"),
-                        o => bail_variant(&format!("{o:?}")).to_string(),
-                    };
-                    format!("call {name}")
+                    format!(
+                        "call {}",
+                        bail_variant(&format!("{:?}", self.afile.expr(callee)))
+                    )
                 }
-                Expr::Name(n) => format!("name {n}"),
-                Expr::Member { name, .. } => format!("member .{name}"),
                 o => format!("expr {}", bail_variant(&format!("{o:?}"))),
             };
             self.set_bail(&reason);
@@ -19438,9 +19554,8 @@ impl<'a> Lower<'a> {
             // intrinsic (recognized via the registry). The block runs with the enclosing suspend
             // function's own `Continuation` bound as its parameter; kotlinc inlines the block and returns
             // its `Any?` result. The leaf shape `{ COROUTINE_SUSPENDED }` (and any block that does NOT
-            // read its continuation parameter) inlines to just the block body. A block that DOES read the
-            // continuation needs the (post-CPS) continuation slot threaded in — not modeled here, so it
-            // bails (skip the file) rather than binding a wrong slot.
+            // read its continuation parameter) inlines to just the block body. A block that DOES read
+            // the continuation is a first-class suspension point (see below).
             Expr::Call { callee, args }
                 if args.len() == 1
                     && matches!(self.afile.expr(callee), ast::Expr::Name(n)
@@ -19455,6 +19570,9 @@ impl<'a> Lower<'a> {
                     // The block reads its continuation (`c.resume(t)`): bind `c` to the enclosing suspend
                     // function's own `Continuation` via the `CurrentContinuation` placeholder — the CPS
                     // pass rewrites it to the real continuation value once the trailing parameter exists.
+                    // The whole intrinsic is a SUSPENSION POINT: registered so the coroutine pass splits
+                    // a state machine around it (`it.resume(v)` then re-enters THIS machine at the resume
+                    // label, exactly kotlinc's protocol).
                     let slot = self.fresh_value();
                     let cont = self.ir.add_expr(IrExpr::CurrentContinuation);
                     let cont_ty = Ty::obj("kotlin/coroutines/Continuation");
@@ -19464,7 +19582,24 @@ impl<'a> Lower<'a> {
                     let body_val = self.expr(body);
                     self.scope.truncate(depth);
                     let body_val = body_val?;
-                    self.emit_block(vec![var], Some(body_val))
+                    let block = self.emit_block(vec![var], Some(body_val));
+                    let logical_ret = ty_to_ir(self.info.ty(e));
+                    // This is an inlined intrinsic BLOCK, not a callable node. Record it in the
+                    // backend-neutral suspension-point channel so the coroutine pass state-splits
+                    // around the block without treating it like a cross-unit call that needs another
+                    // continuation argument appended.
+                    self.ir
+                        .intrinsic_suspension_points
+                        .insert(block, logical_ret);
+                    // Bind the block to a temp: in any position (statement, value, tail) the
+                    // block-splicing transforms dissolve the OUTER grouping but preserve the
+                    // `Variable { init: <suspension point> }` — the exact bound-local shape
+                    // the flattener handles. A bare registered block would be spliced away,
+                    // orphaning the point id (the suspension would be silently lost).
+                    let tmp = self.fresh_value();
+                    let decl = self.emit_variable(tmp, logical_ret, Some(block));
+                    let tmp_read = self.emit_get_value(tmp);
+                    self.emit_block(vec![decl], Some(tmp_read))
                 } else {
                     self.expr(body)?
                 }
@@ -24179,12 +24314,16 @@ impl<'a> Lower<'a> {
                             let non_suspend_fun =
                                 matches!(self.info.ty(arg), Ty::Fun(s) if !s.suspend);
                             if non_suspend_fun && self.ast_body_suspends(*body) {
-                                self.set_bail(&format!(
-                                    "suspend-inline HOF lambda suspends: {}.{}",
+                                // Owner and callable identities are useful when tracing a compiler
+                                // failure, but the public bail category must remain stable and must
+                                // not expose a real class name through survey/backend diagnostics.
+                                crate::trace_compiler!(
+                                    "lower",
+                                    "suspend-inline HOF lambda suspends at {}.{}",
                                     c.owner.render(),
                                     c.name,
-                                ));
-                                return None;
+                                );
+                                return self.bail("suspend-inline HOF lambda suspends");
                             }
                         }
                     }
@@ -24287,8 +24426,10 @@ impl<'a> Lower<'a> {
                 // A private `@InlineOnly` extension (scope fn / `String.uppercase()`) is recorded
                 // as an [`Extension`] by the checker and handled by the general branch above (its
                 // `inline` metadata makes the backend splice). Nothing left to resolve here.
-                self.set_bail(&format!("unrecorded qualified call target '{name}'"));
-                return None;
+                // Keep the source spelling in opt-in trace output only; survey buckets and backend
+                // diagnostics consume the stable reason recorded by `bail`.
+                crate::trace_compiler!("lower", "unrecorded qualified call target '{name}'");
+                return self.bail("unrecorded qualified call target");
             }
         };
         Some(t)
