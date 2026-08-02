@@ -2629,6 +2629,10 @@ fn lower_file_at_reporting_impl(
                         .all(|m| !m.params.iter().any(|p| p.default.is_some()))
                     && c.companion_methods.is_empty()
                     && c.companion_props.is_empty()
+                    // … and no computed property either — its getter body lowers below just like a
+                    // default method's (an early skip would emit `getX()` ABSTRACT → an
+                    // AbstractMethodError at the first read).
+                    && c.body_props.iter().all(|p| !is_computed_prop(p))
                 {
                     // No BODIES to lower — but `@Metadata` still names each parameter, so record the
                     // declared names (via the shared `fn_params` info) before skipping. Without this
@@ -4669,8 +4673,9 @@ fn is_simple_object(c: &ast::ClassDecl) -> bool {
     // const to be an inlinable literal.)
 }
 
-/// An `interface` the IR can emit: only abstract methods (no default/bodied methods, which need a
-/// `DefaultImpls` class), no properties (abstract property getters not modeled), no companion.
+/// An `interface` the IR can emit: abstract methods, default methods (a bodied method becomes a JVM
+/// default method), abstract properties (abstract `getX()`/`setX()`), computed properties (the
+/// getter becomes a JVM default method), and a lowerable companion — anything else gates the file.
 fn is_simple_interface(c: &ast::ClassDecl) -> bool {
     c.is_interface()
         // A companion is supported when it has no base/supertype and its props are lowerable — its
@@ -4680,10 +4685,20 @@ fn is_simple_interface(c: &ast::ClassDecl) -> bool {
         && c.companion_supertypes.is_empty()
         && companion_props_lowerable(c)
         && c.props.is_empty()
-        // Abstract properties (`val x: T`, no initializer/getter) become abstract `getX()`/`setX()`;
-        // a property with an initializer or custom getter (an interface can't have a backing field)
-        // isn't modeled.
-        && c.body_props.iter().all(|p| p.init.is_none() && p.getter.is_none() && p.ty.is_some())
+        // Abstract properties (`val x: T`, no initializer/getter) become abstract `getX()`/`setX()`
+        // — non-extension only: an extension's accessor takes the receiver as its first parameter,
+        // a descriptor this path doesn't emit.
+        // A COMPUTED property (`val x: T get() = …`) is emitted as a JVM default method — the
+        // computed-prop machinery is class-kind-agnostic (pass 1 registers `getX()`, pass 2 lowers
+        // the body, `emit_interface_class` emits bodied methods as default methods). Still gated:
+        // an initializer/`field` read (an interface has no backing field), a `var` custom setter,
+        // an extension property — and a PRIVATE one: pass 1 registers its accessor `public` like
+        // any other, so a same-named member on an implementor would hijack the virtual dispatch
+        // (accessor privacy isn't modeled on this path).
+        && c.body_props.iter().all(|p| {
+            (p.init.is_none() && p.getter.is_none() && p.ty.is_some() && p.receiver.is_none())
+                || (is_computed_prop(p) && !p.visibility.is_private())
+        })
         // Non-extension methods only; a method may be abstract (no body) OR a default method (with a
         // body, emitted as a JVM default method).
         && c.methods.iter().all(|m| m.receiver.is_none())
@@ -9188,7 +9203,7 @@ impl<'a> Lower<'a> {
                     .fields
                     .iter()
                     .position(|(n, _)| n == delegate || n == &synth_name)? as u32;
-            self.forward_iface_methods(file, iface_name, delegate_idx, class_id, internal)?;
+            self.forward_iface_methods(file, c, iface_name, delegate_idx, class_id, internal)?;
         }
         // Expression delegates (`: I by Impl()`) always use a synthesized `$$delegate_e<j>` field.
         for (j, (iface_name, _e)) in c.delegation_exprs.iter().enumerate() {
@@ -9198,7 +9213,7 @@ impl<'a> Lower<'a> {
                 .fields
                 .iter()
                 .position(|(n, _)| n == &synth_name)? as u32;
-            self.forward_iface_methods(file, iface_name, delegate_idx, class_id, internal)?;
+            self.forward_iface_methods(file, c, iface_name, delegate_idx, class_id, internal)?;
         }
         Some(())
     }
@@ -9211,6 +9226,7 @@ impl<'a> Lower<'a> {
     fn forward_iface_methods(
         &mut self,
         file: &ast::File,
+        c: &ast::ClassDecl,
         iface_name: &str,
         delegate_idx: u32,
         class_id: ClassId,
@@ -9276,7 +9292,49 @@ impl<'a> Lower<'a> {
                 queue.push(sup);
             }
         }
+        // A member the class declares ITSELF as an `override` takes precedence over the delegated
+        // implementation (Kotlin's rule) — synthesizing a forwarder for it would shadow the class's
+        // implementation with a call to the delegate (a wrong-value miscompile). Compare parameter
+        // SHAPES, not only literal `Ty` equality: `I<T>.f(T)` is emitted as `f(Object)`, while an
+        // `I<String>` implementation declares `f(String)` and the bridge pass supplies `f(Object)`.
+        // Emitting the delegated `f(Object)` first would occupy that bridge descriptor and route
+        // interface dispatch to the delegate instead of the explicit override. Conversely, a
+        // same-named sibling overload that is not marked `override` must retain its forwarder or an
+        // interface call reaches no implementation. The semantic override flag and subtype relation
+        // make this independent of whether either declaration came from this file or a sibling file.
+        let own_methods: Vec<(String, Vec<Ty>)> = self
+            .syms
+            .class_by_type_name(type_name(internal))?
+            .methods
+            .iter()
+            .flat_map(|(n, sigs)| {
+                sigs.iter()
+                    .filter(|signature| signature.is_override())
+                    .map(move |signature| (n.clone(), signature.params.clone()))
+            })
+            .collect();
+        let own_props: std::collections::HashSet<&str> = c
+            .props
+            .iter()
+            .filter(|p| p.is_property)
+            .map(|p| p.name.as_str())
+            .chain(c.body_props.iter().map(|p| p.name.as_str()))
+            .collect();
         for (mname, params, ret, suspend) in methods {
+            // The inherited/delegated parameter is the erased side of a possible bridge. Equality is
+            // the ordinary case; erased `Any` and a wider source type admit the concrete override.
+            // The latter covers bounded generics (`I<T : Base>.f(T)` implemented as `f(Derived)`).
+            if own_methods.iter().any(|(own_name, own_params)| {
+                own_name == &mname
+                    && own_params.len() == params.len()
+                    && params.iter().zip(own_params).all(|(delegated, own)| {
+                        delegated == own
+                            || delegated.is_erased_top()
+                            || self.syms.is_source_subtype(*own, *delegated)
+                    })
+            }) {
+                continue;
+            }
             let params_ir = tys_to_ir(&params);
             let descriptor = self.runtime.method_descriptor(&params, ret)?;
             let field = self.this_field(class_id, delegate_idx);
@@ -9314,7 +9372,12 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        for (owner, _name, getter_name, setter_name, property_ty) in properties {
+        for (owner, name, getter_name, setter_name, property_ty) in properties {
+            // An `override` in the class itself replaces delegation for this property (properties
+            // can't overload, so a same-named class property is necessarily the override).
+            if own_props.contains(name.as_str()) {
+                continue;
+            }
             let field = self.this_field(class_id, delegate_idx);
             let getter = self.emit_virtual_call(
                 owner,
@@ -10902,23 +10965,25 @@ impl<'a> Lower<'a> {
         self.resolve_field_name(existing_type_name(internal)?, name)
     }
 
-    /// The property `name` DECLARED by `internal` or by one of its superclasses — the declaring owner,
-    /// its type, and whether it is private. Walks the same chain a field lookup does, because a property
-    /// is inherited exactly like the storage behind it.
+    /// The property `name` DECLARED by `internal`, one of its superclasses, or one of its
+    /// interfaces — the declaring owner, its type, and whether it is private. (An interface's
+    /// property, e.g. a default getter, is read through the implementor; the JVM dispatches the
+    /// virtual call to the interface default.)
     fn declared_property(&self, internal: TypeName, name: &str) -> Option<(TypeName, Ty, bool)> {
-        let mut cur = Some(internal);
-        while let Some(ci_name) = cur {
-            let ci = self.class_info_name(ci_name)?;
-            if let Some(p) = self.ir.classes[ci.id as usize]
-                .properties
-                .iter()
-                .find(|p| p.name == name)
-            {
-                return Some((ci_name, p.ty, p.is_private));
-            }
-            cur = ci.super_internal;
+        // Declaration ownership, superclass/interface precedence, and visibility are semantic facts,
+        // so consume the resolver's single hierarchy walk instead of reconstructing it from a mixture
+        // of current-file IR and module symbols. Besides preventing the two walks from drifting, this
+        // preserves a sibling-file property's real visibility: computed IR properties currently do not
+        // carry all accessor visibility, whereas `DeclaredPropertySig` is the canonical handoff.
+        let (owner, property) = self.syms.declared_member_prop(internal, name)?;
+        // `const val` is a static field with no instance accessor. Decline it here so the caller's
+        // ordinary static-constant path performs the read; treating every declared property as an
+        // instance operation would invent `getX()` for object constants. This is a declaration-shape
+        // decision from the same semantic handoff, not a branch on owner/file/module origin.
+        if property.is_const {
+            return None;
         }
-        None
+        Some((owner, property.ty, property.visibility.is_private()))
     }
 
     /// Target-neutral declaration shape for a semantic property owner. Same-file classes are already in
@@ -13949,18 +14014,19 @@ impl<'a> Lower<'a> {
         // Any property this class DECLARES, not only one with a backing field: a computed or delegated
         // property stores nothing, but reading it is the same operation and the backend realizes it the
         // same way (through the accessor it declares).
-        let (class, pty) = match self.resolve_field(recv_internal, name) {
-            Some((class, _idx, pty)) => (class, pty),
+        let (owner_internal, pty) = match self.resolve_field(recv_internal, name) {
+            Some((class, _idx, pty)) => (self.ir.classes[class as usize].fq_name_id(), pty),
             None => {
-                let class = self.class_info(recv_internal)?.id;
-                let declared = self.ir.classes[class as usize]
-                    .properties
-                    .iter()
-                    .find(|p| p.name == name)?;
-                (class, declared.ty)
+                // No backing field anywhere: any DECLARED property on the class, a superclass, or
+                // an interface (a computed property, e.g. an interface's default getter — the
+                // backend emits the virtual call against the DECLARING owner: `invokevirtual` for
+                // a class owner, `invokeinterface` for an interface one). Keep that semantic owner
+                // as a `TypeName`; requiring a current-file `ClassId` here made an inherited default
+                // silently disappear whenever its interface lived in a sibling module source file.
+                let (declaring, pty, _) = self.declared_property(type_name(recv_internal), name)?;
+                (declaring, pty)
             }
         };
-        let owner_internal = self.ir.classes[class as usize].fq_name_id();
         if self.source_property_read_needs_generic_value_class_box(owner_internal, name, e) {
             return None;
         }
@@ -13969,7 +14035,11 @@ impl<'a> Lower<'a> {
         // read, so it stays here.
         // A value class has no runtime type of its own — its values ARE the erased underlying — so there
         // is nothing to narrow to.
-        let owner_is_value = self.ir.classes[class as usize].is_value;
+        // Representation is also a semantic type fact. Querying it by owner keeps the cast rule valid
+        // for both current-file and module owners instead of introducing another origin branch.
+        let owner_is_value = self
+            .value_class_underlying(Ty::obj_name(owner_internal))
+            .is_some();
         let recv =
             if !owner_is_value && recv_slot_ty.is_some_and(|t| t != Ty::obj_name(owner_internal)) {
                 self.emit_type_op(IrTypeOp::Cast, recv, ty_to_ir(Ty::obj_name(owner_internal)))
