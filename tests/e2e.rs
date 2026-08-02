@@ -280,6 +280,8 @@ mod data_object_e2e;
 mod dataclass_hash_and_sam_e2e;
 #[path = "decl_body_on_next_line_e2e.rs"]
 mod decl_body_on_next_line_e2e;
+#[path = "deep_class_bail_reason_e2e.rs"]
+mod deep_class_bail_reason_e2e;
 #[path = "deep_expression_nesting_check.rs"]
 mod deep_expression_nesting_check;
 #[path = "deep_expression_nesting_check_e2e.rs"]
@@ -606,6 +608,8 @@ mod local_fun_default_args_e2e;
 mod local_fun_overload_e2e;
 #[path = "local_fun_ref_e2e.rs"]
 mod local_fun_ref_e2e;
+#[path = "lower_bail_reason_e2e.rs"]
+mod lower_bail_reason_e2e;
 #[path = "lvt_parity_e2e.rs"]
 mod lvt_parity_e2e;
 #[path = "mangled_member_concrete_class_e2e.rs"]
@@ -910,6 +914,8 @@ mod suspend_in_try_body_hoist_e2e;
 mod suspend_inline_hof_suspending_lambda_reject_e2e;
 #[path = "suspend_inline_statementless_block_e2e.rs"]
 mod suspend_inline_statementless_block_e2e;
+#[path = "suspend_interface_delegation_e2e.rs"]
+mod suspend_interface_delegation_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]
 mod suspend_loop_compound_assign_e2e;
 #[path = "suspend_loop_continue_break_e2e.rs"]

@@ -207,3 +207,43 @@ fun box(): String {
 }
 "#);
 }
+
+/// An all-`expect` common FILE legitimately emits ZERO classes after stripping (kotlinc's JVM-MPP
+/// model: the common source set has no bytecode of its own) — the module must still compile and
+/// run. The box-corpus survey used to misreport this shape as an emit bail (its top skip-bucket);
+/// this pins the compiler behavior the survey now mirrors.
+#[test]
+fn all_expect_common_file_module_compiles_and_runs() {
+    let Some(out) = common::compile_and_run_files_with_stdlib(&[
+        (
+            "Common",
+            r#"// LANGUAGE: +MultiPlatformProjects
+expect class S
+expect fun make(): S
+"#,
+        ),
+        (
+            "Main",
+            r#"actual typealias S = String
+actual fun make(): S = "OK"
+fun box(): String = make()
+"#,
+        ),
+    ]) else {
+        panic!("expected the box to compile and run");
+    };
+    assert_eq!(out, "OK");
+}
+
+/// A typealias-only FILE in a source set emits no classes of its own — the set must still compile
+/// and run (the survey's whole-set counterpart is `typealias_only_set_reports_precise_reason`).
+#[test]
+fn typealias_only_file_in_set_compiles() {
+    let Some(out) = common::compile_and_run_files_with_stdlib(&[
+        ("Alias", "typealias Greeting = String"),
+        ("Main", r#"fun box(): Greeting = "OK""#),
+    ]) else {
+        panic!("expected the box to compile and run");
+    };
+    assert_eq!(out, "OK");
+}

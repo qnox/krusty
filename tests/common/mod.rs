@@ -680,43 +680,63 @@ pub fn front_end_diagnostics_files(
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Vec<String> {
-    use krusty::diag::DiagSink;
-    use krusty::frontend::{
-        check_file_in_source_set, collect_signatures_with_cp, preinfer_module_returns,
-    };
+    front_end_diagnostics_files_with_prepare(sources, cp_jars, jdk_modules, |_, _| {})
+}
 
-    let mut diags = DiagSink::new();
-    let mut files = sources
+/// Shared production-shaped diagnostic path. The preparation callback is the only difference
+/// between a frontend-only consumer and a backend-aware batch compile; parsing, feature handling,
+/// expect/actual stripping, signature inference, checking, and diagnostic deduplication stay in
+/// `frontend::analyze_source_set_with_features_and_prepare` instead of being copied into the test
+/// harness.
+fn front_end_diagnostics_files_with_prepare<F>(
+    sources: &[&str],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    prepare: F,
+) -> Vec<String>
+where
+    F: FnOnce(&[krusty::ast::File], &mut krusty::frontend::FrontendSymbols),
+{
+    let cp = cached_classpath(cp_jars, jdk_modules);
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let inputs = sources
         .iter()
-        .map(|source| {
-            let features = krusty::features::LangFeatures::from_source(source);
-            let tokens = krusty::lexer::lex(source, &mut diags);
-            krusty::parser::parse_with_features(source, &tokens, &mut diags, &features)
-        })
+        .map(|source| krusty::frontend::SourceInput::kotlin(source))
         .collect::<Vec<_>>();
-    if sources.iter().any(|source| {
-        krusty::features::LangFeatures::from_source(source).has("MultiPlatformProjects")
-    }) {
-        krusty::frontend::strip_matched_expects(&mut files);
-    }
-    if !diags.has_errors() {
-        let mut cp_paths: Vec<PathBuf> = cp_jars.to_vec();
-        if let Some(p) = jdk_modules {
-            cp_paths.push(p.to_path_buf());
-        }
-        let cp = std::rc::Rc::new(Classpath::new(cp_paths));
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
-        let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
-        if !diags.has_errors() {
-            preinfer_module_returns(&files, &mut syms, &mut diags);
-            for (index, _) in files.iter().enumerate() {
-                diags.set_file(index as u32);
-                let _ = check_file_in_source_set(&files, index as u32, &mut syms, &mut diags);
-            }
-        }
-    }
-    diags.collapse_duplicates();
+    let mut diags = krusty::diag::DiagSink::new();
+    let _ = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        &krusty::features::LangFeatures::new(),
+        prepare,
+        &mut diags,
+    );
     diags.diags.iter().map(|d| d.msg.clone()).collect()
+}
+
+/// Multi-file checker diagnostics WITH module facade registration (`prepare_module_symbols`,
+/// which the backend drivers run before checking) — cross-file resolution then sees the same
+/// positive and negative facade registration as a real compile, unlike
+/// [`front_end_diagnostics_files`]. For asserting a cross-file resolution diagnostic. `None`
+/// (→ skip) when the toolchain is absent.
+#[allow(dead_code)]
+pub fn module_front_end_diagnostics(sources: &[(&str, &str)]) -> Option<Vec<String>> {
+    let stdlib = stdlib_jar()?;
+    let jdk = jdk_modules();
+    let source_texts = sources
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>();
+    let stems = sources
+        .iter()
+        .map(|(stem, _)| (*stem).to_string())
+        .collect::<Vec<_>>();
+    Some(front_end_diagnostics_files_with_prepare(
+        &source_texts,
+        &[stdlib],
+        jdk.as_deref(),
+        |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
+    ))
 }
 
 /// Run a JavaScript source string on Node and return its stdout (trimmed), or `None` if `node` is
@@ -844,6 +864,32 @@ pub fn stdlib_toolchain_ready() -> bool {
     // A probe, so it asks the library form rather than the diagnosing wrapper above:
     // reporting "not ready" is this function's whole job and must not panic.
     stdlib_jar().is_some() && krusty::toolchain::jdk_modules().is_some()
+}
+
+/// Run one front-end-valid inline source through the checked-file → JVM-backend pipeline.
+///
+/// Bail-reason suites deliberately share this helper instead of each rebuilding the checked-file →
+/// JVM-backend pipeline. Keeping the classpath and JDK setup here means a diagnostic test differs only
+/// in its source and expected reason; it cannot silently drift to a file-, module-, or provider-specific
+/// compilation path. As with the surrounding JVM tests, an unavailable provisioned toolchain skips the
+/// assertion rather than turning an environment limitation into a compiler failure.
+#[allow(dead_code)]
+pub fn inline_source_backend_outcome(src: &str) -> Option<BackendOutcome> {
+    let jdk = jdk_modules()?;
+    let cp = krusty::toolchain::classpath_jars_for(src);
+    backend_outcome_in_process(src, "P", &cp, Some(&jdk))
+}
+
+#[allow(dead_code)]
+pub fn assert_inline_source_lower_bail(src: &str, reason: &str) {
+    if !stdlib_toolchain_ready() {
+        return;
+    }
+    assert_eq!(
+        inline_source_backend_outcome(src),
+        Some(BackendOutcome::LowerBail(reason.to_string())),
+        "source must stop at its precise unsupported lowering boundary:\n{src}"
+    );
 }
 
 // ---------------------------------------------------------------------------
