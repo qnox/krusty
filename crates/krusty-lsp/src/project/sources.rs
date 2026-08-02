@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use super::model::{SourceModuleGraph, SourceModuleGraphKey};
@@ -176,14 +175,18 @@ impl ProjectSources {
             return Ok((&cache.documents, cache.inferred_count, java_sources));
         }
 
-        let mut paths = Vec::new();
-        for (root, ignore_workspace_directories) in &root_policies {
-            paths.extend(find_sources(
-                root,
-                *ignore_workspace_directories,
-                &excluded_source_roots,
-            )?);
-        }
+        // Every root in one walk: a source root is usually a few dozen package directories, and a
+        // walk per root would divide the work too finely to be worth dividing.
+        let walk_roots = root_policies
+            .iter()
+            .map(
+                |(root, ignore_workspace_directories)| super::walk::WalkRoot {
+                    path: root.clone(),
+                    ignore_workspace_directories: *ignore_workspace_directories,
+                },
+            )
+            .collect::<Vec<_>>();
+        let mut paths = find_sources(&walk_roots, &excluded_source_roots)?;
         paths.retain(|path| self.excluded_paths.binary_search(path).is_err());
         paths.retain(|path| {
             module_relations
@@ -687,7 +690,7 @@ fn size_limit_message(max_bytes: usize) -> String {
     )
 }
 
-fn read_error_message() -> String {
+pub(super) fn read_error_message() -> String {
     "module source set contains an unreadable source; semantic diagnostics suppressed".to_string()
 }
 
@@ -698,10 +701,11 @@ fn cache_limit_message() -> String {
 
 /// Every Kotlin source the project model knows about, for background indexing.
 ///
-/// Reuses `find_sources`, so the ignore rules that govern open-document source discovery govern
-/// the sweep too; a second walk here would be a second, divergent definition of what counts as a
-/// workspace source. The walk is unbounded in depth and entry count — a large tree must scan
-/// completely, and `progress` is what keeps the client informed while it does.
+/// Reuses the same walker as open-document discovery, so the ignore rules that govern one govern
+/// the other; a second walk here would be a second, divergent definition of what counts as a
+/// workspace source. Every root goes into one walk, which is what makes threading it worthwhile:
+/// per root there is rarely enough to divide. The walk is unbounded in depth and entry count — a
+/// large tree must scan completely, and `progress` is what keeps the client informed while it does.
 pub fn workspace_sources(
     model: &super::model::ProjectModel,
     progress: &mut dyn FnMut(crate::ScanProgress),
@@ -713,41 +717,30 @@ pub fn workspace_sources(
         .collect();
     roots.sort();
     roots.dedup();
-    let all_roots = roots.clone();
-    let mut sources = Vec::new();
-    let mut truncated = false;
-    'roots: for root in &roots {
-        // A root nested inside another would otherwise be walked twice and charged twice.
-        let excluded: Vec<PathBuf> = all_roots
-            .iter()
-            .filter(|other| *other != root && other.starts_with(root))
-            .cloned()
-            .collect();
-        let mut found = Vec::new();
-        // Keep the discovered prefix on a read error. Dropping it would make the root contribute
-        // no files at all, even though the caller explicitly asked for best-effort coverage.
-        // The walker counts only its own root; offset by what earlier roots found so the client
-        // sees a monotonic workspace total rather than a counter that restarts per module.
-        let base = sources.len() as u64;
-        let mut root_progress = |progress_event: crate::ScanProgress| match progress_event {
-            crate::ScanProgress::Found { files } => progress(crate::ScanProgress::Found {
-                files: base + files,
-            }),
-            other => progress(other),
-        };
-        if find_sources_into(root, true, &excluded, &mut found, &mut root_progress).is_err() {
+    // A root nested inside another would otherwise be walked twice and charged twice. Every root is
+    // its own walk entry, so the outer walk stops at all of them.
+    let excluded = roots.clone();
+    let walk_roots = roots
+        .iter()
+        .map(|root| super::walk::WalkRoot {
+            path: root.clone(),
+            ignore_workspace_directories: true,
+        })
+        .collect::<Vec<_>>();
+    let mut found = Vec::new();
+    // Keep the discovered prefix on a read error. Dropping it would make the walk contribute no
+    // files at all, even though the caller explicitly asked for best-effort coverage.
+    let mut truncated = find_sources_into(&walk_roots, &excluded, &mut found, progress).is_err();
+    let mut sources = Vec::with_capacity(found.len());
+    for path in found
+        .into_iter()
+        .filter(|path| krusty::source::is_supported_path(path))
+    {
+        if sources.len() >= crate::MAX_WORKSPACE_INDEX_FILES {
             truncated = true;
+            break;
         }
-        for path in found
-            .into_iter()
-            .filter(|path| krusty::source::is_supported_path(path))
-        {
-            if sources.len() >= crate::MAX_WORKSPACE_INDEX_FILES {
-                truncated = true;
-                break 'roots;
-            }
-            sources.push(path);
-        }
+        sources.push(path);
     }
     sources.sort();
     sources.dedup();
@@ -755,72 +748,26 @@ pub fn workspace_sources(
 }
 
 fn find_sources(
-    root: &Path,
-    ignore_workspace_directories: bool,
-    excluded_source_roots: &[PathBuf],
+    roots: &[super::walk::WalkRoot],
+    excluded: &[PathBuf],
 ) -> Result<Vec<PathBuf>, String> {
     let mut sources = Vec::new();
-    find_sources_into(
-        root,
-        ignore_workspace_directories,
-        excluded_source_roots,
-        &mut sources,
-        &mut |_| {},
-    )?;
+    find_sources_into(roots, excluded, &mut sources, &mut |_| {})?;
     Ok(sources)
 }
 
-/// Shared walker for strict open-document discovery and best-effort workspace inventory.
+/// Shared entry point for strict open-document discovery and best-effort workspace inventory.
 ///
 /// The strict wrapper above discards this buffer on error. Workspace indexing deliberately keeps
 /// it, so both paths share traversal and ignore rules without sharing incompatible error
-/// semantics. The walk is iterative and unlimited in depth and entry count; `progress` receives
-/// the discovered-source count at most every `SCAN_PROGRESS_INTERVAL` and once when the root's
-/// walk ends, so a long scan is visible without flooding the client.
+/// semantics.
 fn find_sources_into(
-    root: &Path,
-    ignore_workspace_directories: bool,
-    excluded_source_roots: &[PathBuf],
+    roots: &[super::walk::WalkRoot],
+    excluded: &[PathBuf],
     sources: &mut Vec<PathBuf>,
     progress: &mut dyn FnMut(crate::ScanProgress),
 ) -> Result<(), String> {
-    let mut last_report = std::time::Instant::now();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        let entries = match fs::read_dir(directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(read_error_message()),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|_| read_error_message())?;
-            let path = entry.path();
-            let kind = entry.file_type().map_err(|_| read_error_message())?;
-            if kind.is_dir() && excluded_source_roots.binary_search(&path).is_ok() {
-                continue;
-            }
-            if kind.is_dir()
-                && (!ignore_workspace_directories || !super::walk::is_ignored_directory(&path))
-            {
-                pending.push(path);
-            } else if kind.is_file()
-                && (krusty::source::is_supported_path(&path)
-                    || path.extension().and_then(|extension| extension.to_str()) == Some("java"))
-            {
-                sources.push(path);
-            }
-        }
-        if last_report.elapsed() >= SCAN_PROGRESS_INTERVAL {
-            progress(crate::ScanProgress::Found {
-                files: sources.len() as u64,
-            });
-            last_report = std::time::Instant::now();
-        }
-    }
-    progress(crate::ScanProgress::Found {
-        files: sources.len() as u64,
-    });
-    Ok(())
+    super::walk::walk_sources(roots, excluded, sources, SCAN_PROGRESS_INTERVAL, progress)
 }
 
 #[cfg(test)]
@@ -844,6 +791,13 @@ mod tests {
 
     fn file_uri(path: &Path) -> String {
         url::Url::from_file_path(path).unwrap().into()
+    }
+
+    fn walk_root(path: &Path, ignore_workspace_directories: bool) -> super::super::walk::WalkRoot {
+        super::super::walk::WalkRoot {
+            path: path.to_path_buf(),
+            ignore_workspace_directories,
+        }
     }
 
     fn dependency_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, ProjectModel) {
@@ -1647,7 +1601,7 @@ mod tests {
         fs::write(directory.join("Second.kt"), "").unwrap();
         fs::write(directory.join("deep/nested/tree/Third.kt"), "").unwrap();
 
-        let result = find_sources(&directory, false, &[]);
+        let result = find_sources(&[walk_root(&directory, false)], &[]);
 
         fs::remove_dir_all(&directory).ok();
         let mut found = result.unwrap();
@@ -1672,11 +1626,16 @@ mod tests {
         let mut found = Vec::new();
         let mut reports = Vec::new();
 
-        let result = find_sources_into(&directory, false, &[], &mut found, &mut |progress| {
-            if let crate::ScanProgress::Found { files } = progress {
-                reports.push(files);
-            }
-        });
+        let result = find_sources_into(
+            &[walk_root(&directory, false)],
+            &[],
+            &mut found,
+            &mut |progress| {
+                if let crate::ScanProgress::Found { files } = progress {
+                    reports.push(files);
+                }
+            },
+        );
 
         fs::remove_dir_all(&directory).ok();
         assert!(result.is_ok());
@@ -1698,7 +1657,10 @@ mod tests {
             fs::write(unrelated.join(format!("{index}.kt")), "").unwrap();
         }
 
-        let result = find_sources(&directory, false, std::slice::from_ref(&unrelated));
+        let result = find_sources(
+            &[walk_root(&directory, false)],
+            std::slice::from_ref(&unrelated),
+        );
 
         fs::remove_dir_all(&directory).ok();
         assert_eq!(result.unwrap(), vec![directory.join("Active.kt")]);
@@ -1714,7 +1676,7 @@ mod tests {
         }
         fs::write(directory.join("src/Feature.kt"), "").unwrap();
 
-        let result = find_sources(&directory, true, &[]);
+        let result = find_sources(&[walk_root(&directory, true)], &[]);
 
         fs::remove_dir_all(&directory).ok();
         assert_eq!(result.unwrap(), vec![directory.join("src/Feature.kt")]);
@@ -1726,7 +1688,7 @@ mod tests {
         fs::create_dir_all(directory.join("build")).unwrap();
         fs::write(directory.join("build/Feature.kt"), "").unwrap();
 
-        let result = find_sources(&directory, false, &[]);
+        let result = find_sources(&[walk_root(&directory, false)], &[]);
 
         fs::remove_dir_all(&directory).ok();
         assert_eq!(result.unwrap(), vec![directory.join("build/Feature.kt")]);

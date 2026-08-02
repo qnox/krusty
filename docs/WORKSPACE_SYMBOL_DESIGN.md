@@ -25,10 +25,14 @@ Landed since:
   on disk. This retired
   `workspace_symbols_do_not_observe_the_snapshot_after_the_last_document_closes`.
 
-**Still outstanding:** everything from "Composite index" onward — persistence across restarts,
-dependency indices, and git-driven discovery — is design for remaining work, not a description of
-current behaviour. Coverage itself is in place; what is missing is making a cold start cheap and
-extending the index past the workspace's own sources.
+- **Discovery on shared walkers.** Every source root goes into one threaded walk rather than one
+  walk per root, which is what makes threading it worth anything: a root on its own is a few dozen
+  directories.
+
+**Still outstanding:** everything from "Composite index" onward — persistence across restarts and
+dependency indices — is design for remaining work, not a description of current behaviour. Coverage
+is in place and discovery is no longer the cold-start cost; what is missing is surviving a restart
+and extending the index past the workspace's own sources.
 
 ## Problem
 
@@ -150,6 +154,30 @@ At ~80–100 µs to parse and extract one file, a realistic branch switch (10–
 **Cold start dominates everything.** Walking the tree and parsing it is the cost; incremental
 updates are noise. This inverts the usual argument for persistence: it is a startup optimisation,
 not a branch-switching one.
+
+The walk itself is now threaded, which is where that cost went. It waits on directory reads rather
+than working the CPU, so more walkers than cores is the point — over a single large tree, 4 walkers
+give 1.5x, 8 give 1.8x, 16 give 2.3x and 32 give 2.7x, and sixteen is where intellij-community stops
+improving.
+
+That measurement is not the one that matters, though, and taking it for the answer was a mistake
+worth recording. **Neither caller walks one large tree.** Both walk the project model's source
+roots, and a source root is usually a few dozen package directories — so a set of walkers per root
+sets itself up and tears itself down for a handful of reads, which measured 2-3x *slower* than not
+threading at all. Every root now goes into one walk, which is both the correct shape and the one
+with enough work to divide:
+
+| | roots | per-root, single-threaded | one walk, shared walkers |
+|---|---|---|---|
+| kotlin | 903 | 303 ms | 195 ms |
+| intellij-community | 839 | 1,109 ms | 564 ms |
+
+Measured interleaved in one process, because the machine drifts between runs by more than the change
+is worth: separate runs of the same code varied by 80%.
+
+`git ls-files` would read the same set faster still, but it buys a dependency on the git binary, a
+fallback path for every workspace that is not a repository, and a second definition of what counts
+as a workspace source — for a cost that is already well under a second.
 
 ## Index structure
 
@@ -469,8 +497,9 @@ Done:
   sources and never sees a URI, so the builder numbers entries positionally and one `assign_uris`
   call at that boundary converts positions into file ids. Nothing has to cross the worker wire.
 
-2. **Git-driven discovery** — the largest single startup win (7.9s → 0.77s), independent of
-   persistence, low risk.
+2. **Faster discovery** — done, by walking every source root together on shared walkers rather than
+   by shelling out to git. 1.6x on kotlin and 2.0x on intellij-community in the shape the callers
+   actually use, no new dependency, and one definition of a workspace source.
 3. **Dependency indices** — content-addressed, shared across workspaces. Immutable, so the lowest
    correctness risk of the persistence work, and the biggest cross-project payoff.
 4. **mmap'd baselines and delta segments** — restart survival and evictable memory. All the format
