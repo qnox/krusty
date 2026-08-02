@@ -74,6 +74,13 @@ const MAX_SOURCE_SET_HOVER_WIRE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SOURCE_SET_DOCUMENT_SYMBOL_ENTRIES: usize = 32 * 1024;
 const MAX_SOURCE_SET_DOCUMENT_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_WORKSPACE_SYMBOL_WIRE_BYTES: usize = 8 * 1024 * 1024;
+/// Ceiling on symbols in one response, on top of the byte ceiling above.
+///
+/// A broad query over a project-wide index matches tens of thousands of declarations, and encoding
+/// them is the dominant cost of answering -- for a client that keeps 100 (Zed's `MAX_MATCHES`) and
+/// re-sorts what it keeps. Results are emitted strongest rung first, so the cap keeps the best of
+/// them and, because encoding stops when it is reached, the weakest rungs are never even scanned.
+pub const MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS: usize = 512;
 const MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 8 * 1024 * 1024;
 /// Ceiling on the retained project-wide index, which is a different thing from the source-set
 /// budget above: that one bounds a single worker message, while this one bounds everything the
@@ -509,6 +516,14 @@ pub struct WorkspaceSymbolIndex {
     names: Vec<String>,
     files: Vec<String>,
     complete: bool,
+    /// Per-name-id match keys, derived from `names` and rebuilt with the search order. Held rather
+    /// than recomputed because both fallback rungs test every name on every query: allocating a
+    /// lowercase copy and a camel-hump expansion per entry is what made a project-wide index cost
+    /// over a tenth of a second per keystroke on the thread that also serves edits.
+    #[serde(skip)]
+    lowercase_names: Vec<String>,
+    #[serde(skip)]
+    initials: Vec<String>,
 }
 
 impl Default for WorkspaceSymbolIndex {
@@ -521,6 +536,8 @@ impl Default for WorkspaceSymbolIndex {
             names: Vec::new(),
             files: Vec::new(),
             complete: true,
+            lowercase_names: Vec::new(),
+            initials: Vec::new(),
         }
     }
 }
@@ -555,6 +572,8 @@ impl<'de> Deserialize<'de> for WorkspaceSymbolIndex {
             names: wire.names,
             files: wire.files,
             complete: wire.complete,
+            lowercase_names: Vec::new(),
+            initials: Vec::new(),
         };
         index.drop_invalid_entries();
         index.rebuild_search_order();
@@ -936,15 +955,27 @@ impl DocumentSymbolIndex {
 /// rather than once per later chunk, and the segment count stays around `log2(entries / chunk)` --
 /// under a dozen for either reference corpus. Segments are disjoint by file, so a query reads them
 /// in sequence with no reconciliation beyond the shadowing every layer already does.
-#[derive(Default)]
 pub struct ProjectSymbolIndex {
     /// Oldest and largest first; the newest chunk is last.
     segments: Vec<WorkspaceSymbolIndex>,
+    /// Tracked here rather than read back off the segments, because a chunk whose every file was
+    /// skipped contributes no segment to carry the flag.
+    complete: bool,
+}
+
+impl Default for ProjectSymbolIndex {
+    fn default() -> Self {
+        Self {
+            segments: Vec::new(),
+            complete: true,
+        }
+    }
 }
 
 impl ProjectSymbolIndex {
     /// Re-index `uris` from `segment`, dropping whatever any segment held for them.
     pub fn replace_files(&mut self, uris: &[String], segment: WorkspaceSymbolIndex) {
+        self.complete &= segment.is_complete();
         for existing in &mut self.segments {
             existing.remove_files(uris);
         }
@@ -964,12 +995,12 @@ impl ProjectSymbolIndex {
                 .pop()
                 .expect("two segments were just observed");
             // The ceiling is on the whole layer, so what the untouched segments already hold is
-            // spent before this merge starts.
+            // spent before this merge starts -- their string tables as well as their entries, or
+            // the layer settles above its ceiling by whatever those tables weigh.
             let reserved = self.segments[..self.segments.len() - 1]
                 .iter()
-                .map(WorkspaceSymbolIndex::entry_count)
-                .sum::<usize>()
-                .saturating_mul(WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES);
+                .map(WorkspaceSymbolIndex::retained_wire_bytes)
+                .sum::<usize>();
             self.segments
                 .last_mut()
                 .expect("two segments were just observed")
@@ -994,6 +1025,12 @@ impl ProjectSymbolIndex {
 
     pub fn segment_count(&self) -> usize {
         self.segments.len()
+    }
+
+    /// Whether every declaration the sweep offered is actually in here. False once a file was too
+    /// large to parse or the layer reached its retention ceiling.
+    pub fn is_complete(&self) -> bool {
+        self.complete && self.segments.iter().all(WorkspaceSymbolIndex::is_complete)
     }
 }
 
@@ -1285,7 +1322,22 @@ impl WorkspaceSymbolIndex {
         }
         self.entries = retained;
         self.files = files;
-        self.rebuild_search_order();
+        // Dropping entries preserves the relative order of the ones that survive, so both rank
+        // orders can be filtered and renumbered in one pass. Re-sorting them is what made
+        // re-indexing a single edited file cost a pass over the whole segment holding it.
+        self.retain_search_order(&retained_indices);
+    }
+
+    fn retain_search_order(&mut self, retained_indices: &[Option<u32>]) {
+        for order in [&mut self.by_name, &mut self.by_initials] {
+            let mut renumbered = Vec::with_capacity(order.len());
+            for index in order.iter() {
+                if let Some(Some(retained)) = retained_indices.get(*index as usize) {
+                    renumbered.push(*retained);
+                }
+            }
+            *order = renumbered;
+        }
     }
 
     /// Replace positional `entry[0]` file indices with ids in the index's own URI table.
@@ -1371,16 +1423,18 @@ impl WorkspaceSymbolIndex {
     }
 
     fn rebuild_search_order(&mut self) {
-        let lowercase_names = self
+        self.lowercase_names = self
             .names
             .iter()
             .map(|name| name.to_lowercase())
             .collect::<Vec<_>>();
-        let initials = self
+        self.initials = self
             .names
             .iter()
             .map(|name| camel_hump_initials(name))
             .collect::<Vec<_>>();
+        let lowercase_names = &self.lowercase_names;
+        let initials = &self.initials;
         let name_id = |entry_index: u32| {
             self.entries
                 .get(entry_index as usize)
@@ -1418,8 +1472,11 @@ impl WorkspaceSymbolIndex {
         self.by_initials = by_initials;
     }
 
-    fn lowercase_name(&self, entry_index: u32) -> Option<String> {
-        Some(self.source_name(entry_index)?.to_lowercase())
+    fn lowercase_name(&self, entry_index: u32) -> Option<&str> {
+        let entry = self.entries.get(entry_index as usize)?;
+        self.lowercase_names
+            .get(entry[10] as usize)
+            .map(String::as_str)
     }
 
     fn source_name(&self, entry_index: u32) -> Option<&str> {
@@ -1427,15 +1484,17 @@ impl WorkspaceSymbolIndex {
         self.names.get(entry[10] as usize).map(String::as_str)
     }
 
-    fn entry_initials(&self, entry_index: u32) -> String {
-        self.source_name(entry_index)
-            .map(camel_hump_initials)
+    fn entry_initials(&self, entry_index: u32) -> &str {
+        self.entries
+            .get(entry_index as usize)
+            .and_then(|entry| self.initials.get(entry[10] as usize))
+            .map(String::as_str)
             .unwrap_or_default()
     }
 
     fn prefix_matches(&self, lowercase_query: &str) -> &[u32] {
         let start = self.by_name.partition_point(|&index| {
-            self.lowercase_name(index).unwrap_or_default().as_str() < lowercase_query
+            self.lowercase_name(index).unwrap_or_default() < lowercase_query
         });
         let count = self.by_name[start..].partition_point(|&index| {
             self.lowercase_name(index)
@@ -1448,7 +1507,7 @@ impl WorkspaceSymbolIndex {
     fn initials_matches(&self, lowercase_query: &str) -> &[u32] {
         let start = self
             .by_initials
-            .partition_point(|&index| self.entry_initials(index).as_str() < lowercase_query);
+            .partition_point(|&index| self.entry_initials(index) < lowercase_query);
         let count = self.by_initials[start..]
             .partition_point(|&index| self.entry_initials(index).starts_with(lowercase_query));
         &self.by_initials[start..start + count]
@@ -1561,8 +1620,17 @@ impl WorkspaceSymbolIndex {
             // two source sets would not recognise itself.
             let uri = match other.files.get(entry[0] as usize) {
                 Some(uri) => Some(uri.as_str()),
-                None if other.files.is_empty() => None,
+                // A positional index shares its numbering with the index it merges into, so this
+                // is only meaningful while neither side has bound its URIs. Reading a file id as a
+                // position would silently report declarations against the wrong file, and the
+                // debug assertion below compiles out of both the gate and release profiles, so
+                // refuse the entry rather than trust it.
+                None if other.files.is_empty() && self.files.is_empty() => None,
                 None => {
+                    debug_assert!(
+                        other.files.is_empty(),
+                        "workspace symbol entry names a file its index does not hold"
+                    );
                     self.complete = false;
                     remapped_entries.push(None);
                     continue;
@@ -1725,6 +1793,37 @@ impl WorkspaceSymbolIndex {
             .collect()
     }
 
+    /// Which interned names satisfy a fallback rung.
+    ///
+    /// Both fallback rungs are scans, and a project-wide index holds several entries per distinct
+    /// name -- 698,516 declarations over 173,551 names on the reference corpus. Testing the name
+    /// table once and reducing the per-entry work to an array read is what keeps a scan affordable
+    /// on the request thread.
+    /// `predicate` receives the name already lowercased and its camel-hump initials, both cached,
+    /// so a rung never lowercases or re-derives anything per name.
+    fn matching_names(&self, predicate: impl Fn(&str, &str) -> bool) -> Vec<bool> {
+        self.lowercase_names
+            .iter()
+            .enumerate()
+            .map(|(id, name)| {
+                let initials = self
+                    .initials
+                    .get(id)
+                    .map(String::as_str)
+                    .unwrap_or_default();
+                predicate(name, initials)
+            })
+            .collect()
+    }
+
+    fn name_matches(&self, entry_index: u32, matching: &[bool]) -> bool {
+        self.entries
+            .get(entry_index as usize)
+            .and_then(|entry| matching.get(entry[10] as usize))
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// Encode one rung of the ladder. Returns false once the wire budget is spent.
     fn encode_rung(
         &self,
@@ -1787,15 +1886,15 @@ impl WorkspaceSymbolIndex {
                 }
             }
             WorkspaceSymbolRung::InitialsSubsequence => {
+                // The rung's own condition is the selective one; the exclusions only decide
+                // whether an earlier rung already claimed the name, so test them second.
+                let matching = self.matching_names(|name, initials| {
+                    is_ordered_subsequence_lowercase(initials, lowercase_query)
+                        && !initials.starts_with(lowercase_query)
+                        && !name.starts_with(lowercase_query)
+                });
                 for &index in &self.by_initials {
-                    let Some(name) = self.source_name(index) else {
-                        continue;
-                    };
-                    let initials = camel_hump_initials(name);
-                    if starts_with_lowercase(name, lowercase_query)
-                        || initials.starts_with(lowercase_query)
-                        || !is_ordered_subsequence_lowercase(&initials, lowercase_query)
-                    {
+                    if !self.name_matches(index, &matching) {
                         continue;
                     }
                     if !self.admit(index, scope, result, wire_bytes, seen) {
@@ -1804,15 +1903,13 @@ impl WorkspaceSymbolIndex {
                 }
             }
             WorkspaceSymbolRung::NameSubsequence => {
+                let matching = self.matching_names(|name, initials| {
+                    is_ordered_subsequence_lowercase(name, lowercase_query)
+                        && !name.starts_with(lowercase_query)
+                        && !is_ordered_subsequence_lowercase(initials, lowercase_query)
+                });
                 for index in 0..self.entries.len() as u32 {
-                    let Some(name) = self.source_name(index) else {
-                        continue;
-                    };
-                    let initials = camel_hump_initials(name);
-                    if starts_with_lowercase(name, lowercase_query)
-                        || is_ordered_subsequence_lowercase(&initials, lowercase_query)
-                        || !is_ordered_subsequence_lowercase(name, lowercase_query)
-                    {
+                    if !self.name_matches(index, &matching) {
                         continue;
                     }
                     if !self.admit(index, scope, result, wire_bytes, seen) {
@@ -1908,6 +2005,22 @@ impl WorkspaceSymbolIndex {
         self.entries.len()
     }
 
+    /// What this index costs against a retention budget: its entries plus every string table.
+    fn retained_wire_bytes(&self) -> usize {
+        self.entries
+            .len()
+            .saturating_mul(WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES)
+            .saturating_add(
+                self.packages
+                    .iter()
+                    .chain(&self.names)
+                    .chain(&self.files)
+                    .fold(0usize, |bytes, value| {
+                        bytes.saturating_add(workspace_symbol_string_wire_cost(value))
+                    }),
+            )
+    }
+
     /// Whether every indexable declaration fit in the retained snapshot budget.
     pub fn is_complete(&self) -> bool {
         self.complete
@@ -1961,7 +2074,9 @@ impl WorkspaceSymbolIndex {
         });
         let symbol_bytes = serialized_json_wire_bytes(&symbol).unwrap_or(usize::MAX);
         let next_bytes = wire_bytes.saturating_add(symbol_bytes).saturating_add(1);
-        if next_bytes > MAX_WORKSPACE_SYMBOL_WIRE_BYTES {
+        if next_bytes > MAX_WORKSPACE_SYMBOL_WIRE_BYTES
+            || result.len() >= MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS
+        {
             return false;
         }
         *wire_bytes = next_bytes;
@@ -4028,6 +4143,8 @@ mod tests {
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
             files: vec!["file:///Merged.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
         let mut other = WorkspaceSymbolIndex {
@@ -4037,6 +4154,8 @@ mod tests {
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
             files: vec!["file:///Merged.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
         index.rebuild_search_order();
@@ -4201,6 +4320,58 @@ mod tests {
                 ["uri"],
             format!("file:///src/File{last}.kt")
         );
+    }
+
+    #[test]
+    fn a_broad_query_is_bounded_by_the_response_symbol_cap() {
+        let sources: Vec<(String, String)> = (0..MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS * 2)
+            .map(|n| {
+                (
+                    format!("file:///Broad{n}.kt"),
+                    format!("package demo\nclass BroadType{n}\n"),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> = sources
+            .iter()
+            .map(|(uri, text)| (uri.as_str(), text.as_str()))
+            .collect();
+        let index = WorkspaceSymbolIndex::from_disk_sources(&borrowed);
+
+        // Every one of these matches on the strongest rung, so the cap decides the count.
+        let encoded = index.encode("BroadType");
+        assert_eq!(encoded.len(), MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS);
+        assert!(encoded
+            .iter()
+            .all(|symbol| symbol["location"]["range"]["start"]["line"].is_number()));
+    }
+
+    #[test]
+    fn removing_a_file_keeps_the_remaining_rank_order() {
+        let mut index = WorkspaceSymbolIndex::from_disk_sources(&[
+            ("file:///A.kt", "package demo\nclass RankAlpha\n"),
+            ("file:///B.kt", "package demo\nclass RankBeta\n"),
+            ("file:///C.kt", "package demo\nclass RankGamma\n"),
+        ]);
+        let before = index
+            .encode("rank")
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(before, vec!["RankAlpha", "RankBeta", "RankGamma"]);
+
+        // Removal renumbers the rank orders rather than re-sorting them; the survivors must keep
+        // both their order and their identity.
+        index.remove_files(&["file:///B.kt".to_string()]);
+
+        let after = index
+            .encode("rank")
+            .into_iter()
+            .map(|symbol| symbol["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(after, vec!["RankAlpha", "RankGamma"]);
+        assert_eq!(index.encode("rg")[0]["name"], "RankGamma");
+        assert_eq!(index.file_uris(), ["file:///A.kt", "file:///C.kt"]);
     }
 
     #[test]
@@ -4466,6 +4637,8 @@ mod tests {
             by_initials: Vec::new(),
             names: vec![name],
             files: vec!["file:///Long.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
 
@@ -4543,6 +4716,8 @@ mod tests {
             by_initials: Vec::new(),
             names: vec!["Kept".into(), "Removed".into()],
             files: vec!["file:///Kept.kt".into(), "file:///Removed.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
         index.rebuild_search_order();
@@ -4597,6 +4772,8 @@ mod tests {
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
             files: vec!["file:///Needle.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: false,
         };
         index.rebuild_search_order();
@@ -5796,6 +5973,8 @@ mod tests {
             by_initials: vec![0],
             names: vec!["Result".repeat(1024)],
             files: vec!["file:///Result.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: false,
         };
         let non_workspace_bytes = analysis.non_workspace_semantic_wire_bytes();
@@ -5843,6 +6022,8 @@ mod tests {
             by_initials: Vec::new(),
             names: vec!["Needle".into()],
             files: vec!["file:///Merged.kt".into()],
+            initials: Vec::new(),
+            lowercase_names: Vec::new(),
             complete: true,
         };
         index.rebuild_search_order();

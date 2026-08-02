@@ -272,6 +272,7 @@ struct CommandState {
     queued: HashMap<String, QueuedIndexEntry>,
     queued_bytes: usize,
     index_admission_truncated: bool,
+    symbol_admission_truncated: bool,
     /// Files handed out, and files enumerated, since the sweep began. Progress reports the pair so
     /// a large workspace shows movement instead of a constant chunk size.
     indexed_done: usize,
@@ -414,7 +415,7 @@ impl CommandState {
                     if bytes
                         > MAX_QUEUED_SYMBOL_INDEX_BYTES.saturating_sub(self.symbol_queued_bytes)
                     {
-                        self.index_admission_truncated = true;
+                        self.symbol_admission_truncated = true;
                         break;
                     }
                     self.symbol_queued_bytes = self.symbol_queued_bytes.saturating_add(bytes);
@@ -490,19 +491,18 @@ impl CommandState {
         if let Some(command) = self.pending.pop_front() {
             return Some(command);
         }
-        if let Some(job) = self.symbols.pop_front() {
-            self.symbol_queued_bytes = self.symbol_queued_bytes.saturating_sub(
-                job.uris
-                    .iter()
-                    .map(|uri| workspace_index_uri_bytes(uri))
-                    .sum::<usize>(),
-            );
-            return Some(EngineCommand::IndexSymbols(job));
-        }
         loop {
             let job = match self.neighborhood.pop_front() {
                 Some(job) => job,
-                None => self.sweep.pop_front()?,
+                // Symbol chunks come between the two diagnostic levels. Ahead of the sweep, because
+                // they are a parse each and project-wide search should not wait hours for a sweep
+                // that is a full analysis per chunk. Behind the neighbourhood level, because that
+                // level is the fast lane for a file the user just saved, and a whole project's
+                // worth of symbol chunks in front of it would be a latency regression.
+                None => match self.take_symbol_chunk() {
+                    Some(command) => return Some(command),
+                    None => self.sweep.pop_front()?,
+                },
             };
             let Some(job) = self.claim(job) else {
                 // Every URI in the chunk was promoted to a higher level; it is a stale duplicate.
@@ -511,6 +511,17 @@ impl CommandState {
             self.indexed_done = self.indexed_done.saturating_add(job.uris.len());
             return Some(EngineCommand::Index(job));
         }
+    }
+
+    fn take_symbol_chunk(&mut self) -> Option<EngineCommand> {
+        let job = self.symbols.pop_front()?;
+        self.symbol_queued_bytes = self.symbol_queued_bytes.saturating_sub(
+            job.uris
+                .iter()
+                .map(|uri| workspace_index_uri_bytes(uri))
+                .sum::<usize>(),
+        );
+        Some(EngineCommand::IndexSymbols(job))
     }
 
     /// Drop the URIs this chunk no longer owns, then release the rest so a file that changes while
@@ -580,6 +591,7 @@ impl CommandState {
         self.queued.clear();
         self.queued_bytes = 0;
         self.index_admission_truncated = false;
+        self.symbol_admission_truncated = false;
         self.generation
     }
 
@@ -723,6 +735,14 @@ impl CommandReceiver {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .index_admission_truncated
+    }
+
+    fn symbol_admission_truncated(&self) -> bool {
+        self.queue
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .symbol_admission_truncated
     }
 
     /// Replace the model generation from inside the engine after a deferred project refresh.
@@ -1019,15 +1039,29 @@ fn run<A: Analysis>(
                     let generation = commands.index_generation();
                     if submitted_sweep_generation != Some(generation) {
                         submit_workspace_sweep(&mut analyze, &commands);
-                        if (analyze.workspace_index_incomplete()
-                            || commands.index_admission_truncated())
+                        let mut logs = Vec::new();
+                        if analyze.workspace_index_incomplete()
+                            || commands.index_admission_truncated()
+                        {
+                            logs.push(
+                                "krusty: workspace diagnostic inventory reached its retention or \
+                                 queue limit; background results are incomplete"
+                                    .to_string(),
+                            );
+                        }
+                        // The two queues have their own ceilings, so say which one was reached
+                        // rather than reporting a symbol shortfall as a diagnostic one.
+                        if commands.symbol_admission_truncated() {
+                            logs.push(
+                                "krusty: workspace symbol inventory reached its queue limit; \
+                                 project-wide symbol search is incomplete"
+                                    .to_string(),
+                            );
+                        }
+                        if !logs.is_empty()
                             && events
                                 .send(Incoming::Engine(EngineEvent::Project(ProjectFeedback {
-                                    logs: vec![
-                                        "krusty: workspace diagnostic inventory reached its \
-                                         retention or queue limit; background results are incomplete"
-                                            .to_string(),
-                                    ],
+                                    logs,
                                     ..ProjectFeedback::default()
                                 })))
                                 .is_err()
@@ -1972,6 +2006,55 @@ mod tests {
             panic!("expected an index chunk");
         };
         assert_eq!(second.priority, IndexPriority::Sweep);
+    }
+
+    #[test]
+    fn symbol_chunks_sit_between_the_neighborhood_and_the_sweep() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/Far.kt".into()],
+        }));
+        state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+            generation: 0,
+            uris: vec!["file:///w/Symbols.kt".into()],
+        }));
+        state.enqueue(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Neighborhood,
+            uris: vec!["file:///w/JustSaved.kt".into()],
+        }));
+
+        // The neighbourhood level is the fast lane for a file the user just saved; a project's
+        // worth of symbol chunks in front of it would be a latency regression. The sweep is a full
+        // analysis per chunk, so symbols must not wait behind it either.
+        let order = std::iter::from_fn(|| state.take())
+            .map(|command| match command {
+                EngineCommand::Index(job) => format!("{:?}", job.priority),
+                EngineCommand::IndexSymbols(_) => "Symbols".to_string(),
+                _ => "other".to_string(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["Neighborhood", "Symbols", "Sweep"]);
+    }
+
+    #[test]
+    fn a_symbol_queue_overflow_is_reported_as_its_own_limit() {
+        let mut state = CommandState::default();
+        let uris = (0..(MAX_QUEUED_SYMBOL_INDEX_BYTES / 64 + 8))
+            .map(|index| format!("file:///w/{}/Symbols{index}.kt", "d".repeat(48)))
+            .collect::<Vec<_>>();
+        state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+            generation: 0,
+            uris,
+        }));
+
+        assert!(state.symbol_admission_truncated);
+        assert!(
+            !state.index_admission_truncated,
+            "a symbol shortfall must not be reported as a diagnostic one"
+        );
     }
 
     #[test]

@@ -974,6 +974,7 @@ pub struct LspService<B> {
     /// Project-model generation `project_symbols` describes. A batch from an older generation is
     /// about a model that no longer exists.
     project_symbols_generation: u64,
+    project_symbols_incomplete_reported: bool,
     workspace_diagnostics: WorkspaceDiagnosticStore,
     backend: B,
     analysis_dirty: bool,
@@ -1028,6 +1029,7 @@ where
             workspace_symbols: WorkspaceSymbolIndex::default(),
             project_symbols: ProjectSymbolIndex::default(),
             project_symbols_generation: 0,
+            project_symbols_incomplete_reported: false,
             workspace_diagnostics: WorkspaceDiagnosticStore::default(),
             backend,
             analysis_dirty: false,
@@ -1376,17 +1378,30 @@ where
     ///
     /// Every attempted URI is re-indexed, so a file the chunk could not read loses its stale
     /// entries instead of keeping them forever.
-    pub(crate) fn apply_symbol_index_batch(&mut self, batch: SymbolIndexBatch) {
+    pub(crate) fn apply_symbol_index_batch(&mut self, batch: SymbolIndexBatch) -> Vec<Value> {
         if batch.generation < self.project_symbols_generation {
-            return;
+            return Vec::new();
         }
         self.project_symbols
             .replace_files(&batch.attempted, batch.symbols);
+        // Said once per generation. A file too large to parse or a layer at its retention ceiling
+        // means the picker is answering over less than the workspace, and nothing else would tell
+        // anyone: a missing symbol looks exactly like a symbol that does not exist.
+        if self.project_symbols.is_complete() || self.project_symbols_incomplete_reported {
+            return Vec::new();
+        }
+        self.project_symbols_incomplete_reported = true;
+        vec![log_message(
+            "krusty: the workspace symbol index reached its retention limit or skipped an \
+             oversized file; project-wide symbol search is incomplete"
+                .to_string(),
+        )]
     }
 
     pub(crate) fn reset_workspace_index(&mut self, generation: u64) -> Vec<Value> {
         self.project_symbols = ProjectSymbolIndex::default();
         self.project_symbols_generation = generation;
+        self.project_symbols_incomplete_reported = false;
         self.workspace_diagnostics.reset_to(generation);
         // Clearing old-model results is itself a diagnostic change. Pull clients must be told even
         // when the replacement model produces no files or its first analysis is still pending.
@@ -4084,7 +4099,10 @@ where
             }
         }
         EngineEvent::SymbolIndexProgress(batch) => {
-            service.apply_symbol_index_batch(batch);
+            for message in service.apply_symbol_index_batch(batch) {
+                let encoded = serde_json::to_vec(&message).map_err(json_io)?;
+                write_framed(writer, &encoded)?;
+            }
         }
         EngineEvent::IndexReset(generation) => {
             for message in service.reset_workspace_index(generation) {
@@ -5455,6 +5473,46 @@ mod tests {
                 },
             }])
         );
+    }
+
+    #[test]
+    fn an_incomplete_project_symbol_index_is_reported_once() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let oversized = format!(
+            "package demo\nclass Oversized\n// {}\n",
+            "x".repeat(crate::analysis::MAX_INDEXED_FILE_BYTES)
+        );
+
+        let reported = service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec!["file:///Huge.kt".to_string()],
+            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
+                "file:///Huge.kt",
+                oversized.as_str(),
+            )]),
+        });
+
+        // A symbol the picker never shows is indistinguishable from one that does not exist, so
+        // the shortfall has to be said out loud -- but once, not per chunk.
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0]["method"], "window/logMessage");
+        assert!(reported[0]["params"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("incomplete")));
+        let repeated = service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec!["file:///Other.kt".to_string()],
+            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
+                "file:///Other.kt",
+                oversized.as_str(),
+            )]),
+        });
+        assert!(repeated.is_empty());
     }
 
     #[test]
