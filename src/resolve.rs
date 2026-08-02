@@ -707,7 +707,10 @@ pub struct ClassSig {
     /// `Box<Int>` substitutes the argument at that index (`Int`) for the erased `Object`.
     pub generic_props: HashMap<String, (usize, bool)>,
     /// Function-property signatures that require class type-parameter substitution.
-    pub generic_function_props: HashMap<String, Ty>,
+    /// Declared property types that mention class parameters anywhere in their shape (`Cell<T>`,
+    /// `(T) -> R`, and similar). Read-site substitution consumes this uniformly; callable-specific
+    /// behavior is decided only after the resulting type is known.
+    pub generic_property_shapes: HashMap<String, Ty>,
     /// For a `@JvmInline value class X(val v: U)` — the sole underlying property's `(name, type U)`.
     /// A value-class value is represented unboxed as `U`; `X` carries static `box-impl`/`unbox-impl`/
     /// `constructor-impl` members for boxed contexts. `None` for an ordinary class.
@@ -1787,9 +1790,16 @@ impl SymbolTable {
     pub fn applied_member_prop_ty(&self, recv: Ty, name: &str) -> Option<Ty> {
         let recv = recv.non_null();
         let internal = recv.obj_internal()?;
-        let (owner, property) = self
-            .declared_member_prop(internal, name)
-            .filter(|(_, property)| property.context_params.is_empty())?;
+        let Some((owner, property)) = self.declared_member_prop(internal, name) else {
+            // Preserve the structural fallback the pre-substitution inference used. Synthetic and
+            // module-populated class signatures can intentionally expose a property shape without a
+            // source `DeclaredPropertySig`; there is then no declaring generic metadata to apply, but
+            // the flattened type is still better than turning a previously inferable read into Error.
+            return self.prop_of_name(internal, name).map(|(ty, _)| ty);
+        };
+        if !property.context_params.is_empty() {
+            return None;
+        }
         Some(self.applied_declared_member_prop_ty(recv, owner, name, property.ty))
     }
 
@@ -1835,7 +1845,7 @@ impl SymbolTable {
                     return *bound;
                 }
             }
-        } else if let Some(&shape) = owner_class.generic_function_props.get(name) {
+        } else if let Some(&shape) = owner_class.generic_property_shapes.get(name) {
             // A property whose type MENTIONS type parameters (`val vs: List<T>`): substitute the
             // bindings into the shape. If an inherited applied owner cannot be reconstructed,
             // retain the conservative declaration type rather than guessing that the child
@@ -5793,6 +5803,16 @@ fn collect_signatures_with_cp_impl(
                             .position(|t| *t == r.name)
                             .map(|index| (index, r.definitely_non_null()))
                     };
+                    // A direct `T?` property is deliberately not specialized to `Int?`/etc.: that
+                    // changes an erased reference slot into a nullable-scalar wrapper boundary whose
+                    // boxing is not modeled here. Nested uses such as `Cell<T?>` remain reference
+                    // shapes and are safe to substitute as a whole.
+                    let is_direct_nullable_tparam = |r: &TypeRef| {
+                        r.nullable()
+                            && r.targs.is_empty()
+                            && r.arg.is_none()
+                            && tparam_names.iter().any(|parameter| parameter == &r.name)
+                    };
                     let mut generic_props: HashMap<String, (usize, bool)> = HashMap::new();
                     for p in c.props.iter().filter(|p| p.is_property) {
                         if let Some(i) = tparam_index(&p.ty) {
@@ -5806,13 +5826,13 @@ fn collect_signatures_with_cp_impl(
                             }
                         }
                     }
-                    let mut generic_function_props = HashMap::new();
+                    let mut generic_property_shapes = HashMap::new();
                     for property in c.props.iter().filter(|property| property.is_property) {
                         let shape = ty_of_ref_silent(&property.ty, &class_names, &symbolic_ctp);
-                        if is_function_property_shape(shape)
+                        if !is_direct_nullable_tparam(&property.ty)
                             && ty_mentions_param(shape, &tparam_names)
                         {
-                            generic_function_props.insert(property.name.clone(), shape);
+                            generic_property_shapes.insert(property.name.clone(), shape);
                         }
                     }
                     for property in c
@@ -5822,10 +5842,10 @@ fn collect_signatures_with_cp_impl(
                     {
                         if let Some(type_ref) = &property.ty {
                             let shape = ty_of_ref_silent(type_ref, &class_names, &symbolic_ctp);
-                            if is_function_property_shape(shape)
+                            if !is_direct_nullable_tparam(type_ref)
                                 && ty_mentions_param(shape, &tparam_names)
                             {
-                                generic_function_props.insert(property.name.clone(), shape);
+                                generic_property_shapes.insert(property.name.clone(), shape);
                             }
                         }
                     }
@@ -5938,7 +5958,7 @@ fn collect_signatures_with_cp_impl(
                             tparam_names,
                             tparam_bounds,
                             generic_props,
-                            generic_function_props,
+                            generic_property_shapes,
                             value_field,
                             generic_methods,
                         },
@@ -5992,7 +6012,7 @@ fn collect_signatures_with_cp_impl(
                                 tparam_names: Vec::new(),
                                 tparam_bounds: Vec::new(),
                                 generic_props: HashMap::new(),
-                                generic_function_props: HashMap::new(),
+                                generic_property_shapes: HashMap::new(),
                                 value_field: None,
                                 generic_methods: HashMap::new(),
                             },
