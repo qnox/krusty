@@ -285,9 +285,10 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
                     // This is the single owner of the emitted/unemitted decision. The checker
                     // consumes the declaration-keyed outcome recorded below; it must not repeat
                     // this predicate because signature/body support evolves with JVM lowering.
-                    let emitted = !f.is_inline()
-                        || f.has_callable_inline_extension_body()
-                        || syms.inline_fn_facade_emittable(file, i as u32, d, f);
+                    // The semantic handoff says whether a callable body exists; this JVM boundary
+                    // owns only its representation as a facade static. Common IR lowering consumes
+                    // the same answer, so registration cannot promise a body that lowering omits.
+                    let emitted = syms.source_fn_has_callable_body(file, i as u32, d, f);
                     if emitted {
                         fns.push((
                             i as u32,
