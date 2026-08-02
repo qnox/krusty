@@ -8234,6 +8234,10 @@ impl<'a> Lower<'a> {
             .class_by_type_name(internal)
             .and_then(|c| c.value_field.as_ref())
             .map(|(_, u)| *u)
+            // Dependency value classes have no source declaration in `FrontendSymbols`; their semantic
+            // metadata is exposed through the same platform oracle used by resolution. Keeping that
+            // fallback here gives every lowering caller one location-independent representation query.
+            .or_else(|| self.syms.libraries.value_underlying(t))
     }
 
     /// Forward a resolved extension callable's DECLARED source receiver onto the emitted call, verbatim —
@@ -14116,12 +14120,7 @@ impl<'a> Lower<'a> {
         let t = if t.is_nullable() {
             t
         } else {
-            t.non_null()
-                .obj_internal()
-                .and_then(|n| self.syms.class_by_type_name(n))
-                .and_then(|cs| cs.value_field.clone())
-                .map(|(_, underlying)| underlying)
-                .unwrap_or(t)
+            self.value_class_underlying(t).unwrap_or(t)
         };
         let c = match t {
             Ty::Long => IrConst::Long(0),
