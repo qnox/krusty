@@ -14495,6 +14495,35 @@ impl<'a> Lower<'a> {
         self.coerce_to_static(read, lt, pty)
     }
 
+    /// Whether a source property read needs boxing at an erased generic storage boundary that the
+    /// current property realization does not provide. A declaration such as `Base<T>(val x: T)`
+    /// stores and returns erased `Object`; when an inherited read specializes `T` to a value class
+    /// (`Base<Result<String>>.x`), Kotlin requires the value-class box at that boundary. Merely casting
+    /// the unboxed underlying value to the wrapper produces a `ClassCastException`.
+    ///
+    /// Keep this gate beside the shared source-property operation rather than teaching individual
+    /// file/member/implicit read branches about `Result` or any concrete value class. Once property
+    /// construction/accessor realization boxes generic value-class values, this single predicate can
+    /// be removed and every caller becomes supported together.
+    fn source_property_read_needs_generic_value_class_box(
+        &self,
+        owner: TypeName,
+        name: &str,
+        expression: AstExprId,
+    ) -> bool {
+        let declared_erased = self
+            .syms
+            .declared_member_prop(owner, name)
+            .is_some_and(|(_, property)| property.ty.is_erased_top());
+        let specialized_value_class = self.info.ty(expression).obj_internal().is_some_and(|ty| {
+            self.syms
+                .class_by_type_name(ty)
+                .is_some_and(|class| class.value_field.is_some())
+                || self.syms.libraries.value_underlying_name(ty).is_some()
+        });
+        declared_erased && specialized_value_class
+    }
+
     /// Read a backing-field property `recv.name` on an in-file class, given the ALREADY-LOWERED receiver
     /// and the receiver's internal name. A read from OUTSIDE the declaring class goes through the public
     /// `getX()` accessor (the backing field is private, matching kotlinc); inside, the field is read
@@ -14530,6 +14559,9 @@ impl<'a> Lower<'a> {
         name: &str,
         e: AstExprId,
     ) -> Option<u32> {
+        if self.source_property_read_needs_generic_value_class_box(owner, name, e) {
+            return None;
+        }
         // A class whose declarations are not tracked yet (an enum entry's body, an anonymous object)
         // still has the backing field; read that.
         let (declaring, ty, is_private) = match self.declared_property(owner, name) {
@@ -14607,6 +14639,9 @@ impl<'a> Lower<'a> {
             }
         };
         let owner_internal = self.ir.classes[class as usize].fq_name_id();
+        if self.source_property_read_needs_generic_value_class_box(owner_internal, name, e) {
+            return None;
+        }
         // Smartcast: a receiver slot wider than the owning class (an erased generic / `Any?` narrowed by
         // `is`) is narrowed to the owner. That is about the RECEIVER's type, not about how the property is
         // read, so it stays here.
@@ -14794,6 +14829,9 @@ impl<'a> Lower<'a> {
         if let Some(ExprLowering::MemberPropertyRead { owner, interface }) =
             self.info.expr_lowers.get(&e)
         {
+            if self.source_property_read_needs_generic_value_class_box(*owner, name, e) {
+                return None;
+            }
             return Some(self.ir.add_expr(IrExpr::PropertyRead {
                 receiver: recv,
                 owner: *owner,
