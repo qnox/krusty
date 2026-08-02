@@ -166,6 +166,14 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         false
     }
 
+    /// Whether a resolved top-level callable is the platform's erased contract-declaration
+    /// intrinsic. Consumers ask after ordinary import-scoped symbol resolution, so source/module
+    /// shadowing and aliases are handled once by the resolver; the provider owns the physical
+    /// callable identity and no facade/class name leaks into target-neutral checking code.
+    fn is_erased_contract_callable(&self, _callable: &LibraryCallable) -> bool {
+        false
+    }
+
     /// Primitive represented by a platform wrapper type.
     fn boxed_primitive(&self, _ty: Ty) -> Option<Ty> {
         None

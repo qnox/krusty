@@ -57,6 +57,21 @@ fn extension_inc_on_nullable_user_class() {
 }
 
 #[test]
+fn trailing_implicit_property_inc_in_unit_extension_stays_a_statement() {
+    // A function block discards its trailing expression. Keep this implicit-receiver property on
+    // the statement path; only value-consuming lambda/if/when/try blocks may preserve `IncDec` as
+    // an expression. This is the boundary that a global "before `}` means value" rule violated.
+    const SRC: &str = "class SyntheticMutable(var value: Int)\n\
+        fun SyntheticMutable.bump() { value++ }\n\
+        fun box(): String {\n\
+        \x20 val mutable = SyntheticMutable(1)\n\
+        \x20 mutable.bump()\n\
+        \x20 return if (mutable.value == 2) \"OK\" else \"fail: ${mutable.value}\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("implicit property inc statement"), "OK");
+}
+
+#[test]
 fn member_dec_local() {
     const SRC: &str = "class N(val i: Int) { operator fun dec(): N = N(i - 1) }\n\
         fun box(): String {\n\
@@ -67,4 +82,110 @@ fn member_dec_local() {
         }\n\
         fun main() { println(box()) }\n";
     assert_eq!(run(SRC).expect("member dec"), "OK");
+}
+
+/// An inc/dec as a lambda block's TRAILING value (`{ -> p.fst++ }` is `() -> Int`, not `() -> Unit`):
+/// the parser keeps it as the block's trailing expression — a `Name` target lowers directly, a
+/// member/index target desugars to a temp block that captures the old (postfix) or new (prefix)
+/// value. Previously the statement re-route fired unconditionally and the lambda yielded `Unit`
+/// (a `ClassCastException` downstream — inline/lambdaReassignmentWithCapture.kt).
+#[test]
+fn incdec_trailing_lambda_value_member_target() {
+    const SRC: &str = "class P(var fst: Int, var snd: Int)\n\
+        fun box(): String {\n\
+        \x20 val p = P(0, 0)\n\
+        \x20 val post: () -> Int = { -> p.fst++ }\n\
+        \x20 if (post() != 0 || p.fst != 1) return \"fail postfix: ${p.fst}\"\n\
+        \x20 val pre: () -> Int = { -> ++p.snd }\n\
+        \x20 if (pre() != 1 || p.snd != 1) return \"fail prefix: ${p.snd}\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("trailing member incdec"), "OK");
+}
+
+/// Same trailing-position rule for a local-variable target (no desugar needed — the expression
+/// form lowers directly).
+#[test]
+fn incdec_trailing_lambda_value_local_target() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20 var x = 10\n\
+        \x20 val post: () -> Int = { -> x++ }\n\
+        \x20 if (post() != 10 || x != 11) return \"fail postfix: $x\"\n\
+        \x20 val pre: () -> Int = { -> ++x }\n\
+        \x20 if (pre() != 12 || x != 12) return \"fail prefix: $x\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("trailing local incdec"), "OK");
+}
+
+/// Closing-block detection is generic rather than lambda-specific: an `if` branch exposes its last
+/// expression as the branch value too. Prefix returns the assigned value and postfix returns the old
+/// value; index targets exercise the same shared member/index assignment builder. The parser unit
+/// regression separately inspects the expansion to prove a custom member getter is read only once.
+#[test]
+fn incdec_trailing_branch_value_and_index_target() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20 val values = intArrayOf(1, 4)\n\
+        \x20 val prefix = if (true) { ++values[0] } else { -1 }\n\
+        \x20 if (prefix != 2 || values[0] != 2) return \"fail prefix: $prefix/${values[0]}\"\n\
+        \x20 val postfix = if (true) { values[0]++ } else { -1 }\n\
+        \x20 if (postfix != 2 || values[0] != 3) return \"fail postfix: $postfix/${values[0]}\"\n\
+        \x20 val indexed: () -> Int = { values[1]++ }\n\
+        \x20 if (indexed() != 4 || values[1] != 5) return \"fail index: ${values[1]}\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("trailing incdec access values"), "OK");
+}
+
+/// The `inline/lambdaReassignmentWithCapture.kt` shape: aliased, reassigning lambdas passed as
+/// function-typed VARIABLE arguments to a cross-file inline facade static.
+#[test]
+fn trailing_incdec_lambda_reassignment_with_capture() {
+    const LIB: &str = "package foo\n\
+                       data class IntPair(public var fst: Int, public var snd: Int)\n\
+                       inline fun run(func: () -> Int): Int {\n\
+                       \x20   return func()\n\
+                       }\n";
+    const MAIN: &str = "package foo\n\
+                        fun bar(p: IntPair): Int {\n\
+                        \x20   var f = { -> p.fst++ }\n\
+                        \x20   var get0 = f\n\
+                        \x20   f = { -> ++p.snd }\n\
+                        \x20   var get1 = f\n\
+                        \x20   var get2 = get1\n\
+                        \x20   f = { -> ++p.fst }\n\
+                        \x20   get2 = f\n\
+                        \x20   return run(get0) + run(get1) + run(get2)\n\
+                        }\n\
+                        fun box(): String {\n\
+                        \x20   val p = IntPair(0, 0)\n\
+                        \x20   if (bar(p) != 3) return \"fail\"\n\
+                        \x20   return if (p.fst == 2 && p.snd == 1) \"OK\" else \"fail: $p\"\n\
+                        }\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", LIB), ("main.kt", MAIN)],
+        "inline_lambda_reassignment_capture",
+    );
+}
+
+/// A non-lvalue inc/dec target in a block's trailing position is an honest parse error (never a
+/// compiler panic and never a double evaluation). It shares the diagnostic with discarded-value
+/// statement handling because both contexts use the same accepted-lvalue classifier.
+#[test]
+fn non_lvalue_trailing_incdec_is_a_parse_error() {
+    let diags = common::front_end_diagnostics(
+        "fun foo(): Int = 1\n\
+         fun box(): String {\n\
+         \x20 val f = { -> foo()++ }\n\
+         \x20 return \"unreachable\"\n\
+         }\n",
+        &[],
+        None,
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("only supported on a simple variable or pure access path")),
+        "expected the non-lvalue inc/dec diagnostic, got: {diags:?}"
+    );
 }

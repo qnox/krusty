@@ -1713,16 +1713,172 @@ impl SymbolTable {
     }
 }
 
+/// Whether the import-scoped top-level family selected for `e` consists solely of the platform's
+/// erased contract intrinsic. The ordinary federated resolver owns aliases, package precedence,
+/// same-module shadowing, and ambiguity; this helper owns only the final semantic classification.
+/// Requiring every surviving overload to be intrinsic is conservative when two star imports expose
+/// competing callables: an ambiguous/user family must remain executable and therefore splice-only.
+fn resolved_call_is_erased_contract(
+    file: &File,
+    e: ExprId,
+    resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+    platform: &dyn SemanticPlatform,
+) -> bool {
+    let Expr::Call { callee, .. } = file.expr(e) else {
+        return false;
+    };
+    let Expr::Name(name) = file.expr(*callee) else {
+        return false;
+    };
+    let overloads = resolver
+        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+        .map(crate::symbol_resolver::Symbol::overloads)
+        .unwrap_or_default();
+    let mut top_level = crate::libraries::FunctionSet { overloads }.into_top_level();
+    let Some(first) = top_level.next() else {
+        return false;
+    };
+    platform.is_erased_contract_callable(&first.callable)
+        && top_level.all(|candidate| platform.is_erased_contract_callable(&candidate.callable))
+}
+
+/// Names introduced anywhere below a function body. Facade eligibility runs before lexical
+/// checking, so it cannot reuse [`Checker::lexical_value_declares`]; conservatively treating a
+/// same-named call as shadowed whenever the function contains such a binding prevents an erased
+/// intrinsic classification from crossing a local/lambda/function boundary. The conservatism is
+/// limited to the very small set of callee names that otherwise resolve to the contract intrinsic.
+fn function_bound_names(file: &File, function: &FunDecl) -> std::collections::HashSet<String> {
+    fn expression(file: &File, e: ExprId, names: &mut std::collections::HashSet<String>) {
+        match file.expr(e) {
+            Expr::Lambda { params, .. } => {
+                if params.is_empty() {
+                    names.insert("it".to_string());
+                } else {
+                    names.extend(params.iter().cloned());
+                }
+            }
+            Expr::Try { catches, .. } => {
+                names.extend(catches.iter().map(|catch| catch.name.clone()));
+            }
+            _ => {}
+        }
+        let mut expressions = Vec::new();
+        let mut statements = Vec::new();
+        file.any_child_expr(
+            e,
+            &mut |child| {
+                expressions.push(child);
+                false
+            },
+            &mut |statement| {
+                statements.push(statement);
+                false
+            },
+        );
+        for child in expressions {
+            expression(file, child, names);
+        }
+        for child in statements {
+            statement(file, child, names);
+        }
+    }
+
+    fn statement(file: &File, s: StmtId, names: &mut std::collections::HashSet<String>) {
+        match file.stmt(s) {
+            Stmt::Local { name, .. }
+            | Stmt::LocalLateinit { name, .. }
+            | Stmt::LocalDelegate { name, .. }
+            | Stmt::For { name, .. }
+            | Stmt::ForEach { name, .. } => {
+                names.insert(name.clone());
+            }
+            Stmt::Destructure { entries, .. } => {
+                names.extend(
+                    entries
+                        .iter()
+                        .filter(|(name, _)| name != "_")
+                        .map(|(name, _)| name.clone()),
+                );
+            }
+            Stmt::LocalFun(function) => {
+                names.insert(function.name.clone());
+                names.extend(
+                    function
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.name.clone()),
+                );
+            }
+            Stmt::LocalClass(class) => {
+                names.insert(class.name.clone());
+            }
+            _ => {}
+        }
+        let mut expressions = Vec::new();
+        file.any_child_stmt(s, &mut |child| {
+            expressions.push(child);
+            false
+        });
+        for child in expressions {
+            expression(file, child, names);
+        }
+    }
+
+    let mut names = function
+        .params
+        .iter()
+        .map(|parameter| parameter.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    if let FunBody::Expr(body) | FunBody::Block(body) = function.body {
+        expression(file, body, &mut names);
+    }
+    names
+}
+
 /// Shapes that lower correctly ONLY when an `inline` body is spliced into a caller — the checker
 /// analyses the body with splice assumptions, so emitting it standalone (a facade static for
 /// cross-file calls) would miscompile: nested lambdas / anonymous objects (capture analysis +
-/// synthetic numbering), `try` / `break` / `continue` / expression-position `return` (inline-frame
-/// control flow), and `is`/`as` on a type parameter (splicing substitutes the call-site type
-/// argument; a standalone body can only erase to the bound). Conservative: the file just skips.
-fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
-    fn bad_expr(file: &File, e: ExprId, tparams: &[String]) -> bool {
+/// synthetic numbering), `try` / `break` / `continue` / a LABELED or expression-position `return`
+/// (inline-frame control flow — a plain unlabeled value-`return` is just a method return), and
+/// `is`/`as` on a type parameter (splicing substitutes the call-site type argument; a standalone
+/// body can only erase to the bound). A semantically resolved contract-declaration block is erased,
+/// not a closure.
+/// Conservative: the file just skips.
+fn inline_body_has_splice_only_shape(
+    file: &File,
+    f: &FunDecl,
+    is_erased_contract: &impl Fn(ExprId) -> bool,
+) -> bool {
+    fn bad_expr(
+        file: &File,
+        e: ExprId,
+        tparams: &[String],
+        is_erased_contract: &impl Fn(ExprId) -> bool,
+    ) -> bool {
         if file.anonymous_object_classes.contains_key(&e) {
             return true;
+        }
+        // An erased contract DSL lambda never becomes a closure. Walk its BODY (and every ordinary
+        // argument) for genuinely splice-only shapes, but bypass only calls whose selected callable
+        // family has the provider-owned intrinsic identity. Aliases and source shadows therefore use
+        // exactly the same resolution seam as checker erasure below.
+        if is_erased_contract(e) {
+            if let Expr::Call { args, .. } = file.expr(e) {
+                let mut bad = false;
+                for (i, &arg) in args.iter().enumerate() {
+                    let lambda_body = match file.expr(arg) {
+                        Expr::Lambda { body, .. } if i + 1 == args.len() => Some(*body),
+                        _ => None,
+                    };
+                    bad |= bad_expr(
+                        file,
+                        lambda_body.unwrap_or(arg),
+                        tparams,
+                        is_erased_contract,
+                    );
+                }
+                return bad;
+            }
         }
         match file.expr(e) {
             Expr::Lambda { .. }
@@ -1733,22 +1889,31 @@ fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
             Expr::Is { ty, .. } | Expr::As { ty, .. } if tparams.contains(&ty.name) => true,
             _ => file.any_child_expr(
                 e,
-                &mut |child| bad_expr(file, child, tparams),
-                &mut |stmt| bad_stmt(file, stmt, tparams),
+                &mut |child| bad_expr(file, child, tparams, is_erased_contract),
+                &mut |stmt| bad_stmt(file, stmt, tparams, is_erased_contract),
             ),
         }
     }
-    fn bad_stmt(file: &File, s: StmtId, tparams: &[String]) -> bool {
+    fn bad_stmt(
+        file: &File,
+        s: StmtId,
+        tparams: &[String],
+        is_erased_contract: &impl Fn(ExprId) -> bool,
+    ) -> bool {
         if matches!(
             file.stmt(s),
             Stmt::Break(_) | Stmt::Continue(_) | Stmt::Return(_, Some(_))
         ) {
             return true;
         }
-        file.any_child_stmt(s, &mut |child| bad_expr(file, child, tparams))
+        file.any_child_stmt(s, &mut |child| {
+            bad_expr(file, child, tparams, is_erased_contract)
+        })
     }
     match &f.body {
-        FunBody::Expr(body) | FunBody::Block(body) => bad_expr(file, *body, &f.type_params),
+        FunBody::Expr(body) | FunBody::Block(body) => {
+            bad_expr(file, *body, &f.type_params, is_erased_contract)
+        }
         FunBody::None => true,
     }
 }
@@ -1775,9 +1940,38 @@ impl SymbolTable {
         }) else {
             return false;
         };
+        let module = crate::module_symbols::ModuleSymbols::for_file(self, file_index);
+        let import_scope = function_import_scope(file, self);
+        let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
+            &*self.libraries,
+            &module,
+            &import_scope,
+        );
+        let bound_names = function_bound_names(file, f);
+        // Contract identity depends on the import scope and callee NAME, not on call arguments.
+        // Memoize per name so a large inline body pays the federated lookup once per distinct name.
+        let contract_names = std::cell::RefCell::new(HashMap::<String, bool>::new());
+        let is_erased_contract = |expression| {
+            let Expr::Call { callee, .. } = file.expr(expression) else {
+                return false;
+            };
+            let Expr::Name(name) = file.expr(*callee) else {
+                return false;
+            };
+            if bound_names.contains(name) {
+                return false;
+            }
+            if let Some(resolved) = contract_names.borrow().get(name).copied() {
+                return resolved;
+            }
+            let resolved =
+                resolved_call_is_erased_contract(file, expression, &resolver, &*self.libraries);
+            contract_names.borrow_mut().insert(name.clone(), resolved);
+            resolved
+        };
         !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
             && !self.ty_mentions_value_class(sig.ret)
-            && !inline_body_has_splice_only_shape(file, f)
+            && !inline_body_has_splice_only_shape(file, f, &is_erased_contract)
     }
 
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
@@ -13920,10 +14114,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// True when `e` is a call to the `kotlin.contracts.contract { … }` intrinsic — the erased
-    /// contract-declaration block. The callee name `contract` is confirmed to resolve to a
-    /// top-level function in `kotlin/contracts` through the symbol resolver, so a user function that
-    /// happens to be named `contract` is not mistaken for it.
+    /// True when `e` resolves to the platform's erased contract-declaration intrinsic. This is the
+    /// same import-scoped, module-federated identity query used by inline-facade eligibility, so an
+    /// alias, source shadow, or unrelated same-named declaration cannot make checking and emission
+    /// disagree about whether the DSL lambda exists at runtime.
     fn is_contract_call(&self, e: ExprId) -> bool {
         let Expr::Call { callee, .. } = self.file.expr(e) else {
             return false;
@@ -13931,29 +14125,13 @@ impl<'a> Checker<'a> {
         let Expr::Name(name) = self.file.expr(*callee) else {
             return false;
         };
-        if name != "contract" {
+        // Lexical values/local functions outrank every top-level import. They are intentionally kept
+        // outside SymbolResolver's package federation, so close that final precedence rung here
+        // before asking the shared top-level identity classifier.
+        if self.lexical_value_declares(name) {
             return false;
         }
-        // A user-declared top-level `fun contract(…)` in this module shadows the stdlib intrinsic —
-        // then the call is a real function and must NOT be erased.
-        if self.module_declares("contract") {
-            return false;
-        }
-        crate::libraries::FunctionSet {
-            overloads: self
-                .resolver()
-                .resolve_symbol(
-                    crate::symbol_resolver::SymRecv::TopLevel,
-                    "contract",
-                    &[],
-                    &[],
-                )
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .unwrap_or_default(),
-        }
-        .overloads
-        .iter()
-        .any(|o| o.callable.owner.starts_with("kotlin/contracts"))
+        resolved_call_is_erased_contract(self.file, e, &self.resolver(), &*self.syms.libraries)
     }
 
     /// Decode every top-level function's `contract { … }` block up front (see the call site in
