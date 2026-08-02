@@ -5536,6 +5536,26 @@ fn collect_signatures_with_cp_impl(
                     // any synthetic signature (`serializer()`) into `static_methods`.
                     let companion_fun_names: std::collections::HashSet<String> =
                         c.companion_methods.iter().map(|m| m.name.clone()).collect();
+                    // Compute the companion value scope once and share it between expression-body
+                    // method inference and the class signature. Rebuilding this list inside every
+                    // method would duplicate both declaration type inference and allocation; more
+                    // importantly, the two consumers could drift to different lookup semantics.
+                    let companion_property_scope: Vec<(String, Ty, bool)> = c
+                        .companion_props
+                        .iter()
+                        .map(|p| {
+                            let ty = match &p.ty {
+                                Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
+                                None => p
+                                    .init
+                                    .map(|i| {
+                                        infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)
+                                    })
+                                    .unwrap_or(Ty::Error),
+                            };
+                            (p.name.clone(), ty, p.is_var)
+                        })
+                        .collect();
                     // `companion object` members → static methods/props on this class.
                     let mut static_methods: HashMap<String, Signature> = c
                         .companion_methods
@@ -5555,12 +5575,22 @@ fn collect_signatures_with_cp_impl(
                                 .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
                                 .unwrap_or_else(|| {
                                     if let FunBody::Expr(e) = &m.body {
-                                        let t = infer_lit_ty(
+                                        // A companion method's body resolves the companion's own
+                                        // properties unqualified — infer with them in scope so a
+                                        // `= result` body gets the property's type (not `Unit`).
+                                        // Use the shared scoped inference entry point rather than a
+                                        // companion-only `InferEnv`. Besides avoiding a second set of
+                                        // lookup rules, this preserves the normal module-property,
+                                        // object, static-classifier, and cycle-guard behavior while
+                                        // adding the companion properties as the lexical value scope.
+                                        let t = infer_lit_ty_scoped(
                                             file,
                                             *e,
                                             &class_names,
                                             &fun_rets,
+                                            &companion_property_scope,
                                             &*libraries,
+                                            &table,
                                         );
                                         if t != Ty::Error {
                                             t
@@ -5627,12 +5657,9 @@ fn collect_signatures_with_cp_impl(
                     let static_props: HashMap<String, (Ty, Visibility)> = c
                         .companion_props
                         .iter()
-                        .map(|p| {
-                            let ty = match &p.ty {
-                                Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
-                                None => p.init.map(|i| infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)).unwrap_or(Ty::Error),
-                            };
-                            if ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
+                        .zip(companion_property_scope.iter())
+                        .map(|(p, (name, ty, _))| {
+                            if *ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
                             }
                             // Custom accessors on a `companion object` property are emitted as the
@@ -5641,7 +5668,7 @@ fn collect_signatures_with_cp_impl(
                             if p.getter.is_some() || p.setter.is_some() {
                                 diags.error(p.span, "krusty: companion-object property custom accessors are not supported".to_string());
                             }
-                            (p.name.clone(), (ty, p.visibility))
+                            (name.clone(), (*ty, p.visibility))
                         })
                         .collect();
                     let lateinit_props: std::collections::HashSet<String> = c
@@ -9672,7 +9699,8 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: TypeName },
-    /// A static field read selected by a symbol provider.
+    /// A static field read selected semantically by resolution, independent of whether its symbol
+    /// came from the current file, another module file, or a platform/classpath provider.
     StaticFieldRead {
         owner: TypeName,
         name: String,
@@ -21631,11 +21659,10 @@ impl<'a> Checker<'a> {
                 let lexical_classes = self.lexical_source_class_names();
                 // A companion's own properties precede its enum entries.
                 if self.companion_of.is_some() {
-                    if let Some(&ty) = lexical_classes.first().and_then(|owner| {
-                        self.syms
-                            .class_by_type_name(*owner)
-                            .and_then(|class| class.static_props.get(&n).map(|(ty, _)| ty))
-                    }) {
+                    if let Some(ty) = lexical_classes
+                        .first()
+                        .and_then(|owner| self.record_class_static_property_read(e, *owner, &n))
+                    {
                         return self.set(e, ty);
                     }
                 }
@@ -21650,11 +21677,7 @@ impl<'a> Checker<'a> {
                     if self.companion_of.is_some() && index == 0 {
                         continue;
                     }
-                    if let Some(&ty) = self
-                        .syms
-                        .class_by_type_name(owner)
-                        .and_then(|class| class.static_props.get(&n).map(|(ty, _)| ty))
-                    {
+                    if let Some(ty) = self.record_class_static_property_read(e, owner, &n) {
                         return self.set(e, ty);
                     }
                 }
@@ -26576,6 +26599,44 @@ impl<'a> Checker<'a> {
             );
         }
         field.ty
+    }
+
+    /// Select a property stored on a class as a static field and hand its semantic owner to lowering.
+    ///
+    /// Lexical companion lookup belongs here in the checker: it already has source nesting and
+    /// shadowing information, whereas lowering must not infer an owner from a generated class name.
+    /// Recording the existing origin-neutral `StaticFieldRead` also gives source/module properties
+    /// the same backend path as provider-resolved static fields. The descriptor remains absent so the
+    /// backend derives it from the checked expression type, exactly as it does for imported source
+    /// companion properties.
+    ///
+    /// A private property is still returned for frontend type propagation, but deliberately receives
+    /// no direct-field lowering. Krusty does not yet synthesize the JVM access bridge required when a
+    /// nested class reads that field, and recording `getstatic` here would turn a conservative skip
+    /// into `IllegalAccessError`. This decision is based on declaration visibility, not on a guessed
+    /// physical class relationship.
+    fn record_class_static_property_read(
+        &mut self,
+        expression: ExprId,
+        owner: TypeName,
+        name: &str,
+    ) -> Option<Ty> {
+        let (ty, visibility) = *self
+            .syms
+            .class_by_type_name(owner)?
+            .static_props
+            .get(name)?;
+        if !visibility.is_private() {
+            self.expr_lowers.insert(
+                expression,
+                ExprLowering::StaticFieldRead {
+                    owner,
+                    name: name.to_string(),
+                    descriptor: None,
+                },
+            );
+        }
+        Some(ty)
     }
 
     /// Probe a member read without emitting a diagnostic: returns `Some(ty)` if `recv.name` resolves,
