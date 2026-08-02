@@ -52,6 +52,7 @@ fn parse_with_features_and_script(
         multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
         explicit_backing_fields: features.has("ExplicitBackingFields"),
         no_trailing_lambda: false,
+        block_trailing_is_value: false,
         lexical_type_params: Vec::new(),
         lexical_type_param_bounds: Vec::new(),
         pending_annotations: Vec::new(),
@@ -733,6 +734,13 @@ struct Parser<'a> {
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
     no_trailing_lambda: bool,
+    /// Whether the statement list currently being parsed belongs to a block whose trailing
+    /// expression is semantically consumed (lambda and `if`/`when`/`try` value blocks). Function,
+    /// accessor, constructor, init, loop, and `finally` blocks discard a trailing expression; they
+    /// must keep inc/dec on the statement path, especially for an implicit-receiver property name.
+    /// Saved/restored at every nested block boundary so syntax context, not a lambda-only special
+    /// case, owns the decision.
+    block_trailing_is_value: bool,
     /// Type parameters in the current lexical parser context. Synthetic anonymous classes are hoisted
     /// to file-level declarations, so they must carry the generic names they mention in supertypes or
     /// member signatures; otherwise checking the hoisted class reports `T` as unresolved.
@@ -880,7 +888,7 @@ impl<'a> Parser<'a> {
             )
         } else {
             self.skip_newlines();
-            self.parse_branch()
+            self.parse_branch(false)
         }
     }
     fn skip_newlines(&mut self) {
@@ -1778,7 +1786,7 @@ impl<'a> Parser<'a> {
                     self.skip_newlines();
                     Some(FunBody::Expr(self.parse_expr()))
                 } else if self.at(TokenKind::LBrace) {
-                    Some(FunBody::Block(self.parse_block_expr()))
+                    Some(FunBody::Block(self.parse_block_expr(false)))
                 } else {
                     None // default-bodied setter (e.g. `private set`)
                 };
@@ -2005,7 +2013,7 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             FunBody::Expr(self.parse_expr())
         } else if self.at(TokenKind::LBrace) {
-            FunBody::Block(self.parse_block_expr())
+            FunBody::Block(self.parse_block_expr(false))
         } else {
             self.diags.error(
                 self.tok().span,
@@ -2339,7 +2347,7 @@ impl<'a> Parser<'a> {
                         }
                         self.skip_newlines();
                         if self.at(TokenKind::LBrace) {
-                            let _ = self.parse_block_expr();
+                            let _ = self.parse_block_expr(false);
                         }
                     }
                     TokenKind::Ident if matches!(self.text(), "object" | "interface") => {
@@ -2525,7 +2533,7 @@ impl<'a> Parser<'a> {
             let (supertypes, _, _, _, _, _) = self.parse_supertypes();
             let _ = supertypes;
             if self.at(TokenKind::LBrace) {
-                let _ = self.parse_block_expr();
+                let _ = self.parse_block_expr(false);
             }
             return FunDecl {
                 name: "<fun-interface>".to_string(),
@@ -2587,7 +2595,7 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             FunBody::Expr(self.parse_expr())
         } else if self.at(TokenKind::LBrace) {
-            FunBody::Block(self.parse_block_expr())
+            FunBody::Block(self.parse_block_expr(false))
         } else {
             self.i = body_save;
             FunBody::None
@@ -3014,7 +3022,7 @@ impl<'a> Parser<'a> {
                                 .map_or(false, |t| t.kind == TokenKind::LBrace) =>
                     {
                         self.bump(); // 'init'
-                        let block = self.parse_block_expr();
+                        let block = self.parse_block_expr(false);
                         init_order.push(ClassInit::Block(block));
                     }
                     // `companion object [Name] { fun…; val… }` — members become static on this class.
@@ -3176,7 +3184,7 @@ impl<'a> Parser<'a> {
                         }
                         self.skip_newlines();
                         let body = if self.at(TokenKind::LBrace) {
-                            Some(self.parse_block_expr())
+                            Some(self.parse_block_expr(false))
                         } else {
                             None
                         };
@@ -3646,7 +3654,7 @@ impl<'a> Parser<'a> {
                                 .map_or(false, |t| t.kind == TokenKind::LBrace) =>
                     {
                         self.bump();
-                        let block = self.parse_block_expr();
+                        let block = self.parse_block_expr(false);
                         init_order.push(ClassInit::Block(block));
                     }
                     TokenKind::KwClass => {
@@ -3803,7 +3811,7 @@ impl<'a> Parser<'a> {
                                 .map_or(false, |t| t.kind == TokenKind::LBrace) =>
                     {
                         self.bump();
-                        let block = self.parse_block_expr();
+                        let block = self.parse_block_expr(false);
                         init_order.push(ClassInit::Block(block));
                     }
                     // A plain nested class in an object body (`object Foo { class Bar … }`) hoists to the
@@ -4631,6 +4639,8 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         let mut stmts = Vec::new();
+        let saved_block_value = self.block_trailing_is_value;
+        self.block_trailing_is_value = true;
         loop {
             self.skip_newlines();
             if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
@@ -4638,6 +4648,7 @@ impl<'a> Parser<'a> {
             }
             stmts.push(self.parse_stmt());
         }
+        self.block_trailing_is_value = saved_block_value;
         // Prepend `val (a, b) = <synthetic-param>` for each destructured parameter (reversed so the
         // first parameter's binding ends up first).
         for (synth, entries, source_props, sp) in destructures.into_iter().rev() {
@@ -4725,7 +4736,7 @@ impl<'a> Parser<'a> {
                 sp,
             )
         } else {
-            self.parse_block_expr()
+            self.parse_block_expr(false)
         };
         let end = self.file.expr_spans[body.0 as usize];
         let lam = self
@@ -4741,9 +4752,11 @@ impl<'a> Parser<'a> {
         lam
     }
 
-    fn parse_block_expr(&mut self) -> ExprId {
+    fn parse_block_expr(&mut self, trailing_is_value: bool) -> ExprId {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
+        let saved_block_value = self.block_trailing_is_value;
+        self.block_trailing_is_value = trailing_is_value;
         let mut stmts = Vec::new();
         loop {
             self.skip_newlines();
@@ -4752,6 +4765,7 @@ impl<'a> Parser<'a> {
             }
             stmts.push(self.parse_stmt());
         }
+        self.block_trailing_is_value = saved_block_value;
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
         // A trailing bare expression is the block's value.
@@ -4791,6 +4805,76 @@ impl<'a> Parser<'a> {
         target: Span,
     ) -> StmtId {
         self.finish_assignment_stmt(Stmt::IncDec { name, dec, prefix }, start, target)
+    }
+
+    /// Preserve the value of a member/index inc/dec at the end of ANY value-capable block. Both
+    /// forms evaluate the getter/index read exactly once: postfix saves the old value before
+    /// assigning `old.inc()`, while prefix saves `target.inc()` before assigning and returning that
+    /// same new value. Keeping the result in a parser-reserved local also avoids the tempting but
+    /// incorrect prefix expansion `target = target.inc(); target`, which invokes a custom getter a
+    /// second time. Receiver/index expressions still have to be pure because the assignment side of
+    /// the current AST reuses them; unsupported targets produce a diagnostic rather than being
+    /// double-evaluated.
+    fn incdec_access_value(
+        &mut self,
+        e: ExprId,
+        target: ExprId,
+        dec: bool,
+        prefix: bool,
+        start: Span,
+    ) -> StmtId {
+        let target_span = self.assignment_target_span(target);
+        if !self.incdec_access_is_pure(target) {
+            self.diags.error(
+                self.file.expr_spans[e.0 as usize],
+                "krusty: '++'/'--' is only supported on a simple variable or pure access path",
+            );
+            return self.finish_stmt(Stmt::Expr(e), start);
+        }
+        let op_name = if dec { "dec" } else { "inc" };
+        let target_read = self
+            .file
+            .add_expr(self.file.expr(target).clone(), target_span);
+        let saved_value = if prefix {
+            self.build_inc_dec_call(target_read, op_name, target_span)
+        } else {
+            target_read
+        };
+        // Keep the saved value in the parser's synthetic-name namespace. Even an escaped source
+        // binding with the same spelling cannot interfere: this generated block contains only its
+        // own local and generated reads, and repeated expansions have independent scopes.
+        const SAVED: &str = "$$incDecValue";
+        let local = self.file.add_stmt(
+            Stmt::Local {
+                is_var: false,
+                name: SAVED.to_string(),
+                ty: None,
+                init: saved_value,
+            },
+            start,
+        );
+        let saved_read = self
+            .file
+            .add_expr(Expr::Name(SAVED.to_string()), target_span);
+        let assigned_value = if prefix {
+            saved_read
+        } else {
+            self.build_inc_dec_call(saved_read, op_name, target_span)
+        };
+        let assignment = self
+            .finish_incdec_access_assignment(target, assigned_value, start, target_span)
+            .expect("pure member/index target has an assignment form");
+        let trailing = self
+            .file
+            .add_expr(Expr::Name(SAVED.to_string()), target_span);
+        let block = self.file.add_expr(
+            Expr::Block {
+                stmts: vec![local, assignment],
+                trailing: Some(trailing),
+            },
+            Span::new(start.lo, self.file.expr_spans[e.0 as usize].hi),
+        );
+        self.finish_stmt(Stmt::Expr(block), start)
     }
 
     /// A full-form destructuring statement starts with `(` (name-based) or `[` (positional, only
@@ -5237,15 +5321,32 @@ impl<'a> Parser<'a> {
                 // Increment/decrement *statement* (`target++` / `++target`): `parse_prefix`/
                 // `parse_postfix` built an `Expr::IncDec`; in statement position the value is
                 // discarded, so re-route to the statement helper (which desugars a `Name` to
-                // `Stmt::IncDec` and a member/index target to an assignment).
+                // `Stmt::IncDec` and a member/index target to an assignment). Immediately before a
+                // closing brace of a VALUE-CONSUMING block, keep the expression value. The enclosing
+                // parser context marks lambda/if/when/try value blocks; function/accessor/init/
+                // constructor/loop/finally blocks stay on this statement path. This avoids both a
+                // lambda-only fork and accidentally treating a Unit function's trailing implicit
+                // property increment as a local-variable expression.
                 if let Expr::IncDec {
                     target,
                     dec,
                     prefix,
                 } = self.file.expr(e).clone()
                 {
-                    let op_span = self.file.expr_spans[e.0 as usize];
-                    return self.incdec_target(target, dec, prefix, op_span, start);
+                    // Peek WITHOUT consuming: only a `}` (after newlines) makes this the body's last
+                    // statement — consuming the newlines here would shift the statement's spans.
+                    let after_nl = (self.i..self.t.len())
+                        .find(|&i| self.t[i].kind != TokenKind::Newline)
+                        .map(|i| self.t[i].kind);
+                    if after_nl != Some(TokenKind::RBrace) || !self.block_trailing_is_value {
+                        let op_span = self.file.expr_spans[e.0 as usize];
+                        return self.incdec_target(target, dec, prefix, op_span, start);
+                    }
+                    // A block's trailing statement can be its VALUE. A `Name` target lowers directly
+                    // as an expression; member/index targets use the shared, single-read expansion.
+                    if !matches!(self.file.expr(target), Expr::Name(_)) {
+                        return self.incdec_access_value(e, target, dec, prefix, start);
+                    }
                 }
                 // assignment: `name = value` or `receiver.name = value`.
                 if self.at(TokenKind::Eq) {
@@ -6946,7 +7047,7 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         self.expect(TokenKind::RParen, "')'");
         self.skip_newlines();
-        let then_branch = self.parse_branch();
+        let then_branch = self.parse_branch(true);
         // optional else (may be on the next line)
         let save = self.i;
         self.skip_newlines();
@@ -6962,7 +7063,7 @@ impl<'a> Parser<'a> {
         };
         let else_branch = if !else_is_when_entry && self.eat(TokenKind::KwElse) {
             self.skip_newlines();
-            Some(self.parse_branch())
+            Some(self.parse_branch(true))
         } else {
             self.i = save;
             None
@@ -7038,7 +7139,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'try'
         self.skip_newlines();
-        let body = self.parse_block_expr();
+        let body = self.parse_block_expr(true);
         let mut catches = Vec::new();
         let mut finally = None;
         loop {
@@ -7068,7 +7169,7 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(TokenKind::RParen, "')'");
                 self.skip_newlines();
-                let cbody = self.parse_block_expr();
+                let cbody = self.parse_block_expr(true);
                 catches.push(CatchClause {
                     name,
                     ty,
@@ -7077,7 +7178,7 @@ impl<'a> Parser<'a> {
             } else if self.at(TokenKind::Ident) && self.text() == "finally" {
                 self.bump(); // 'finally'
                 self.skip_newlines();
-                finally = Some(self.parse_block_expr());
+                finally = Some(self.parse_block_expr(false));
                 break; // `finally` is always last
             } else {
                 self.i = save;
@@ -7122,6 +7223,45 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// Whether a member/index target can use the current assignment AST without evaluating its
+    /// receiver or indices more than once. Name targets have their dedicated `Stmt::IncDec` path;
+    /// every other expression is rejected consistently by statement and value inc/dec handling.
+    fn incdec_access_is_pure(&self, target: ExprId) -> bool {
+        match self.file.expr(target) {
+            Expr::Member { receiver, .. } => self.is_pure_path(*receiver),
+            Expr::Index { array, indices } => {
+                self.is_pure_path(*array) && indices.iter().all(|&i| self.is_pure_path(i))
+            }
+            _ => false,
+        }
+    }
+
+    /// Build the store half shared by discarded-value and value-producing member/index inc/dec.
+    /// Centralizing this match keeps the accepted lvalue families, source spans, and future property
+    /// or index-store extensions identical across both syntactic contexts.
+    fn finish_incdec_access_assignment(
+        &mut self,
+        target: ExprId,
+        value: ExprId,
+        start: Span,
+        target_span: Span,
+    ) -> Option<StmtId> {
+        let statement = match self.file.expr(target).clone() {
+            Expr::Member { receiver, name } => Stmt::AssignMember {
+                receiver,
+                name,
+                value,
+            },
+            Expr::Index { array, indices } => Stmt::AssignIndex {
+                array,
+                indices,
+                value,
+            },
+            _ => return None,
+        };
+        Some(self.finish_assignment_stmt(statement, start, target_span))
+    }
+
     fn incdec_target(
         &mut self,
         e: ExprId,
@@ -7138,45 +7278,11 @@ impl<'a> Parser<'a> {
         let target_span = self.assignment_target_span(e);
         match self.file.expr(e).clone() {
             Expr::Name(n) => self.parse_incdec(n, dec, prefix, start, target_span),
-            Expr::Member { receiver, name } if self.is_pure_path(receiver) => {
-                let lhs = self.file.add_expr(
-                    Expr::Member {
-                        receiver,
-                        name: name.clone(),
-                    },
-                    op_span,
-                );
+            Expr::Member { .. } | Expr::Index { .. } if self.incdec_access_is_pure(e) => {
+                let lhs = self.file.add_expr(self.file.expr(e).clone(), op_span);
                 let value = self.build_inc_dec_call(lhs, op_name, op_span);
-                self.finish_assignment_stmt(
-                    Stmt::AssignMember {
-                        receiver,
-                        name,
-                        value,
-                    },
-                    start,
-                    target_span,
-                )
-            }
-            Expr::Index { array, indices }
-                if self.is_pure_path(array) && indices.iter().all(|&i| self.is_pure_path(i)) =>
-            {
-                let lhs = self.file.add_expr(
-                    Expr::Index {
-                        array,
-                        indices: indices.clone(),
-                    },
-                    op_span,
-                );
-                let value = self.build_inc_dec_call(lhs, op_name, op_span);
-                self.finish_assignment_stmt(
-                    Stmt::AssignIndex {
-                        array,
-                        indices,
-                        value,
-                    },
-                    start,
-                    target_span,
-                )
+                self.finish_incdec_access_assignment(e, value, start, target_span)
+                    .expect("pure member/index target has an assignment form")
             }
             _ => {
                 self.diags.error(
@@ -7278,7 +7384,7 @@ impl<'a> Parser<'a> {
             }
             self.expect(TokenKind::Arrow, "'->'");
             self.skip_newlines();
-            let body = self.parse_branch();
+            let body = self.parse_branch(true);
             arms.push(WhenArm { conditions, body });
         }
         let end = self.tok().span;
@@ -7530,14 +7636,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_branch(&mut self) -> ExprId {
+    fn parse_branch(&mut self, trailing_is_value: bool) -> ExprId {
         if self.at(TokenKind::LBrace) {
             // A branch body `{ … }` is a BLOCK — unless it is a LAMBDA (`when (x) { … -> { _ -> body } }`
             // returning a function type), detected by a top-level `->` before the closing `}`.
             if self.at_lambda_brace() {
                 return self.parse_lambda();
             }
-            return self.parse_block_expr();
+            return self.parse_block_expr(trailing_is_value);
         }
         let start = self.tok().span;
         let s = self.parse_stmt();
@@ -8923,6 +9029,25 @@ mod tests {
         assert_eq!(
             tree("fun f(a: IntArray): Int = a[0]"),
             "(fun f (param a IntArray) :Int (index a 0))\n"
+        );
+    }
+
+    #[test]
+    fn prefix_member_value_expansion_reads_the_property_once() {
+        // A prefix value must be the value produced by `inc()`, not a second read after the setter.
+        // The debug tree exposes member READS as `(. probe value)`; the assignment target is a
+        // distinct `set-member` node. Exactly one read therefore pins the single-evaluation
+        // invariant without requiring the backend to support a custom-accessor fixture.
+        let parsed =
+            tree("fun f(probe: SyntheticProbe): Int = if (true) { ++probe.value } else { 0 }");
+        assert_eq!(
+            parsed.matches("(. probe value)").count(),
+            1,
+            "prefix expansion must read the member once: {parsed}"
+        );
+        assert!(
+            parsed.contains("set-member"),
+            "prefix expansion must retain the member assignment: {parsed}"
         );
     }
 

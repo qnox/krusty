@@ -198,6 +198,13 @@ struct SourceRootIndexNode {
 }
 
 impl SourceRootIndex {
+    /// Build the same longest-component-prefix relation exposed by
+    /// [`ProjectModel::module_source_root_for_source`] once for the immutable graph snapshot.
+    ///
+    /// Owners are stored as model indices rather than cloned roots so the index cannot drift from
+    /// package prefixes or other root metadata held by the snapshot. Inserting in model order is
+    /// also significant: replacing an existing owner makes an identical later root win, matching
+    /// the linear reference implementation's `(depth, module_index, root_index)` tie-break.
     fn new(modules: &[Module]) -> Self {
         let mut index = Self {
             nodes: vec![SourceRootIndexNode::default()],

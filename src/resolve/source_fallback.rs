@@ -635,6 +635,10 @@ impl SemanticPlatform for SourceFallbackPlatform {
         self.platform.is_default_library_owner(internal)
     }
 
+    fn is_erased_contract_callable(&self, callable: &crate::libraries::LibraryCallable) -> bool {
+        self.platform.is_erased_contract_callable(callable)
+    }
+
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {
         self.platform.boxed_primitive(ty)
     }
