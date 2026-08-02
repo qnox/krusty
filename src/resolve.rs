@@ -1695,6 +1695,25 @@ impl SymbolTable {
         })
     }
 
+    /// Return one source declaration's callable signature and optional declared extension receiver.
+    /// The declaration key is authoritative: callers do not need file-, module-, or
+    /// classpath-specific lookup branches, and top-level versus extension storage remains an
+    /// indexing detail of the symbol table.
+    fn source_callable_signature(
+        &self,
+        name: &str,
+        file: u32,
+        declaration: DeclId,
+    ) -> Option<(Option<Ty>, &Signature)> {
+        if let Some((receiver, signature)) =
+            self.source_extension_signature(name, file, declaration)
+        {
+            return Some((Some(receiver), signature));
+        }
+        self.source_function_signature(name, file, declaration)
+            .map(|signature| (None, signature))
+    }
+
     fn fun_ret_by_erased_params(&self, name: &str, params: &[ErasedTypeKey]) -> Option<Ty> {
         let overloads = self.funs.get(name)?;
         overloads
@@ -1874,13 +1893,14 @@ fn function_bound_names(file: &File, function: &FunDecl) -> std::collections::Ha
 
 /// Shapes that lower correctly ONLY when an `inline` body is spliced into a caller — the checker
 /// analyses the body with splice assumptions, so emitting it standalone (a facade static for
-/// cross-file calls) would miscompile: nested lambdas / anonymous objects (capture analysis +
-/// synthetic numbering), `try` / `break` / `continue` / a LABELED or expression-position `return`
-/// (inline-frame control flow — a plain unlabeled value-`return` is just a method return), and
-/// `is`/`as` on a type parameter (splicing substitutes the call-site type argument; a standalone
-/// body can only erase to the bound). A semantically resolved contract-declaration block is erased,
-/// not a closure.
-/// Conservative: the file just skips.
+/// cross-file calls) would miscompile: a lambda that is STORED or returned rather than passed to
+/// a call (capture analysis + synthetic numbering assume the caller's file), anonymous objects,
+/// `try` / `break` / `continue` / a LABELED or expression-position `return` (inline-frame control
+/// flow — a plain unlabeled value-`return` is just a method return), and `is`/`as` on a type
+/// parameter (splicing substitutes the call-site type argument; a standalone body can only erase
+/// to the bound). A lambda passed directly to a call is screened by its body because it can be
+/// emitted as an ordinary closure; a semantically resolved contract-declaration block is erased,
+/// not a closure. Conservative: the file just skips.
 fn inline_body_has_splice_only_shape(
     file: &File,
     f: &FunDecl,
@@ -1924,6 +1944,20 @@ fn inline_body_has_splice_only_shape(
             | Expr::Continue { .. }
             | Expr::Return { .. } => true,
             Expr::Is { ty, .. } | Expr::As { ty, .. } if tparams.contains(&ty.name) => true,
+            // A lambda in DIRECT call-argument position is safe standalone: it splices with an
+            // inline callee or closes over like any fn body. Its BODY is screened (a stored or
+            // returned lambda stays rejected above), and a `return` inside it — a non-local
+            // return through the inline frame — keeps the fn splice-only.
+            Expr::Call { callee, args } => {
+                bad_expr(file, *callee, tparams, is_erased_contract)
+                    || args.iter().any(|&arg| match file.expr(arg) {
+                        Expr::Lambda { body, .. } => {
+                            lambda_body_has_return(file, *body)
+                                || bad_expr(file, *body, tparams, is_erased_contract)
+                        }
+                        _ => bad_expr(file, arg, tparams, is_erased_contract),
+                    })
+            }
             _ => file.any_child_expr(
                 e,
                 &mut |child| bad_expr(file, child, tparams, is_erased_contract),
@@ -1947,6 +1981,17 @@ fn inline_body_has_splice_only_shape(
             bad_expr(file, child, tparams, is_erased_contract)
         })
     }
+    /// Any `return` inside a lambda argument's body (non-local through the inline frame — its
+    /// framing only holds when spliced into a caller, not emitted standalone).
+    fn lambda_body_has_return(file: &File, e: ExprId) -> bool {
+        if matches!(file.expr(e), Expr::Return { .. }) {
+            return true;
+        }
+        file.any_child_expr(e, &mut |c| lambda_body_has_return(file, c), &mut |s| {
+            matches!(file.stmt(s), Stmt::Return(..))
+                || file.any_child_stmt(s, &mut |c| lambda_body_has_return(file, c))
+        })
+    }
     match &f.body {
         FunBody::Expr(body) | FunBody::Block(body) => {
             bad_expr(file, *body, &f.type_params, is_erased_contract)
@@ -1957,10 +2002,11 @@ fn inline_body_has_splice_only_shape(
 
 impl SymbolTable {
     /// Whether an `inline fun` may be lowered + emitted as a callable facade static for CROSS-FILE
-    /// calls: [`FunDecl::has_emittable_inline_body`] syntactically, its signature mentions no value
-    /// class (a cross-file `invokestatic` applies no value-class mangling/erasure), and its body
-    /// carries no splice-only shape (the checker analyses an `inline` body with splice
-    /// assumptions). Anything else stays splice-only — a cross-file call keeps the file skipped.
+    /// calls: syntactically (inline, non-reified, non-suspend), its signature — receiver included
+    /// for an extension — mentions no value class (a cross-file `invokestatic` applies no
+    /// value-class mangling/erasure), and its body carries no splice-only shape (the checker
+    /// analyses an `inline` body with splice assumptions). Anything else stays splice-only — a
+    /// cross-file call keeps the file skipped.
     pub fn inline_fn_facade_emittable(
         &self,
         file: &File,
@@ -1968,15 +2014,21 @@ impl SymbolTable {
         decl: DeclId,
         f: &FunDecl,
     ) -> bool {
-        if !f.has_emittable_inline_body() {
+        if !f.is_inline() || !f.reified_type_params.is_empty() || f.is_suspend() {
             return false;
         }
-        let Some(sig) = self.funs.get(&f.name).and_then(|sigs| {
-            sigs.iter()
-                .find(|s| s.source_file == Some(file_index) && s.source_decl == Some(decl))
-        }) else {
+        // A source declaration has exactly one callable signature. Resolve it by declaration
+        // identity and screen the receiver, when present, as arg0 of the same static ABI instead of
+        // maintaining separate top-level and extension policy branches here.
+        let Some((receiver, sig)) = self.source_callable_signature(&f.name, file_index, decl)
+        else {
             return false;
         };
+        let value_class_free = receiver
+            .into_iter()
+            .chain(sig.params.iter().copied())
+            .all(|ty| !self.ty_mentions_value_class(ty))
+            && !self.ty_mentions_value_class(sig.ret);
         let module = crate::module_symbols::ModuleSymbols::for_file(self, file_index);
         let import_scope = function_import_scope(file, self);
         let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
@@ -2006,9 +2058,24 @@ impl SymbolTable {
             contract_names.borrow_mut().insert(name.clone(), resolved);
             resolved
         };
-        !sig.params.iter().any(|t| self.ty_mentions_value_class(*t))
-            && !self.ty_mentions_value_class(sig.ret)
-            && !inline_body_has_splice_only_shape(file, f, &is_erased_contract)
+        value_class_free && !inline_body_has_splice_only_shape(file, f, &is_erased_contract)
+    }
+
+    /// Whether a source function has a standalone callable body in the checked program. Ordinary
+    /// functions always do; an inline function does only when its established callable-extension
+    /// path or the conservative standalone-body analysis supports it. This semantic answer is
+    /// shared by common IR lowering and target registration so neither layer reconstructs the
+    /// declaration-kind predicate or introduces file/module/classpath exceptions.
+    pub fn source_fn_has_callable_body(
+        &self,
+        file: &File,
+        file_index: u32,
+        declaration: DeclId,
+        function: &FunDecl,
+    ) -> bool {
+        !function.is_inline()
+            || function.has_callable_inline_extension_body()
+            || self.inline_fn_facade_emittable(file, file_index, declaration, function)
     }
 
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or

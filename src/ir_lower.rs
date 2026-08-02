@@ -2143,19 +2143,16 @@ fn lower_file_at_reporting_impl(
     }
 
     // A splice-only inline fun is registered/lowered NOWHERE (its body is expanded at each call
-    // site); an `inline_fn_facade_emittable` one ALSO emits a facade static for cross-file calls,
-    // so it goes through registration and body lowering like a plain fun.
-    let splice_only_inline = |f: &FunDecl, d: DeclId| {
-        f.is_inline()
-            && !f.has_callable_inline_extension_body()
-            && !syms.inline_fn_facade_emittable(file, file_index, d, f)
-    };
+    // site). Consume the same declaration-keyed semantic answer as backend registration so adding
+    // a callable source shape cannot make one layer emit an owner while the other omits its body.
+    let has_callable_body =
+        |f: &FunDecl, d: DeclId| syms.source_fn_has_callable_body(file, file_index, d, f);
 
     // Pass 1b: register callable top-level and extension functions.
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
             lo.set_bail("deep:fun-register"); // pass 1b phase marker (survey diagnostic only)
-            if splice_only_inline(f, d) {
+            if !has_callable_body(f, d) {
                 continue;
             }
             if let Some(recv_ref) = &f.receiver {
@@ -2433,7 +2430,7 @@ fn lower_file_at_reporting_impl(
     // Pass 2: lower bodies.
     for &d in &file.decls {
         match file.decl(d) {
-            Decl::Fun(f) if splice_only_inline(f, d) => {}
+            Decl::Fun(f) if !has_callable_body(f, d) => {}
             Decl::Fun(f) => {
                 lo.set_bail("deep:fun");
                 lo.scope.clear();
