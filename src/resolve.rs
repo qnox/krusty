@@ -1730,6 +1730,43 @@ impl SymbolTable {
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.values().find(|sig| sig.internal == internal)
     }
+
+    /// Find the source declaration that owns a member property across the complete module hierarchy.
+    /// Collected signatures flatten inherited property shapes into `ClassSig::props`, but declaration
+    /// facts such as visibility and setter visibility remain only in the owner's `declared_props`.
+    /// Keep this as the single graph walk for consumers that need declaration facts, so inherited
+    /// interface and superclass properties cannot acquire guessed visibility independently.
+    pub fn declared_member_prop(
+        &self,
+        internal: TypeName,
+        name: &str,
+    ) -> Option<(TypeName, &DeclaredPropertySig)> {
+        let mut pending = vec![internal];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let Some(class) = self.class_by_type_name(current) else {
+                continue;
+            };
+            if let Some(declared) = class.declared_props.get(name) {
+                return Some((current, declared));
+            }
+            // A class member wins over an interface member. Push interfaces in reverse declaration
+            // order first and the superclass last because this is a LIFO worklist: the resulting
+            // search is current class -> complete superclass hierarchy -> declared interfaces. This
+            // is also the order used when source properties are brought into checker scope. Keeping
+            // the order here explicit prevents a visibility lookup from selecting an interface
+            // declaration while the ordinary property lookup selected a same-named superclass member.
+            let interfaces = class.interface_names().collect::<Vec<_>>();
+            pending.extend(interfaces.into_iter().rev());
+            if let Some(superclass) = class.super_internal_name() {
+                pending.push(superclass);
+            }
+        }
+        None
+    }
 }
 
 /// Whether the import-scoped top-level family selected for `e` consists solely of the platform's
@@ -9555,6 +9592,16 @@ pub enum ExprLowering {
     },
     /// An unbound classpath member or extension-property reference.
     ClasspathUnboundPropertyRef(Box<crate::symbol_resolver::ResolvedPropertyRef>),
+    /// An unqualified source member-property reference (`::p`) selected against the current
+    /// dispatch receiver. Lowering consumes this exact owner instead of repeating source hierarchy
+    /// and visibility resolution; presence also distinguishes a selected-but-unlowerable member
+    /// from a top-level property with the same name, so shadowing fails closed.
+    ImplicitThisMemberPropertyRef { owner: TypeName },
+    /// An unqualified source member-function reference (`::m`) selected against the current semantic
+    /// `this`. The owner is a semantic handoff, not a JVM-slot hint: top-level extensions bind `this`
+    /// at slot zero, member extensions bind it after the dispatch receiver, and nested receiver scopes
+    /// may bind it to a local value. Lowering captures the scoped value and dispatches on this owner.
+    ImplicitThisMemberFunctionRef { owner: TypeName },
     /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
     /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
     /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
@@ -9912,6 +9959,7 @@ fn make_checker<'a>(
         tparams: Default::default(),
         reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
+        this_unavailable: false,
         this_extension_receiver: None,
         this_narrow: None,
         this_labels: Vec::new(),
@@ -10244,8 +10292,35 @@ fn record_function_capture_targets(
     record_capture_targets(file, targets, roots, discovered)
 }
 
+/// Kotlin gives these unqualified instance methods a fixed return even when source omits the
+/// annotation. Keep this source-shape rule shared by method checking and any pass that predicts
+/// whether method checking can publish an inferred return: duplicating the list would let an
+/// optimization silently diverge from the semantic path when a contract is added or corrected.
+fn implicit_object_contract_return(function: &FunDecl) -> Option<Ty> {
+    match (
+        function.receiver.is_none(),
+        function.name.as_str(),
+        function.params.len(),
+    ) {
+        (true, "compareTo", 1) => Some(Ty::Int),
+        (true, "equals", 1) => Some(Ty::Boolean),
+        (true, "hashCode", 0) => Some(Ty::Int),
+        (true, "toString", 0) => Some(Ty::String),
+        _ => None,
+    }
+}
+
+fn method_may_publish_inferred_return(function: &FunDecl) -> bool {
+    function.ret.is_none()
+        && implicit_object_contract_return(function).is_none()
+        && matches!(function.body, FunBody::Expr(_))
+}
+
 struct ClassCapturePlan {
-    method_check_prefix_len: usize,
+    /// One decision per method in the retained instance/enum-entry prefix. A shorter vector means
+    /// the remaining suffix is irrelevant; `false` inside the vector means semantic checking may be
+    /// skipped but the checker's ordered mutation summary must still advance past that method.
+    methods: Vec<bool>,
     companion_methods: Vec<bool>,
 }
 
@@ -10255,11 +10330,13 @@ impl ClassCapturePlan {
     /// method only asks the corresponding generic function seam which ordered method owns each
     /// target.
     ///
-    /// Instance and enum-entry methods publish inferred returns into shared checker state. Keep the
-    /// exact prefix through the last capture-bearing method. A target in any other class region
-    /// keeps the complete prefix because constructors, properties, init blocks, enum arguments, and
-    /// companion functions may consume those published returns. Companion functions themselves do
-    /// not publish into that cross-function cache, so they can be selected independently.
+    /// Instance and enum-entry methods publish inferred returns into shared checker state. Retain
+    /// the exact prefix through the last capture-bearing method, but semantically check within that
+    /// prefix only methods that own a target or can publish such a return. A target in any other
+    /// class region keeps the complete prefix because constructors, properties, init blocks, enum
+    /// arguments, and companion functions may consume those published returns. Companion functions
+    /// themselves do not publish into that cross-function cache, so they can be selected
+    /// independently.
     fn for_class(
         file: &File,
         class: &ClassDecl,
@@ -10277,17 +10354,25 @@ impl ClassCapturePlan {
             )
             .collect::<Vec<_>>();
         let mut method_targets = std::collections::HashSet::new();
-        let mut method_check_prefix_len = 0;
-        for (index, method) in methods.iter().enumerate() {
-            if record_function_capture_targets(file, method, targets, &mut method_targets) {
-                method_check_prefix_len = index + 1;
-            }
-        }
+        let mut selected_methods = methods
+            .iter()
+            .map(|method| {
+                record_function_capture_targets(file, method, targets, &mut method_targets)
+            })
+            .collect::<Vec<_>>();
+        let mut method_check_prefix_len = selected_methods
+            .iter()
+            .rposition(|selected| *selected)
+            .map_or(0, |index| index + 1);
         if declaration_targets
             .iter()
             .any(|target| !method_targets.contains(target))
         {
             method_check_prefix_len = methods.len();
+        }
+        selected_methods.truncate(method_check_prefix_len);
+        for (selected, method) in selected_methods.iter_mut().zip(methods) {
+            *selected |= method_may_publish_inferred_return(method);
         }
 
         let mut companion_targets = std::collections::HashSet::new();
@@ -10299,7 +10384,7 @@ impl ClassCapturePlan {
             })
             .collect();
         Self {
-            method_check_prefix_len,
+            methods: selected_methods,
             companion_methods,
         }
     }
@@ -11072,15 +11157,17 @@ fn check_file_at_impl_mode(
                         }
                     }
                 }
-                let method_check_prefix_len = capture_scope
+                let method_capture_plan = capture_scope
                     .as_ref()
-                    .and_then(|scope| scope.class_plans.get(&d))
-                    .map_or(usize::MAX, |plan| plan.method_check_prefix_len);
+                    .and_then(|scope| scope.class_plans.get(&d));
                 let mut method_check_index = 0;
                 for m in &cl.methods {
-                    if method_check_index < method_check_prefix_len {
-                        c.check_method(m, &props);
-                    }
+                    c.check_method_in_capture_plan(
+                        m,
+                        &props,
+                        method_capture_plan,
+                        method_check_index,
+                    );
                     method_check_index += 1;
                 }
                 // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
@@ -11125,9 +11212,12 @@ fn check_file_at_impl_mode(
                         c.pop_scope();
                     }
                     for bm in &entry.methods {
-                        if method_check_index < method_check_prefix_len {
-                            c.check_method(bm, &entry_props);
-                        }
+                        c.check_method_in_capture_plan(
+                            bm,
+                            &entry_props,
+                            method_capture_plan,
+                            method_check_index,
+                        );
                         method_check_index += 1;
                     }
                 }
@@ -11169,10 +11259,16 @@ fn check_file_at_impl_mode(
                     for p in &sc.params {
                         if let Some(default) = p.default {
                             let ty = c.secondary_ctor_param_ty(p);
-                            c.check_default_arg(&p.ty, default, ty);
+                            // A ctor-param default is evaluated in the CALLER's context — no `this`.
+                            c.with_this_unavailable(|c| {
+                                c.check_default_arg(&p.ty, default, ty);
+                            });
                         }
                     }
-                    match &sc.delegation {
+                    // Delegation-call args (`this(…)`/`super(…)`) run before the delegated
+                    // constructor — `this` is UNINITIALIZED there (same guard as the primary
+                    // `super(…)` clause below).
+                    c.with_this_unavailable(|c| match &sc.delegation {
                         CtorDelegation::This(delegation) => {
                             for &argument in &delegation.args {
                                 // A delegation lambda is contextual: leave its initial `Error`
@@ -11235,7 +11331,7 @@ fn check_file_at_impl_mode(
                             );
                         }
                         CtorDelegation::None => {}
-                    }
+                    });
                     if let Some(body) = sc.body {
                         c.with_ret(Ty::Unit, |c| {
                             c.expr_statement(body);
@@ -11255,7 +11351,8 @@ fn check_file_at_impl_mode(
                 for p in &cl.props {
                     if let Some(dx) = p.default {
                         let pty = c.resolve_ty(&p.ty);
-                        c.check_default_arg(&p.ty, dx, pty);
+                        // A ctor-param default is evaluated in the CALLER's context — no `this`.
+                        c.with_this_unavailable(|c| c.check_default_arg(&p.ty, dx, pty));
                     }
                 }
                 c.pop_scope();
@@ -11294,66 +11391,71 @@ fn check_file_at_impl_mode(
                 // checked below once the ctor is resolved; anything else is typed up front.
                 let file = c.file;
                 let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
-                for &arg in &cl.base_args {
-                    if !is_lambda(arg) {
-                        c.expr(arg);
+                // `this` is UNINITIALIZED inside `super(…)` args — an implicit-`this` callable ref
+                // there must not resolve (see `this_unavailable`).
+                c.with_this_unavailable(|c| {
+                    for &arg in &cl.base_args {
+                        if !is_lambda(arg) {
+                            c.expr(arg);
+                        }
                     }
-                }
-                // Resolve the primary constructor's `Base(args)` clause through the SAME delegation
-                // candidates and argument-slot mapper used by secondary `super(args)` calls. Besides
-                // keeping same-file, sibling-module, and classpath bases on one path, the resulting
-                // source-order `argument_types` are essential for named/vararg arguments: zipping the
-                // source arguments with parameter order would contextually type the wrong lambda.
-                if !cl.base_args.is_empty() {
-                    let internal = class_internal(c.file, &cl.name);
-                    let names = cl
-                        .base_args
-                        .first()
-                        .and_then(|argument| c.file.base_arg_names.get(&argument.0))
-                        .cloned()
-                        .unwrap_or_else(|| vec![None; cl.base_args.len()]);
-                    let arguments = CtorDelegationCall {
-                        args: cl.base_args.clone(),
-                        names,
-                        trailing_lambda: false,
-                    };
-                    let candidates = c.super_ctor_delegation_candidates(cl);
-                    if let Some(selected) = c.select_source_constructor(&arguments, &candidates) {
-                        // A receiver lambda's implicit label is the source-level base class's SIMPLE
-                        // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
-                        // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
-                        let label = cl.base_class.as_deref().map(|base| {
-                            base.rsplit(['/', '.', '$'])
-                                .next()
-                                .unwrap_or(base)
-                                .to_string()
-                        });
-                        for ((&arg, &expected), &has_receiver) in cl
+                    // Resolve the primary constructor's `Base(args)` clause through the SAME delegation
+                    // candidates and argument-slot mapper used by secondary `super(args)` calls. Besides
+                    // keeping same-file, sibling-module, and classpath bases on one path, the resulting
+                    // source-order `argument_types` are essential for named/vararg arguments: zipping the
+                    // source arguments with parameter order would contextually type the wrong lambda.
+                    if !cl.base_args.is_empty() {
+                        let internal = class_internal(c.file, &cl.name);
+                        let names = cl
                             .base_args
-                            .iter()
-                            .zip(&selected.argument_types)
-                            .zip(&selected.argument_lambda_receivers)
+                            .first()
+                            .and_then(|argument| c.file.base_arg_names.get(&argument.0))
+                            .cloned()
+                            .unwrap_or_else(|| vec![None; cl.base_args.len()]);
+                        let arguments = CtorDelegationCall {
+                            args: cl.base_args.clone(),
+                            names,
+                            trailing_lambda: false,
+                        };
+                        let candidates = c.super_ctor_delegation_candidates(cl);
+                        if let Some(selected) = c.select_source_constructor(&arguments, &candidates)
                         {
-                            if is_lambda(arg) {
-                                c.check_argument_expected(
-                                    arg,
-                                    expected,
-                                    has_receiver,
-                                    label.as_deref(),
-                                );
+                            // A receiver lambda's implicit label is the source-level base class's SIMPLE
+                            // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
+                            // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
+                            let label = cl.base_class.as_deref().map(|base| {
+                                base.rsplit(['/', '.', '$'])
+                                    .next()
+                                    .unwrap_or(base)
+                                    .to_string()
+                            });
+                            for ((&arg, &expected), &has_receiver) in cl
+                                .base_args
+                                .iter()
+                                .zip(&selected.argument_types)
+                                .zip(&selected.argument_lambda_receivers)
+                            {
+                                if is_lambda(arg) {
+                                    c.check_argument_expected(
+                                        arg,
+                                        expected,
+                                        has_receiver,
+                                        label.as_deref(),
+                                    );
+                                }
                             }
-                        }
-                        c.super_ctor_params
-                            .insert(internal, selected.target.params().to_vec());
-                    } else {
-                        // No unique ctor match: type the deferred lambda args without an expected type.
-                        for &arg in &cl.base_args {
-                            if is_lambda(arg) {
-                                c.expr(arg);
+                            c.super_ctor_params
+                                .insert(internal, selected.target.params().to_vec());
+                        } else {
+                            // No unique ctor match: type the deferred lambda args without an expected type.
+                            for &arg in &cl.base_args {
+                                if is_lambda(arg) {
+                                    c.expr(arg);
+                                }
                             }
                         }
                     }
-                }
+                });
                 // Interface-delegation expressions (`: I by mk(x)`) are evaluated in the constructor too,
                 // so they're typed here — with the ctor params and `this` in scope.
                 for (_iface, e) in &cl.delegation_exprs {
@@ -12209,6 +12311,12 @@ struct Checker<'a> {
     reified_tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
+    /// `true` while checking expressions where implicit `this` is unavailable or uninitialized — a class's
+    /// `super(…)`/delegation-call arguments and constructor-parameter defaults (the latter are
+    /// evaluated in the CALLER's context). Every implicit-`this` callable-reference shape uses this
+    /// shared state; restricting it to properties would leave `::method` able to capture the same
+    /// unavailable or uninitialized semantic receiver.
+    this_unavailable: bool,
     this_extension_receiver: Option<Span>,
     /// A flow-narrowing of the implicit receiver established by `if (this is B)`: `this` is known to
     /// be `B` (a subtype of `this_ty`) inside the guarded branch, so a bare member of `B` resolves.
@@ -12533,6 +12641,30 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Apply one ordered class-capture method decision. A missing plan is the conservative full-walk
+    /// fallback used both outside capture discovery and when target-inventory completeness failed.
+    /// A missing entry in a present plan is instead the irrelevant suffix after the final target.
+    /// Skipped non-publishers inside the retained prefix still replace the mutation summary because
+    /// `check_method` normally performs that state transition before semantic work, and a later
+    /// selected class region reads these checker-wide sets while discovering mutable captures.
+    fn check_method_in_capture_plan(
+        &mut self,
+        function: &FunDecl,
+        properties: &[ScopedProperty],
+        plan: Option<&ClassCapturePlan>,
+        method_index: usize,
+    ) {
+        let Some(plan) = plan else {
+            self.check_method(function, properties);
+            return;
+        };
+        match plan.methods.get(method_index) {
+            Some(true) => self.check_method(function, properties),
+            Some(false) => self.reset_body_mutations(fun_body_expr(&function.body)),
+            None => {}
+        }
+    }
+
     fn resolved_type(&self, internal: &str) -> Option<crate::libraries::LibraryType> {
         self.resolved_type_name(type_name(internal))
             .map(|classifier| (*classifier).clone())
@@ -12566,6 +12698,17 @@ impl<'a> Checker<'a> {
 
     fn with_ret<R>(&mut self, ret_ty: Ty, f: impl FnOnce(&mut Self) -> R) -> R {
         self.with_ret_allowed(ret_ty, true, f)
+    }
+
+    /// Evaluate a constructor-header region before a dispatch receiver exists. Centralizing the
+    /// save/restore transition keeps primary defaults, secondary defaults, and delegation arguments
+    /// on one rule and prevents an early return in one caller from leaking the state into a body where
+    /// `this` is initialized.
+    fn with_this_unavailable<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = std::mem::replace(&mut self.this_unavailable, true);
+        let result = f(self);
+        self.this_unavailable = previous;
+        result
     }
 
     fn with_ret_allowed<R>(
@@ -18207,13 +18350,7 @@ impl<'a> Checker<'a> {
                 .push((label_index, recv_ref.span));
             self.this_extension_receiver = Some(recv_ref.span);
         }
-        let object_contract_ret = match (f.receiver.is_none(), f.name.as_str(), f.params.len()) {
-            (true, "compareTo", 1) => Some(Ty::Int),
-            (true, "equals", 1) => Some(Ty::Boolean),
-            (true, "hashCode", 0) => Some(Ty::Int),
-            (true, "toString", 0) => Some(Ty::String),
-            _ => None,
-        };
+        let object_contract_ret = implicit_object_contract_return(f);
         self.ret_ty = f
             .ret
             .as_ref()
@@ -18394,6 +18531,23 @@ impl<'a> Checker<'a> {
         internal: TypeName,
         name: &str,
     ) -> Option<(TypeName, Ty, bool, Option<Visibility>)> {
+        // Source declarations are authoritative for every semantic property fact. In particular,
+        // `ClassSig::props` contains inherited backing-field shapes flattened into subclasses, so a
+        // lookup through that cache cannot identify the actual declaring owner and can pair the
+        // selected type with visibility from a different branch of the hierarchy. Resolve the full
+        // declaration once and derive type, mutability, setter visibility, and owner together.
+        if let Some((owner, property)) = self.syms.declared_member_prop(internal, name) {
+            return property.context_params.is_empty().then_some((
+                owner,
+                property.ty,
+                property.setter_name.is_some(),
+                property.setter_visibility,
+            ));
+        }
+
+        // Retain the structural fallback for signatures that intentionally have no source
+        // declaration metadata (synthetic/module-populated `ClassSig::props`). It is deliberately
+        // secondary: source properties must never lose their declaring owner to the flattened cache.
         let mut pending = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(current) = pending.pop() {
@@ -22263,15 +22417,80 @@ impl<'a> Checker<'a> {
                 // An unqualified `::m` inside a class is a BOUND reference to the enclosing receiver's
                 // member FUNCTION — `this::m`. Resolved before the top-level fallbacks (a member takes
                 // precedence over a same-named top-level decl), exactly matching the lowerer's
-                // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return — a
-                // member-property implicit ref isn't lowered, so it's NOT resolved here either, to keep
-                // the checker and lowerer in agreement).
+                // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return); the
+                // member-PROPERTY case (`::p`) follows, matching `lower_implicit_this_prop_ref`.
                 if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                    if let Some(sig) = self.syms.method_of_name(internal, &name) {
+                    if let Some((owner, sig)) = self.syms.method_of_with_owner_name(internal, &name)
+                    {
                         if sig.requires_all_args() && sig.ret != Ty::Nothing {
+                            // Constructor headers have no initialized semantic receiver to capture.
+                            // Other receiver shapes are safe because lowering consumes the exact
+                            // selected owner and captures its scoped `this` value; it does not assume
+                            // that every implicit receiver lives in JVM slot zero.
+                            if self.this_unavailable {
+                                self.diags.error(
+                                    self.span(e),
+                                    "krusty: callable references are not supported",
+                                );
+                                return self.set(e, Ty::Error);
+                            }
+                            self.expr_lowers
+                                .insert(e, ExprLowering::ImplicitThisMemberFunctionRef { owner });
                             self.mark_current_extension_receiver_used(e);
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
+                    }
+                    // An unqualified `::p` inside a class is a BOUND reference to the enclosing
+                    // receiver's member PROPERTY (`this::p`) — resolved after member fns (a fn
+                    // takes precedence). A member SHADOWS a same-named top-level decl, so once
+                    // found here the reference NEVER falls through to the top-level arms: it is
+                    // typed only where the lowering (`lower_implicit_this_prop_ref`, capturing the
+                    // dispatch `this` at slot 0) is valid —
+                    //   * not where `this` is unavailable/uninitialized (super-ctor args,
+                    //     ctor-param defaults — `this_unavailable`);
+                    //   * not a `private`/`protected` property, nor a `var` with a `private`
+                    //     setter (the synthetic reference class can't reach such an accessor —
+                    //     an illegal-access miscompile);
+                    //   * a computed (backing-field-less) property IS typed here but declined by
+                    //     the lowerer — a sound skip, never a mis-bind.
+                    if let Some((owner, _, is_var, setter_visibility)) =
+                        self.lookup_prop_with_owner_name(internal, &name)
+                    {
+                        // The same declaration resolver supplies every property fact. A private base
+                        // property flattened into the subclass's structural field cache must not
+                        // default to public or borrow visibility from a same-named interface member.
+                        let visibility = self
+                            .syms
+                            .declared_member_prop(internal, &name)
+                            .map(|(_, property)| property.visibility)
+                            // Only synthetic/module-populated structural properties reach this
+                            // fallback; they carry no source visibility and preserve the historical
+                            // public treatment.
+                            .unwrap_or(Visibility::Public);
+                        let accessible =
+                            |v: Visibility| matches!(v, Visibility::Public | Visibility::Internal);
+                        if !self.this_unavailable
+                            && accessible(visibility)
+                            && (!is_var || setter_visibility.is_none_or(accessible))
+                        {
+                            if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                // Record the semantic selection once. Lowering must not repeat the
+                                // hierarchy/visibility walk: this marker both supplies the exact
+                                // dispatch owner and makes a computed member fail closed instead of
+                                // falling through to a shadowed top-level/extension property.
+                                self.expr_lowers.insert(
+                                    e,
+                                    ExprLowering::ImplicitThisMemberPropertyRef { owner },
+                                );
+                                self.mark_current_extension_receiver_used(e);
+                                return self.set(e, ty);
+                            }
+                        }
+                        self.diags.error(
+                            self.span(e),
+                            "krusty: callable references are not supported",
+                        );
+                        return self.set(e, Ty::Error);
                     }
                 }
                 if let Some(receiver) = self.this_ty {
@@ -25229,15 +25448,9 @@ impl<'a> Checker<'a> {
         receiver: TypeName,
         name: &str,
     ) -> Option<(Visibility, TypeName)> {
-        let mut cur = Some(receiver);
-        while let Some(internal) = cur {
-            let cs = self.syms.class_by_type_name(internal)?;
-            if let Some(property) = cs.declared_props.get(name) {
-                return Some((property.visibility, internal));
-            }
-            cur = cs.super_internal_name();
-        }
-        None
+        self.syms
+            .declared_member_prop(receiver, name)
+            .map(|(owner, property)| (property.visibility, owner))
     }
 
     fn inaccessible_classifier(
@@ -32966,7 +33179,10 @@ fun target(seed: Int): Marker {
     return object : Marker { fun value(): Int = captured }
 }
 class MethodHost {
-    fun untouched(): Int = 2
+    fun declared(): Int = 2
+    fun inferred() = source()
+    override fun toString() = source()
+    fun block(): Int { return 2 }
     fun build(seed: Int): Marker {
         val captured = seed
         return object : Marker { fun value(): Int = captured }
@@ -32974,9 +33190,17 @@ class MethodHost {
     fun defaulted(value: Marker = object : Marker {}): Marker = value
     fun after(): Int = 3
 }
+class PropertyHost {
+    fun declared(): Int = 2
+    fun inferred() = source()
+    override fun toString() = source()
+    fun block(): Int { return 2 }
+    val target: Marker = object : Marker { fun value(): Int = 4 }
+    fun laterInferred() = source()
+}
 class CompanionHost {
-    fun dependency(): Int = 4
-    fun later(): Int = 5
+    fun dependency() = source()
+    fun declared(): Int = 5
     companion object {
         fun untouched(): Int = 6
         fun build(seed: Int): Marker {
@@ -33009,7 +33233,14 @@ fun after(): Int = 3
 
         assert_eq!(
             named,
-            vec!["top", "defaulted", "target", "MethodHost", "CompanionHost"]
+            vec![
+                "top",
+                "defaulted",
+                "target",
+                "MethodHost",
+                "PropertyHost",
+                "CompanionHost"
+            ]
         );
 
         let class = |name: &str| {
@@ -33028,8 +33259,23 @@ fun after(): Int = 3
             .get(&method_host)
             .expect("selected class should have a complete plan");
         // The last target is in a parameter default, proving the generic function-root seam is not
-        // a body-only shortcut. The unrelated suffix remains outside the semantic capture walk.
-        assert_eq!(method_plan.method_check_prefix_len, 3);
+        // a body-only shortcut. Within that prefix, only an inferred-return publisher and the two
+        // target owners require semantic checking; declared, block-body, and fixed-contract methods
+        // retain only the cheap mutation-summary transition. The unrelated suffix is omitted.
+        assert_eq!(
+            method_plan.methods,
+            vec![false, true, false, false, true, true]
+        );
+
+        let (property_host, _) = class("PropertyHost");
+        let property_plan = scope
+            .class_plans
+            .get(&property_host)
+            .expect("selected class should have a complete plan");
+        // A property target retains the complete ordered method sequence, including a publisher
+        // after the property. This is intentionally conservative because the checker processes
+        // method return publication before later class regions.
+        assert_eq!(property_plan.methods, vec![false, true, false, false, true]);
 
         let (companion_host, _) = class("CompanionHost");
         let companion_plan = scope
@@ -33037,8 +33283,9 @@ fun after(): Int = 3
             .get(&companion_host)
             .expect("selected class should have a complete plan");
         // A target in a companion function lies outside the ordered instance-method sequence, so
-        // both instance methods are retained while companion functions remain independently scoped.
-        assert_eq!(companion_plan.method_check_prefix_len, 2);
+        // the full sequence is represented, but only its inferred-return publisher is checked.
+        // Companion functions remain independently scoped.
+        assert_eq!(companion_plan.methods, vec![true, false]);
         assert_eq!(companion_plan.companion_methods, vec![false, true]);
     }
 
@@ -35597,6 +35844,40 @@ fun box(): String {
             ),
             "checker must record the declaring module owner for inherited member calls"
         );
+    }
+
+    #[test]
+    fn declared_property_resolution_prefers_the_class_hierarchy_over_interfaces() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "interface Contract { val value: String }\n\
+             open class Base {\n\
+                 var value: String = \"base\"\n\
+                     private set\n\
+             }\n\
+             class Child : Base(), Contract",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let symbols = collect_signatures(&files, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let child = symbols
+            .classes
+            .get("Child")
+            .expect("child signature")
+            .internal_name();
+        let (owner, property) = symbols
+            .declared_member_prop(child, "value")
+            .expect("inherited value declaration");
+
+        // `Base.value` is the concrete class member that satisfies `Contract.value`. Property
+        // lookup, callable-reference lowering, and access checks must therefore all retain Base's
+        // mutability and private-setter facts; selecting the interface declaration here would make
+        // an unsafe mutable reference appear publicly writable.
+        assert!(owner.matches("Base"), "selected owner: {}", owner.render());
+        assert!(property.setter_name.is_some());
+        assert_eq!(property.setter_visibility, Some(Visibility::Private));
     }
 
     #[test]
