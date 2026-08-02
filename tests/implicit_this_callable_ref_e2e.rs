@@ -270,6 +270,57 @@ fun box(): String = "OK"
     );
 }
 
+/// `this_unavailable` and the member-extension receiver split are dispatch invariants, not
+/// property-only exceptions. The pre-existing implicit method-reference lowering also captures JVM
+/// slot zero, so it must reject the same constructor-header and extension-receiver contexts instead
+/// of resolving against one receiver and emitting against another.
+#[test]
+fn implicit_this_method_refs_share_dispatch_receiver_guards() {
+    if !common::stdlib_toolchain_ready() {
+        return;
+    }
+    let cases = [
+        (
+            "MethodSuperArg",
+            r#"
+open class Base(val r: Any)
+class C : Base {
+    fun value(): String = "OK"
+    constructor() : super(::value)
+}
+fun box(): String = "OK"
+"#,
+        ),
+        (
+            "MethodCtorDefault",
+            r#"
+class C(val r: () -> String = ::value) {
+    fun value(): String = "OK"
+}
+fun box(): String = C().r()
+"#,
+        ),
+        (
+            "MethodExtensionReceiver",
+            r#"
+class ExtensionHost { fun value(): String = "extension" }
+class DispatchHost {
+    fun value(): String = "dispatch"
+    fun ExtensionHost.ref() = ::value
+    fun test(receiver: ExtensionHost): String = receiver.ref()()
+}
+fun box(): String = DispatchHost().test(ExtensionHost())
+"#,
+        ),
+    ];
+    for (stem, source) in cases {
+        assert!(
+            common::compile_and_run_with_stdlib(source, stem).is_none(),
+            "{stem}: an implicit method ref without a matching initialized dispatch receiver must skip"
+        );
+    }
+}
+
 /// REJECTION GUARD: an inner class's unqualified `::p` naming an OUTER-class property must NOT
 /// compile (the outer `this` isn't capturable here) — and mixed shapes like
 /// callableReference/bound/emptyLHS.kt (top-level extension refs, outer-this refs) stay skipped.

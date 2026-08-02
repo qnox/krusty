@@ -1712,17 +1712,16 @@ impl SymbolTable {
         self.classes.values().find(|sig| sig.internal == internal)
     }
 
-    /// The `(visibility, setter_visibility)` of a member property as DECLARED, walking the
-    /// supertype chain to the class whose `declared_props` actually holds the entry. Needed
-    /// because collect flattens a same-file base class's properties into the subclass's `props`
-    /// WITHOUT the `declared_props` entry — attributing visibility to the flattened copy would
-    /// default a `private` base property to `Public` (an illegal-access miscompile). `None` when
-    /// no class on the chain declares the property (callers then treat it as `Public`).
-    pub fn member_prop_visibility(
+    /// Find the source declaration that owns a member property across the complete module hierarchy.
+    /// Collected signatures flatten inherited property shapes into `ClassSig::props`, but declaration
+    /// facts such as visibility and setter visibility remain only in the owner's `declared_props`.
+    /// Keep this as the single graph walk for consumers that need declaration facts, so inherited
+    /// interface and superclass properties cannot acquire guessed visibility independently.
+    pub fn declared_member_prop(
         &self,
         internal: TypeName,
         name: &str,
-    ) -> Option<(crate::types::Visibility, Option<crate::types::Visibility>)> {
+    ) -> Option<(TypeName, &DeclaredPropertySig)> {
         let mut pending = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(current) = pending.pop() {
@@ -1733,12 +1732,19 @@ impl SymbolTable {
                 continue;
             };
             if let Some(declared) = class.declared_props.get(name) {
-                return Some((declared.visibility, declared.setter_visibility));
+                return Some((current, declared));
             }
-            if let Some(s) = class.super_internal_name() {
-                pending.push(s);
+            // A class member wins over an interface member. Push interfaces in reverse declaration
+            // order first and the superclass last because this is a LIFO worklist: the resulting
+            // search is current class -> complete superclass hierarchy -> declared interfaces. This
+            // is also the order used when source properties are brought into checker scope. Keeping
+            // the order here explicit prevents a visibility lookup from selecting an interface
+            // declaration while the ordinary property lookup selected a same-named superclass member.
+            let interfaces = class.interface_names().collect::<Vec<_>>();
+            pending.extend(interfaces.into_iter().rev());
+            if let Some(superclass) = class.super_internal_name() {
+                pending.push(superclass);
             }
-            pending.extend(class.interface_names());
         }
         None
     }
@@ -9528,6 +9534,11 @@ pub enum ExprLowering {
     },
     /// An unbound classpath member or extension-property reference.
     ClasspathUnboundPropertyRef(Box<crate::symbol_resolver::ResolvedPropertyRef>),
+    /// An unqualified source member-property reference (`::p`) selected against the current
+    /// dispatch receiver. Lowering consumes this exact owner instead of repeating source hierarchy
+    /// and visibility resolution; presence also distinguishes a selected-but-unlowerable member
+    /// from a top-level property with the same name, so shadowing fails closed.
+    ImplicitThisMemberPropertyRef { owner: TypeName },
     /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
     /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
     /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
@@ -11186,18 +11197,15 @@ fn check_file_at_impl_mode(
                         if let Some(default) = p.default {
                             let ty = c.secondary_ctor_param_ty(p);
                             // A ctor-param default is evaluated in the CALLER's context — no `this`.
-                            let prev_this_unavailable = c.this_unavailable;
-                            c.this_unavailable = true;
-                            c.check_default_arg(&p.ty, default, ty);
-                            c.this_unavailable = prev_this_unavailable;
+                            c.with_this_unavailable(|c| {
+                                c.check_default_arg(&p.ty, default, ty);
+                            });
                         }
                     }
                     // Delegation-call args (`this(…)`/`super(…)`) run before the delegated
                     // constructor — `this` is UNINITIALIZED there (same guard as the primary
                     // `super(…)` clause below).
-                    let prev_this_unavailable = c.this_unavailable;
-                    c.this_unavailable = true;
-                    match &sc.delegation {
+                    c.with_this_unavailable(|c| match &sc.delegation {
                         CtorDelegation::This(delegation) => {
                             for &argument in &delegation.args {
                                 // A delegation lambda is contextual: leave its initial `Error`
@@ -11260,9 +11268,7 @@ fn check_file_at_impl_mode(
                             );
                         }
                         CtorDelegation::None => {}
-                    }
-                    // Restore before the ctor BODY — `this` is initialized there (delegation ran).
-                    c.this_unavailable = prev_this_unavailable;
+                    });
                     if let Some(body) = sc.body {
                         c.with_ret(Ty::Unit, |c| {
                             c.expr_statement(body);
@@ -11283,10 +11289,7 @@ fn check_file_at_impl_mode(
                     if let Some(dx) = p.default {
                         let pty = c.resolve_ty(&p.ty);
                         // A ctor-param default is evaluated in the CALLER's context — no `this`.
-                        let prev_this_unavailable = c.this_unavailable;
-                        c.this_unavailable = true;
-                        c.check_default_arg(&p.ty, dx, pty);
-                        c.this_unavailable = prev_this_unavailable;
+                        c.with_this_unavailable(|c| c.check_default_arg(&p.ty, dx, pty));
                     }
                 }
                 c.pop_scope();
@@ -11327,69 +11330,69 @@ fn check_file_at_impl_mode(
                 let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
                 // `this` is UNINITIALIZED inside `super(…)` args — an implicit-`this` callable ref
                 // there must not resolve (see `this_unavailable`).
-                let prev_this_unavailable = c.this_unavailable;
-                c.this_unavailable = true;
-                for &arg in &cl.base_args {
-                    if !is_lambda(arg) {
-                        c.expr(arg);
+                c.with_this_unavailable(|c| {
+                    for &arg in &cl.base_args {
+                        if !is_lambda(arg) {
+                            c.expr(arg);
+                        }
                     }
-                }
-                // Resolve the primary constructor's `Base(args)` clause through the SAME delegation
-                // candidates and argument-slot mapper used by secondary `super(args)` calls. Besides
-                // keeping same-file, sibling-module, and classpath bases on one path, the resulting
-                // source-order `argument_types` are essential for named/vararg arguments: zipping the
-                // source arguments with parameter order would contextually type the wrong lambda.
-                if !cl.base_args.is_empty() {
-                    let internal = class_internal(c.file, &cl.name);
-                    let names = cl
-                        .base_args
-                        .first()
-                        .and_then(|argument| c.file.base_arg_names.get(&argument.0))
-                        .cloned()
-                        .unwrap_or_else(|| vec![None; cl.base_args.len()]);
-                    let arguments = CtorDelegationCall {
-                        args: cl.base_args.clone(),
-                        names,
-                        trailing_lambda: false,
-                    };
-                    let candidates = c.super_ctor_delegation_candidates(cl);
-                    if let Some(selected) = c.select_source_constructor(&arguments, &candidates) {
-                        // A receiver lambda's implicit label is the source-level base class's SIMPLE
-                        // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
-                        // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
-                        let label = cl.base_class.as_deref().map(|base| {
-                            base.rsplit(['/', '.', '$'])
-                                .next()
-                                .unwrap_or(base)
-                                .to_string()
-                        });
-                        for ((&arg, &expected), &has_receiver) in cl
+                    // Resolve the primary constructor's `Base(args)` clause through the SAME delegation
+                    // candidates and argument-slot mapper used by secondary `super(args)` calls. Besides
+                    // keeping same-file, sibling-module, and classpath bases on one path, the resulting
+                    // source-order `argument_types` are essential for named/vararg arguments: zipping the
+                    // source arguments with parameter order would contextually type the wrong lambda.
+                    if !cl.base_args.is_empty() {
+                        let internal = class_internal(c.file, &cl.name);
+                        let names = cl
                             .base_args
-                            .iter()
-                            .zip(&selected.argument_types)
-                            .zip(&selected.argument_lambda_receivers)
+                            .first()
+                            .and_then(|argument| c.file.base_arg_names.get(&argument.0))
+                            .cloned()
+                            .unwrap_or_else(|| vec![None; cl.base_args.len()]);
+                        let arguments = CtorDelegationCall {
+                            args: cl.base_args.clone(),
+                            names,
+                            trailing_lambda: false,
+                        };
+                        let candidates = c.super_ctor_delegation_candidates(cl);
+                        if let Some(selected) = c.select_source_constructor(&arguments, &candidates)
                         {
-                            if is_lambda(arg) {
-                                c.check_argument_expected(
-                                    arg,
-                                    expected,
-                                    has_receiver,
-                                    label.as_deref(),
-                                );
+                            // A receiver lambda's implicit label is the source-level base class's SIMPLE
+                            // name. Split every internal/nested separator so `Outer.Base` and `Outer$Base`
+                            // both expose `Base`, rather than exposing a JVM-internal spelling as a label.
+                            let label = cl.base_class.as_deref().map(|base| {
+                                base.rsplit(['/', '.', '$'])
+                                    .next()
+                                    .unwrap_or(base)
+                                    .to_string()
+                            });
+                            for ((&arg, &expected), &has_receiver) in cl
+                                .base_args
+                                .iter()
+                                .zip(&selected.argument_types)
+                                .zip(&selected.argument_lambda_receivers)
+                            {
+                                if is_lambda(arg) {
+                                    c.check_argument_expected(
+                                        arg,
+                                        expected,
+                                        has_receiver,
+                                        label.as_deref(),
+                                    );
+                                }
                             }
-                        }
-                        c.super_ctor_params
-                            .insert(internal, selected.target.params().to_vec());
-                    } else {
-                        // No unique ctor match: type the deferred lambda args without an expected type.
-                        for &arg in &cl.base_args {
-                            if is_lambda(arg) {
-                                c.expr(arg);
+                            c.super_ctor_params
+                                .insert(internal, selected.target.params().to_vec());
+                        } else {
+                            // No unique ctor match: type the deferred lambda args without an expected type.
+                            for &arg in &cl.base_args {
+                                if is_lambda(arg) {
+                                    c.expr(arg);
+                                }
                             }
                         }
                     }
-                }
-                c.this_unavailable = prev_this_unavailable;
+                });
                 // Interface-delegation expressions (`: I by mk(x)`) are evaluated in the constructor too,
                 // so they're typed here — with the ctor params and `this` in scope.
                 for (_iface, e) in &cl.delegation_exprs {
@@ -12245,11 +12248,11 @@ struct Checker<'a> {
     reified_tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
-    /// `true` while checking expressions where `this` is unavailable or uninitialized — a class's
+    /// `true` while checking expressions where implicit `this` is unavailable or uninitialized — a class's
     /// `super(…)`/delegation-call arguments and constructor-parameter defaults (the latter are
-    /// evaluated in the CALLER's context): an implicit-`this` callable ref (`::p`) must NOT
-    /// resolve, since lowering it would capture the wrong/uninitialized receiver (never
-    /// miscompile).
+    /// evaluated in the CALLER's context). Every implicit-`this` callable-reference shape uses this
+    /// shared state; restricting it to properties would leave `::method` able to capture the same
+    /// wrong or uninitialized slot-zero receiver.
     this_unavailable: bool,
     this_extension_receiver: Option<Span>,
     /// A flow-narrowing of the implicit receiver established by `if (this is B)`: `this` is known to
@@ -12632,6 +12635,17 @@ impl<'a> Checker<'a> {
 
     fn with_ret<R>(&mut self, ret_ty: Ty, f: impl FnOnce(&mut Self) -> R) -> R {
         self.with_ret_allowed(ret_ty, true, f)
+    }
+
+    /// Evaluate a constructor-header region before a dispatch receiver exists. Centralizing the
+    /// save/restore transition keeps primary defaults, secondary defaults, and delegation arguments
+    /// on one rule and prevents an early return in one caller from leaking the state into a body where
+    /// `this` is initialized.
+    fn with_this_unavailable<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = std::mem::replace(&mut self.this_unavailable, true);
+        let result = f(self);
+        self.this_unavailable = previous;
+        result
     }
 
     fn with_ret_allowed<R>(
@@ -18454,6 +18468,23 @@ impl<'a> Checker<'a> {
         internal: TypeName,
         name: &str,
     ) -> Option<(TypeName, Ty, bool, Option<Visibility>)> {
+        // Source declarations are authoritative for every semantic property fact. In particular,
+        // `ClassSig::props` contains inherited backing-field shapes flattened into subclasses, so a
+        // lookup through that cache cannot identify the actual declaring owner and can pair the
+        // selected type with visibility from a different branch of the hierarchy. Resolve the full
+        // declaration once and derive type, mutability, setter visibility, and owner together.
+        if let Some((owner, property)) = self.syms.declared_member_prop(internal, name) {
+            return property.context_params.is_empty().then_some((
+                owner,
+                property.ty,
+                property.setter_name.is_some(),
+                property.setter_visibility,
+            ));
+        }
+
+        // Retain the structural fallback for signatures that intentionally have no source
+        // declaration metadata (synthetic/module-populated `ClassSig::props`). It is deliberately
+        // secondary: source properties must never lose their declaring owner to the flattened cache.
         let mut pending = vec![internal];
         let mut seen = std::collections::HashSet::new();
         while let Some(current) = pending.pop() {
@@ -22328,6 +22359,18 @@ impl<'a> Checker<'a> {
                 if let Some(Ty::Obj(internal, _)) = self.this_ty {
                     if let Some(sig) = self.syms.method_of_name(internal, &name) {
                         if sig.requires_all_args() && sig.ret != Ty::Nothing {
+                            // Both implicit method and property references capture JVM slot zero.
+                            // In constructor headers no initialized receiver exists; in a member
+                            // extension `this_ty` names the extension receiver while slot zero is
+                            // the dispatch receiver. Reject both cases before any top-level fallback,
+                            // because the member name still shadows those fallbacks.
+                            if self.this_unavailable || self.this_extension_receiver.is_some() {
+                                self.diags.error(
+                                    self.span(e),
+                                    "krusty: callable references are not supported",
+                                );
+                                return self.set(e, Ty::Error);
+                            }
                             self.mark_current_extension_receiver_used(e);
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
@@ -22347,16 +22390,20 @@ impl<'a> Checker<'a> {
                     //     an illegal-access miscompile);
                     //   * a computed (backing-field-less) property IS typed here but declined by
                     //     the lowerer — a sound skip, never a mis-bind.
-                    if let Some((_owner, _, is_var, _setter_visibility)) =
+                    if let Some((owner, _, is_var, setter_visibility)) =
                         self.lookup_prop_with_owner_name(internal, &name)
                     {
-                        // Visibility as DECLARED, resolved through flattened same-file base
-                        // properties (a `private` base property flattened into the subclass's
-                        // `props` must NOT default to `Public`).
-                        let (visibility, setter_visibility) = self
+                        // The same declaration resolver supplies every property fact. A private base
+                        // property flattened into the subclass's structural field cache must not
+                        // default to public or borrow visibility from a same-named interface member.
+                        let visibility = self
                             .syms
-                            .member_prop_visibility(internal, &name)
-                            .unwrap_or((Visibility::Public, None));
+                            .declared_member_prop(internal, &name)
+                            .map(|(_, property)| property.visibility)
+                            // Only synthetic/module-populated structural properties reach this
+                            // fallback; they carry no source visibility and preserve the historical
+                            // public treatment.
+                            .unwrap_or(Visibility::Public);
                         let accessible =
                             |v: Visibility| matches!(v, Visibility::Public | Visibility::Internal);
                         if !self.this_unavailable
@@ -22365,6 +22412,14 @@ impl<'a> Checker<'a> {
                             && (!is_var || setter_visibility.is_none_or(accessible))
                         {
                             if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                // Record the semantic selection once. Lowering must not repeat the
+                                // hierarchy/visibility walk: this marker both supplies the exact
+                                // dispatch owner and makes a computed member fail closed instead of
+                                // falling through to a shadowed top-level/extension property.
+                                self.expr_lowers.insert(
+                                    e,
+                                    ExprLowering::ImplicitThisMemberPropertyRef { owner },
+                                );
                                 self.mark_current_extension_receiver_used(e);
                                 return self.set(e, ty);
                             }
@@ -25331,15 +25386,9 @@ impl<'a> Checker<'a> {
         receiver: TypeName,
         name: &str,
     ) -> Option<(Visibility, TypeName)> {
-        let mut cur = Some(receiver);
-        while let Some(internal) = cur {
-            let cs = self.syms.class_by_type_name(internal)?;
-            if let Some(property) = cs.declared_props.get(name) {
-                return Some((property.visibility, internal));
-            }
-            cur = cs.super_internal_name();
-        }
-        None
+        self.syms
+            .declared_member_prop(receiver, name)
+            .map(|(owner, property)| (property.visibility, owner))
     }
 
     fn inaccessible_classifier(
@@ -35733,6 +35782,40 @@ fun box(): String {
             ),
             "checker must record the declaring module owner for inherited member calls"
         );
+    }
+
+    #[test]
+    fn declared_property_resolution_prefers_the_class_hierarchy_over_interfaces() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "interface Contract { val value: String }\n\
+             open class Base {\n\
+                 var value: String = \"base\"\n\
+                     private set\n\
+             }\n\
+             class Child : Base(), Contract",
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let symbols = collect_signatures(&files, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let child = symbols
+            .classes
+            .get("Child")
+            .expect("child signature")
+            .internal_name();
+        let (owner, property) = symbols
+            .declared_member_prop(child, "value")
+            .expect("inherited value declaration");
+
+        // `Base.value` is the concrete class member that satisfies `Contract.value`. Property
+        // lookup, callable-reference lowering, and access checks must therefore all retain Base's
+        // mutability and private-setter facts; selecting the interface declaration here would make
+        // an unsafe mutable reference appear publicly writable.
+        assert!(owner.matches("Base"), "selected owner: {}", owner.render());
+        assert!(property.setter_name.is_some());
+        assert_eq!(property.setter_visibility, Some(Visibility::Private));
     }
 
     #[test]
