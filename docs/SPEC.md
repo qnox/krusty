@@ -2401,6 +2401,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nullable scalar requires an erased-reference/boxing boundary not modeled here
   (`computed_prop_generic_return_e2e`).
 
+- **A property access retains both its logical use-site and semantic declaration types.** The
+  emitter lowers per file, so a sibling source class has no classfile to ask; deriving an accessor
+  descriptor from the read's substituted logical type produced `Holder.getA:()LA;` — a
+  `NoSuchMethodError` against the erased `()Ljava/lang/Object;`. Common lowering now records the
+  declaration type without branching on file/module/classpath origin or choosing a JVM accessor
+  spelling. The JVM emitter uses that semantic type only when it must derive a declaration-less
+  descriptor, then bridges the erased result to the logical type with a `checkcast`
+  (`computed_prop_generic_return_e2e::cross_file_generic_member_read_uses_erased_accessor`).
+
+- **Member computed getters retry to a bounded fixpoint.** An unannotated member expression getter
+  (`val a get() = holder.a`) infers during its class's collection, so a referenced class collected
+  later — another file, or a later class in this one — left the property typed `Error` (and the
+  lowerer bailed). Like the top-level fixpoint, pending getters retry after the class walk with
+  their first-pass scope, its `Error` entries refreshed from the live signatures each round so
+  chains through preceding siblings converge (bounded; cycles stay `Error`), in either file order
+  (`computed_prop_generic_return_e2e`).
+
 - **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
   Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc
   constructs `Id()` via the static `constructor-impl$default(dummy, mask, marker)`, which fills the

@@ -1392,6 +1392,13 @@ pub struct IrFile {
     /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
+    /// Stable property-operation identity → the declaration's semantic value type before
+    /// use-site generic substitution. Resolution knows this fact uniformly for every source owner;
+    /// recording it here lets a backend derive the physical accessor boundary without asking whether
+    /// the declaration came from this file, a sibling file, or a dependency. This deliberately carries
+    /// no accessor spelling or target descriptor. As with the JVM realization table below, the stable
+    /// operation identity survives backend rewrites that move a property node to another arena slot.
+    pub property_declaration_types: std::collections::HashMap<u32, Ty>,
     /// Stable property-operation identity → JVM accessor spelling and physical property-value type,
     /// selected by the value-class pass for an owner in another source file. The common node keeps the
     /// Kotlin name and logical type; this backend side table carries the declaration-less target

@@ -350,13 +350,15 @@ fn cross_file_member_properties_keep_semantic_ir() {
 
     let sources = [
         "@JvmInline value class Label(val text: String)\n\
-         class Counter(var value: Int, val label: Label)\n",
+         class Counter(var value: Int, val label: Label)\n\
+         class GenericBox<T>(val item: T)\n",
         "fun update(counter: Counter): Int {\n\
          \x20 val before = counter.value\n\
          \x20 counter.value = before + 1\n\
          \x20 return counter.value\n\
          }\n\
-         fun label(counter: Counter): String = counter.label.text\n",
+         fun label(counter: Counter): String = counter.label.text\n\
+         fun item(box: GenericBox<String>): String = box.item\n",
     ];
     let mut diagnostics = DiagSink::new();
     let files: Vec<_> = sources
@@ -446,6 +448,36 @@ fn cross_file_member_properties_keep_semantic_ir() {
             )
         }),
         "common lowering must not encode a JVM accessor merely because the declaration is in another file"
+    );
+
+    // A substituted generic read needs both `String` at the use site and the declaration's erased
+    // type at the eventual call boundary. Common lowering may retain that semantic distinction, but it
+    // must not choose `getItem` or any other JVM spelling. Key the assertion through the operation's
+    // stable identity so it also guards backend rewrites that move the node to a different arena slot.
+    let generic_operation = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .find_map(|(id, expression)| match expression {
+            IrExpr::PropertyRead {
+                owner,
+                name,
+                operation,
+                ..
+            } if owner.matches("GenericBox") && name == "item" => {
+                Some(operation.unwrap_or(id as u32))
+            }
+            _ => None,
+        })
+        .expect("generic sibling property should remain a semantic read");
+    assert!(
+        ir.property_declaration_types
+            .contains_key(&generic_operation),
+        "common IR must retain the declaration type independently of source-file origin"
+    );
+    assert!(
+        ir.property_accessor_jvm_realizations.is_empty(),
+        "only a JVM pass may attach accessor spellings or physical JVM realizations"
     );
 }
 

@@ -13803,6 +13803,78 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Preserve a property's declaration type beside the use-site-substituted type on the IR node.
+    /// This is a semantic fact, so collection is deliberately identical for an owner in this file, a
+    /// sibling file, or a dependency represented in the symbol table. For `Holder<A>.a`, for example,
+    /// the node remains logically `A` while the declaration type remains erased `T`/`Object`; a target
+    /// backend can use the latter for its call boundary and bridge the result to the former.
+    fn record_property_declaration_type(
+        &mut self,
+        id: u32,
+        owner: TypeName,
+        name: &str,
+        logical: Ty,
+    ) {
+        let Some((_, property)) = self.syms.declared_member_prop(owner, name) else {
+            return;
+        };
+        let declaration = property.storage_ty.unwrap_or(property.ty);
+        // Keep full-type inequality rather than comparing only erased classes: nullability changes a
+        // primitive's physical boundary (`Int` versus boxed `Int?`) even though its semantic scalar
+        // kind is otherwise the same.
+        if declaration == logical {
+            return;
+        }
+        self.ir.property_declaration_types.insert(id, declaration);
+    }
+
+    /// Construct the single target-neutral read shape and attach any declaration/use-site type split.
+    /// Keeping that bookkeeping here means a new syntactic access path cannot accidentally emit the
+    /// same `PropertyRead` node while omitting the semantic fact its backends rely on.
+    fn add_property_read(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        ty: Ty,
+        interface: bool,
+    ) -> u32 {
+        let read = self.ir.add_expr(IrExpr::PropertyRead {
+            receiver,
+            owner,
+            name: name.to_string(),
+            ty,
+            interface,
+            operation: None,
+        });
+        self.record_property_declaration_type(read, owner, name, ty);
+        read
+    }
+
+    /// Write analogue of [`Self::add_property_read`]. Reads and writes therefore preserve declaration
+    /// types under the same rule instead of duplicating origin-sensitive metadata at their call sites.
+    fn add_property_write(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        value: u32,
+        ty: Ty,
+        interface: bool,
+    ) -> u32 {
+        let write = self.ir.add_expr(IrExpr::PropertyWrite {
+            receiver,
+            owner,
+            name: name.to_string(),
+            value,
+            ty,
+            interface,
+            operation: None,
+        });
+        self.record_property_declaration_type(write, owner, name, ty);
+        write
+    }
+
     fn lower_declared_property_read(
         &mut self,
         receiver: u32,
@@ -13830,14 +13902,13 @@ impl<'a> Lower<'a> {
         if is_private && !self.can_access_source_private(owner) {
             self.mark_property_access_bridge(declaring, name);
         }
-        let read = self.ir.add_expr(IrExpr::PropertyRead {
+        let read = self.add_property_read(
             receiver,
             owner,
-            name: name.to_string(),
+            name,
             ty,
-            interface: self.property_owner_is_interface(owner),
-            operation: None,
-        });
+            self.property_owner_is_interface(owner),
+        );
         Some(self.coerce_generic_read(read, e, ty))
     }
 
@@ -13857,14 +13928,14 @@ impl<'a> Lower<'a> {
         if private && !self.can_access_source_private(owner) {
             self.mark_property_access_bridge(declaring, name);
         }
-        Some(self.ir.add_expr(IrExpr::PropertyRead {
+        let read = self.add_property_read(
             receiver,
             owner,
-            name: name.to_string(),
+            name,
             ty,
-            interface: self.property_owner_is_interface(owner),
-            operation: None,
-        }))
+            self.property_owner_is_interface(owner),
+        );
+        Some(read)
     }
 
     fn lower_field_read_on(
@@ -13909,14 +13980,13 @@ impl<'a> Lower<'a> {
         // only inside the declaring class) or the accessor is the backend's choice, not this one. The node
         // carries the property's DECLARED type; substituting it to the type this site sees (a generic
         // property read through a concrete receiver) is the same coercion every other read gets.
-        let read = self.ir.add_expr(IrExpr::PropertyRead {
-            receiver: recv,
-            owner: owner_internal,
-            name: name.to_string(),
-            ty: pty,
-            interface: self.property_owner_is_interface(owner_internal),
-            operation: None,
-        });
+        let read = self.add_property_read(
+            recv,
+            owner_internal,
+            name,
+            pty,
+            self.property_owner_is_interface(owner_internal),
+        );
         Some(self.coerce_generic_read(read, e, pty))
     }
 
@@ -14083,14 +14153,8 @@ impl<'a> Lower<'a> {
             if self.source_property_read_needs_generic_value_class_box(*owner, name, e) {
                 return None;
             }
-            return Some(self.ir.add_expr(IrExpr::PropertyRead {
-                receiver: recv,
-                owner: *owner,
-                name: name.to_string(),
-                ty,
-                interface: *interface,
-                operation: None,
-            }));
+            let read = self.add_property_read(recv, *owner, name, ty, *interface);
+            return Some(read);
         }
         let resolved = self.info.resolved_member(e).cloned().map(|r| {
             let m = r.member;
@@ -16455,15 +16519,14 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         let val = self.lower_arg(value, &ty_to_ir(pty))?;
-                        Some(self.ir.add_expr(IrExpr::PropertyWrite {
-                            receiver: recv,
+                        Some(self.add_property_write(
+                            recv,
                             owner,
-                            name: name.clone(),
-                            value: val,
-                            ty: pty,
-                            interface: self.property_owner_is_interface(owner),
-                            operation: None,
-                        }))
+                            &name,
+                            val,
+                            pty,
+                            self.property_owner_is_interface(owner),
+                        ))
                     }
                 }
             }
@@ -16549,15 +16612,14 @@ impl<'a> Lower<'a> {
                         dec,
                     )?;
                     let recv2 = self.emit_get_value(this_v);
-                    return Some(self.ir.add_expr(IrExpr::PropertyWrite {
-                        receiver: recv2,
-                        owner: owner_tn,
-                        name: name.clone(),
-                        value: nv,
-                        ty: fty,
-                        interface: self.property_owner_is_interface(owner_tn),
-                        operation: None,
-                    }));
+                    return Some(self.add_property_write(
+                        recv2,
+                        owner_tn,
+                        &name,
+                        nv,
+                        fty,
+                        self.property_owner_is_interface(owner_tn),
+                    ));
                 }
                 let (v, ty) = self.lookup(&name)?;
                 // A user `inc`/`dec` operator on a non-numeric variable → `x = x.inc()`.
@@ -17417,15 +17479,8 @@ impl<'a> Lower<'a> {
         {
             let r = self.expr(receiver)?;
             let v = self.lower_arg(value, &ty_to_ir(ty))?;
-            return Some(self.ir.add_expr(IrExpr::PropertyWrite {
-                receiver: r,
-                owner,
-                name: name.to_string(),
-                value: v,
-                ty,
-                interface,
-                operation: None,
-            }));
+            let write = self.add_property_write(r, owner, name, v, ty, interface);
+            return Some(write);
         }
         // A property of a class THIS compilation declares. Same rule as everywhere else: name the
         // property, and let the backend decide whether the store is a direct field write (legal only
@@ -17461,15 +17516,14 @@ impl<'a> Lower<'a> {
         let r = self.expr(receiver)?;
         // Coerce the value to the property's type (e.g. `Int` literal into a `Long` property).
         let v = self.lower_arg(value, &ty_to_ir(prop_ty))?;
-        Some(self.ir.add_expr(IrExpr::PropertyWrite {
-            receiver: r,
+        Some(self.add_property_write(
+            r,
             owner,
-            name: name.to_string(),
-            value: v,
-            ty: prop_ty,
-            interface: self.property_owner_is_interface(owner),
-            operation: None,
-        }))
+            name,
+            v,
+            prop_ty,
+            self.property_owner_is_interface(owner),
+        ))
     }
 
     /// Whether `receiver.name = value` is a compound assignment (`receiver.name op= …`): the parser
