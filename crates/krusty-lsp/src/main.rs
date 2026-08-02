@@ -847,11 +847,13 @@ impl krusty_lsp::Analysis for WorkerHost {
         let Some(snapshot) = self.sync.as_ref().and_then(ProjectSync::snapshot) else {
             return Vec::new();
         };
-        let model = snapshot.model();
+        // The immutable snapshot owns both module relations and the component-indexed source-root
+        // relation. Keep every production classification on that shared relation; unwrapping the
+        // model here would silently restore an O(files × roots) scan during neighborhood indexing.
         let open_modules: std::collections::HashSet<usize> = open_uris
             .iter()
             .filter_map(|uri| krusty_lsp::uri::file_uri_to_path(uri))
-            .filter_map(|path| model.module_index_for_source(&path))
+            .filter_map(|path| snapshot.module_index_for_source(&path))
             .collect();
         if open_modules.is_empty() {
             return Vec::new();
@@ -864,7 +866,7 @@ impl krusty_lsp::Analysis for WorkerHost {
                 let Some(path) = krusty_lsp::uri::file_uri_to_path(uri) else {
                     return false;
                 };
-                model
+                snapshot
                     .module_index_for_source(&path)
                     .is_some_and(|module| open_modules.contains(&module))
             })
@@ -979,8 +981,10 @@ impl krusty_lsp::Analysis for WorkerHost {
         documents: &[(&str, &str)],
         open_uris: &[&str],
     ) -> (Vec<DocumentAnalysis>, Vec<(String, String)>) {
-        let module_assignments =
-            project_module_assignments(self.sync.as_ref().and_then(ProjectSync::model), documents);
+        let module_assignments = project_module_assignments(
+            self.sync.as_ref().and_then(ProjectSync::snapshot),
+            documents,
+        );
         let group_seeds = project_analysis_groups(&module_assignments);
         let module_relations = self.sync.as_ref().and_then(ProjectSync::snapshot);
         let mut analyses = (0..documents.len())
@@ -1333,8 +1337,8 @@ impl krusty_lsp::Analysis for WorkerHost {
                 && self
                     .sync
                     .as_ref()
-                    .and_then(ProjectSync::model)
-                    .and_then(|model| model.module_for_source(path))
+                    .and_then(ProjectSync::snapshot)
+                    .and_then(|snapshot| snapshot.module_index_for_source(path))
                     .is_some()
         });
         if is_project_source {
@@ -1409,12 +1413,13 @@ fn source_kind_from_uri(uri: &str) -> krusty::source::SourceKind {
 }
 
 fn project_module_assignments(
-    model: Option<&ProjectModel>,
+    snapshot: Option<&krusty_lsp::project::model::SourceModuleGraph>,
     documents: &[(&str, &str)],
 ) -> Vec<Option<usize>> {
-    model.map_or_else(
+    snapshot.map_or_else(
         || vec![Some(0); documents.len()],
-        |model| {
+        |snapshot| {
+            let model = snapshot.model();
             if matches!(model.kind, ProviderKind::Explicit | ProviderKind::None) {
                 return vec![Some(0); documents.len()];
             }
@@ -1424,7 +1429,7 @@ fn project_module_assignments(
                     url::Url::parse(uri)
                         .ok()
                         .and_then(|uri| uri.to_file_path().ok())
-                        .and_then(|path| model.module_index_for_source(&path))
+                        .and_then(|path| snapshot.module_index_for_source(&path))
                 })
                 .collect()
         },
@@ -1762,8 +1767,8 @@ mod tests {
             (unowned_uri.as_str(), "fun same() {}"),
             (consumer_uri.as_str(), "fun same() {}"),
         ];
-        let assignments = project_module_assignments(Some(&model), &documents);
         let module_graph = model.clone().into_source_module_graph();
+        let assignments = project_module_assignments(Some(&module_graph), &documents);
 
         assert_eq!(assignments, [Some(0), None, Some(1)]);
         assert_eq!(
@@ -1859,11 +1864,12 @@ mod tests {
         assert!(failures[1].diagnostics.is_empty());
         assert_eq!(failures[2].diagnostics[0].msg, "failed");
 
-        let fallback_model =
+        let fallback_snapshot =
             krusty_lsp::ProjectModel::new("/workspace", krusty_lsp::ProviderKind::None)
-                .with_modules(model.modules);
+                .with_modules(model.modules)
+                .into_source_module_graph();
         assert_eq!(
-            project_module_assignments(Some(&fallback_model), &documents),
+            project_module_assignments(Some(&fallback_snapshot), &documents),
             [Some(0), Some(0), Some(0)]
         );
         assert_eq!(
