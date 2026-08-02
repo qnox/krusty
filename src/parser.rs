@@ -776,11 +776,12 @@ struct Parser<'a> {
 /// levels. One semantic level can cost up to two entries (a binary operator's right operand is one
 /// `parse_bp` recursion, and a parenthesized operand re-enters via `parse_expr` → another), so a
 /// 450-level `0+(0+(…))` chain — which the checker and lowering admit under their 500-level
-/// `expr_depth` guards — consumes ~900 entries. 1000 entries therefore admits every shape the
-/// later passes admit at up to two entries per level (redundant nesting like doubled parens
-/// spends entries faster and trips sooner), while still bounding the parser's recursion (degrade
-/// with a diagnostic, never crash).
-const EXPR_DEPTH_LIMIT: u32 = 1000;
+/// `expr_depth` guards — consumes ~900 entries. Twice the shared semantic bound therefore admits
+/// every shape the later passes admit at up to two entries per level (redundant nesting like
+/// doubled parens spends entries faster and trips sooner), while still bounding the parser's
+/// recursion (degrade with a diagnostic, never crash). Derive this value rather than copying 1000
+/// so parser/checker/lowering cannot silently drift to incompatible limits.
+const EXPR_DEPTH_LIMIT: u32 = crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH * 2;
 
 impl<'a> Parser<'a> {
     fn push_lexical_type_params(
