@@ -165,9 +165,14 @@ impl JvmLibraries {
             // leading params (their exact types — an extension receiver, a vararg array) and
             // truncate the trailing synthetics. A normal function's metadata count equals the
             // descriptor's param count, so this is a no-op for it (no regression).
-            let meta =
-                self.cp
-                    .metadata_call_facts_name(c.owner, meta_name, &params, &physical_ret, false);
+            let meta = self.cp.metadata_call_facts_name(
+                c.owner,
+                meta_name,
+                &params,
+                &physical_ret,
+                false,
+                &|name| self.value_underlying_name(name),
+            );
             if let Some(keep) = meta.kept_params {
                 if keep < params.len() {
                     params.truncate(keep);
@@ -178,9 +183,13 @@ impl JvmLibraries {
             } else {
                 c.descriptor.clone()
             };
-            let inline = self
-                .cp
-                .is_inline_callable_name(c.owner, meta_name, &inline_desc, &params);
+            let inline = self.cp.is_inline_callable_name(
+                c.owner,
+                meta_name,
+                &inline_desc,
+                &params,
+                &|name| self.value_underlying_name(name),
+            );
             let call_sig = meta.call_sig;
             let contract = meta.contract.clone();
             let context_count = meta.context_count;
@@ -515,7 +524,9 @@ impl JvmLibraries {
         let (desc_params, desc_ret) = parse_method_desc_with_field_params(jvm_desc)?;
         if let Some(gsig) =
             self.cp
-                .aligned_generic_sig_name(owner, jvm_name, &desc_params, &desc_ret)
+                .aligned_generic_sig_name(owner, jvm_name, &desc_params, &desc_ret, &|name| {
+                    self.value_underlying_name(name)
+                })
         {
             // Metadata DESCRIBES this class's function — it is the authoritative signature and there is NO
             // fallback to the JVM `Signature`. A failure to align/decode here is a bug to fix in the reader.
@@ -826,8 +837,17 @@ impl JvmLibraries {
                 let Some((params, ret)) = parse_method_desc(&m.descriptor) else {
                     continue;
                 };
-                let member_metadata =
-                    super::classpath::aligned_member_metadata(meta_fns, &m.name, &m.descriptor);
+                // NO value-class probing here: this runs INSIDE `resolve_type_name`'s type build,
+                // so querying `value_underlying_name` (which itself resolves types) recurses
+                // unboundedly on cyclic class graphs. The exact `jvm_desc` match needs no probing,
+                // and resolution-time member alignment (`metadata_member_call_facts_name`) supplies
+                // the closure where it is safe.
+                let member_metadata = super::classpath::aligned_member_metadata(
+                    meta_fns,
+                    &m.name,
+                    &m.descriptor,
+                    &|_| None,
+                );
                 let platform_nullable_params = is_java.then(|| {
                     params
                         .iter()
@@ -2504,9 +2524,12 @@ impl SymbolSource for JvmLibraries {
                             m.descriptor.clone()
                         };
                         let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
-                        let member_facts =
-                            self.cp
-                                .metadata_member_call_facts_name(cn, meta_name, &m.descriptor);
+                        let member_facts = self.cp.metadata_member_call_facts_name(
+                            cn,
+                            meta_name,
+                            &m.descriptor,
+                            &|name| self.value_underlying_name(name),
+                        );
                         let member_ret_metadata = suspend.then(|| {
                             member_facts
                                 .as_ref()

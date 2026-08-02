@@ -29,6 +29,33 @@ fn classpath_varargs_static_qualified_and_via_import() {
 }
 
 #[test]
+fn imported_java_static_accepts_lambda_for_sam_parameter() {
+    // `import C.staticFn` + `staticFn { … }` where the parameter is a Java SAM interface: the
+    // imported-static path must keep the lambda a LAMBDA literal through overload resolution and
+    // check it against the SAM method, exactly like the qualified `C.staticFn { … }` call.
+    const SRC: &str = "import java.util.concurrent.CompletableFuture.runAsync\n\
+        fun box(): String {\n\
+        \x20 var s = \"FAIL\"\n\
+        \x20 runAsync { s = \"OK\" }.get()\n\
+        \x20 return s\n\
+        }\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("imported static SAM call"),
+        "OK"
+    );
+}
+
+#[test]
+fn imported_generic_java_static_accepts_lambda_for_sam_parameter() {
+    const SRC: &str = "import java.util.concurrent.CompletableFuture.supplyAsync\n\
+        fun box(): String = if (supplyAsync { 21 + 21 }.get() == 42) \"OK\" else \"FAIL\"\n";
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SRC, "Main").expect("imported generic static SAM call"),
+        "OK"
+    );
+}
+
+#[test]
 fn aliased_java_static_method_import_resolves() {
     const SRC: &str = "import java.lang.Integer.parseInt as pi\n\
         fun box(): String {\n\
