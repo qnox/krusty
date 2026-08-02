@@ -623,6 +623,10 @@ mod tests {
                     | "support/BaseScope"
                     | "support/BaseTarget"
                     | "support/Target"
+                    | "fixture/Outer"
+                    | "fixture/Outer$Hidden"
+                    | "fixture/Outer$Hidden$Context"
+                    | "fixture/CollisionEnum"
             )
             .then(|| {
                 let mut supertypes = TypeNameList::new();
@@ -672,11 +676,15 @@ mod tests {
         }
 
         fn resolve_symbols(&self, fqn: &str) -> ResolvedSymbols {
+            let classifier = self.resolve_type(fqn).map(std::rc::Rc::new);
             let Some(name) = fqn
                 .strip_prefix("support/")
                 .filter(|name| matches!(*name, "adjust" | "configure" | "transform"))
             else {
-                return ResolvedSymbols::default();
+                return ResolvedSymbols {
+                    classifier,
+                    ..ResolvedSymbols::default()
+                };
             };
             let receiver = Ty::obj("support/Target");
             let lambda_receiver = Ty::obj("support/BaseScope");
@@ -712,7 +720,7 @@ mod tests {
                 ret: Ty::Unit,
             });
             ResolvedSymbols {
-                classifier: None,
+                classifier,
                 callables: Callables::Functions(FunctionSet {
                     overloads: vec![function],
                 }),
@@ -750,7 +758,31 @@ mod tests {
         }
     }
 
-    impl SemanticPlatform for ExistingLibrary {}
+    impl SemanticPlatform for ExistingLibrary {
+        fn static_field(
+            &self,
+            internal: &str,
+            name: &str,
+        ) -> Option<crate::libraries::StaticFieldRef> {
+            (internal == "fixture/CollisionEnum" && name == "ANY").then(|| {
+                crate::libraries::StaticFieldRef {
+                    owner: crate::types::type_name(internal),
+                    name: name.to_string(),
+                    descriptor: "Lfixture/CollisionEnum;".to_string(),
+                    ty: Ty::obj("fixture/CollisionEnum"),
+                    constant: None,
+                }
+            })
+        }
+
+        fn static_field_name(
+            &self,
+            internal: crate::types::TypeName,
+            name: &str,
+        ) -> Option<crate::libraries::StaticFieldRef> {
+            self.static_field(&internal.render(), name)
+        }
+    }
 
     #[test]
     fn standalone_analysis_accepts_simple_function() {
@@ -1544,6 +1576,275 @@ mod tests {
             "{:?}",
             diagnostics.diags
         );
+    }
+
+    #[test]
+    fn declaration_only_source_exposes_qualified_nested_enum_entry() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import dependency.Model\n\
+                 val context: Model.Context = Model.Context.ANY",
+            ),
+            SourceInput::kotlin(
+                "package dependency\n\
+                 class Model { enum class Context { ANY } }",
+            ),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    }
+
+    #[test]
+    fn declaration_only_source_hides_public_nested_enum_of_internal_class() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import dependency.Hidden.Context\n\
+                 val context: Any = Context.ANY",
+            ),
+            SourceInput::kotlin(
+                "package dependency\n\
+                 internal class Hidden { enum class Context { ANY } }",
+            ),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(diagnostics
+            .diags
+            .iter()
+            .any(|diagnostic| diagnostic.msg.contains("unresolved reference 'Context'")));
+    }
+
+    #[test]
+    fn declaration_only_source_hides_public_enum_below_internal_nested_class() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import dependency.Outer\n\
+                 val context: Outer.Hidden.Context? = null",
+            ),
+            SourceInput::kotlin(
+                "package dependency\n\
+                 class Outer { internal class Hidden { enum class Context { ANY } } }",
+            ),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(diagnostics.diags.iter().any(|diagnostic| {
+            diagnostic
+                .msg
+                .contains("unresolved reference 'Outer.Hidden.Context'")
+        }));
+    }
+
+    #[test]
+    fn declaration_only_internal_class_shadows_public_platform_type() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import fixture.*\n\
+                 val hidden: Present? = null",
+            ),
+            SourceInput::kotlin("package fixture\ninternal class Present"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        let analysis = analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(ExistingLibrary),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(diagnostics
+            .diags
+            .iter()
+            .any(|diagnostic| diagnostic.msg.contains("unresolved reference 'Present'")));
+        assert!(analysis
+            .symbols
+            .libraries
+            .resolve_symbols_name(crate::types::type_name("fixture/Present"))
+            .classifier
+            .is_none());
+    }
+
+    #[test]
+    fn declaration_only_internal_nested_class_shadows_public_platform_path() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import fixture.Outer\n\
+                 val hidden: Outer.Hidden.Context? = null",
+            ),
+            SourceInput::kotlin(
+                "package fixture\n\
+                 class Outer { internal class Hidden { class Context } }",
+            ),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        let analysis = analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(ExistingLibrary),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+
+        assert!(diagnostics.diags.iter().any(|diagnostic| {
+            diagnostic
+                .msg
+                .contains("unresolved reference 'Outer.Hidden.Context'")
+        }));
+        assert!(analysis
+            .symbols
+            .libraries
+            .resolve_symbols_name(crate::types::type_name("fixture/Outer$Hidden$Context"))
+            .classifier
+            .is_none());
+        assert!(!analysis
+            .symbols
+            .libraries
+            .classifier_accessible_from_package(
+                crate::types::type_name("fixture/Outer$Hidden$Context"),
+                crate::types::type_name("consumer"),
+            ));
+    }
+
+    #[test]
+    fn declaration_only_internal_ancestor_shadows_absent_platform_descendant() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import fixture.Outer\n\
+                 val hidden: Outer.Hidden.Context? = null",
+            ),
+            SourceInput::kotlin("package fixture\nclass Outer { internal class Hidden }"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        let analysis = analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(ExistingLibrary),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+        let hidden = crate::types::type_name("fixture/Outer$Hidden$Context");
+
+        assert!(diagnostics.diags.iter().any(|diagnostic| {
+            diagnostic
+                .msg
+                .contains("unresolved reference 'Outer.Hidden.Context'")
+        }));
+        assert!(analysis
+            .symbols
+            .libraries
+            .resolve_type_name(hidden)
+            .is_none());
+        assert!(analysis
+            .symbols
+            .libraries
+            .resolve_symbols_name(hidden)
+            .classifier
+            .is_none());
+    }
+
+    #[test]
+    fn declaration_only_public_ancestors_allow_absent_platform_descendant() {
+        let inputs = [
+            SourceInput::kotlin(
+                "package consumer\n\
+                 import fixture.Outer\n\
+                 val visible: Outer.Hidden.Context? = null",
+            ),
+            SourceInput::kotlin("package fixture\nclass Outer { class Hidden }"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        let analysis = analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(ExistingLibrary),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+        let visible = crate::types::type_name("fixture/Outer$Hidden$Context");
+
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+        assert!(analysis
+            .symbols
+            .libraries
+            .resolve_type_name(visible)
+            .is_some());
+    }
+
+    #[test]
+    fn declaration_only_internal_class_shadows_platform_static_field() {
+        let inputs = [
+            SourceInput::kotlin("package consumer\nval checked = Unit"),
+            SourceInput::kotlin("package fixture\ninternal class CollisionEnum"),
+        ];
+        let mut diagnostics = DiagSink::new();
+
+        let analysis = analyze_source_set_prefix_with_features(
+            &inputs,
+            1,
+            1,
+            Box::new(ExistingLibrary),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+        let collision = crate::types::type_name("fixture/CollisionEnum");
+
+        assert_eq!(
+            analysis.symbols.libraries.classifier_visibility(collision),
+            Some(Visibility::Internal)
+        );
+        assert!(analysis
+            .symbols
+            .libraries
+            .static_field("fixture/CollisionEnum", "ANY")
+            .is_none());
+        assert!(analysis
+            .symbols
+            .libraries
+            .static_field_name(collision, "ANY")
+            .is_none());
     }
 
     #[test]
