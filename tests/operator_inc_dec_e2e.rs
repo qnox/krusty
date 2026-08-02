@@ -57,6 +57,21 @@ fn extension_inc_on_nullable_user_class() {
 }
 
 #[test]
+fn trailing_implicit_property_inc_in_unit_extension_stays_a_statement() {
+    // A function block discards its trailing expression. Keep this implicit-receiver property on
+    // the statement path; only value-consuming lambda/if/when/try blocks may preserve `IncDec` as
+    // an expression. This is the boundary that a global "before `}` means value" rule violated.
+    const SRC: &str = "class SyntheticMutable(var value: Int)\n\
+        fun SyntheticMutable.bump() { value++ }\n\
+        fun box(): String {\n\
+        \x20 val mutable = SyntheticMutable(1)\n\
+        \x20 mutable.bump()\n\
+        \x20 return if (mutable.value == 2) \"OK\" else \"fail: ${mutable.value}\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("implicit property inc statement"), "OK");
+}
+
+#[test]
 fn member_dec_local() {
     const SRC: &str = "class N(val i: Int) { operator fun dec(): N = N(i - 1) }\n\
         fun box(): String {\n\

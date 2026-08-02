@@ -52,6 +52,7 @@ fn parse_with_features_and_script(
         multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
         explicit_backing_fields: features.has("ExplicitBackingFields"),
         no_trailing_lambda: false,
+        block_trailing_is_value: false,
         lexical_type_params: Vec::new(),
         lexical_type_param_bounds: Vec::new(),
         pending_annotations: Vec::new(),
@@ -733,6 +734,13 @@ struct Parser<'a> {
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
     no_trailing_lambda: bool,
+    /// Whether the statement list currently being parsed belongs to a block whose trailing
+    /// expression is semantically consumed (lambda and `if`/`when`/`try` value blocks). Function,
+    /// accessor, constructor, init, loop, and `finally` blocks discard a trailing expression; they
+    /// must keep inc/dec on the statement path, especially for an implicit-receiver property name.
+    /// Saved/restored at every nested block boundary so syntax context, not a lambda-only special
+    /// case, owns the decision.
+    block_trailing_is_value: bool,
     /// Type parameters in the current lexical parser context. Synthetic anonymous classes are hoisted
     /// to file-level declarations, so they must carry the generic names they mention in supertypes or
     /// member signatures; otherwise checking the hoisted class reports `T` as unresolved.
@@ -880,7 +888,7 @@ impl<'a> Parser<'a> {
             )
         } else {
             self.skip_newlines();
-            self.parse_branch()
+            self.parse_branch(false)
         }
     }
     fn skip_newlines(&mut self) {
@@ -1778,7 +1786,7 @@ impl<'a> Parser<'a> {
                     self.skip_newlines();
                     Some(FunBody::Expr(self.parse_expr()))
                 } else if self.at(TokenKind::LBrace) {
-                    Some(FunBody::Block(self.parse_block_expr()))
+                    Some(FunBody::Block(self.parse_block_expr(false)))
                 } else {
                     None // default-bodied setter (e.g. `private set`)
                 };
@@ -2005,7 +2013,7 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             FunBody::Expr(self.parse_expr())
         } else if self.at(TokenKind::LBrace) {
-            FunBody::Block(self.parse_block_expr())
+            FunBody::Block(self.parse_block_expr(false))
         } else {
             self.diags.error(
                 self.tok().span,
@@ -2339,7 +2347,7 @@ impl<'a> Parser<'a> {
                         }
                         self.skip_newlines();
                         if self.at(TokenKind::LBrace) {
-                            let _ = self.parse_block_expr();
+                            let _ = self.parse_block_expr(false);
                         }
                     }
                     TokenKind::Ident if matches!(self.text(), "object" | "interface") => {
@@ -2525,7 +2533,7 @@ impl<'a> Parser<'a> {
             let (supertypes, _, _, _, _, _) = self.parse_supertypes();
             let _ = supertypes;
             if self.at(TokenKind::LBrace) {
-                let _ = self.parse_block_expr();
+                let _ = self.parse_block_expr(false);
             }
             return FunDecl {
                 name: "<fun-interface>".to_string(),
@@ -2587,7 +2595,7 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             FunBody::Expr(self.parse_expr())
         } else if self.at(TokenKind::LBrace) {
-            FunBody::Block(self.parse_block_expr())
+            FunBody::Block(self.parse_block_expr(false))
         } else {
             self.i = body_save;
             FunBody::None
@@ -3014,7 +3022,7 @@ impl<'a> Parser<'a> {
                                 .map_or(false, |t| t.kind == TokenKind::LBrace) =>
                     {
                         self.bump(); // 'init'
-                        let block = self.parse_block_expr();
+                        let block = self.parse_block_expr(false);
                         init_order.push(ClassInit::Block(block));
                     }
                     // `companion object [Name] { fun…; val… }` — members become static on this class.
@@ -3176,7 +3184,7 @@ impl<'a> Parser<'a> {
                         }
                         self.skip_newlines();
                         let body = if self.at(TokenKind::LBrace) {
-                            Some(self.parse_block_expr())
+                            Some(self.parse_block_expr(false))
                         } else {
                             None
                         };
@@ -3646,7 +3654,7 @@ impl<'a> Parser<'a> {
                                 .map_or(false, |t| t.kind == TokenKind::LBrace) =>
                     {
                         self.bump();
-                        let block = self.parse_block_expr();
+                        let block = self.parse_block_expr(false);
                         init_order.push(ClassInit::Block(block));
                     }
                     TokenKind::KwClass => {
@@ -3803,7 +3811,7 @@ impl<'a> Parser<'a> {
                                 .map_or(false, |t| t.kind == TokenKind::LBrace) =>
                     {
                         self.bump();
-                        let block = self.parse_block_expr();
+                        let block = self.parse_block_expr(false);
                         init_order.push(ClassInit::Block(block));
                     }
                     // A plain nested class in an object body (`object Foo { class Bar … }`) hoists to the
@@ -4631,6 +4639,8 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         let mut stmts = Vec::new();
+        let saved_block_value = self.block_trailing_is_value;
+        self.block_trailing_is_value = true;
         loop {
             self.skip_newlines();
             if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
@@ -4638,6 +4648,7 @@ impl<'a> Parser<'a> {
             }
             stmts.push(self.parse_stmt());
         }
+        self.block_trailing_is_value = saved_block_value;
         // Prepend `val (a, b) = <synthetic-param>` for each destructured parameter (reversed so the
         // first parameter's binding ends up first).
         for (synth, entries, source_props, sp) in destructures.into_iter().rev() {
@@ -4725,7 +4736,7 @@ impl<'a> Parser<'a> {
                 sp,
             )
         } else {
-            self.parse_block_expr()
+            self.parse_block_expr(false)
         };
         let end = self.file.expr_spans[body.0 as usize];
         let lam = self
@@ -4741,9 +4752,11 @@ impl<'a> Parser<'a> {
         lam
     }
 
-    fn parse_block_expr(&mut self) -> ExprId {
+    fn parse_block_expr(&mut self, trailing_is_value: bool) -> ExprId {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
+        let saved_block_value = self.block_trailing_is_value;
+        self.block_trailing_is_value = trailing_is_value;
         let mut stmts = Vec::new();
         loop {
             self.skip_newlines();
@@ -4752,6 +4765,7 @@ impl<'a> Parser<'a> {
             }
             stmts.push(self.parse_stmt());
         }
+        self.block_trailing_is_value = saved_block_value;
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
         // A trailing bare expression is the block's value.
@@ -5308,10 +5322,11 @@ impl<'a> Parser<'a> {
                 // `parse_postfix` built an `Expr::IncDec`; in statement position the value is
                 // discarded, so re-route to the statement helper (which desugars a `Name` to
                 // `Stmt::IncDec` and a member/index target to an assignment). Immediately before a
-                // closing brace, keep the expression value: the generic block parser decides whether
-                // that trailing value is consumed (lambda/if/when/try) or discarded (Unit function,
-                // constructor, or init block). This avoids a lambda-only semantic fork and also makes
-                // `if (c) { p.x++ } else { ... }` produce the old value as Kotlin requires.
+                // closing brace of a VALUE-CONSUMING block, keep the expression value. The enclosing
+                // parser context marks lambda/if/when/try value blocks; function/accessor/init/
+                // constructor/loop/finally blocks stay on this statement path. This avoids both a
+                // lambda-only fork and accidentally treating a Unit function's trailing implicit
+                // property increment as a local-variable expression.
                 if let Expr::IncDec {
                     target,
                     dec,
@@ -5323,7 +5338,7 @@ impl<'a> Parser<'a> {
                     let after_nl = (self.i..self.t.len())
                         .find(|&i| self.t[i].kind != TokenKind::Newline)
                         .map(|i| self.t[i].kind);
-                    if after_nl != Some(TokenKind::RBrace) {
+                    if after_nl != Some(TokenKind::RBrace) || !self.block_trailing_is_value {
                         let op_span = self.file.expr_spans[e.0 as usize];
                         return self.incdec_target(target, dec, prefix, op_span, start);
                     }
@@ -7032,7 +7047,7 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         self.expect(TokenKind::RParen, "')'");
         self.skip_newlines();
-        let then_branch = self.parse_branch();
+        let then_branch = self.parse_branch(true);
         // optional else (may be on the next line)
         let save = self.i;
         self.skip_newlines();
@@ -7048,7 +7063,7 @@ impl<'a> Parser<'a> {
         };
         let else_branch = if !else_is_when_entry && self.eat(TokenKind::KwElse) {
             self.skip_newlines();
-            Some(self.parse_branch())
+            Some(self.parse_branch(true))
         } else {
             self.i = save;
             None
@@ -7124,7 +7139,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'try'
         self.skip_newlines();
-        let body = self.parse_block_expr();
+        let body = self.parse_block_expr(true);
         let mut catches = Vec::new();
         let mut finally = None;
         loop {
@@ -7154,7 +7169,7 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(TokenKind::RParen, "')'");
                 self.skip_newlines();
-                let cbody = self.parse_block_expr();
+                let cbody = self.parse_block_expr(true);
                 catches.push(CatchClause {
                     name,
                     ty,
@@ -7163,7 +7178,7 @@ impl<'a> Parser<'a> {
             } else if self.at(TokenKind::Ident) && self.text() == "finally" {
                 self.bump(); // 'finally'
                 self.skip_newlines();
-                finally = Some(self.parse_block_expr());
+                finally = Some(self.parse_block_expr(false));
                 break; // `finally` is always last
             } else {
                 self.i = save;
@@ -7369,7 +7384,7 @@ impl<'a> Parser<'a> {
             }
             self.expect(TokenKind::Arrow, "'->'");
             self.skip_newlines();
-            let body = self.parse_branch();
+            let body = self.parse_branch(true);
             arms.push(WhenArm { conditions, body });
         }
         let end = self.tok().span;
@@ -7621,14 +7636,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_branch(&mut self) -> ExprId {
+    fn parse_branch(&mut self, trailing_is_value: bool) -> ExprId {
         if self.at(TokenKind::LBrace) {
             // A branch body `{ … }` is a BLOCK — unless it is a LAMBDA (`when (x) { … -> { _ -> body } }`
             // returning a function type), detected by a top-level `->` before the closing `}`.
             if self.at_lambda_brace() {
                 return self.parse_lambda();
             }
-            return self.parse_block_expr();
+            return self.parse_block_expr(trailing_is_value);
         }
         let start = self.tok().span;
         let s = self.parse_stmt();
