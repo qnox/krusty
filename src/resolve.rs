@@ -14177,17 +14177,6 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::libraries::LibraryMember> {
         self.resolver().resolve_super_instance(internal, name, args)
     }
-    fn resolve_companion(
-        &self,
-        internal: &str,
-        name: &str,
-        args: &[Ty],
-    ) -> Option<crate::libraries::LibraryMember> {
-        use crate::symbol_resolver::{SymRecv, Symbol};
-        self.resolver()
-            .resolve_symbol(SymRecv::Type(internal), name, args, &[])
-            .and_then(Symbol::companion)
-    }
     fn resolve_companion_with_literal_args(
         &self,
         internal: &str,
@@ -18874,13 +18863,29 @@ impl<'a> Checker<'a> {
                 } else {
                     elem
                 };
-                self.expect_assignable(expected, *a, self.span(args[i]), "argument");
+                self.expect_call_arg(expected, args[i], *a);
             }
         } else {
             for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
-                self.expect_assignable(*p, *a, self.span(args[i]), "argument");
+                self.expect_call_arg(*p, args[i], *a);
             }
         }
+    }
+
+    /// Validate one argument after overload selection. A lambda targeting a classpath SAM is checked
+    /// against the SAM method parameters here, at the common call-argument seam; import/member/vararg
+    /// paths must not each reimplement the conversion or accidentally compare `FunctionN` to the Java
+    /// interface type.
+    fn expect_call_arg(&mut self, expected: Ty, argument: ExprId, actual: Ty) {
+        if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+            if let Some(sam) =
+                crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, expected)
+            {
+                self.check_lambda_with_types(argument, &sam.params);
+                return;
+            }
+        }
+        self.expect_assignable(expected, actual, self.span(argument), "argument");
     }
 
     fn expect_source_constructor_args(
@@ -31744,9 +31749,18 @@ impl<'a> Checker<'a> {
                             .map(|(o, m)| (o.to_string(), m.to_string()))
                     }) {
                         if let Some(owner_internal) = self.nested_internal(&owner_path) {
-                            if let Some(m) =
-                                self.resolve_companion(&owner_internal, &member, &arg_tys)
-                            {
+                            // Lambda args must stay LAMBDA literals here (`assertThrows(T::class.java)
+                            // { … }`): as plain typed `FunctionN` args the Java SAM-interface parameter
+                            // (`Executable`, `Runnable`) never matches and the imported static is
+                            // reported unresolved.
+                            let arg_kinds = self.call_arg_kinds(args);
+                            let call_targs = self.resolved_explicit_type_args(call);
+                            if let Some(m) = self.resolve_companion_with_literal_args(
+                                &owner_internal,
+                                &member,
+                                &arg_kinds,
+                                &call_targs,
+                            ) {
                                 let owner = m.owner_name_or(&owner_internal);
                                 let phys =
                                     m.physical_name.clone().unwrap_or_else(|| m.name.clone());
@@ -31767,19 +31781,8 @@ impl<'a> Checker<'a> {
                                     .flatten();
                                 if let Some(elem) = vararg {
                                     callable.vararg_elem = Some(elem);
-                                    let fixed = m.params.len() - 1;
-                                    for (i, &a) in args.iter().enumerate() {
-                                        let pt = if i < fixed { m.params[i] } else { elem };
-                                        self.expect_assignable(
-                                            pt,
-                                            arg_tys[i],
-                                            self.span(a),
-                                            "argument",
-                                        );
-                                    }
-                                } else {
-                                    self.expect_call_args(&m.params, false, args, &arg_tys);
                                 }
+                                self.expect_call_args(&m.params, m.call_sig.vararg, args, &arg_tys);
                                 self.resolved_calls
                                     .insert(call, ResolvedCall::TopLevel(callable));
                                 return ret;

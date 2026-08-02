@@ -1354,6 +1354,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-suspending body, a tail suspend call, and a bound suspension (`val x = work(); …`); a suspension nested
   in an `if`/`when` CONDITION cleanly SKIPS (the pre-existing flattener limit), never miscompiles. Test:
   `tests/classpath_runblocking_e2e.rs`.
+- **`kotlinx.coroutines.test.runTest { … }` resolves, lowers, and RUNS** — the value-class-parametered
+  sibling of the `runBlocking` case. `runTest(timeout: kotlin.time.Duration = …, testBody)` mangles its
+  JVM name (`sourceName-<hash>`) AND its `$default` synthetic because of a value-class
+  parameter, which broke the call at TWO seams. METADATA ALIGNMENT (`classpath.rs`): `@Metadata` names
+  the value class while the descriptor carries its erased underlying (`J`), so `meta_param_compat` /
+  `meta_param_exact` now resolve the underlying through the platform's value-class knowledge
+  (`value_underlying_name`, threaded into `aligned_meta_index` / `metadata_call_facts_name` /
+  `aligned_generic_sig_name` / `is_inline_callable_name` for top-level/static callables and into
+  `aligned_member_metadata` / `metadata_member_shape_matches` / `metadata_member_descriptor` for
+  members; unsigned underlyings normalize like the mapped builtins, `UInt` → `Int`) — before, alignment failed and the function
+  silently lost its parameter names/defaults, making every under-applied call inapplicable. DEFAULT-CALL
+  LOOKUP (`symbol_resolver.rs`): `resolve_top_level_default_callable` probed only the SOURCE spelling
+  (`runTest$default` — the deprecated unmangled overload); it now also resolves each mangled spelling's
+  `$default` directly in its base candidate's facade package (the import scope only knows the source
+  name). Tests: `tests/classpath_runtest_e2e.rs`, `jvm::classpath` `metadata_param_matching_*`.
+- **An imported Java STATIC accepts a lambda for a SAM-interface parameter** (`import
+  org.junit.jupiter.api.Assertions.assertThrows`; `assertThrows(T::class.java) { … }`, `import
+  java.util.concurrent.CompletableFuture.runAsync`). Two gaps made the unqualified call unresolved.
+  RESOLUTION (`resolve.rs`): the imported-static path disambiguated overloads with TYPED argument
+  kinds, collapsing the lambda to a plain `FunctionN` that never matches a Java SAM parameter; it now
+  routes through `resolve_companion_with_literal_args` so the lambda stays a `LambdaLiteral` and the
+  `classpath_sam_arg_matches` rule in `best_companion_overload` applies. CHECKING: the selected
+  member's arguments were re-checked by raw assignability (`() -> Unit` vs `Runnable` → mismatch); a
+  lambda argument against a classpath SAM parameter is now checked against the SAM method's parameter
+  types (`check_lambda_with_types`), mirroring the qualified-call path. Test:
+  `tests/static_member_import_e2e.rs`.
 - **A generic classpath `suspend` member returning a TYPE PARAMETER binds it from the receiver's type
   argument** (`interface Repo<T> { suspend fun byId(): T? }` on a `Repo<Cfg>` receiver → `Cfg?`). The
   non-suspend member path binds `T` via `member_return` (substituting the receiver's args into the generic
