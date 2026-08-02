@@ -10,8 +10,11 @@ classification. Parsing and construction of the final navigation indexes are com
 The follow-up capture-discovery change confirms this directly: removing unrelated semantic checks
 from one serial inference pass reduced the `acee6cd0` 1,000-file worker median by 38%, without
 adding workers. The measured stacked prototype for dependency-preserving narrowing inside selected
-classes removed another 15.7% from the resulting worker time, reducing the matching 7.64-second
-median to 6.44 seconds.
+classes removed another 15.7% from the resulting worker time. The return-inference dependency
+worklist was then measured directly against its `d5a7c332` stack base at 7.40 versus 6.79 seconds,
+an additional 8.3% reduction without adding workers. These are anchored branch measurements rather
+than current-tree timings; absolute times vary with host load, and the integrated capture-discovery
+implementation has not been re-profiled.
 
 On the original profiling base (`2fc95b4b`), the two measured compiler-side changes reduce the
 1,000-file analysis pass from 6.70 seconds to 3.86 seconds (42%) and peak RSS from 465 MiB to about
@@ -176,6 +179,35 @@ later replaced the prototype's resolver-local ownership rescans with the generic
 and function-root traversal. That exact integrated implementation has not been re-profiled, so the
 measurements above establish the optimization direction but are not a current-tree timing claim.
 
+### Return-inference dependency worklist
+
+Tracing the fixpoint on the same 1,000-file slice found 125 files with inferred expression bodies.
+Every round checked 35 top-level and 288 method candidates, but the first round changed only 43
+signatures (31 methods, 10 top-level functions, and two member extensions), while the second changed
+none. The unconditional second semantic sweep was therefore verification work rather than useful
+inference for this workload.
+
+The follow-up keeps the complete first round, then carries the names of changed callables into a
+conservative file worklist. Only files with inferred expression bodies whose AST mentions a changed
+callable are revisited. Import aliases are expanded. Names from the checker's canonical synthetic
+operator registry and the remaining hidden syntax protocols retain every candidate file because
+those calls can be implicit in the AST; ordinary infix functions keep their names and use the normal
+AST scan. Java synthetic properties use the same platform getter-name mapping as resolution, cached
+once per distinct AST name in each file. Name collisions can schedule extra work but cannot omit an
+explicit or synthetic-property dependency.
+
+Five interleaved optimized A/B runs give:
+
+| Build | Median worker time | Median peak RSS |
+|---|---:|---:|
+| Dependency-preserving class capture discovery (`d5a7c332`) | 7.40 s | 254,060 KiB |
+| Return-inference dependency worklist | 6.79 s | 253,596 KiB |
+
+That is a further 8.3% worker-time reduction with effectively flat peak RSS. Median end-to-end time
+falls from 7.89 to 7.26 seconds (8.0%). In the matching sampled profile,
+`preinfer_returns_pass` falls from 1,664/5,332 samples (31.2%) to 1,162/5,373 (21.6%). The
+worklist reduces this repeated single-thread work; it does not introduce analysis workers.
+
 ## Measured changes on the profiling base
 
 ### Share the compilation-wide class-name map
@@ -243,12 +275,12 @@ redact them before sharing; only aggregate measurements belong in committed docu
 
 ## Prioritized next improvements
 
-1. Replace the remaining module-wide return pre-inference passes with a dependency worklist. Record
-   which callable returns depend on which unresolved calls, and revisit only affected callables. For an
-   editor request, eagerly infer open files and lazily infer support bodies reached by those files.
-   Cache the resulting declaration/return snapshot by source fingerprint. In the sampled
-   dependency-preserving prototype, `preinfer_returns_pass` contained 31.2% of inclusive samples and
-   was the largest remaining direct serial optimization target.
+1. Refine the return-inference worklist from conservative file/name dependencies to exact callable
+   keys and declaration-level dependencies. The first round still checks every inferred expression
+   body, and name collisions schedule unrelated second-round bodies. For an editor request, eagerly
+   infer open files and lazily infer support bodies reached by those files. Cache the resulting
+   declaration/return snapshot by source fingerprint. After the file worklist,
+   `preinfer_returns_pass` contains 21.6% of inclusive samples.
 2. Separate declaration/type-position names from arbitrary expression names during signature
    collection. `collect_file_type_names` intentionally over-approximates `Expr::Name`, including
    locals and parameters, causing useless import and classpath probes. A lexical local-name filter
@@ -300,3 +332,5 @@ remove repeated work on one thread.
 - Full `./run-tests.sh` on the `acee6cd0` validation base: all test binaries passed.
 - Full `./run-tests.sh` after focused capture discovery: all test binaries passed.
 - Full `./run-tests.sh` on the original dependency-preserving prototype: all test binaries passed.
+- Full `./run-tests.sh` for the return-inference dependency worklist on its stacked validation base:
+  all test binaries passed.
