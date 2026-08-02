@@ -222,6 +222,8 @@ mod collection_special_member_stub_e2e;
 mod companion_const_e2e;
 #[path = "companion_e2e.rs"]
 mod companion_e2e;
+#[path = "companion_member_read_e2e.rs"]
+mod companion_member_read_e2e;
 #[path = "companion_non_const_prop_e2e.rs"]
 mod companion_non_const_prop_e2e;
 #[path = "companion_supertype_e2e.rs"]
@@ -764,6 +766,8 @@ mod pair_triple_e2e;
 mod paren_condition_newline_e2e;
 #[path = "parser_errors_coverage_e2e.rs"]
 mod parser_errors_coverage_e2e;
+#[path = "path_smartcast_e2e.rs"]
+mod path_smartcast_e2e;
 #[path = "plugins_e2e.rs"]
 mod plugins_e2e;
 #[path = "primitive_bound_generic_e2e.rs"]
