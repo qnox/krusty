@@ -19,8 +19,9 @@ use serde_json::{json, Value};
 use super::super::{
     CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex,
     HoverIndex, IndexOutcome, IndexedFile, LibraryDefinitionIndex, MaterializedDefinition,
-    SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex, WorkspaceSymbolIndex,
-    MAX_RETAINED_ANALYSIS_BYTES, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
+    ProjectSymbolIndex, SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex,
+    WorkspaceSymbolIndex, MAX_RETAINED_ANALYSIS_BYTES, SEMANTIC_TOKEN_MODIFIERS,
+    SEMANTIC_TOKEN_TYPES,
 };
 use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
 use crate::compiler_analysis::LibraryRef;
@@ -969,7 +970,7 @@ pub struct LspService<B> {
     /// Declarations from every workspace file the background sweep has reached, opened or not.
     /// Unlike `workspace_symbols` this survives analysis batches: coverage is what it is for, and
     /// rebuilding it per batch would shrink it back to whatever happens to be open.
-    project_symbols: WorkspaceSymbolIndex,
+    project_symbols: ProjectSymbolIndex,
     /// Project-model generation `project_symbols` describes. A batch from an older generation is
     /// about a model that no longer exists.
     project_symbols_generation: u64,
@@ -1025,7 +1026,7 @@ where
             documents: HashMap::new(),
             source_set: Vec::new(),
             workspace_symbols: WorkspaceSymbolIndex::default(),
-            project_symbols: WorkspaceSymbolIndex::default(),
+            project_symbols: ProjectSymbolIndex::default(),
             project_symbols_generation: 0,
             workspace_diagnostics: WorkspaceDiagnosticStore::default(),
             backend,
@@ -1384,7 +1385,7 @@ where
     }
 
     pub(crate) fn reset_workspace_index(&mut self, generation: u64) -> Vec<Value> {
-        self.project_symbols = WorkspaceSymbolIndex::default();
+        self.project_symbols = ProjectSymbolIndex::default();
         self.project_symbols_generation = generation;
         self.workspace_diagnostics.reset_to(generation);
         // Clearing old-model results is itself a diagnostic change. Pull clients must be told even
@@ -2050,7 +2051,7 @@ where
             id,
             Value::Array(
                 self.workspace_symbols
-                    .encode_over(&params.query, &self.project_symbols),
+                    .encode_over(&params.query, &self.project_symbols.layers()),
             ),
         )])
     }
