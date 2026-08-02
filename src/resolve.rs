@@ -9539,6 +9539,11 @@ pub enum ExprLowering {
     /// and visibility resolution; presence also distinguishes a selected-but-unlowerable member
     /// from a top-level property with the same name, so shadowing fails closed.
     ImplicitThisMemberPropertyRef { owner: TypeName },
+    /// An unqualified source member-function reference (`::m`) selected against the current semantic
+    /// `this`. The owner is a semantic handoff, not a JVM-slot hint: top-level extensions bind `this`
+    /// at slot zero, member extensions bind it after the dispatch receiver, and nested receiver scopes
+    /// may bind it to a local value. Lowering captures the scoped value and dispatches on this owner.
+    ImplicitThisMemberFunctionRef { owner: TypeName },
     /// An unqualified function reference `::foo` where `foo` is imported from a SAME-FILE `object`
     /// (`import Host.foo`) — a BOUND reference to that object's singleton member, lowered exactly like
     /// `Host::foo` (capture `Host.INSTANCE`, invoke the member).
@@ -12252,7 +12257,7 @@ struct Checker<'a> {
     /// `super(…)`/delegation-call arguments and constructor-parameter defaults (the latter are
     /// evaluated in the CALLER's context). Every implicit-`this` callable-reference shape uses this
     /// shared state; restricting it to properties would leave `::method` able to capture the same
-    /// wrong or uninitialized slot-zero receiver.
+    /// unavailable or uninitialized semantic receiver.
     this_unavailable: bool,
     this_extension_receiver: Option<Span>,
     /// A flow-narrowing of the implicit receiver established by `if (this is B)`: `this` is known to
@@ -22357,20 +22362,22 @@ impl<'a> Checker<'a> {
                 // `lower_implicit_this_method_ref` (member functions only, non-`Nothing` return); the
                 // member-PROPERTY case (`::p`) follows, matching `lower_implicit_this_prop_ref`.
                 if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                    if let Some(sig) = self.syms.method_of_name(internal, &name) {
+                    if let Some((owner, sig)) = self.syms.method_of_with_owner_name(internal, &name)
+                    {
                         if sig.requires_all_args() && sig.ret != Ty::Nothing {
-                            // Both implicit method and property references capture JVM slot zero.
-                            // In constructor headers no initialized receiver exists; in a member
-                            // extension `this_ty` names the extension receiver while slot zero is
-                            // the dispatch receiver. Reject both cases before any top-level fallback,
-                            // because the member name still shadows those fallbacks.
-                            if self.this_unavailable || self.this_extension_receiver.is_some() {
+                            // Constructor headers have no initialized semantic receiver to capture.
+                            // Other receiver shapes are safe because lowering consumes the exact
+                            // selected owner and captures its scoped `this` value; it does not assume
+                            // that every implicit receiver lives in JVM slot zero.
+                            if self.this_unavailable {
                                 self.diags.error(
                                     self.span(e),
                                     "krusty: callable references are not supported",
                                 );
                                 return self.set(e, Ty::Error);
                             }
+                            self.expr_lowers
+                                .insert(e, ExprLowering::ImplicitThisMemberFunctionRef { owner });
                             self.mark_current_extension_receiver_used(e);
                             return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                         }
@@ -22383,8 +22390,6 @@ impl<'a> Checker<'a> {
                     // dispatch `this` at slot 0) is valid —
                     //   * not where `this` is unavailable/uninitialized (super-ctor args,
                     //     ctor-param defaults — `this_unavailable`);
-                    //   * not in a member-EXTENSION context, where `this` is the extension
-                    //     receiver but slot 0 is the DISPATCH receiver;
                     //   * not a `private`/`protected` property, nor a `var` with a `private`
                     //     setter (the synthetic reference class can't reach such an accessor —
                     //     an illegal-access miscompile);
@@ -22407,7 +22412,6 @@ impl<'a> Checker<'a> {
                         let accessible =
                             |v: Visibility| matches!(v, Visibility::Public | Visibility::Internal);
                         if !self.this_unavailable
-                            && self.this_extension_receiver.is_none()
                             && accessible(visibility)
                             && (!is_var || setter_visibility.is_none_or(accessible))
                         {

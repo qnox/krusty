@@ -5,10 +5,9 @@
 //! lowerer had no arm for it — the checker/lowerer are deliberately kept in lock-step. The lowering
 //! mirrors `lower_implicit_this_method_ref`: capture `this` (slot 0) and dispatch the accessor on it.
 //!
-//! Safety contract (never miscompile): the checker types `::p` only where the lowering's `this`
-//! capture is valid — member bodies/accessors/initializers/delegates — NOT in a super-constructor
-//! argument (uninitialized `this`), not in a member-extension context (`this` is the extension
-//! receiver, slot 0 is dispatch), not for an outer `this` of an inner class, not for a
+//! Safety contract (never miscompile): the checker types `::p` only where lowering can capture its
+//! semantic `this` — including class and extension bodies — NOT in a super-constructor argument
+//! (uninitialized `this`), not for an outer `this` of an inner class, not for a
 //! `private`/`protected` property or a `private`-setter `var` (the synthetic reference class can't
 //! reach the accessor, incl. inherited via same-file base-class prop flattening), and not for a
 //! computed (backing-field-less) member property.
@@ -108,20 +107,6 @@ fn unsafe_member_prop_ref_shapes_still_rejected() {
     }
     // (name, source) — every one must fail to compile-and-run.
     let cases: &[(&str, &str)] = &[
-        // A member-EXTENSION fn: `this` is the extension receiver, but the lowering would capture
-        // the DISPATCH receiver (slot 0) and bind `C.y`, not `A.y`.
-        (
-            "MemberExtShadow",
-            r#"
-class A { val y: String = "A" }
-class C {
-    val y: String = "C"
-    fun A.f() = ::y
-    fun test(a: A) = a.f()
-}
-fun box(): String = C().test(A()).get()
-"#,
-        ),
         // A private member property: no accessor is emitted, so the reference class's `get()`
         // would hit a NoSuchMethodError.
         (
@@ -270,10 +255,8 @@ fun box(): String = "OK"
     );
 }
 
-/// `this_unavailable` and the member-extension receiver split are dispatch invariants, not
-/// property-only exceptions. The pre-existing implicit method-reference lowering also captures JVM
-/// slot zero, so it must reject the same constructor-header and extension-receiver contexts instead
-/// of resolving against one receiver and emitting against another.
+/// `this_unavailable` is a callable-reference invariant, not a property-only exception. Method refs
+/// in constructor headers must reject the same unavailable/uninitialized semantic receiver.
 #[test]
 fn implicit_this_method_refs_share_dispatch_receiver_guards() {
     if !common::stdlib_toolchain_ready() {
@@ -300,18 +283,6 @@ class C(val r: () -> String = ::value) {
 fun box(): String = C().r()
 "#,
         ),
-        (
-            "MethodExtensionReceiver",
-            r#"
-class ExtensionHost { fun value(): String = "extension" }
-class DispatchHost {
-    fun value(): String = "dispatch"
-    fun ExtensionHost.ref() = ::value
-    fun test(receiver: ExtensionHost): String = receiver.ref()()
-}
-fun box(): String = DispatchHost().test(ExtensionHost())
-"#,
-        ),
     ];
     for (stem, source) in cases {
         assert!(
@@ -321,9 +292,43 @@ fun box(): String = DispatchHost().test(ExtensionHost())
     }
 }
 
+/// Implicit refs capture the semantic `this`, not a hard-coded JVM slot. A member extension places
+/// its dispatch receiver in slot zero and its extension receiver after it; both function and property
+/// references must bind the latter. A top-level extension still places that receiver in slot zero,
+/// exercising the same checker-to-lowerer handoff with a different physical layout.
+#[test]
+fn implicit_refs_capture_the_scoped_extension_receiver() {
+    run_box(
+        r#"
+class Extension(val value: String) {
+    fun read(): String = value
+}
+class Dispatch {
+    val value: String = "wrong-property"
+    fun read(): String = "wrong-method"
+    fun Extension.both(): String = ::value.get() + ::read()
+    fun test(): String = Extension("O").both()
+}
+fun box(): String = if (Dispatch().test() == "OO") "OK" else "FAIL"
+"#,
+        "ImplicitRefsMemberExtensionReceiver",
+    );
+
+    run_box(
+        r#"
+class Extension(val value: String) {
+    fun read(): String = value
+}
+fun Extension.both(): String = ::value.get() + ::read()
+fun box(): String = if (Extension("O").both() == "OO") "OK" else "FAIL"
+"#,
+        "ImplicitRefsTopLevelExtensionReceiver",
+    );
+}
+
 /// REJECTION GUARD: an inner class's unqualified `::p` naming an OUTER-class property must NOT
 /// compile (the outer `this` isn't capturable here) — and mixed shapes like
-/// callableReference/bound/emptyLHS.kt (top-level extension refs, outer-this refs) stay skipped.
+/// callableReference/bound/emptyLHS.kt (other extension-ref and outer-this shapes) stay skipped.
 #[test]
 fn outer_this_and_extension_ref_shapes_still_rejected() {
     let src = r#"

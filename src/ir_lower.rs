@@ -12619,12 +12619,17 @@ impl<'a> Lower<'a> {
         )
     }
 
-    /// An unqualified member-function reference `::m` inside a class — a BOUND ref to the enclosing
-    /// receiver (`this::m`): capture `this` (value 0) and emit the same `FunctionReferenceImpl` the
-    /// `obj::m` form does. Member-property and extension implicit refs aren't modeled here (the type
-    /// isn't `Ty::Fun` / there's no member method), so they fall through.
+    /// An unqualified member-function reference `::m` — a BOUND ref to the current semantic receiver
+    /// (`this::m`). The checker supplies the exact declaring owner; capture the scoped `this` value
+    /// instead of assuming JVM slot zero. That distinction is observable for a member extension,
+    /// whose dispatch receiver is slot zero but whose extension `this` is the following value.
     fn lower_implicit_this_method_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
-        let internal = self.cur_class?;
+        let Some(ExprLowering::ImplicitThisMemberFunctionRef { owner }) =
+            self.info.expr_lowers.get(&e)
+        else {
+            return None;
+        };
+        let internal = *owner;
         let (_, _, target_fid, _) = self.resolve_method_name(internal, name)?;
         let Ty::Fun(sig) = self.info.ty(e) else {
             return None;
@@ -12643,7 +12648,8 @@ impl<'a> Lower<'a> {
         let call_interface = self
             .class_info_name(internal)
             .is_some_and(|ci| self.ir.classes[ci.id as usize].is_interface);
-        let this_e = self.emit_get_value(0);
+        let (this_value, _) = self.lookup("this")?;
+        let this_e = self.emit_get_value(this_value);
         let param_tys = tys_to_ir(&sig.params);
         self.make_func_ref(
             e.0,
@@ -12663,13 +12669,13 @@ impl<'a> Lower<'a> {
         )
     }
 
-    /// An unqualified `::p` inside a class is a BOUND reference to the enclosing receiver's member
-    /// PROPERTY (`this::p`) — mirrors [`Self::lower_implicit_this_method_ref`] for fns, capturing
-    /// `this` (slot 0). The checker records the exact source-member selection after owning hierarchy,
-    /// visibility, shadowing, and receiver-availability decisions. Lowering deliberately consumes
-    /// that handoff instead of re-resolving: an absent marker belongs to another callable-ref arm,
-    /// while a present marker that lacks a backing field fails the file rather than falling through
-    /// to a same-named top-level or extension property.
+    /// An unqualified `::p` with an implicit receiver is a BOUND reference (`this::p`) — mirrors
+    /// [`Self::lower_implicit_this_method_ref`] for functions, capturing the scoped semantic `this`.
+    /// The checker records the exact source-member selection after owning hierarchy, visibility,
+    /// shadowing, and receiver-availability decisions. Lowering deliberately consumes that handoff
+    /// instead of re-resolving: an absent marker belongs to another callable-ref arm, while a present
+    /// marker that lacks a backing field fails the file rather than falling through to a same-named
+    /// top-level or extension property.
     fn lower_implicit_this_prop_ref(&mut self, e: AstExprId, name: &str) -> Option<u32> {
         let Some(ExprLowering::ImplicitThisMemberPropertyRef { owner }) =
             self.info.expr_lowers.get(&e)
@@ -12699,7 +12705,8 @@ impl<'a> Lower<'a> {
         if !field_exists {
             return None;
         }
-        let this_e = self.emit_get_value(0);
+        let (this_value, _) = self.lookup("this")?;
+        let this_e = self.emit_get_value(this_value);
         self.finish_prop_ref(name, internal, Some(this_e), None)
     }
 
@@ -20501,15 +20508,20 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // An unqualified `::m` inside a class binds to the enclosing receiver (`this::m`) — a
-            // member function takes precedence over a same-named top-level decl (matches the checker).
-            if receiver.is_none() {
-                if let Some(r) = self.lower_implicit_this_method_ref(e, &name) {
-                    return Some(r);
-                }
+            // An unqualified `::m` with an implicit receiver binds that semantic `this` — a member
+            // function takes precedence over a same-named top-level declaration (matches the checker).
+            if receiver.is_none()
+                && matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ImplicitThisMemberFunctionRef { .. })
+                )
+            {
+                // Presence is terminal for the same shadowing reason as member-property markers:
+                // if realization fails, do not silently bind a same-named top-level callable.
+                return self.lower_implicit_this_method_ref(e, &name);
             }
-            // An unqualified `::p` inside a class binds to the enclosing receiver's member PROPERTY
-            // (`this::p`), after member fns and before top-level decls. Presence of the checker's
+            // An unqualified `::p` with an implicit receiver binds its member property (`this::p`),
+            // after member functions and before top-level declarations. Presence of the checker's
             // semantic marker is terminal: a failed emit must bail instead of rebinding a shadowed
             // top-level/extension property.
             if receiver.is_none()
