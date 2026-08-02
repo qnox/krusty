@@ -14563,6 +14563,47 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// A property operation whose OWNER is a source class of ANOTHER file of this module: the
+    /// emitter has no classfile for it (its IR covers only this file's classes), so it cannot
+    /// read the accessor's erased descriptor from the declaration — and must NOT derive it from
+    /// the node's logical type, which is SUBSTITUTED at this site (`Holder<A>.a` reads as `A`,
+    /// but `Holder.getA` erases `T` to `Object`; calling `()LA;` is a `NoSuchMethodError`).
+    /// Record the declaration's erased PHYSICAL type in the side table the emitter consults as
+    /// its declaration-less fallback; the logical type drives the checkcast bridge. The JVM
+    /// value-class pass overrides these stamps for value-class-typed properties (mangled
+    /// accessor + underlying).
+    fn stamp_cross_file_property_access(
+        &mut self,
+        id: u32,
+        owner: TypeName,
+        name: &str,
+        logical: Ty,
+        write: bool,
+    ) {
+        // Same-file owner: the emitter answers from the declaration, never the stamp.
+        if self.class_info_name(owner).is_some() {
+            return;
+        }
+        let Some((_, property)) = self.syms.declared_member_prop(owner, name) else {
+            return;
+        };
+        let physical = property.storage_ty.unwrap_or(property.ty);
+        // Full-type inequality, not just erasure-class: nullability changes the descriptor for a
+        // PRIMITIVE (`Int` → `()I`, `Int?` → `()Ljava/lang/Integer;`), so a safe-call read of a
+        // cross-file primitive property needs the stamp even though the erased classes agree.
+        if physical == logical {
+            return;
+        }
+        let accessor = if write {
+            crate::names::property_setter_name(name)
+        } else {
+            property_getter_name(name)
+        };
+        self.ir
+            .property_accessor_jvm_realizations
+            .insert(id, (accessor, physical));
+    }
+
     fn lower_declared_property_read(
         &mut self,
         receiver: u32,
@@ -14598,6 +14639,7 @@ impl<'a> Lower<'a> {
             interface: self.property_owner_is_interface(owner),
             operation: None,
         });
+        self.stamp_cross_file_property_access(read, owner, name, ty, false);
         Some(self.coerce_generic_read(read, e, ty))
     }
 
@@ -14617,14 +14659,16 @@ impl<'a> Lower<'a> {
         if private && !self.can_access_source_private(owner) {
             self.mark_property_access_bridge(declaring, name);
         }
-        Some(self.ir.add_expr(IrExpr::PropertyRead {
+        let read = self.ir.add_expr(IrExpr::PropertyRead {
             receiver,
             owner,
             name: name.to_string(),
             ty,
             interface: self.property_owner_is_interface(owner),
             operation: None,
-        }))
+        });
+        self.stamp_cross_file_property_access(read, owner, name, ty, false);
+        Some(read)
     }
 
     fn lower_field_read_on(
@@ -14843,14 +14887,18 @@ impl<'a> Lower<'a> {
             if self.source_property_read_needs_generic_value_class_box(*owner, name, e) {
                 return None;
             }
-            return Some(self.ir.add_expr(IrExpr::PropertyRead {
+            let read = self.ir.add_expr(IrExpr::PropertyRead {
                 receiver: recv,
                 owner: *owner,
                 name: name.to_string(),
                 ty,
                 interface: *interface,
                 operation: None,
-            }));
+            });
+            // The node carries the site-SUBSTITUTED type (`Holder<A>.a` reads as `A`); the
+            // accessor's descriptor must stay the declaration's erased form.
+            self.stamp_cross_file_property_access(read, *owner, name, ty, false);
+            return Some(read);
         }
         let resolved = self.info.resolved_member(e).cloned().map(|r| {
             let m = r.member;
@@ -18177,7 +18225,7 @@ impl<'a> Lower<'a> {
         {
             let r = self.expr(receiver)?;
             let v = self.lower_arg(value, &ty_to_ir(ty))?;
-            return Some(self.ir.add_expr(IrExpr::PropertyWrite {
+            let write = self.ir.add_expr(IrExpr::PropertyWrite {
                 receiver: r,
                 owner,
                 name: name.to_string(),
@@ -18185,7 +18233,10 @@ impl<'a> Lower<'a> {
                 ty,
                 interface,
                 operation: None,
-            }));
+            });
+            // Same erased-descriptor rule as the read path (`lower_member_read_on`).
+            self.stamp_cross_file_property_access(write, owner, name, ty, true);
+            return Some(write);
         }
         // A property of a class THIS compilation declares. Same rule as everywhere else: name the
         // property, and let the backend decide whether the store is a direct field write (legal only

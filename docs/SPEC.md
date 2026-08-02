@@ -2374,6 +2374,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `class B(val holder: Holder<A>) { val a get() = holder.a }` collected `a: Any` and every member
   read on it failed (`computed_prop_generic_return_e2e`).
 
+- **A cross-file source-class property access emits the DECLARATION's erased accessor descriptor.**
+  The emitter lowers per file, so a sibling source class has no classfile to ask; deriving the
+  accessor descriptor from the read's (substituted) logical type produced `Holder.getA:()LA;` — a
+  `NoSuchMethodError` against the erased `()Ljava/lang/Object;`. The lowerer now records the
+  declaration's erased physical type in `property_accessor_jvm_realizations` for cross-file source
+  reads/writes (the JVM value-class pass merges, keeping its own stamps authoritative), and the
+  emitter bridges the erased result to the logical type with a `checkcast`
+  (`computed_prop_generic_return_e2e::cross_file_generic_member_read_uses_erased_accessor`).
+
+- **Member computed getters retry to a bounded fixpoint.** An unannotated member expression getter
+  (`val a get() = holder.a`) infers during its class's collection, so a referenced class collected
+  later — another file, or a later class in this one — left the property typed `Error` (and the
+  lowerer bailed). Like the top-level fixpoint, pending getters retry after the class walk with
+  their first-pass scope, its `Error` entries refreshed from the live signatures each round so
+  chains through preceding siblings converge (bounded; cycles stay `Error`), in either file order
+  (`computed_prop_generic_return_e2e`).
+
 - **Zero-arg construction of an all-default classpath value class (`Id()`).** A `@JvmInline value class
   Id(val v: String = "x")` has no synthetic no-arg `<init>` (unlike a plain all-default class); kotlinc
   constructs `Id()` via the static `constructor-impl$default(dummy, mask, marker)`, which fills the

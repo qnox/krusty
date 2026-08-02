@@ -4243,6 +4243,11 @@ fn collect_signatures_with_cp_impl(
         String,
         Vec<ErasedTypeKey>,
     )> = std::collections::HashSet::new();
+    // Unannotated MEMBER expression getters whose first-pass inference hit `Error` — a referenced
+    // class may simply be collected later (another file, or a later class in this one). Each entry
+    // keeps the exact scope of its first pass; retried to a fixpoint after the walk (see
+    // [`finish_member_computed_getter_inference`]).
+    let mut pending_member_getters: Vec<PendingMemberGetter> = Vec::new();
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
@@ -4952,7 +4957,7 @@ fn collect_signatures_with_cp_impl(
                             match (&bp.ty, &bp.getter) {
                                 (Some(r), _) => ty_of_ref(r, &class_names, &btp, diags),
                                 (None, Some(FunBody::Expr(g))) if !c.is_value => {
-                                    infer_lit_ty_scoped(
+                                    let inferred = infer_lit_ty_scoped(
                                         file,
                                         *g,
                                         &class_names,
@@ -4960,7 +4965,18 @@ fn collect_signatures_with_cp_impl(
                                         &property_scope,
                                         &*libraries,
                                         &table,
-                                    )
+                                    );
+                                    if inferred == Ty::Error && bp.receiver.is_none() {
+                                        pending_member_getters.push(PendingMemberGetter {
+                                            file_index: i,
+                                            class_name: c.name.clone(),
+                                            prop_name: bp.name.clone(),
+                                            scope: property_scope.clone(),
+                                            class_names: class_names.clone(),
+                                            getter: *g,
+                                        });
+                                    }
+                                    inferred
                                 }
                                 (None, Some(FunBody::Expr(g))) => {
                                     let locals: HashMap<&str, Ty> = property_scope
@@ -6134,6 +6150,14 @@ fn collect_signatures_with_cp_impl(
         }
     }
 
+    finish_member_computed_getter_inference(
+        files,
+        &fun_rets,
+        &*libraries,
+        &mut table,
+        &mut pending_member_getters,
+    );
+
     finish_top_level_computed_property_inference(
         files,
         &file_class_names,
@@ -7292,6 +7316,82 @@ fn infer_top_level_property_expr(
         )
         .collect::<Vec<_>>();
     infer_lit_ty_scoped(file, expression, class_names, fun_rets, &props, src, table)
+}
+
+/// A member computed getter whose first-pass inference hit `Error`, kept for the post-walk retry
+/// with the exact scope and name resolution context of its first pass.
+struct PendingMemberGetter {
+    file_index: usize,
+    class_name: String,
+    prop_name: String,
+    scope: Vec<(String, Ty, bool)>,
+    class_names: ClassNames,
+    getter: ExprId,
+}
+
+/// Retry unannotated MEMBER expression getters whose first-pass inference hit `Error` because a
+/// class they reference was collected only later (a class in another file, or later in this one)
+/// — the member analogue of [`finish_top_level_computed_property_inference`]. Each entry keeps
+/// its first pass's exact scope, so the retry IS the deferred inference; bounded by the pending
+/// count, so dependency chains converge and self/mutual cycles stay `Error`.
+fn finish_member_computed_getter_inference(
+    files: &[File],
+    fun_rets: &HashMap<String, Ty>,
+    src: &dyn SemanticPlatform,
+    table: &mut SymbolTable,
+    pending: &mut Vec<PendingMemberGetter>,
+) {
+    let rounds = pending.len();
+    for _ in 0..rounds {
+        let mut changed = false;
+        pending.retain_mut(|entry| {
+            // Refresh scope entries whose first-pass type was still `Error` from the class's LIVE
+            // signatures: a same-class chain (`val b get() = h.a; val a get() = b`) sees the
+            // sibling resolved by an earlier round instead of the frozen first-pass `Error`.
+            if entry.scope.iter().any(|(_, ty, _)| *ty == Ty::Error) {
+                if let Some(sig) = table.classes.get(&entry.class_name) {
+                    for (name, ty, _) in &mut entry.scope {
+                        if *ty == Ty::Error {
+                            if let Some((_, current, _)) =
+                                sig.props.iter().find(|(n, _, _)| n == name)
+                            {
+                                *ty = *current;
+                            }
+                        }
+                    }
+                }
+            }
+            let inferred = infer_lit_ty_scoped(
+                &files[entry.file_index],
+                entry.getter,
+                &entry.class_names,
+                fun_rets,
+                &entry.scope,
+                src,
+                table,
+            );
+            if inferred == Ty::Error {
+                return true;
+            }
+            changed = true;
+            if let Some(sig) = table.classes.get_mut(&entry.class_name) {
+                if let Some(property) = sig.declared_props.get_mut(&entry.prop_name) {
+                    property.ty = inferred;
+                }
+                if let Some(backing) = sig
+                    .props
+                    .iter_mut()
+                    .find(|(name, _, _)| name == &entry.prop_name)
+                {
+                    backing.1 = inferred;
+                }
+            }
+            false
+        });
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// Retry unannotated top-level expression getters after every property signature is present. A getter
