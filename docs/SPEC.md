@@ -728,9 +728,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   binding (the classic mechanism); a segmented fact is recorded per scope frame and consulted when a
   member read is typed, the lowerer emitting its generic `checkcast`/unbox from the recorded type.
   kotlinc's stability rules gate every step: the root is `this` or a local `val`/parameter (never a
-  `var`); each segment is a `val` (no setter) without a custom getter or delegate on a FINAL class
-  (a subclass of an open class could override it with a computed getter), its type substituted like
-  the member read (`Box<T>(val v: T)` narrows through the receiver's actual type argument). A
+  `var`); each segment is a `val` (no setter) without a custom getter or delegate whose getter cannot
+  be replaced at runtime — a final property is stable even on an open class, while an open property
+  requires a statically final receiver type. Its type is substituted like the member read
+  (`Box<T>(val v: T)` narrows through the receiver's actual type argument). A
   safe-call chain's proof covers every prefix (`a?.b?.c != null` narrows `a`, `a.b`, and `a.b.c`);
   a plain chain's covers the full path only; a safe-call chain ending in a METHOD (`u?.f() != null`)
   narrows just the root. Soundness invalidations: a fresh declaration of the root name drops the

@@ -1,8 +1,10 @@
 //! Path-based flow narrowing (smart casts): `==`/`!=` null checks, `is`/`!is` type tests, and
 //! contract conclusions apply not only to plain bindings but to STABLE ACCESS PATHS — `this.p`,
 //! `a.p`, `a.b.c`, `a?.p` — when every step is immutable (a local `val`/parameter root and `val`
-//! properties without custom getters on final classes, per kotlinc's stability rules). A `var`
-//! property or a custom getter is never narrowed. Round-tripped on the JVM under the shared runner.
+//! properties whose getters cannot be replaced at runtime, per kotlinc's stability rules). A `var`
+//! property or a custom getter is never narrowed. A default `val` remains final on an open class;
+//! an explicitly open property needs a statically final receiver type. Round-tripped on the JVM
+//! under the shared runner.
 
 use super::common;
 
@@ -16,6 +18,19 @@ fn assert_ok(src: &str) {
     let diagnostics = common::front_end_diagnostics(src, &[stdlib], jdk.as_deref());
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(run(src), Some("OK".to_string()));
+}
+
+/// Rejection tests must prove that the checker reached the intended assignment/member read. Merely
+/// asserting "some diagnostic" would also pass for malformed Kotlin and could hide a parser-only
+/// failure in a fixture that never exercised path stability.
+fn assert_type_mismatch(src: &str, context: &str) {
+    let diagnostics = common::front_end_diagnostics(src, &[], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("type mismatch")),
+        "{context}; expected a type mismatch, got {diagnostics:?}"
+    );
 }
 
 #[test]
@@ -104,6 +119,30 @@ fun box(): String {\n\
     }\n\
     val none = Outer(null)\n\
     if (none.inner?.s != null) return \"FAIL null\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_ok(SRC);
+}
+
+#[test]
+fn safe_call_nullable_primitive_property_narrows_path_and_receiver() {
+    // The safe-call expression is physically a boxed `Int?`, while the proof narrows its stable
+    // property path to primitive `Int`. This covers the generic read-time coercion as well as the
+    // prefix fact that a non-null safe-call result proves the nullable root receiver non-null.
+    const SRC: &str = "data class Count(val n: Int?)\n\
+fun read(count: Count?): Int {\n\
+    if (count?.n != null) {\n\
+        val receiver: Count = count\n\
+        val n: Int = count?.n\n\
+        if (receiver.n == null) return -2\n\
+        return n + n\n\
+    }\n\
+    return -1\n\
+}\n\
+fun box(): String {\n\
+    if (read(Count(2)) != 4) return \"FAIL value\"\n\
+    if (read(Count(null)) != -1) return \"FAIL property null\"\n\
+    if (read(null) != -1) return \"FAIL receiver null\"\n\
     return \"OK\"\n\
 }\n";
     assert_ok(SRC);
@@ -227,6 +266,29 @@ fun box(): String {\n\
 }
 
 #[test]
+fn when_value_class_property_narrowing_stays_rejected() {
+    // A value class selected from an `Any` property needs representation-specific unboxing that the
+    // generic member-read coercion does not yet provide. `if` already rejects this narrowing through
+    // the shared support gate; `when` must do the same instead of accepting a verifier-risking path.
+    const SRC: &str = "@JvmInline value class Token(val raw: String)\n\
+class Holder(val value: Any)\n\
+fun box(): String {\n\
+    val holder = Holder(Token(\"OK\"))\n\
+    return when (holder.value) {\n\
+        is Token -> holder.value.raw\n\
+        else -> \"FAIL\"\n\
+    }\n\
+}\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("unresolved reference 'raw'")),
+        "unsupported value-class property narrowing must stay a checked skip; got {diagnostics:?}"
+    );
+}
+
+#[test]
 fn contract_condition_narrows_property_in_else_branch() {
     // `isNullOrBlank` carries `returns(false) implies (this != null)`: reaching the `else`
     // proves the RECEIVER path `a.p` non-null (kotlinc smart-casts it there).
@@ -271,10 +333,9 @@ fun box(): String {\n\
     }\n\
     return \"none\"\n\
 }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        !diagnostics.is_empty(),
-        "a var property must not smart-cast (assigning String? to String must fail)"
+    assert_type_mismatch(
+        SRC,
+        "a var property must not smart-cast (assigning String? to String must fail)",
     );
 }
 
@@ -293,31 +354,134 @@ fun box(): String {\n\
     }\n\
     return \"none\"\n\
 }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        !diagnostics.is_empty(),
-        "a custom-getter property must not smart-cast (assigning String? to String must fail)"
+    assert_type_mismatch(
+        SRC,
+        "a custom-getter property must not smart-cast (assigning String? to String must fail)",
+    );
+
+    // The unqualified spelling is the same dispatch-property read, not a stable local slot. It
+    // must pass through the identical custom-getter gate instead of being narrowed by name alone.
+    const BARE_SRC: &str = "class Box(val raw: String?) {\n\
+    val label: String?\n\
+        get() = raw\n\
+    fun read(): String {\n\
+        if (label != null) {\n\
+            val s: String = label\n\
+            return s\n\
+        }\n\
+        return \"none\"\n\
+    }\n\
+}\n";
+    assert_type_mismatch(
+        BARE_SRC,
+        "a bare custom-getter property must use the same stability gate as this.property",
     );
 }
 
 #[test]
-fn open_class_property_is_not_narrowed() {
-    // kotlinc: an `open` class's property can be overridden with a computed getter by a
-    // subclass — the read is not stable, so no smart cast.
+fn final_property_on_open_class_is_narrowed() {
+    // Kotlin members are final by default even when the containing class is open. Stability follows
+    // the selected property, so this default `val` can be smart-cast exactly as kotlinc does.
     const SRC: &str = "open class Box(val label: String?)\n\
 fun box(): String {\n\
     val b = Box(\"hi\")\n\
+    if (b.label != null) {\n\
+        val s: String = b.label\n\
+        return if (s == \"hi\") \"OK\" else \"FAIL value\"\n\
+    }\n\
+    return \"FAIL null\"\n\
+}\n";
+    assert_ok(SRC);
+
+    // The same final property remains stable through its bare spelling inside the open class.
+    const BARE_SRC: &str = "open class Box(val label: String?) {\n\
+    fun read(): String {\n\
+        if (label != null) {\n\
+            val s: String = label\n\
+            return s\n\
+        }\n\
+        return \"none\"\n\
+    }\n\
+}\n\
+fun box(): String = Box(\"OK\").read()\n";
+    assert_ok(BARE_SRC);
+}
+
+#[test]
+fn open_property_on_open_receiver_is_not_narrowed() {
+    // An explicitly `open val` can be overridden with a computed getter by a runtime subclass, so
+    // re-reading it after the null check is unstable while the receiver's static type remains open.
+    const SRC: &str = "open class Box(open val label: String?)\n\
+fun box(): String {\n\
+    val b: Box = Box(\"hi\")\n\
     if (b.label != null) {\n\
         val s: String = b.label\n\
         return s\n\
     }\n\
     return \"none\"\n\
 }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        !diagnostics.is_empty(),
-        "an open class's property must not smart-cast (assigning String? to String must fail)"
+    assert_type_mismatch(
+        SRC,
+        "an open property on an open receiver must not smart-cast (assigning String? to String must fail)",
     );
+
+    // Inside the declaring class, an unqualified name still dispatches through the open getter and
+    // can observe an override on the runtime receiver. It is therefore equally unstable.
+    const BARE_SRC: &str = "open class Box(open val label: String?) {\n\
+    fun read(): String {\n\
+        if (label != null) {\n\
+            val s: String = label\n\
+            return s\n\
+        }\n\
+        return \"none\"\n\
+    }\n\
+}\n";
+    assert_type_mismatch(
+        BARE_SRC,
+        "a bare open property must use the same stability gate as this.property",
+    );
+
+    // An override remains open by default in an open class even without a repeated `open` token.
+    // The parser records that semantic modality; signature collection must preserve it here.
+    const IMPLICITLY_OPEN_OVERRIDE_SRC: &str = "open class Base(open val label: String?)\n\
+open class Mid(override val label: String?) : Base(label)\n\
+fun read(mid: Mid): String {\n\
+    if (mid.label != null) {\n\
+        val s: String = mid.label\n\
+        return s\n\
+    }\n\
+    return \"none\"\n\
+}\n";
+    assert_type_mismatch(
+        IMPLICITLY_OPEN_OVERRIDE_SRC,
+        "an override in an open class remains overridable unless explicitly final",
+    );
+}
+
+#[test]
+fn open_property_on_final_receiver_is_narrowed() {
+    // Both an override and an inherited open property are stable through a final static receiver:
+    // the receiver type rules out a runtime subclass with a different getter. Kotlinc therefore
+    // permits these smart casts; checking only the property's modifier would be too conservative.
+    const SRC: &str = "open class Base(open val label: String?)\n\
+class Child(override val label: String?) : Base(label)\n\
+class Inherited(label: String?) : Base(label)\n\
+fun box(): String {\n\
+    val child = Child(\"OK\")\n\
+    if (child.label != null) {\n\
+        val s: String = child.label\n\
+        if (s != \"OK\") return \"FAIL override value\"\n\
+    } else {\n\
+        return \"FAIL override null\"\n\
+    }\n\
+    val inherited = Inherited(\"OK\")\n\
+    if (inherited.label != null) {\n\
+        val s: String = inherited.label\n\
+        return s\n\
+    }\n\
+    return \"FAIL inherited null\"\n\
+}\n";
+    assert_ok(SRC);
 }
 
 #[test]
@@ -362,10 +526,9 @@ fun f(a: A): Int {\n\
     return s.length\n\
 }\n\
 fun box(): String = \"OK\"\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        !diagnostics.is_empty(),
-        "a redeclared root must not keep the old binding's narrowing (assigning String? to String must fail)"
+    assert_type_mismatch(
+        SRC,
+        "a redeclared root must not keep the old binding's narrowing (assigning String? to String must fail)",
     );
 }
 
@@ -387,10 +550,9 @@ class C(val p: String?) {\n\
     }\n\
 }\n\
 fun box(): String = \"OK\"\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        !diagnostics.is_empty(),
-        "a this-rooted narrowing must not leak into a receiver lambda (assigning String? to String must fail)"
+    assert_type_mismatch(
+        SRC,
+        "a this-rooted narrowing must not leak into a receiver lambda (assigning String? to String must fail)",
     );
 }
 
@@ -409,6 +571,24 @@ fun box(): String {\n\
     }\n\
     if (Box<String?>(null).v != null) return \"FAIL null\"\n\
     return \"OK\"\n\
+}\n";
+    assert_ok(SRC);
+}
+
+#[test]
+fn inherited_generic_property_narrows_with_applied_owner_type() {
+    // The selected property is declared on `Base<T>`, while the receiver is `Child`. Stability
+    // checking, ordinary reads, and read-only probes must all view `Child` through its applied
+    // `Base<String?>` supertype instead of substituting the child's unrelated type slots.
+    const SRC: &str = "open class Base<T>(val value: T)\n\
+class Child(value: String?) : Base<String?>(value)\n\
+fun box(): String {\n\
+    val child = Child(\"OK\")\n\
+    if (child.value != null) {\n\
+        val s: String = child.value\n\
+        return s\n\
+    }\n\
+    return \"FAIL null\"\n\
 }\n";
     assert_ok(SRC);
 }
@@ -459,10 +639,9 @@ fn this_narrowing_does_not_leak_into_same_type_receiver_lambda() {
     }\n\
 }\n\
 fun box(): String = \"OK\"\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
-    assert!(
-        !diagnostics.is_empty(),
-        "a this-rooted narrowing must not transfer to a same-type receiver lambda (assigning String? to String must fail)"
+    assert_type_mismatch(
+        SRC,
+        "a this-rooted narrowing must not transfer to a same-type receiver lambda (assigning String? to String must fail)",
     );
 }
 

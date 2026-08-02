@@ -626,6 +626,11 @@ pub struct DeclaredPropertySig {
     /// different value than an earlier proof, so flow narrowing (smart casts) must skip it
     /// (kotlinc: "smart cast is impossible, because the property has a custom getter").
     pub has_custom_getter: bool,
+    /// Whether this property's accessor remains overridable. Smart-cast stability depends on the
+    /// selected property's modality, not merely on whether its declaring class is open: a default
+    /// `val` is final even in an open class, while an `open val` becomes stable when viewed through
+    /// a statically final receiver type because no runtime subclass can replace its getter.
+    pub is_open: bool,
     pub context_params: Vec<Ty>,
 }
 
@@ -4818,6 +4823,7 @@ fn collect_signatures_with_cp_impl(
                                         .is_var
                                         .then_some(property.visibility),
                                     has_custom_getter: false,
+                                    is_open: property.is_open,
                                     context_params: Vec::new(),
                                 },
                             )
@@ -5068,6 +5074,9 @@ fn collect_signatures_with_cp_impl(
                                     }
                                 }),
                                 has_custom_getter: bp.getter.is_some() || bp.delegate.is_some(),
+                                // An abstract property is necessarily overridable even when its
+                                // source omitted the redundant `open` modifier.
+                                is_open: bp.is_open || bp.is_abstract,
                                 context_params,
                             },
                         );
@@ -10322,6 +10331,7 @@ fn install_anonymous_object_captures(
                     setter_name: None,
                     setter_visibility: None,
                     has_custom_getter: false,
+                    is_open: false,
                     context_params: Vec::new(),
                 },
             );
@@ -18129,8 +18139,9 @@ impl<'a> Checker<'a> {
     /// proof and a later re-read, so no smart cast is sound. kotlinc's stability rules:
     /// * the ROOT is `this` or a local `val`/parameter (a `var` can be reassigned);
     /// * every SEGMENT is a `val` (no setter) without a custom getter or delegate (a computed
-    ///   read can return a different value per call) on a FINAL class (a subclass of an open
-    ///   class could override the property with a computed getter).
+    ///   read can return a different value per call), and cannot be overridden on the receiver's
+    ///   statically possible runtime types. A final property on an open class is stable; an open
+    ///   property is stable only when the receiver type itself is final.
     fn stable_path_ty(&self, path: &NarrowPath) -> Option<Ty> {
         let mut ty = if path.root == "this" {
             self.this_ty?
@@ -18139,10 +18150,23 @@ impl<'a> Checker<'a> {
             if local.is_var {
                 return None;
             }
+            // A bare own-member read (`label`) is an alias for a dispatch-property read
+            // (`this.label`), not a captured immutable slot. Route it through the segmented path
+            // so custom/delegated/open getters receive exactly the same stability decision as the
+            // qualified spelling. This also declines an enclosing-instance property in an inner
+            // class: bare lookup may find it, but the current `this` is not that property's receiver.
+            if path.segments.is_empty()
+                && matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty(_))
+            {
+                return self.stable_path_ty(&NarrowPath {
+                    root: "this".to_string(),
+                    segments: vec![path.root.clone()],
+                });
+            }
             // A member/top-level property as the ROOT of a longer path re-reads through its
             // accessor each time; only a plain local/`val` slot is a stable root there. (For a
-            // ROOT-ONLY path the origin does not matter — the narrowed binding shadows the name,
-            // the historical mechanism for `if (prop != null)` on an own member `val`.)
+            // ROOT-ONLY top-level path, the historical shadowing mechanism remains conservative;
+            // dispatch properties were normalized to `this.<name>` above.)
             if !path.segments.is_empty() && !matches!(local.origin, ReceiverFnValueOrigin::Local) {
                 return None;
             }
@@ -18152,62 +18176,26 @@ impl<'a> Checker<'a> {
             let recv = ty.non_null();
             let internal = recv.obj_internal()?;
             let class = self.syms.class_by_type_name(internal)?;
-            if !class.is_final() {
-                return None;
-            }
             let (owner, property) = self.syms.declared_member_prop(internal, segment)?;
             if property.setter_name.is_some()
                 || property.has_custom_getter
+                || (property.is_open && !class.is_final())
                 || !property.context_params.is_empty()
             {
                 return None;
             }
-            ty = property.ty;
-            // The declaration may speak in the class's type parameters (`Box<T>(val v: T)`);
-            // mirror the member-READ substitution (`check_member`'s `generic_props` /
-            // `generic_function_props` arms) so the proof and the read agree on the path's type.
-            if let Some(owner_class) = self.syms.class_by_type_name(owner) {
-                if let Some(&(i, definitely_non_null)) = owner_class.generic_props.get(segment) {
-                    let applied = if owner == internal {
-                        Some(recv)
-                    } else {
-                        self.applied_source_supertype(recv, owner)
-                    };
-                    if let Some(&arg) = applied.and_then(|applied| applied.type_args().get(i)) {
-                        ty = if definitely_non_null {
-                            arg.non_null()
-                        } else {
-                            arg
-                        };
-                    } else if let Some(bound) = owner_class.tparam_bounds.get(i) {
-                        if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
-                            ty = *bound;
-                        }
-                    }
-                } else if let Some(&shape) = owner_class.generic_function_props.get(segment) {
-                    // `owner` is always an ancestor (`declared_member_prop` walked to it); if the
-                    // applied form can't be computed, don't guess the bindings.
-                    let applied = if owner == internal {
-                        recv
-                    } else {
-                        self.applied_source_supertype(recv, owner)?
-                    };
-                    let bindings = owner_class.type_parameter_bindings(applied);
-                    ty = crate::symbol_resolver::ty_subst(shape, &bindings);
-                }
-            }
+            // Use the same generic-property instantiation as ordinary member reads and probes; a
+            // path proof is sound only when its declared and read-time types are identical.
+            ty = self.applied_declared_property_ty(recv, owner, segment, property.ty);
         }
         Some(ty)
     }
 
     /// Whether a proof about `path` can soundly narrow later re-reads of it. A root-only path
-    /// keeps the historical rule (any non-`var` binding — including names that resolve outside
-    /// the local scopes, narrowed by shadowing); a segmented path must be fully stable
-    /// ([`Self::stable_path_ty`]).
+    /// uses the same full stability check as a segmented path. In particular, a bare own member is
+    /// normalized to `this.<name>` by [`Self::stable_path_ty`] so it cannot bypass getter/modality
+    /// checks merely because member properties are installed in the lexical scope.
     fn path_is_stable(&self, path: &NarrowPath) -> bool {
-        if path.segments.is_empty() {
-            return path.root == "this" || !matches!(self.lookup(&path.root), Some(l) if l.is_var);
-        }
         self.stable_path_ty(path).is_some()
     }
 
@@ -18933,6 +18921,60 @@ impl<'a> Checker<'a> {
             pending.extend(class.interfaces.iter_ids());
         }
         None
+    }
+
+    /// Apply a source property's declaring-class type parameters to one concrete receiver type.
+    ///
+    /// Ordinary reads, read-only probes, and stable-path validation must agree on this result. A
+    /// separate copy in each consumer previously risked accepting a narrowing under one type while
+    /// checking the eventual read under another. The owner is semantic declaration data from
+    /// [`SymbolTable::declared_member_prop`]; same-class and inherited properties differ only in how
+    /// the receiver is viewed as that owner, never by source-file/module/classpath origin.
+    fn applied_declared_property_ty(
+        &self,
+        receiver: Ty,
+        owner: TypeName,
+        name: &str,
+        declared: Ty,
+    ) -> Ty {
+        let Some(receiver_internal) = receiver.obj_internal() else {
+            return declared;
+        };
+        let Some(class) = self.syms.class_by_type_name(owner) else {
+            return declared;
+        };
+        let applied_owner = || {
+            if owner == receiver_internal {
+                Some(receiver)
+            } else {
+                self.applied_source_supertype(receiver, owner)
+            }
+        };
+        if let Some(&(index, definitely_non_null)) = class.generic_props.get(name) {
+            if let Some(&argument) = applied_owner().and_then(|ty| ty.type_args().get(index)) {
+                return if definitely_non_null {
+                    argument.non_null()
+                } else {
+                    argument
+                };
+            }
+            if let Some(bound) = class.tparam_bounds.get(index) {
+                if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
+                    return *bound;
+                }
+            }
+        } else if let Some(&shape) = class.generic_function_props.get(name) {
+            // If an inherited applied owner cannot be reconstructed, retain the declaration's
+            // conservative type. Substituting the child receiver directly into the owner's formal
+            // parameters would guess a relationship that semantic supertype resolution did not find.
+            if let Some(applied) = applied_owner() {
+                return crate::symbol_resolver::ty_subst(
+                    shape,
+                    &class.type_parameter_bindings(applied),
+                );
+            }
+        }
+        declared
     }
 
     /// Resolve a bare property write through Kotlin's ordered implicit receivers. Source properties
@@ -21527,11 +21569,8 @@ impl<'a> Checker<'a> {
                 // not modeled.
                 let mut proven = Vec::new();
                 self.null_check_narrowings(lhs, &mut proven);
-                for (path, ty) in proven {
-                    if !ty.is_unsigned() {
-                        self.apply_narrowing_unchecked(&path, ty);
-                    }
-                }
+                proven.retain(|(_, ty)| !ty.is_unsigned());
+                self.apply_narrowings(&proven, false);
                 match lt0 {
                     Ty::Nullable(inner) => *inner,
                     _ => lt,
@@ -22633,8 +22672,9 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Smart-cast the body of a single positive `is T` arm (the subject is a stable
-                // binding or property path). Historically ungated by `narrowing_is_supported` —
-                // keep that, just apply through the shared path machinery.
+                // binding or property path). Apply through the same support gate as `if`/`while`:
+                // extending the historical root-only behavior to member reads must not bypass
+                // backend representation limits such as an `Any` property narrowed to a value class.
                 let arm_casts = match arm.conditions.as_slice() {
                     [cnd] => self.smartcast_narrowings(*cnd, false),
                     _ => Vec::new(),
@@ -22646,9 +22686,7 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 self.push_scope();
-                for (path, ty) in &arm_casts {
-                    self.apply_narrowing_unchecked(path, *ty);
-                }
+                self.apply_narrowings(&arm_casts, false);
                 let bt = self.with_this_narrow(arm_this_narrow, |c| {
                     c.expr_result(arm.body, expected, value_required)
                 });
@@ -26527,37 +26565,7 @@ impl<'a> Checker<'a> {
                         self.reject_if_inaccessible(vis, name, owner, span);
                     }
                 }
-                if let Some(cs) = self.syms.class_by_type_name(owner) {
-                    if let Some(&(i, definitely_non_null)) = cs.generic_props.get(name) {
-                        let applied = if owner == internal_name {
-                            Some(rt)
-                        } else {
-                            self.applied_source_supertype(rt, owner)
-                        };
-                        if let Some(&arg) = applied.and_then(|ty| ty.type_args().get(i)) {
-                            return Some(if definitely_non_null {
-                                arg.non_null()
-                            } else {
-                                arg
-                            });
-                        }
-                        if let Some(bound) = cs.tparam_bounds.get(i) {
-                            if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
-                                return Some(*bound);
-                            }
-                        }
-                    }
-                    if let Some(&shape) = cs.generic_function_props.get(name) {
-                        let applied = if owner == internal_name {
-                            rt
-                        } else {
-                            self.applied_source_supertype(rt, owner).unwrap_or(rt)
-                        };
-                        let bindings = cs.type_parameter_bindings(applied);
-                        return Some(crate::symbol_resolver::ty_subst(shape, &bindings));
-                    }
-                }
-                return Some(ty);
+                return Some(self.applied_declared_property_ty(rt, owner, name, ty));
             }
             if let Some(m) = self.resolve_external_inherited_property(internal_name, name) {
                 let ret = m.ret;
@@ -26672,39 +26680,8 @@ impl<'a> Checker<'a> {
 
     fn probe_property_read(&self, rt: Ty, name: &str) -> Option<PropertyReadProbe> {
         if let Ty::Obj(internal_name, _) = rt {
-            if let Some((owner, mut ty, _, _)) =
-                self.lookup_prop_with_owner_name(internal_name, name)
-            {
-                if let Some(cs) = self.syms.class_by_type_name(owner) {
-                    if let Some(&(i, definitely_non_null)) = cs.generic_props.get(name) {
-                        let applied = if owner == internal_name {
-                            Some(rt)
-                        } else {
-                            self.applied_source_supertype(rt, owner)
-                        };
-                        if let Some(&arg) = applied.and_then(|ty| ty.type_args().get(i)) {
-                            ty = if definitely_non_null {
-                                arg.non_null()
-                            } else {
-                                arg
-                            };
-                        } else if let Some(bound) = cs.tparam_bounds.get(i) {
-                            if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
-                                ty = *bound;
-                            }
-                        }
-                    } else if let Some(&shape) = cs.generic_function_props.get(name) {
-                        let applied = if owner == internal_name {
-                            rt
-                        } else {
-                            self.applied_source_supertype(rt, owner).unwrap_or(rt)
-                        };
-                        ty = crate::symbol_resolver::ty_subst(
-                            shape,
-                            &cs.type_parameter_bindings(applied),
-                        );
-                    }
-                }
+            if let Some((owner, ty, _, _)) = self.lookup_prop_with_owner_name(internal_name, name) {
+                let ty = self.applied_declared_property_ty(rt, owner, name, ty);
                 return Some(PropertyReadProbe::Found {
                     ty,
                     access: self.effective_property_visibility(internal_name, name),
