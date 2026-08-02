@@ -616,6 +616,10 @@ pub struct DeclaredPropertySig {
     pub ty: Ty,
     pub storage_ty: Option<Ty>,
     pub visibility: Visibility,
+    /// A source `const val` is realized as a static field and deliberately has no instance getter.
+    /// Keep that ABI fact in the semantic declaration handoff: consumers that only see a module
+    /// signature must not mistake the conventional `getter_name` spelling for an emitted accessor.
+    pub is_const: bool,
     pub getter_name: String,
     pub setter_name: Option<String>,
     /// Visibility of the setter declaration. `None` means `val`; a `var` normally inherits the
@@ -4903,6 +4907,7 @@ fn collect_signatures_with_cp_impl(
                                     ty: ty_of_ref_silent(&property.ty, &class_names, &ctp),
                                     storage_ty: None,
                                     visibility: property.visibility,
+                                    is_const: false,
                                     getter_name: property_getter_name(&property.name),
                                     setter_name: property
                                         .is_var
@@ -5163,6 +5168,7 @@ fn collect_signatures_with_cp_impl(
                                 ty: property_ty,
                                 storage_ty,
                                 visibility: bp.visibility,
+                                is_const: bp.is_const,
                                 getter_name: property_getter_name(&bp.name),
                                 setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
                                 setter_visibility: bp.is_var.then(|| {
@@ -10525,6 +10531,7 @@ fn install_anonymous_object_captures(
                     ty: capture.ty,
                     storage_ty: None,
                     visibility: Visibility::Private,
+                    is_const: false,
                     getter_name: property_getter_name(&capture.name),
                     setter_name: None,
                     setter_visibility: None,
