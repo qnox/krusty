@@ -5555,12 +5555,50 @@ fn collect_signatures_with_cp_impl(
                                 .map(|r| ty_of_ref(r, &class_names, &mtp, diags))
                                 .unwrap_or_else(|| {
                                     if let FunBody::Expr(e) = &m.body {
-                                        let t = infer_lit_ty(
+                                        // A companion method's body resolves the companion's own
+                                        // properties unqualified — infer with them in scope so a
+                                        // `= result` body gets the property's type (not `Unit`).
+                                        let comp_props: Vec<(String, Ty, bool)> = c
+                                            .companion_props
+                                            .iter()
+                                            .map(|p| {
+                                                let ty = match &p.ty {
+                                                    Some(r) => {
+                                                        ty_of_ref(r, &class_names, &ctp, diags)
+                                                    }
+                                                    None => p
+                                                        .init
+                                                        .map(|i| {
+                                                            infer_lit_ty(
+                                                                file,
+                                                                i,
+                                                                &class_names,
+                                                                &fun_rets,
+                                                                &*libraries,
+                                                            )
+                                                        })
+                                                        .unwrap_or(Ty::Error),
+                                                };
+                                                (p.name.clone(), ty, p.is_var)
+                                            })
+                                            .collect();
+                                        let inferring = std::cell::RefCell::new(
+                                            std::collections::HashSet::new(),
+                                        );
+                                        let env = InferEnv {
+                                            up: &|_, _| None,
+                                            inferring: &inferring,
+                                            is_object: &|_| false,
+                                            static_classifier_value: &|_, _| None,
+                                        };
+                                        let t = infer_lit_ty_p(
                                             file,
                                             *e,
                                             &class_names,
                                             &fun_rets,
+                                            &comp_props,
                                             &*libraries,
+                                            &env,
                                         );
                                         if t != Ty::Error {
                                             t

@@ -203,6 +203,7 @@ fn lower_file_at_reporting_impl(
         next_value: 0,
         expected_array_elem: std::cell::Cell::new(None),
         cur_class: None,
+        lambda_lexical_classes: Vec::new(),
         cur_field: None,
         field_accessor_props: std::collections::HashSet::new(),
         field_accessor_var_props: std::collections::HashSet::new(),
@@ -5490,6 +5491,11 @@ pub(crate) struct Lower<'a> {
     /// `Cell` so the take-once read works through `&self`; save/restore guards a nested-array initializer.
     expected_array_elem: std::cell::Cell<Option<Ty>>,
     cur_class: Option<TypeName>,
+    /// The enclosing class a lambda was lexically written in, while `cur_class` is cleared for its
+    /// body (a real closure that doesn't capture `this` — instance-member reads must fail, but a
+    /// `companion object` STATIC read is frame-independent and still resolves). A stack: nested
+    /// lambdas push/pop in order.
+    lambda_lexical_classes: Vec<TypeName>,
     /// When lowering a property's custom accessor body (`get()`/`set()`), the property's backing field
     /// `(class_id, field_index, field_ir_type)` — so the `field` keyword reads/writes it. `None`
     /// outside an accessor body.
@@ -8762,11 +8768,17 @@ impl<'a> Lower<'a> {
         // When this closure does NOT capture the enclosing `this`, lower its body with `cur_class`
         // cleared: a bare instance-member access then fails to resolve and the lambda bails (skip)
         // rather than emitting a `GetField(GetValue(0))` that reads the wrong captured slot. When it
-        // DOES capture `this` (slot 0), keep `cur_class` so those accesses resolve against it.
+        // DOES capture `this` (slot 0), keep `cur_class` so those accesses resolve against it. The
+        // cleared class is kept on `lambda_lexical_classes` for frame-independent STATIC reads
+        // (companion-object properties).
         let saved_cur_class = if captures_this {
             self.cur_class
         } else {
-            self.cur_class.take()
+            let taken = self.cur_class.take();
+            if let Some(t) = taken {
+                self.lambda_lexical_classes.push(t);
+            }
+            taken
         };
         // An ANONYMOUS FUNCTION's body owns its `return`: a bare `return e` is a LOCAL return from this
         // closure method, not a non-local return of the enclosing fn. Lower its body with `cur_ret_ty`
@@ -8796,6 +8808,9 @@ impl<'a> Lower<'a> {
             self.cur_ret_ty = rt;
         }
         self.cur_class = saved_cur_class;
+        if !captures_this && saved_cur_class.is_some() {
+            self.lambda_lexical_classes.pop();
+        }
         self.cur_method_returns_unit_ref = saved_unit_ref;
         self.scope = saved_scope;
         self.next_value = saved_next;
@@ -12711,6 +12726,41 @@ impl<'a> Lower<'a> {
         self.finish_prop_ref(name, internal, Some(this_e), None)
     }
 
+    /// An unqualified read of a `companion object` property from the outer class, a nested class,
+    /// or the companion's own members: the property is a STATIC field on the OUTER class (kotlinc's
+    /// layout) — emit the same `getstatic Outer.X` the qualified `Outer.X` path emits. Walks the
+    /// enclosing-class chain of the current class (`Outer$Nested$1` → `Outer$Nested` → `Outer`,
+    /// stripping a trailing `$Companion`) so the INNERMOST companion wins; call it only after real
+    /// member lookups (a member shadows a same-named companion member). A `private` companion
+    /// property's field is emitted private — a cross-class read would be an IllegalAccessError (no
+    /// nestmate support) — so it stays a bail.
+    fn lower_companion_static_read(&mut self, name: &str) -> Option<u32> {
+        // `cur_class`, or the lexical class of the lambda being lowered (a static read is
+        // frame-independent — a closure that didn't capture `this` still resolves it).
+        let mut cur = self
+            .cur_class
+            .or_else(|| self.lambda_lexical_classes.last().copied())?;
+        loop {
+            if let Some(cty) = self.companion_consts.get(&(cur, name.to_string())).cloned() {
+                let private =
+                    self.ir.statics.iter().any(|s| {
+                        s.name == name && s.owner == Some(cur) && s.visibility.is_private()
+                    });
+                if private {
+                    return None;
+                }
+                return Some(self.emit_external_static_field(
+                    cur.render(),
+                    name.to_string(),
+                    self.runtime.type_descriptor(cty)?,
+                ));
+            }
+            let rendered = cur.render();
+            let (outer, _) = rendered.rsplit_once('$')?;
+            cur = type_name(outer);
+        }
+    }
+
     /// Bound callable reference on an arbitrary EXPRESSION receiver (`"abc"::get`, `1::foo`, `mk()::m`):
     /// the receiver is evaluated once and captured into the closure. Handles a bound extension function
     /// (`expr::extFun` → the lifted static `extFun(recv, args…)`, captured receiver) and a bound member
@@ -15651,12 +15701,18 @@ impl<'a> Lower<'a> {
         let depth = self.scope.len();
         let p_slot = self.fresh_value();
         let saved_cur = self.cur_class;
+        if let Some(t) = saved_cur {
+            self.lambda_lexical_classes.push(t);
+        }
         self.cur_class = None;
         self.scope.push(("this".to_string(), p_slot, rty));
         let var_p = self.emit_variable(p_slot, ty_to_ir(rty), Some(recv));
         let body_val = self.expr(rl.body);
         self.scope.truncate(depth);
         self.cur_class = saved_cur;
+        if saved_cur.is_some() {
+            self.lambda_lexical_classes.pop();
+        }
         let body_val = body_val?;
         let result = if rl.returns_receiver {
             let recv_read = self.emit_get_value(p_slot);
@@ -15693,6 +15749,9 @@ impl<'a> Lower<'a> {
         let p_slot = self.fresh_value();
         let saved_cur = self.cur_class;
         if pname == "this" {
+            if let Some(t) = saved_cur {
+                self.lambda_lexical_classes.push(t);
+            }
             self.cur_class = None;
         }
         self.scope.push((pname.to_string(), p_slot, rty));
@@ -15702,6 +15761,9 @@ impl<'a> Lower<'a> {
         let body_val = self.expr(body);
         self.scope.truncate(depth);
         self.cur_class = saved_cur;
+        if pname == "this" && saved_cur.is_some() {
+            self.lambda_lexical_classes.pop();
+        }
         let body_val = body_val?;
         // A receiver-returning scope fn (`also`/`apply`) whose body DIVERGES (non-local `return`/`throw`,
         // body typed `Nothing`): the trailing "read the receiver back" is unreachable. Emitting it leaves
@@ -21017,7 +21079,11 @@ impl<'a> Lower<'a> {
             } else {
                 // Unqualified member of the enclosing class: a backing field (`this.<field>`), or a
                 // computed property (`this.getX()`).
-                let (this_v, this_ty) = self.lookup("$dispatch").or_else(|| self.lookup("this"))?;
+                let (this_v, this_ty) =
+                    match self.lookup("$dispatch").or_else(|| self.lookup("this")) {
+                        Some(pair) => pair,
+                        None => return self.lower_companion_static_read(&n),
+                    };
                 let recv = self.emit_get_value(this_v);
                 // `this` was flow-narrowed to a subtype by an enclosing `if (this is B)`, and this
                 // member exists only on `B` — `checkcast` the receiver to `B`, then read the member
@@ -21086,7 +21152,7 @@ impl<'a> Lower<'a> {
                             {
                                 ty.non_null().obj_internal().unwrap().to_string()
                             }
-                            _ => return None,
+                            _ => return self.lower_companion_static_read(&n),
                         };
                         let this0 = if let Some((v, vty)) = self.lookup("this$0") {
                             if !vty
@@ -21101,7 +21167,11 @@ impl<'a> Lower<'a> {
                         };
                         // The outer property, read from the inner class — a different class, so the
                         // backend takes its accessor.
-                        self.lower_field_read_on(this0, &outer, &n, e, None)?
+                        if let Some(read) = self.lower_field_read_on(this0, &outer, &n, e, None) {
+                            read
+                        } else {
+                            return self.lower_companion_static_read(&n);
+                        }
                     }
                 } else {
                     // An extension/receiver-lambda implicit receiver: `fun A.f() = n` (or
@@ -21115,11 +21185,18 @@ impl<'a> Lower<'a> {
                             self.lower_field_read_on(recv, &internal.render(), &n, e, None)
                         {
                             read
+                        } else if let Some(read) = self.lower_member_read_on(recv, this_ty, &n, e) {
+                            read
                         } else {
-                            self.lower_member_read_on(recv, this_ty, &n, e)?
+                            // The receiver has no such member — a companion property of the
+                            // lexically enclosing class (a `x.run { result }` in a member).
+                            return self.lower_companion_static_read(&n);
                         }
                     } else {
-                        self.lower_member_read_on(recv, this_ty, &n, e)?
+                        match self.lower_member_read_on(recv, this_ty, &n, e) {
+                            Some(read) => read,
+                            None => return self.lower_companion_static_read(&n),
+                        }
                     }
                 };
                 // Smart-cast narrowing: a nullable-primitive *field* read narrowed to its primitive
