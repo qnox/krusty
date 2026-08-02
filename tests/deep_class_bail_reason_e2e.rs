@@ -105,8 +105,9 @@ fn gated_corpus_cases_report_precise_class_lower_bail() {
 #[test]
 fn suspend_covariant_override_reports_erasure_gate() {
     // A suspend member overriding a (non-generic) interface method with a value-class COVARIANT
-    // return needs an erasure bridge the coroutine pass never fixes up.
-    common::assert_inline_source_lower_bail(
+    // return needs an erasure bridge the coroutine pass never fixes up. The gate lives in the bridge
+    // pass (bridges are derived in the JVM backend), so the file stops there rather than in lowering.
+    common::assert_inline_source_backend_bail(
         r#"
 @JvmInline
 value class IC(val s: String)
@@ -121,7 +122,7 @@ class Test : IBar {
 
 fun box(): String = "OK"
 "#,
-        "gate:suspend-override-erasure",
+        krusty::jvm::backend::SkipReason::Bridges,
     );
 }
 

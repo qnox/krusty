@@ -16,6 +16,9 @@ pub enum SkipReason {
     ValueClasses,
     /// `lower_suspend` — a `suspend fun` shape not yet supported.
     Suspend,
+    /// `derive_bridges` — an override whose bridge cannot be modeled (a bounded type-param erasure, or a
+    /// `suspend` override the coroutine pass would rewrite out from under the bridge).
+    Bridges,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -27,13 +30,16 @@ pub enum SkipReason {
 /// Runs, in order:
 /// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
 ///    declarations from the file's annotations; no-op without a trigger annotation.
-/// 2. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
-/// 3. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
+/// 2. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
+///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
+///    declaration, so lowering records only the declarations and this pass derives the bridges.
+/// 3. `apply_collection_bridge_barriers` — attach JVM collection bridge semantics.
+/// 4. `lower_value_classes` — realize `@JvmInline value class`es as their unboxed underlying type
 ///    (the IR keeps them as plain classes so JS / a native-value-type JVM are unaffected).
-/// 4. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
-/// 5. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
+/// 5. `lower_suspend` — realize `suspend fun`s as their continuation-passing-style ABI.
+/// 6. `mark_must_inline_lambdas` — drop the dead standalone impl of a must-inline call's
 ///    (`require`/`check`) message lambda; it is spliced at the call site.
-/// 6. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
+/// 7. `reparent_lambda_impls` — a lambda impl method must be a member of the CLASS whose code emits
 ///    its `invokedynamic` (the impl is PRIVATE, kotlinc's placement, so a cross-class handle would
 ///    be an IllegalAccessError). Lowering attaches impls per `cur_class`, which misses code that
 ///    ends up in a class only later: enum-entry constructor arguments and suspend-lambda state
@@ -68,6 +74,10 @@ pub fn run_backend_passes_with_metadata(
         &resolve_class_name,
         jvm_plugin_type_descriptor,
     );
+    // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
+    // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
+    // before the value-class pass (which retargets them once mangled names are known).
+    crate::jvm::bridges::derive_bridges(ir, syms)?;
     apply_collection_bridge_barriers(ir, syms);
     let vc_module = crate::module_symbols::ModuleSymbols::new(syms);
     let vc_resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
@@ -404,6 +414,7 @@ impl Backend for JvmBackend {
             let what = match reason {
                 SkipReason::ValueClasses => "value-class",
                 SkipReason::Suspend => "suspend-function",
+                SkipReason::Bridges => "bridge-method",
             };
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -763,6 +774,10 @@ mod tests {
             (
                 "run_enabled(",
                 &["src/plugins/mod.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "derive_bridges(",
+                &["src/jvm/bridges.rs", "src/jvm/backend.rs"],
             ),
             ("apply_collection_bridge_barriers(", &["src/jvm/backend.rs"]),
         ];

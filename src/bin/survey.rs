@@ -114,6 +114,9 @@ fn emit_checked_ir(
         Err(krusty::jvm::backend::SkipReason::Suspend) => {
             return Err("lower: suspend-function shape not lowered".into())
         }
+        Err(krusty::jvm::backend::SkipReason::Bridges) => {
+            return Err("lower: bridge-method shape not lowered".into())
+        }
         Ok(()) => {}
     }
     // Facade `@Metadata`, as the gate and CLI backend write — a later MODULE's compile reads this
