@@ -52,7 +52,6 @@ fn parse_with_features_and_script(
         multi_dollar_interpolation: features.has("MultiDollarInterpolation"),
         explicit_backing_fields: features.has("ExplicitBackingFields"),
         no_trailing_lambda: false,
-        in_lambda_body: false,
         lexical_type_params: Vec::new(),
         lexical_type_param_bounds: Vec::new(),
         pending_annotations: Vec::new(),
@@ -734,11 +733,6 @@ struct Parser<'a> {
     /// used where a following `{` belongs to an enclosing construct (a `: I by Impl()` delegate, whose
     /// `{` opens the class body, not a lambda on the delegate call).
     no_trailing_lambda: bool,
-    /// Set while parsing a LAMBDA body's statement list: there an inc/dec as the last statement is
-    /// the body's VALUE (`{ -> p.fst++ }` is `() -> Int`), so it must not be re-routed to a
-    /// discarded-value statement. Named-fn/nested blocks (parsed via `parse_block_expr`) keep the
-    /// statement route.
-    in_lambda_body: bool,
     /// Type parameters in the current lexical parser context. Synthetic anonymous classes are hoisted
     /// to file-level declarations, so they must carry the generic names they mention in supertypes or
     /// member signatures; otherwise checking the hoisted class reports `T` as unresolved.
@@ -4637,8 +4631,6 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         let mut stmts = Vec::new();
-        let saved_lambda_body = self.in_lambda_body;
-        self.in_lambda_body = true;
         loop {
             self.skip_newlines();
             if self.at(TokenKind::RBrace) || self.at(TokenKind::Eof) {
@@ -4646,7 +4638,6 @@ impl<'a> Parser<'a> {
             }
             stmts.push(self.parse_stmt());
         }
-        self.in_lambda_body = saved_lambda_body;
         // Prepend `val (a, b) = <synthetic-param>` for each destructured parameter (reversed so the
         // first parameter's binding ends up first).
         for (synth, entries, source_props, sp) in destructures.into_iter().rev() {
@@ -4753,9 +4744,6 @@ impl<'a> Parser<'a> {
     fn parse_block_expr(&mut self) -> ExprId {
         let start = self.tok().span;
         self.expect(TokenKind::LBrace, "'{'");
-        // A named-fn/nested block is NOT a lambda body (the inc/dec trailing rule is lambda-only).
-        let saved_lambda_body = self.in_lambda_body;
-        self.in_lambda_body = false;
         let mut stmts = Vec::new();
         loop {
             self.skip_newlines();
@@ -4764,7 +4752,6 @@ impl<'a> Parser<'a> {
             }
             stmts.push(self.parse_stmt());
         }
-        self.in_lambda_body = saved_lambda_body;
         let end = self.tok().span;
         self.expect(TokenKind::RBrace, "'}'");
         // A trailing bare expression is the block's value.
@@ -4806,12 +4793,15 @@ impl<'a> Parser<'a> {
         self.finish_assignment_stmt(Stmt::IncDec { name, dec, prefix }, start, target)
     }
 
-    /// A member/index `target++` / `++target` as a LAMBDA body's TRAILING value: postfix desugars
-    /// to `{ val $$old = target; target = $$old.inc(); $$old }`, prefix to `{ target = target.inc();
-    /// target }`. Like [`Parser::incdec_target`], the receiver/index must be side-effect-free (the
-    /// desugar re-evaluates it); a non-lvalue or impure target is an honest parse error, not a
-    /// double evaluation.
-    fn incdec_trailing_value(
+    /// Preserve the value of a member/index inc/dec at the end of ANY value-capable block. Both
+    /// forms evaluate the getter/index read exactly once: postfix saves the old value before
+    /// assigning `old.inc()`, while prefix saves `target.inc()` before assigning and returning that
+    /// same new value. Keeping the result in a parser-reserved local also avoids the tempting but
+    /// incorrect prefix expansion `target = target.inc(); target`, which invokes a custom getter a
+    /// second time. Receiver/index expressions still have to be pure because the assignment side of
+    /// the current AST reuses them; unsupported targets produce a diagnostic rather than being
+    /// double-evaluated.
+    fn incdec_access_value(
         &mut self,
         e: ExprId,
         target: ExprId,
@@ -4819,83 +4809,53 @@ impl<'a> Parser<'a> {
         prefix: bool,
         start: Span,
     ) -> StmtId {
-        let target_span = self.file.expr_spans[target.0 as usize];
-        let op_name = if dec { "dec" } else { "inc" };
-        let pure = match self.file.expr(target) {
-            Expr::Member { receiver, .. } => self.is_pure_path(*receiver),
-            Expr::Index { array, indices } => {
-                self.is_pure_path(*array) && indices.iter().all(|&i| self.is_pure_path(i))
-            }
-            _ => false,
-        };
-        if !pure {
+        let target_span = self.assignment_target_span(target);
+        if !self.incdec_access_is_pure(target) {
             self.diags.error(
-                start,
-                "krusty: an inc/dec with a non-lvalue or side-effecting target in trailing position is not supported",
+                self.file.expr_spans[e.0 as usize],
+                "krusty: '++'/'--' is only supported on a simple variable or pure access path",
             );
             return self.finish_stmt(Stmt::Expr(e), start);
         }
-        let assign = |s: &mut Self, value: ExprId| -> StmtId {
-            match s.file.expr(target).clone() {
-                Expr::Member { receiver, name } => s.finish_assignment_stmt(
-                    Stmt::AssignMember {
-                        receiver,
-                        name,
-                        value,
-                    },
-                    start,
-                    target_span,
-                ),
-                Expr::Index { array, indices } => s.finish_assignment_stmt(
-                    Stmt::AssignIndex {
-                        array,
-                        indices,
-                        value,
-                    },
-                    start,
-                    target_span,
-                ),
-                _ => unreachable!("guarded by the purity check above"),
-            }
-        };
-        let (stmts, trailing) = if prefix {
-            // `{ target = target.inc(); target }`
-            let read = self
-                .file
-                .add_expr(self.file.expr(target).clone(), target_span);
-            let call = self.build_inc_dec_call(read, op_name, target_span);
-            let assign = assign(self, call);
-            let read2 = self
-                .file
-                .add_expr(self.file.expr(target).clone(), target_span);
-            (vec![assign], read2)
+        let op_name = if dec { "dec" } else { "inc" };
+        let target_read = self
+            .file
+            .add_expr(self.file.expr(target).clone(), target_span);
+        let saved_value = if prefix {
+            self.build_inc_dec_call(target_read, op_name, target_span)
         } else {
-            // `{ val $$old = target; target = $$old.inc(); $$old }`
-            let read = self
-                .file
-                .add_expr(self.file.expr(target).clone(), target_span);
-            let local = self.file.add_stmt(
-                Stmt::Local {
-                    is_var: false,
-                    name: "$$old".to_string(),
-                    ty: None,
-                    init: read,
-                },
-                start,
-            );
-            let old_read = self
-                .file
-                .add_expr(Expr::Name("$$old".to_string()), target_span);
-            let call = self.build_inc_dec_call(old_read, op_name, target_span);
-            let assign = assign(self, call);
-            let old_read2 = self
-                .file
-                .add_expr(Expr::Name("$$old".to_string()), target_span);
-            (vec![local, assign], old_read2)
+            target_read
         };
+        // Keep the saved value in the parser's synthetic-name namespace. Even an escaped source
+        // binding with the same spelling cannot interfere: this generated block contains only its
+        // own local and generated reads, and repeated expansions have independent scopes.
+        const SAVED: &str = "$$incDecValue";
+        let local = self.file.add_stmt(
+            Stmt::Local {
+                is_var: false,
+                name: SAVED.to_string(),
+                ty: None,
+                init: saved_value,
+            },
+            start,
+        );
+        let saved_read = self
+            .file
+            .add_expr(Expr::Name(SAVED.to_string()), target_span);
+        let assigned_value = if prefix {
+            saved_read
+        } else {
+            self.build_inc_dec_call(saved_read, op_name, target_span)
+        };
+        let assignment = self
+            .finish_incdec_access_assignment(target, assigned_value, start, target_span)
+            .expect("pure member/index target has an assignment form");
+        let trailing = self
+            .file
+            .add_expr(Expr::Name(SAVED.to_string()), target_span);
         let block = self.file.add_expr(
             Expr::Block {
-                stmts,
+                stmts: vec![local, assignment],
                 trailing: Some(trailing),
             },
             Span::new(start.lo, self.file.expr_spans[e.0 as usize].hi),
@@ -5347,9 +5307,11 @@ impl<'a> Parser<'a> {
                 // Increment/decrement *statement* (`target++` / `++target`): `parse_prefix`/
                 // `parse_postfix` built an `Expr::IncDec`; in statement position the value is
                 // discarded, so re-route to the statement helper (which desugars a `Name` to
-                // `Stmt::IncDec` and a member/index target to an assignment). As the block's LAST
-                // statement the inc/dec is the block's VALUE (`{ -> p.fst++ }` is `() -> Int`),
-                // so keep it as a `Stmt::Expr` for the trailing-value extraction to pick up.
+                // `Stmt::IncDec` and a member/index target to an assignment). Immediately before a
+                // closing brace, keep the expression value: the generic block parser decides whether
+                // that trailing value is consumed (lambda/if/when/try) or discarded (Unit function,
+                // constructor, or init block). This avoids a lambda-only semantic fork and also makes
+                // `if (c) { p.x++ } else { ... }` produce the old value as Kotlin requires.
                 if let Expr::IncDec {
                     target,
                     dec,
@@ -5361,15 +5323,14 @@ impl<'a> Parser<'a> {
                     let after_nl = (self.i..self.t.len())
                         .find(|&i| self.t[i].kind != TokenKind::Newline)
                         .map(|i| self.t[i].kind);
-                    if after_nl != Some(TokenKind::RBrace) || !self.in_lambda_body {
+                    if after_nl != Some(TokenKind::RBrace) {
                         let op_span = self.file.expr_spans[e.0 as usize];
                         return self.incdec_target(target, dec, prefix, op_span, start);
                     }
-                    // A LAMBDA body's trailing statement: the inc/dec is the body's VALUE
-                    // (`{ -> p.fst++ }` is `() -> Int`). A `Name` target lowers directly as an
-                    // expression; a member/index target needs the temp-block desugar below.
+                    // A block's trailing statement can be its VALUE. A `Name` target lowers directly
+                    // as an expression; member/index targets use the shared, single-read expansion.
                     if !matches!(self.file.expr(target), Expr::Name(_)) {
-                        return self.incdec_trailing_value(e, target, dec, prefix, start);
+                        return self.incdec_access_value(e, target, dec, prefix, start);
                     }
                 }
                 // assignment: `name = value` or `receiver.name = value`.
@@ -7247,6 +7208,45 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// Whether a member/index target can use the current assignment AST without evaluating its
+    /// receiver or indices more than once. Name targets have their dedicated `Stmt::IncDec` path;
+    /// every other expression is rejected consistently by statement and value inc/dec handling.
+    fn incdec_access_is_pure(&self, target: ExprId) -> bool {
+        match self.file.expr(target) {
+            Expr::Member { receiver, .. } => self.is_pure_path(*receiver),
+            Expr::Index { array, indices } => {
+                self.is_pure_path(*array) && indices.iter().all(|&i| self.is_pure_path(i))
+            }
+            _ => false,
+        }
+    }
+
+    /// Build the store half shared by discarded-value and value-producing member/index inc/dec.
+    /// Centralizing this match keeps the accepted lvalue families, source spans, and future property
+    /// or index-store extensions identical across both syntactic contexts.
+    fn finish_incdec_access_assignment(
+        &mut self,
+        target: ExprId,
+        value: ExprId,
+        start: Span,
+        target_span: Span,
+    ) -> Option<StmtId> {
+        let statement = match self.file.expr(target).clone() {
+            Expr::Member { receiver, name } => Stmt::AssignMember {
+                receiver,
+                name,
+                value,
+            },
+            Expr::Index { array, indices } => Stmt::AssignIndex {
+                array,
+                indices,
+                value,
+            },
+            _ => return None,
+        };
+        Some(self.finish_assignment_stmt(statement, start, target_span))
+    }
+
     fn incdec_target(
         &mut self,
         e: ExprId,
@@ -7263,45 +7263,11 @@ impl<'a> Parser<'a> {
         let target_span = self.assignment_target_span(e);
         match self.file.expr(e).clone() {
             Expr::Name(n) => self.parse_incdec(n, dec, prefix, start, target_span),
-            Expr::Member { receiver, name } if self.is_pure_path(receiver) => {
-                let lhs = self.file.add_expr(
-                    Expr::Member {
-                        receiver,
-                        name: name.clone(),
-                    },
-                    op_span,
-                );
+            Expr::Member { .. } | Expr::Index { .. } if self.incdec_access_is_pure(e) => {
+                let lhs = self.file.add_expr(self.file.expr(e).clone(), op_span);
                 let value = self.build_inc_dec_call(lhs, op_name, op_span);
-                self.finish_assignment_stmt(
-                    Stmt::AssignMember {
-                        receiver,
-                        name,
-                        value,
-                    },
-                    start,
-                    target_span,
-                )
-            }
-            Expr::Index { array, indices }
-                if self.is_pure_path(array) && indices.iter().all(|&i| self.is_pure_path(i)) =>
-            {
-                let lhs = self.file.add_expr(
-                    Expr::Index {
-                        array,
-                        indices: indices.clone(),
-                    },
-                    op_span,
-                );
-                let value = self.build_inc_dec_call(lhs, op_name, op_span);
-                self.finish_assignment_stmt(
-                    Stmt::AssignIndex {
-                        array,
-                        indices,
-                        value,
-                    },
-                    start,
-                    target_span,
-                )
+                self.finish_incdec_access_assignment(e, value, start, target_span)
+                    .expect("pure member/index target has an assignment form")
             }
             _ => {
                 self.diags.error(
@@ -9048,6 +9014,25 @@ mod tests {
         assert_eq!(
             tree("fun f(a: IntArray): Int = a[0]"),
             "(fun f (param a IntArray) :Int (index a 0))\n"
+        );
+    }
+
+    #[test]
+    fn prefix_member_value_expansion_reads_the_property_once() {
+        // A prefix value must be the value produced by `inc()`, not a second read after the setter.
+        // The debug tree exposes member READS as `(. probe value)`; the assignment target is a
+        // distinct `set-member` node. Exactly one read therefore pins the single-evaluation
+        // invariant without requiring the backend to support a custom-accessor fixture.
+        let parsed =
+            tree("fun f(probe: SyntheticProbe): Int = if (true) { ++probe.value } else { 0 }");
+        assert_eq!(
+            parsed.matches("(. probe value)").count(),
+            1,
+            "prefix expansion must read the member once: {parsed}"
+        );
+        assert!(
+            parsed.contains("set-member"),
+            "prefix expansion must retain the member assignment: {parsed}"
         );
     }
 

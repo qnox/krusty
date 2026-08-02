@@ -69,7 +69,7 @@ fn member_dec_local() {
     assert_eq!(run(SRC).expect("member dec"), "OK");
 }
 
-/// An inc/dec as a block's TRAILING value (`{ -> p.fst++ }` is `() -> Int`, not `() -> Unit`):
+/// An inc/dec as a lambda block's TRAILING value (`{ -> p.fst++ }` is `() -> Int`, not `() -> Unit`):
 /// the parser keeps it as the block's trailing expression — a `Name` target lowers directly, a
 /// member/index target desugars to a temp block that captures the old (postfix) or new (prefix)
 /// value. Previously the statement re-route fired unconditionally and the lambda yielded `Unit`
@@ -103,6 +103,25 @@ fn incdec_trailing_lambda_value_local_target() {
     assert_eq!(run(SRC).expect("trailing local incdec"), "OK");
 }
 
+/// Closing-block detection is generic rather than lambda-specific: an `if` branch exposes its last
+/// expression as the branch value too. Prefix returns the assigned value and postfix returns the old
+/// value; index targets exercise the same shared member/index assignment builder. The parser unit
+/// regression separately inspects the expansion to prove a custom member getter is read only once.
+#[test]
+fn incdec_trailing_branch_value_and_index_target() {
+    const SRC: &str = "fun box(): String {\n\
+        \x20 val values = intArrayOf(1, 4)\n\
+        \x20 val prefix = if (true) { ++values[0] } else { -1 }\n\
+        \x20 if (prefix != 2 || values[0] != 2) return \"fail prefix: $prefix/${values[0]}\"\n\
+        \x20 val postfix = if (true) { values[0]++ } else { -1 }\n\
+        \x20 if (postfix != 2 || values[0] != 3) return \"fail postfix: $postfix/${values[0]}\"\n\
+        \x20 val indexed: () -> Int = { values[1]++ }\n\
+        \x20 if (indexed() != 4 || values[1] != 5) return \"fail index: ${values[1]}\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(run(SRC).expect("trailing incdec access values"), "OK");
+}
+
 /// The `inline/lambdaReassignmentWithCapture.kt` shape: aliased, reassigning lambdas passed as
 /// function-typed VARIABLE arguments to a cross-file inline facade static.
 #[test]
@@ -134,8 +153,9 @@ fn trailing_incdec_lambda_reassignment_with_capture() {
     );
 }
 
-/// A non-lvalue inc/dec target in a lambda's trailing position is an honest parse error (never a
-/// compiler panic and never a double evaluation).
+/// A non-lvalue inc/dec target in a block's trailing position is an honest parse error (never a
+/// compiler panic and never a double evaluation). It shares the diagnostic with discarded-value
+/// statement handling because both contexts use the same accepted-lvalue classifier.
 #[test]
 fn non_lvalue_trailing_incdec_is_a_parse_error() {
     let diags = common::front_end_diagnostics(
@@ -150,7 +170,7 @@ fn non_lvalue_trailing_incdec_is_a_parse_error() {
     assert!(
         diags
             .iter()
-            .any(|d| d.contains("inc/dec with a non-lvalue or side-effecting target")),
+            .any(|d| d.contains("only supported on a simple variable or pure access path")),
         "expected the non-lvalue inc/dec diagnostic, got: {diags:?}"
     );
 }
