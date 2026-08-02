@@ -896,6 +896,8 @@ mod super_default_args_e2e;
 mod super_interface_default_e2e;
 #[path = "super_to_base_secondary_ctor_e2e.rs"]
 mod super_to_base_secondary_ctor_e2e;
+#[path = "superclass_bridge_e2e.rs"]
+mod superclass_bridge_e2e;
 #[path = "supertype_scan_arrow_e2e.rs"]
 mod supertype_scan_arrow_e2e;
 #[path = "suspend_class_implements_interface_e2e.rs"]

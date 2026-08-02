@@ -15,7 +15,7 @@ use crate::frontend::FrontendSymbols;
 use crate::ir::{Bridge, IrFile};
 use crate::jvm::backend::SkipReason;
 use crate::jvm::names::type_descriptor;
-use crate::names::{accessor_property_name, property_getter_name, property_setter_name};
+use crate::names::{property_getter_name, property_setter_name};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
 /// Every bridge family this class needs, appended to `IrClass::bridges`.
@@ -29,7 +29,7 @@ pub fn derive_bridges(ir: &mut IrFile, syms: &FrontendSymbols) -> Result<(), Ski
         if syms.class_by_type_name(ir.classes[cid].fq_name).is_none() {
             continue;
         }
-        superclass_method_bridges(ir, cid)?;
+        superclass_method_bridges(ir, cid, syms)?;
         property_bridges(ir, cid, syms);
         mapped_interface_bridges(ir, cid, syms);
         interface_bridges(ir, cid, syms)?;
@@ -37,38 +37,161 @@ pub fn derive_bridges(ir: &mut IrFile, syms: &FrontendSymbols) -> Result<(), Ski
     Ok(())
 }
 
-/// The nearest same-named method above this class, walking the superclass chain within the file.
-fn super_chain_method(ir: &IrFile, cid: usize, name: &str) -> Option<u32> {
-    let mut owner = ir.classes[cid].superclass;
-    loop {
-        let base = ir.classes.iter().find(|c| c.fq_name == owner)?;
-        if let Some(fid) = base
+#[derive(Clone)]
+struct MethodShape {
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+/// Methods DECLARED on one semantic owner, normalized to the same erased shape regardless of where the
+/// owner came from. IR declarations are authoritative when present because later lowering may have
+/// refined their physical shape; module symbols cover a sibling source owner without IR in this file;
+/// library symbols cover the first external boundary. Keeping that provider distinction inside this
+/// adapter prevents bridge policy from growing separate same-file/module/classpath branches.
+fn declared_method_shapes(
+    ir: &IrFile,
+    syms: &FrontendSymbols,
+    owner: TypeName,
+    name: &str,
+) -> Vec<MethodShape> {
+    if let Some(class) = class_of(ir, owner) {
+        return class
             .methods
             .iter()
             .copied()
-            .find(|fid| ir.functions[*fid as usize].name == name)
-        {
-            return Some(fid);
-        }
-        owner = base.superclass;
+            .filter_map(|fid| {
+                let function = &ir.functions[fid as usize];
+                (function.name == name).then(|| MethodShape {
+                    params: function
+                        .params
+                        .iter()
+                        .copied()
+                        .map(bridge_erasure)
+                        .collect(),
+                    ret: bridge_erasure(function.ret),
+                })
+            })
+            .collect();
     }
+    if let Some(class) = syms.class_by_type_name(owner) {
+        return class
+            .methods
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|signature| MethodShape {
+                params: signature
+                    .params
+                    .iter()
+                    .copied()
+                    .map(bridge_erasure)
+                    .collect(),
+                ret: bridge_erasure(signature.ret),
+            })
+            .collect();
+    }
+    syms.libraries
+        .resolve_type_name(owner)
+        .into_iter()
+        .flat_map(|class| {
+            class
+                .members
+                .iter()
+                .filter(move |member| member.name == name)
+                .map(|member| MethodShape {
+                    params: member.params.iter().copied().map(bridge_erasure).collect(),
+                    ret: bridge_erasure(member.ret),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The direct semantic superclass. Source and library symbol providers expose different storage
+/// records, but the bridge walk only needs the language fact "the one parent that is not an interface".
+/// Centralizing that normalization also avoids inferring ownership from rendered JVM class names.
+fn direct_superclass(syms: &FrontendSymbols, owner: TypeName) -> Option<TypeName> {
+    if let Some(class) = syms.class_by_type_name(owner) {
+        return class.super_internal;
+    }
+    syms.libraries.resolve_type_name(owner).and_then(|class| {
+        class.supertypes.iter_ids().find(|&candidate| {
+            !syms
+                .libraries
+                .resolve_type_name(candidate)
+                .is_some_and(|ty| ty.is_interface())
+                && !syms
+                    .class_by_type_name(candidate)
+                    .is_some_and(|ty| ty.is_interface())
+        })
+    })
 }
 
 /// A method overriding a superclass method with a different erased signature (a generic or covariant
 /// override) needs an `ACC_BRIDGE` method carrying the SUPERCLASS's descriptor that delegates to the
 /// concrete override — without it a call through a base reference resolves to a method that is not there.
-fn superclass_method_bridges(ir: &mut IrFile, cid: usize) -> Result<(), SkipReason> {
+fn superclass_method_bridges(
+    ir: &mut IrFile,
+    cid: usize,
+    syms: &FrontendSymbols,
+) -> Result<(), SkipReason> {
     for own_fid in ir.classes[cid].methods.clone() {
+        // The explicit source modifier is the semantic discriminator. A same-named fresh declaration is
+        // an overload, not evidence that a superclass descriptor should delegate to it; backend/plugin
+        // synthesized methods are deliberately absent and may satisfy inherited obligations.
+        if ir.fresh_method_decls.contains(&own_fid) {
+            continue;
+        }
         let name = ir.functions[own_fid as usize].name.clone();
-        let Some(base_fid) = super_chain_method(ir, cid, &name) else {
+        let own = &ir.functions[own_fid as usize];
+        let own_shape = MethodShape {
+            params: own.params.iter().copied().map(bridge_erasure).collect(),
+            ret: bridge_erasure(own.ret),
+        };
+        let mut owner = Some(ir.classes[cid].superclass);
+        let mut seen = std::collections::HashSet::new();
+        let base_shape = loop {
+            let Some(base_owner) = owner.filter(|owner| seen.insert(*owner)) else {
+                break None;
+            };
+            let mut compatible = declared_method_shapes(ir, syms, base_owner, &name)
+                .into_iter()
+                .filter(|base| {
+                    base.params.len() == own_shape.params.len()
+                        && base
+                            .params
+                            .iter()
+                            .zip(&own_shape.params)
+                            .all(|(&erased, &concrete)| param_narrows(syms, erased, concrete))
+                        && return_admits(syms, base.ret, own_shape.ret, false)
+                })
+                .collect::<Vec<_>>();
+            // An exact parameter descriptor identifies the overridden overload before a merely
+            // compatible generic one. If neither choice is unique, declining the file is safer than
+            // emitting a bridge to an arbitrary overload.
+            let exact = compatible
+                .iter()
+                .filter(|shape| shape.params == own_shape.params)
+                .count();
+            if exact == 1 {
+                break compatible
+                    .into_iter()
+                    .find(|shape| shape.params == own_shape.params);
+            }
+            if exact > 1 || compatible.len() > 1 {
+                return Err(SkipReason::Bridges);
+            }
+            if let Some(shape) = compatible.pop() {
+                break Some(shape);
+            }
+            // A nearer class may declare only sibling overloads. Keep walking: the method explicitly
+            // marked `override` can still implement a declaration farther up the superclass chain.
+            owner = direct_superclass(syms, base_owner);
+        };
+        let Some(base) = base_shape else {
             continue;
         };
-        let own = &ir.functions[own_fid as usize];
-        let (op, or) = (own.params.clone(), own.ret);
-        let base = &ir.functions[base_fid as usize];
-        let (bp, br) = (base.params.clone(), base.ret);
-        // A different ARITY means this is a sibling OVERLOAD of the base method, not an override.
-        if bp.len() != op.len() || (bp == op && br == or) {
+        if base.params == own_shape.params && base.ret == own_shape.ret {
             continue;
         }
         // A suspend override needing an erasure bridge can't be modeled (the coroutine pass rewrites the
@@ -79,10 +202,10 @@ fn superclass_method_bridges(ir: &mut IrFile, cid: usize) -> Result<(), SkipReas
         }
         ir.classes[cid].bridges.push(Bridge {
             name,
-            erased_params: bp,
-            erased_ret: br,
-            concrete_params: op,
-            concrete_ret: or,
+            erased_params: base.params,
+            erased_ret: base.ret,
+            concrete_params: own.params.clone(),
+            concrete_ret: own.ret,
             type_safe_barrier: false,
             target_name: None,
             box_ret: None,
@@ -104,6 +227,44 @@ fn accessor_ret(ir: &IrFile, owner: TypeName, name: &str, declared: Ty) -> Ty {
         .unwrap_or(declared)
 }
 
+#[derive(Clone, Copy)]
+struct PropertyShape {
+    ty: Ty,
+    accessor_ret: Ty,
+    is_var: bool,
+}
+
+/// One property DECLARED by a semantic owner, normalized across IR/module/library providers. The
+/// provider lookup is intentionally confined here; callers reason only about property type, accessor
+/// realization, and mutability, so source and classpath properties cannot drift into twin algorithms.
+fn declared_property_shape(
+    ir: &IrFile,
+    syms: &FrontendSymbols,
+    owner: TypeName,
+    name: &str,
+) -> Option<PropertyShape> {
+    if let Some(class) = syms.class_by_type_name(owner) {
+        let (ty, is_var) = class.prop(name)?;
+        return Some(PropertyShape {
+            ty,
+            accessor_ret: accessor_ret(ir, owner, name, ty),
+            is_var,
+        });
+    }
+    syms.libraries
+        .property_members(Ty::obj_name(owner), name)
+        .overloads
+        .into_iter()
+        .find(|property| {
+            matches!(property.kind, crate::libraries::PropKind::Member) && property.owner == owner
+        })
+        .map(|property| PropertyShape {
+            ty: property.ty,
+            accessor_ret: property.ty,
+            is_var: property.setter.is_some(),
+        })
+}
+
 /// A property overriding a supertype property with a different erased type (a covariant override
 /// `from: Sub` over `from: Super`, or a generic `val x: T` erased to `Object` overridden with a concrete
 /// type) needs a synthetic `getX()` returning the supertype's erased type that delegates to the concrete
@@ -111,65 +272,47 @@ fn accessor_ret(ir: &IrFile, owner: TypeName, name: &str, declared: Ty) -> Ty {
 /// override needs the matching `setX(erased)`, else a write through the supertype silently no-ops.
 fn property_bridges(ir: &mut IrFile, cid: usize, syms: &FrontendSymbols) {
     let internal_name = ir.classes[cid].fq_name;
-    for sup in syms.supertype_internal_names_from(internal_name) {
-        let Some(sc) = syms.class_by_type_name(sup) else {
-            continue;
-        };
-        for (pname, sty, base_is_var) in sc.props.clone() {
-            let Some((own_ty, own_is_var)) = syms.prop_of_name(internal_name, &pname) else {
+    let own_properties: Vec<(String, PropertyShape)> = ir.classes[cid]
+        .properties
+        .iter()
+        .filter_map(|property| {
+            let (ty, is_var) = syms.prop_of_name(internal_name, &property.name)?;
+            Some((
+                property.name.clone(),
+                PropertyShape {
+                    ty,
+                    accessor_ret: accessor_ret(ir, internal_name, &property.name, ty),
+                    is_var,
+                },
+            ))
+        })
+        .collect();
+    let mut supertypes = syms
+        .applied_hierarchy(Ty::obj_name(internal_name))
+        .into_iter()
+        .filter(|(owner, _, _)| *owner != internal_name)
+        .collect::<Vec<_>>();
+    // `applied_hierarchy` is a graph walk whose sibling order is an implementation detail. Bridge
+    // deduplication intentionally lets the nearest declaration win, so make that semantic ordering
+    // explicit before examining superclass and interface providers.
+    supertypes.sort_by_key(|(_, _, depth)| *depth);
+    for (super_owner, _, _) in supertypes {
+        for (name, own) in &own_properties {
+            let Some(base) = declared_property_shape(ir, syms, super_owner, name) else {
                 continue;
             };
-            if type_descriptor(sty) == type_descriptor(own_ty) {
+            if type_descriptor(base.ty) == type_descriptor(own.ty) {
                 continue;
             }
             push_property_bridge(
                 ir,
                 cid,
-                &pname,
-                accessor_ret(ir, sup, &pname, sty),
-                accessor_ret(ir, internal_name, &pname, own_ty),
-                (sty, own_ty),
-                base_is_var && own_is_var,
+                name,
+                base.accessor_ret,
+                own.accessor_ret,
+                (base.ty, own.ty),
+                base.is_var && own.is_var,
             );
-        }
-    }
-    // The CLASSPATH-supertype twin of the loop above: a property whose INFERRED type covariantly narrows
-    // a classpath supertype property (`override val context = EmptyCoroutineContext` under
-    // `Continuation.context: CoroutineContext`) needs the same `get<X>()` bridge. The classpath
-    // interface's accessor is a plain METHOD (`getContext()`), so pair this class's own properties
-    // against the supertype's member set.
-    let own_prop_names: Vec<String> = ir.classes[cid]
-        .properties
-        .iter()
-        .map(|p| p.name.clone())
-        .collect();
-    let sup_names: Vec<TypeName> = syms
-        .class_by_type_name(internal_name)
-        .map(|ci| {
-            ci.interfaces
-                .iter_ids()
-                .chain(ci.super_internal)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    for sup in sup_names {
-        let recv = Ty::Obj(sup, &[]);
-        for pname in &own_prop_names {
-            let Some((own_ty, _)) = syms.prop_of_name(internal_name, pname) else {
-                continue;
-            };
-            let ps = syms.libraries.property_members(recv, pname);
-            let Some(pi) = ps
-                .overloads
-                .iter()
-                .find(|p| matches!(p.kind, crate::libraries::PropKind::Member))
-            else {
-                continue;
-            };
-            if type_descriptor(pi.ty) == type_descriptor(own_ty) {
-                continue;
-            }
-            push_property_bridge(ir, cid, pname, pi.ty, own_ty, (pi.ty, own_ty), false);
         }
     }
 }
@@ -332,13 +475,24 @@ fn methods_named<'a>(ir: &'a IrFile, owner: TypeName, name: &'a str) -> Vec<u32>
         .unwrap_or_default()
 }
 
-/// The nearest declaration of a property at or above `internal`, within this file.
-fn declared_property(ir: &IrFile, internal: TypeName, name: &str) -> Option<(TypeName, Ty)> {
+/// The nearest property declaration whose GENERATED accessor has `accessor`, together with whether the
+/// match is its setter. Matching the forward naming functions is deliberate: reversing `getURL` or
+/// `setOpen` loses information (`URL` vs `uRL`, `isOpen` vs `open`) and can point an interface obligation
+/// at the wrong property. This walk consumes declarations, never rendered owner/class names.
+fn declared_property_accessor(
+    ir: &IrFile,
+    internal: TypeName,
+    accessor: &str,
+) -> Option<(TypeName, Ty, bool)> {
     let mut cur = internal;
     loop {
         let c = class_of(ir, cur)?;
-        if let Some(p) = c.properties.iter().find(|p| p.name == name) {
-            return Some((cur, p.ty));
+        if let Some(property) = c.properties.iter().find(|property| {
+            property_getter_name(&property.name) == accessor
+                || (property.is_var && property_setter_name(&property.name) == accessor)
+        }) {
+            let setter = property.is_var && property_setter_name(&property.name) == accessor;
+            return Some((cur, property.ty, setter));
         }
         cur = c.superclass;
     }
@@ -682,14 +836,15 @@ fn interface_bridges(
                     let f = &ir.functions[fid as usize];
                     Some((f.params.clone(), f.ret, f.dispatch_receiver))
                 }
-                None => accessor_property_name(&name).and_then(|prop| {
-                    let (declaring, ty) = declared_property(ir, internal_name, &prop)?;
-                    Some(if name.starts_with("set") {
-                        (vec![ty], Ty::Unit, Some(declaring))
-                    } else {
-                        (Vec::new(), ty, Some(declaring))
-                    })
-                }),
+                None => declared_property_accessor(ir, internal_name, &name).map(
+                    |(declaring, ty, setter)| {
+                        if setter {
+                            (vec![ty], Ty::Unit, Some(declaring))
+                        } else {
+                            (Vec::new(), ty, Some(declaring))
+                        }
+                    },
+                ),
             };
             let Some((concrete_params, concrete_ret, impl_owner)) = impl_sig else {
                 continue;

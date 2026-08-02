@@ -775,6 +775,10 @@ mod tests {
                 "run_enabled(",
                 &["src/plugins/mod.rs", "src/jvm/backend.rs"],
             ),
+            (
+                "derive_bridges(",
+                &["src/jvm/bridges.rs", "src/jvm/backend.rs"],
+            ),
             ("apply_collection_bridge_barriers(", &["src/jvm/backend.rs"]),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
