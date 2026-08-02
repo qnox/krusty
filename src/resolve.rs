@@ -6291,6 +6291,22 @@ fn map_call_sig_args_with_trailing(
     )
 }
 
+/// Whether a selected call needs its source arguments mapped to semantic parameter slots for lowering.
+/// Keep this origin-neutral: plain members and class-body extensions have the same named/default/
+/// trailing-lambda rules, and a location-specific copy can silently stop recording positional omissions.
+fn call_requires_argument_slots(
+    signature: &CallSig,
+    argument_count: usize,
+    has_argument_names: bool,
+    trailing_lambda: bool,
+) -> bool {
+    signature.has_param_names()
+        && (has_argument_names
+            || trailing_lambda
+            || (argument_count != signature.param_names.len()
+                && signature.required < signature.param_names.len()))
+}
+
 /// The one mapping failure worth reporting, when every candidate failed for the SAME reason.
 ///
 /// Equality is over the whole failure, deliberately. Agreeing only on the first error is not enough:
@@ -8859,7 +8875,9 @@ pub enum ResolvedCall {
         ret: Ty,
         inline: InlineKind,
         interface: bool,
-        vararg: bool,
+        /// The semantic vararg slot; `Some` subsumes the former duplicated `vararg` boolean and also
+        /// preserves the index needed for non-last varargs followed by a trailing lambda.
+        vararg_index: Option<usize>,
         suspend: bool,
         projected_return_hazard: bool,
     },
@@ -8874,7 +8892,8 @@ pub enum ResolvedCall {
         ret: Ty,
         physical_ret: Ty,
         interface: bool,
-        vararg: bool,
+        /// The semantic vararg slot. Its presence is the vararg flag and its value drives packing.
+        vararg_index: Option<usize>,
     },
     /// A same-module extension operator selected by the checker for a source expression.
     ModuleExtension {
@@ -12201,7 +12220,7 @@ impl MemberExtensionFunctionCandidate {
             ret: self.ret,
             physical_ret: self.physical_ret,
             interface,
-            vararg: self.call_sig.vararg,
+            vararg_index: self.call_sig.vararg_index,
         }
     }
 }
@@ -14666,7 +14685,7 @@ impl<'a> Checker<'a> {
                                     .syms
                                     .class_by_type_name(owner)
                                     .is_some_and(|class| class.is_interface()),
-                                vararg: sig.vararg(),
+                                vararg_index: sig.vararg_index,
                                 suspend: sig.is_suspend(),
                                 projected_return_hazard: sig.projected_return_hazard,
                             },
@@ -14688,7 +14707,7 @@ impl<'a> Checker<'a> {
                             ret: sig.ret,
                             inline: InlineKind::from_flags(sig.is_inline(), false),
                             interface,
-                            vararg: sig.vararg(),
+                            vararg_index: sig.vararg_index,
                             suspend: sig.is_suspend(),
                             projected_return_hazard: sig.projected_return_hazard,
                         },
@@ -20668,7 +20687,7 @@ impl<'a> Checker<'a> {
                                 ret: sig.ret,
                                 inline: InlineKind::from_flags(sig.is_inline(), false),
                                 interface,
-                                vararg: sig.vararg(),
+                                vararg_index: sig.vararg_index,
                                 suspend: sig.is_suspend(),
                                 projected_return_hazard: sig.projected_return_hazard,
                             },
@@ -26107,14 +26126,27 @@ impl<'a> Checker<'a> {
                         self.call_callee_name_span(call),
                     );
                 }
-                if let Some(names) = arg_names.as_deref() {
-                    if let Ok(slots) = map_call_sig_args_with_trailing(
+                // Named, trailing-lambda, or omitted-argument calls: record the argument→parameter
+                // slot map so lowering can route through the `$default` stub (a positional
+                // omitted-default call has no names but still needs the map — mirrors the plain
+                // member path's condition).
+                let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                if call_requires_argument_slots(
+                    &candidate.call_sig,
+                    args.len(),
+                    arg_names.is_some(),
+                    trailing_lambda,
+                ) {
+                    match map_call_sig_args_with_trailing(
                         args,
-                        Some(names),
+                        arg_names.as_deref(),
                         &candidate.call_sig,
-                        self.file.call_has_trailing_lambda.contains(&call.0),
+                        trailing_lambda,
                     ) {
-                        self.resolved_call_arg_slots.insert(call, slots);
+                        Ok(slots) => {
+                            self.resolved_call_arg_slots.insert(call, slots);
+                        }
+                        Err(error) => self.report_call_arg_mapping_error(call, args, error),
                     }
                 }
                 let interface = self
@@ -26774,7 +26806,7 @@ impl<'a> Checker<'a> {
                     ret,
                     inline: fi.flags.inline,
                     interface,
-                    vararg: fi.call_sig.vararg,
+                    vararg_index: fi.call_sig.vararg_index,
                     suspend: fi.callable.suspend,
                     projected_return_hazard: fi.projected_return_hazard,
                 },
@@ -27378,17 +27410,26 @@ impl<'a> Checker<'a> {
         // names (honouring `required`), then type-check against THAT parameter — a NAMED call may reorder
         // (`z.test(b = …, a = …)`), so a positional check would pair each argument with the wrong
         // parameter. Fires for any named call, and for an omitted-argument call to a method with defaults.
-        } else if cs.has_param_names()
-            && (arg_names.is_some()
-                || trailing_lambda
-                || (!cs.vararg && arg_tys.len() != params.len() && cs.required < params.len()))
+        } else if call_requires_argument_slots(cs, args.len(), arg_names.is_some(), trailing_lambda)
         {
             match map_call_sig_args_with_trailing(args, arg_names, cs, trailing_lambda) {
                 Ok(slots) => {
                     for (i, slot) in slots.iter().enumerate() {
                         if let Some(a) = slot {
+                            // Slot mapping records the first positional vararg element in the array
+                            // parameter's semantic slot (subsequent elements remain source-order peers).
+                            // Check an ordinary element against the array's ELEMENT type; only an explicit
+                            // spread is an array-valued argument. This is the same representation-neutral
+                            // rule used by overload scoring, and keeps trailing-lambda mapping from turning
+                            // a valid `m(1, 2) {}` into an `Int`-versus-`IntArray` diagnostic.
+                            let expected =
+                                if cs.vararg_index == Some(i) && !self.file.is_spread_arg(*a) {
+                                    params[i].array_elem().unwrap_or(params[i])
+                                } else {
+                                    params[i]
+                                };
                             self.expect_assignable(
-                                params[i],
+                                expected,
                                 self.expr_types[a.0 as usize],
                                 self.span(*a),
                                 "argument",
@@ -27482,7 +27523,7 @@ impl<'a> Checker<'a> {
                 ret,
                 inline: fi.inline,
                 interface: fi.is_interface(),
-                vararg: cs.vararg,
+                vararg_index: cs.vararg_index,
                 suspend: fi.suspend(),
                 projected_return_hazard,
             },
