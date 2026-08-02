@@ -2,15 +2,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use krusty::ast::{ClassDecl, ClassKind, Decl, FunDecl, PropDecl};
+use krusty::ast::{ClassDecl, ClassKind, Decl, File, FunDecl, PropDecl};
 use krusty::diag::{DiagSink, Span};
 use krusty::frontend::lex_name_tokens;
 
+use super::navigation::definition_name_span;
 use super::source_scan::{
     bounded_utf8_advance, matching_delimiter, normalized_scan_end, skip_block_comment, skip_quoted,
     skip_trivia, utf8_char_len,
 };
-use super::{navigation::definition_name_span, FileAnalysis};
 
 const SYMBOL_KIND_CLASS: u8 = 5;
 const SYMBOL_KIND_METHOD: u8 = 6;
@@ -57,9 +57,14 @@ impl ExtractionBudget {
     }
 }
 
+/// Extract the declaration hierarchy from a parsed file.
+///
+/// Takes the parsed `File` rather than a `FileAnalysis`: nothing here reads resolved types, so a
+/// file that was only parsed -- which is all an unopened workspace file gets -- produces the same
+/// symbols as one that was fully analyzed.
 pub(crate) fn document_symbol_occurrences(
     source: &str,
-    analysis: &FileAnalysis,
+    file: &File,
     max_entries: usize,
 ) -> Vec<DocumentSymbolOccurrence> {
     if max_entries == 0 {
@@ -70,15 +75,14 @@ pub(crate) fn document_symbol_occurrences(
     };
     let mut diagnostics = DiagSink::new();
     let tokens = lex_name_tokens(source, &mut diagnostics);
-    let classes = analysis
-        .file
+    let classes = file
         .decls
         .iter()
         .filter_map(|&declaration| {
-            if analysis.file.is_local_declaration(declaration) {
+            if file.is_local_declaration(declaration) {
                 return None;
             }
-            match analysis.file.decl(declaration) {
+            match file.decl(declaration) {
                 Decl::Class(class) => Some(class),
                 _ => None,
             }
@@ -98,11 +102,11 @@ pub(crate) fn document_symbol_occurrences(
     }
 
     let mut roots = Vec::new();
-    for &declaration in &analysis.file.decls {
-        if analysis.file.is_local_declaration(declaration) {
+    for &declaration in &file.decls {
+        if file.is_local_declaration(declaration) {
             continue;
         }
-        match analysis.file.decl(declaration) {
+        match file.decl(declaration) {
             Decl::Fun(function) => {
                 if let Some(node) = function_node(source, &tokens, function, false, &mut budget) {
                     roots.push(node);
@@ -119,22 +123,16 @@ pub(crate) fn document_symbol_occurrences(
                     .rsplit_once('.')
                     .is_some_and(|(parent, _)| class_names.contains(parent));
                 if !has_parent {
-                    if let Some(node) = class_node(
-                        source,
-                        &tokens,
-                        &analysis.file,
-                        class,
-                        &nested,
-                        0,
-                        &mut budget,
-                    ) {
+                    if let Some(node) =
+                        class_node(source, &tokens, file, class, &nested, 0, &mut budget)
+                    {
                         roots.push(node);
                     }
                 }
             }
         }
     }
-    roots.extend(type_alias_nodes(source, &tokens, analysis, &mut budget));
+    roots.extend(type_alias_nodes(source, &tokens, file, &mut budget));
     roots.sort_by_key(|node| (node.range.lo, node.range.hi));
 
     let mut flattened = Vec::new();
@@ -334,18 +332,15 @@ fn secondary_constructor_range(
 fn type_alias_nodes(
     source: &str,
     tokens: &[krusty::frontend::FrontendNameToken],
-    analysis: &FileAnalysis,
+    file: &File,
     budget: &mut ExtractionBudget,
 ) -> Vec<SymbolNode> {
-    let aliases = analysis
-        .file
+    let aliases = file
         .type_aliases
         .iter()
         .map(|(alias, _)| alias.as_str())
         .chain(
-            analysis
-                .file
-                .type_alias_fun
+            file.type_alias_fun
                 .iter()
                 .map(|(alias, _, _)| alias.as_str()),
         )
@@ -1234,10 +1229,10 @@ mod tests {
         let mut analysis = analyze_standalone_source_set(&[source]);
         let file = analysis.files.pop().unwrap();
 
-        let occurrences = document_symbol_occurrences(source, &file, 1);
+        let occurrences = document_symbol_occurrences(source, &file.file, 1);
         assert_eq!(occurrences.len(), 1);
         assert_eq!(occurrences[0].name, "first");
-        assert!(document_symbol_occurrences(source, &file, 0).is_empty());
+        assert!(document_symbol_occurrences(source, &file.file, 0).is_empty());
     }
 
     #[test]
@@ -1252,7 +1247,7 @@ mod tests {
                       enum class E { @Deprecated(\"old\", ReplaceWith(\"new\")) A, /* prior */ B }\n";
         let mut analysis = analyze_standalone_source_set(&[source]);
         let file = analysis.files.pop().unwrap();
-        let occurrences = document_symbol_occurrences(source, &file, 32);
+        let occurrences = document_symbol_occurrences(source, &file.file, 32);
         let range_text = |name: &str| {
             let occurrence = occurrences
                 .iter()
@@ -1298,7 +1293,7 @@ mod tests {
             let later = source.find("class Later").expect("later declaration");
             let mut analysis = analyze_standalone_source_set(&[&source]);
             let file = analysis.files.pop().expect("analyzed file");
-            let occurrences = document_symbol_occurrences(&source, &file, 64);
+            let occurrences = document_symbol_occurrences(&source, &file.file, 64);
             assert!(occurrences.iter().any(
                 |occurrence| occurrence.kind == SYMBOL_KIND_CLASS && occurrence.name == "Later"
             ));
@@ -1320,7 +1315,7 @@ mod tests {
         let source = "class Sample /* unterminated\n";
         let mut analysis = analyze_standalone_source_set(&[source]);
         let file = analysis.files.pop().expect("analyzed file");
-        let occurrences = document_symbol_occurrences(source, &file, 64);
+        let occurrences = document_symbol_occurrences(source, &file.file, 64);
         assert!(occurrences
             .iter()
             .all(|occurrence| occurrence.kind != SYMBOL_KIND_CONSTRUCTOR));
@@ -1344,7 +1339,7 @@ mod tests {
         ] {
             let mut analysis = analyze_standalone_source_set(&[source]);
             let file = analysis.files.pop().expect("analyzed file");
-            let _ = document_symbol_occurrences(source, &file, 64);
+            let _ = document_symbol_occurrences(source, &file.file, 64);
         }
     }
 
