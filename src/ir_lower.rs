@@ -8234,6 +8234,10 @@ impl<'a> Lower<'a> {
             .class_by_type_name(internal)
             .and_then(|c| c.value_field.as_ref())
             .map(|(_, u)| *u)
+            // Dependency value classes have no source declaration in `FrontendSymbols`; their semantic
+            // metadata is exposed through the same platform oracle used by resolution. Keeping that
+            // fallback here gives every lowering caller one location-independent representation query.
+            .or_else(|| self.syms.libraries.value_underlying(t))
     }
 
     /// Forward a resolved extension callable's DECLARED source receiver onto the emitted call, verbatim —
@@ -14110,6 +14114,14 @@ impl<'a> Lower<'a> {
         // A NON-nullable primitive stored in its `Obj("kotlin/…")` value-class form is a JVM primitive
         // (e.g. a non-null `Int` parameter is `int`), so its zero is the primitive `0`, not a null ref.
         let t = t.unboxed_primitive().unwrap_or(t);
+        // A value CLASS's placeholder is the zero of its ERASED underlying — a `$default` stub's
+        // descriptor erases value-class params (`z: Z` → `int`), so a `null` here wouldn't verify.
+        // Only for a NON-nullable value class: a `Z?` slot stays BOXED (its zero is `null`).
+        let t = if t.is_nullable() {
+            t
+        } else {
+            self.value_class_underlying(t).unwrap_or(t)
+        };
         let c = match t {
             Ty::Long => IrConst::Long(0),
             Ty::Double => IrConst::Double(0.0),

@@ -1356,11 +1356,16 @@ pub struct IrFile {
     /// emits — otherwise it would seed `List.hashCode` (an orphan) while the body uses `Object.hashCode`.
     data_hashcode_owners: std::collections::HashMap<(String, String), String>,
     /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `Ty`) REFERENCED in
-    /// this file — `kotlin/Result` → `Object`. The JVM value-class pass merges these into its erasure map
-    /// so a classpath value-class type unboxes exactly like a user value class. Populated by ir_lower
-    /// (which has the classpath); only REFERENCE-underlying ones are recorded (a primitive-underlying
-    /// `UInt`/`ULong` keeps its existing dedicated handling).
+    /// this file. The JVM value-class pass merges these into its erasure map so a dependency value class
+    /// unboxes exactly like a same-file declaration. Populated by ir_lower (which has the classpath);
+    /// native unsigned builtins keep their dedicated `Ty`/runtime handling and are not recorded here.
     external_value_classes: std::collections::HashMap<TypeName, Ty>,
+    /// Expression identity → `(declared value-class name, erased underlying type)` for a construction
+    /// rewritten in place by the JVM value-class pass. This records semantic origin rather than the
+    /// generated helper's spelling: a source `new` remains distinguishable from an unrelated static call
+    /// whose user-written name happens to resemble a backend helper. Consumers must treat the entry as
+    /// valid only while the rewritten expression remains at the same arena index.
+    erased_value_constructions: std::collections::HashMap<ExprId, (TypeName, Ty)>,
     /// Getter method name (`getV`) for each classpath `@JvmInline value class` in
     /// [`Self::external_value_classes`] — lets the value-class pass recognize a sole-property read emitted
     /// as `invokevirtual X.getV()` and rewrite it to identity (the receiver IS the unboxed underlying).
@@ -1618,6 +1623,32 @@ impl IrFile {
         self.external_value_class_name(internal).is_some()
     }
 
+    /// Resolve a value class's erased underlying type without making callers branch on whether the
+    /// declaration belongs to this source file or was recovered from dependency metadata.
+    fn value_class_underlying_name(&self, internal: TypeName) -> Option<Ty> {
+        self.external_value_class_name(internal)
+            .copied()
+            .or_else(|| {
+                self.classes
+                    .iter()
+                    .find(|class| class.is_value && class.fq_name == internal)
+                    .and_then(|class| class.fields.first().map(|field| field.ty))
+            })
+    }
+
+    /// Preserve the source meaning of a value-class construction after the JVM pass replaces its
+    /// generic `New` node with a target helper call. The safety gate uses this pass-produced fact instead
+    /// of trusting generated method names, which are neither semantic identities nor reserved names.
+    pub(crate) fn record_erased_value_construction(
+        &mut self,
+        expression: ExprId,
+        owner: TypeName,
+        underlying: Ty,
+    ) {
+        self.erased_value_constructions
+            .insert(expression, (owner, underlying));
+    }
+
     /// The in-IR (same-file) `ClassId` for `internal`, or `None` when the name is an external/other-module
     /// class not compiled in this file. The bridge from the unified [`IrExpr::New`]'s owner name back to a
     /// `ClassId` for consumers that need the in-IR class (emit, function/property-reference detection).
@@ -1824,10 +1855,9 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     // a pre-pass-only rejection merely leaves an uncalled stub. (Only the PARAMETERS matter: a
     // file-class function's value-class return does not mangle its name — see `vc_mangle`.)
     let vc_of = |t: &Ty| {
-        t.non_null().obj_internal().filter(|&n| {
-            ir.has_external_value_class_name(n)
-                || ir.classes.iter().any(|c| c.is_value && c.fq_name == n)
-        })
+        t.non_null()
+            .obj_internal()
+            .filter(|&n| ir.is_value_class_name(n))
     };
     let vc_params: Vec<TypeName> = f.params.iter().filter_map(vc_of).collect();
     if f.name.contains('-') || !vc_params.is_empty() {
@@ -1849,21 +1879,11 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
             return false;
         }
         for &n in &vc_params {
-            let same_file = ir.classes.iter().find(|c| c.is_value && c.fq_name == n);
             // A GENERIC value class (`X<T>(val s: T)`) or a NESTED value-class underlying erases
             // through extra layers the placeholder/adaptation here doesn't cover — conservative
             // pre-pass reject (post-pass still emits the stub; it just gets no routed calls).
-            if same_file.is_some_and(|c| !c.type_params.is_empty()) {
+            if !vc_stub_shape_ok(ir, n) {
                 return false;
-            }
-            let underlying: Option<&Ty> = ir
-                .external_value_class_name(n)
-                .or_else(|| same_file.and_then(|c| c.fields.first().map(|fld| &fld.ty)));
-            match underlying {
-                Some(u) if u.is_nullable() => return false,
-                Some(u) if vc_of(u).is_some() => return false,
-                Some(_) => {}
-                None => return false,
             }
         }
     }
@@ -1884,10 +1904,81 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
     let Some(defaults) = ir.param_defaults(fid) else {
         return false;
     };
-    defaults
-        .iter()
-        .flatten()
-        .all(|&d| default_expr_stub_safe(ir, d, n))
+    defaults.iter().enumerate().all(|(i, d)| match d {
+        Some(d) => {
+            default_expr_stub_safe(ir, *d, n) && default_root_slot_ok(ir, *d, f.params.get(i))
+        }
+        None => true,
+    })
+}
+
+/// The erased representations must MATCH where a default value lands: a value-class construction
+/// default (`z: Z = Z(42)`) re-emits as the unboxed `constructor-impl` call, so it can only fill a
+/// slot whose erased type IS that underlying — i.e. a parameter of exactly the same NON-nullable
+/// value class. A `Z?` (boxed slot), `Any`, or interface parameter would need a `box-impl` the
+/// erased stub doesn't model — rejected (a pre-pass-only reject merely leaves an uncalled stub:
+/// post-pass the default is already a rewritten call and passes trivially).
+fn default_root_slot_ok(ir: &IrFile, e: ExprId, param: Option<&Ty>) -> bool {
+    // Post-pass view: provenance recorded while rewriting the generic construction tells us the
+    // expression's erased result without inspecting a JVM helper name. The erased slot must be exactly
+    // that underlying type; a boxed or generic slot would require adaptation the facade does not model.
+    if let Some((_, underlying)) = ir.erased_value_constructions.get(&e) {
+        return param.is_some_and(|param| param == underlying);
+    }
+    match &ir.exprs[e as usize] {
+        // Pre-pass view: the default is a value-class `new` — the slot must be exactly the same
+        // NON-nullable value class (erased representations match).
+        IrExpr::New { internal, .. } if ir.is_value_class_name(*internal) => {
+            param.is_some_and(|p| !p.is_nullable() && p.obj_internal() == Some(*internal))
+        }
+        root => {
+            // A param whose erased slot is PRIMITIVE (pre-pass: a non-nullable value-class param
+            // over a primitive underlying; post-pass: the already-erased param) can only be filled
+            // by a root carrying the erased representation — a const, a local slot, or a
+            // construction (handled above). Any OTHER value-class-typed root (a field/getter read,
+            // a coercion) carries the BOXED representation — stored raw in the stub, it fails
+            // class-load verification.
+            let primitive_slot = param.is_some_and(|p| {
+                !p.is_reference()
+                    || (!p.is_nullable()
+                        && p.obj_internal()
+                            .and_then(|name| ir.value_class_underlying_name(name))
+                            .is_some_and(|underlying| !underlying.is_reference()))
+            });
+            if !primitive_slot {
+                return true;
+            }
+            let root_is_vc = ir.logical_types.get(&e).is_some_and(|t| {
+                t.non_null()
+                    .obj_internal()
+                    .is_some_and(|name| ir.is_value_class_name(name))
+            });
+            !root_is_vc || matches!(root, IrExpr::Const(_) | IrExpr::GetValue(_))
+        }
+    }
+}
+
+/// Whether a value class is simple enough for the erased `$default` stub: non-generic, with a
+/// resolvable, non-nullable, non-nested-VC underlying — the carve-outs of
+/// [`toplevel_default_stub_safe`], shared by the parameter check and the default-expression
+/// construction check ([`default_expr_stub_safe`]).
+fn vc_stub_shape_ok(ir: &IrFile, n: TypeName) -> bool {
+    let vc_of = |t: &Ty| {
+        t.non_null()
+            .obj_internal()
+            .filter(|&name| ir.is_value_class_name(name))
+    };
+    let same_file = ir.classes.iter().find(|c| c.is_value && c.fq_name == n);
+    if same_file.is_some_and(|c| !c.type_params.is_empty()) {
+        return false;
+    }
+    let underlying = ir.value_class_underlying_name(n);
+    match underlying {
+        Some(u) if u.is_nullable() => false,
+        Some(u) if vc_of(&u).is_some() => false,
+        Some(_) => true,
+        None => false,
+    }
 }
 
 fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
@@ -1895,11 +1986,17 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
         IrExpr::GetValue(i) if *i >= n => return false,
         IrExpr::SetValue { var, .. } if *var >= n => return false,
         IrExpr::Variable { index, .. } if *index >= n => return false,
-        // A plain `new`/object construction (`f: F = F()`) is fine — the stub re-emits it. But a
-        // VALUE/inline-class construction is NOT: it erases to its unboxed underlying (and mangles the
-        // owning function's `$default` name), which the plain static stub doesn't box/unbox — so keep it
-        // excluded (the file falls back to the inline call-site fill / skip).
-        IrExpr::New { internal, .. } if ir.is_value_class_name(*internal) => return false,
+        // A plain `new`/object construction (`f: F = F()`) is fine — the stub re-emits it. A
+        // VALUE/inline-class construction erases to its unboxed underlying — but the value-class
+        // pass rewrites it to a plain `constructor-impl` static call in registered defaults exactly
+        // as in function bodies, so the erased stub CAN re-emit it — behind the same carve-outs as
+        // a value-class parameter (a generic / nullable-underlying / nested-VC shape keeps the
+        // conservative reject: the file falls back to the inline call-site fill / skip).
+        IrExpr::New { internal, .. }
+            if ir.is_value_class_name(*internal) && !vc_stub_shape_ok(ir, *internal) =>
+        {
+            return false;
+        }
         // A default LAMBDA (`f: (Int) -> Int = { it + 1 }`) is re-emittable: the closure construction
         // only reads its captures, and those are checked as children (a capture of a spilled temp /
         // enclosing local — any value `>= n` — rejects above). Its `inline_body` is in the lambda's OWN
@@ -1911,7 +2008,14 @@ fn default_expr_stub_safe(ir: &IrFile, e: ExprId, n: u32) -> bool {
         IrExpr::Call {
             callee: Callee::Static { name, .. },
             ..
-        } if name.contains('-') => return false,
+        } if name.contains('-')
+            // Only a construction that THIS pass rewrote is known safe. Generated-looking spellings
+            // are not reserved: accepting them by string would let an unrelated user/library call
+            // bypass the conservative mangled-call gate.
+            && !ir.erased_value_constructions.contains_key(&e) =>
+        {
+            return false;
+        }
         _ => {}
     }
     let mut ok = true;
@@ -2306,5 +2410,59 @@ mod tests {
 
         f.classes[0].fields[0].ty = Ty::nullable(Ty::String);
         assert!(!toplevel_default_stub_safe(&f, fid));
+    }
+
+    #[test]
+    fn default_stub_trusts_value_construction_provenance_not_helper_spelling() {
+        // A generated-looking JVM name is not proof that a call came from value-class lowering: source
+        // and dependency declarations can use escaped identifiers. Keep the call rejected until the
+        // value-class pass explicitly records that this expression replaced a semantic construction.
+        let mut f = IrFile::default();
+        let fid = add_toplevel_fn(&mut f, "consume", Ty::Int);
+        let call = f.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: crate::types::type_name("example/Wrapper"),
+                name: "constructor-impl".to_string(),
+                descriptor: "(I)I".to_string(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        f.fn_params
+            .insert(fid, FnParamInfo::defaults(Vec::new(), vec![Some(call)]));
+
+        assert!(!toplevel_default_stub_safe(&f, fid));
+
+        f.record_erased_value_construction(
+            call,
+            crate::types::type_name("example/Wrapper"),
+            Ty::Int,
+        );
+        assert!(toplevel_default_stub_safe(&f, fid));
+    }
+
+    #[test]
+    fn default_stub_uses_external_value_class_metadata_without_a_source_class() {
+        // Dependency metadata and same-file declarations must enter the representation checks through
+        // one query. No synthetic `IrClass` is added here: the external semantic record alone identifies
+        // the value class and its primitive underlying slot.
+        let mut f = IrFile::default();
+        let wrapper = crate::types::type_name("dependency/Wrapper");
+        f.insert_external_value_class_name(wrapper, Ty::Int);
+        let fid = add_toplevel_fn(&mut f, "consume", Ty::obj_name(wrapper));
+        let argument = f.add_expr(IrExpr::Const(IrConst::Int(7)));
+        let construction = f.add_expr(IrExpr::New {
+            internal: wrapper,
+            args: vec![argument],
+            ctor_params: Some(vec![Ty::Int]),
+            ctor_desc: None,
+        });
+        f.fn_params.insert(
+            fid,
+            FnParamInfo::defaults(Vec::new(), vec![Some(construction)]),
+        );
+
+        assert!(toplevel_default_stub_safe(&f, fid));
     }
 }

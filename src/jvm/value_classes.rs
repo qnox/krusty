@@ -1756,6 +1756,14 @@ pub fn lower_value_classes(
         // First decide the rewrite WITHOUT holding a mutable borrow (so `prop_access` can `add_expr`).
         enum Rw {
             Ctor(IrExpr),
+            /// A source value-class construction rewritten to its erased helper call. Keep this distinct
+            /// from other helper-producing rewrites so downstream safety checks can rely on semantic
+            /// origin instead of matching a generated method name.
+            ValueConstruction {
+                expr: IrExpr,
+                owner: TypeName,
+                underlying: Ty,
+            },
             Prop(ExprId, TypeName),
             /// Same-value-class `==`/`!=` → `equals-impl0(U, U)Z` compared against 0 (kotlinc's ABI).
             VcEq {
@@ -1802,16 +1810,20 @@ pub fn lower_value_classes(
                         Some(ps) => ps.iter().map(|p| desc(&erase(p, &under))).collect(),
                         None => ret.clone(),
                     };
-                    Some(Rw::Ctor(IrExpr::Call {
-                        callee: Callee::Static {
-                            owner,
-                            name: "constructor-impl".to_string(),
-                            descriptor: format!("({params}){ret}"),
-                            inline: InlineKind::None,
+                    Some(Rw::ValueConstruction {
+                        expr: IrExpr::Call {
+                            callee: Callee::Static {
+                                owner,
+                                name: "constructor-impl".to_string(),
+                                descriptor: format!("({params}){ret}"),
+                                inline: InlineKind::None,
+                            },
+                            dispatch_receiver: None,
+                            args: args.clone(),
                         },
-                        dispatch_receiver: None,
-                        args: args.clone(),
-                    }))
+                        owner,
+                        underlying: u,
+                    })
                 }
             }
             // An explicit coercion of an UNBOXED value class to a nullable `X?` (`a?.foo()` : `Z?`, the
@@ -1953,6 +1965,14 @@ pub fn lower_value_classes(
         };
         let rewrite = match rw {
             Some(Rw::Ctor(e)) => Some(e),
+            Some(Rw::ValueConstruction {
+                expr,
+                owner,
+                underlying,
+            }) => {
+                ir.record_erased_value_construction(id, owner, underlying);
+                Some(expr)
+            }
             Some(Rw::VcCtorDefault { owner, u }) => {
                 // `constructor-impl$default(<underlying dummy>, mask=1, DefaultConstructorMarker=null)`:
                 // the stub fills the omitted param from the class's default; the dummy underlying is a
@@ -1962,6 +1982,7 @@ pub fn lower_value_classes(
                 let dummy = ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(u)));
                 let mask = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(1)));
                 let null_marker = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+                ir.record_erased_value_construction(id, owner, u);
                 Some(IrExpr::Call {
                     callee: Callee::Static {
                         owner,
