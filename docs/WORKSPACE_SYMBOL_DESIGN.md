@@ -243,12 +243,22 @@ baseline         full snapshot at commit C               mmap'd, ~38 MiB
 dependencies     one index per artifact                  mmap'd, shared across workspaces
 ```
 
-Two of these exist today, both in memory: the edit overlay is the live analysis index, and the
-baseline is the project index the symbol pass fills. Shadowing between them is per file — the live
-layer names the files it covers, and the project layer suppresses those. `replace_files` is the
-tombstone: every URI a chunk *attempted* is re-indexed, so a file that was deleted or became
-unreadable loses its entries rather than keeping them forever. What is missing is making either
-layer survive a restart.
+Two of these exist today, both in memory. The edit overlay is the live analysis index. The baseline
+is `ProjectSymbolIndex`, and it is already segmented rather than singular: each chunk becomes a
+segment, and adjacent segments merge only while their sizes are within a factor of two, so a
+declaration is rewritten a logarithmic number of times instead of once per later chunk. Measured on
+the corpus shape, folding every chunk into one index cost 54 ms at 20k entries and grew from there,
+on the thread that also serves requests; segmenting holds the median splice near 5 ms with under a
+dozen resident segments.
+
+Shadowing is per file, and layer order decides shadowing only — ranking walks rung by rung across
+every layer, or a subsequence match in a newly indexed chunk would outrank an exact prefix match in
+the segment beside it. `replace_files` is the tombstone: every URI a chunk *attempted* is
+re-indexed, so a file that was deleted or became unreadable loses its entries rather than keeping
+them forever.
+
+What is missing is making any of it survive a restart, and compaction is currently unbounded in the
+sense that it only ever merges — there is no eviction.
 
 This is the segment model Lucene uses (immutable segments, tombstones, background compaction) and
 the milestone model IntelliJ's shared indexes use — a prebuilt index for a nearby commit, with local
@@ -358,7 +368,13 @@ within the 3–5 s build without any client-side coordination.
 Following the existing `MAX_*` conventions, set high enough that neither reference corpus trips
 them — truncating a 700k-symbol index to save 20 MiB defeats the feature's purpose.
 
-- max indexed files, max entries, max retained name bytes
+- max indexed files, max entries, max retained name bytes. The project layer's ceiling is separate
+  from the source set's: `MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES` bounds one worker
+  message at 8 MiB, and inheriting it capped project-wide coverage at roughly 30k declarations.
+  `MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES` is 192 MiB of wire budget, which at the ~167
+  worst-case bytes this accounting charges per entry admits about 1.2M declarations against the
+  698,516 the largest reference corpus holds.
+- `MAX_INDEXED_FILE_BYTES` per file, checked against metadata before the read
 - max symbols per response
 - max library materialisations per query: 32
 - dependency cache size cap with LRU eviction
