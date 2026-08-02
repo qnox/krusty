@@ -1622,35 +1622,31 @@ impl MetaFn {
     }
 
     pub fn member_call_sig(&self) -> CallSig {
-        let mut sig = CallSig::metadata_member(
+        let (lambda_receivers, lambda_receiver_params) = self.lambda_receiver_shape();
+        let mut sig = CallSig::metadata_function(
             self.value_params.len(),
             self.value_params.iter().map(|p| p.name.clone()).collect(),
             self.value_params.iter().map(|p| p.has_default()).collect(),
+            lambda_receivers,
+            lambda_receiver_params,
+            self.value_params.iter().map(|p| p.materialized()).collect(),
             self.vararg_index(),
         );
         sig.platform_nullable_params = self.value_params.iter().map(|p| p.nullable()).collect();
-        self.set_lambda_receiver_shape(&mut sig);
         sig
     }
 
-    /// Wire the decoded `@ExtensionFunctionType` value-param facts (`Recv.() -> R`) into the call
-    /// sig — the same shape the top-level path records via [`CallSig::metadata_top_level`], so a
-    /// MEMBER call's lambda argument binds its implicit `this` exactly like a top-level HOF's
-    /// does. Without it the receiver is indistinguishable from a leading value parameter and
-    /// overload matching rejects the (one-arity-shorter) lambda literal. EXTENSION call sigs
-    /// deliberately stay unwired: an extension call's lambda arguments already bind receivers
-    /// through the extension-resolution channel (`extension_lambda_shape`), and a second source
-    /// would re-route scope-function blocks (`run { this@C … }`) onto receiver-lambda paths whose
-    /// lowering cannot resolve a labeled `this`.
-    fn set_lambda_receiver_shape(&self, sig: &mut CallSig) {
-        sig.set_lambda_receiver_shape(
-            self.value_params.len(),
+    /// Decode the semantic receiver-function shape once for every metadata function consumer.
+    /// A concrete `Recv.() -> R` carries both the receiver type and the mark; a generic
+    /// `T.() -> R` carries only the mark and recovers `T` after call-site substitution.
+    pub(super) fn lambda_receiver_shape(&self) -> (Vec<Option<Ty>>, Vec<bool>) {
+        (
             self.value_params
                 .iter()
                 .map(|p| p.recv_fun_receiver.map(crate::types::Ty::obj_name))
                 .collect(),
             self.value_params.iter().map(|p| p.recv_fun()).collect(),
-        );
+        )
     }
 
     pub fn vararg_index(&self) -> Option<usize> {

@@ -842,8 +842,13 @@ impl CallSig {
         CallSig::metadata_base(param_count, Vec::new(), Vec::new(), None)
     }
 
+    /// Build the source call shape for a non-extension Kotlin function decoded from metadata.
+    /// Members and receiver-less top-level functions carry the same value-parameter semantics;
+    /// keeping one constructor prevents either origin from silently dropping receiver-lambda or
+    /// materialization facts. Extension functions first remove their callable receiver and are
+    /// handled by [`Self::metadata_extension`].
     #[allow(clippy::too_many_arguments)]
-    pub fn metadata_top_level(
+    pub fn metadata_function(
         param_count: usize,
         names: Vec<String>,
         defaults: Vec<bool>,
@@ -863,7 +868,7 @@ impl CallSig {
     /// (`lambda_receivers`) and the plain flag (`lambda_receiver_params`). Each list is kept only
     /// when it aligns with `param_count`, so consumers can index positionally without
     /// re-validating arity.
-    pub(crate) fn set_lambda_receiver_shape(
+    fn set_lambda_receiver_shape(
         &mut self,
         param_count: usize,
         lambda_receivers: Vec<Option<Ty>>,
@@ -879,6 +884,13 @@ impl CallSig {
         defaults: Vec<bool>,
         vararg_index: Option<usize>,
     ) -> Self {
+        // Do not route extension declarations through `metadata_function`. Their callable receiver
+        // is removed here, and extension resolution derives each lambda argument's full function
+        // shape from the selected extension signature. Publishing the receiver-lambda marks through
+        // this second channel would make one semantic fact origin-dependent and can re-check
+        // receiver blocks through the member path, where labeled `this` lowering has different
+        // ownership. Ordinary members and receiver-less top-level functions have no such competing
+        // channel, so they intentionally share `metadata_function` instead.
         // The physical param count includes the extension receiver; the source VALUE params (with their
         // default flags — an `inline fun Mutex.withLock(owner: Any? = null, action)` needs them so an
         // omitted-default trailing-lambda call resolves) follow it.

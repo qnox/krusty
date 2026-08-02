@@ -1,39 +1,43 @@
 //! A lambda passed to a classpath Kotlin MEMBER whose parameter is a RECEIVER function type
 //! (`Recv.() -> Unit` — `@Metadata`'s `@ExtensionFunctionType`) binds its implicit `this` to the
 //! receiver. Two shapes: an instance member (`holder.build { … }`) and a companion-object member
-//! reached through the type name (`Parameters.build { … }` — the ktor `io.ktor.http.Parameters`
-//! shape, which used to fail as "unresolved Java static 'Parameters.build'").
+//! reached through the type name (`FactoryApi.create { … }`, which used to fall through to the
+//! unresolved-static recovery path).
 //! Needs the JVM toolchain + real kotlinc; skips otherwise.
 use super::common;
 
-/// The ktor `io.ktor.http.Parameters` shape: an interface whose companion object declares a
-/// factory taking an extension lambda.
+/// An interface whose companion object declares a factory taking an extension lambda. All names
+/// are intentionally fixture-local: the regression is about metadata shape, not a specific
+/// dependency or generated runtime class.
 const LIB: &str = "package lib\n\
-    interface Parameters {\n\
+    interface FactoryApi {\n\
         companion object {\n\
-            fun build(builderAction: ParametersBuilder.() -> Unit): Parameters {\n\
-                val b = ParametersBuilder()\n\
+            fun create(builderAction: BuildScope.() -> Unit): FactoryApi {\n\
+                val b = BuildScope()\n\
                 b.builderAction()\n\
-                return P(b.v)\n\
+                return Product(b.v)\n\
             }\n\
         }\n\
     }\n\
-    class ParametersBuilder {\n\
+    class BuildScope {\n\
         var v: String = \"\"\n\
     }\n\
-    class P(val v: String) : Parameters\n";
+    class Product(val v: String) : FactoryApi\n";
 
 /// The companion-object member call resolves and the lambda's implicit `this` binds to the
-/// declared receiver (a member assign through `this` type-checks and lowers).
+/// declared receiver (a member assign through `this` type-checks and lowers). Exercise both
+/// positional and NAMED binding: expectation lookup must follow semantic parameter slots rather
+/// than assuming source argument index equals parameter index.
 #[test]
 fn classpath_companion_ext_lambda_call() {
     common::expect_box_ok_against(
         "companion_ext_lambda",
         LIB,
-        "import lib.Parameters\n\
+        "import lib.FactoryApi\n\
          fun box(): String {\n\
-             val p = Parameters.build { v = \"OK\" }\n\
-             return (p as lib.P).v\n\
+             val positional = FactoryApi.create { v = \"O\" }\n\
+             val named = FactoryApi.create(builderAction = { v = \"K\" })\n\
+             return (positional as lib.Product).v + (named as lib.Product).v\n\
          }\n",
     );
 }
@@ -114,8 +118,9 @@ fn classpath_instance_ext_lambda_runs() {
 
 /// A GENERIC receiver function-type parameter (`block: T.() -> String`): `@Metadata` names no
 /// receiver class for a type parameter, so the expectation recovers the receiver from the
-/// SUBSTITUTED parameter type. Also covers named lambda arguments and a call with two
-/// function-typed parameters (only one of them a receiver type).
+/// SUBSTITUTED parameter type. Also covers REORDERED named lambda arguments and a call with two
+/// function-typed parameters (only one of them a receiver type), proving each source argument gets
+/// the expectation of the semantic parameter slot it names.
 #[test]
 fn classpath_member_generic_ext_lambda_call() {
     const LIB4: &str = "package lib\n\
@@ -130,25 +135,45 @@ fn classpath_member_generic_ext_lambda_call() {
         "import lib.Box\n\
          fun box(): String {\n\
              val b = Box(\"K\")\n\
-             b.mutate { \"O\" + this }\n\
-             return b.out\n\
+             b.mutate(block = { \"O\" + this })\n\
+             val combined = b.two(b = { this }, a = { \"O\" })\n\
+             return if (b.out == \"OK\" && combined == \"OK\") \"OK\" else \"F:\" + b.out + combined\n\
          }\n",
     );
 }
 
-/// Named lambda arguments to a classpath member with two function-typed parameters (regression
-/// control: the named-argument slot path types lambdas against the erased parameters — unchanged
-/// by this fix). NAMED arguments to a RECEIVER function-type parameter are a pre-existing gap
-/// (the slot path has no lambda-expectation channel; it fails on master identically).
+/// A concrete generic receiver must come from the substituted function shape, not the compact
+/// metadata classifier. The latter identifies only `List`; retaining `List<String>` is what makes
+/// the indexed element a `String` and permits its `length` member.
+#[test]
+fn classpath_member_parameterized_ext_lambda_receiver() {
+    const LIB5: &str = "package lib\n\
+        class GenericReceiver {\n\
+            fun inspect(block: List<String>.() -> String): String = block(listOf(\"OK\"))\n\
+        }\n";
+    common::expect_box_ok_against(
+        "member_parameterized_ext_lambda",
+        LIB5,
+        "import lib.GenericReceiver\n\
+         fun box(): String {\n\
+             val result = GenericReceiver().inspect { if (this[0].length == 2) this[0] else \"F\" }\n\
+             return result\n\
+         }\n",
+    );
+}
+
+/// Named lambda arguments to a classpath member with two PLAIN function-typed parameters are a
+/// regression control for the same semantic-slot mapping used by the receiver-lambda case above.
+/// Reversed source order must preserve each named parameter's position at invocation.
 #[test]
 fn classpath_member_lambda_named_args() {
-    const LIB5: &str = "package lib\n\
+    const LIB6: &str = "package lib\n\
         class Pair2 {\n\
             fun two(a: () -> String, b: () -> String): String = a() + b()\n\
         }\n";
     common::expect_box_ok_against(
         "member_lambda_named",
-        LIB5,
+        LIB6,
         "import lib.Pair2\n\
          fun box(): String {\n\
              val named = Pair2().two(b = { \"x\" }, a = { \"y\" })\n\

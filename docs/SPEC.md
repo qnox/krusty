@@ -1280,26 +1280,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **A classpath MEMBER taking a RECEIVER lambda (`Recv.() -> R`) binds the lambda's `this`.**
   `@Metadata` marks such a value parameter with the `@ExtensionFunctionType` type annotation;
-  krusty always decoded it (`MetaValueParam.recv_fun`/`recv_fun_receiver`) but only wired it into
-  the call sig for TOP-LEVEL functions (`CallSig::metadata_top_level`), so a member's
+  krusty always decoded it (`MetaValueParam.recv_fun`/`recv_fun_receiver`) but previously wired it
+  only into the call sig for TOP-LEVEL functions, so a member's
   `Builder.() -> Unit` parameter was indistinguishable from a leading value parameter
   `(Builder) -> Unit` and every lambda literal failed overload matching one arity short — a
-  companion-object factory reached through the type name (ktor's `Parameters.build { … }`) fell
-  through to the "unresolved Java static" catch-all. `MetaFn::member_call_sig` now records the same
-  `lambda_receivers`/`lambda_receiver_params` shape (via the shared `CallSig::
-  set_lambda_receiver_shape`), and the checker's pre-selection lambda hook
-  (`classpath_lambda_expectations`, generalised from SAM-only) derives the expected shape of ANY
-  function-typed parameter — receiver split out per the call-sig mark — typing the literal with
+  companion-object factory reached through the type name (`FactoryApi.create { … }`) fell
+  through to the "unresolved Java static" catch-all. Member and receiver-less top-level metadata
+  now share `CallSig::metadata_function`, which records the same
+  `lambda_receivers`/`lambda_receiver_params`/`lambda_materialized` shape, and the checker's
+  pre-selection lambda hook
+  (`provider_member_lambda_expectations`, generalised from SAM-only) derives the expected shape of
+  ANY function-typed parameter — receiver split out per the call-sig mark — typing the literal with
   `check_lambda_with_receiver_labeled`, mirroring the top-level HOF path; the hook's candidate
   probe also sees through `Type → companion object`, the same fallback the call resolution
   applies. EXTENSION call sigs stay unwired on purpose: extension calls already bind lambda
   receivers through `extension_lambda_shape`, and a second channel re-routed scope-function blocks
   (`run { this@C … }`) onto receiver-lambda paths whose lowering cannot resolve a labeled `this`.
   A generic receiver (`block: T.() -> R`) names no receiver class in metadata, so the expectation
-  recovers it from the SUBSTITUTED parameter type. Known limit (pre-existing): NAMED arguments to
-  a receiver function-type member parameter still check the lambda standalone — the
-  named-argument slot path (`record_classpath_member_call_with_slots`) has no expectation channel
-  and rejected such calls before this change too.
+  recovers it from the SUBSTITUTED parameter type. Expectations are mapped from source arguments
+  through the selected `CallSig`'s semantic parameter slots before specialization, so reordered
+  NAMED arguments and trailing/defaulted call shapes receive the declaration slot's lambda shape
+  instead of whichever parameter happens to share the source argument's position.
   Test: `tests/classpath_companion_ext_lambda_e2e.rs`.
 
 - **Aliased imports (`import a.b.Member as Alias`).** The import map binds the alias directly to the
