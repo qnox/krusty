@@ -5640,13 +5640,60 @@ impl<'a> Lower<'a> {
         record_suspend: bool,
     ) -> u32 {
         let logical_ret = callable.ret;
-        let call = self.emit_static_call(
-            callable.owner_type(),
-            callable.name,
-            callable.descriptor,
-            callable.inline,
-            args,
-        );
+        // A member of an `object` / `companion object` brought into scope by `import Owner.name`: its
+        // realization is an INSTANCE invoke on the singleton, not a facade static. Resolution recorded
+        // exactly which field holds it (a plain object's `INSTANCE`, or the outer class's field for a
+        // companion), so the load is a read of that field and the invoke is virtual.
+        let call = if let Some(singleton) = callable.singleton_dispatch.clone() {
+            let receiver = self.emit_external_static_field(
+                singleton.owner.render(),
+                &singleton.name,
+                singleton.descriptor.clone(),
+            );
+            if callable.inline.must_inline() {
+                // `@InlineOnly` (the shape `Duration.Companion`'s accessors have): the method is
+                // non-public, so there is no call to make — the backend splices its body with the
+                // singleton bound as the receiver, which is what a `Static` callee carrying a
+                // `dispatch_receiver` means. Matched on `must_inline` rather than `can_inline`: an
+                // OPTIONAL splice may decline, and its fallback is an `invokestatic` — which would be
+                // the wrong instruction entirely for an instance method.
+                self.emit_call(
+                    Callee::Static {
+                        owner: callable.owner_type(),
+                        name: callable.name.clone(),
+                        descriptor: callable.descriptor.clone(),
+                        inline: callable.inline,
+                    },
+                    Some(receiver),
+                    args,
+                )
+            } else {
+                // The VERBATIM descriptor, never one rebuilt from `params`: `Ty` does not distinguish
+                // `B`/`S` from `I`, so a rebuilt descriptor silently widens a `Byte`/`Short` parameter
+                // and the emitted call names a method that does not exist. That resolves, compiles and
+                // VERIFIES, failing only at runtime with `NoSuchMethodError` — the worst failure shape
+                // available. The class file's own spelling is already on the callable.
+                self.emit_call(
+                    Callee::Virtual {
+                        owner: callable.owner_type(),
+                        name: callable.name.clone(),
+                        descriptor: callable.descriptor.clone(),
+                        params: None,
+                        interface: false,
+                    },
+                    Some(receiver),
+                    args,
+                )
+            }
+        } else {
+            self.emit_static_call(
+                callable.owner_type(),
+                callable.name,
+                callable.descriptor,
+                callable.inline,
+                args,
+            )
+        };
         if record_suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
@@ -7586,18 +7633,17 @@ impl<'a> Lower<'a> {
         let mut arg_prelude = Vec::new();
         if c.default_call {
             if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+                let vararg_index = c.vararg_index.filter(|&index| {
+                    c.params
+                        .get(index)
+                        .is_some_and(|p| p.array_elem().is_some())
+                });
                 let (slot_args, prelude) =
-                    self.lower_call_slot_args_source_order(args, &slots, &c.params, true)?;
+                    self.lower_default_slot_args(args, &slots, &c.params, vararg_index)?;
                 a = slot_args;
                 arg_prelude = prelude;
-                self.append_default_masks_marker(
-                    &mut a,
-                    c.params.len(),
-                    slots
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, slot)| slot.is_none().then_some(index)),
-                );
+                let masked = Self::default_masked_slots(&slots, vararg_index).collect::<Vec<_>>();
+                self.append_default_masks_marker(&mut a, c.params.len(), masked);
             } else {
                 self.append_default_call_args(
                     &mut a,
@@ -14620,7 +14666,44 @@ impl<'a> Lower<'a> {
             params,
             fill_omitted,
             None,
+            None,
         )
+    }
+
+    /// [`Self::lower_call_slot_args_source_order`] for a `$default` call that may OMIT a vararg.
+    ///
+    /// A vararg slot is not defaultable: the `$default` stub passes the array straight through, so
+    /// kotlinc emits an EMPTY array for an omitted vararg and leaves its mask bit clear. A zero
+    /// placeholder there reaches the real function as `null` and trips its non-null parameter check
+    /// at runtime. Callers must mask with [`Self::default_masked_slots`] to match.
+    fn lower_default_slot_args(
+        &mut self,
+        source_args: &[AstExprId],
+        slots: &[Option<AstExprId>],
+        params: &[Ty],
+        vararg_index: Option<usize>,
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        self.lower_call_slot_args_source_order_with_element(
+            source_args,
+            slots,
+            params,
+            true,
+            None,
+            vararg_index,
+        )
+    }
+
+    /// The slots an omitting `$default` call must mark in its mask: every unfilled parameter except
+    /// the vararg, which carries an empty array instead (see [`Self::lower_default_slot_args`]).
+    fn default_masked_slots(
+        slots: &[Option<AstExprId>],
+        vararg_index: Option<usize>,
+    ) -> impl Iterator<Item = usize> + '_ {
+        slots
+            .iter()
+            .enumerate()
+            .filter(move |(index, _)| Some(*index) != vararg_index)
+            .filter_map(|(index, slot)| slot.is_none().then_some(index))
     }
 
     fn lower_call_slot_args_source_order_with_element(
@@ -14630,6 +14713,7 @@ impl<'a> Lower<'a> {
         params: &[Ty],
         fill_omitted: bool,
         elem_prim: Option<Ty>,
+        omitted_vararg: Option<usize>,
     ) -> Option<(Vec<u32>, Vec<u32>)> {
         if slots.len() != params.len() {
             return None;
@@ -14662,6 +14746,10 @@ impl<'a> Lower<'a> {
         for (i, tmp) in slot_temp.into_iter().enumerate() {
             match tmp {
                 Some(tmp) => lowered.push(self.emit_get_value(tmp)),
+                None if omitted_vararg == Some(i) => {
+                    let array = self.emit_vararg(ty_to_ir(params[i]), Vec::new());
+                    lowered.push(array);
+                }
                 None if fill_omitted => lowered.push(self.zero_placeholder(params[i])),
                 None => return None,
             }
@@ -14898,6 +14986,14 @@ impl<'a> Lower<'a> {
             .as_deref()
             .map(|s| self.syms.libraries.signature_formal_names(s))
             .unwrap_or_default();
+        crate::trace_compiler!(
+            "splice",
+            "reified_call_subst_for {}.{} signature={:?} formals={formals:?} targs={:?}",
+            c.owner.render(),
+            c.name,
+            c.signature,
+            self.info.resolved_call_type_args.get(&ast_call)
+        );
         // The type ARGUMENTS come pre-resolved from the checker (`resolved_call_type_args`) — the checker
         // resolves imports/classpath types the lowerer's local `ty_ref` can't (a wildcard-imported class).
         if let Some(targs) = self.info.resolved_call_type_args.get(&ast_call) {
@@ -22932,18 +23028,18 @@ impl<'a> Lower<'a> {
                     // arguments and mask exactly the unmapped slots.
                     if ctx_n == 0 && self.info.resolved_call_arg_slots.contains_key(&e) {
                         let slots = self.info.resolved_call_arg_slots.get(&e).cloned()?;
+                        let vararg_index = c.vararg_index.filter(|&index| {
+                            c.params
+                                .get(index)
+                                .is_some_and(|p| p.array_elem().is_some())
+                        });
                         let (slot_args, prelude) =
-                            self.lower_call_slot_args_source_order(&args, &slots, &c.params, true)?;
+                            self.lower_default_slot_args(&args, &slots, &c.params, vararg_index)?;
                         a.extend(slot_args);
                         arg_prelude = prelude;
-                        self.append_default_masks_marker(
-                            &mut a,
-                            c.params.len(),
-                            slots
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(index, slot)| slot.is_none().then_some(index)),
-                        );
+                        let masked =
+                            Self::default_masked_slots(&slots, vararg_index).collect::<Vec<_>>();
+                        self.append_default_masks_marker(&mut a, c.params.len(), masked);
                     } else {
                         // A `name$default` call (`assertEquals(a, b)` omits the `message` default):
                         // lower the provided prefix, then append a placeholder per omitted trailing
@@ -22993,7 +23089,16 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
+                // A TOP-LEVEL `inline fun <reified T>` (`nameOf<Svc>()`) needs the same reified
+                // substitution an extension splice records: without it the emitter cannot specialize
+                // the callee's `reifiedOperationMarker` body and falls back to a direct call, which
+                // for a reified callee only ever throws. There is no receiver to infer `T` from, so
+                // the call's own type arguments are the whole binding.
+                let reified_subst = self.reified_call_subst_for(e, &c, None);
                 let call = self.emit_library_static_call(c, a, call_suspend);
+                if !reified_subst.is_empty() {
+                    self.ir.reified_call_subst.insert(call, reified_subst);
+                }
                 let call = if arg_prelude.is_empty() {
                     call
                 } else {
@@ -24192,7 +24297,7 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         self.lower_call_slot_args_source_order_with_element(
-                            &args, &slots, &mparams, false, elem_prim,
+                            &args, &slots, &mparams, false, elem_prim, None,
                         )?
                     } else {
                         let mut lowered = Vec::new();

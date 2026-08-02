@@ -1,0 +1,102 @@
+//! A call to a CLASSPATH top-level `inline fun <reified T>` compiled, then threw
+//! `UnsupportedOperationException: This function has a reified type parameter and thus can only be
+//! inlined at compilation time` when run.
+//!
+//! The splice machinery was fine; its INPUT was missing. `reified_call_subst_for` — which pairs the
+//! callee's formal type-parameter names with the call's type arguments — was invoked only on the two
+//! EXTENSION lowering paths, so a top-level call recorded no substitution, `splice_unified` refused to
+//! specialize a `reifiedOperationMarker` body it could not bind, and the emitter fell back to a direct
+//! call. That fallback is a miscompile for a reified callee: kotlinc's compiled body exists only to
+//! throw. The guard meant to catch exactly this (`ir_emit`: bail rather than fall back) was keyed on
+//! the same absent substitution, so it never fired — the reason a wrong program compiled clean.
+//!
+//! An extension `<reified T>` splice was already covered (`filterIsInstance<String>()`); this pins the
+//! top-level form, which is what `mockk<T>()` and most test-double builders are.
+use super::common;
+
+const LIB: &str = r#"
+    package lib
+
+    inline fun <reified T : Any> nameOf(): String = T::class.simpleName ?: "?"
+
+    inline fun <reified T : Any> describe(prefix: String = "<", suffix: String = ">"): String =
+        prefix + (T::class.simpleName ?: "?") + suffix
+
+    inline fun <reified T : Any> isA(value: Any): Boolean = value is T
+"#;
+
+/// A reified inline whose DEFAULT is a lambda typed on `T`. kotlinc marks the `$default` body with
+/// `Intrinsics.needClassReification` — "regenerate the class this materializes, per call site".
+const NEEDS_CLASS_REIFICATION: &str = r#"
+    package lib
+
+    inline fun <reified T : Any> configure(block: T.() -> Unit = {}): String =
+        (T::class.simpleName ?: "?") + "/configured"
+"#;
+
+#[test]
+fn top_level_reified_inline_call_splices_and_runs() {
+    let Some(libout) = common::compile_lib("reified_inline_top_level", LIB) else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let classpath = [libout, stdlib];
+    // `nameOf` reifies into `T::class`; `isA` into an `instanceof`; `describe` covers the shapes
+    // crossed with defaults — all supplied, all omitted, and one named while an earlier is omitted
+    // (the `$default` synthetic, whose body is equally splice-only).
+    let main = "import lib.describe\n\
+        import lib.isA\n\
+        import lib.nameOf\n\
+        fun box(): String {\n\
+        \x20 if (nameOf<String>() != \"String\") return \"nameOf: ${nameOf<String>()}\"\n\
+        \x20 if (describe<String>(\"[\", \"]\") != \"[String]\") return \"supplied: ${describe<String>(\"[\", \"]\")}\"\n\
+        \x20 if (describe<String>() != \"<String>\") return \"omitted: ${describe<String>()}\"\n\
+        \x20 if (describe<String>(suffix = \"}\") != \"<String}\") return \"named: ${describe<String>(suffix = \"}\")}\"\n\
+        \x20 if (!isA<String>(\"x\")) return \"isA true\"\n\
+        \x20 if (isA<String>(7)) return \"isA false\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(&jdk)) else {
+        panic!(
+            "compile/run returned None: {:?}",
+            common::front_end_diagnostics(main, &classpath, Some(&jdk))
+        );
+    };
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn a_body_needing_class_reification_bails_instead_of_miscompiling() {
+    // krusty splices INSTRUCTIONS; it cannot regenerate a dependency's compiled inner classes, which
+    // is exactly what `needClassReification` demands. Reusing the erased-`T` copy — or falling back to
+    // a direct call, which throws — would both be miscompiles, so the backend REFUSES the call. This
+    // pins the refusal: the day class regeneration lands, this test is what says so.
+    let Some(libout) = common::compile_lib("reified_needs_reification", NEEDS_CLASS_REIFICATION)
+    else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let classpath = [libout, stdlib];
+    let main = "import lib.configure\n\
+        fun box(): String = configure<String>()\n";
+    let diagnostics = common::front_end_diagnostics(main, &classpath, Some(&jdk));
+    // The front end accepts it — resolution is fine; the BACKEND is what must refuse.
+    assert!(
+        diagnostics.is_empty(),
+        "resolution should succeed, got {diagnostics:?}"
+    );
+    assert!(
+        common::compile_in_process(main, "Main", &classpath, Some(&jdk)).is_none(),
+        "a needClassReification body must not be emitted as a call that throws at runtime"
+    );
+}

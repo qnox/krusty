@@ -14031,8 +14031,10 @@ impl<'a> Checker<'a> {
         &self,
         name: &str,
         arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
-        self.top_level_lambda_shape_in_scope(name, arg_tys, None)
+        self.top_level_lambda_shape_in_scope(name, arg_tys, arg_names, trailing_lambda, None)
     }
 
     fn lambda_overload_partially_applicable(
@@ -14221,6 +14223,8 @@ impl<'a> Checker<'a> {
         &self,
         name: &str,
         arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
         scope: Option<&[TypeName]>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let resolver = match scope {
@@ -14233,16 +14237,41 @@ impl<'a> Checker<'a> {
                 .map(crate::symbol_resolver::Symbol::overloads)
                 .unwrap_or_default(),
         };
-        let has_exact = fs.has_top_level_arity(arg_tys.len());
+        let labelled = arg_names.is_some_and(|names| names.iter().any(Option::is_some));
+        // A labelled call's arity says nothing about which parameters are filled — `f(budget = 3) { }`
+        // supplies two arguments to a three-parameter function — so the exact-arity narrowing below
+        // applies only to a purely positional call.
+        let has_exact = !labelled && fs.has_top_level_arity(arg_tys.len());
         for o in fs.top_level() {
             if has_exact && o.semantic_params().len() != arg_tys.len() {
                 continue;
             }
-            let Some(argument_map) = crate::symbol_resolver::trailing_default_arg_indices(
-                o.semantic_params().len(),
-                arg_tys,
-            ) else {
-                continue;
+            // A labelled argument binds by NAME, not by position: the positional map would align
+            // `f(budget = 3) { }`'s `Int` against parameter 0, find the overload inapplicable, and
+            // leave the trailing lambda unshaped — typed `() -> Unit` with no receiver, which then
+            // fails against the callee's block parameter. Mirrors `extension_lambda_shape`.
+            let argument_map = if labelled {
+                // The FULL Kotlin mapping — labels, defaults, vararg, and the trailing-lambda rule
+                // (an unlabelled `{ … }` binds the LAST parameter, not the next position). A label
+                // naming no parameter of THIS overload only rules out this overload.
+                let Some(map) = call_argument_parameter_indices(
+                    arg_tys.len(),
+                    o.semantic_params().len(),
+                    arg_names,
+                    trailing_lambda,
+                    &o.call_sig,
+                ) else {
+                    continue;
+                };
+                map
+            } else {
+                let Some(map) = crate::symbol_resolver::trailing_default_arg_indices(
+                    o.semantic_params().len(),
+                    arg_tys,
+                ) else {
+                    continue;
+                };
+                map
             };
             if !self.lambda_overload_partially_applicable(o, None, arg_tys, &argument_map) {
                 continue;
@@ -28630,6 +28659,8 @@ impl<'a> Checker<'a> {
                                 let shape = self.top_level_lambda_shape_in_scope(
                                     &name,
                                     &partial,
+                                    arg_names.as_deref(),
+                                    true,
                                     Some(&pkg_scope),
                                 );
                                 if let Some(pt) = shape
@@ -30901,7 +30932,14 @@ impl<'a> Checker<'a> {
                     .filter(|_| has_lambda_argument)
                     // A library top-level function only when no user function shadows it.
                     .filter(|_| known_sig.is_none())
-                    .and_then(|partial| self.top_level_lambda_shape(&fname, partial));
+                    .and_then(|partial| {
+                        self.top_level_lambda_shape(
+                            &fname,
+                            partial,
+                            arg_names.as_deref(),
+                            self.file.call_has_trailing_lambda.contains(&call.0),
+                        )
+                    });
                 let mut known_generic_bindings = if let Some((_, bindings)) = adapted_outer {
                     bindings
                 } else if let Some(generic) =
@@ -32384,14 +32422,41 @@ impl<'a> Checker<'a> {
                         None => (args.to_vec(), arg_tys.clone(), None),
                     };
                     let arg_kinds = self.call_arg_kinds(&sel_args);
-                    let resolved = match expected {
-                        Some(expected) => self.resolver().resolve_top_level_with_expected(
+                    // A labelled call that OMITS a parameter (`mockk(relaxed = true)`) is not a
+                    // positional call: `sel_args` is compacted to the arguments actually written, so
+                    // matching it against the leading parameters checks each argument against the
+                    // wrong declaration. Selection gets the parameter slot each argument named, and
+                    // only the `$default` synthetic can take the call (the base needs every argument).
+                    let named_slots = resolved_slots.as_ref().and_then(|slots| {
+                        let filled: Vec<usize> = slots
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(parameter, argument)| argument.map(|_| parameter))
+                            .collect();
+                        (filled.len() < slots.len()).then_some(filled)
+                    });
+                    let named_resolved = named_slots.as_ref().and_then(|slots| {
+                        let arg_tys: Vec<Ty> = arg_kinds
+                            .iter()
+                            .map(|argument| crate::symbol_resolver::CallArgKind::ty(*argument))
+                            .collect();
+                        self.resolver().resolve_top_level_named_default_callable(
+                            &fname,
+                            &arg_tys,
+                            slots,
+                            &call_targs,
+                            expected,
+                        )
+                    });
+                    let resolved = match (named_resolved, expected) {
+                        (Some(c), _) => Some(c),
+                        (None, Some(expected)) => self.resolver().resolve_top_level_with_expected(
                             &fname,
                             &arg_kinds,
                             &call_targs,
                             expected,
                         ),
-                        None => self
+                        (None, None) => self
                             .resolver()
                             .resolve_symbol_with_literal_args(
                                 crate::symbol_resolver::SymRecv::TopLevel,
@@ -32424,6 +32489,14 @@ impl<'a> Checker<'a> {
                         // (see [`TypeInfo::resolved_top_level`]).
                         self.resolved_calls
                             .insert(call, ResolvedCall::TopLevel(c.clone()));
+                        // Stash the RESOLVED explicit type arguments, exactly as the extension arm
+                        // does: a TOP-LEVEL `inline fun <reified T>` (`nameOf<Svc>()`) is spliced,
+                        // and its `reifiedOperationMarker` body can only be specialized from them.
+                        // Imports/classpath types resolve here, not in the lowerer.
+                        if !call_targs.is_empty() {
+                            self.resolved_call_type_args
+                                .insert(call, call_targs.iter().copied().map(Some).collect());
+                        }
                         if let Some(slots) = resolved_slots {
                             self.resolved_call_arg_slots.insert(call, slots);
                         }
@@ -32432,7 +32505,26 @@ impl<'a> Checker<'a> {
                         let vararg = last_is_array
                             && (c.params.len() != arg_tys.len()
                                 || c.params.last().map_or(false, |p| arg_tys.last() != Some(p)));
-                        if vararg && !c.params.is_empty() {
+                        if let Some(slots) = named_slots.as_ref().filter(|_| c.default_call) {
+                            // The labelled, parameter-omitting form: each argument is checked against
+                            // the parameter its label named, not against the one at its position.
+                            for ((index, &parameter), &argument) in
+                                slots.iter().enumerate().zip(sel_args.iter())
+                            {
+                                if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                                    continue;
+                                }
+                                let Some(&declared) = c.params.get(parameter) else {
+                                    continue;
+                                };
+                                self.expect_library_call_arg(
+                                    declared,
+                                    arg_tys[index],
+                                    argument,
+                                    "argument",
+                                );
+                            }
+                        } else if vararg && !c.params.is_empty() {
                             let fixed = c.params.len() - 1;
                             let elem = c.vararg_elem.unwrap_or_else(|| {
                                 c.params[fixed].array_elem().unwrap_or(Ty::Error)

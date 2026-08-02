@@ -222,6 +222,17 @@ impl JvmLibraries {
             } else {
                 physical_ret
             };
+            // A value-class parameter erases to its underlying in the descriptor. Resolution compares
+            // the ARGUMENT's Kotlin type against these, so a `Duration`/`Tag` argument matches nothing
+            // while they stay erased. Restore the declared type — LAST, after every metadata/bytecode
+            // alignment above has matched against the erased form the class file actually spells. The
+            // emit `descriptor` keeps the physical form and the value-classes pass unboxes at the call,
+            // exactly how a mangled MEMBER with a value-class parameter is already exposed.
+            for (parameter, declared) in params.iter_mut().zip(&meta.value_class_params) {
+                if let Some(declared) = declared {
+                    *parameter = *declared;
+                }
+            }
             let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
             let generic_sig_for_callable = self.callable_generic_sig(
                 c.owner,
@@ -274,6 +285,264 @@ impl JvmLibraries {
             });
         }
         overloads
+    }
+
+    /// The OBJECT an import path's parent denotes, as a class internal name — or `None` when it denotes
+    /// a package (the common case) or a non-object type.
+    ///
+    /// An import path separates every segment alike (`kotlin/time/Duration/Companion`), but a NESTED
+    /// class is spelled with `$` (`kotlin/time/Duration$Companion`). Which trailing segments are nesting
+    /// is not knowable from the path, so each split point is tried outward-in until one names an object.
+    fn object_owner_internal(
+        &self,
+        path: TypeName,
+    ) -> Option<(TypeName, crate::libraries::StaticFieldRef)> {
+        let rendered = path.render();
+        // A plain `object` is `TypeKind::Object` — it carries its own `INSTANCE`. A COMPANION object does
+        // not: its singleton is a static field on the OUTER class (named after the companion, so a named
+        // companion is not `Companion`), which is why the type shape calls it a class. Both are objects
+        // as far as this namespace rule is concerned; the difference is only WHERE the singleton lives,
+        // and that field is returned so emit never has to guess a name.
+        let singleton =
+            |candidate: TypeName| -> Option<(TypeName, crate::libraries::StaticFieldRef)> {
+                let name = candidate.render();
+                let descriptor = format!("L{name};");
+                let field = |owner: TypeName, field_name: &str| crate::libraries::StaticFieldRef {
+                    owner,
+                    name: field_name.to_string(),
+                    descriptor: descriptor.clone(),
+                    ty: Ty::obj_name(candidate),
+                    constant: None,
+                };
+                if self
+                    .resolve_type_name(candidate)
+                    .is_some_and(|classifier| classifier.is_object())
+                {
+                    return Some((candidate, field(candidate, "INSTANCE")));
+                }
+                let (outer, simple) = name.rsplit_once('$')?;
+                let outer = type_name(outer);
+                let outer_class = self.cp.find_name(outer)?;
+                // The holder field is named after the companion itself (`Companion`, or its declared
+                // name), so require THAT name rather than accepting any static field of the nested
+                // type — an ordinary nested class held in a static field of its outer would otherwise
+                // read as an object with that field as its singleton.
+                let holder = outer_class.fields.iter().find(|f| {
+                    f.name == simple
+                        && f.descriptor == descriptor
+                        && f.access & crate::jvm::classreader::ACC_STATIC != 0
+                })?;
+                Some((candidate, field(outer, &holder.name)))
+            };
+        if let Some(hit) = singleton(path) {
+            return Some(hit);
+        }
+        // Nesting is a SUFFIX property, so convert trailing separators one at a time, keeping the ones
+        // already converted: `a/b/Outer/Inner` → `a/b/Outer$Inner` → `a/b$Outer$Inner`.
+        let mut candidate = rendered.clone();
+        for (at, _) in rendered.match_indices('/').rev() {
+            candidate.replace_range(at..=at, "$");
+            if let Some(hit) = singleton(type_name(&candidate)) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    /// Member EXTENSIONS named `name` declared inside the `object` / `companion object` `owner`, as
+    /// extension callables dispatched on that object's singleton.
+    ///
+    /// `import Duration.Companion.minutes` puts `minutes` in scope as an extension on `Int`, with
+    /// `Duration.Companion` supplying the dispatch receiver. Everything about selection is then ordinary
+    /// extension resolution — only the EMIT differs, and that difference rides on the callable as
+    /// [`LibraryCallable::singleton_dispatch`]. Nothing is contributed when `owner` is not an object
+    /// (the overwhelmingly common case: the parent really is a package).
+    fn object_member_extensions(
+        &self,
+        owner: TypeName,
+        name: &str,
+        overloads: &mut Vec<FunctionInfo>,
+        props: &mut Vec<PropertyInfo>,
+    ) {
+        let Some((owner, singleton)) = self.object_owner_internal(owner) else {
+            return;
+        };
+        let Some(class) = self.cp.find_name(owner) else {
+            return;
+        };
+        // A member's emit handle is the class's OWN method — resolved from `@Metadata`'s recorded JVM
+        // name + descriptor, never a `getX` guess, so `@JvmName` and value-class mangling
+        // (`getMinutes-UwyO8pc`) are carried verbatim.
+        //
+        // A NON-public one is `@InlineOnly` (`Duration.Companion`'s `minutes` accessor is `private`):
+        // there is no legal call site for it, so it must be SPLICED, which is what `MustInline` tells
+        // the backend. Returning the inline kind rather than a yes/no keeps that distinction where the
+        // bytecode fact is read.
+        let declared = |jvm_name: &str, desc: &str| {
+            class
+                .methods
+                .iter()
+                .find(|method| method.name == jvm_name && method.descriptor == desc)
+                .map(|method| InlineKind::from_flags(!method.is_public(), !method.is_public()))
+        };
+        for function in super::metadata::class_functions(&class) {
+            if function.kotlin_name != name || !function.is_extension() || !function.is_public() {
+                continue;
+            }
+            // A `suspend` member extension appends a `Continuation` parameter and erases its return,
+            // and the singleton dispatch does not yet thread the CPS form. Surfacing it would let the
+            // front end accept a call the backend then drops — a clean compile that emits nothing,
+            // which is exactly the silent-green shape this work set out to remove. Leave it
+            // unresolved (a diagnostic) until the CPS shape is threaded here.
+            if function.is_suspend() {
+                continue;
+            }
+            let Some(desc) = function.jvm_desc else {
+                continue;
+            };
+            let Some(function_inline) = declared(&function.jvm_name, desc) else {
+                continue;
+            };
+            let Some((params, physical_ret)) = parse_method_desc(desc) else {
+                continue;
+            };
+            if params.is_empty() {
+                continue; // an extension's first parameter IS its receiver
+            }
+            let generic_sig = function.generic_sig.clone();
+            let receiver = generic_sig
+                .as_ref()
+                .and_then(|gsig| gsig.receiver)
+                .or_else(|| function.receiver_class.map(kotlin_type_name_to_ty))
+                .unwrap_or(params[0]);
+            let ret = metadata_return_info(function.ret_class, function.ret_nullable())
+                .apply(physical_ret);
+            let callable = LibraryCallable {
+                suspend: function.is_suspend(),
+                inline: function_inline,
+                context_count: function.context_count,
+                generic_sig: generic_sig.clone().map(Box::new),
+                singleton_dispatch: Some(Box::new(singleton.clone())),
+                ..LibraryCallable::library(
+                    owner,
+                    function.jvm_name.clone(),
+                    params,
+                    ret,
+                    physical_ret,
+                    desc.to_string(),
+                )
+            };
+            overloads.push(FunctionInfo {
+                ret: metadata_return_info(function.ret_class, function.ret_nullable()),
+                visibility: function.visibility,
+                generic_sig,
+                context_count: function.context_count,
+                call_sig: function.member_call_sig(),
+                flags: FnFlags {
+                    inline: InlineKind::None,
+                    suspend: function.is_suspend(),
+                    operator: function.is_operator(),
+                },
+                ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
+            });
+        }
+        for property in super::metadata::class_properties(&class) {
+            if property.name != name || !property.is_extension {
+                continue;
+            }
+            let Some(getter_sig) = property.getter.as_ref() else {
+                continue;
+            };
+            let Some(getter_inline) = declared(&getter_sig.name, &getter_sig.desc) else {
+                continue;
+            };
+            let Some((getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
+                continue;
+            };
+            if getter_params.len() != 1 {
+                continue; // exactly the extension receiver
+            }
+            let property_gsig = property.generic_sig.clone();
+            let fallback = property
+                .ret_class
+                .map_or(getter_ret, kotlin_type_name_to_ty);
+            let property_ty = property_gsig.as_ref().map_or_else(
+                || {
+                    if property.ret_nullable {
+                        Ty::nullable(fallback)
+                    } else {
+                        fallback
+                    }
+                },
+                |gsig| gsig.ret,
+            );
+            let accessor = |jvm_name: &str,
+                            desc: &str,
+                            params: Vec<Ty>,
+                            ret: Ty,
+                            physical: Ty,
+                            inline: InlineKind| {
+                LibraryCallable {
+                    inline,
+                    singleton_dispatch: Some(Box::new(singleton.clone())),
+                    ..LibraryCallable::library(
+                        owner,
+                        jvm_name.to_string(),
+                        params,
+                        ret,
+                        physical,
+                        desc.to_string(),
+                    )
+                }
+            };
+            let setter = property.setter.as_ref().and_then(|setter_sig| {
+                let setter_inline = declared(&setter_sig.name, &setter_sig.desc)?;
+                let (params, ret) = parse_method_desc(&setter_sig.desc)?;
+                (params.len() == 2 && ret == Ty::Unit).then(|| {
+                    accessor(
+                        &setter_sig.name,
+                        &setter_sig.desc,
+                        params,
+                        Ty::Unit,
+                        ret,
+                        setter_inline,
+                    )
+                })
+            });
+            props.push(PropertyInfo {
+                kind: PropKind::Extension,
+                receiver: property_gsig
+                    .as_ref()
+                    .and_then(|gsig| gsig.receiver)
+                    .or_else(|| {
+                        Some(
+                            property
+                                .receiver_class
+                                .map_or(getter_params[0], Ty::obj_name),
+                        )
+                    }),
+                formals: property_gsig
+                    .as_ref()
+                    .map(|gsig| gsig.formals.clone())
+                    .unwrap_or_default(),
+                ty: property_ty,
+                context_count: 0,
+                getter: accessor(
+                    &getter_sig.name,
+                    &getter_sig.desc,
+                    getter_params,
+                    property_ty,
+                    getter_ret,
+                    getter_inline,
+                ),
+                setter,
+                is_const: property.is_const,
+                visibility: property.visibility,
+                owner,
+                receiver_rank: 0,
+                source_key: None,
+            });
+        }
     }
 
     pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
@@ -2202,6 +2471,13 @@ impl SymbolSource for JvmLibraries {
         // Extension PROPERTIES of the source name live in the CALLABLE namespace's property half. A name is
         // functions XOR a property, so these are surfaced separately and chosen when there are no functions.
         let mut props: Vec<PropertyInfo> = Vec::new();
+        // The fqn's parent need not be a PACKAGE. `import kotlin.time.Duration.Companion.minutes` names a
+        // member of an OBJECT, and Kotlin's rule is that importing one brings it into scope with that
+        // object as its implicit dispatch receiver — so an object-like classifier is a legal parent of a
+        // callable name, exactly like a package. Its member EXTENSIONS are surfaced here; the singleton is
+        // recorded on the callable (`singleton_dispatch`) because the emit is an instance invoke on
+        // `Owner.INSTANCE` / `Outer.Companion`, not a facade `invokestatic`.
+        self.object_member_extensions(pkg, &name, &mut overloads, &mut props);
         // Extension discovery is @Metadata-driven (the source of truth), NOT a scan of JVM statics: the
         // package's PUBLIC facades' metadata carry each extension's SOURCE receiver, parameters, return
         // (with nullability), visibility, and generic signature. The JVM method (`@JvmName`-mangled name +
