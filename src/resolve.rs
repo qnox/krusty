@@ -10186,8 +10186,35 @@ fn record_function_capture_targets(
     record_capture_targets(file, targets, roots, discovered)
 }
 
+/// Kotlin gives these unqualified instance methods a fixed return even when source omits the
+/// annotation. Keep this source-shape rule shared by method checking and any pass that predicts
+/// whether method checking can publish an inferred return: duplicating the list would let an
+/// optimization silently diverge from the semantic path when a contract is added or corrected.
+fn implicit_object_contract_return(function: &FunDecl) -> Option<Ty> {
+    match (
+        function.receiver.is_none(),
+        function.name.as_str(),
+        function.params.len(),
+    ) {
+        (true, "compareTo", 1) => Some(Ty::Int),
+        (true, "equals", 1) => Some(Ty::Boolean),
+        (true, "hashCode", 0) => Some(Ty::Int),
+        (true, "toString", 0) => Some(Ty::String),
+        _ => None,
+    }
+}
+
+fn method_may_publish_inferred_return(function: &FunDecl) -> bool {
+    function.ret.is_none()
+        && implicit_object_contract_return(function).is_none()
+        && matches!(function.body, FunBody::Expr(_))
+}
+
 struct ClassCapturePlan {
-    method_check_prefix_len: usize,
+    /// One decision per method in the retained instance/enum-entry prefix. A shorter vector means
+    /// the remaining suffix is irrelevant; `false` inside the vector means semantic checking may be
+    /// skipped but the checker's ordered mutation summary must still advance past that method.
+    methods: Vec<bool>,
     companion_methods: Vec<bool>,
 }
 
@@ -10197,11 +10224,13 @@ impl ClassCapturePlan {
     /// method only asks the corresponding generic function seam which ordered method owns each
     /// target.
     ///
-    /// Instance and enum-entry methods publish inferred returns into shared checker state. Keep the
-    /// exact prefix through the last capture-bearing method. A target in any other class region
-    /// keeps the complete prefix because constructors, properties, init blocks, enum arguments, and
-    /// companion functions may consume those published returns. Companion functions themselves do
-    /// not publish into that cross-function cache, so they can be selected independently.
+    /// Instance and enum-entry methods publish inferred returns into shared checker state. Retain
+    /// the exact prefix through the last capture-bearing method, but semantically check within that
+    /// prefix only methods that own a target or can publish such a return. A target in any other
+    /// class region keeps the complete prefix because constructors, properties, init blocks, enum
+    /// arguments, and companion functions may consume those published returns. Companion functions
+    /// themselves do not publish into that cross-function cache, so they can be selected
+    /// independently.
     fn for_class(
         file: &File,
         class: &ClassDecl,
@@ -10219,17 +10248,25 @@ impl ClassCapturePlan {
             )
             .collect::<Vec<_>>();
         let mut method_targets = std::collections::HashSet::new();
-        let mut method_check_prefix_len = 0;
-        for (index, method) in methods.iter().enumerate() {
-            if record_function_capture_targets(file, method, targets, &mut method_targets) {
-                method_check_prefix_len = index + 1;
-            }
-        }
+        let mut selected_methods = methods
+            .iter()
+            .map(|method| {
+                record_function_capture_targets(file, method, targets, &mut method_targets)
+            })
+            .collect::<Vec<_>>();
+        let mut method_check_prefix_len = selected_methods
+            .iter()
+            .rposition(|selected| *selected)
+            .map_or(0, |index| index + 1);
         if declaration_targets
             .iter()
             .any(|target| !method_targets.contains(target))
         {
             method_check_prefix_len = methods.len();
+        }
+        selected_methods.truncate(method_check_prefix_len);
+        for (selected, method) in selected_methods.iter_mut().zip(methods) {
+            *selected |= method_may_publish_inferred_return(method);
         }
 
         let mut companion_targets = std::collections::HashSet::new();
@@ -10241,7 +10278,7 @@ impl ClassCapturePlan {
             })
             .collect();
         Self {
-            method_check_prefix_len,
+            methods: selected_methods,
             companion_methods,
         }
     }
@@ -11014,15 +11051,17 @@ fn check_file_at_impl_mode(
                         }
                     }
                 }
-                let method_check_prefix_len = capture_scope
+                let method_capture_plan = capture_scope
                     .as_ref()
-                    .and_then(|scope| scope.class_plans.get(&d))
-                    .map_or(usize::MAX, |plan| plan.method_check_prefix_len);
+                    .and_then(|scope| scope.class_plans.get(&d));
                 let mut method_check_index = 0;
                 for m in &cl.methods {
-                    if method_check_index < method_check_prefix_len {
-                        c.check_method(m, &props);
-                    }
+                    c.check_method_in_capture_plan(
+                        m,
+                        &props,
+                        method_capture_plan,
+                        method_check_index,
+                    );
                     method_check_index += 1;
                 }
                 // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
@@ -11067,9 +11106,12 @@ fn check_file_at_impl_mode(
                         c.pop_scope();
                     }
                     for bm in &entry.methods {
-                        if method_check_index < method_check_prefix_len {
-                            c.check_method(bm, &entry_props);
-                        }
+                        c.check_method_in_capture_plan(
+                            bm,
+                            &entry_props,
+                            method_capture_plan,
+                            method_check_index,
+                        );
                         method_check_index += 1;
                     }
                 }
@@ -12472,6 +12514,30 @@ impl<'a> Checker<'a> {
         if let Some(body) = body {
             collect_all_reassigned(self.file, body, &mut self.fn_reassigned);
             collect_closure_reassigned(self.file, body, &mut self.fn_closure_reassigned);
+        }
+    }
+
+    /// Apply one ordered class-capture method decision. A missing plan is the conservative full-walk
+    /// fallback used both outside capture discovery and when target-inventory completeness failed.
+    /// A missing entry in a present plan is instead the irrelevant suffix after the final target.
+    /// Skipped non-publishers inside the retained prefix still replace the mutation summary because
+    /// `check_method` normally performs that state transition before semantic work, and a later
+    /// selected class region reads these checker-wide sets while discovering mutable captures.
+    fn check_method_in_capture_plan(
+        &mut self,
+        function: &FunDecl,
+        properties: &[ScopedProperty],
+        plan: Option<&ClassCapturePlan>,
+        method_index: usize,
+    ) {
+        let Some(plan) = plan else {
+            self.check_method(function, properties);
+            return;
+        };
+        match plan.methods.get(method_index) {
+            Some(true) => self.check_method(function, properties),
+            Some(false) => self.reset_body_mutations(fun_body_expr(&function.body)),
+            None => {}
         }
     }
 
@@ -18149,13 +18215,7 @@ impl<'a> Checker<'a> {
                 .push((label_index, recv_ref.span));
             self.this_extension_receiver = Some(recv_ref.span);
         }
-        let object_contract_ret = match (f.receiver.is_none(), f.name.as_str(), f.params.len()) {
-            (true, "compareTo", 1) => Some(Ty::Int),
-            (true, "equals", 1) => Some(Ty::Boolean),
-            (true, "hashCode", 0) => Some(Ty::Int),
-            (true, "toString", 0) => Some(Ty::String),
-            _ => None,
-        };
+        let object_contract_ret = implicit_object_contract_return(f);
         self.ret_ty = f
             .ret
             .as_ref()
@@ -32908,7 +32968,10 @@ fun target(seed: Int): Marker {
     return object : Marker { fun value(): Int = captured }
 }
 class MethodHost {
-    fun untouched(): Int = 2
+    fun declared(): Int = 2
+    fun inferred() = source()
+    override fun toString() = source()
+    fun block(): Int { return 2 }
     fun build(seed: Int): Marker {
         val captured = seed
         return object : Marker { fun value(): Int = captured }
@@ -32916,9 +32979,17 @@ class MethodHost {
     fun defaulted(value: Marker = object : Marker {}): Marker = value
     fun after(): Int = 3
 }
+class PropertyHost {
+    fun declared(): Int = 2
+    fun inferred() = source()
+    override fun toString() = source()
+    fun block(): Int { return 2 }
+    val target: Marker = object : Marker { fun value(): Int = 4 }
+    fun laterInferred() = source()
+}
 class CompanionHost {
-    fun dependency(): Int = 4
-    fun later(): Int = 5
+    fun dependency() = source()
+    fun declared(): Int = 5
     companion object {
         fun untouched(): Int = 6
         fun build(seed: Int): Marker {
@@ -32951,7 +33022,14 @@ fun after(): Int = 3
 
         assert_eq!(
             named,
-            vec!["top", "defaulted", "target", "MethodHost", "CompanionHost"]
+            vec![
+                "top",
+                "defaulted",
+                "target",
+                "MethodHost",
+                "PropertyHost",
+                "CompanionHost"
+            ]
         );
 
         let class = |name: &str| {
@@ -32970,8 +33048,23 @@ fun after(): Int = 3
             .get(&method_host)
             .expect("selected class should have a complete plan");
         // The last target is in a parameter default, proving the generic function-root seam is not
-        // a body-only shortcut. The unrelated suffix remains outside the semantic capture walk.
-        assert_eq!(method_plan.method_check_prefix_len, 3);
+        // a body-only shortcut. Within that prefix, only an inferred-return publisher and the two
+        // target owners require semantic checking; declared, block-body, and fixed-contract methods
+        // retain only the cheap mutation-summary transition. The unrelated suffix is omitted.
+        assert_eq!(
+            method_plan.methods,
+            vec![false, true, false, false, true, true]
+        );
+
+        let (property_host, _) = class("PropertyHost");
+        let property_plan = scope
+            .class_plans
+            .get(&property_host)
+            .expect("selected class should have a complete plan");
+        // A property target retains the complete ordered method sequence, including a publisher
+        // after the property. This is intentionally conservative because the checker processes
+        // method return publication before later class regions.
+        assert_eq!(property_plan.methods, vec![false, true, false, false, true]);
 
         let (companion_host, _) = class("CompanionHost");
         let companion_plan = scope
@@ -32979,8 +33072,9 @@ fun after(): Int = 3
             .get(&companion_host)
             .expect("selected class should have a complete plan");
         // A target in a companion function lies outside the ordered instance-method sequence, so
-        // both instance methods are retained while companion functions remain independently scoped.
-        assert_eq!(companion_plan.method_check_prefix_len, 2);
+        // the full sequence is represented, but only its inferred-return publisher is checked.
+        // Companion functions remain independently scoped.
+        assert_eq!(companion_plan.methods, vec![true, false]);
         assert_eq!(companion_plan.companion_methods, vec![false, true]);
     }
 
