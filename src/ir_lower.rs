@@ -20638,6 +20638,14 @@ impl<'a> Lower<'a> {
                 let receiver = self.coerce_argument_value(receiver, this_ty, target)?;
                 return Some(self.emit_extension_property_get(e, *getter, receiver));
             }
+            // A classpath TOP-LEVEL property read: the facade's static getter, no receiver.
+            if let Some(ExprLowering::TopLevelPropertyGet { getter }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let physical_ret = getter.physical_ret;
+                let call = self.emit_library_static_call(*getter, Vec::new(), false);
+                return Some(self.coerce_erased_call_result(e, call, &physical_ret, true));
+            }
             if let Some(ExprLowering::IntrinsicProperty(member)) =
                 self.info.expr_lowers.get(&e).cloned()
             {

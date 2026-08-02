@@ -579,7 +579,23 @@ pub(crate) fn specialized_lambda_member_params(
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    specialized_lambda_params(&member.params, member.generic_sig.as_ref(), args, type_args)
+    // A `suspend` member's generic signature carries the trailing `Continuation` that its LOGICAL
+    // parameter list drops. Trim it so the two align — otherwise specialization bails on the length
+    // check and every lambda argument of a suspend member loses its expected shape.
+    let trimmed;
+    let generic_sig = match member.generic_sig.as_ref() {
+        Some(signature)
+            if member.suspend() && signature.params.len() == member.params.len() + 1 =>
+        {
+            trimmed = GenericSig {
+                params: signature.params[..member.params.len()].to_vec(),
+                ..signature.clone()
+            };
+            Some(&trimmed)
+        }
+        signature => signature,
+    };
+    specialized_lambda_params(&member.params, generic_sig, args, type_args)
 }
 
 fn specialized_lambda_params(
@@ -1676,6 +1692,29 @@ impl<'a> SymbolResolver<'a> {
             .unwrap_or_default()
     }
 
+    /// The receiver-less TOP-LEVEL property this unqualified name denotes, over the resolver's import
+    /// scope (`import pkg.plugin`, `import pkg.*`, or the file's own package). The property analogue of
+    /// the `SymRecv::TopLevel` callable query: a read of the name is a read of this property, realized
+    /// through its declaring facade's static getter. `None` when the name is not a top-level property, or
+    /// when two in-scope packages declare one (ambiguous — the caller reports the name unresolved rather
+    /// than picking arbitrarily).
+    pub fn resolve_top_level_property(&self, name: &str) -> Option<PropertyInfo> {
+        let mut candidates = self
+            .symbols_in_scope(name)
+            .into_iter()
+            .flat_map(|(_, symbols)| match &symbols.callables {
+                crate::libraries::Callables::Properties(properties) => properties.overloads.clone(),
+                crate::libraries::Callables::Both { properties, .. } => {
+                    properties.overloads.clone()
+                }
+                _ => Vec::new(),
+            })
+            .filter(|property| property.kind == PropKind::TopLevel)
+            .filter(|property| property.context_count == 0);
+        let selected = candidates.next()?;
+        candidates.next().is_none().then_some(selected)
+    }
+
     /// Select the nearest in-scope extension property, rejecting equal-rank candidates.
     pub fn resolve_extension_property(
         &self,
@@ -2669,6 +2708,33 @@ impl<'a> SymbolResolver<'a> {
         Some(mapping)
     }
 
+    /// The parameter types a `$default` synthetic would actually receive `args` at, or `None` when it
+    /// cannot take the call. The measure a defaulted call is RANKED by: only the parameters the call
+    /// supplies distinguish two candidates, the omitted ones are filled identically either way. Reads the
+    /// mapping the same way the emit does — by LABEL when the arguments name their parameters, else
+    /// positionally — so ranking never disagrees with what it ranks.
+    fn default_call_shape(
+        &self,
+        info: &FunctionInfo,
+        args: &[Ty],
+        slots: Option<&[usize]>,
+    ) -> Option<Vec<Ty>> {
+        if !info.public() && !info.flags.inline.must_inline() {
+            return None;
+        }
+        let params = &info.callable.params;
+        let mapping = match slots {
+            Some(slots) => self.named_default_arg_mapping(info, params, args, slots)?,
+            None => self.default_arg_mapping(info, params, args)?,
+        };
+        Some(
+            mapping
+                .iter()
+                .filter_map(|(parameter, _)| params.get(*parameter).copied())
+                .collect(),
+        )
+    }
+
     fn default_arg_mapping(
         &self,
         info: &FunctionInfo,
@@ -2680,7 +2746,11 @@ impl<'a> SymbolResolver<'a> {
         if args.len() > real_count {
             return None;
         }
-        let fits = |p: &Ty, a: &Ty| arg_fits_platform(self.lib, p, a);
+        // Applicability is a SOURCE question: an argument fits a parameter when it is assignable to it,
+        // subtypes included (`plainDefault(sub)` for `plainDefault(base: Base, n: Int = 3)`). The
+        // platform-only check answers "same erased shape", which silently rejects every subtype argument
+        // — and only on the defaulted path, so the same call with all arguments spelled out resolved.
+        let fits = |p: &Ty, a: &Ty| self.arg_fits_or_subtype(p, a);
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
         if trailing_lambda && args.len() < real_count {
             let last_param = real_count.checked_sub(1)?;
@@ -2828,8 +2898,38 @@ impl<'a> SymbolResolver<'a> {
             Some(callable)
         };
         let fsd = function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default")));
-        for o in fsd.top_level() {
-            if let Some(callable) = try_default(o) {
+        // Applicability alone does not choose: with `pick(b: Base, n: Int = 3)` and `pick(s: Sub, n: Int
+        // = 4)` both in scope, `pick(Sub())` fits BOTH, and the answer is the most specific one — the same
+        // rule the all-arguments-spelled-out path applies. Order the applicable synthetics so a candidate
+        // no other dominates is tried first; declaration order breaks ties, as before.
+        let applicable: Vec<(Vec<Ty>, &FunctionInfo)> = fsd
+            .top_level()
+            .filter_map(|o| Some((self.default_call_shape(o, args, slots)?, o)))
+            .collect();
+        let dominated: Vec<bool> = applicable
+            .iter()
+            .map(|(shape, _)| {
+                applicable.iter().any(|(other, _)| {
+                    other.len() == shape.len()
+                        && other != shape
+                        && other.iter().zip(shape).all(|(&other, &own)| {
+                            resolution_subtype(self.lib, &self.src, other, own)
+                        })
+                })
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..applicable.len()).collect();
+        // Specificity first; then FEWER omitted defaults — `manyFirst("x")` against
+        // `manyFirst(a, b = 1)` and `manyFirst(a, b = 1, c = 2)` is the two-parameter one, whichever
+        // order the classpath lists them in. Declaration order breaks what is left.
+        order.sort_by_key(|&index| {
+            (
+                usize::from(dominated[index]),
+                applicable[index].1.callable.params.len(),
+            )
+        });
+        for index in order {
+            if let Some(callable) = try_default(applicable[index].1) {
                 return Some(callable);
             }
         }

@@ -126,6 +126,7 @@ fn parse_type_gsig_node(
     let mut tp_id = None;
     let mut tpn_id = None;
     let mut nullable = false;
+    let mut anno_id = None;
     let mut args: Vec<Ty> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
@@ -156,12 +157,31 @@ fn parse_type_gsig_node(
                 }
                 args.push(arg.unwrap_or_else(|| Ty::obj("kotlin/Any")));
             }
+            (100, 2) => {
+                // Type.annotation (extension field 100) — `Annotation.id` = 1. A RECEIVER function type
+                // (`Cfg.() -> Unit`) is a plain `kotlin/FunctionN` classifier carrying the
+                // `@kotlin.ExtensionFunctionType` annotation; without it the decoded `Ty::Fun` would read
+                // as an ordinary `(Cfg) -> Unit` and never match a receiver-lambda argument.
+                let n = pb.varint()? as usize;
+                let abody = pb.bytes(n)?;
+                let mut ap = Pb { b: abody, i: 0 };
+                while !ap.at_end() {
+                    let at = ap.varint()?;
+                    match (at >> 3, at & 7) {
+                        (1, 0) => anno_id = ap.varint(),
+                        (_, w) => ap.skip(w)?,
+                    }
+                }
+            }
             (_, w) => pb.skip(w)?,
         }
     }
+    let receiver_fun = anno_id
+        .and_then(|id| resolve_class_name(records, d2, id as usize))
+        .is_some_and(|name| name == "kotlin/ExtensionFunctionType");
     let ty = if let Some(id) = class_id {
         let internal = resolve_class_name(records, d2, id as usize)?;
-        gsig_from_kotlin_class(&internal, args)
+        gsig_from_kotlin_class(&internal, args, receiver_fun)
     } else if let Some(id) = tp_id {
         tparams.get(&id).map(|n| {
             let bound = bounds
@@ -190,11 +210,16 @@ fn parse_type_gsig_node(
 /// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
 /// [`Ty::Fun`] (args are `[P1..Pn, R]`), a Kotlin primitive collapses to its dedicated [`Ty`] variant (so
 /// it matches a JVM-descriptor primitive downstream), everything else stays a [`Ty::Obj`].
-fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>) -> Ty {
+///
+/// `receiver_fun` is the type's `@kotlin.ExtensionFunctionType` mark: a receiver function type carries
+/// its receiver as the FIRST type argument, which [`Ty::Fun`] models as the first parameter binding
+/// `this` (`has_receiver`).
+fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>, receiver_fun: bool) -> Ty {
     if let Some(arity) = internal.strip_prefix("kotlin/Function") {
         if arity.parse::<u8>().is_ok() {
             let ret = args.pop().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            return Ty::fun(args, ret);
+            let has_receiver = receiver_fun && !args.is_empty();
+            return Ty::fun_with_shape(args, ret, 0, has_receiver, false);
         }
     }
     // Arrays are `Obj` types. A boxed `Array<T>` carries its element as a type argument — built directly

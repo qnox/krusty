@@ -140,6 +140,8 @@ mod classpath_covariant_override_e2e;
 mod classpath_ctor_vs_same_named_function_e2e;
 #[path = "classpath_data_copy_e2e.rs"]
 mod classpath_data_copy_e2e;
+#[path = "classpath_default_arg_subtype_e2e.rs"]
+mod classpath_default_arg_subtype_e2e;
 #[path = "classpath_default_args_e2e.rs"]
 mod classpath_default_args_e2e;
 #[path = "classpath_default_vararg_call_e2e.rs"]
@@ -158,6 +160,8 @@ mod classpath_jdk_static_e2e;
 mod classpath_jvmstatic_object_property_e2e;
 #[path = "classpath_member_metadata_alignment_e2e.rs"]
 mod classpath_member_metadata_alignment_e2e;
+#[path = "classpath_member_receiver_lambda_e2e.rs"]
+mod classpath_member_receiver_lambda_e2e;
 #[path = "classpath_named_arg_skips_default_e2e.rs"]
 mod classpath_named_arg_skips_default_e2e;
 #[path = "classpath_nested_ctor_reordered_named_valueclass_e2e.rs"]
@@ -188,6 +192,8 @@ mod classpath_protected_member_e2e;
 mod classpath_qualified_nested_named_ctor_e2e;
 #[path = "classpath_receiver_lambda_e2e.rs"]
 mod classpath_receiver_lambda_e2e;
+#[path = "classpath_receiver_lambda_overload_e2e.rs"]
+mod classpath_receiver_lambda_overload_e2e;
 #[path = "classpath_reified_inline_toplevel_e2e.rs"]
 mod classpath_reified_inline_toplevel_e2e;
 #[path = "classpath_runblocking_e2e.rs"]
@@ -200,6 +206,8 @@ mod classpath_subtype_ctor_arg_e2e;
 mod classpath_super_ctor_args_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
+#[path = "classpath_top_level_property_e2e.rs"]
+mod classpath_top_level_property_e2e;
 #[path = "classpath_type_ref_e2e.rs"]
 mod classpath_type_ref_e2e;
 #[path = "classpath_typealias_e2e.rs"]

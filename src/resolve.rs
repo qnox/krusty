@@ -10120,6 +10120,12 @@ pub enum ExprLowering {
         receiver: Ty,
         ty: Ty,
     },
+    /// A bare-name read of a TOP-LEVEL property (`import pkg.plugin; plugin.tag`), resolved to its
+    /// declaring facade's receiver-less static getter. The checker is the sole resolver; lowering emits
+    /// this callable instead of rediscovering the property.
+    TopLevelPropertyGet {
+        getter: Box<crate::libraries::LibraryCallable>,
+    },
     /// A Kotlin invoke-operator call (`a(args)`, equivalently `a.invoke(args)`) selected by the
     /// checker. The one convention covers both a function VALUE receiver (`Ty::Fun`, lowered to a
     /// direct function invocation) and a non-function receiver carrying a member `operator fun invoke`
@@ -14152,35 +14158,40 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .map(|(argument, &parameter)| {
+                // The receiver comes from the parameter's own function TYPE (already substituted into
+                // `param_types`), which carries the receiver's type ARGUMENTS (`Config<T>.() -> Unit` with
+                // `T` bound by this call). `call_sig.lambda_receivers` is the weaker fallback: a callable
+                // with no generic signature records only the receiver's CLASS, so preferring it would
+                // shape the lambda against a raw `Config` and lose the binding.
                 overload
                     .call_sig
-                    .lambda_receivers
+                    .lambda_receiver_params
                     .get(parameter)
                     .copied()
+                    .unwrap_or(false)
+                    .then(|| {
+                        let context_count = overload
+                            .call_sig
+                            .lambda_context_counts
+                            .get(parameter)
+                            .copied()
+                            .unwrap_or_default();
+                        shape
+                            .param_types
+                            .as_ref()
+                            .and_then(|types| types.get(argument))
+                            .and_then(|types| types.get(context_count))
+                            .copied()
+                    })
                     .flatten()
-                    .map(|receiver| crate::symbol_resolver::ty_subst(receiver, &binds))
                     .or_else(|| {
                         overload
                             .call_sig
-                            .lambda_receiver_params
+                            .lambda_receivers
                             .get(parameter)
                             .copied()
-                            .unwrap_or(false)
-                            .then(|| {
-                                let context_count = overload
-                                    .call_sig
-                                    .lambda_context_counts
-                                    .get(parameter)
-                                    .copied()
-                                    .unwrap_or_default();
-                                shape
-                                    .param_types
-                                    .as_ref()
-                                    .and_then(|types| types.get(argument))
-                                    .and_then(|types| types.get(context_count))
-                                    .copied()
-                            })
                             .flatten()
+                            .map(|receiver| crate::symbol_resolver::ty_subst(receiver, &binds))
                     })
             })
             .collect::<Vec<_>>();
@@ -16858,6 +16869,16 @@ impl<'a> Checker<'a> {
         } else {
             None
         }
+    }
+
+    /// The TOP-LEVEL property an unqualified name denotes, over this file's import scope — asked of the
+    /// federated symbol source, so where it was declared is not this rung's question. Only a property with
+    /// an accessible getter and a value-shaped type is a read; anything a nearer scope declares (a local, a
+    /// member, this module's own top-level properties) is resolved by an earlier rung and shadows it.
+    fn top_level_property(&self, name: &str) -> Option<crate::libraries::PropertyInfo> {
+        self.resolver()
+            .resolve_top_level_property(name)
+            .filter(|property| property.getter.ret.is_read_value_result())
     }
 
     fn source_class_decl_by_internal(&self, internal: TypeName) -> Option<ClassDecl> {
@@ -22540,6 +22561,18 @@ impl<'a> Checker<'a> {
                     self.expr_lowers
                         .insert(e, ExprLowering::IntrinsicProperty(Box::new(member)));
                     ret
+                } else if let Some(property) = self.top_level_property(&n) {
+                    // A TOP-LEVEL property read (`import pkg.plugin; plugin`): its value is its declaring
+                    // facade's static getter call. Last among the value rungs — every enclosing scope
+                    // (locals, members, objects) shadows an imported top-level property.
+                    let ty = property.ty;
+                    self.expr_lowers.insert(
+                        e,
+                        ExprLowering::TopLevelPropertyGet {
+                            getter: Box::new(property.getter),
+                        },
+                    );
+                    ty
                 } else {
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -26206,8 +26239,15 @@ impl<'a> Checker<'a> {
             &ctor_params,
             self.file.call_has_trailing_lambda.contains(&call.0),
         )?;
+        // Type only arguments this call has not typed yet. This constructor is one CANDIDATE for a
+        // `Name(args)` whose name may also be a top-level function; re-checking an argument that already
+        // has a type would overwrite it with the expected-type-free one — a trailing lambda already shaped
+        // against the function's receiver parameter (`Cfg.() -> Unit`) would fall back to `() -> Unit`,
+        // after which neither this constructor nor the function accepts the call.
         for &a in slots.iter().flatten() {
-            self.expr(a);
+            if self.expr_types[a.0 as usize] == Ty::Error {
+                self.expr(a);
+            }
         }
         if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
             let tys: Vec<Ty> = ordered
