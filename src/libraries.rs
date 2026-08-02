@@ -853,10 +853,24 @@ impl CallSig {
         vararg_index: Option<usize>,
     ) -> Self {
         let mut sig = CallSig::metadata_base(param_count, names, defaults, vararg_index);
-        sig.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
-        sig.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
+        sig.set_lambda_receiver_shape(param_count, lambda_receivers, lambda_receiver_params);
         sig.lambda_materialized = vec_for_arity(lambda_materialized, param_count);
         sig
+    }
+
+    /// Record which value parameters are RECEIVER function types (`Recv.() -> R`, from
+    /// `@Metadata`'s `@ExtensionFunctionType`): the receiver's type per parameter
+    /// (`lambda_receivers`) and the plain flag (`lambda_receiver_params`). Each list is kept only
+    /// when it aligns with `param_count`, so consumers can index positionally without
+    /// re-validating arity.
+    pub(crate) fn set_lambda_receiver_shape(
+        &mut self,
+        param_count: usize,
+        lambda_receivers: Vec<Option<Ty>>,
+        lambda_receiver_params: Vec<bool>,
+    ) {
+        self.lambda_receivers = vec_for_arity(lambda_receivers, param_count);
+        self.lambda_receiver_params = vec_for_arity(lambda_receiver_params, param_count);
     }
 
     pub fn metadata_extension(

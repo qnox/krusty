@@ -1629,7 +1629,28 @@ impl MetaFn {
             self.vararg_index(),
         );
         sig.platform_nullable_params = self.value_params.iter().map(|p| p.nullable()).collect();
+        self.set_lambda_receiver_shape(&mut sig);
         sig
+    }
+
+    /// Wire the decoded `@ExtensionFunctionType` value-param facts (`Recv.() -> R`) into the call
+    /// sig — the same shape the top-level path records via [`CallSig::metadata_top_level`], so a
+    /// MEMBER call's lambda argument binds its implicit `this` exactly like a top-level HOF's
+    /// does. Without it the receiver is indistinguishable from a leading value parameter and
+    /// overload matching rejects the (one-arity-shorter) lambda literal. EXTENSION call sigs
+    /// deliberately stay unwired: an extension call's lambda arguments already bind receivers
+    /// through the extension-resolution channel (`extension_lambda_shape`), and a second source
+    /// would re-route scope-function blocks (`run { this@C … }`) onto receiver-lambda paths whose
+    /// lowering cannot resolve a labeled `this`.
+    fn set_lambda_receiver_shape(&self, sig: &mut CallSig) {
+        sig.set_lambda_receiver_shape(
+            self.value_params.len(),
+            self.value_params
+                .iter()
+                .map(|p| p.recv_fun_receiver.map(crate::types::Ty::obj_name))
+                .collect(),
+            self.value_params.iter().map(|p| p.recv_fun()).collect(),
+        );
     }
 
     pub fn vararg_index(&self) -> Option<usize> {

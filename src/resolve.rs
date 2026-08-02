@@ -1059,6 +1059,58 @@ fn call_arg_kind(file: &File, expression: ExprId, ty: Ty) -> CallArgKind {
     }
 }
 
+/// A lambda argument's expected shape at one parameter position of a selected classpath
+/// candidate: the VALUE parameter types, plus the receiver type when the parameter is a receiver
+/// function type (`Recv.() -> R`). The lambda checks against this shape so its implicit
+/// `this`/`it` bind exactly as kotlinc binds them.
+#[derive(Clone, Debug)]
+struct LambdaExpectation {
+    value_params: Vec<Ty>,
+    receiver: Option<Ty>,
+}
+
+/// The expected shape of a lambda argument against the selected candidate's `param`: a Kotlin
+/// function-typed parameter contributes its input types — the receiver of an
+/// `@ExtensionFunctionType` parameter (`Recv.() -> R`, marked on the call sig's
+/// `lambda_receiver_params`) split from the leading position — and a Java SAM interface
+/// contributes its single method's parameter types. Any other parameter gives no expectation.
+fn lambda_expectation(
+    lib: &dyn crate::libraries::SemanticPlatform,
+    candidate: &crate::libraries::LibraryMember,
+    index: usize,
+    param: Ty,
+) -> Option<LambdaExpectation> {
+    match param.non_null() {
+        Ty::Fun(sig) => {
+            let has_receiver = candidate
+                .call_sig
+                .lambda_receiver_params
+                .get(index)
+                .copied()
+                .unwrap_or(false);
+            let (receiver, skip) = if has_receiver {
+                // A receiver mark without a receiver parameter means the call sig and the
+                // decoded type disagree — decline rather than type the lambda against a
+                // truncated shape.
+                let receiver = sig.params.get(sig.context_count).copied()?;
+                (Some(receiver), sig.context_count + 1)
+            } else {
+                (None, sig.context_count)
+            };
+            Some(LambdaExpectation {
+                value_params: sig.params.get(skip..).unwrap_or_default().to_vec(),
+                receiver,
+            })
+        }
+        param => crate::symbol_resolver::classpath_sam_signature(lib, param).map(|sam| {
+            LambdaExpectation {
+                value_params: sam.params,
+                receiver: None,
+            }
+        }),
+    }
+}
+
 fn positional_candidate_score(
     params: &[Ty],
     vararg: bool,
@@ -20025,14 +20077,18 @@ impl<'a> Checker<'a> {
         self.file.expr_uses_name(body, "it") && self.lookup("it").is_none()
     }
 
-    fn classpath_sam_param_types(
+    /// A lambda argument's expected shape at one parameter position of a classpath candidate: the
+    /// VALUE parameter types, plus the receiver type when the parameter is a receiver function
+    /// type (`Recv.() -> R`). The lambda checks against this shape so its implicit `this`/`it`
+    /// bind exactly as kotlinc binds them.
+    fn classpath_lambda_expectations(
         &self,
         receiver: crate::symbol_resolver::SymRecv<'_>,
         name: &str,
         args: &[ExprId],
         partial: &[Option<Ty>],
         type_args: &[Ty],
-    ) -> Option<Vec<Option<Vec<Ty>>>> {
+    ) -> Option<Vec<Option<LambdaExpectation>>> {
         let provisional: Vec<Ty> = args
             .iter()
             .enumerate()
@@ -20047,10 +20103,37 @@ impl<'a> Checker<'a> {
             .zip(provisional)
             .map(|(&arg, ty)| call_arg_kind(self.file, arg, ty))
             .collect();
+        // The probe is MEMBER-only by construction: `selected_member` reads the instance-call,
+        // object-instance, or companion facet, never the extension facet — so the specialized
+        // params are value-param based and align with the argument positions below.
         let candidate = self
             .resolver()
-            .resolve_symbol_with_literal_and_lambda_args(receiver, name, &arg_kinds, type_args)?
-            .selected_member()?;
+            .resolve_symbol_with_literal_and_lambda_args(receiver, name, &arg_kinds, type_args)
+            .and_then(crate::symbol_resolver::Symbol::selected_member)
+            .or_else(|| {
+                // `Type.name(args)` whose member lives on the type's COMPANION OBJECT
+                // (`Parameters.build { … }`): the probe above sees neither a static nor an
+                // instance member of the type itself, so retry against the companion's type —
+                // the same fallback the call resolution below applies.
+                let internal = match receiver {
+                    crate::symbol_resolver::SymRecv::Type(internal) => type_name(internal),
+                    crate::symbol_resolver::SymRecv::TypeName(internal) => internal,
+                    _ => return None,
+                };
+                let companion = self
+                    .resolved_type_name(internal)?
+                    .companion_object
+                    .clone()?
+                    .1;
+                self.resolver()
+                    .resolve_symbol_with_literal_and_lambda_args(
+                        crate::symbol_resolver::SymRecv::Value(Ty::obj_name(companion)),
+                        name,
+                        &arg_kinds,
+                        type_args,
+                    )
+                    .and_then(crate::symbol_resolver::Symbol::selected_member)
+            })?;
         Some(
             crate::symbol_resolver::specialized_sam_member_params(
                 &candidate, &arg_kinds, type_args,
@@ -20058,15 +20141,13 @@ impl<'a> Checker<'a> {
             .into_iter()
             .enumerate()
             .map(|(index, param)| {
-                if arg_kinds
+                if !arg_kinds
                     .get(index)
                     .is_some_and(|arg| arg.is_lambda_literal())
                 {
-                    crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, param)
-                        .map(|sam| sam.params)
-                } else {
-                    None
+                    return None;
                 }
+                lambda_expectation(&*self.syms.libraries, &candidate, index, param)
             })
             .collect(),
         )
@@ -20121,10 +20202,11 @@ impl<'a> Checker<'a> {
     }
 
     /// Argument kinds for a classpath static/companion call whose parameters may be Java SAM
-    /// interfaces. Non-lambda arguments are checked normally; a lambda argument is checked against
-    /// the selected candidate's SPECIALIZED SAM parameter types (so `it` gets the SAM method's
-    /// parameter type, not `Any`), falling back to a plain check when no SAM signature applies.
-    fn classpath_sam_arg_kinds(
+    /// interfaces or Kotlin function types. Non-lambda arguments are checked normally; a lambda
+    /// argument is checked against the selected candidate's SPECIALIZED expectation (so `it` gets
+    /// the SAM method's parameter type, or `this` the `Recv.() -> R` receiver, not `Any`), falling
+    /// back to a plain check when no expectation applies.
+    fn classpath_lambda_arg_kinds(
         &mut self,
         receiver: crate::symbol_resolver::SymRecv<'_>,
         name: &str,
@@ -20136,7 +20218,7 @@ impl<'a> Checker<'a> {
             .map(|&arg| (self.lambda_probe_ty(arg).is_none()).then(|| self.expr(arg)))
             .collect();
         let lambda_params =
-            self.classpath_sam_param_types(receiver, name, args, &partial, type_args);
+            self.classpath_lambda_expectations(receiver, name, args, &partial, type_args);
         args.iter()
             .enumerate()
             .map(|(index, &arg)| {
@@ -20144,9 +20226,11 @@ impl<'a> Checker<'a> {
                     match lambda_params
                         .as_ref()
                         .and_then(|all| all.get(index))
-                        .and_then(Option::as_deref)
+                        .and_then(Option::as_ref)
                     {
-                        Some(params) => self.check_lambda_with_types(arg, params),
+                        Some(expectation) => {
+                            self.check_lambda_with_expectation(arg, expectation, None)
+                        }
                         None => partial[index].unwrap_or_else(|| self.expr(arg)),
                     }
                 } else {
@@ -20155,6 +20239,21 @@ impl<'a> Checker<'a> {
                 call_arg_kind(self.file, arg, ty)
             })
             .collect()
+    }
+
+    /// Check a lambda argument against its classpath expectation: with the receiver binding
+    /// (`this`) for a `Recv.() -> R` parameter, else against plain value parameter types.
+    fn check_lambda_with_expectation(
+        &mut self,
+        arg: ExprId,
+        expectation: &LambdaExpectation,
+        label: Option<&str>,
+    ) -> Ty {
+        if let Some(receiver) = expectation.receiver {
+            self.check_lambda_with_receiver_labeled(arg, receiver, &expectation.value_params, label)
+        } else {
+            self.check_lambda_with_types(arg, &expectation.value_params)
+        }
     }
 
     fn expect_library_call_arg(&mut self, expected: Ty, actual: Ty, expr: ExprId, context: &str) {
@@ -28874,7 +28973,7 @@ impl<'a> Checker<'a> {
                     if let Some(internal) = self.classpath_type_receiver_internal(receiver) {
                         let fq = internal.render();
                         let explicit_type_args = self.explicit_call_type_args(call);
-                        let arg_kinds = self.classpath_sam_arg_kinds(
+                        let arg_kinds = self.classpath_lambda_arg_kinds(
                             crate::symbol_resolver::SymRecv::Type(&fq),
                             &name,
                             args,
@@ -29006,7 +29105,7 @@ impl<'a> Checker<'a> {
                             .or_else(|| self.imports.get(&cls).cloned());
                         if let Some(internal) = receiver_class {
                             let explicit_type_args = self.explicit_call_type_args(call);
-                            let arg_kinds = self.classpath_sam_arg_kinds(
+                            let arg_kinds = self.classpath_lambda_arg_kinds(
                                 crate::symbol_resolver::SymRecv::Type(&internal),
                                 &name,
                                 args,
@@ -29270,9 +29369,9 @@ impl<'a> Checker<'a> {
                             .collect(),
                     )
                 });
-                let classpath_sam_pts = if ext_lambda_pts.is_none() {
+                let classpath_lambda_pts = if ext_lambda_pts.is_none() {
                     let explicit_type_args = self.explicit_call_type_args(call);
-                    self.classpath_sam_param_types(
+                    self.classpath_lambda_expectations(
                         crate::symbol_resolver::SymRecv::Value(rt),
                         &name,
                         args,
@@ -29343,9 +29442,13 @@ impl<'a> Checker<'a> {
                                     return c.check_lambda_with_types(a, pt);
                                 }
                             }
-                            if let Some(ref pts) = classpath_sam_pts {
-                                if let Some(pt) = pts.get(i).and_then(Option::as_deref) {
-                                    return c.check_lambda_with_types(a, pt);
+                            if let Some(ref pts) = classpath_lambda_pts {
+                                if let Some(expectation) = pts.get(i).and_then(Option::as_ref) {
+                                    return c.check_lambda_with_expectation(
+                                        a,
+                                        expectation,
+                                        call_fn_name.as_deref(),
+                                    );
                                 }
                             }
                             if let Some(ref pts) = ext_lambda_pts {
@@ -29376,17 +29479,17 @@ impl<'a> Checker<'a> {
                         .collect()
                 });
                 let arg_kinds = self.call_arg_kinds(args);
-                let has_classpath_sam = classpath_sam_pts
+                let has_lambda_expectation = classpath_lambda_pts
                     .as_ref()
                     .is_some_and(|params| params.iter().any(Option::is_some));
                 let classpath_arg_kinds: Vec<CallArgKind> = arg_kinds
                     .iter()
                     .map(|arg| {
                         match *arg {
-                            // A lambda probe is meaningful only when a classpath SAM candidate
+                            // A lambda probe is meaningful only when a classpath candidate
                             // supplied its expected parameter shape. Without one, keep the checked
                             // function type and avoid letting the resolver reinterpret the lambda.
-                            CallArgKind::LambdaLiteral(ty) if !has_classpath_sam => {
+                            CallArgKind::LambdaLiteral(ty) if !has_lambda_expectation => {
                                 CallArgKind::Typed(ty)
                             }
                             // Integer provenance is independent of SAM inference and must reach
@@ -30809,12 +30912,12 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                // A CLASSPATH member of an implicit receiver taking a SAM lambda
-                // (`Button().apply { addActionListener { … } }`): recover the SAM's parameter
-                // types the same way an explicit-receiver call does, so a lambda with no
-                // declared parameters types with the functional method's arity (`it` bound)
-                // instead of caching a zero-arity function type that no overload accepts.
-                let implicit_classpath_member_sam_pts = if implicit_member_lambda_enabled
+                // A CLASSPATH member of an implicit receiver whose parameter takes a lambda
+                // (`Button().apply { addActionListener { … } }`): recover the expected shape the
+                // same way an explicit-receiver call does, so a lambda with no declared parameters
+                // types with the functional method's arity (`it` bound) instead of caching a
+                // zero-arity function type that no overload accepts.
+                let implicit_classpath_member_lambda_pts = if implicit_member_lambda_enabled
                     && ordinary_this_member_lambda_shape.is_none()
                     && this_member_ext_lambda_plan.is_none()
                     && implicit_library_ext_lambda_shape.is_none()
@@ -30824,7 +30927,7 @@ impl<'a> Checker<'a> {
                     self.implicit_receiver_types()
                         .into_iter()
                         .find_map(|receiver| {
-                            self.classpath_sam_param_types(
+                            self.classpath_lambda_expectations(
                                 crate::symbol_resolver::SymRecv::Value(receiver),
                                 &fname,
                                 args,
@@ -30844,12 +30947,23 @@ impl<'a> Checker<'a> {
                             .and_then(|shape| shape.param_types.clone())
                     })
                     .or_else(|| {
-                        // Shape providers above carry `Vec<Vec<Ty>>` (every slot known); the SAM
-                        // probe knows only the lambda slots — default the rest to empty.
-                        implicit_classpath_member_sam_pts.map(|slots| {
+                        // Shape providers above carry `Vec<Vec<Ty>>` (every slot known, a
+                        // receiver INCLUDED at index 0); the expectation probe knows only the
+                        // lambda slots — default the rest to empty.
+                        implicit_classpath_member_lambda_pts.as_ref().map(|slots| {
                             slots
-                                .into_iter()
-                                .map(Option::unwrap_or_default)
+                                .iter()
+                                .map(|slot| {
+                                    slot.as_ref()
+                                        .map(|expectation| {
+                                            expectation
+                                                .receiver
+                                                .into_iter()
+                                                .chain(expectation.value_params.iter().copied())
+                                                .collect()
+                                        })
+                                        .unwrap_or_default()
+                                })
                                 .collect::<Vec<_>>()
                         })
                     });
@@ -30860,6 +30974,16 @@ impl<'a> Checker<'a> {
                         implicit_library_ext_lambda_shape
                             .as_ref()
                             .and_then(|shape| shape.receivers.clone())
+                    })
+                    .or_else(|| {
+                        implicit_classpath_member_lambda_pts.as_ref().map(|slots| {
+                            slots
+                                .iter()
+                                .map(|slot| {
+                                    slot.as_ref().and_then(|expectation| expectation.receiver)
+                                })
+                                .collect::<Vec<_>>()
+                        })
                     });
                 let ctor_lambda_types: Option<Vec<(Ty, bool)>> = if !self
                     .lexical_value_declares(&fname)
