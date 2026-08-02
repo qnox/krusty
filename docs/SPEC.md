@@ -875,19 +875,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ACC_PRIVATE` method/field is never spliced (the member is legal only inside the defining class;
   kotlinc rewrites to a synthetic `access$…` bridge krusty does not model — the fallback real call
   stays in the class).
-  **Cross-file source calls to top-level `inline fun`s link as facade statics.** A same-file call
+  **Cross-file source calls to `inline fun`s link as facade statics.** A same-file call
   splices the body; a call from ANOTHER file of the same module has no AST to splice, so the
   defining file lowers + emits the inline fun as a facade static (kotlinc's `public static
-  synthetic` shape) and the caller emits a plain `invokestatic` via the existing `Callee::CrossFile`
-  path. Emittability is gated twice — syntactically (`FunDecl::has_emittable_inline_body`:
-  top-level, non-reified, non-suspend) and semantically (`SymbolTable::inline_fn_facade_emittable`:
-  no value class in the signature — a cross-file `invokestatic` applies no mangling/erasure — and
-  no splice-only body shape: nested lambdas, anonymous objects, `try`/`break`/`continue`,
-  expression-position `return`, `is`/`as` on a type parameter) — with the shared registration
-  predicate `SymbolTable::emits_fn_facade` used by the backend, survey, and conformance drivers.
+  synthetic` shape — an extension rides the static's arg0) and the caller emits a plain
+  `invokestatic` via the existing `Callee::CrossFile` path. Emittability is gated twice —
+  syntactically (non-reified, non-suspend) and semantically
+  (`SymbolTable::inline_fn_facade_emittable`: no value class in the signature, receiver
+  included — a cross-file `invokestatic` applies no mangling/erasure — and no splice-only body
+  shape: a lambda that is stored or returned rather than passed to a call, anonymous objects,
+  `try`/`break`/`continue`, a labeled or expression-position `return`, `is`/`as` on a type
+  parameter; a `contract { … }` block is erased, not a closure) — with the shared registration
+  semantic predicate `SymbolTable::source_fn_has_callable_body` consumed by common IR lowering and
+  `jvm::prepare_module_symbols`; the latter is shared by backend, survey, and conformance drivers.
   Unsafe call sites BAIL rather than miscompile: an unregistered (unemittable) callee, a lambda
   argument with a non-local `return` or a mutating capture, a callable-reference/anonymous-function
-  argument, a function-typed variable, or an enclosing inline lambda parameter passed as a value
+  argument, or an enclosing inline lambda parameter passed as a value (an ordinary function-typed
+  variable is fine — its value is a real closure).
   (`tests/cross_file_inline_call_e2e.rs`).
 - **Collection `+=` (read-only vs mutable).** `coll += x` mutates in place when a `plusAssign` operator is
   applicable to the receiver, else reassigns (`coll = coll.plus(x)`) — exactly kotlinc's augmented-assignment

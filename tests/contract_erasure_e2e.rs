@@ -54,3 +54,18 @@ fn user_defined_contract_function_is_not_erased() {
         }\n";
     assert_eq!(run(SRC).expect("user contract not erased"), "OK");
 }
+
+#[test]
+fn local_contract_function_shadows_imported_intrinsic() {
+    // Lexical bindings outrank explicit/star imports. This local function must execute even though
+    // the real intrinsic is in the file's import scope; the shared top-level identity query runs
+    // only after the checker has excluded lexical values and local functions.
+    const SRC: &str = "import kotlin.contracts.*\n\
+        fun box(): String {\n\
+        \x20 var log = \"\"\n\
+        \x20 fun contract(block: () -> Unit) { log += \"ran\"; block() }\n\
+        \x20 contract { log += \"!\" }\n\
+        \x20 return if (log == \"ran!\") \"OK\" else \"fail: \" + log\n\
+        }\n";
+    assert_eq!(run(SRC).expect("local contract not erased"), "OK");
+}
