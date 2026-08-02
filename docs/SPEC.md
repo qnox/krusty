@@ -2401,13 +2401,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nullable scalar requires an erased-reference/boxing boundary not modeled here
   (`computed_prop_generic_return_e2e`).
 
-- **A cross-file source-class property access emits the DECLARATION's erased accessor descriptor.**
-  The emitter lowers per file, so a sibling source class has no classfile to ask; deriving the
-  accessor descriptor from the read's (substituted) logical type produced `Holder.getA:()LA;` — a
-  `NoSuchMethodError` against the erased `()Ljava/lang/Object;`. The lowerer now records the
-  declaration's erased physical type in `property_accessor_jvm_realizations` for cross-file source
-  reads/writes (the JVM value-class pass merges, keeping its own stamps authoritative), and the
-  emitter bridges the erased result to the logical type with a `checkcast`
+- **A property access retains both its logical use-site and semantic declaration types.** The
+  emitter lowers per file, so a sibling source class has no classfile to ask; deriving an accessor
+  descriptor from the read's substituted logical type produced `Holder.getA:()LA;` — a
+  `NoSuchMethodError` against the erased `()Ljava/lang/Object;`. Common lowering now records the
+  declaration type without branching on file/module/classpath origin or choosing a JVM accessor
+  spelling. The JVM emitter uses that semantic type only when it must derive a declaration-less
+  descriptor, then bridges the erased result to the logical type with a `checkcast`
   (`computed_prop_generic_return_e2e::cross_file_generic_member_read_uses_erased_accessor`).
 
 - **Member computed getters retry to a bounded fixpoint.** An unannotated member expression getter

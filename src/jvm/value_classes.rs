@@ -356,9 +356,7 @@ pub fn lower_value_classes(
     // this table only as its declaration-less fallback; same-file declarations and classpath metadata
     // remain authoritative. Keeping this target fact in a JVM-pass side table prevents common lowering
     // from branching on whether the owner came from this file, another module file, or the classpath.
-    // EXTEND the table, never replace it: the lowerer already stamped cross-file erased-generic
-    // accessors (whose declarations carry no value-class shape); value-class stamps win on overlap.
-    let vc_stamps: std::collections::HashMap<u32, (String, Ty)> = ir
+    ir.property_accessor_jvm_realizations = ir
         .exprs
         .iter()
         .enumerate()
@@ -406,7 +404,6 @@ pub fn lower_value_classes(
             Some((operation, (accessor, physical)))
         })
         .collect();
-    ir.property_accessor_jvm_realizations.extend(vc_stamps);
 
     let value_class_ids: Vec<u32> = (0..ir.classes.len() as u32)
         .filter(|&i| ir.classes[i as usize].is_value)

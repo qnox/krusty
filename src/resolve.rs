@@ -5014,7 +5014,7 @@ fn collect_signatures_with_cp_impl(
                                     if inferred == Ty::Error && bp.receiver.is_none() {
                                         pending_member_getters.push(PendingMemberGetter {
                                             file_index: i,
-                                            class_name: c.name.clone(),
+                                            owner: type_name(&internal),
                                             prop_name: bp.name.clone(),
                                             scope: property_scope.clone(),
                                             class_names: class_names.clone(),
@@ -7408,7 +7408,10 @@ fn infer_top_level_property_expr(
 /// with the exact scope and name resolution context of its first pass.
 struct PendingMemberGetter {
     file_index: usize,
-    class_name: String,
+    /// Exact semantic owner, rather than the source/display name used as one symbol-table index.
+    /// Two files may legally declare the same simple class name in different packages; retaining the
+    /// internal identity prevents a retry for one declaration from refreshing or mutating the other.
+    owner: TypeName,
     prop_name: String,
     scope: Vec<(String, Ty, bool)>,
     class_names: ClassNames,
@@ -7435,7 +7438,7 @@ fn finish_member_computed_getter_inference(
             // signatures: a same-class chain (`val b get() = h.a; val a get() = b`) sees the
             // sibling resolved by an earlier round instead of the frozen first-pass `Error`.
             if entry.scope.iter().any(|(_, ty, _)| *ty == Ty::Error) {
-                if let Some(sig) = table.classes.get(&entry.class_name) {
+                if let Some(sig) = table.class_by_type_name(entry.owner) {
                     for (name, ty, _) in &mut entry.scope {
                         if *ty == Ty::Error {
                             if let Some((_, current, _)) =
@@ -7460,7 +7463,7 @@ fn finish_member_computed_getter_inference(
                 return true;
             }
             changed = true;
-            if let Some(sig) = table.classes.get_mut(&entry.class_name) {
+            if let Some(sig) = table.class_by_type_name_mut(entry.owner) {
                 if let Some(property) = sig.declared_props.get_mut(&entry.prop_name) {
                     property.ty = inferred;
                 }

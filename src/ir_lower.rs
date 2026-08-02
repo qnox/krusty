@@ -13803,45 +13803,29 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// A property operation whose OWNER is a source class of ANOTHER file of this module: the
-    /// emitter has no classfile for it (its IR covers only this file's classes), so it cannot
-    /// read the accessor's erased descriptor from the declaration — and must NOT derive it from
-    /// the node's logical type, which is SUBSTITUTED at this site (`Holder<A>.a` reads as `A`,
-    /// but `Holder.getA` erases `T` to `Object`; calling `()LA;` is a `NoSuchMethodError`).
-    /// Record the declaration's erased PHYSICAL type in the side table the emitter consults as
-    /// its declaration-less fallback; the logical type drives the checkcast bridge. The JVM
-    /// value-class pass overrides these stamps for value-class-typed properties (mangled
-    /// accessor + underlying).
-    fn stamp_cross_file_property_access(
+    /// Preserve a property's declaration type beside the use-site-substituted type on the IR node.
+    /// This is a semantic fact, so collection is deliberately identical for an owner in this file, a
+    /// sibling file, or a dependency represented in the symbol table. For `Holder<A>.a`, for example,
+    /// the node remains logically `A` while the declaration type remains erased `T`/`Object`; a target
+    /// backend can use the latter for its call boundary and bridge the result to the former.
+    fn record_property_declaration_type(
         &mut self,
         id: u32,
         owner: TypeName,
         name: &str,
         logical: Ty,
-        write: bool,
     ) {
-        // Same-file owner: the emitter answers from the declaration, never the stamp.
-        if self.class_info_name(owner).is_some() {
-            return;
-        }
         let Some((_, property)) = self.syms.declared_member_prop(owner, name) else {
             return;
         };
-        let physical = property.storage_ty.unwrap_or(property.ty);
-        // Full-type inequality, not just erasure-class: nullability changes the descriptor for a
-        // PRIMITIVE (`Int` → `()I`, `Int?` → `()Ljava/lang/Integer;`), so a safe-call read of a
-        // cross-file primitive property needs the stamp even though the erased classes agree.
-        if physical == logical {
+        let declaration = property.storage_ty.unwrap_or(property.ty);
+        // Keep full-type inequality rather than comparing only erased classes: nullability changes a
+        // primitive's physical boundary (`Int` versus boxed `Int?`) even though its semantic scalar
+        // kind is otherwise the same.
+        if declaration == logical {
             return;
         }
-        let accessor = if write {
-            crate::names::property_setter_name(name)
-        } else {
-            property_getter_name(name)
-        };
-        self.ir
-            .property_accessor_jvm_realizations
-            .insert(id, (accessor, physical));
+        self.ir.property_declaration_types.insert(id, declaration);
     }
 
     fn lower_declared_property_read(
@@ -13879,7 +13863,7 @@ impl<'a> Lower<'a> {
             interface: self.property_owner_is_interface(owner),
             operation: None,
         });
-        self.stamp_cross_file_property_access(read, owner, name, ty, false);
+        self.record_property_declaration_type(read, owner, name, ty);
         Some(self.coerce_generic_read(read, e, ty))
     }
 
@@ -13907,7 +13891,7 @@ impl<'a> Lower<'a> {
             interface: self.property_owner_is_interface(owner),
             operation: None,
         });
-        self.stamp_cross_file_property_access(read, owner, name, ty, false);
+        self.record_property_declaration_type(read, owner, name, ty);
         Some(read)
     }
 
@@ -14135,9 +14119,7 @@ impl<'a> Lower<'a> {
                 interface: *interface,
                 operation: None,
             });
-            // The node carries the site-SUBSTITUTED type (`Holder<A>.a` reads as `A`); the
-            // accessor's descriptor must stay the declaration's erased form.
-            self.stamp_cross_file_property_access(read, *owner, name, ty, false);
+            self.record_property_declaration_type(read, *owner, name, ty);
             return Some(read);
         }
         let resolved = self.info.resolved_member(e).cloned().map(|r| {
@@ -17474,8 +17456,7 @@ impl<'a> Lower<'a> {
                 interface,
                 operation: None,
             });
-            // Same erased-descriptor rule as the read path (`lower_member_read_on`).
-            self.stamp_cross_file_property_access(write, owner, name, ty, true);
+            self.record_property_declaration_type(write, owner, name, ty);
             return Some(write);
         }
         // A property of a class THIS compilation declares. Same rule as everywhere else: name the
