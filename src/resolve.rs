@@ -10149,18 +10149,140 @@ pub fn discover_anonymous_object_captures(files: &[File], syms: &mut SymbolTable
     }
 }
 
+#[derive(Default)]
+struct PreinferPassResult {
+    changed_names: std::collections::HashSet<String>,
+}
+
+impl PreinferPassResult {
+    fn changed(&self) -> bool {
+        !self.changed_names.is_empty()
+    }
+}
+
+/// The exact function shape consumed by [`preinfer_returns_pass`]. Keep the worklist candidate filter
+/// on this predicate too: adding another inferred function shape must not make the pass capable of
+/// checking it while later fixpoint rounds silently exclude its file.
+fn function_needs_return_preinfer(function: &FunDecl) -> bool {
+    function.ret.is_none() && matches!(function.body, FunBody::Expr(_))
+}
+
+/// Return the receiver and expression getter for the exact member-extension property shape consumed
+/// by [`preinfer_returns_pass`]. An `Option` carries the operands as well as the eligibility decision,
+/// avoiding a parallel boolean predicate that could drift from the pass's destructuring.
+fn member_extension_property_preinfer_body(property: &PropDecl) -> Option<(&TypeRef, ExprId)> {
+    match (&property.receiver, &property.ty, &property.getter) {
+        (Some(receiver), None, Some(FunBody::Expr(getter))) => Some((receiver, *getter)),
+        _ => None,
+    }
+}
+
+fn file_has_preinfer_candidates(file: &File) -> bool {
+    file.decls
+        .iter()
+        .any(|&declaration| match file.decl(declaration) {
+            Decl::Fun(function) => function_needs_return_preinfer(function),
+            Decl::Class(class) => {
+                class.methods.iter().any(function_needs_return_preinfer)
+                    || class
+                        .body_props
+                        .iter()
+                        .any(|property| member_extension_property_preinfer_body(property).is_some())
+            }
+            Decl::Property(_) => false,
+        })
+}
+
+/// Whether a callable can be invoked without its source name appearing in the AST. Start with the
+/// checker's canonical synthetic-operator registry so this dependency gate automatically follows
+/// additions such as the bracket-assignment `set`/`put` fallback instead of maintaining a second
+/// arithmetic/operator list. The remaining names belong to syntax protocols that use other resolver
+/// paths (compound assignment, invocation, iteration, delegation, destructuring, equality, and `..<`).
+/// Ordinary infix functions such as `until`, `downTo`, and `step` are intentionally absent: the parser
+/// retains those names in an ordinary `Call`, so the explicit-name scan below handles them precisely.
+fn callable_name_may_be_implicit_in_ast(name: &str) -> bool {
+    SyntheticOperatorCall::from_name(name).is_some()
+        || name == CALLABLE_INVOKE_OPERATOR
+        || matches!(
+            name,
+            "plusAssign"
+                | "minusAssign"
+                | "timesAssign"
+                | "divAssign"
+                | "remAssign"
+                | "rangeUntil"
+                | "equals"
+                | "iterator"
+                | "hasNext"
+                | "next"
+                | "getValue"
+                | "setValue"
+                | "provideDelegate"
+        )
+        || name.strip_prefix("component").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// Whether a file may read a return changed by the previous pre-inference round. This is deliberately
+/// name-conservative: overloads and unrelated declarations can cause extra work, but every explicit
+/// source call/property/reference retains its callable name in the AST. Operator/protocol calls do not,
+/// so any changed implicit-call name keeps every candidate file active for the next round.
+fn file_may_depend_on_preinfer_names(
+    file: &File,
+    changed_names: &std::collections::HashSet<String>,
+    libraries: &dyn SemanticPlatform,
+) -> bool {
+    if changed_names
+        .iter()
+        .any(|name| callable_name_may_be_implicit_in_ast(name))
+    {
+        return true;
+    }
+    let mut effective_names = changed_names.clone();
+    for (alias, target) in &file.import_aliases {
+        if target
+            .rsplit('.')
+            .next()
+            .is_some_and(|name| changed_names.contains(name))
+        {
+            effective_names.insert(alias.clone());
+        }
+    }
+    let mut mapped_names = std::collections::HashSet::new();
+    file.expr_arena.iter().any(|expression| {
+        let name = match expression {
+            Expr::Name(name)
+            | Expr::Member { name, .. }
+            | Expr::SafeCall { name, .. }
+            | Expr::CallableRef { name, .. } => name,
+            _ => return false,
+        };
+        effective_names.contains(name)
+            || (mapped_names.insert(name.as_str())
+                && libraries
+                    .physical_property_getter_names(name)
+                    .iter()
+                    .any(|getter| effective_names.contains(getter)))
+    })
+}
+
 /// One pre-inference pass over `file`: check every EXPRESSION-body top-level function / class method
 /// whose return type is not declared, and patch the inferred return into `syms` (funs, extension funs,
-/// class methods). Returns `true` if any signature's return type changed — so a caller can iterate to a
-/// fixpoint (a body that calls another expr-body decl declared later, or in another file). Runs on a
-/// scratch `DiagSink` (inference diagnostics are not the real check's).
-fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -> bool {
+/// class methods). Returns the names of changed signatures so the module fixpoint can revisit only
+/// files that may depend on them. Runs on a scratch `DiagSink` (inference diagnostics are not the real
+/// check's).
+fn preinfer_returns_pass(
+    file: &File,
+    file_index: u32,
+    syms: &mut SymbolTable,
+) -> PreinferPassResult {
     let mut scratch = DiagSink::new();
     let mut pre = make_checker(file, file_index, None, &*syms, &mut scratch);
     let mut inferred_member_ext_rets = Vec::new();
     for &d in &file.decls {
         if let Decl::Fun(f) = file.decl(d) {
-            if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) {
+            if function_needs_return_preinfer(f) {
                 let resolve = class_internal_resolver(pre.syms);
                 pre.tparams =
                     TParams::from_decl_with(&f.type_params, &f.type_param_bounds, &resolve);
@@ -10194,8 +10316,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
             pre.this_labels.push((cl.name.clone(), dispatch_ty, true));
             let properties = pre.scoped_properties(internal_name);
             for (property_index, property) in cl.body_props.iter().enumerate() {
-                let (Some(receiver), None, Some(FunBody::Expr(getter))) =
-                    (&property.receiver, &property.ty, &property.getter)
+                let Some((receiver, getter)) = member_extension_property_preinfer_body(property)
                 else {
                     continue;
                 };
@@ -10223,7 +10344,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                     let parameter_type = pre.resolve_ty(&parameter.ty);
                     pre.declare(&parameter.name, parameter_type, false);
                 }
-                let inferred = pre.expr(*getter);
+                let inferred = pre.expr(getter);
                 pre.pop_scope();
                 pre.symbolic_signature_inference = false;
                 inferred_member_ext_rets.push((
@@ -10237,7 +10358,7 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                 pre.tparams.clear();
             }
             for m in &cl.methods {
-                if m.ret.is_none() && matches!(m.body, FunBody::Expr(_)) {
+                if function_needs_return_preinfer(m) {
                     pre.tparams = class_tparams.symbolic_extended_with(
                         &m.type_params,
                         &m.type_param_bounds,
@@ -10258,13 +10379,17 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
     let method_rets = std::mem::take(&mut pre.inferred_method_rets);
     let member_ext_fun_rets = std::mem::take(&mut pre.inferred_member_ext_fun_rets);
     drop(pre);
-    let mut changed = false;
+    let mut result = PreinferPassResult::default();
     for ((file, decl), ret) in fun_rets {
-        if let Some(sig) = syms.funs.values_mut().find_map(|sigs| {
+        if let Some((name, sig)) = syms.funs.iter_mut().find_map(|(name, sigs)| {
             sigs.iter_mut()
                 .find(|s| s.source_file == Some(file) && s.source_decl == Some(DeclId(decl)))
+                .map(|signature| (name.as_str(), signature))
         }) {
-            changed |= sig.set_inferred_return(ret);
+            let function_changed = sig.set_inferred_return(ret);
+            if function_changed {
+                result.changed_names.insert(name.to_string());
+            }
         }
     }
     for ((file, decl, name), ret) in ext_rets {
@@ -10276,17 +10401,27 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
                 })
             })
         }) {
-            changed |= sig.set_inferred_return(ret);
+            let function_changed = sig.set_inferred_return(ret);
+            if function_changed {
+                result.changed_names.insert(name);
+            }
         }
     }
     for ((internal, name, params), ret) in method_rets {
         if let Some(class) = syms.class_by_type_name_mut(internal) {
-            changed |= class.set_inferred_method_return(&name, &params, ret);
+            let method_changed = class.set_inferred_method_return(&name, &params, ret);
+            if method_changed {
+                result.changed_names.insert(name);
+            }
         }
     }
     for ((internal, name, receiver, params), ret) in member_ext_fun_rets {
         if let Some(class) = syms.class_by_type_name_mut(internal) {
-            changed |= class.set_inferred_member_extension_return(&name, receiver, &params, ret);
+            let function_changed =
+                class.set_inferred_member_extension_return(&name, receiver, &params, ret);
+            if function_changed {
+                result.changed_names.insert(name);
+            }
         }
     }
     for (internal, name, index, ret) in inferred_member_ext_rets {
@@ -10298,11 +10433,14 @@ fn preinfer_returns_pass(file: &File, file_index: u32, syms: &mut SymbolTable) -
             .and_then(|class| class.member_ext_props.get_mut(&name))
             .and_then(|properties| properties.get_mut(index))
         {
-            changed |= signature.ret != ret;
+            let property_changed = signature.ret != ret;
+            if property_changed {
+                result.changed_names.insert(name.clone());
+            }
             signature.ret = ret;
         }
     }
-    changed
+    result
 }
 
 /// Pre-infer EXPRESSION-body return types across the WHOLE module (every file), patching `syms` before
@@ -10322,15 +10460,35 @@ pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &m
 fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
     discover_anonymous_object_captures(files, syms);
     let saved = diags.current_file();
+    let candidates = files
+        .iter()
+        .map(file_has_preinfer_candidates)
+        .collect::<Vec<_>>();
+    let mut active = candidates.clone();
     for _pass in 0..8 {
-        let mut changed = false;
+        let mut changed_names = std::collections::HashSet::new();
         for (i, file) in files.iter().enumerate() {
+            if !active[i] {
+                continue;
+            }
             diags.set_file(i as u32);
-            changed |= preinfer_returns_pass(file, i as u32, syms);
+            changed_names.extend(preinfer_returns_pass(file, i as u32, syms).changed_names);
         }
-        if !changed {
+        if changed_names.is_empty() {
             break;
         }
+        active = files
+            .iter()
+            .zip(&candidates)
+            .map(|(file, candidate)| {
+                *candidate
+                    && file_may_depend_on_preinfer_names(
+                        file,
+                        &changed_names,
+                        syms.libraries.as_ref(),
+                    )
+            })
+            .collect();
     }
     diags.set_file(saved);
 }
@@ -10356,7 +10514,7 @@ fn check_file_at_impl_mode(
     // dependency chain is shallow; an unresolvable case simply stops improving).
     if !capture_discovery {
         for _pass in 0..8 {
-            if !preinfer_returns_pass(file, file_index, syms) {
+            if !preinfer_returns_pass(file, file_index, syms).changed() {
                 break;
             }
         }
@@ -32456,6 +32614,108 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
+
+    #[test]
+    fn preinfer_worklist_finds_explicit_and_aliased_dependencies() {
+        let mut diagnostics = DiagSink::new();
+        let direct = parse_file("fun inferred() = owner.changed()", &mut diagnostics);
+        let aliased = parse_file(
+            "import sample.changed as renamed\nfun inferred() = renamed()",
+            &mut diagnostics,
+        );
+        let unrelated = parse_file("fun inferred() = owner.stable()", &mut diagnostics);
+        let synthetic_property = parse_file(
+            "fun inferred() = SyntheticCatalog().entries[0]",
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty());
+        let changed = std::collections::HashSet::from(["changed".to_string()]);
+        let changed_getter = std::collections::HashSet::from(["getEntries".to_string()]);
+        let changed_unicode_getter = std::collections::HashSet::from(["getÄpfel".to_string()]);
+        let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(Vec::new()),
+        ));
+
+        assert!(file_may_depend_on_preinfer_names(
+            &direct, &changed, &libraries
+        ));
+        assert!(file_may_depend_on_preinfer_names(
+            &aliased, &changed, &libraries
+        ));
+        assert!(!file_may_depend_on_preinfer_names(
+            &unrelated, &changed, &libraries
+        ));
+        assert!(file_may_depend_on_preinfer_names(
+            &synthetic_property,
+            &changed_getter,
+            &libraries
+        ));
+        let unicode_synthetic_property = parse_file(
+            "fun inferred() = UnicodeSyntheticCatalog().äpfel[0]",
+            &mut diagnostics,
+        );
+        assert!(file_may_depend_on_preinfer_names(
+            &unicode_synthetic_property,
+            &changed_unicode_getter,
+            &libraries
+        ));
+    }
+
+    #[test]
+    fn preinfer_worklist_keeps_implicit_operator_dependencies_conservative() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file("fun inferred() = stable()", &mut diagnostics);
+        assert!(diagnostics.diags.is_empty());
+
+        assert!(file_may_depend_on_preinfer_names(
+            &file,
+            &std::collections::HashSet::from(["plus".to_string()]),
+            &EmptySymbolSource
+        ));
+        // `put` is the checker-recorded fallback for indexed assignment. Deriving the worklist gate
+        // from `SyntheticOperatorCall` keeps this less-common hidden target in sync with `set`.
+        assert!(file_may_depend_on_preinfer_names(
+            &file,
+            &std::collections::HashSet::from(["put".to_string()]),
+            &EmptySymbolSource
+        ));
+        assert!(file_may_depend_on_preinfer_names(
+            &file,
+            &std::collections::HashSet::from(["component12".to_string()]),
+            &EmptySymbolSource
+        ));
+        // `until` is an ordinary infix call whose name remains in the AST. A file that does not
+        // mention it need not be scheduled globally merely because another file changed that name.
+        assert!(!file_may_depend_on_preinfer_names(
+            &file,
+            &std::collections::HashSet::from(["until".to_string()]),
+            &EmptySymbolSource
+        ));
+    }
+
+    #[test]
+    fn preinfer_candidate_filter_matches_inferred_expression_bodies() {
+        let mut diagnostics = DiagSink::new();
+        let top_level = parse_file("fun value() = source()", &mut diagnostics);
+        let class_method = parse_file(
+            "class Synthetic { fun value() = source() }",
+            &mut diagnostics,
+        );
+        let member_extension_property = parse_file(
+            "class Synthetic { val String.value get() = length }",
+            &mut diagnostics,
+        );
+        let declared = parse_file(
+            "class Synthetic { fun value(): String = source() }",
+            &mut diagnostics,
+        );
+        assert!(diagnostics.diags.is_empty());
+
+        assert!(file_has_preinfer_candidates(&top_level));
+        assert!(file_has_preinfer_candidates(&class_method));
+        assert!(file_has_preinfer_candidates(&member_extension_property));
+        assert!(!file_has_preinfer_candidates(&declared));
+    }
 
     #[test]
     fn capture_discovery_selects_only_enclosing_top_level_declarations() {
