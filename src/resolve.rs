@@ -19914,7 +19914,12 @@ impl<'a> Checker<'a> {
         // subexpression sees `None` unless a propagation site re-arms it via `expr_expected`.
         let expected = self.expected.take();
         let value_required = value_required || expected.is_some();
-        let t = self.expr_inner(e, expected, value_required);
+        // Grow the stack per level, not only at the `check_file` entry: one nesting level of a
+        // CALL expression stacks `expr_inner` + `check_call` (far larger unoptimized frames than
+        // a `&&`-chain level), so 500 levels overrun any single grown segment. The per-call check
+        // is a stack-pointer read; `stacker` chains further segments only when the current one
+        // runs low (see [`crate::wide_stack`]).
+        let t = crate::wide_stack::on_wide_stack(|| self.expr_inner(e, expected, value_required));
         self.expr_depth -= 1;
         t
     }

@@ -18753,7 +18753,11 @@ impl<'a> Lower<'a> {
             self.expr_depth -= 1;
             return None;
         }
-        let r = self.expr_inner(e);
+        // Grow the stack per level, not only at the pass entry: a deep genuine nesting (e.g. a
+        // 450-level call chain) stacks frames far larger per level than the `&&`-chain sizing the
+        // entry reserve was measured against, so 500 levels can overrun any single grown segment
+        // (see [`crate::wide_stack`]; the checker's `expr_with_context` grows the same way).
+        let r = crate::wide_stack::on_wide_stack(|| self.expr_inner(e));
         self.expr_depth -= 1;
         // Record the expression's LOGICAL (source) type verbatim, keyed by its IR id — the value-class
         // pass reads it to recover a value's representation when the IR node alone is ambiguous (a library

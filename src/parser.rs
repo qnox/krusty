@@ -60,9 +60,15 @@ fn parse_with_features_and_script(
         pending_context_params: Vec::new(),
         is_script,
         script_stmts: Vec::new(),
+        expr_depth: 0,
     };
     p.file.is_script = is_script;
-    p.parse_file();
+    // Run the parse with the recursion-bound stack reserve already in place (like the checker's
+    // and lowering's pass entries): without this, the calling thread's remaining stack is
+    // (almost) always under the reserve, so the FIRST `parse_bp` of every top-level expression
+    // would allocate and free a fresh grown segment — per statement. With it, the per-level
+    // checks in `parse_bp` are a stack-pointer read that only grows on genuinely deep nesting.
+    crate::wide_stack::on_wide_stack(|| p.parse_file());
     if !p.script_stmts.is_empty() {
         let first = p.file.stmt_spans[p.script_stmts[0].0 as usize];
         let last = p.file.stmt_spans[p.script_stmts[p.script_stmts.len() - 1].0 as usize];
@@ -759,7 +765,22 @@ struct Parser<'a> {
     pending_context_params: Vec<Param>,
     is_script: bool,
     script_stmts: Vec<StmtId>,
+    /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
+    /// [`EXPR_DEPTH_LIMIT`] so a pathologically nested expression (`((((…x…))))`) degrades to an
+    /// error expression instead of overflowing the stack — the same "degrade, never crash"
+    /// contract as the checker's and lowering's `expr_depth` guards.
+    expr_depth: u32,
 }
+
+/// Maximum expression-parse recursion depth, counted in `parse_bp` ENTRIES — not semantic nesting
+/// levels. One semantic level can cost up to two entries (a binary operator's right operand is one
+/// `parse_bp` recursion, and a parenthesized operand re-enters via `parse_expr` → another), so a
+/// 450-level `0+(0+(…))` chain — which the checker and lowering admit under their 500-level
+/// `expr_depth` guards — consumes ~900 entries. 1000 entries therefore admits every shape the
+/// later passes admit at up to two entries per level (redundant nesting like doubled parens
+/// spends entries faster and trips sooner), while still bounding the parser's recursion (degrade
+/// with a diagnostic, never crash).
+const EXPR_DEPTH_LIMIT: u32 = 1000;
 
 impl<'a> Parser<'a> {
     fn push_lexical_type_params(
@@ -6082,7 +6103,60 @@ impl<'a> Parser<'a> {
         lhs
     }
 
+    /// Depth-guarded entry for the binary-expression parser. Every expression recursion funnels
+    /// through here — `parse_expr` → `parse_elvis` → `parse_bp`, and nested operands
+    /// (parenthesized/bracketed expressions, call arguments, prefix operands, branch bodies)
+    /// re-enter via `parse_expr` — so this single guard bounds all of it. A left-leaning binary
+    /// chain (`a && b && c`) iterates in `parse_bp_inner`'s loop and does not grow the depth;
+    /// only genuinely nested expressions (`((((x))))`, `f(f(f(x)))`) do. Past
+    /// [`EXPR_DEPTH_LIMIT`] the expression degrades to an error expression with a diagnostic —
+    /// degrade, never crash — mirroring the checker's and lowering's `expr_depth` guards.
     fn parse_bp(&mut self, min_bp: u8) -> ExprId {
+        if self.expr_depth >= EXPR_DEPTH_LIMIT {
+            let span = self.tok().span;
+            self.diags.error(span, "expression nesting too deep");
+            // Skip the REST of the over-deep expression, bracket-balanced: without this, the
+            // leftover tokens (`((((…` ) re-parse as postfix call nesting on the error
+            // expression, rebuilding a ~500-deep AST that the downstream passes then recurse
+            // over — and a closer-per-frame unwind would emit an `expected ')'` cascade. Stop at
+            // a closer or newline at relative depth 0 (they belong to the enclosing construct,
+            // whose frame consumes them on the way out) or at EOF.
+            let mut depth = 0i32;
+            loop {
+                match self.kind() {
+                    TokenKind::Eof => break,
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                        depth += 1;
+                        self.bump();
+                    }
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                        self.bump();
+                    }
+                    TokenKind::Newline if depth == 0 => break,
+                    _ => {
+                        self.bump();
+                    }
+                }
+            }
+            return self.file.add_expr(Expr::Name("<error>".to_string()), span);
+        }
+        self.expr_depth += 1;
+        // Grow the stack HERE, per level, not once at the parse entry: one nesting level stacks
+        // 5–6 unoptimized parser frames (`parse_bp_inner` → `parse_prefix` → `parse_primary` →
+        // `parse_expr` → `parse_elvis` → back here), so the depth bound needs more than one grown
+        // segment — a single entry-point reserve was measured to SIGBUS between 400 and 500 paren
+        // levels. The per-call check is a stack-pointer read; `stacker` chains further segments
+        // only when the current one runs low (see [`crate::wide_stack`]).
+        let e = crate::wide_stack::on_wide_stack(|| self.parse_bp_inner(min_bp));
+        self.expr_depth -= 1;
+        e
+    }
+
+    fn parse_bp_inner(&mut self, min_bp: u8) -> ExprId {
         let mut lhs = self.parse_prefix();
         loop {
             // A newline before `||`/`&&`/`?:` is a line continuation, not a terminator — consume it so
@@ -6400,8 +6474,20 @@ impl<'a> Parser<'a> {
                 .get(self.i + 1)
                 .is_some_and(|t| t.kind == TokenKind::At)
         {
-            self.bump(); // label name
-            self.bump(); // '@'
+            // Consume the WHOLE label chain (`a@ b@ e`) iteratively before the single re-entry:
+            // per-label self-recursion here would be an unguarded, un-grown stack path — a long
+            // machine-generated label chain must degrade like any other deep nesting, and after
+            // this loop the re-entry cannot reach this branch again (the next token is no label).
+            while self.at(TokenKind::Ident)
+                && !matches!(self.text(), "this" | "super")
+                && self
+                    .t
+                    .get(self.i + 1)
+                    .is_some_and(|t| t.kind == TokenKind::At)
+            {
+                self.bump(); // label name
+                self.bump(); // '@'
+            }
             return self.parse_prefix();
         }
         let unop = match self.kind() {

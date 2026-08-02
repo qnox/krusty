@@ -72,6 +72,75 @@ fn deep_inferred_return_chain_preinfers_on_default_stack() {
 }
 
 #[test]
+fn deep_paren_nesting_parses_on_default_stack() {
+    // 400 nested parens → PARSER recursion depth ~400 entries, inside the parser's 1000-entry
+    // depth guard: must parse and compile cleanly. Parens are grouping-only (no AST node), so the
+    // downstream passes see a depth-1 expression — the parser's own recursion is the pass under
+    // test here. A left-leaning `&&` chain parses iteratively, so the chain tests above never
+    // exercise it.
+    let src = format!(
+        "fun deep(): Int = {}1{}\n",
+        "(".repeat(400),
+        ")".repeat(400)
+    );
+    let (es, emitted) = compile(&src);
+    assert!(es.is_empty(), "expected no diagnostics, got: {es:?}");
+    assert!(
+        emitted,
+        "400 nested parens are inside the parser depth guard and must emit"
+    );
+}
+
+#[test]
+fn beyond_depth_guard_paren_nesting_degrades_without_crash() {
+    // 1500 nested parens → past the parser's 1000-entry depth guard: the parser must emit a
+    // diagnostic and produce an error expression — degrade, never crash — on a default 2 MiB
+    // test-thread stack in an unoptimized build.
+    let src = format!(
+        "fun deep(): Int = {}1{}\n",
+        "(".repeat(1500),
+        ")".repeat(1500)
+    );
+    let (es, _) = compile(&src);
+    assert!(
+        es.iter().any(|m| m.contains("expression nesting too deep")),
+        "expected the nesting-depth diagnostic for 1500 nested parens, got: {} diagnostic(s): {:?}",
+        es.len(),
+        es.iter().take(3).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn deep_nested_call_chain_inside_guard_degrades_or_compiles_without_crash() {
+    // 450-deep genuine call nesting `f(f(f(…f(1)…)))` — inside every 500 depth guard. Unlike
+    // parens (grouping-only, no AST node), each level IS an AST node, so the checker and lowering
+    // recurse the full 450 levels over call handling — much larger unoptimized frames than the
+    // `&&`-chain levels above. Must never crash on a default 2 MiB test-thread stack.
+    let src = format!(
+        "fun f(x: Int): Int = x\nfun deep(): Int = {}1{}\n",
+        "f(".repeat(450),
+        ")".repeat(450)
+    );
+    let (es, emitted) = compile(&src);
+    assert!(es.is_empty(), "expected no diagnostics, got: {es:?}");
+    assert!(
+        emitted,
+        "450-deep call chain is inside every depth guard and must emit"
+    );
+}
+
+#[test]
+fn deep_label_chain_parses_on_default_stack() {
+    // 100k stacked expression labels (`l@ l@ … 1`) — the label prefix is consumed iteratively,
+    // so chain length must cost O(1) stack. Per-label recursion in `parse_prefix` was an
+    // unguarded, un-grown path: deep enough chains overflowed even the grown segment.
+    let src = format!("fun deep(): Int = {}1\n", "l@ ".repeat(100_000));
+    let (es, emitted) = compile(&src);
+    assert!(es.is_empty(), "expected no diagnostics, got: {es:?}");
+    assert!(emitted, "label chain is a semantic no-op and must emit");
+}
+
+#[test]
 fn beyond_depth_guard_chain_degrades_without_crash() {
     // 700 operands → past the 500 depth guard: the expression may type as `Error` (diagnostics are
     // allowed), but the compiler must return, not crash.
