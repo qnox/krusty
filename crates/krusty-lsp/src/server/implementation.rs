@@ -336,22 +336,30 @@ pub struct DocumentAnalyzer;
 /// parse. An unreadable or deleted file simply contributes nothing; the caller knows which URIs it
 /// attempted and drops their stale entries.
 pub fn index_workspace_symbols_from_disk(uris: &[&str]) -> WorkspaceSymbolIndex {
-    let readable: Vec<(&str, String)> = uris
-        .iter()
-        .filter_map(|uri| {
-            let path = crate::uri::file_uri_to_path(uri)?;
-            let size = usize::try_from(std::fs::metadata(&path).ok()?.len()).ok()?;
-            if size > crate::analysis::MAX_INDEXED_FILE_BYTES {
+    let mut skipped_oversized = false;
+    let readable = uris.iter().filter_map(|uri| {
+        let path = crate::uri::file_uri_to_path(uri)?;
+        let size = match usize::try_from(std::fs::metadata(&path).ok()?.len()) {
+            Ok(size) => size,
+            Err(_) => {
+                skipped_oversized = true;
                 return None;
             }
-            Some((*uri, std::fs::read_to_string(path).ok()?))
-        })
-        .collect();
-    let sources: Vec<(&str, &str)> = readable
-        .iter()
-        .map(|(uri, text)| (*uri, text.as_str()))
-        .collect();
-    WorkspaceSymbolIndex::from_disk_sources(&sources)
+        };
+        if size > crate::analysis::MAX_INDEXED_FILE_BYTES {
+            // This check intentionally precedes the read. Because the generic builder never
+            // sees the source, propagate the omission after construction rather than letting
+            // an empty-looking input incorrectly restore the chunk's completeness.
+            skipped_oversized = true;
+            return None;
+        }
+        Some((*uri, std::fs::read_to_string(path).ok()?))
+    });
+    let mut index = WorkspaceSymbolIndex::from_uri_sources(readable);
+    if skipped_oversized {
+        index.mark_incomplete();
+    }
+    index
 }
 
 /// FNV-1a over the file text. Only ever compared against another hash this process produced, so a
@@ -4349,6 +4357,36 @@ fn json_io(error: serde_json::Error) -> io::Error {
 mod tests {
     use super::*;
     use crate::server::engine::{EngineCommand, EngineEvent, ServerStatus};
+
+    #[test]
+    fn disk_symbol_index_reports_a_file_rejected_before_reading() {
+        struct RemoveOnDrop(std::path::PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "krusty-lsp-oversized-symbol-index-{}.kt",
+            std::process::id()
+        ));
+        let cleanup = RemoveOnDrop(path.clone());
+        let file = std::fs::File::create(&path).expect("create sparse oversized source");
+        file.set_len(crate::analysis::MAX_INDEXED_FILE_BYTES as u64 + 1)
+            .expect("size sparse oversized source");
+        drop(file);
+        let uri = crate::uri::path_to_file_uri(&path).expect("temporary path is a file URI");
+
+        let index = index_workspace_symbols_from_disk(&[&uri]);
+
+        assert_eq!(index.entry_count(), 0);
+        assert!(
+            !index.is_complete(),
+            "pre-read size rejection must reach the retained index completeness flag"
+        );
+        drop(cleanup);
+    }
 
     #[test]
     fn formatting_response_bounds_cover_the_complete_rpc_envelope() {

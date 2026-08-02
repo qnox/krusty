@@ -167,7 +167,11 @@ A freshly built index is still positional — the builder runs in the analysis w
 sources and never sees a URI. `assign_uris` ends that phase at the batch the server applies, the one
 place that knows which document each position was. `merge_from` unions file tables by URI, so two
 indexes built from different source sets merge without either one's numbering leaking into the
-other.
+other. Those phases are a runtime invariant rather than a debug-only convention: URI assignment is
+one-shot, and a merge refuses either direction when one non-empty side is positional and the other
+is bound. In both cases the valid entries are preserved and the index becomes incomplete. This is
+necessary because `entry[0] == 0` is valid in both representations, so inspecting an individual
+entry cannot recover which meaning was intended after an invalid merge.
 
 The layout stays pointer-free and `u32`-addressed, matching the AST/IR convention and, not
 coincidentally, what a memory-mapped format would require.
@@ -186,7 +190,11 @@ test enforces that boundary.
 It is guarded by `MAX_INDEXED_FILE_BYTES`, checked against file metadata before the read so an
 oversized file costs a `stat` rather than a parse. A multi-megabyte generated or sparse file
 otherwise stalls the build for tens of seconds, which is how a 32 MiB test fixture once starved the
-request loop.
+request loop. The disk adapter feeds that metadata-filtered iterator directly into the same generic
+URI/source builder used by borrowed test inputs, so only one file's owned text is retained at a
+time. Because a metadata rejection happens before that builder can observe the source, the adapter
+also marks the resulting index incomplete explicitly; an oversized-only chunk must not look like a
+complete empty chunk.
 
 ## Query language
 
@@ -242,7 +250,10 @@ rank orders instead of renumbering them.
 - **Wildcards** — extract the literal prefix before the first metacharacter, binary-search that
   range, then glob-verify inside it. `Foo*` is sub-microsecond; `*Foo*` degrades to the 4 ms
   substring scan. `?` consumes one Unicode scalar rather than one UTF-8 byte, and a shared
-  transition budget bounds adversarial wildcard backtracking. No new index structure.
+  transition budget bounds adversarial wildcard backtracking. The budget is owned by the whole
+  request and is spent across every project segment, live layer, ranking rung, and translated query;
+  resetting it at any inner loop would multiply the bound by attacker-controlled index structure.
+  No new index structure.
 - **Keyboard layout** — a ЙЦУКЕН→QWERTY positional table applied to the *query*; search both forms
   and union. The explicit mapping touches Cyrillic characters only, so ordinary qualified-query
   punctuation does not spuriously create a translated query. ~200 bytes, zero index cost.
@@ -265,7 +276,10 @@ segment, and adjacent segments merge only while their sizes are within a factor 
 declaration is rewritten a logarithmic number of times instead of once per later chunk. Measured on
 the corpus shape, folding every chunk into one index cost 54 ms at 20k entries and grew from there,
 on the thread that also serves requests; segmenting holds the median splice near 5 ms with under a
-dozen resident segments.
+dozen resident segments. The 192 MiB project budget belongs to the aggregate rather than an
+individual merge: `replace_files` reserves the conservative retained cost of every untouched
+segment before admitting a replacement, including a tail too differently sized to merge. This
+keeps the promised whole-layer ceiling true between compactions as well as immediately after one.
 
 Shadowing is per file, and layer order decides shadowing only — ranking walks rung by rung across
 every layer, or a subsequence match in a newly indexed chunk would outrank an exact prefix match in
@@ -399,7 +413,9 @@ them — truncating a 700k-symbol index to save 20 MiB defeats the feature's pur
   message at 8 MiB, and inheriting it capped project-wide coverage at roughly 30k declarations.
   `MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES` is 192 MiB of wire budget, which at the ~167
   worst-case bytes this accounting charges per entry admits about 1.2M declarations against the
-  698,516 the largest reference corpus holds.
+  698,516 the largest reference corpus holds. Admission subtracts every retained segment from that
+  aggregate budget before accepting a new one; the conservative accounting includes both search
+  permutations rather than relying only on the smaller serialized JSON size.
 - `MAX_INDEXED_FILE_BYTES` per file, checked against metadata before the read
 - `MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS` per response, alongside the byte ceiling
 - Reaching any of them is reported to the client once per generation. A symbol the picker never
@@ -415,9 +431,13 @@ Unit:
 - extractor produces identical output through the `&File` signature change
 - index build, each query rung, and the ladder's fallthrough order
 - wildcard prefix extraction and glob verification
+- one wildcard transition budget shared across all query layers
 - keyboard-layout transliteration
 - adaptive qualified-vs-simple naming
 - budget truncation
+- aggregate project-budget enforcement before differently sized segments merge
+- positional/bound phase violations preserve valid locations and report incompleteness
+- metadata-rejected disk sources report incompleteness through the production adapter
 - per-file invalidation splices correctly
 - layer shadowing and tombstone resolution
 

@@ -975,11 +975,34 @@ impl Default for ProjectSymbolIndex {
 impl ProjectSymbolIndex {
     /// Re-index `uris` from `segment`, dropping whatever any segment held for them.
     pub fn replace_files(&mut self, uris: &[String], segment: WorkspaceSymbolIndex) {
-        self.complete &= segment.is_complete();
+        self.replace_files_within(uris, segment, MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES);
+    }
+
+    /// The budgeted implementation behind [`Self::replace_files`]. Keeping the ceiling here, at
+    /// the aggregate that owns every segment, prevents an unmerged tail from sitting outside a
+    /// limit that was previously checked only when two adjacent segments happened to coalesce.
+    fn replace_files_within(
+        &mut self,
+        uris: &[String],
+        mut segment: WorkspaceSymbolIndex,
+        max_wire_bytes: usize,
+    ) {
         for existing in &mut self.segments {
             existing.remove_files(uris);
         }
         self.segments.retain(|segment| segment.entry_count() > 0);
+
+        // Spend every untouched segment before admitting the replacement. The accounting is the
+        // same conservative entry/string accounting used by merge budgets, so adding a small tail
+        // cannot exceed the whole-layer ceiling merely because its neighbour is more than twice
+        // its size and therefore does not merge yet.
+        let reserved = self
+            .segments
+            .iter()
+            .map(WorkspaceSymbolIndex::retained_wire_bytes)
+            .sum::<usize>();
+        segment.retain_accounted_wire_budget(max_wire_bytes.saturating_sub(reserved));
+        self.complete &= segment.is_complete();
         if segment.entry_count() == 0 {
             return;
         }
@@ -1004,10 +1027,7 @@ impl ProjectSymbolIndex {
             self.segments
                 .last_mut()
                 .expect("two segments were just observed")
-                .merge_within(
-                    merged,
-                    MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES.saturating_sub(reserved),
-                );
+                .merge_within(merged, max_wire_bytes.saturating_sub(reserved));
         }
     }
 
@@ -1093,16 +1113,32 @@ impl WorkspaceSymbolIndex {
     /// multi-megabyte source otherwise stalls the build for tens of seconds -- and marks the index
     /// incomplete so callers can report the gap.
     pub fn from_disk_sources(files: &[(&str, &str)]) -> Self {
+        Self::from_uri_sources(files.iter().copied())
+    }
+
+    /// Build from any URI/source iterator, consuming and dropping each source after its parse.
+    ///
+    /// The disk adapter yields owned `String`s lazily, while tests usually borrow string slices.
+    /// Keeping both origins on this one ingestion path prevents the file reader from retaining a
+    /// whole 128-file chunk (up to roughly 512 MiB at the per-file ceiling) before parsing begins.
+    pub(crate) fn from_uri_sources<I, U, S>(files: I) -> Self
+    where
+        I: IntoIterator<Item = (U, S)>,
+        U: AsRef<str>,
+        S: AsRef<str>,
+    {
         let mut result = Self::default();
         let mut budget = WorkspaceSymbolBudget::new();
         let mut interning = WorkspaceSymbolInterning::default();
 
         for (uri, source) in files {
+            let uri = uri.as_ref();
+            let source = source.as_ref();
             if source.len() > MAX_INDEXED_FILE_BYTES {
                 result.complete = false;
                 continue;
             }
-            if !interning.files.contains_key(*uri)
+            if !interning.files.contains_key(uri)
                 && !budget.reserve(workspace_symbol_string_wire_cost(uri))
             {
                 result.complete = false;
@@ -1351,10 +1387,15 @@ impl WorkspaceSymbolIndex {
     /// Call once, on an index the builder just produced: binding is what ends the positional
     /// phase, and re-binding an already-bound index would read file ids as positions.
     pub fn assign_uris(&mut self, uris: &[&str]) {
-        debug_assert!(
-            self.files.is_empty(),
-            "workspace symbol index binds its URI table once"
-        );
+        if !self.files.is_empty() {
+            // A non-empty URI table proves this index is already bound. Its entry file values are
+            // IDs in that table, not positions in `uris`; interpreting them a second time silently
+            // moves declarations to unrelated files in the gate and release profiles where a
+            // debug assertion would not exist. Preserve the valid original locations, reject the
+            // phase violation through completeness, and let the caller report the shortfall.
+            self.complete = false;
+            return;
+        }
         let mut file_ids = HashMap::<&str, u32>::new();
         let mut files = Vec::new();
         let mut retained = Vec::with_capacity(self.entries.len());
@@ -1397,6 +1438,10 @@ impl WorkspaceSymbolIndex {
             if !workspace_symbol_entry_is_valid(&entry)
                 || self.packages.get(entry[9] as usize).is_none()
                 || self.names.get(entry[10] as usize).is_none()
+                // An empty file table is the legitimate worker-side positional phase. Once the
+                // table is non-empty, every value is a bound file id and must resolve; retaining a
+                // dangling id would make queries silently skip a corrupted declaration.
+                || (!self.files.is_empty() && self.files.get(entry[0] as usize).is_none())
             {
                 self.complete = false;
                 retained_indices.push(None);
@@ -1517,6 +1562,21 @@ impl WorkspaceSymbolIndex {
         if self.wire_bytes() <= max_wire_bytes {
             return;
         }
+        self.retain_entries_within(max_wire_bytes);
+    }
+
+    /// Retain against the conservative accounting used by the segmented project layer. JSON wire
+    /// size is intentionally not the trigger here: `retained_wire_bytes` also reserves both search
+    /// permutations at their worst-case integer width, and mixing those two measures would let the
+    /// aggregate exceed the ceiling even though each segment passed its own exact-wire check.
+    fn retain_accounted_wire_budget(&mut self, max_wire_bytes: usize) {
+        if self.retained_wire_bytes() <= max_wire_bytes {
+            return;
+        }
+        self.retain_entries_within(max_wire_bytes);
+    }
+
+    fn retain_entries_within(&mut self, max_wire_bytes: usize) {
         let old = std::mem::take(self);
         let mut retained = Self {
             complete: false,
@@ -1586,6 +1646,18 @@ impl WorkspaceSymbolIndex {
     /// Merge under an explicit retention ceiling. The source-set default bounds one worker message;
     /// the project-wide index is retained by the session and gets its own, larger, ceiling.
     pub fn merge_within(&mut self, other: Self, max_wire_bytes: usize) {
+        let self_is_bound = !self.files.is_empty();
+        let other_is_bound = !other.files.is_empty();
+        if !self.entries.is_empty() && !other.entries.is_empty() && self_is_bound != other_is_bound
+        {
+            // `entry[0]` has two meanings across the worker boundary: a source position before
+            // `assign_uris`, and a file-table id afterwards. Merging either non-empty phase into
+            // the other cannot be repaired by choosing one interpretation; both commonly start at
+            // zero. Refuse symmetrically and retain the target's still-valid entries. Empty indexes
+            // are phase-agnostic and remain useful as merge accumulators/tombstones.
+            self.complete = false;
+            return;
+        }
         let mut budget = WorkspaceSymbolBudget::from_index_within(self, max_wire_bytes);
         let mut package_ids = self
             .packages
@@ -1716,6 +1788,18 @@ impl WorkspaceSymbolIndex {
     /// layer's would let a subsequence match in a newly indexed chunk outrank an exact prefix match
     /// in the segment beside it, and spend the response budget on it.
     fn encode_layers(query: &str, layers: &[&Self], open: &HashSet<&str>) -> Vec<Value> {
+        Self::encode_layers_with_glob_steps(query, layers, open, MAX_WORKSPACE_SYMBOL_GLOB_STEPS)
+    }
+
+    /// Budgeted query implementation. The transition budget belongs to the request, not an index
+    /// segment: a project query walks every layer and may also try a keyboard-layout translation,
+    /// so resetting inside either loop multiplies attacker-controlled work by both dimensions.
+    fn encode_layers_with_glob_steps(
+        query: &str,
+        layers: &[&Self],
+        open: &HashSet<&str>,
+        mut remaining_glob_steps: usize,
+    ) -> Vec<Value> {
         let mut result = Vec::new();
         if query.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
             return result;
@@ -1771,6 +1855,7 @@ impl WorkspaceSymbolIndex {
                         &mut result,
                         &mut wire_bytes,
                         &mut seen[index],
+                        &mut remaining_glob_steps,
                     ) {
                         return result;
                     }
@@ -1832,6 +1917,7 @@ impl WorkspaceSymbolIndex {
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
         seen: &mut HashSet<u32>,
+        remaining_glob_steps: &mut usize,
     ) -> bool {
         let query = scope.query;
         let lowercase_query = &query.pattern;
@@ -1854,6 +1940,7 @@ impl WorkspaceSymbolIndex {
                         result,
                         wire_bytes,
                         seen,
+                        remaining_glob_steps,
                     )
                 } else {
                     self.encode_glob_candidates(
@@ -1862,6 +1949,7 @@ impl WorkspaceSymbolIndex {
                         result,
                         wire_bytes,
                         seen,
+                        remaining_glob_steps,
                     )
                 };
             }
@@ -1931,17 +2019,13 @@ impl WorkspaceSymbolIndex {
         result: &mut Vec<Value>,
         wire_bytes: &mut usize,
         seen: &mut std::collections::HashSet<u32>,
+        remaining_steps: &mut usize,
     ) -> bool {
-        let mut remaining_steps = MAX_WORKSPACE_SYMBOL_GLOB_STEPS;
         for index in candidates {
             let Some(name) = self.source_name(index) else {
                 continue;
             };
-            match matches_glob(
-                &name.to_lowercase(),
-                &scope.query.pattern,
-                &mut remaining_steps,
-            ) {
+            match matches_glob(&name.to_lowercase(), &scope.query.pattern, remaining_steps) {
                 Some(true) => {}
                 Some(false) => continue,
                 None => return false,
@@ -2024,6 +2108,15 @@ impl WorkspaceSymbolIndex {
     /// Whether every indexable declaration fit in the retained snapshot budget.
     pub fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    /// Record a producer-side omission discovered before source text reached the generic builder.
+    ///
+    /// The disk adapter checks metadata before allocating a file. An oversized file is therefore
+    /// absent from `from_disk_sources` entirely, so only this explicit channel can distinguish the
+    /// bounded omission from a genuinely empty chunk.
+    pub(crate) fn mark_incomplete(&mut self) {
+        self.complete = false;
     }
 
     fn clear_incomplete(&mut self) {
@@ -3884,6 +3977,35 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_transition_budget_is_shared_across_project_layers() {
+        let first = WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///First.kt",
+            "package demo\nclass RepeatedTarget\n",
+        )]);
+        let second = WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///Second.kt",
+            "package demo\nclass RepeatedTarget\n",
+        )]);
+        let query = WorkspaceQuery::parse("*target");
+        let mut probe_steps = usize::MAX;
+        assert_eq!(
+            matches_glob("repeatedtarget", &query.pattern, &mut probe_steps),
+            Some(true)
+        );
+        let one_match_steps = usize::MAX - probe_steps;
+
+        let encoded = WorkspaceSymbolIndex::encode_layers_with_glob_steps(
+            "*target",
+            &[&first, &second],
+            &HashSet::new(),
+            one_match_steps,
+        );
+
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(encoded[0]["location"]["uri"], "file:///First.kt");
+    }
+
+    #[test]
     fn workspace_symbols_match_package_qualified_queries() {
         let index = indexed(
             &[
@@ -3938,11 +4060,11 @@ mod tests {
 
     #[test]
     fn a_trailing_double_colon_is_stripped_before_matching() {
-        let index = indexed(&["class KotlinParser\n"], &["file:///E.kt"]);
+        let index = indexed(&["class SyntheticParser\n"], &["file:///E.kt"]);
 
         // Zed keeps only the text after the last `::` for its own filter, so a trailing marker
         // disables client filtering; the server must not try to match the marker itself.
-        assert_eq!(encoded_names(&index, "*parser*::"), vec!["KotlinParser"]);
+        assert_eq!(encoded_names(&index, "*parser*::"), vec!["SyntheticParser"]);
     }
 
     #[test]
@@ -4323,6 +4445,29 @@ mod tests {
     }
 
     #[test]
+    fn the_project_budget_covers_unmerged_segments_as_one_layer() {
+        let mut project = ProjectSymbolIndex::default();
+        let (first_uris, first) = project_chunk(0, 8);
+        let first_cost = first.retained_wire_bytes();
+        let limit = first_cost.saturating_add(first_cost / 2);
+        project.replace_files_within(&first_uris, first, limit);
+
+        let (second_uris, second) = project_chunk(1, 8);
+        project.replace_files_within(&second_uris, second, limit);
+
+        let retained = project
+            .segments
+            .iter()
+            .map(WorkspaceSymbolIndex::retained_wire_bytes)
+            .sum::<usize>();
+        assert!(retained <= limit, "retained {retained} bytes over {limit}");
+        assert!(
+            !project.is_complete(),
+            "admitting only part of the second unmerged segment must be observable"
+        );
+    }
+
+    #[test]
     fn a_broad_query_is_bounded_by_the_response_symbol_cap() {
         let sources: Vec<(String, String)> = (0..MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS * 2)
             .map(|n| {
@@ -4389,7 +4534,7 @@ mod tests {
             &["file:///Weak.kt".to_string()],
             WorkspaceSymbolIndex::from_disk_sources(&[(
                 "file:///Weak.kt",
-                "package demo\nclass PolymorphicArraySerializer\n",
+                "package demo\nclass PlaceholderAdapterServiceRenderer\n",
             )]),
         );
 
@@ -4400,8 +4545,9 @@ mod tests {
             .map(|symbol| symbol["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
 
-        // `PolymorphicArraySerializer` matches only on the weakest rung, and sits in a newer
-        // segment. Ranking a whole layer at a time would put it first.
+        // The deliberately synthetic long name matches `parser` only as a subsequence on the
+        // weakest rung, and sits in a newer segment. Ranking a whole layer at a time would put it
+        // first.
         assert_eq!(names.first().map(String::as_str), Some("Parser"));
     }
 
@@ -4569,6 +4715,49 @@ mod tests {
             "file:///MergedSecond.kt"
         );
         assert!(first.is_complete());
+    }
+
+    #[test]
+    fn a_positional_index_refuses_a_bound_merge_before_uri_assignment() {
+        let positional_source = "package demo\nclass PositionalType\n";
+        let analysis = analyze_standalone_source_set(&[positional_source]);
+        let mut positional =
+            WorkspaceSymbolIndex::from_source_set(&[positional_source], &analysis.files);
+        let bound = WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///Bound.kt",
+            "package demo\nclass BoundType\n",
+        )]);
+
+        // Both indexes use entry[0] == 0, but one means source position zero and the other means
+        // file-table id zero. Combining them before the positional side is bound must not make
+        // either interpretation win accidentally.
+        positional.merge_from(bound);
+        positional.assign_uris(&["file:///Positional.kt"]);
+
+        assert_eq!(
+            positional.encode("PositionalType")[0]["location"]["uri"],
+            "file:///Positional.kt"
+        );
+        assert!(positional.encode("BoundType").is_empty());
+        assert!(!positional.is_complete());
+    }
+
+    #[test]
+    fn assigning_uris_twice_keeps_the_original_bound_locations() {
+        let mut index = WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///Original.kt",
+            "package demo\nclass BoundOnce\n",
+        )]);
+
+        // A second assignment would read file id zero as source position zero. Production gate and
+        // release profiles disable debug assertions, so correctness must not depend on one.
+        index.assign_uris(&["file:///Wrong.kt"]);
+
+        assert_eq!(
+            index.encode("BoundOnce")[0]["location"]["uri"],
+            "file:///Original.kt"
+        );
+        assert!(!index.is_complete());
     }
 
     #[test]
