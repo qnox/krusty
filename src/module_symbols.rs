@@ -1078,6 +1078,7 @@ mod tests {
                 getter_name: "getState".into(),
                 setter_name: Some("setState".into()),
                 setter_visibility: Some(Visibility::Protected),
+                has_custom_getter: false,
                 context_params: Vec::new(),
             },
         );

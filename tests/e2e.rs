@@ -762,6 +762,8 @@ mod pair_triple_e2e;
 mod paren_condition_newline_e2e;
 #[path = "parser_errors_coverage_e2e.rs"]
 mod parser_errors_coverage_e2e;
+#[path = "path_smartcast_e2e.rs"]
+mod path_smartcast_e2e;
 #[path = "plugins_e2e.rs"]
 mod plugins_e2e;
 #[path = "primitive_bound_generic_e2e.rs"]

@@ -622,6 +622,10 @@ pub struct DeclaredPropertySig {
     /// property's visibility, while an explicit `private set` narrows only this value. Keeping it beside
     /// `setter_name` prevents backend accessor synthesis from accidentally widening the source ABI.
     pub setter_visibility: Option<Visibility>,
+    /// `true` for a property with a custom getter or a delegate — a re-read can then observe a
+    /// different value than an earlier proof, so flow narrowing (smart casts) must skip it
+    /// (kotlinc: "smart cast is impossible, because the property has a custom getter").
+    pub has_custom_getter: bool,
     pub context_params: Vec<Ty>,
 }
 
@@ -4813,6 +4817,7 @@ fn collect_signatures_with_cp_impl(
                                     setter_visibility: property
                                         .is_var
                                         .then_some(property.visibility),
+                                    has_custom_getter: false,
                                     context_params: Vec::new(),
                                 },
                             )
@@ -5062,6 +5067,7 @@ fn collect_signatures_with_cp_impl(
                                         bp.visibility
                                     }
                                 }),
+                                has_custom_getter: bp.getter.is_some() || bp.delegate.is_some(),
                                 context_params,
                             },
                         );
@@ -9846,6 +9852,38 @@ impl TypeInfo {
     }
 }
 
+/// A STABLE ACCESS PATH a flow narrowing (smart cast) applies to: an immutable ROOT binding
+/// (`this`, a local `val`/parameter) followed by immutable property segments (`a.b.c`). A root-only
+/// path is the classic name narrowing; segments extend the same proofs (`==`/`!=` null checks,
+/// `is`/`!is` type tests, contract conclusions) to property reads, like kotlinc. One machinery
+/// serves every condition shape and application site — nothing keys on the condition's syntax.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct NarrowPath {
+    root: String,
+    segments: Vec<String>,
+}
+
+impl NarrowPath {
+    fn root_only(root: &str) -> Self {
+        NarrowPath {
+            root: root.to_string(),
+            segments: Vec::new(),
+        }
+    }
+}
+
+/// A recorded property-path narrowing: the proven type plus the RECEIVER GENERATION it was
+/// proven against. A `this`-rooted path names a property of one specific receiver object; every
+/// `this` rebind (a receiver lambda, an inner class, an extension receiver — even to the SAME
+/// type, since that is a different object) bumps [`Checker::this_gen`], so the narrowing applies
+/// only while the generation matches. Save/restore sites restore the generation with the type,
+/// so an outer narrowing is valid again once the nested receiver scope ends.
+#[derive(Clone, Copy)]
+struct PathNarrowing {
+    ty: Ty,
+    this_gen: u64,
+}
+
 struct Local {
     ty: Ty,
     is_var: bool,
@@ -9959,6 +9997,7 @@ fn make_checker<'a>(
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         resolved_type_refs: HashMap::new(),
         scopes: Vec::new(),
+        path_narrows: Vec::new(),
         ret_ty: Ty::Unit,
         expected: None,
         imports,
@@ -9968,6 +10007,7 @@ fn make_checker<'a>(
         tparams: Default::default(),
         reified_tparams: std::collections::HashSet::new(),
         this_ty: None,
+        this_gen: 0,
         this_unavailable: false,
         this_extension_receiver: None,
         this_narrow: None,
@@ -10234,6 +10274,7 @@ fn install_anonymous_object_captures(
                     getter_name: property_getter_name(&capture.name),
                     setter_name: None,
                     setter_visibility: None,
+                    has_custom_getter: false,
                     context_params: Vec::new(),
                 },
             );
@@ -10658,7 +10699,7 @@ fn preinfer_returns_pass(
                     .map(|name| class_tparams.erase(name))
                     .collect::<Vec<_>>(),
             );
-            pre.this_ty = Some(dispatch_ty);
+            pre.set_this_ty(Some(dispatch_ty));
             pre.this_labels.push((cl.name.clone(), dispatch_ty, true));
             let properties = pre.scoped_properties(internal_name);
             for (property_index, property) in cl.body_props.iter().enumerate() {
@@ -10678,7 +10719,7 @@ fn preinfer_returns_pass(
                     &class_internal_resolver(pre.syms),
                 );
                 let receiver_ty = pre.resolve_ty(receiver);
-                pre.this_ty = Some(receiver_ty);
+                pre.set_this_ty(Some(receiver_ty));
                 pre.this_labels
                     .push((property.name.clone(), receiver_ty, false));
                 pre.symbolic_signature_inference = true;
@@ -10700,7 +10741,7 @@ fn preinfer_returns_pass(
                     inferred,
                 ));
                 pre.this_labels.pop();
-                pre.this_ty = Some(dispatch_ty);
+                pre.set_this_ty(Some(dispatch_ty));
                 pre.tparams.clear();
             }
             for m in &cl.methods {
@@ -10717,7 +10758,7 @@ fn preinfer_returns_pass(
                 }
             }
             pre.this_labels.pop();
-            pre.this_ty = None;
+            pre.set_this_ty(None);
         }
     }
     let fun_rets = std::mem::take(&mut pre.inferred_fun_rets);
@@ -11041,7 +11082,7 @@ fn check_file_at_impl_mode(
                 if let Some(owner) = current_owner {
                     props.extend(c.scoped_properties(owner));
                 }
-                c.this_ty = current_owner.map(Ty::obj_name);
+                c.set_this_ty(current_owner.map(Ty::obj_name));
                 // Push the enclosing-class labels for the duration of this class's member checks: the
                 // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
                 // class's own label (`this@C`) innermost. Walk `inner_of` outward.
@@ -11519,12 +11560,13 @@ fn check_file_at_impl_mode(
                     // the backing-field type (the implicit-`this` scope of props is already active).
                     // A member extension accessor uses the extension receiver as `this`.
                     let dispatch_this = c.this_ty;
+                    let dispatch_this_gen = c.this_gen;
                     let dispatch_extension_receiver = c.this_extension_receiver;
                     let outer_symbolic_signature_inference = c.symbolic_signature_inference;
                     let extension_receiver =
                         bp.receiver.as_ref().map(|receiver| c.resolve_ty(receiver));
                     if let Some(receiver) = extension_receiver {
-                        c.this_ty = Some(receiver);
+                        c.set_this_ty(Some(receiver));
                         c.this_labels.push((bp.name.clone(), receiver, false));
                         let label_index = c.this_labels.len() - 1;
                         let receiver_span =
@@ -11631,6 +11673,7 @@ fn check_file_at_impl_mode(
                         c.this_labels.pop();
                     }
                     c.this_ty = dispatch_this;
+                    c.this_gen = dispatch_this_gen;
                     c.this_extension_receiver = dispatch_extension_receiver;
                     c.symbolic_signature_inference = outer_symbolic_signature_inference;
                     c.tparams = outer_tparams;
@@ -11644,7 +11687,7 @@ fn check_file_at_impl_mode(
                 for _ in 0..label_depth {
                     c.this_labels.pop();
                 }
-                c.this_ty = None;
+                c.set_this_ty(None);
                 // Enum entry constructor arguments (e.g. `RED(0xff0000)`) are type-checked in a
                 // fresh scope — they're emitted in the static `<clinit>` and cannot access `this`.
                 if cl.is_enum() {
@@ -11766,10 +11809,11 @@ fn check_file_at_impl_mode(
                 // For an extension property (`val Recv.name: T get() = …`), `this` inside the
                 // accessors is the receiver.
                 let prev_this = c.this_ty;
+                let prev_this_gen = c.this_gen;
                 let prev_extension_receiver = c.this_extension_receiver;
                 let recv_ty = p.receiver.as_ref().map(|r| c.resolve_ty(r));
                 if let Some(rt) = recv_ty {
-                    c.this_ty = Some(rt);
+                    c.set_this_ty(Some(rt));
                     c.this_labels.push((p.name.clone(), rt, false));
                     let label_index = c.this_labels.len() - 1;
                     let receiver_span = p.receiver.as_ref().expect("receiver was resolved").span;
@@ -11838,6 +11882,7 @@ fn check_file_at_impl_mode(
                     c.this_labels.pop();
                 }
                 c.this_ty = prev_this;
+                c.this_gen = prev_this_gen;
                 c.this_extension_receiver = prev_extension_receiver;
                 // A delegated property's delegate expression (`by Del()`) must be type-checked so its
                 // (and its sub-expressions') types are recorded for the lowering of `x$delegate`.
@@ -12300,6 +12345,13 @@ struct Checker<'a> {
     expr_types: Vec<Ty>,
     resolved_type_refs: HashMap<(u32, u32), TypeName>,
     scopes: Vec<HashMap<String, Local>>,
+    /// Active PROPERTY-PATH narrowings (`a.b` proven non-null / `is T` by an enclosing condition),
+    /// one frame per scope — pushed/popped in lockstep with [`Self::scopes`] so a branch's
+    /// narrowings never leak past its end, exactly like the `declare`-based root narrowings.
+    /// Unlike `Local::narrowed` (straight-line `var` flow) these survive into nested closures and
+    /// loops: every step of a [`NarrowPath`] is immutable, so the proof holds wherever the path is
+    /// re-read. Root-only narrowings are NOT stored here (they shadow the binding via `declare`).
+    path_narrows: Vec<HashMap<NarrowPath, PathNarrowing>>,
     ret_ty: Ty,
     /// Expected type for the next expression. Consumed by [`Self::expr`]; result-position
     /// propagation must re-arm it through [`Self::expr_expected`].
@@ -12320,6 +12372,10 @@ struct Checker<'a> {
     reified_tparams: std::collections::HashSet<String>,
     /// The type of `this` when checking class members (`None` at top level).
     this_ty: Option<Ty>,
+    /// Bumped on EVERY `this` rebind ([`Self::set_this_ty`]) — identifies the receiver OBJECT
+    /// epoch for `this`-rooted property-path narrowings (a same-type receiver lambda is still a
+    /// different object). Save/restore sites restore it together with `this_ty`.
+    this_gen: u64,
     /// `true` while checking expressions where implicit `this` is unavailable or uninitialized — a class's
     /// `super(…)`/delegation-call arguments and constructor-parameter defaults (the latter are
     /// evaluated in the CALLER's context). Every implicit-`this` callable-reference shape uses this
@@ -14416,47 +14472,45 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The name of a STABLE binding a contract parameter refers to at this call site: the
-    /// positional argument expression for `Param(i)`, the receiver expression for `Receiver` —
-    /// or, for a leading CONTEXT parameter (supplied implicitly), the context SOURCE the checker
-    /// resolved (`with("O") { validate1() }` → `this`).
-    fn contract_stable_arg_name(
+    /// The stable ACCESS PATH a contract parameter refers to at this call site: the positional
+    /// argument expression for `Param(i)`, the receiver expression for `Receiver` — a plain name
+    /// or a property path (`requireNotNull(a.b)`, `a.p.isNullOrBlank()`) — or, for a leading
+    /// CONTEXT parameter (supplied implicitly), the context SOURCE the checker resolved
+    /// (`with("O") { validate1() }` → `this`).
+    fn contract_stable_arg_path(
         &self,
         call: ExprId,
         param: crate::contracts::ParamRef,
-    ) -> Option<String> {
-        if let Some(name) =
-            self.contract_arg_expr(call, param)
-                .and_then(|e| match self.file.expr(e) {
-                    Expr::Name(n) => Some(n.clone()),
-                    _ => None,
-                })
+    ) -> Option<NarrowPath> {
+        if let Some(path) = self
+            .contract_arg_expr(call, param)
+            .and_then(|e| self.expr_access_path(e))
         {
-            return Some(name);
+            return Some(path);
         }
         // A leading context parameter: its "argument" is the implicit context source — recorded
         // on the resolved module target for module calls, in the context-args map for classpath
         // calls.
         if let crate::contracts::ParamRef::Param(i) = param {
             if let Some(sources) = self.context_args.get(&call) {
-                return sources.get(i).cloned();
+                return sources.get(i).map(|s| NarrowPath::root_only(s));
             }
             if let Some(ResolvedCall::ModuleTopLevel(c)) = self.resolved_calls.get(&call) {
-                return c.context_args.get(i).cloned();
+                return c.context_args.get(i).map(|s| NarrowPath::root_only(s));
             }
         }
         None
     }
 
-    /// Map a contract conclusion onto the call's actual arguments, producing `(name, Ty)`
-    /// narrowings for stable bindings. Only sound forms narrow: `x != null`, `x is T` (positive),
-    /// the boolean argument itself (recursed through the ordinary condition machinery), and
-    /// `&&` compounds. `x == null`, `!is`, `||`, and constants yield nothing.
+    /// Map a contract conclusion onto the call's actual arguments, producing `(path, Ty)`
+    /// narrowings for stable access paths. Only sound forms narrow: `x != null`, `x is T`
+    /// (positive), the boolean argument itself (recursed through the ordinary condition
+    /// machinery), and `&&` compounds. `x == null`, `!is`, `||`, and constants yield nothing.
     fn conclusion_narrowings(
         &self,
         call: ExprId,
         conclusion: &crate::contracts::Condition,
-        out: &mut Vec<(String, Ty)>,
+        out: &mut Vec<(NarrowPath, Ty)>,
     ) {
         use crate::contracts::{Condition, ConditionType};
         match conclusion {
@@ -14464,13 +14518,13 @@ impl<'a> Checker<'a> {
                 param,
                 negated: true,
             } => {
-                let Some(n) = self.contract_stable_arg_name(call, *param) else {
+                let Some(path) = self.contract_stable_arg_path(call, *param) else {
                     return;
                 };
-                // Shared with the flow smart-cast paths (`stable_nullable_binding`): `this`,
+                // Shared with the flow smart-cast paths (`stable_path_ty`): `this`,
                 // `var`-rejection, and the nullable unwrap must not drift by condition shape.
-                if let Some(inner) = self.stable_nullable_binding(&n) {
-                    out.push((n, inner));
+                if let Some(Ty::Nullable(inner)) = self.stable_path_ty(&path) {
+                    out.push((path, *inner));
                 }
             }
             Condition::IsType {
@@ -14478,15 +14532,15 @@ impl<'a> Checker<'a> {
                 ty: ConditionType::Source(tyref),
                 negated: false,
             } => {
-                let Some(n) = self.contract_stable_arg_name(call, *param) else {
+                let Some(path) = self.contract_stable_arg_path(call, *param) else {
                     return;
                 };
-                if matches!(self.lookup(&n), Some(l) if l.is_var) {
+                if !self.path_is_stable(&path) {
                     return;
                 }
                 let tt = self.resolve_ty_no_diag(tyref);
                 if tt != Ty::Error && tt.is_reference() {
-                    out.push((n, tt));
+                    out.push((path, tt));
                 }
             }
             Condition::IsType {
@@ -14497,15 +14551,15 @@ impl<'a> Checker<'a> {
                 // A contract decoded from `@Metadata`: the is-type is already semantic but may
                 // mention the callee's type parameters (`value is R`) — substitute them with the
                 // call's bindings (`Refinement<Any, String>.validate` → `String`).
-                let Some(n) = self.contract_stable_arg_name(call, *param) else {
+                let Some(path) = self.contract_stable_arg_path(call, *param) else {
                     return;
                 };
-                if matches!(self.lookup(&n), Some(l) if l.is_var) {
+                if !self.path_is_stable(&path) {
                     return;
                 }
                 let tt = self.subst_contract_metadata_ty(call, *ty);
                 if tt != Ty::Error && tt.is_reference() && !tt.is_ty_param() {
-                    out.push((n, tt));
+                    out.push((path, tt));
                 }
             }
             Condition::BoolParam(param) => {
@@ -14592,7 +14646,7 @@ impl<'a> Checker<'a> {
         &self,
         cond: ExprId,
         truth: bool,
-        out: &mut Vec<(String, Ty)>,
+        out: &mut Vec<(NarrowPath, Ty)>,
     ) {
         let Some(contract) = self.contract_for_call(cond) else {
             return;
@@ -15059,10 +15113,20 @@ impl<'a> Checker<'a> {
         // one can invalidate it, so drop all narrowings at every scope boundary.
         self.clear_local_narrows();
         self.scopes.push(HashMap::new());
+        self.path_narrows.push(HashMap::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.path_narrows.pop();
         self.clear_local_narrows();
+    }
+    /// Rebind `this` (receiver lambda, inner class, extension receiver, class-member scope). EVERY
+    /// rebind bumps the receiver generation — a same-type receiver is still a different object —
+    /// invalidating `this`-rooted property-path narrowings recorded against the previous receiver.
+    /// Save/restore sites restore `this_gen` together with `this_ty` (write both fields directly).
+    fn set_this_ty(&mut self, ty: Option<Ty>) {
+        self.this_gen = self.this_gen.wrapping_add(1);
+        self.this_ty = ty;
     }
     fn update_lambda_info(&mut self, e: ExprId, update: impl FnOnce(&mut LambdaInfo)) {
         let mut info = match self.expr_lowers.remove(&e) {
@@ -15981,12 +16045,33 @@ impl<'a> Checker<'a> {
         is_var: bool,
         origin: ReceiverFnValueOrigin,
     ) {
+        // A NEW binding under an existing name invalidates the property-path narrowings rooted at
+        // the old one (`if (a.p == null) return; val a = …` — the proof was about the OLD `a`).
+        // Narrowing shadows are exempt (`declare_narrowing_shadow`): they re-bind the SAME value.
+        if let Some(frame) = self.path_narrows.last_mut() {
+            frame.retain(|path, _| path.root != name);
+        }
         self.scopes.last_mut().unwrap().insert(
             name.to_string(),
             Local {
                 ty,
                 is_var,
                 origin,
+                narrowed: None,
+            },
+        );
+    }
+
+    /// Shadow a binding with its flow-narrowed type (`if (x != null) …`). Unlike a fresh
+    /// declaration this re-binds the SAME runtime value, so property-path narrowings rooted at it
+    /// stay valid.
+    fn declare_narrowing_shadow(&mut self, name: &str, ty: Ty) {
+        self.scopes.last_mut().unwrap().insert(
+            name.to_string(),
+            Local {
+                ty,
+                is_var: false,
+                origin: ReceiverFnValueOrigin::Local,
                 narrowed: None,
             },
         );
@@ -17969,61 +18054,175 @@ impl<'a> Checker<'a> {
         tt.is_reference().then_some(tt)
     }
 
-    /// The non-null form of a stable nullable binding.
-    ///
-    /// Parameters/`val`s and `this` are safe to narrow because their value cannot change between the
-    /// proof and use; a mutable local is deliberately excluded. All flow and contract smart-cast paths
-    /// share this gate so `this`, `var`, and nullable handling cannot drift by condition shape.
-    fn stable_nullable_binding(&self, name: &str) -> Option<Ty> {
-        let ty = if name == "this" {
-            self.this_ty
-        } else {
-            self.lookup(name)
-                .filter(|local| !local.is_var)
-                .map(|local| local.ty)
-        };
-        match ty {
-            Some(Ty::Nullable(inner)) => Some(*inner),
+    /// The access path an expression denotes: a root name followed by property segments through
+    /// plain (`.`) and safe (`?.`) member reads. `None` for anything else (a call result, an
+    /// indexed read, a temporary) — a proof on it says nothing about a later re-read.
+    fn expr_access_path(&self, e: ExprId) -> Option<NarrowPath> {
+        match self.file.expr(e) {
+            Expr::Name(n) => Some(NarrowPath::root_only(n)),
+            Expr::Member { receiver, name } => {
+                let mut path = self.expr_access_path(*receiver)?;
+                path.segments.push(name.clone());
+                Some(path)
+            }
+            Expr::SafeCall {
+                receiver,
+                name,
+                args: None,
+            } => {
+                let mut path = self.expr_access_path(*receiver)?;
+                path.segments.push(name.clone());
+                Some(path)
+            }
             _ => None,
         }
     }
 
-    fn smartcast_binding(&self, cond: ExprId, for_else: bool) -> Option<(String, Ty)> {
-        // `x != null` (then-branch) / `x == null` (else-branch) narrows `T?` to `T`. Only a stable
-        // `val`/parameter narrows soundly.
+    /// The DECLARED type of a stable access path — `None` when any step can change between a
+    /// proof and a later re-read, so no smart cast is sound. kotlinc's stability rules:
+    /// * the ROOT is `this` or a local `val`/parameter (a `var` can be reassigned);
+    /// * every SEGMENT is a `val` (no setter) without a custom getter or delegate (a computed
+    ///   read can return a different value per call) on a FINAL class (a subclass of an open
+    ///   class could override the property with a computed getter).
+    fn stable_path_ty(&self, path: &NarrowPath) -> Option<Ty> {
+        let mut ty = if path.root == "this" {
+            self.this_ty?
+        } else {
+            let local = self.lookup(&path.root)?;
+            if local.is_var {
+                return None;
+            }
+            // A member/top-level property as the ROOT of a longer path re-reads through its
+            // accessor each time; only a plain local/`val` slot is a stable root there. (For a
+            // ROOT-ONLY path the origin does not matter — the narrowed binding shadows the name,
+            // the historical mechanism for `if (prop != null)` on an own member `val`.)
+            if !path.segments.is_empty() && !matches!(local.origin, ReceiverFnValueOrigin::Local) {
+                return None;
+            }
+            local.ty
+        };
+        for segment in &path.segments {
+            let recv = ty.non_null();
+            let internal = recv.obj_internal()?;
+            let class = self.syms.class_by_type_name(internal)?;
+            if !class.is_final() {
+                return None;
+            }
+            let (owner, property) = self.syms.declared_member_prop(internal, segment)?;
+            if property.setter_name.is_some()
+                || property.has_custom_getter
+                || !property.context_params.is_empty()
+            {
+                return None;
+            }
+            ty = property.ty;
+            // The declaration may speak in the class's type parameters (`Box<T>(val v: T)`);
+            // mirror the member-READ substitution (`check_member`'s `generic_props` /
+            // `generic_function_props` arms) so the proof and the read agree on the path's type.
+            if let Some(owner_class) = self.syms.class_by_type_name(owner) {
+                if let Some(&(i, definitely_non_null)) = owner_class.generic_props.get(segment) {
+                    let applied = if owner == internal {
+                        Some(recv)
+                    } else {
+                        self.applied_source_supertype(recv, owner)
+                    };
+                    if let Some(&arg) = applied.and_then(|applied| applied.type_args().get(i)) {
+                        ty = if definitely_non_null {
+                            arg.non_null()
+                        } else {
+                            arg
+                        };
+                    } else if let Some(bound) = owner_class.tparam_bounds.get(i) {
+                        if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
+                            ty = *bound;
+                        }
+                    }
+                } else if let Some(&shape) = owner_class.generic_function_props.get(segment) {
+                    // `owner` is always an ancestor (`declared_member_prop` walked to it); if the
+                    // applied form can't be computed, don't guess the bindings.
+                    let applied = if owner == internal {
+                        recv
+                    } else {
+                        self.applied_source_supertype(recv, owner)?
+                    };
+                    let bindings = owner_class.type_parameter_bindings(applied);
+                    ty = crate::symbol_resolver::ty_subst(shape, &bindings);
+                }
+            }
+        }
+        Some(ty)
+    }
+
+    /// Whether a proof about `path` can soundly narrow later re-reads of it. A root-only path
+    /// keeps the historical rule (any non-`var` binding — including names that resolve outside
+    /// the local scopes, narrowed by shadowing); a segmented path must be fully stable
+    /// ([`Self::stable_path_ty`]).
+    fn path_is_stable(&self, path: &NarrowPath) -> bool {
+        if path.segments.is_empty() {
+            return path.root == "this" || !matches!(self.lookup(&path.root), Some(l) if l.is_var);
+        }
+        self.stable_path_ty(path).is_some()
+    }
+
+    /// Narrowings from a `!= null`/`== null` proof on `operand`: the operand's whole ACCESS PATH
+    /// (`a.b != null` proves `a.b` non-null) — and, for a SAFE-CALL chain (`a?.b?.c != null`),
+    /// every prefix too, since a non-null safe-call result means every link held (kotlinc narrows
+    /// the root receiver in the branch). Only stable paths narrow soundly.
+    fn null_check_narrowings(&self, operand: ExprId, out: &mut Vec<(NarrowPath, Ty)>) {
+        let Some(path) = self.expr_access_path(operand) else {
+            // Not a property path. A SAFE-CALL chain ending in a method (`u?.f() != null`,
+            // `u?.f() ?: return`) is no property read, but a non-null result still proves the
+            // chain's ROOT receiver non-null — it only completes when every `?.` held.
+            let mut root = operand;
+            while let Expr::SafeCall { receiver, .. } = self.file.expr(root) {
+                root = *receiver;
+            }
+            if let Expr::Name(n) = self.file.expr(root).clone() {
+                let root_path = NarrowPath::root_only(&n);
+                if let Some(Ty::Nullable(inner)) = self.stable_path_ty(&root_path) {
+                    out.push((root_path, *inner));
+                }
+            }
+            return;
+        };
+        // A plain chain's proof covers only the full path; a safe-call chain's covers every prefix.
+        let shortest = if matches!(self.file.expr(operand), Expr::SafeCall { .. }) {
+            0
+        } else {
+            path.segments.len()
+        };
+        for len in (shortest..=path.segments.len()).rev() {
+            let prefix = NarrowPath {
+                root: path.root.clone(),
+                segments: path.segments[..len].to_vec(),
+            };
+            if let Some(Ty::Nullable(inner)) = self.stable_path_ty(&prefix) {
+                out.push((prefix, *inner));
+            }
+        }
+    }
+
+    /// The flow narrowings a condition establishes for the branch where it holds (`for_else` =
+    /// the FALSE branch): `x != null`, `x is T`, and their safe-call/property-path forms. Each
+    /// entry is a stable [`NarrowPath`] and the type it is proven to have.
+    fn smartcast_narrowings(&self, cond: ExprId, for_else: bool) -> Vec<(NarrowPath, Ty)> {
+        let mut out = Vec::new();
+        // `x != null` (then-branch) / `x == null` (else-branch) narrows `T?` to `T`.
         if let Expr::Binary { op, lhs, rhs, .. } = self.file.expr(cond).clone() {
             if matches!(op, BinOp::Ne | BinOp::Eq) {
                 let narrows_then = matches!(op, BinOp::Ne); // `!= null` narrows in the then-branch
                 if narrows_then != for_else {
-                    let name = match (self.file.expr(lhs).clone(), self.file.expr(rhs).clone()) {
-                        (Expr::Name(n), Expr::NullLit) | (Expr::NullLit, Expr::Name(n)) => Some(n),
-                        // `b?.prop != null` / `b?.f() != null`: a non-null safe-call RESULT means the
-                        // receiver itself was non-null (kotlinc narrows `b` in the branch). Descend a
-                        // chain of safe calls — `a?.b?.c != null` means every prefix, hence the root,
-                        // was non-null — but stop at anything else (a plain call's result says nothing
-                        // about ITS receiver). Only a stable name receiver narrows soundly.
-                        (Expr::SafeCall { receiver, .. }, Expr::NullLit)
-                        | (Expr::NullLit, Expr::SafeCall { receiver, .. }) => {
-                            let mut root = receiver;
-                            loop {
-                                match self.file.expr(root) {
-                                    Expr::Name(n) => break Some(n.clone()),
-                                    Expr::SafeCall {
-                                        receiver: inner, ..
-                                    } => root = *inner,
-                                    _ => break None,
-                                }
-                            }
-                        }
+                    let operand = match (self.file.expr(lhs), self.file.expr(rhs)) {
+                        (_, Expr::NullLit) => Some(lhs),
+                        (Expr::NullLit, _) => Some(rhs),
                         _ => None,
                     };
-                    if let Some(n) = name {
-                        if let Some(non_null) = self.stable_nullable_binding(&n) {
-                            return Some((n, non_null));
-                        }
+                    if let Some(operand) = operand {
+                        self.null_check_narrowings(operand, &mut out);
                     }
                 }
             }
+            return out;
         }
         let Expr::Is {
             operand,
@@ -18031,71 +18230,78 @@ impl<'a> Checker<'a> {
             negated,
         } = self.file.expr(cond).clone()
         else {
-            return None;
+            return out;
         };
         // The then-branch narrows on a positive `is`; the else-branch on a negative `!is`.
         if negated != for_else {
-            return None;
+            return out;
         }
-        let Expr::Name(n) = self.file.expr(operand).clone() else {
-            return None;
+        let Some(path) = self.expr_access_path(operand) else {
+            return out;
         };
-        // Only stable values (val/parameter) smart-cast soundly — a `var` could be reassigned.
-        if matches!(self.lookup(&n), Some(l) if l.is_var) {
-            return None;
+        // Only stable values smart-cast soundly — a `var`/computed property could change.
+        if !self.path_is_stable(&path) {
+            return out;
         }
         let tt = self.resolve_ty_no_diag(&ty);
         // `is T?` accepts null, so its narrowing remains nullable.
-        if ty.nullable() {
-            (tt != Ty::Error).then_some((n, tt))
+        let narrowed = if ty.nullable() {
+            (tt != Ty::Error).then_some(tt)
         } else if tt.is_reference() {
-            Some((n, tt))
+            Some(tt)
         } else {
             // A non-null primitive (`is Int`/`is Double`/`is Char`): narrow to the primitive so a
-            // later USE unboxes — the lowerer's `Name` path coerces a reference slot to the narrowed
+            // later USE unboxes — the lowerer's read paths coerce a reference slot to the narrowed
             // primitive (checkcast wrapper + unbox), and a boxed-FP `==` reached this way conforms
             // with IEEE semantics. Unsigned (`is UInt`) stays unnarrowed: its value-box unbox to the
             // `kotlin.UInt` type isn't modeled (krusty erases unsigned to `int`).
-            (tt.is_numeric_or_char() || tt == Ty::Boolean).then_some((n, tt))
+            (tt.is_numeric_or_char() || tt == Ty::Boolean).then_some(tt)
+        };
+        if let Some(narrowed) = narrowed {
+            out.push((path, narrowed));
         }
+        out
     }
 
-    fn condition_narrowings(&self, cond: ExprId, truth: bool) -> Vec<(String, Ty)> {
+    fn condition_narrowings(&self, cond: ExprId, truth: bool) -> Vec<(NarrowPath, Ty)> {
         let mut candidates = Vec::new();
         self.collect_condition_narrowings(cond, truth, &mut candidates);
-        let nonnull: std::collections::HashSet<String> = candidates
+        let nonnull: std::collections::HashSet<NarrowPath> = candidates
             .iter()
-            .filter_map(|(name, ty)| (!ty.is_nullable()).then_some(name.clone()))
+            .filter_map(|(path, ty)| (!ty.is_nullable()).then_some(path.clone()))
             .collect();
-        let mut result = Vec::new();
+        let mut result: Vec<(NarrowPath, Ty)> = Vec::new();
         let mut conflicts = std::collections::HashSet::new();
-        for (name, ty) in candidates {
-            if conflicts.contains(&name) {
+        for (path, ty) in candidates {
+            if conflicts.contains(&path) {
                 continue;
             }
             let ty = match ty {
-                Ty::Nullable(inner) if nonnull.contains(name.as_str()) && !inner.is_unsigned() => {
-                    *inner
-                }
+                Ty::Nullable(inner) if nonnull.contains(&path) && !inner.is_unsigned() => *inner,
                 _ => ty,
             };
-            let Some((_, current)) = result.iter_mut().find(|(existing, _)| *existing == name)
+            let Some((_, current)) = result.iter_mut().find(|(existing, _)| *existing == path)
             else {
-                result.push((name, ty));
+                result.push((path, ty));
                 continue;
             };
             let context = crate::assignable::TyCtx::new();
             if crate::assignable::is_subtype(&context, self, ty, *current) {
                 *current = ty;
             } else if !crate::assignable::is_subtype(&context, self, *current, ty) {
-                result.retain(|(existing, _)| *existing != name);
-                conflicts.insert(name);
+                result.retain(|(existing, _)| *existing != path);
+                conflicts.insert(path);
             }
         }
         result
     }
 
-    fn collect_condition_narrowings(&self, cond: ExprId, truth: bool, out: &mut Vec<(String, Ty)>) {
+    fn collect_condition_narrowings(
+        &self,
+        cond: ExprId,
+        truth: bool,
+        out: &mut Vec<(NarrowPath, Ty)>,
+    ) {
         // `!cond` flips the branch facts: the narrowings of `cond`-false hold when `!cond` is true
         // (and vice versa). Recursing with a flipped `truth` also yields De Morgan for `!(a && b)` /
         // `!(a || b)` through the combine rule below.
@@ -18116,23 +18322,133 @@ impl<'a> Checker<'a> {
             }
         }
         self.contract_condition_narrowings(cond, truth, out);
-        if let Some(binding) = self.smartcast_binding(cond, !truth) {
-            out.push(binding);
-        }
+        out.extend(self.smartcast_narrowings(cond, !truth));
     }
 
-    fn narrowing_is_supported(&self, name: &str, ty: Ty, compound: bool) -> bool {
+    fn narrowing_is_supported(&self, path: &NarrowPath, ty: Ty, compound: bool) -> bool {
         let is_value = ty
             .obj_internal()
             .and_then(|internal| self.syms.class_by_type_name(internal))
             .is_some_and(|class| class.value_field.is_some());
-        let source_ty = if name == "this" {
-            self.this_ty
+        let source_ty = if path.segments.is_empty() {
+            if path.root == "this" {
+                self.this_ty
+            } else {
+                self.lookup(&path.root).map(|local| local.ty)
+            }
         } else {
-            self.lookup(name).map(|local| local.ty)
+            self.stable_path_ty(path)
         };
         let unboxes_nullable = matches!(source_ty, Some(Ty::Nullable(inner)) if *inner == ty);
         (!is_value || unboxes_nullable) && (!compound || ty != Ty::Boolean)
+    }
+
+    /// Bring the narrowings a condition proves into scope for a guarded region. The single
+    /// application point for every site (`if`/`while` branches, `&&`/`||` right operands,
+    /// early-return guards, contract statements): each narrowing is gated by
+    /// [`Self::narrowing_is_supported`], then applied.
+    fn apply_narrowings(&mut self, casts: &[(NarrowPath, Ty)], compound: bool) {
+        for (path, ty) in casts {
+            if self.narrowing_is_supported(path, *ty, compound) {
+                self.apply_narrowing_unchecked(path, *ty);
+            }
+        }
+    }
+
+    /// Apply one narrowing without the support gate: a root-only path shadows the binding in the
+    /// current scope (the classic mechanism — reads resolve to the narrowed `Local`), a property
+    /// path is recorded in the current [`Self::path_narrows`] frame for the read-time hook.
+    fn apply_narrowing_unchecked(&mut self, path: &NarrowPath, ty: Ty) {
+        if path.segments.is_empty() {
+            let root = path.root.clone();
+            // Alias: a proof on the BARE name of an own member `val` (`if (p != null)`) also
+            // narrows the qualified `this.p` read form — same immutable property.
+            if matches!(
+                self.lookup(&root).map(|local| local.origin),
+                Some(ReceiverFnValueOrigin::DispatchProperty(_))
+            ) {
+                self.record_path_narrowing(
+                    NarrowPath {
+                        root: "this".to_string(),
+                        segments: vec![root.clone()],
+                    },
+                    ty,
+                );
+            }
+            self.declare_narrowing_shadow(&root, ty);
+        } else {
+            self.record_path_narrowing(path.clone(), ty);
+            // Alias: a proof on `this.p` also narrows the BARE `p` read form (same property).
+            if path.root == "this" && path.segments.len() == 1 {
+                let name = path.segments[0].clone();
+                if matches!(
+                    self.lookup(&name).map(|local| local.origin),
+                    Some(ReceiverFnValueOrigin::DispatchProperty(_))
+                ) {
+                    self.declare_narrowing_shadow(&name, ty);
+                }
+            }
+        }
+    }
+
+    /// Record a property-path narrowing in the current frame, snapshotting the receiver epoch it
+    /// was proven in (see [`PathNarrowing`]).
+    fn record_path_narrowing(&mut self, path: NarrowPath, ty: Ty) {
+        if let Some(frame) = self.path_narrows.last_mut() {
+            frame.insert(
+                path,
+                PathNarrowing {
+                    ty,
+                    this_gen: self.this_gen,
+                },
+            );
+        }
+    }
+
+    /// The active narrowing for a property path, if any. Narrowings recorded BELOW the frame
+    /// holding the root's innermost binding refer to an outer, now-shadowed binding — skip them;
+    /// a `this`-rooted narrowing applies only while `this` is still the receiver it was proven
+    /// against (not inside a receiver lambda / inner class).
+    fn lookup_path_narrowing(&self, path: &NarrowPath) -> Option<Ty> {
+        if path.segments.is_empty() {
+            return None;
+        }
+        let root_frame = if path.root == "this" {
+            0
+        } else {
+            self.scopes
+                .iter()
+                .rposition(|scope| scope.contains_key(&path.root))?
+        };
+        self.path_narrows[root_frame..]
+            .iter()
+            .rev()
+            .filter_map(|frame| frame.get(path))
+            .find(|narrowing| path.root != "this" || narrowing.this_gen == self.this_gen)
+            .map(|narrowing| narrowing.ty)
+    }
+
+    /// The flow-narrowed type of a stable property READ (`a.b`, `a?.b`, `this.b`): when an
+    /// enclosing condition proved this exact access path non-null or `is T`, the read sees the
+    /// narrowed type, and the lowerer emits the `checkcast`/unbox from its generic per-expression
+    /// coercion (`info.ty(e)` against the property's physical type). Re-validated against the
+    /// CURRENT scope state — a changed binding or an unstable step drops the narrowing.
+    fn path_narrowed_read_ty(&self, receiver: ExprId, name: &str, declared: Ty) -> Ty {
+        let Some(mut path) = self.expr_access_path(receiver) else {
+            return declared;
+        };
+        path.segments.push(name.to_string());
+        let Some(narrowed) = self.lookup_path_narrowing(&path) else {
+            return declared;
+        };
+        let still_valid = self
+            .stable_path_ty(&path)
+            .is_some_and(|current| current.non_null() == declared.non_null());
+        if narrowed != declared && still_valid {
+            narrowed
+        } else {
+            declared
+        }
     }
 
     fn check_duplicate_param_names(
@@ -18202,10 +18518,11 @@ impl<'a> Checker<'a> {
         }
         // Extension function: look up in ext_funs table; set this_ty to the receiver type.
         let prev_this = self.this_ty;
+        let prev_this_gen = self.this_gen;
         let prev_extension_receiver = self.this_extension_receiver;
         if let Some(recv_ref) = &f.receiver {
             let recv_ty = self.resolve_ty(recv_ref);
-            self.this_ty = Some(recv_ty);
+            self.set_this_ty(Some(recv_ty));
             self.this_labels.push((f.name.clone(), recv_ty, false));
             let label_index = self.this_labels.len() - 1;
             self.extension_receiver_labels
@@ -18319,6 +18636,7 @@ impl<'a> Checker<'a> {
             self.this_labels.pop();
         }
         self.this_ty = prev_this;
+        self.this_gen = prev_this_gen;
         self.this_extension_receiver = prev_extension_receiver;
         self.allow_lambda_mutation = prev_allow;
     }
@@ -18338,10 +18656,11 @@ impl<'a> Checker<'a> {
             .cloned()
             .collect();
         let dispatch_this = self.this_ty;
+        let dispatch_this_gen = self.this_gen;
         let dispatch_extension_receiver = self.this_extension_receiver;
         if let Some(recv_ref) = &f.receiver {
             let receiver = self.resolve_ty(recv_ref);
-            self.this_ty = Some(receiver);
+            self.set_this_ty(Some(receiver));
             self.this_labels.push((f.name.clone(), receiver, false));
             let label_index = self.this_labels.len() - 1;
             self.extension_receiver_labels
@@ -18457,6 +18776,7 @@ impl<'a> Checker<'a> {
             self.this_labels.pop();
         }
         self.this_ty = dispatch_this;
+        self.this_gen = dispatch_this_gen;
         self.this_extension_receiver = dispatch_extension_receiver;
     }
 
@@ -21153,24 +21473,16 @@ impl<'a> Checker<'a> {
             if rt == Ty::Nothing {
                 // `x ?: return` (or throw/break/continue/a `Nothing` call): completing the elvis
                 // proves a stable `x` non-null for the code that follows, exactly like an
-                // `if (x == null) return` guard. Mirrors `smartcast_binding`'s `x != null` case:
-                // stable `val`/parameter only. Unsigned stays unnarrowed because its value-box
-                // unbox to `kotlin.UInt` is not modeled.
-                // A SAFE-CALL left side (`u?.javaPsi ?: return`) proves its ROOT receiver
-                // non-null the same way — the chain only completes when the root held.
-                let mut narrow_root = lhs;
-                while let Expr::SafeCall { receiver, .. } = self.file.expr(narrow_root) {
-                    narrow_root = *receiver;
-                }
-                if let Expr::Name(n) = self.file.expr(narrow_root).clone() {
-                    if let Some(l) = self.lookup(&n) {
-                        if !l.is_var {
-                            if let Ty::Nullable(inner) = l.ty {
-                                if !inner.is_unsigned() {
-                                    self.declare(&n, *inner, false);
-                                }
-                            }
-                        }
+                // `if (x == null) return` guard — the same machinery (`null_check_narrowings`)
+                // covers plain names, property paths (`a.b ?: return` narrows `a.b`), and
+                // SAFE-CALL left sides (`u?.f ?: return` proves the root `u` non-null).
+                // Unsigned stays unnarrowed because its value-box unbox to `kotlin.UInt` is
+                // not modeled.
+                let mut proven = Vec::new();
+                self.null_check_narrowings(lhs, &mut proven);
+                for (path, ty) in proven {
+                    if !ty.is_unsigned() {
+                        self.apply_narrowing_unchecked(&path, ty);
                     }
                 }
                 match lt0 {
@@ -21547,6 +21859,13 @@ impl<'a> Checker<'a> {
                 Ty::nullable(result)
             }
         };
+        // A property READ (`a?.b`, not a call) proven non-null by an enclosing condition
+        // (`a?.b != null`, a contract) reads as the narrowed type in the guarded region.
+        let t = if args.is_none() && t != Ty::Error {
+            self.path_narrowed_read_ty(receiver, &name, t)
+        } else {
+            t
+        };
         self.set(e, t)
     }
 
@@ -21744,11 +22063,7 @@ impl<'a> Checker<'a> {
                 let lt = self.expr(lhs);
                 let casts = self.condition_narrowings(lhs, op == BinOp::And);
                 self.push_scope();
-                for (n, t) in &casts {
-                    if self.narrowing_is_supported(n, *t, true) {
-                        self.declare(n, *t, false);
-                    }
-                }
+                self.apply_narrowings(&casts, true);
                 let rt = self.expr(rhs);
                 self.pop_scope();
                 // `check_binary` enforces both operands are `Boolean` (and reports the same
@@ -22063,7 +22378,9 @@ impl<'a> Checker<'a> {
                 }
             }
             let rt = self.expr(receiver);
-            self.check_member(rt, &name, self.span(e), Some(e))
+            let declared = self.check_member(rt, &name, self.span(e), Some(e));
+            // A proof from an enclosing condition (`a.b != null`, `a.b is T`) narrows this read.
+            self.path_narrowed_read_ty(receiver, &name, declared)
         };
         self.set(e, t)
     }
@@ -22083,11 +22400,7 @@ impl<'a> Checker<'a> {
             let then_casts = self.condition_narrowings(cond, true);
             let then_compound = matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
             self.push_scope();
-            for (name, ty) in &then_casts {
-                if self.narrowing_is_supported(name, *ty, then_compound) {
-                    self.declare(name, *ty, false);
-                }
-            }
+            self.apply_narrowings(&then_casts, then_compound);
             // `if (this is B)` narrows the implicit receiver to `B` for the branch body.
             let tt = self.with_this_narrow(self.this_is_narrowing(cond, false), |c| {
                 c.expr_result(then_branch, expected, value_required)
@@ -22099,11 +22412,7 @@ impl<'a> Checker<'a> {
                     let else_compound =
                         matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
                     self.push_scope();
-                    for (name, ty) in &else_casts {
-                        if self.narrowing_is_supported(name, *ty, else_compound) {
-                            self.declare(name, *ty, false);
-                        }
-                    }
+                    self.apply_narrowings(&else_casts, else_compound);
                     let et = self.with_this_narrow(self.this_is_narrowing(cond, true), |c| {
                         c.expr_result(eb, expected, value_required)
                     });
@@ -22156,11 +22465,7 @@ impl<'a> Checker<'a> {
                         let casts = self.condition_narrowings(cond, false);
                         let compound =
                             matches!(self.file.expr(cond), Expr::Binary { op: BinOp::Or, .. });
-                        for (name, ty) in casts {
-                            if self.narrowing_is_supported(&name, ty, compound) {
-                                self.declare(&name, ty, false);
-                            }
-                        }
+                        self.apply_narrowings(&casts, compound);
                         match else_branch {
                             Some(eb) => level = eb,
                             None => break,
@@ -22182,11 +22487,7 @@ impl<'a> Checker<'a> {
                                     self.conclusion_narrowings(ie, conclusion, &mut casts);
                                     let compound =
                                         matches!(conclusion, crate::contracts::Condition::And(..));
-                                    for (name, ty) in casts {
-                                        if self.narrowing_is_supported(&name, ty, compound) {
-                                            self.declare(&name, ty, false);
-                                        }
-                                    }
+                                    self.apply_narrowings(&casts, compound);
                                 }
                             }
                         }
@@ -22289,10 +22590,12 @@ impl<'a> Checker<'a> {
                         _ => {}
                     }
                 }
-                // Smart-cast the body of a single positive `is T` arm (subject is a stable name).
-                let arm_cast = match arm.conditions.as_slice() {
-                    [cnd] => self.smartcast_binding(*cnd, false),
-                    _ => None,
+                // Smart-cast the body of a single positive `is T` arm (the subject is a stable
+                // binding or property path). Historically ungated by `narrowing_is_supported` —
+                // keep that, just apply through the shared path machinery.
+                let arm_casts = match arm.conditions.as_slice() {
+                    [cnd] => self.smartcast_narrowings(*cnd, false),
+                    _ => Vec::new(),
                 };
                 // `when (this) { is B -> … }` narrows the implicit receiver to `B` in that arm's
                 // body (the `when`-subject analog of `if (this is B)`).
@@ -22301,8 +22604,8 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 self.push_scope();
-                if let Some((n, t)) = &arm_cast {
-                    self.declare(n, *t, false);
+                for (path, ty) in &arm_casts {
+                    self.apply_narrowing_unchecked(path, *ty);
                 }
                 let bt = self.with_this_narrow(arm_this_narrow, |c| {
                     c.expr_result(arm.body, expected, value_required)
@@ -23250,8 +23553,9 @@ impl<'a> Checker<'a> {
             return Ty::Error;
         }
         let prev_this = self.this_ty;
+        let prev_this_gen = self.this_gen;
         let prev_extension_receiver = self.this_extension_receiver;
-        self.this_ty = Some(recv);
+        self.set_this_ty(Some(recv));
         self.this_extension_receiver = None;
         let pushed = label.map(|l| {
             self.this_labels.push((l.to_string(), recv, false));
@@ -23261,6 +23565,7 @@ impl<'a> Checker<'a> {
             self.this_labels.pop();
         }
         self.this_ty = prev_this;
+        self.this_gen = prev_this_gen;
         self.this_extension_receiver = prev_extension_receiver;
         r
     }
@@ -24778,6 +25083,7 @@ impl<'a> Checker<'a> {
                 self.mark_receiver_lambda(e, receiver);
             }
             let prev_this = self.this_ty;
+            let prev_this_gen = self.this_gen;
             let prev_extension_receiver = self.this_extension_receiver;
             let labels_depth = self.this_labels.len();
             let mut implicit_types = context_types.to_vec();
@@ -24787,7 +25093,7 @@ impl<'a> Checker<'a> {
                     self.this_labels
                         .push((format!("$context{index}"), *receiver, false));
                 }
-                self.this_ty = Some(current);
+                self.set_this_ty(Some(current));
                 self.this_extension_receiver = None;
                 if let Some(label) = label {
                     self.this_labels.push((label.to_string(), current, false));
@@ -24818,6 +25124,7 @@ impl<'a> Checker<'a> {
             self.pop_scope();
             self.this_labels.truncate(labels_depth);
             self.this_ty = prev_this;
+            self.this_gen = prev_this_gen;
             self.this_extension_receiver = prev_extension_receiver;
             let mut pts = context_types.to_vec();
             pts.extend(extension_receiver);
@@ -32087,11 +32394,7 @@ impl<'a> Checker<'a> {
                 let casts = self.condition_narrowings(cond, true);
                 let compound = matches!(self.file.expr(cond), Expr::Binary { op: BinOp::And, .. });
                 self.push_scope();
-                for (name, ty) in &casts {
-                    if self.narrowing_is_supported(name, *ty, compound) {
-                        self.declare(name, *ty, false);
-                    }
-                }
+                self.apply_narrowings(&casts, compound);
                 self.check_loop_body(body, &label);
                 self.pop_scope();
             }
@@ -32939,9 +33242,10 @@ impl<'a> Checker<'a> {
                 FunBody::Expr(e) => {
                     // Check expression in isolation to infer return type (before registering sig).
                     let previous_this = self.this_ty;
+                    let previous_this_gen = self.this_gen;
                     let previous_extension_receiver = self.this_extension_receiver;
                     if let (Some(receiver), Some(receiver_ref)) = (receiver, f.receiver.as_ref()) {
-                        self.this_ty = Some(receiver);
+                        self.set_this_ty(Some(receiver));
                         self.this_labels.push((f.name.clone(), receiver, false));
                         let label_index = self.this_labels.len() - 1;
                         self.extension_receiver_labels
@@ -32961,6 +33265,7 @@ impl<'a> Checker<'a> {
                         self.this_labels.pop();
                     }
                     self.this_ty = previous_this;
+                    self.this_gen = previous_this_gen;
                     self.this_extension_receiver = previous_extension_receiver;
                     inferred
                 }
@@ -33013,9 +33318,10 @@ impl<'a> Checker<'a> {
         // Check the body (for a block body or when return type was already inferred above for expr).
         self.with_ret(ret_ty, |c| {
             let previous_this = c.this_ty;
+            let previous_this_gen = c.this_gen;
             let previous_extension_receiver = c.this_extension_receiver;
             if let (Some(receiver), Some(receiver_ref)) = (receiver, f.receiver.as_ref()) {
-                c.this_ty = Some(receiver);
+                c.set_this_ty(Some(receiver));
                 c.this_labels.push((f.name.clone(), receiver, false));
                 let label_index = c.this_labels.len() - 1;
                 c.extension_receiver_labels
@@ -33045,6 +33351,7 @@ impl<'a> Checker<'a> {
                 c.this_labels.pop();
             }
             c.this_ty = previous_this;
+            c.this_gen = previous_this_gen;
             c.this_extension_receiver = previous_extension_receiver;
         });
         for t in added_tparams {
