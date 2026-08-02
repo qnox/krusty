@@ -886,7 +886,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   shape: a lambda that is stored or returned rather than passed to a call, anonymous objects,
   `try`/`break`/`continue`, a labeled or expression-position `return`, `is`/`as` on a type
   parameter; a `contract { … }` block is erased, not a closure) — with the shared registration
-  predicate `SymbolTable::emits_fn_facade` used by the backend, survey, and conformance drivers.
+  predicate in `jvm::prepare_module_symbols` used by the backend, survey, and conformance drivers.
   Unsafe call sites BAIL rather than miscompile: an unregistered (unemittable) callee, a lambda
   argument with a non-local `return` or a mutating capture, a callable-reference/anonymous-function
   argument, or an enclosing inline lambda parameter passed as a value (an ordinary function-typed

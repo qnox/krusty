@@ -1,7 +1,7 @@
 //! The JVM [`Backend`]: lowers each already-checked file to `.class` files (with `@Metadata` inside
 //! the class bytes) and emits the `META-INF/<module>.kotlin_module` package → facade mapping.
 
-use crate::ast::{Decl, File};
+use crate::ast::{Decl, DeclId, File, FunDecl};
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
 use crate::frontend::{CheckedFile, FrontendSymbols};
@@ -268,6 +268,21 @@ pub fn classpath_inner_class_resolver(
     })
 }
 
+/// The JVM registrar's complete facade-emission decision. Keep it at the backend boundary because
+/// a facade static is a JVM representation choice; every production, survey, and conformance
+/// caller reaches this one predicate through [`prepare_module_symbols`] instead of duplicating it.
+fn emits_fn_facade(
+    syms: &FrontendSymbols,
+    file: &File,
+    file_index: u32,
+    declaration: DeclId,
+    function: &FunDecl,
+) -> bool {
+    !function.is_inline()
+        || function.has_callable_inline_extension_body()
+        || syms.inline_fn_facade_emittable(file, file_index, declaration, function)
+}
+
 pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut FrontendSymbols) {
     if files.len() <= 1 {
         return;
@@ -285,7 +300,7 @@ pub fn prepare_module_symbols(files: &[File], stems: &[String], syms: &mut Front
                     // This is the single owner of the emitted/unemitted decision. The checker
                     // consumes the declaration-keyed outcome recorded below; it must not repeat
                     // this predicate because signature/body support evolves with JVM lowering.
-                    let emitted = syms.emits_fn_facade(file, i as u32, d, f);
+                    let emitted = emits_fn_facade(syms, file, i as u32, d, f);
                     if emitted {
                         fns.push((
                             i as u32,

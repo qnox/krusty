@@ -1695,11 +1695,11 @@ impl SymbolTable {
         })
     }
 
-    /// Return the callable signature emitted for a source declaration, plus the receiver that
-    /// occupies static argument zero for an extension. The declaration key is authoritative: the
-    /// caller does not need a file-, module-, or classpath-specific branch, and top-level versus
-    /// extension storage remains an indexing detail of the symbol table.
-    fn source_facade_signature(
+    /// Return one source declaration's callable signature and optional declared extension receiver.
+    /// The declaration key is authoritative: callers do not need file-, module-, or
+    /// classpath-specific lookup branches, and top-level versus extension storage remains an
+    /// indexing detail of the symbol table.
+    fn source_callable_signature(
         &self,
         name: &str,
         file: u32,
@@ -2020,7 +2020,8 @@ impl SymbolTable {
         // A source declaration has exactly one callable signature. Resolve it by declaration
         // identity and screen the receiver, when present, as arg0 of the same static ABI instead of
         // maintaining separate top-level and extension policy branches here.
-        let Some((receiver, sig)) = self.source_facade_signature(&f.name, file_index, decl) else {
+        let Some((receiver, sig)) = self.source_callable_signature(&f.name, file_index, decl)
+        else {
             return false;
         };
         let value_class_free = receiver
@@ -2058,15 +2059,6 @@ impl SymbolTable {
             resolved
         };
         value_class_free && !inline_body_has_splice_only_shape(file, f, &is_erased_contract)
-    }
-
-    /// Whether a function is lowered and emitted as a facade static. This is the complete policy
-    /// consumed by module registration: declaration kind changes the static ABI (an extension
-    /// receiver is arg0), but must not create a second emission decision in another driver.
-    pub fn emits_fn_facade(&self, file: &File, file_index: u32, decl: DeclId, f: &FunDecl) -> bool {
-        !f.is_inline()
-            || f.has_callable_inline_extension_body()
-            || self.inline_fn_facade_emittable(file, file_index, decl, f)
     }
 
     /// Whether type `t` references a `@JvmInline value class` — directly, as a type argument, or
