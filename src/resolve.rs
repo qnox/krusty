@@ -1767,6 +1767,55 @@ impl SymbolTable {
         }
         None
     }
+
+    /// The type of member property `name` as seen AT A USE SITE on a receiver of type `recv`:
+    /// the declaration's type with the receiver's type arguments substituted (`Holder<A>.a` is
+    /// `A`, not the erased `T`; `Leaf : Mid<String>` binds `T = String` for `Mid.v`). The single
+    /// substitution point for every consumer that types a member read off an applied receiver —
+    /// the checker (`resolve_property_read`) and the signature-time computed-getter inference —
+    /// so no path re-implements (or forgets) it.
+    pub fn applied_member_prop_ty(&self, recv: Ty, name: &str) -> Option<Ty> {
+        let recv = recv.non_null();
+        let internal = recv.obj_internal()?;
+        let (owner, property) = self
+            .declared_member_prop(internal, name)
+            .filter(|(_, property)| property.context_params.is_empty())?;
+        let mut ty = property.ty;
+        let Some(owner_class) = self.class_by_type_name(owner) else {
+            return Some(ty);
+        };
+        // The applied form of the DECLARING class as seen from this receiver (`recv` itself when
+        // the property is declared right on it, else the ancestor's instantiation).
+        let applied = || {
+            if owner == internal {
+                Some(recv)
+            } else {
+                self.applied_type_hierarchy(recv)
+                    .into_iter()
+                    .find_map(|(o, applied, _)| (o == owner).then_some(applied))
+            }
+        };
+        if let Some(&(i, definitely_non_null)) = owner_class.generic_props.get(name) {
+            // A `val p: T`-shaped property: the type is the receiver's i-th type argument.
+            if let Some(&arg) = applied().and_then(|applied| applied.type_args().get(i)) {
+                ty = if definitely_non_null {
+                    arg.non_null()
+                } else {
+                    arg
+                };
+            } else if let Some(bound) = owner_class.tparam_bounds.get(i) {
+                if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
+                    ty = *bound;
+                }
+            }
+        } else if let Some(&shape) = owner_class.generic_function_props.get(name) {
+            // A property whose type MENTIONS type parameters (`val vs: List<T>`): substitute the
+            // bindings into the shape.
+            let bindings = owner_class.type_parameter_bindings(applied()?);
+            ty = crate::symbol_resolver::ty_subst(shape, &bindings);
+        }
+        Some(ty)
+    }
 }
 
 /// Whether the import-scoped top-level family selected for `e` consists solely of the platform's
@@ -7203,9 +7252,11 @@ fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty {
 /// cycle-guard set of expression bodies currently being inferred. Passed explicitly (formerly two of
 /// these were an ambient thread-local) so the guard is per-inference and cannot leak across calls.
 struct InferEnv<'a> {
-    /// Resolve a property of a module class currently being collected. The library source cannot see
-    /// module-local classes, so a `param.member` initializer needs this to infer its type.
-    up: &'a dyn Fn(&str, &str) -> Option<Ty>,
+    /// Resolve a property of a module class currently being collected, AS SEEN FROM its applied
+    /// receiver (type arguments substituted — `Holder<A>.a` is `A`, not the erased `T`). The
+    /// library source cannot see module-local classes, so a `param.member` initializer needs
+    /// this to infer its type.
+    up: &'a dyn Fn(Ty, &str) -> Option<Ty>,
     /// Expression-body ids currently on the inference stack — a companion method whose inferred return
     /// recurses back to itself (`a()=C.b(); b()=C.a()`) yields `Error` (skip) instead of looping.
     inferring: &'a std::cell::RefCell<std::collections::HashSet<u32>>,
@@ -7384,7 +7435,7 @@ fn infer_lit_ty_scoped(
     src: &dyn SemanticPlatform,
     table: &SymbolTable,
 ) -> Ty {
-    let up = |ci: &str, cn: &str| table.prop_of(ci, cn).map(|(pt, _)| pt);
+    let up = |recv: Ty, name: &str| table.applied_member_prop_ty(recv, name);
     let is_object = |name: &str| table.objects.contains(name);
     let static_classifier_value = |internal: TypeName, name: &str| {
         table
@@ -7540,10 +7591,10 @@ fn infer_lit_ty_p(
                 return g.ret;
             }
             // A property of a module class being collected, invisible to the library source.
-            if let Some(internal) = rt.obj_internal() {
-                if let Some(t) = (env.up)(&internal.render(), name) {
-                    return t;
-                }
+            // The shared applied-receiver substitution gives the type the READ sees (`Holder<A>.a`
+            // is `A`) — not the declaration's erased form.
+            if let Some(t) = (env.up)(rt, name) {
+                return t;
             }
             Ty::Error
         }
@@ -26197,37 +26248,9 @@ impl<'a> Checker<'a> {
                         self.reject_if_inaccessible(vis, name, owner, span);
                     }
                 }
-                if let Some(cs) = self.syms.class_by_type_name(owner) {
-                    if let Some(&(i, definitely_non_null)) = cs.generic_props.get(name) {
-                        let applied = if owner == internal_name {
-                            Some(rt)
-                        } else {
-                            self.applied_source_supertype(rt, owner)
-                        };
-                        if let Some(&arg) = applied.and_then(|ty| ty.type_args().get(i)) {
-                            return Some(if definitely_non_null {
-                                arg.non_null()
-                            } else {
-                                arg
-                            });
-                        }
-                        if let Some(bound) = cs.tparam_bounds.get(i) {
-                            if *bound != Ty::Error && *bound != Ty::obj("kotlin/Any") {
-                                return Some(*bound);
-                            }
-                        }
-                    }
-                    if let Some(&shape) = cs.generic_function_props.get(name) {
-                        let applied = if owner == internal_name {
-                            rt
-                        } else {
-                            self.applied_source_supertype(rt, owner).unwrap_or(rt)
-                        };
-                        let bindings = cs.type_parameter_bindings(applied);
-                        return Some(crate::symbol_resolver::ty_subst(shape, &bindings));
-                    }
-                }
-                return Some(ty);
+                // The declaration's type with the receiver's type arguments substituted — the
+                // shared applied-receiver computation (`Holder<A>.a` is `A`, not the erased `T`).
+                return Some(self.syms.applied_member_prop_ty(rt, name).unwrap_or(ty));
             }
             if let Some(m) = self.resolve_external_inherited_property(internal_name, name) {
                 let ret = m.ret;
