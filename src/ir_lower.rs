@@ -6825,68 +6825,64 @@ impl<'a> Lower<'a> {
             physical_ret,
             ret,
             interface,
-            vararg,
+            vararg_index,
             suspend,
             ..
         } = target
         else {
             return None;
         };
+        // Resolve source arguments to semantic slots once. This is also where an omitted vararg becomes
+        // its typed empty array, so every emission branch (linked, direct, or `$default`) observes the
+        // same argument realization and only genuine defaulted slots remain `None`.
+        let (provided, mut prelude) =
+            self.lower_selected_module_member_args(call_expr, args, params, params, *vararg_index)?;
         if let Some((class, index, _fid, linked_ret)) =
             self.link_local_method(&owner.render(), name, params)
         {
-            let (provided, mut prelude) =
-                self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
             let recv = self.spill_receiver_before_args(recv, *receiver_ty, &mut prelude);
             let call = self.emit_method_call(class, index, recv, provided);
             let call = self.record_suspend_call(call, *suspend, *ret);
             let call = self.coerce_to_static(call, *ret, linked_ret);
             return Some(self.wrap_arg_prelude(call, prelude));
         }
-        if !interface {
-            if let Some(slots) = self.info.resolved_call_arg_slots.get(&call_expr).cloned() {
-                if slots.iter().any(Option::is_none) {
-                    let (slot_args, mut prelude) =
-                        self.lower_call_slot_args_source_order(args, &slots, params, true)?;
-                    let recv = self.spill_receiver_before_args(recv, *receiver_ty, &mut prelude);
-                    let mut lowered = vec![recv];
-                    lowered.extend(slot_args);
-                    let omitted = slots
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, slot)| slot.is_none())
-                        .map(|(index, _)| index)
-                        .collect::<Vec<_>>();
-                    self.append_default_masks_marker(
-                        &mut lowered,
-                        params.len(),
-                        omitted.iter().copied(),
-                    );
-                    let mut default_params = vec![Ty::obj_name(*owner)];
-                    default_params.extend(params.iter().map(|&ty| self.vc_erase_ty(ty)));
-                    default_params.extend(std::iter::repeat_n(
-                        Ty::Int,
-                        default_mask_count(params.len()),
-                    ));
-                    default_params.push(Ty::obj("java/lang/Object"));
-                    let descriptor = self
-                        .runtime
-                        .method_descriptor(&default_params, ty_to_ir(*physical_ret))?;
-                    let call = self.emit_static_call(
-                        owner.render(),
-                        format!("{name}$default"),
-                        descriptor,
-                        InlineKind::None,
-                        lowered,
-                    );
-                    let call = self.record_suspend_call(call, *suspend, *ret);
-                    let call = self.coerce_to_static(call, *ret, *physical_ret);
-                    return Some(self.wrap_arg_prelude(call, prelude));
-                }
+        if !interface && provided.iter().any(Option::is_none) {
+            let recv = self.spill_receiver_before_args(recv, *receiver_ty, &mut prelude);
+            let mut lowered = vec![recv];
+            for (index, argument) in provided.iter().copied().enumerate() {
+                lowered.push(match argument {
+                    Some(argument) => argument,
+                    None => self.zero_placeholder(params[index]),
+                });
             }
+            let omitted = provided
+                .iter()
+                .enumerate()
+                .filter(|(_, argument)| argument.is_none())
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            self.append_default_masks_marker(&mut lowered, params.len(), omitted.iter().copied());
+            let mut default_params = vec![Ty::obj_name(*owner)];
+            default_params.extend(params.iter().map(|&ty| self.vc_erase_ty(ty)));
+            default_params.extend(std::iter::repeat_n(
+                Ty::Int,
+                default_mask_count(params.len()),
+            ));
+            default_params.push(Ty::obj("java/lang/Object"));
+            let descriptor = self
+                .runtime
+                .method_descriptor(&default_params, ty_to_ir(*physical_ret))?;
+            let call = self.emit_static_call(
+                owner.render(),
+                format!("{name}$default"),
+                descriptor,
+                InlineKind::None,
+                lowered,
+            );
+            let call = self.record_suspend_call(call, *suspend, *ret);
+            let call = self.coerce_to_static(call, *ret, *physical_ret);
+            return Some(self.wrap_arg_prelude(call, prelude));
         }
-        let (provided, mut prelude) =
-            self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
         let recv = self.spill_receiver_before_args(recv, *receiver_ty, &mut prelude);
         let lowered = provided.into_iter().collect::<Option<Vec<_>>>()?;
         let call = self.emit_call(
@@ -6965,14 +6961,20 @@ impl<'a> Lower<'a> {
         let ResolvedCall::ModuleMemberExtension {
             extension_receiver,
             params,
-            vararg,
+            physical_params,
+            vararg_index,
             ..
         } = target
         else {
             return None;
         };
-        let (mut provided, mut prelude) =
-            self.lower_selected_module_member_args(call_expr, args, params, *vararg)?;
+        let (mut provided, mut prelude) = self.lower_selected_module_member_args(
+            call_expr,
+            args,
+            params,
+            physical_params,
+            *vararg_index,
+        )?;
         let extension_value =
             self.spill_receiver_before_args(extension_value, *extension_receiver, &mut prelude);
         let call =
@@ -15382,14 +15384,104 @@ impl<'a> Lower<'a> {
         call: AstExprId,
         args: &[AstExprId],
         params: &[Ty],
-        vararg: bool,
+        physical_params: &[Ty],
+        vararg_index: Option<usize>,
     ) -> Option<(Vec<Option<u32>>, Vec<u32>)> {
         if let Some(slots) = self.info.resolved_call_arg_slots.get(&call).cloned() {
-            return self.lower_method_slot_args_source_order(args, &slots, params);
+            if slots.len() != params.len() || physical_params.len() != params.len() {
+                return None;
+            }
+            let Some(vararg_index) = vararg_index else {
+                // Keep required/default-only calls on the established generic slot-order path; the
+                // specialization below exists solely because one vararg slot can represent zero, one,
+                // or many source expressions and therefore needs collection rather than one temp.
+                return self.lower_method_slot_args_source_order(args, &slots, params);
+            };
+            let logical_element = *params.get(vararg_index)?;
+            let selected = *physical_params.get(vararg_index)?;
+            // Generic instantiation may expose the vararg slot as its logical ELEMENT (`T` → `Int`)
+            // while the selected JVM method still accepts an ARRAY (`Object[]`/`int[]`). Prefer that
+            // selected physical shape; a source-only target that carries the logical element is
+            // normalized through the same rule instead of requiring an origin branch.
+            let array = selected
+                .array_elem()
+                .map(|_| selected)
+                .unwrap_or_else(|| Ty::array(logical_element));
+            let physical_element = array.array_elem()?;
+            let mut slot_temp = vec![None; params.len()];
+            let mut vararg_temp = Vec::new();
+            let mut prelude = Vec::new();
+            let argument_names = self.afile.call_arg_names.get(&call.0);
+            let trailing_lambda = self.afile.call_has_trailing_lambda.contains(&call.0);
+            for (source_index, &argument) in args.iter().enumerate() {
+                let mapped = slots.iter().position(|slot| *slot == Some(argument));
+                let is_unmapped_vararg_element = mapped.is_none()
+                    && argument_names
+                        .and_then(|names| names.get(source_index))
+                        .and_then(Option::as_ref)
+                        .is_none()
+                    && !(trailing_lambda && source_index + 1 == args.len());
+                let slot = match (mapped, is_unmapped_vararg_element) {
+                    (Some(index), _) => index,
+                    (None, true) => vararg_index,
+                    _ => return None,
+                };
+                if slot == vararg_index {
+                    let spread = self.afile.is_spread_arg(argument);
+                    let value = if spread {
+                        self.lower_arg(argument, &ty_to_ir(array))?
+                    } else {
+                        let value = self.lower_arg(argument, &ty_to_ir(logical_element))?;
+                        self.coerce_argument_value(
+                            value,
+                            logical_element,
+                            ty_to_ir(physical_element),
+                        )?
+                    };
+                    let temp_ty = if spread { array } else { physical_element };
+                    let temp = self.fresh_value();
+                    prelude.push(self.emit_variable(temp, ty_to_ir(temp_ty), Some(value)));
+                    vararg_temp.push((temp, spread));
+                    continue;
+                }
+                if slot_temp[slot].is_some() {
+                    return None;
+                }
+                let ty = ty_to_ir(params[slot]);
+                let value = self.lower_arg(argument, &ty)?;
+                let temp = self.fresh_value();
+                prelude.push(self.emit_variable(temp, ty, Some(value)));
+                slot_temp[slot] = Some(temp);
+            }
+            let mut provided = slots
+                .iter()
+                .enumerate()
+                .map(|(index, argument)| {
+                    if vararg_index == index {
+                        return Some(None);
+                    }
+                    Some(match argument {
+                        Some(_) => Some(self.emit_get_value(slot_temp[index]?)),
+                        None => None,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let (temps, spreads): (Vec<_>, Vec<_>) = vararg_temp.into_iter().unzip();
+            let elements = temps
+                .into_iter()
+                .map(|temp| self.emit_get_value(temp))
+                .collect();
+            // The vararg slot is always supplied to the selected method. With no source elements this
+            // is the typed empty array; with elements/spreads it is one physical packed array.
+            // Consequently a remaining `None` unambiguously denotes a declared default and is the only
+            // kind of slot allowed to set a `$default` mask bit downstream.
+            provided[vararg_index] =
+                Some(self.emit_vararg_with_spreads(ty_to_ir(array), elements, spreads));
+            return Some((provided, prelude));
         }
-        let fixed = vararg_arity(vararg, params.len(), args.len())?;
+        let fixed = vararg_arity(vararg_index.is_some(), params.len(), args.len())?;
         let provided = self
-            .lower_call_args_vararg(args, params, vararg, fixed)?
+            .lower_call_args_vararg(args, params, vararg_index.is_some(), fixed)?
             .into_iter()
             .map(Some)
             .collect();

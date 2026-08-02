@@ -141,16 +141,13 @@ fn corpus_member_ext_defaults_box_ok() {
     }
 }
 
-/// REJECTION GUARD: a trailing-lambda call that OMITS a vararg (`1.foo {}` on
-/// `fun Int.foo(vararg xs: Int, block: () -> Unit)`) must NOT route to a `$default` stub — the
-/// empty-array vararg default is only synthesized when some param carries an explicit default, so
-/// the stub may not exist (a dangling `foo$default` call → NoSuchMethodError). Covers both the
-/// member-extension path this file's feature enabled and the pre-existing plain-member path.
+/// Trailing-lambda calls route a non-last vararg through one semantic packing path: omission materializes
+/// the declared empty array, while multiple positional elements are collected into that same physical
+/// array. Both member extensions and plain members exercise omission and multiple elements. Inspecting
+/// primitive `IntArray` contents prevents an erased `Object[]` placeholder or a first-element-only slot
+/// map from hiding in the result.
 #[test]
 fn trailing_lambda_vararg_omission_no_dangling_default() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
     let cases: &[(&str, &str)] = &[
         (
             "MemberExtVarargTrailing",
@@ -158,9 +155,15 @@ fn trailing_lambda_vararg_omission_no_dangling_default() {
 class A {
     fun Int.foo(vararg xs: Int, block: () -> Unit): String {
         block()
+        if (xs.isEmpty()) return "empty"
+        if (xs.size == 2 && xs[0] == 2 && xs[1] == 3) return "packed"
+        return "wrong"
+    }
+    fun test(): String {
+        if (1.foo {} != "empty") return "empty"
+        if (1.foo(2, 3) {} != "packed") return "packed"
         return "OK"
     }
-    fun test(): String = 1.foo {}
 }
 fun box(): String = A().test()
 "#,
@@ -171,9 +174,15 @@ fun box(): String = A().test()
 class A {
     fun foo(vararg xs: Int, block: () -> Unit): String {
         block()
+        if (xs.isEmpty()) return "empty"
+        if (xs.size == 2 && xs[0] == 2 && xs[1] == 3) return "packed"
+        return "wrong"
+    }
+    fun test(): String {
+        if (foo {} != "empty") return "empty"
+        if (this.foo(2, 3) {} != "packed") return "packed"
         return "OK"
     }
-    fun test(): String = foo {}
 }
 fun box(): String = A().test()
 "#,
@@ -181,11 +190,31 @@ fun box(): String = A().test()
     ];
     for (stem, src) in cases {
         let cp = krusty::toolchain::classpath_jars_for(src);
-        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(&jdk));
-        assert_ne!(
-            outcome,
+        let jdk = common::jdk_modules();
+        assert_eq!(
+            common::backend_outcome_in_process(src, stem, &cp, jdk.as_deref()),
             Some(common::BackendOutcome::Emitted),
-            "{stem}: omitted-vararg trailing-lambda call must not emit a dangling $default call"
+            "{stem}: valid omitted vararg must reach backend emission"
         );
+        run_box(src, stem);
     }
+}
+
+/// When another parameter really is defaulted, the omitted vararg still supplies an empty array but
+/// only the explicit default receives a mask bit in the `$default` call.
+#[test]
+fn trailing_lambda_omits_vararg_and_explicit_default() {
+    run_box(
+        r#"
+class A {
+    fun Int.foo(prefix: String = "O", vararg xs: Int, block: () -> String): String {
+        if (xs.isNotEmpty()) return "elements"
+        return prefix + block()
+    }
+    fun test(): String = 1.foo { "K" }
+}
+fun box(): String = A().test()
+"#,
+        "MemberExtVarargAndDefault",
+    );
 }
