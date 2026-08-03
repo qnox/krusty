@@ -13,6 +13,19 @@
 //!
 //! Only files are cached. A directory on the classpath can change without anything in its own
 //! metadata moving, so it is read every time.
+//!
+//! Every way a cached file can be wrong — missing, truncated, corrupt, not UTF-8, written by a
+//! newer version, belonging to another jar — ends at the same place: no answer, and the caller
+//! reads the jar. A cache is an optimisation, and a broken one is only ever allowed to cost time.
+//! Writing is best effort for the same reason: a cache directory that cannot be created or written
+//! makes for a slower start, not a failure.
+//!
+//! What is cached is the jar's *raw* entry names, before anything is filtered or parsed out of
+//! them. That is what keeps the format version honest: deciding that some entry is not worth
+//! indexing changes the index, not the file, so a change of that kind cannot leave a stale cache
+//! behind it. The version guards the file layout alone, and it is carried in the directory name as
+//! well as the header — the directory so an older version's files are orphaned wholesale rather
+//! than checked one by one, the header so a hash collision cannot pass for a hit.
 
 use std::fs;
 use std::io;
@@ -232,6 +245,45 @@ mod tests {
         // A rename is atomic; the bytes it publishes need not be durable. A half-written listing
         // whose jar never changes again would otherwise be permanent.
         assert_eq!(load(&temp.0, &jar), None);
+    }
+
+    #[test]
+    fn a_corrupt_cache_file_misses_so_the_jar_is_read_again() {
+        let temp = TempDir::new("corrupt");
+        let jar = jar_like(&temp.0, "library.jar", "jar bytes");
+        store(&temp.0, &jar, &["demo/Type".to_string()]);
+        let key = cache_key(&jar).unwrap();
+        let path = cache_path(&temp.0, &jar, &key);
+
+        // Every way a cached file can be wrong has to end at the same place: no answer, so the
+        // caller reads the jar. A cache is an optimisation, and a broken one is only ever allowed
+        // to cost time.
+        for damage in ["", "garbage", "\n\n\n", "1 0 0 0 /elsewhere.jar\ndemo/Type"] {
+            fs::write(&path, damage).unwrap();
+            assert_eq!(load(&temp.0, &jar), None, "accepted {damage:?}");
+        }
+
+        // Not even valid UTF-8.
+        fs::write(&path, [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        assert_eq!(load(&temp.0, &jar), None);
+
+        // A directory where the file should be.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir_all(&path).unwrap();
+        assert_eq!(load(&temp.0, &jar), None);
+    }
+
+    #[test]
+    fn an_unwritable_cache_root_is_not_an_error() {
+        let temp = TempDir::new("unwritable");
+        let jar = jar_like(&temp.0, "library.jar", "jar bytes");
+        // The root is a file, so no directory can be created under it. Storing must stay silent:
+        // a cache that cannot be written is a slower start, not a failure.
+        let root = jar_like(&temp.0, "not-a-directory", "");
+
+        store(&root, &jar, &["demo/Type".to_string()]);
+
+        assert_eq!(load(&root, &jar), None);
     }
 
     #[test]

@@ -666,6 +666,25 @@ fn a_cached_classpath_yields_the_same_index_and_is_reused() {
         cache.is_dir(),
         "the cold build must have left something to reuse"
     );
+
+    // Damage every cached listing. The index must come back identical, by reading the jars again:
+    // a cache is an optimisation, and a broken one is only ever allowed to cost time.
+    fn damage(directory: &std::path::Path) {
+        for entry in std::fs::read_dir(directory).unwrap().flatten() {
+            if entry.file_type().unwrap().is_dir() {
+                damage(&entry.path());
+            } else {
+                std::fs::write(entry.path(), "corrupt").unwrap();
+            }
+        }
+    }
+    damage(&cache);
+    let rebuilt = krusty_lsp::DependencySymbolIndex::from_cached_classpath(&entries, &cache);
+    assert_eq!(rebuilt.class_count(), direct.class_count());
+    assert_eq!(
+        rebuilt.candidates("AbstractList", 8),
+        direct.candidates("AbstractList", 8)
+    );
     assert!(
         direct.class_count() > 100,
         "the stdlib declares more than this; a test that quietly indexed nothing would pass every \
