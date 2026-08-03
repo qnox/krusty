@@ -115,6 +115,32 @@ pub struct StaticFieldRef {
     pub constant: Option<LibraryConst>,
 }
 
+/// One field declaration retained on a classifier shape. Keeping inaccessible and static declarations
+/// is intentional: either declaration hides an equally named inherited instance field even though it
+/// cannot itself realize a Kotlin instance-property read.
+#[derive(Clone, Debug)]
+pub struct LibraryField {
+    pub name: String,
+    /// Logical source type before receiver type arguments are substituted.
+    pub ty: Ty,
+    /// Erased type recovered from the physical descriptor. This is the safe result for a raw receiver
+    /// whose declaration type still contains an unbound type parameter.
+    pub erased_ty: Ty,
+    /// Opaque backend token consumed only by the platform emitter.
+    pub descriptor: String,
+    pub visibility: Visibility,
+    pub is_static: bool,
+}
+
+/// An exact readable instance-field declaration selected by the shared hierarchy walk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstanceFieldRef {
+    pub owner: TypeName,
+    pub name: String,
+    pub ty: Ty,
+    pub descriptor: String,
+}
+
 /// Source-level services exposed by compiled libraries.
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Semantic interface/class used by the platform libraries to model a function value of `arity`.
@@ -1132,9 +1158,11 @@ pub enum InlineKind {
     /// A Kotlin `inline` function (per its `@Metadata`): the JVM backend MAY splice its compiled body
     /// at the call site, but a real call is a legal fallback (the callee is a public method).
     CanInline,
-    /// A NON-PUBLIC `@InlineOnly` function (`require`/`check`/`error`/`let`/…): there is no callable
-    /// method to invoke, so the backend MUST splice the body — a failed splice skips the whole file
-    /// (never an `invokestatic` on the private method → never an `IllegalAccessError`).
+    /// No legal direct-call fallback. This includes a NON-PUBLIC `@InlineOnly` function
+    /// (`require`/`check`/`error`/`let`/…) whose method is inaccessible and a reified source body
+    /// whose erased method may exist only to publish inline code. The backend MUST splice the body;
+    /// a failed splice skips the whole file rather than emitting an inaccessible or unspecialized
+    /// `invokestatic`.
     MustInline,
 }
 
@@ -1333,6 +1361,10 @@ pub struct LibraryType {
     /// Internal names of the superclass + implemented interfaces (for the inherited-member walk).
     pub supertypes: TypeNameList,
     pub constructors: Vec<LibraryMember>,
+    /// Field declarations owned by this classifier. Selection is deliberately not performed by the
+    /// provider: the resolver walks these together with properties and supertypes, so source, module,
+    /// and compiled classifiers obey one hiding and precedence rule.
+    pub fields: Vec<LibraryField>,
     /// Instance members (member functions and property accessors).
     pub members: Vec<LibraryMember>,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
@@ -1373,6 +1405,11 @@ pub struct LibraryType {
     /// The enum entry names this type declares (`Kind` → `["PENDING", "DONE"]`); empty for a non-enum.
     /// Lets `EnumName.ENTRY` resolve for a classpath enum as it does for a source enum.
     pub enum_entries: Vec<String>,
+    /// Exact physical realization of Kotlin's synthetic `EnumType.entries` property, when this symbol
+    /// provider exposes a direct accessor. This is deliberately separate from [`Self::companion`]:
+    /// the accessor is not a source-callable `getEntries()` function, and keeping a dedicated fact
+    /// prevents consumers from rediscovering it by provider-specific names or descriptors.
+    pub enum_entries_accessor: Option<LibraryMember>,
     /// Whether a `@JvmInline value class`'s primary constructor is defaulted — kotlinc emits a
     /// `constructor-impl$default` synthetic exactly then, which realizes an all-defaulted `Id()`.
     pub value_ctor_has_default: bool,
@@ -1583,6 +1620,7 @@ mod tests {
             kind: super::TypeKind::Class,
             supertypes: crate::types::TypeNameList::new(),
             constructors: vec![],
+            fields: vec![],
             members: vec![],
             companion: vec![],
             companion_consts: std::collections::HashMap::new(),
@@ -1594,6 +1632,7 @@ mod tests {
             type_params: vec![],
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: vec![],
+            enum_entries_accessor: None,
             value_ctor_has_default: false,
             ctor_named_params: vec![],
             value_class_properties: vec![],

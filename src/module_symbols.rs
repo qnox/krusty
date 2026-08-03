@@ -79,7 +79,7 @@ impl<'a> ModuleSymbols<'a> {
                     .map(move |s| lib_member(n, s, c.internal_name(), c.is_interface()))
             })
             .collect();
-        let companion = c
+        let companion: Vec<LibraryMember> = c
             .static_methods
             .iter()
             .map(|(n, s)| lib_member(n, s, c.internal_name(), c.is_interface()))
@@ -124,6 +124,25 @@ impl<'a> ModuleSymbols<'a> {
         } else {
             crate::libraries::TypeKind::Class
         };
+        let enum_entries_accessor = enum_entries.as_ref().map(|_| {
+            // Describe the accessor the backend emits even though it has no source declaration. This
+            // is the same LibraryMember capability dependency providers expose, so consumers retain
+            // one origin-independent target and lowering need not reconstruct its JVM call. Keep the
+            // logical name uncallable: `Enum.getEntries()` is not a Kotlin source function; only the
+            // synthetic `Enum.entries` property may select its physical name.
+            let mut entries = LibraryMember::new(
+                "<enum-entries-accessor>".to_string(),
+                Vec::new(),
+                Ty::obj_args(
+                    "kotlin/enums/EnumEntries",
+                    &[Ty::obj_name(c.internal_name())],
+                ),
+                "()Lkotlin/enums/EnumEntries;".to_string(),
+            );
+            entries.owner = Some(c.internal_name());
+            entries.physical_name = Some("getEntries".to_string());
+            entries
+        });
         let enum_entries = enum_entries.unwrap_or_default();
         let sealed_subclasses = if c.is_sealed() {
             self.syms.subclass_names_of(c.internal_name()).into()
@@ -152,6 +171,7 @@ impl<'a> ModuleSymbols<'a> {
             kind,
             supertypes: supertypes.into(),
             constructors,
+            fields: Vec::new(),
             members,
             companion,
             companion_consts: HashMap::new(),
@@ -165,6 +185,7 @@ impl<'a> ModuleSymbols<'a> {
             type_params: Vec::new(),
             sealed_subclasses,
             enum_entries,
+            enum_entries_accessor,
             value_ctor_has_default: false,
             ctor_named_params,
             value_class_properties: Vec::new(),
@@ -472,7 +493,7 @@ fn lib_member(name: &str, sig: &Signature, owner: TypeName, is_interface: bool) 
     m.set_is_interface(is_interface);
     m.set_suspend(sig.is_suspend());
     m.visibility = sig.visibility;
-    m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), false);
+    m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), sig.requires_splice());
     m.call_sig = sig.call_sig();
     m
 }
@@ -502,7 +523,7 @@ fn fn_info(
         ret: sig.ret,
         physical_ret: sig.ret,
         suspend: sig.is_suspend(),
-        inline: InlineKind::from_flags(sig.is_inline(), false),
+        inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
         default_call: false,
         vararg_elem: None,
         vararg_index: None,
@@ -526,7 +547,7 @@ fn fn_info(
             .zip(sig.source_decl)
             .map(|(file, decl)| (file, decl.0)),
         flags: FnFlags {
-            inline: InlineKind::from_flags(sig.is_inline(), false),
+            inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
             suspend: sig.is_suspend(),
@@ -947,6 +968,12 @@ mod tests {
         let phase = source.resolve_type("sample/Phase").unwrap();
         assert!(phase.is_enum());
         assert_eq!(phase.enum_entries, ["FIRST", "SECOND"]);
+        let entries = phase
+            .enum_entries_accessor
+            .as_ref()
+            .expect("source enum shape should retain its synthetic entries accessor");
+        assert_eq!(entries.name, "<enum-entries-accessor>");
+        assert_eq!(entries.descriptor, "()Lkotlin/enums/EnumEntries;");
     }
 
     #[test]
@@ -1139,6 +1166,34 @@ mod tests {
         assert_eq!(overloads.overloads.len(), 1);
         assert!(overloads.overloads[0].flags.inline.can_inline());
         assert!(overloads.overloads[0].callable.inline.can_inline());
+    }
+
+    #[test]
+    fn required_splice_flows_as_the_generic_inline_capability() {
+        let mut symbols = FrontendSymbols::default();
+        let receiver = Ty::obj("demo/Receiver");
+        let mut signature = sig(vec![Ty::Int], Ty::Boolean);
+        // An emitted method and a legal direct fallback are independent capabilities. Reified
+        // source declarations use this signature bit even when their facade exists, and all module
+        // callable projections must preserve it as the shared `MustInline` semantic state.
+        signature.flags = signature
+            .flags
+            .with_is_inline(true)
+            .with_requires_splice(true);
+        symbols
+            .ext_funs
+            .entry("check".into())
+            .or_default()
+            .insert(receiver.extension_recv_key(), vec![signature]);
+        let module = ModuleSymbols::new(&symbols);
+
+        let functions = match module.resolve_symbols("check").callables {
+            crate::libraries::Callables::Functions(functions) => functions.overloads,
+            _ => Vec::new(),
+        };
+        assert_eq!(functions.len(), 1);
+        assert!(functions[0].flags.inline.must_inline());
+        assert!(functions[0].callable.inline.must_inline());
     }
 
     #[test]

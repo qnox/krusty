@@ -80,13 +80,7 @@ impl LspOptions {
     }
 
     pub fn effective_classpath(&self) -> Vec<PathBuf> {
-        let mut classpath = self.classpath.clone();
-        if !self.no_jdk {
-            if let Some(modules) = platform_jdk_modules(self.jdk_home.as_deref()) {
-                classpath.push(modules);
-            }
-        }
-        classpath
+        effective_classpath_for(&self.classpath, self.jdk_home.as_deref(), self.no_jdk)
     }
 
     /// The classpath passed explicitly with `-cp`, without JDK modules. Empty means "no explicit
@@ -145,6 +139,30 @@ impl LspOptions {
     }
 }
 
+/// Compose the classpath used by an analysis process from project/CLI entries and the selected JDK.
+/// Initial startup and project-model reconfiguration share this function so they cannot disagree
+/// about `-no-jdk`, JDK discovery, ordering, or duplicate a worker-only version of option semantics.
+pub(crate) fn effective_classpath_for(
+    classpath: &[PathBuf],
+    jdk_home: Option<&Path>,
+    no_jdk: bool,
+) -> Vec<PathBuf> {
+    let mut effective = classpath.to_vec();
+    effective.extend(effective_platform_classpath(jdk_home, no_jdk));
+    effective
+}
+
+/// The platform-only portion of an analysis classpath. Project grouping needs this separately when
+/// it builds per-module classpaths, but it must use the same JDK/no-JDK rule as the worker's complete
+/// launch classpath rather than maintaining another conditional in the server binary.
+pub fn effective_platform_classpath(jdk_home: Option<&Path>, no_jdk: bool) -> Vec<PathBuf> {
+    if no_jdk {
+        Vec::new()
+    } else {
+        platform_jdk_modules(jdk_home).into_iter().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +206,10 @@ mod tests {
         assert_eq!(
             options.effective_classpath(),
             vec![PathBuf::from("a.jar"), PathBuf::from("b/classes")]
+        );
+        assert!(
+            effective_platform_classpath(Some(Path::new("/ignored-jdk")), true).is_empty(),
+            "-no-jdk must suppress platform modules for every classpath consumer"
         );
         let features = options.language_features();
         assert!(features.has("NameBasedDestructuring"));

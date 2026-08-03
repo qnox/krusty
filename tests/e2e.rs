@@ -10,6 +10,8 @@ mod abstract_instantiation_check_e2e;
 mod abstract_member_check_e2e;
 #[path = "abstract_modifier_consistency_e2e.rs"]
 mod abstract_modifier_consistency_e2e;
+#[path = "annotated_setter_parameter_e2e.rs"]
+mod annotated_setter_parameter_e2e;
 #[path = "annotation_instantiation_e2e.rs"]
 mod annotation_instantiation_e2e;
 #[path = "anon_fun_statement_e2e.rs"]
@@ -108,6 +110,8 @@ mod catch_annotation_comma_e2e;
 mod checker_operator_methods_e2e;
 #[path = "class_body_e2e.rs"]
 mod class_body_e2e;
+#[path = "class_header_newline_e2e.rs"]
+mod class_header_newline_e2e;
 #[path = "class_literal_e2e.rs"]
 mod class_literal_e2e;
 #[path = "class_metadata_roundtrip.rs"]
@@ -204,6 +208,8 @@ mod classpath_runblocking_e2e;
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]
 mod classpath_subtype_ctor_arg_e2e;
+#[path = "classpath_super_call_e2e.rs"]
+mod classpath_super_call_e2e;
 #[path = "classpath_super_ctor_args_e2e.rs"]
 mod classpath_super_ctor_args_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
@@ -650,6 +656,8 @@ mod mangled_member_null_arg_e2e;
 mod map_entry_destructure_e2e;
 #[path = "map_get_nullable_elvis_e2e.rs"]
 mod map_get_nullable_elvis_e2e;
+#[path = "mapped_collection_scope_e2e.rs"]
+mod mapped_collection_scope_e2e;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
