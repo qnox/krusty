@@ -61,6 +61,105 @@ fun box(): String = builder {
 "#);
 }
 
+/// A parameter slot (here the receiver) PLUS a CAPTURED enclosing local. Both are modeled by the same
+/// `SuspendLambda` fields — captures are stored by the constructor, parameter slots by `create`/`invoke` —
+/// so the combination lowers; it used to bail (skip the file) as a leaf-only scope limit.
+#[test]
+fn suspend_receiver_lambda_captures_and_receiver() {
+    run(r#"
+import kotlin.coroutines.*
+
+class Scope(val budget: Int)
+
+fun withScope(body: suspend Scope.() -> Unit) {
+    body.startCoroutine(Scope(7), Continuation(EmptyCoroutineContext) {})
+}
+
+fun box(): String {
+    var seen = 0
+    withScope { seen += budget }
+    return if (seen == 7) "OK" else "FAIL $seen"
+}
+"#);
+}
+
+/// The same combination with an ordinary VALUE parameter rather than a receiver.
+#[test]
+fn suspend_value_param_lambda_captures() {
+    run(r#"
+import kotlin.coroutines.*
+
+fun apply(x: Int, body: suspend (Int) -> Unit) {
+    val started: suspend () -> Unit = { body(x) }
+    started.startCoroutine(Continuation(EmptyCoroutineContext) {})
+}
+
+fun box(): String {
+    var seen = 0
+    apply(7) { v -> seen += v }
+    return if (seen == 7) "OK" else "FAIL $seen"
+}
+"#);
+}
+
+/// A `Unit` tail that leaves NOTHING on the operand stack must materialize the `Unit` singleton — a
+/// call to a `Unit` function VALUE, after a suspension. Storing the tail into the machine's result temp
+/// instead read from an empty stack (`VerifyError: Operand stack underflow`).
+#[test]
+fn suspend_receiver_lambda_unit_tail_invokes_function_value() {
+    run(r#"
+import kotlin.coroutines.*
+
+class Scope(val budget: Int)
+
+suspend fun work(): Int = 5
+
+var out = ""
+
+fun withScope(body: suspend Scope.() -> Unit) {
+    body.startCoroutine(Scope(7), Continuation(EmptyCoroutineContext) {})
+}
+
+fun box(): String {
+    val f: () -> Unit = { out += "!" }
+    withScope {
+        val a = work()
+        out = "" + a + budget
+        f()
+    }
+    return if (out == "57!") "OK" else "FAIL $out"
+}
+"#);
+}
+
+/// The same rule for a `Unit` `try` tail, with a sub-int local live across the suspension (the shape the
+/// removed receiver-lambda spill bail used to skip).
+#[test]
+fn suspend_receiver_lambda_unit_try_tail() {
+    run(r#"
+import kotlin.coroutines.*
+
+class Scope(val budget: Int)
+
+suspend fun work(): Int = 5
+
+var out = ""
+
+fun withScope(body: suspend Scope.() -> Unit) {
+    body.startCoroutine(Scope(7), Continuation(EmptyCoroutineContext) {})
+}
+
+fun box(): String {
+    withScope {
+        val flag = budget > 3
+        val a = work()
+        try { out = "" + flag + a } catch (e: Exception) { out = "x" }
+    }
+    return if (out == "true5") "OK" else "FAIL $out"
+}
+"#);
+}
+
 /// Receiver PLUS an explicit value parameter (`suspend R.(A) -> T`): the lambda lowers (receiver
 /// bound as `this`, `s` as the value param) — previously this shape skipped the file. The stdlib
 /// offers no 3-slot `startCoroutine`, so the builder here only materializes the lambda.

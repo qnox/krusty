@@ -8976,6 +8976,76 @@ impl<'a> Lower<'a> {
     /// `Function{n+1}`, captures the free variables as fields (set in `<init>`, copied into the fresh
     /// instance `invoke` builds), and carries `invokeSuspend(Object)` (the body, result boxed) plus the
     /// erased `invoke(Object)` (`new This(captures.., (Continuation)arg).invokeSuspend(Unit)`).
+    /// The names bound to a `SuspendLambda`'s `slots` parameter slots: each leading CONTEXT and
+    /// EXTENSION-RECEIVER slot binds as the implicit `this`, and the remaining slots take the lambda's
+    /// declared names (or the implicit `it`). `None` when the lambda's own parameter list can't fill
+    /// the value slots.
+    ///
+    /// One rule for both spellings of a suspend function type — the source `suspend R.() -> T` and a
+    /// classpath parameter's erased `FunctionN` + trailing `Continuation` — so a receiver lambda binds
+    /// its receiver as `this` whatever the callee's origin.
+    fn suspend_lambda_bind_names(
+        &self,
+        arg: AstExprId,
+        lparams: &[String],
+        slots: usize,
+        context_count: usize,
+    ) -> Option<Vec<String>> {
+        let context_count = context_count.min(slots);
+        let receiver_count = usize::from(lambda_info(self.info, arg).receiver.is_some())
+            .min(slots.saturating_sub(context_count));
+        let implicit_count = context_count + receiver_count;
+        let mut names = vec!["this".to_string(); implicit_count];
+        names.extend(ast::lambda_params_or_implicit(
+            lparams,
+            slots - implicit_count,
+        )?);
+        (names.len() == slots).then_some(names)
+    }
+
+    /// Whether a `Unit`-typed tail value must be replaced by "run it, then yield the `Unit` singleton".
+    /// True exactly for the nodes that leave NOTHING on the operand stack: a call (to a function, a
+    /// method, or a function VALUE) returning `Unit` emits a `void` invocation, and a `Unit` `try` emits
+    /// its branches for effect. Every other `Unit`-typed node already yields the singleton (an assignment
+    /// and a `when` without `else` lower to an explicit `Unit`).
+    ///
+    /// A tail that SUSPENDS keeps its own shape instead, so the coroutine flattener still sees it: for a
+    /// call that means the call node itself (its arguments are evaluated unconditionally and hoist ahead
+    /// of it), for a `try` it means anywhere inside (the suspension sits in control flow the flattener
+    /// rewrites in place). Only meaningful for a value already known to be `Unit`-typed — the callee's
+    /// own return type is not consulted here.
+    fn unit_tail_needs_unit_value(&self, e: u32) -> bool {
+        match self.ir.exprs[e as usize] {
+            IrExpr::Call { .. } | IrExpr::MethodCall { .. } | IrExpr::InvokeFunction { .. } => {
+                !self.ir_expr_suspends(e)
+            }
+            IrExpr::Try { .. } => !self.ir_subtree_suspends(e),
+            _ => false,
+        }
+    }
+
+    /// Whether `body` calls a MODULE-declared `suspend inline` callable by bare name. Matching by name
+    /// over-approximates (a same-named ordinary call counts), which is the SAFE direction — it can only
+    /// skip a file, never accept one.
+    fn body_calls_module_suspend_inline(&self, body: AstExprId) -> bool {
+        let names = std::cell::RefCell::new(Vec::new());
+        collect_call_names(self.afile, body, &names);
+        let names = names.into_inner();
+        if names.is_empty() {
+            return false;
+        }
+        let suspend_inline =
+            |sigs: &Vec<Signature>| sigs.iter().any(|s| s.is_suspend() && s.is_inline());
+        names.iter().any(|name| {
+            self.syms.funs.get(name).is_some_and(suspend_inline)
+                || self
+                    .syms
+                    .classes
+                    .values()
+                    .any(|class| class.methods.get(name).is_some_and(suspend_inline))
+        })
+    }
+
     fn lower_suspend_lambda(
         &mut self,
         body: AstExprId,
@@ -9017,11 +9087,6 @@ impl<'a> Lower<'a> {
         }
         captures.reverse();
         let n_cap = captures.len() as u32;
-        // Own parameters are modeled only for a LEAF lambda (no captures, no internal suspension) for
-        // now — a param + capture/suspension combination needs the general lambda-mode machine.
-        if arity > 0 && n_cap > 0 {
-            return None;
-        }
         // A NULLABLE value-class parameter stays unmodeled (its boxed/null spill interplay isn't
         // covered by the value-class pass's SetField boundary); a plain value-class parameter is —
         // the erased `invoke`'s boxed argument unboxes at the param spill store.
@@ -9036,6 +9101,13 @@ impl<'a> Lower<'a> {
         // for now only a single TAIL suspend call (`{ foo() }`) with no captures is modeled; anything
         // else bails (skip the file) rather than miscompile the continuation threading.
         let body_suspends = self.ast_body_suspends(body);
+        // A `suspend inline` callee must be SPLICED at the call site — its compiled method is not the
+        // one the source signature names. The splicer does not reach into a state machine's states, so
+        // the machine would emit an ordinary call and fail at runtime (`NoSuchMethodError`). Skip the
+        // file rather than miscompile.
+        if self.body_calls_module_suspend_inline(body) {
+            return self.bail("gate:suspend-inline-call-in-suspend-lambda");
+        }
         let jvm_arity = arity + 1; // + the trailing continuation
         let function_iface = self
             .syms
@@ -9211,6 +9283,17 @@ impl<'a> Lower<'a> {
                     value: Some(v),
                 } => (stmts.clone(), *v),
                 _ => (Vec::new(), body_val),
+            };
+            // A `Unit` tail that leaves NOTHING on the operand stack (a call to a `Unit` function or a
+            // `Unit` `try`) would make the temp below store from an empty stack (`VerifyError: Operand
+            // stack underflow`). Materialize the `Unit` singleton after the effect — the same coercion a
+            // `Unit` value gets in argument position. A SUSPENDING tail keeps its own shape (see
+            // `unit_tail_needs_unit_value`): its value is the CPS result the machine propagates.
+            let b_val = if self.info.ty(body) == Ty::Unit && self.unit_tail_needs_unit_value(b_val)
+            {
+                self.unit_value_after_effect(b_val)
+            } else {
+                b_val
             };
             // Bind the body value to a temp (`val tmp = <value>; return box(tmp)`) so a CONDITIONAL
             // suspension in the value (`if (c) foo() else 7`) surfaces as a `Variable{init: When}`
@@ -13607,19 +13690,24 @@ impl<'a> Lower<'a> {
                     .and_then(|p| p.obj_internal())
                     .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"));
                 if tail_continuation && !s.suspend {
-                    // Value parameters are everything before the trailing continuation (the receiver of a
-                    // `Recv.() -> R` builder lambda is modeled as the single value parameter `it`).
+                    // Parameter slots are everything before the trailing continuation. A leading
+                    // context/extension-receiver slot binds as the implicit `this`, exactly as it does
+                    // for the source-`suspend` spelling below — the erasure hides the `suspend` marker,
+                    // not the receiver (which survives as `@ExtensionFunctionType` in the callee's
+                    // `@Metadata`, so the checked type carries it).
                     let value_params: Vec<Ty> = s.params[..s.params.len() - 1].to_vec();
                     if let Expr::Lambda {
                         params: lparams,
                         body,
                     } = self.afile.expr(arg).clone()
                     {
-                        let bind_names =
-                            ast::lambda_params_or_implicit(&lparams, value_params.len())?;
-                        if bind_names.len() == value_params.len() {
-                            return self.lower_suspend_lambda(body, &value_params, bind_names);
-                        }
+                        let bind_names = self.suspend_lambda_bind_names(
+                            arg,
+                            &lparams,
+                            value_params.len(),
+                            s.context_count,
+                        )?;
+                        return self.lower_suspend_lambda(body, &value_params, bind_names);
                     }
                     return None;
                 }
@@ -13670,16 +13758,6 @@ impl<'a> Lower<'a> {
                     body,
                 } = self.afile.expr(arg).clone()
                 {
-                    let context_count = s.context_count.min(params.len());
-                    let receiver_count =
-                        usize::from(lambda_info(self.info, arg).receiver.is_some())
-                            .min(params.len().saturating_sub(context_count));
-                    let implicit_count = context_count + receiver_count;
-                    let mut bind_names = vec!["this".to_string(); implicit_count];
-                    bind_names.extend(ast::lambda_params_or_implicit(
-                        &lparams,
-                        params.len().saturating_sub(implicit_count),
-                    )?);
                     // Parameter `Ty`s come from the checked lambda type; absent metadata falls back to `Any`.
                     let ty_params: Vec<Ty> = self
                         .info
@@ -13688,7 +13766,9 @@ impl<'a> Lower<'a> {
                         .map(|p| p.to_vec())
                         .filter(|p| p.len() == params.len())
                         .unwrap_or_else(|| vec![Ty::obj("kotlin/Any"); params.len()]);
-                    if bind_names.len() == params.len() {
+                    if let Some(bind_names) =
+                        self.suspend_lambda_bind_names(arg, &lparams, params.len(), s.context_count)
+                    {
                         return self.lower_suspend_lambda(body, &ty_params, bind_names);
                     }
                 }

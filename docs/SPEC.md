@@ -334,6 +334,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`::suspend_lambda_with_parameter_runs`). This is also the shape a coroutine-builder lambda takes
   (`runBlocking`/`launch` accept `suspend CoroutineScope.() -> T` — a receiver lambda is a 1-parameter
   suspend lambda), so builders are ordinary classpath calls once their suspend-lambda argument compiles.
+  **Own parameters WITH captures**: the two are the same mechanism — captures are the leading fields,
+  stored by the constructor from the creation site; parameter slots are the fields after them, stored by
+  `create`/`invoke`; `invokeSuspend` reloads both. They are therefore modeled together, not just
+  separately (the earlier leaf-only restriction was a scope limit, not a machine limit). Proven for a
+  receiver slot plus a captured `var` (`withScope { seen += budget }`) and for a value parameter plus a
+  capture, each box-run (`tests/suspend_receiver_lambda_e2e.rs::suspend_receiver_lambda_captures_and_receiver`,
+  `::suspend_value_param_lambda_captures`).
+- **A suspend lambda's parameter slots bind the RECEIVER as `this` — for a classpath callee too.** A
+  `suspend R.() -> T` parameter folds its receiver into the erased `Function{n+1}`'s FIRST slot, and the
+  checker resolves a bare member in the body against that receiver. Lowering binds the leading
+  context/extension slots as the implicit `this` and the remaining slots to the lambda's own parameter
+  names. Both spellings of a suspend function type now go through the one rule
+  (`Lower::suspend_lambda_bind_names`): the source `suspend` marker, and a CLASSPATH parameter whose
+  descriptor erases the marker away (recognized structurally by the trailing `Continuation`) — the
+  erasure hides `suspend`, not the receiver, which survives as `@ExtensionFunctionType` in the callee's
+  `@Metadata`. Previously the classpath path bound that slot as the value parameter `it`, so any body
+  that actually USED the receiver failed to lower and the whole file was skipped ("this construct is not
+  yet supported by the IR backend") while an empty body compiled. Proven against a kotlinc-built
+  dependency, box-run: a receiver read, a capturing body, and a named argument ahead of the trailing
+  lambda (`tests/classpath_suspend_receiver_lambda_e2e.rs`).
+- **A `Unit` tail in a suspending lambda body materializes the `Unit` singleton.** A tail that is a CALL
+  to a `Unit` function returns `void` and leaves nothing on the operand stack; binding it to the
+  machine's result temp emitted a store from an empty stack (`VerifyError: Operand stack underflow`).
+  Such a tail now runs for effect and yields `kotlin/Unit.INSTANCE` — the same coercion a `Unit` value
+  gets in argument position. Every other `Unit`-typed tail already yields a value (an assignment and a
+  `when` without `else` lower to an explicit `Unit`) and a SUSPENDING tail keeps its own value: that
+  value is the CPS result the machine propagates. This was the real cause of the corpus
+  `coroutines/intLikeVarSpilling` failures, which the sub-int/array spill bail had been skipping by
+  proxy (it keyed on a machine's leading `this` field, i.e. on the callee being a receiver lambda); that
+  bail is removed and those cases now compile and run. A tail that suspends keeps its own shape so the
+  flattener still sees it — for a call that means the call node itself (its arguments hoist ahead of it),
+  for a `try` anywhere inside (the suspension sits in control flow rewritten in place, and that machine
+  still SKIPS rather than compiling: corpus `coroutines/varSpilling/kt75926`).
+  **Known gap** (pre-existing, unchanged): two `Unit` tail spellings still underflow — a SAFE CALL
+  (`h?.act()`, whose checked type is `Unit?`, not `Unit`) and an inline-SPLICED tail (`run { sink(a) }`,
+  whose value sits in a nested block). Both are `VerifyError`s today, not skips.
+- **A `suspend inline` callee inside a suspend lambda SKIPS (never miscompiles).** Its body must be
+  spliced at the call site — the compiled method is not the one the source signature names — and the
+  splicer does not reach into a state machine's states, so the machine would emit an ordinary call and
+  fail at runtime with `NoSuchMethodError`. `Lower::body_calls_module_suspend_inline` detects a
+  module-declared `suspend inline` callee by name (an over-approximation, which can only skip a file)
+  and bails. Corpus `coroutines/kt15017.kt`.
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
@@ -1499,7 +1541,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   CoroutineScope.() -> T`, erased in the descriptor to a bare `Function2` with no `suspend` flag; `lower_arg`
   detects the suspend lambda STRUCTURALLY (its checked `Ty::Fun` ends in a `Continuation` param) and routes
   it to `lower_suspend_lambda`, which builds the real `SuspendLambda` state machine (the `CoroutineScope`
-  receiver is modeled as the value parameter `it`). The lambda body is lowered as a `suspend` context
+  receiver binds as the body's implicit `this`, like any receiver lambda). The lambda body is lowered as a `suspend` context
   (`cur_fn_suspend`) so a suspend MEMBER call inside it (`repo.get(…)` on a classpath `suspend` interface) is
   CPS-threaded, and `suspend_member_call` detection consults the library for classpath members. Supports a
   non-suspending body, a tail suspend call, and a bound suspension (`val x = work(); …`); a suspension nested
