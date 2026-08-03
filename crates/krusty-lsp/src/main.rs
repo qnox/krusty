@@ -930,7 +930,7 @@ impl krusty_lsp::Analysis for WorkerHost {
         let Some(sync) = self.sync.as_ref() else {
             return krusty_lsp::DependencySymbolIndex::default();
         };
-        let mut entries = sync.project_classpath();
+        let mut entries = sync.dependency_classpath();
         entries.extend(self.platform_classpath.iter().cloned());
         if entries.is_empty() {
             return krusty_lsp::DependencySymbolIndex::default();

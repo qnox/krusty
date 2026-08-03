@@ -1,6 +1,6 @@
 mod analysis;
 mod compiler_analysis;
-pub mod dependency_cache;
+mod dependency_cache;
 mod dependency_sources;
 mod dependency_symbols;
 pub mod deps_cache;

@@ -78,15 +78,14 @@ impl DependencySymbolIndex {
     ///
     /// Jar by jar rather than all at once, because that is the granularity the cache shares at: two
     /// projects rarely resolve the same *set* of artifacts, and constantly resolve the same
-    /// individual ones. Composing per-jar listings has to deduplicate, which composing a single
-    /// classpath did for free -- a name declared by two jars is one class, and the earlier entry on
-    /// the classpath is the one that wins resolution.
+    /// individual ones. Either way the listings have to be deduplicated -- a classpath can carry two
+    /// versions of the same artifact, and a name both declare is one class, resolved from whichever
+    /// entry comes first.
     pub fn from_cached_classpath(
         entries: &[std::path::PathBuf],
         cache_root: &std::path::Path,
     ) -> Self {
         let mut names = Vec::new();
-        let mut seen = std::collections::HashSet::new();
         for entry in entries {
             let classes = match crate::dependency_cache::load(cache_root, entry) {
                 Some(cached) => cached,
@@ -96,11 +95,7 @@ impl DependencySymbolIndex {
                     classes
                 }
             };
-            for class in classes {
-                if seen.insert(class.clone()) {
-                    names.push(class);
-                }
-            }
+            names.extend(classes);
         }
         Self::from_internal_names(names)
     }
@@ -111,6 +106,9 @@ impl DependencySymbolIndex {
     /// `Map.Entry`, so the separator becomes `.` and the simple name keeps its outer classes.
     /// Synthetic names — anonymous classes, lambda carriers — are dropped: nobody searches for
     /// `Foo$1`, and they outnumber the real declarations in some jars.
+    ///
+    /// Repeats collapse. A classpath can carry two versions of one artifact, and a name both
+    /// declare is a single class, resolved from whichever entry comes first.
     pub fn from_internal_names(internals: impl IntoIterator<Item = String>) -> Self {
         let mut result = Self {
             complete: true,
@@ -118,7 +116,11 @@ impl DependencySymbolIndex {
         };
         let mut name_ids = HashMap::<String, u32>::new();
         let mut package_ids = HashMap::<String, u32>::new();
+        let mut declared = std::collections::HashSet::new();
         for internal in internals {
+            if !declared.insert(internal.clone()) {
+                continue;
+            }
             if result.entries.len() >= MAX_DEPENDENCY_CLASSES {
                 result.complete = false;
                 break;
@@ -224,7 +226,7 @@ impl DependencySymbolIndex {
         for &index in self.prefix_range(&self.by_name, &self.lowercase_names, pattern) {
             push(&mut ranked, index);
         }
-        if query.package.is_some() {
+        if query.package.is_some() && ranked.len() < limit {
             // A qualified query spells the qualifier separately, so the pattern is the last segment
             // and a nested class has to be reachable by it.
             for index in 0..self.entries.len() as u32 {
@@ -373,11 +375,22 @@ impl DependencySymbolIndex {
 /// `(dotted package, simple name)` for a slashed internal name, or `None` when nothing would search
 /// for it.
 fn split_internal_name(internal: &str) -> Option<(String, String)> {
+    // A multi-release jar carries whole duplicate trees under `META-INF/versions/<n>/`. They are
+    // the same classes the root of the jar declares, and the classpath resolves them by their real
+    // name, so indexing the versioned path yields a name that can never be located -- measured at
+    // half of every candidate for a jar like byte-buddy.
+    if internal.starts_with("META-INF/") {
+        return None;
+    }
     let (package, class) = match internal.rsplit_once('/') {
         Some((package, class)) => (package.replace('/', "."), class),
         None => (String::new(), internal),
     };
     if class.is_empty() {
+        return None;
+    }
+    // Module and package descriptors are compiled entries but not declarations anyone searches for.
+    if class == "module-info" || class == "package-info" {
         return None;
     }
     // `Foo$1`, `Foo$1$2`, `Foo$sam$...`: compiler-generated carriers, never searched for by name.
@@ -525,6 +538,37 @@ mod tests {
         assert_eq!(candidate.name, "Map.Entry");
         assert_eq!(candidate.internal, "java/util/Map$Entry");
         assert_eq!(names(&index, "me", 8), vec!["Map.Entry"]);
+    }
+
+    #[test]
+    fn multi_release_and_descriptor_entries_are_not_indexed() {
+        let index = index(&[
+            "net/bytebuddy/ByteBuddy",
+            // A multi-release jar carries whole duplicate trees. The classpath resolves the real
+            // name, so indexing the versioned path yields a class that can never be located.
+            "META-INF/versions/9/net/bytebuddy/ByteBuddy",
+            "META-INF/versions/11/net/bytebuddy/Other",
+            "module-info",
+            "demo/package-info",
+        ]);
+
+        assert_eq!(index.class_count(), 1);
+        let found = index.candidates("ByteBuddy", 8);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].internal, "net/bytebuddy/ByteBuddy");
+    }
+
+    #[test]
+    fn two_versions_of_one_artifact_yield_one_candidate() {
+        // A classpath can carry two versions of the same jar; a name both declare is one class,
+        // resolved from whichever entry comes first.
+        let index = index(&[
+            "kotlin/collections/AbstractList",
+            "kotlin/collections/AbstractList",
+        ]);
+
+        assert_eq!(index.class_count(), 1);
+        assert_eq!(index.candidates("AbstractList", 8).len(), 1);
     }
 
     #[test]

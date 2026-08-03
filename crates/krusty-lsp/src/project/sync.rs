@@ -125,6 +125,64 @@ impl ProjectSync {
         self.project_classpath_with(&|path| std::fs::canonicalize(path).ok())
     }
 
+    /// The classpath minus the project's own compiled output.
+    ///
+    /// What the project depends on, as opposed to what it produces. Indexing its own output as a
+    /// dependency would list every workspace class twice -- once from its source and once as a stub
+    /// decompiled from the class file beside it.
+    pub fn dependency_classpath(&self) -> Vec<PathBuf> {
+        let canonicalize = &|path: &Path| std::fs::canonicalize(path).ok();
+        let all = self.project_classpath_with(canonicalize);
+        let outputs = self.output_count_with(canonicalize);
+        all.into_iter().skip(outputs).collect()
+    }
+
+    /// How many leading entries of `project_classpath` are the project's own output.
+    fn output_count_with(&self, canonicalize: &dyn Fn(&Path) -> Option<PathBuf>) -> usize {
+        let Some(model) = self.model() else {
+            return 0;
+        };
+        let declared_output_set = model
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module
+                    .outputs
+                    .iter()
+                    .map(|output| output.path().to_path_buf())
+                    .chain(module.friend_paths.iter().cloned())
+            })
+            .collect::<HashSet<_>>();
+        let mut canonical_paths = CanonicalPathCache::new(canonicalize);
+        let mut canonical_output_set = HashSet::new();
+        for output in &declared_output_set {
+            if let Some(canonical) = canonical_paths.get(output) {
+                canonical_output_set.insert(canonical.to_path_buf());
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut count = 0;
+        for module in &model.modules {
+            for entry in model.compile_classpath(module) {
+                if !seen.insert(entry.clone()) {
+                    continue;
+                }
+                let is_output = entry
+                    .ancestors()
+                    .any(|ancestor| declared_output_set.contains(ancestor))
+                    || canonical_paths.get(&entry).is_some_and(|entry| {
+                        entry
+                            .ancestors()
+                            .any(|ancestor| canonical_output_set.contains(ancestor))
+                    });
+                if is_output {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     fn project_classpath_with(
         &self,
         canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,

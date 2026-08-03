@@ -2319,7 +2319,7 @@ impl WorkspaceQuery {
         self.pattern.is_empty() && self.package.is_none()
     }
 
-    fn response_name(&self, declared_package: &str, source_name: &str) -> String {
+    pub(crate) fn response_name(&self, declared_package: &str, source_name: &str) -> String {
         let Some(separator) = self.separator else {
             return source_name.to_string();
         };
@@ -2496,7 +2496,7 @@ pub(crate) fn is_ordered_subsequence_lowercase(haystack: &str, lowercase_needle:
     false
 }
 
-pub(crate) fn starts_with_lowercase(haystack: &str, lowercase_needle: &str) -> bool {
+fn starts_with_lowercase(haystack: &str, lowercase_needle: &str) -> bool {
     if !haystack.is_ascii() || !lowercase_needle.is_ascii() {
         return haystack.to_lowercase().starts_with(lowercase_needle);
     }

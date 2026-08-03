@@ -56,9 +56,14 @@ fn cache_path(cache_root: &Path, jar: &Path, key: &CacheKey) -> PathBuf {
 }
 
 /// The header a cached listing carries, so the key is verified rather than trusted.
-fn header(jar: &Path, key: &CacheKey) -> String {
+///
+/// It records the number of names as well as the key. A rename is atomic but the bytes it publishes
+/// need not be durable: a crash between write and flush can leave a file whose header is intact and
+/// whose body stops early, and the jar's key never changes again, so a short listing would be
+/// permanent. The count turns that into a miss.
+fn header(jar: &Path, key: &CacheKey, names: usize) -> String {
     format!(
-        "{DEPENDENCY_CACHE_FORMAT_VERSION} {} {} {}",
+        "{DEPENDENCY_CACHE_FORMAT_VERSION} {} {} {names} {}",
         key.bytes,
         key.modified_nanos,
         jar.to_string_lossy()
@@ -70,11 +75,14 @@ pub fn load(cache_root: &Path, jar: &Path) -> Option<Vec<String>> {
     let key = cache_key(jar)?;
     let text = fs::read_to_string(cache_path(cache_root, jar, &key)).ok()?;
     let mut lines = text.lines();
-    // A key collision must miss, not answer with another jar's classes.
-    if lines.next()? != header(jar, &key) {
+    let header_line = lines.next()?;
+    let names = lines.map(str::to_string).collect::<Vec<_>>();
+    // A key collision must miss rather than answer with another jar's classes, and a body that
+    // stops short of what the header promises must miss rather than answer with part of one.
+    if header_line != header(jar, &key, names.len()) {
         return None;
     }
-    Some(lines.map(str::to_string).collect())
+    Some(names)
 }
 
 /// Cache `names` as the class listing for `jar`.
@@ -86,7 +94,7 @@ pub fn store(cache_root: &Path, jar: &Path, names: &[String]) {
         return;
     };
     let path = cache_path(cache_root, jar, &key);
-    let _ = write_atomically(&path, &header(jar, &key), names);
+    let _ = write_atomically(&path, &header(jar, &key, names.len()), names);
 }
 
 fn write_atomically(path: &Path, header: &str, names: &[String]) -> io::Result<()> {
@@ -103,7 +111,13 @@ fn write_atomically(path: &Path, header: &str, names: &[String]) -> io::Result<(
     }
     // Written beside the target and renamed, so a reader never sees half a listing -- several
     // workspaces share this directory and may be writing the same jar at once.
-    let temporary = path.with_extension(format!("classes.tmp{}", std::process::id()));
+    // The temporary name carries the thread as well as the process: several jars are written under
+    // one cache root, and two threads writing the same jar would otherwise share a scratch file.
+    let temporary = path.with_extension(format!(
+        "classes.tmp{}.{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
     fs::write(&temporary, text)?;
     fs::rename(&temporary, path)
 }
@@ -200,6 +214,24 @@ mod tests {
         store(&temp.0, &directory, &["demo/Compiled".to_string()]);
 
         assert_eq!(load(&temp.0, &directory), None);
+    }
+
+    #[test]
+    fn a_truncated_listing_misses_rather_than_reading_as_a_short_one() {
+        let temp = TempDir::new("truncated");
+        let jar = jar_like(&temp.0, "library.jar", "jar bytes");
+        let names = (0..50)
+            .map(|index| format!("demo/Type{index}"))
+            .collect::<Vec<_>>();
+        store(&temp.0, &jar, &names);
+        let key = cache_key(&jar).unwrap();
+        let path = cache_path(&temp.0, &jar, &key);
+        let whole = fs::read_to_string(&path).unwrap();
+        fs::write(&path, &whole[..whole.len() / 3]).unwrap();
+
+        // A rename is atomic; the bytes it publishes need not be durable. A half-written listing
+        // whose jar never changes again would otherwise be permanent.
+        assert_eq!(load(&temp.0, &jar), None);
     }
 
     #[test]

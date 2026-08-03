@@ -998,6 +998,10 @@ const DIAGNOSTIC_REFRESH_REQUEST_ID: &str = "krusty/diagnosticRefresh";
 /// these costs a render the first time it is returned.
 const MAX_DEPENDENCY_SYMBOLS_PER_RESPONSE: usize = 32;
 
+/// Ceiling on rendered dependency sources held for reuse. Each retains the text it was rendered
+/// from, so this is a memory bound rather than a hit-rate one.
+const MAX_LOCATED_DEPENDENCIES: usize = 512;
+
 pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
@@ -1445,11 +1449,25 @@ where
     }
 
     pub(crate) fn set_dependency_index(&mut self, index: DependencySymbolIndex) {
+        // A new index describes a new classpath. What was rendered from the old one may be a
+        // different version of the same class, and serving it would open the wrong source; what
+        // failed to render under the old one deserves another attempt.
         self.dependency_symbols = index;
+        self.located_dependencies.clear();
+        self.requested_dependencies.clear();
     }
 
     pub(crate) fn record_located_dependencies(&mut self, located: Vec<LocatedDependency>) {
         for found in located {
+            // Each entry retains the rendered source, so a session that browses widely would
+            // otherwise accumulate them without limit. Oldest-first is wrong for a cache but right
+            // here: what a reader is looking at now is what they just asked for.
+            if self.located_dependencies.len() >= MAX_LOCATED_DEPENDENCIES {
+                self.located_dependencies.clear();
+                self.requested_dependencies.clear();
+            }
+            self.requested_dependencies
+                .insert(found.candidate.internal.clone());
             self.located_dependencies
                 .insert(found.candidate.internal.clone(), found);
         }
@@ -1471,6 +1489,10 @@ where
         if query.is_empty() {
             return (symbols, missing);
         }
+        // The client re-filters results against the name it is given, so a qualified query has to
+        // be answered with the qualified name -- exactly as the project layer does, or these hits
+        // are computed and then discarded before anyone sees them.
+        let parsed = crate::analysis::WorkspaceQuery::parse(query);
         for candidate in self
             .dependency_symbols
             .candidates(query, MAX_DEPENDENCY_SYMBOLS_PER_RESPONSE)
@@ -1487,7 +1509,7 @@ where
             let start = byte_offset_to_position(&found.text, found.span.lo as usize);
             let end = byte_offset_to_position(&found.text, found.span.hi as usize);
             let symbol = json!({
-                "name": candidate.name,
+                "name": parsed.response_name(&candidate.package, &candidate.name),
                 "kind": 5,
                 "containerName": candidate.package,
                 "location": {
@@ -1510,6 +1532,8 @@ where
         self.project_symbols = ProjectSymbolIndex::default();
         self.project_symbols_generation = generation;
         self.project_symbols_incomplete_reported = false;
+        self.located_dependencies.clear();
+        self.requested_dependencies.clear();
         self.workspace_diagnostics.reset_to(generation);
         // Clearing old-model results is itself a diagnostic change. Pull clients must be told even
         // when the replacement model produces no files or its first analysis is still pending.
@@ -2184,6 +2208,8 @@ where
             .unwrap_or(MAX_WORKSPACE_SYMBOL_WIRE_BYTES);
         let (dependencies, missing) = self.dependency_symbols(&params.query, &mut wire_bytes);
         symbols.extend(dependencies);
+        // The response ceiling covers the whole response, not each layer's share of it.
+        symbols.truncate(crate::analysis::MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS);
         for candidate in &missing {
             self.requested_dependencies
                 .insert(candidate.internal.clone());
@@ -5675,6 +5701,84 @@ mod tests {
         assert_eq!(symbol["location"]["range"]["start"]["line"], 2);
         assert_eq!(symbol["location"]["range"]["start"]["character"], 6);
         assert_eq!(symbol["location"]["range"]["end"]["character"], 18);
+    }
+
+    #[test]
+    fn a_new_classpath_forgets_what_the_old_one_rendered() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+            "vendor/Versioned".to_string(),
+        ]));
+        service.record_located_dependencies(vec![crate::LocatedDependency {
+            candidate: crate::DependencyCandidate {
+                internal: "vendor/Versioned".to_string(),
+                package: "vendor".to_string(),
+                name: "Versioned".to_string(),
+            },
+            path: std::path::PathBuf::from("/cache/old/vendor/Versioned.kt"),
+            span: krusty::diag::Span::new(22, 31),
+            text: "package vendor\n\nclass Versioned\n".to_string(),
+        }]);
+
+        // A dependency version bump replaces the index. The rendered source from the old version is
+        // still on disk -- the cache is content-addressed -- and would otherwise be served forever.
+        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+            "vendor/Versioned".to_string(),
+        ]));
+
+        let answered = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "versioned",
+            "method": "workspace/symbol",
+            "params": {"query": "Versioned"}
+        }));
+        assert_eq!(
+            answered.messages[0]["result"],
+            json!([]),
+            "the old version's source must not answer for the new one"
+        );
+    }
+
+    #[test]
+    fn a_qualified_query_gets_a_qualified_dependency_name() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+            "kotlin/collections/AbstractList".to_string(),
+        ]));
+        service.record_located_dependencies(vec![crate::LocatedDependency {
+            candidate: crate::DependencyCandidate {
+                internal: "kotlin/collections/AbstractList".to_string(),
+                package: "kotlin.collections".to_string(),
+                name: "AbstractList".to_string(),
+            },
+            path: std::path::PathBuf::from("/cache/kotlin/collections/AbstractList.kt"),
+            span: krusty::diag::Span::new(34, 46),
+            text: "package kotlin.collections\n\nclass AbstractList\n".to_string(),
+        }]);
+
+        let answered = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "qualified",
+            "method": "workspace/symbol",
+            "params": {"query": "collections.AbstractList"}
+        }));
+
+        // The client re-filters against the name it is given. A bare `AbstractList` cannot match
+        // the text the user typed, so the hit would be computed and then discarded.
+        assert_eq!(
+            answered.messages[0]["result"][0]["name"],
+            "kotlin.collections.AbstractList"
+        );
     }
 
     #[test]
