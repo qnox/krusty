@@ -664,3 +664,33 @@ suspend fun act(): Unit {\n\
 }\n";
     rejects_suspend("suspend_unit", src);
 }
+
+#[test]
+fn labelled_trailing_lambda_parses() {
+    // A lambda may carry its OWN label (`run rr@{ … }`) instead of taking the callee's name. The
+    // label tokens sit between the callee and the `{`, so without handling them the postfix parse
+    // ends before the block, the lambda is never attached as an argument, and the callee reports as
+    // an unresolved reference.
+    let src = "fun box(): String {\n\
+    val r = run rr@{ 30 }\n\
+    if (r != 30) return \"r=$r\"\n\
+    return \"OK\"\n\
+}\n";
+    run_ok(src, "LabelledTrailingLambda");
+}
+
+#[test]
+fn labelled_return_leaves_the_lambda_not_the_function() {
+    // `return@run v` is LOCAL to the lambda. With no frame to break to it lowered as the enclosing
+    // function's return, pushing the lambda's value where the function's type is required — which
+    // the verifier rejects ("Bad return type") rather than merely running wrong.
+    let src = "fun box(): String {\n\
+    val r = run {\n\
+        for (i in 0 until 10) { if (i == 3) return@run i * 10 }\n\
+        -1\n\
+    }\n\
+    if (r != 30) return \"r=$r\"\n\
+    return \"OK\"\n\
+}\n";
+    run_ok(src, "LabelledReturnIsLocal");
+}

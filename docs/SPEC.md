@@ -2384,6 +2384,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for an expression the checker accepts. `String.length` alone records its resolved member — the other
   two are backend intrinsics, and recording a member for them retargets the read into unverifiable
   bytecode. Test: `tests/toplevel_property_inference_e2e.rs::toplevel_property_cross_reference`.
+- **A lambda may carry its own label, and a labelled return is LOCAL to it.** `run rr@{ … }` puts the
+  label tokens between the callee and the `{`, which ended the postfix parse before the block: the
+  lambda was never attached as an argument and the callee reported as an unresolved reference. Every
+  site that decides whether a labelled return is local now asks for the lambda's EFFECTIVE label — its
+  own when written, else the name of the function it is passed to. `return@run v` itself lowered as
+  the ENCLOSING function's return, pushing the lambda's value where the function's type is required
+  (a `VerifyError`, not merely a wrong answer); it now breaks out of a splice frame, the same
+  mechanism a user `inline fun` already used. A body whose every path is a labelled return still
+  declines: the checker types the call from the `Nothing` fall-through, so there is no result type to
+  bind — typing a lambda from the JOIN of its labelled returns is the checker-side fix that shape
+  needs. Tests: `tests/inline_vc_suspend_coverage_e2e.rs::labelled_trailing_lambda_parses`,
+  `::labelled_return_leaves_the_lambda_not_the_function`,
+  `::inline_local_labeled_return`.
 
 ## 8. Success criteria for the PoC
 

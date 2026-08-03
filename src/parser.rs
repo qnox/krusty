@@ -6834,6 +6834,9 @@ impl<'a> Parser<'a> {
         // Explicit type arguments parsed just before a call paren (`foo<Int>(…)`), attached to the
         // call once it is built so a constructor instantiation (`ArrayList<Int>()`) keeps its args.
         let mut pending_targs: Vec<TypeRef> = Vec::new();
+        // An explicit label seen just before a trailing lambda (`run rr@{ … }`), consumed by the
+        // `{ … }` arm on the next turn of the loop.
+        let mut pending_lambda_label: Option<String> = None;
         loop {
             // A postfix chain may continue on a following line: Kotlin treats a newline before `.` or
             // `?.` as part of the selector chain, not a statement terminator (`x\n  .foo()\n  .bar()`).
@@ -7057,8 +7060,30 @@ impl<'a> Parser<'a> {
                 // Trailing lambda: `expr { … }` / `recv.m(args) { … }` → append the lambda as the
                 // last call argument (same line only, to avoid swallowing an unrelated block).
                 TokenKind::LBrace if self.no_trailing_lambda => break,
+                // An EXPLICITLY LABELLED trailing lambda (`run rr@{ … }`): consume the label and let
+                // the next turn of the loop take the ordinary `{ … }` path, which attaches it as the
+                // call's last argument. Without this the label tokens end the postfix loop, the block
+                // is never attached, and the callee reports as an unresolved reference.
+                TokenKind::Ident
+                    if !self.no_trailing_lambda
+                        && self
+                            .t
+                            .get(self.i + 1)
+                            .is_some_and(|t| t.kind == TokenKind::At)
+                        && self
+                            .t
+                            .get(self.i + 2)
+                            .is_some_and(|t| t.kind == TokenKind::LBrace) =>
+                {
+                    pending_lambda_label = Some(self.text().to_string());
+                    self.bump(); // label name
+                    self.bump(); // '@'
+                }
                 TokenKind::LBrace => {
                     let lambda = self.parse_lambda();
+                    if let Some(label) = pending_lambda_label.take() {
+                        self.file.lambda_labels.insert(lambda.0, label);
+                    }
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.t[self.i.saturating_sub(1)].span;
                     let old = lhs;

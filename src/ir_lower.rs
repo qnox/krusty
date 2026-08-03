@@ -10317,6 +10317,65 @@ impl<'a> Lower<'a> {
         ty.obj_internal().and_then(|i| self.class_info_name(i))
     }
 
+    /// The label a lambda answers to. An EXPLICITLY labelled literal (`run rr@{ … }`) answers to its
+    /// own name; otherwise the lambda takes the name of the function it is passed to, which is what
+    /// `return@run` / `return@forEach` targets. Every site that decides whether a labelled return is
+    /// local to the lambda must ask this, not assume the callee's name.
+    fn lambda_label(&self, lambda: AstExprId, callee: &str) -> String {
+        self.afile
+            .lambda_labels
+            .get(&lambda.0)
+            .cloned()
+            .unwrap_or_else(|| callee.to_string())
+    }
+
+    /// Splice a zero-parameter lambda body in place, giving a `return@<label>` inside it a LOCAL-return
+    /// frame: the body is wrapped in a `while (true) { … break@brk }` and the labelled return lowers to
+    /// `break@brk`, leaving its value in a slot. Without the frame the labelled return falls through to
+    /// the ENCLOSING function's return and pushes a value of the lambda's type where the function's is
+    /// required — unverifiable bytecode (`run { … return@run 30 … }` inside a `String` function).
+    fn splice_labeled_lambda_body(
+        &mut self,
+        body: AstExprId,
+        label: &str,
+        result_ty: Ty,
+    ) -> Option<u32> {
+        let brk = format!("$lamret${}", self.fresh_value());
+        // `result_ty` is the CALL's type, not the body's: a body whose every path is a `return@label`
+        // falls through as `Nothing` while the call still produces a value, and binding the slot as
+        // `Nothing` leaves the splice with no result at all ("control flow falls through code end").
+        if result_ty != Ty::Unit && result_ty != Ty::Nothing {
+            let ret = result_ty;
+            let result_slot = self.fresh_value();
+            let dflt = self.emit_zero_value(ret);
+            let decl = self.emit_variable(result_slot, ty_to_ir(ret), Some(dflt));
+            self.inline_lambda_ret
+                .push((label.to_string(), result_slot, brk.clone(), ret, false));
+            let body_val = self.expr(body);
+            self.inline_lambda_ret.pop();
+            let body_val = body_val?;
+            // Normal fall-through: the body's own value is the result.
+            let assign = self.emit_set_value(result_slot, body_val);
+            let brk_stmt = self.emit_break(Some(brk.clone()));
+            let loop_body = self.emit_block(vec![assign, brk_stmt], None);
+            let cond = self.emit_const(IrConst::Boolean(true));
+            let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+            let get = self.emit_get_value(result_slot);
+            return Some(self.emit_block(vec![decl, loopw], Some(get)));
+        }
+        self.inline_lambda_ret
+            .push((label.to_string(), 0, brk.clone(), Ty::Unit, false));
+        let body_val = self.expr(body);
+        self.inline_lambda_ret.pop();
+        let body_val = body_val?;
+        let brk_stmt = self.emit_break(Some(brk.clone()));
+        let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
+        let cond = self.emit_const(IrConst::Boolean(true));
+        let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+        let unit = self.emit_unit();
+        Some(self.emit_block(vec![loopw], Some(unit)))
+    }
+
     fn single_lambda_arg(&self, args: &[AstExprId]) -> Option<(AstExprId, Vec<String>, AstExprId)> {
         let [arg] = args else {
             return None;
@@ -18956,6 +19015,11 @@ impl<'a> Lower<'a> {
                     },
                 ) = (splice, arg_expr)
                 {
+                    // An explicitly labelled lambda answers to its OWN label (`run rr@{ … return@rr
+                    // … }`); an unlabelled one takes the callee's name, which is what `return@run`
+                    // targets. Both the disallowed-return check and the splice frame use this name, so
+                    // it is resolved once here.
+                    let lam_label = self.lambda_label(args[ai], fname);
                     let context_count = fnsig.context_count.min(fnsig.params.len());
                     let receiver_count = usize::from(f.params[i].ty.fun_has_receiver())
                         .min(fnsig.params.len().saturating_sub(context_count));
@@ -18969,7 +19033,7 @@ impl<'a> Lower<'a> {
                     // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
                     // bail. A `return@<thisInlineFn>` IS modeled (a local return from the spliced lambda,
                     // handled by the `inline_lambda_ret` frame set up at the invoke site), so it's allowed.
-                    if body_has_disallowed_return(self.afile, lbody, fname)
+                    if body_has_disallowed_return(self.afile, lbody, &lam_label)
                         || params.len() != fnsig.params.len()
                     {
                         self.scope.truncate(depth);
@@ -19010,7 +19074,7 @@ impl<'a> Lower<'a> {
                         params,
                         body: lbody,
                         param_tys: lam_param_tys,
-                        label: fname.to_string(),
+                        label: lam_label,
                         lexical_scope: caller_scope.clone(),
                         lexical_class: caller_class,
                         lexical_fn_name: caller_fn_name.clone(),
@@ -22801,14 +22865,30 @@ impl<'a> Lower<'a> {
             // block()`): inline the lambda body directly as the value. The receiver scope
             // functions (`x.let`/`with(x)`) are intercepted similarly; without this, no-receiver
             // `run` falls to the bytecode splicer, which bails on a branchy body (`run { if … }`).
-            if let ("run", Some((_, params, body)), true, true) = (
+            if let ("run", Some((lambda, params, body)), true, true) = (
                 fname.as_str(),
                 one_lambda_arg.as_ref(),
                 self.lookup(&fname).is_none(),
                 !self.module_declares(&fname),
             ) {
-                if params.is_empty() && !body_has_labeled_return(self.afile, *body, "run") {
-                    return self.expr(*body);
+                let label = self.lambda_label(*lambda, "run");
+                if params.is_empty() {
+                    let (body, label) = (*body, label);
+                    return if body_has_labeled_return(self.afile, body, &label) {
+                        // A body whose every path is a `return@label` falls through as `Nothing`, and
+                        // the checker types the CALL from that fall-through — so there is no result
+                        // type for the splice to bind, and the enclosing expression body drops the
+                        // value instead of returning it. Typing the lambda from the JOIN of its
+                        // labelled returns is the real fix and belongs in the checker; until then this
+                        // shape declines rather than miscompiling.
+                        let result_ty = self.info.ty(e);
+                        if result_ty == Ty::Nothing {
+                            return None;
+                        }
+                        self.splice_labeled_lambda_body(body, &label, result_ty)
+                    } else {
+                        self.expr(body)
+                    };
                 }
             }
             // A call to a lifted local function — the checker mapped this call to its decl.
