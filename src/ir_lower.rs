@@ -8965,24 +8965,26 @@ impl<'a> Lower<'a> {
         (names.len() == slots).then_some(names)
     }
 
-    /// Whether a `Unit`-typed tail value must be replaced by "run it, then yield the `Unit` singleton".
-    /// True exactly for the nodes that leave NOTHING on the operand stack: a call (to a function, a
-    /// method, or a function VALUE) returning `Unit` emits a `void` invocation, and a `Unit` `try` emits
-    /// its branches for effect. Every other `Unit`-typed node already yields the singleton (an assignment
-    /// and a `when` without `else` lower to an explicit `Unit`).
+    /// Whether a `Unit`-typed tail value should be replaced by "run it, then yield the `Unit` singleton".
     ///
-    /// A tail that SUSPENDS keeps its own shape instead, so the coroutine flattener still sees it: for a
-    /// call that means the call node itself (its arguments are evaluated unconditionally and hoist ahead
-    /// of it), for a `try` it means anywhere inside (the suspension sits in control flow the flattener
-    /// rewrites in place). Only meaningful for a value already known to be `Unit`-typed — the callee's
-    /// own return type is not consulted here.
+    /// Several `Unit` tails leave NOTHING on the operand stack — a call (to a function, a method, or a
+    /// function VALUE) returning `Unit` emits a `void` invocation; a `try`, a `when` and a safe call emit
+    /// their branches for effect; a block ends in one of those. Binding such a tail to the machine's
+    /// result temp stores from an empty stack. The ones that DO leave a value (an assignment, a `when`
+    /// without `else`) are popped in statement position, so running every `Unit` tail for effect and
+    /// yielding the singleton is uniformly correct — and it is what the leaf form already does.
+    ///
+    /// The exception is a tail that SUSPENDS: it keeps its own shape so the coroutine flattener still
+    /// sees it. For a CALL that means the call node itself — its arguments are evaluated unconditionally
+    /// and hoist ahead of it, so a suspending argument is no reason to leave the void call unwrapped. For
+    /// anything else it means anywhere inside, because the suspension sits in control flow the flattener
+    /// rewrites in place (corpus `coroutines/varSpilling/kt75926`).
     fn unit_tail_needs_unit_value(&self, e: u32) -> bool {
         match self.ir.exprs[e as usize] {
             IrExpr::Call { .. } | IrExpr::MethodCall { .. } | IrExpr::InvokeFunction { .. } => {
                 !self.ir_expr_suspends(e)
             }
-            IrExpr::Try { .. } => !self.ir_subtree_suspends(e),
-            _ => false,
+            _ => !self.ir_subtree_suspends(e),
         }
     }
 
@@ -9248,7 +9250,10 @@ impl<'a> Lower<'a> {
             // stack underflow`). Materialize the `Unit` singleton after the effect — the same coercion a
             // `Unit` value gets in argument position. A SUSPENDING tail keeps its own shape (see
             // `unit_tail_needs_unit_value`): its value is the CPS result the machine propagates.
-            let b_val = if self.info.ty(body) == Ty::Unit && self.unit_tail_needs_unit_value(b_val)
+            // A safe call's `Unit?` is a `Unit` tail too — the value is discarded either way, and both
+            // arms of the null test leave the stack as they found it.
+            let b_val = if self.info.ty(body).non_null() == Ty::Unit
+                && self.unit_tail_needs_unit_value(b_val)
             {
                 self.unit_value_after_effect(b_val)
             } else {
