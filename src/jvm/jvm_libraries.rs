@@ -2981,12 +2981,7 @@ impl SymbolSource for JvmLibraries {
                         // JVM form (`java/util/Map`, when the member is found on a classpath supertype);
                         // map both to the builtin whose `@Metadata` declares the nullability.
                         let builtin_cn =
-                            super::jvm_class_map::jvm_collection_to_kotlin_type_name(cn)
-                                .or_else(|| {
-                                    super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(
-                                        cn,
-                                    )
-                                })
+                            super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(cn)
                                 .unwrap_or(cn);
                         let builtin_ret_nullable = !ret.is_reference()
                             && self.cp.builtin_member_ret_nullable_name(

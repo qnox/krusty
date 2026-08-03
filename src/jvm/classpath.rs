@@ -967,7 +967,11 @@ struct BuiltinMember {
 /// itself with its type arguments dropped — exactly what a JVM descriptor records.
 fn builtin_erased(ty: Ty) -> Ty {
     match ty {
-        Ty::TyParam(..) => Ty::obj("kotlin/Any"),
+        // JVM erasure follows the primary declared bound (`<T : CharSequence>` erases to
+        // `CharSequence`), not unconditionally `Object`. Unbounded parameters already carry `Any?` as
+        // their bound, so the same recursive rule covers both cases and stays aligned with
+        // `names::type_descriptor` and bridge erasure.
+        Ty::TyParam(_, bound) => builtin_erased(*bound),
         Ty::Nullable(inner) => builtin_erased(*inner),
         Ty::Obj(name, args) if !args.is_empty() => Ty::obj_name(name),
         other => other,
@@ -2200,9 +2204,8 @@ impl Classpath {
     /// class — whose `Signature` normally carries these facts — is absent from the classpath.
     /// `internal` may be the Kotlin name or its mapped JVM form (`java/util/List`).
     pub fn builtin_class_gsig_name(&self, internal: TypeName) -> Option<(Vec<String>, Vec<Ty>)> {
-        let kotlin = super::jvm_class_map::jvm_collection_to_kotlin_type_name(internal)
-            .or_else(|| super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(internal))
-            .unwrap_or(internal);
+        let kotlin =
+            super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal);
         self.builtins_file_for_package(Self::builtins_package_for(kotlin))
             .get_name(kotlin)
             .map(|c| (c.formals.clone(), c.supertype_tys.clone()))
@@ -4441,6 +4444,18 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
 #[cfg(test)]
 mod fq_tests {
     use super::*;
+
+    #[test]
+    fn builtin_type_parameter_erasure_follows_its_primary_bound() {
+        let bounded = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
+        assert_eq!(
+            builtin_erased(bounded),
+            Ty::obj("kotlin/CharSequence"),
+            "a decoded builtins signature must use the same bound erasure as JVM descriptors"
+        );
+        let unbounded = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        assert_eq!(builtin_erased(unbounded), Ty::obj("kotlin/Any"));
+    }
 
     #[test]
     fn member_metadata_matches_the_jvm_descriptor() {

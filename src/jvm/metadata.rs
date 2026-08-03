@@ -113,6 +113,104 @@ fn parse_receiver_type_gsig_bounded(
     })
 }
 
+/// The carrier-independent wire shape of Kotlin metadata's `Type` message. Both an annotation's
+/// `@Metadata` payload and a `.kotlin_builtins` fragment use these same fields; only the way their
+/// numeric class/string ids and type-table references are resolved differs. Keeping the protobuf walk
+/// here prevents the two decoders from acquiring subtly different nullability, type-parameter,
+/// annotation, or argument handling as either carrier evolves.
+struct ParsedTypeNode<'a> {
+    class_id: Option<u64>,
+    /// Strict schema field 7, used by the builtins decoder.
+    type_parameter_id: Option<u64>,
+    /// The ordinary `@Metadata` reader historically accepts field 8 as a parameter id too. Keep that
+    /// compatibility choice separate from the strict field so sharing the wire parser does not silently
+    /// broaden the builtins semantics.
+    metadata_type_parameter_id: Option<u64>,
+    type_parameter_name_id: Option<u64>,
+    nullable: bool,
+    arguments: Vec<ParsedTypeArgument<'a>>,
+    annotation_ids: Vec<u64>,
+}
+
+/// A type argument is either an inline `Type`, an id into the carrier's `TypeTable`, or a star
+/// projection with no type. `@Metadata` normally uses the inline form; builtins fragments commonly use
+/// the table form. Resolution deliberately stays with the caller because only that caller owns the
+/// corresponding table.
+enum ParsedTypeArgument<'a> {
+    Inline(&'a [u8]),
+    Table(u64),
+    Star,
+}
+
+fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut node = ParsedTypeNode {
+        class_id: None,
+        type_parameter_id: None,
+        metadata_type_parameter_id: None,
+        type_parameter_name_id: None,
+        nullable: false,
+        arguments: Vec::new(),
+        annotation_ids: Vec::new(),
+    };
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (3, 0) => node.nullable = pb.varint()? != 0,
+            (6, 0) => node.class_id = Some(pb.varint()?),
+            (7, 0) => {
+                let id = pb.varint()?;
+                node.type_parameter_id = Some(id);
+                node.metadata_type_parameter_id = Some(id);
+            }
+            // Field 8 is `flexible_upper_bound_id`, but the ordinary metadata decoder historically
+            // accepted it as a parameter id. Record that compatibility view without exposing it to the
+            // strict builtins resolver, whose old decoder accepted only the actual field 7.
+            (8, 0) => node.metadata_type_parameter_id = Some(pb.varint()?),
+            (9, 0) => node.type_parameter_name_id = Some(pb.varint()?),
+            (2, 2) => {
+                let n = pb.varint()? as usize;
+                let mut argument_pb = Pb {
+                    b: pb.bytes(n)?,
+                    i: 0,
+                };
+                let mut argument = ParsedTypeArgument::Star;
+                while !argument_pb.at_end() {
+                    let tag = argument_pb.varint()?;
+                    match (tag >> 3, tag & 7) {
+                        (2, 2) => {
+                            let n = argument_pb.varint()? as usize;
+                            argument = ParsedTypeArgument::Inline(argument_pb.bytes(n)?);
+                        }
+                        (3, 0) => argument = ParsedTypeArgument::Table(argument_pb.varint()?),
+                        (_, wire) => argument_pb.skip(wire)?,
+                    }
+                }
+                node.arguments.push(argument);
+            }
+            (100, 2) => {
+                // `Type.annotation` is an extension carrying an `Annotation` message whose field 1 is
+                // the annotation class id. Preserve every occurrence; semantic interpretation (for
+                // example `ExtensionFunctionType`) requires the caller's name resolver.
+                let n = pb.varint()? as usize;
+                let mut annotation_pb = Pb {
+                    b: pb.bytes(n)?,
+                    i: 0,
+                };
+                while !annotation_pb.at_end() {
+                    let tag = annotation_pb.varint()?;
+                    match (tag >> 3, tag & 7) {
+                        (1, 0) => node.annotation_ids.push(annotation_pb.varint()?),
+                        (_, wire) => annotation_pb.skip(wire)?,
+                    }
+                }
+            }
+            (_, wire) => pb.skip(wire)?,
+        }
+    }
+    Some(node)
+}
+
 fn parse_type_gsig_node(
     body: &[u8],
     records: &[Rec],
@@ -121,74 +219,30 @@ fn parse_type_gsig_node(
     bounds: &HashMap<String, Ty>,
     nested: bool,
 ) -> Option<Ty> {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut class_id = None;
-    let mut tp_id = None;
-    let mut tpn_id = None;
-    let mut nullable = false;
-    let mut receiver_fun = false;
-    let mut args: Vec<Ty> = Vec::new();
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (3, 0) => nullable = pb.varint()? != 0,
-            (6, 0) => class_id = Some(pb.varint()?),
-            (8, 0) => tp_id = Some(pb.varint()?),
-            // `Type.type_parameter` = 7 per `metadata.proto` (the id of the type parameter);
-            // field 8 above is `flexible_upper_bound_id`, historically also treated as one.
-            (7, 0) => tp_id = Some(pb.varint()?),
-            (9, 0) => tpn_id = Some(pb.varint()?),
-            (2, 2) => {
-                // Type.argument — `Argument.type` = field 2 (an inline `Type`); a `*` projection has none.
-                let n = pb.varint()? as usize;
-                let abody = pb.bytes(n)?;
-                let mut ap = Pb { b: abody, i: 0 };
-                let mut arg = None;
-                while !ap.at_end() {
-                    let at = ap.varint()?;
-                    match (at >> 3, at & 7) {
-                        (2, 2) => {
-                            let tn = ap.varint()? as usize;
-                            let tb = ap.bytes(tn)?;
-                            arg = parse_type_gsig_node(tb, records, d2, tparams, bounds, true);
-                        }
-                        (_, w) => ap.skip(w)?,
-                    }
-                }
-                args.push(arg.unwrap_or_else(|| Ty::obj("kotlin/Any")));
+    let node = parse_type_node(body)?;
+    let args = node
+        .arguments
+        .into_iter()
+        .map(|argument| match argument {
+            ParsedTypeArgument::Inline(body) => {
+                parse_type_gsig_node(body, records, d2, tparams, bounds, true)
             }
-            (100, 2) => {
-                // Type.annotation (extension field 100) — `Annotation.id` = 1. A RECEIVER function type
-                // (`Cfg.() -> Unit`) is a plain `kotlin/FunctionN` classifier carrying the
-                // `@kotlin.ExtensionFunctionType` annotation; without it the decoded `Ty::Fun` would read
-                // as an ordinary `(Cfg) -> Unit` and never match a receiver-lambda argument.
-                let n = pb.varint()? as usize;
-                let abody = pb.bytes(n)?;
-                let mut ap = Pb { b: abody, i: 0 };
-                let mut annotation_id = None;
-                while !ap.at_end() {
-                    let at = ap.varint()?;
-                    match (at >> 3, at & 7) {
-                        (1, 0) => annotation_id = ap.varint(),
-                        (_, w) => ap.skip(w)?,
-                    }
-                }
-                // `Type.annotation` is REPEATED. Receiver-ness is the presence of ONE semantic marker,
-                // not a property of whichever annotation happened to be serialized last. Accumulate the
-                // predicate while walking the field so adding an unrelated type-use annotation cannot
-                // erase an earlier `@ExtensionFunctionType` mark (protobuf preserves no useful ordering
-                // contract between independent annotations).
-                receiver_fun |= annotation_id
-                    .and_then(|id| resolve_class_name(records, d2, id as usize))
-                    .is_some_and(|name| name == "kotlin/ExtensionFunctionType");
-            }
-            (_, w) => pb.skip(w)?,
-        }
-    }
-    let ty = if let Some(id) = class_id {
+            // This carrier does not expose the containing TypeTable here. Treat a table-only or star
+            // argument as its erased `Any` stand-in, matching the previous inline-only decoder.
+            ParsedTypeArgument::Table(_) | ParsedTypeArgument::Star => None,
+        })
+        .map(|argument| argument.unwrap_or_else(|| Ty::obj("kotlin/Any")))
+        .collect();
+    // A receiver function type is a plain `FunctionN` plus an `ExtensionFunctionType` annotation.
+    // Annotations are repeated, so the semantic marker may appear anywhere in the shared wire node.
+    let receiver_fun = node.annotation_ids.iter().any(|&id| {
+        resolve_class_name(records, d2, id as usize)
+            .is_some_and(|name| name == "kotlin/ExtensionFunctionType")
+    });
+    let ty = if let Some(id) = node.class_id {
         let internal = resolve_class_name(records, d2, id as usize)?;
         gsig_from_kotlin_class(&internal, args, receiver_fun)
-    } else if let Some(id) = tp_id {
+    } else if let Some(id) = node.metadata_type_parameter_id {
         tparams.get(&id).map(|n| {
             let bound = bounds
                 .get(n)
@@ -197,7 +251,7 @@ fn parse_type_gsig_node(
             Ty::ty_param(n, bound)
         })?
     } else {
-        let id = tpn_id?;
+        let id = node.type_parameter_name_id?;
         resolve_string(records, d2, id as usize).map(|s| {
             let bound = bounds
                 .get(&s)
@@ -206,11 +260,13 @@ fn parse_type_gsig_node(
             Ty::ty_param(&s, bound)
         })?
     };
-    Some(if nested && nullable && matches!(ty, Ty::TyParam(..)) {
-        Ty::nullable(ty)
-    } else {
-        ty
-    })
+    Some(
+        if nested && node.nullable && matches!(ty, Ty::TyParam(..)) {
+            Ty::nullable(ty)
+        } else {
+            ty
+        },
+    )
 }
 
 /// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
@@ -2966,68 +3022,45 @@ type TypeParamNames = std::collections::HashMap<u64, String>;
 const BUILTIN_TYPE_DEPTH_LIMIT: u32 = 16;
 
 impl BuiltinTables<'_> {
-    /// Decode one `Type` message (a type-table entry or an inline `Type`) into a [`BuiltinTy`]. Mirrors
-    /// the `@Metadata` decoder [`parse_type_gsig_node`]: `class_name` (field 6) with its `argument`s
-    /// (field 2), else `type_parameter` (field 7, by id) or `type_parameter_name` (field 9, by string).
-    /// An `Argument` carries its type either inline (`Argument.type` = 2) or by table id
-    /// (`Argument.type_id` = 3) — a builtins fragment uses the latter — so both are followed.
+    /// Resolve the shared [`parse_type_node`] wire shape through a builtins fragment's tables. A type is
+    /// `class_name` (field 6) with `argument`s, `type_parameter` (field 7, by id), or
+    /// `type_parameter_name` (field 9, by string). An argument may carry its type inline or by table id;
+    /// builtins commonly use the latter, so those edges consume the recursion budget as well.
     fn ty(&self, body: &[u8], tparams: &TypeParamNames, depth: u32) -> Option<BuiltinTy> {
         if depth > BUILTIN_TYPE_DEPTH_LIMIT {
             return None;
         }
-        let mut pb = Pb { b: body, i: 0 };
-        let mut class_id = None;
-        let mut tp_id = None;
-        let mut tpn_id = None;
-        let mut nullable = false;
-        let mut args: Vec<BuiltinTy> = Vec::new();
-        while !pb.at_end() {
-            let tag = pb.varint()?;
-            match (tag >> 3, tag & 7) {
-                (3, 0) => nullable = pb.varint()? != 0,
-                (6, 0) => class_id = Some(pb.varint()?),
-                (7, 0) => tp_id = Some(pb.varint()?),
-                (9, 0) => tpn_id = Some(pb.varint()?),
-                (2, 2) => {
-                    let n = pb.varint()? as usize;
-                    let abody = pb.bytes(n)?;
-                    let mut ap = Pb { b: abody, i: 0 };
-                    let mut arg = None;
-                    while !ap.at_end() {
-                        let at = ap.varint()?;
-                        match (at >> 3, at & 7) {
-                            (2, 2) => {
-                                let tn = ap.varint()? as usize;
-                                let tb = ap.bytes(tn)?;
-                                arg = self.ty(tb, tparams, depth + 1);
-                            }
-                            (3, 0) => {
-                                let id = ap.varint()? as usize;
-                                arg = self.ty_by_id(id, tparams, depth + 1);
-                            }
-                            (_, w) => ap.skip(w)?,
-                        }
-                    }
-                    // A star projection (`Map<*, *>`) records no type; `Any` is its erased stand-in,
-                    // matching what the `@Metadata` decoder substitutes.
-                    args.push(arg.unwrap_or_else(|| BuiltinTy::class("kotlin/Any")));
-                }
-                (_, w) => pb.skip(w)?,
-            }
-        }
-        if let Some(id) = class_id {
+        let node = parse_type_node(body)?;
+        let args = node
+            .arguments
+            .into_iter()
+            .map(|argument| match argument {
+                ParsedTypeArgument::Inline(body) => self.ty(body, tparams, depth + 1),
+                ParsedTypeArgument::Table(id) => usize::try_from(id)
+                    .ok()
+                    .and_then(|id| self.ty_by_id(id, tparams, depth + 1)),
+                ParsedTypeArgument::Star => None,
+            })
+            // A star projection or an invalid table reference has `Any` as its erased stand-in,
+            // exactly like the ordinary metadata consumer of the shared wire parser.
+            .map(|argument| argument.unwrap_or_else(|| BuiltinTy::class("kotlin/Any")))
+            .collect();
+        if let Some(id) = node.class_id {
             return Some(BuiltinTy::Class {
                 internal: resolve_qname(self.qnames, self.strings, id as i64),
                 args,
-                nullable,
+                nullable: node.nullable,
             });
         }
-        let name = match (tp_id, tpn_id) {
+        let name = match (node.type_parameter_id, node.type_parameter_name_id) {
             (Some(id), _) => tparams.get(&id).cloned()?,
             (None, Some(sid)) => self.strings.get(sid as usize).cloned()?,
             (None, None) => return None,
         };
-        Some(BuiltinTy::Param { name, nullable })
+        Some(BuiltinTy::Param {
+            name,
+            nullable: node.nullable,
+        })
     }
 
     fn ty_by_id(&self, id: usize, tparams: &TypeParamNames, depth: u32) -> Option<BuiltinTy> {
