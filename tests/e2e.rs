@@ -208,6 +208,8 @@ mod classpath_runblocking_e2e;
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]
 mod classpath_subtype_ctor_arg_e2e;
+#[path = "classpath_super_call_e2e.rs"]
+mod classpath_super_call_e2e;
 #[path = "classpath_super_ctor_args_e2e.rs"]
 mod classpath_super_ctor_args_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
@@ -652,6 +654,8 @@ mod mangled_member_null_arg_e2e;
 mod map_entry_destructure_e2e;
 #[path = "map_get_nullable_elvis_e2e.rs"]
 mod map_get_nullable_elvis_e2e;
+#[path = "mapped_collection_scope_e2e.rs"]
+mod mapped_collection_scope_e2e;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]

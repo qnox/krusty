@@ -1023,6 +1023,49 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a `Comparable` parameter is a VerifyError), so such a call is DECLINED (the file skips), never
   miscompiled. Tests: `tests/bounded_type_param_e2e.rs`.
 
+- **A mapped collection's member scope comes from `.kotlin_builtins`, not from the JVM class.** A mapped
+  Kotlin type (`kotlin/collections/MutableList`, …) has no `.class` of its own; krusty resolves it through
+  the JVM type it maps to (`java/util/List`). That class's method set is NOT its Kotlin API. `java.util.List`
+  declares `remove(int)` (remove BY INDEX) alongside `remove(Object)` (remove the ELEMENT), plus `stream`,
+  `toArray`, `getFirst`, `spliterator` — none of which Kotlin's `MutableList` has. Kotlin declares only
+  `MutableCollection.remove(element: E): Boolean`; the index-taking method is reachable solely under the
+  renamed name `removeAt` (kotlinc's `BuiltinMethodsWithDifferentJvmName`). Taking the Java set therefore
+  MISCOMPILED: `list.remove(10)` bound the primitive-`int` overload — removing whichever element sits at
+  index 10, or throwing `IndexOutOfBoundsException` — because an `Int` argument fits `I` exactly while
+  `remove(Object)` needs boxing.
+
+  So for a mapped COLLECTION the `.kotlin_builtins` declaration supplies BOTH the members and the
+  supertypes, replacing the JVM class's rather than joining them — the supertypes too, or `java/util/List`
+  re-enters one rung up the receiver walk and re-supplies everything. The class file still states the kind
+  and constructors. Nothing physical changes: the builtins decode to the same erased descriptors and the
+  same JVM owner, member names stay in SOURCE terms, and the Kotlin → JVM rename happens where it always
+  did, at emit (`names::mapped_builtin_virtual_name`, `removeAt` → `remove`). No filter subtracts from the
+  Java scope and no reverse table exists — the correct set is simply the declared one. The OVERRIDE
+  direction is unchanged: a class realizing `MutableList` writes `removeAt`, and `mapped_interface_members`
+  emits the `remove(int)` bridge. Tests: `tests/mapped_collection_scope_e2e.rs`, corpus
+  `specialBuiltins/irrelevantRemoveAtOverride.kt`.
+
+  A CONCRETE `java.util` class (`ArrayList`, `AbstractList`) is the other half, and needs the other
+  mechanism: it has a real class file, so it never consults the builtins and keeps its Java member scope —
+  including its own `remove(int)`. kotlinc handles exactly this in `LazyJavaClassMemberScope`
+  (`isVisibleAsFunction` / `doesOverrideRenamedBuiltins` / `createRenamedCopy`): a Java method whose
+  signature matches a renamed builtin is hidden under its JVM name and re-exposed under the Kotlin one.
+  krusty derives this read-side rename from the same `mapped_interface_members` semantic handoff used
+  for bridge emission. The selected mapping must match the JVM name AND full erased descriptor (only
+  `remove(int)` is renamed, not `remove(Object)`) and its declaring mapped interface must occur in the
+  concrete receiver's hierarchy. There is therefore no second reverse table to drift, and an unrelated
+  class declaring `remove(index: Int): Any` is untouched. Verified against kotlinc:
+  `arrayListOf(10, 20, 30).remove(10)` removes the ELEMENT on both `ArrayList` and `AbstractList`
+  receivers, while `removeAt(0)` emits `remove(I)`.
+
+  Limited to the COLLECTION mapped builtins. `kotlin/String` also leaks its JVM class's members, but two of
+  them are load-bearing: kotlinc reaches `String.substring` and `String.indexOf` through `kotlin.text`
+  EXTENSIONS (an `@InlineOnly` splice down to the Java member, and `StringsKt.indexOf$default`), a path
+  krusty does not yet cover — today they resolve only via the leak. Everything else on `String` (`replace`,
+  `split`, `trim`, `uppercase`, `startsWith`, `contains`, `get`, `length`, `plus`, `compareTo`) already
+  resolves as an extension or a builtin member. Widening this to the remaining mapped builtins is gated on
+  those two, not on anything in the member-scope model.
+
 - **Kotlin members on JVM-mapped built-ins (`CharSequence`/`Number`/`Comparable`).** kotlinc maps these
   Kotlin types to JVM classes (`java/lang/CharSequence`, …) but their Kotlin API differs from the JVM
   class's methods — `CharSequence.get(i)` dispatches to `charAt`, `Number.toInt()` to `intValue`, and the
