@@ -274,6 +274,93 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   helper` lib, then krusty resolves + runs a caller against it → 43
   (`tests/suspend_e2e.rs::krusty_compiled_suspend_dep_is_consumable`); the real kotlinc 2.4.0 also reads
   the annotation and compiles the same caller without error.
+- **`@Metadata` writer — the CLASS round-trip (a `@Metadata` on every emitted class, not just the
+  facade).** A file facade's `@Metadata` describes that file's TOP-LEVEL declarations only, so krusty
+  used to emit nothing at all for a CLASS — and a krusty-compiled class was therefore unreadable by
+  krusty itself. The gap is not about missing bytecode: `javap -p` showed `copy`, `copy$default` and
+  `componentN` in the class file all along. What only `@Metadata` can carry is the Kotlin-level facts a
+  JVM descriptor cannot spell — a constructor's and a member's PARAMETER NAMES (so `p.copy(y = 4)`
+  binds by label) and the `operator` mark on `componentN` (so `val (a, b) = q` destructures). Compiling
+  `data class Point(val x: Int, val y: Int)` with krusty and a caller against it reported "named
+  arguments are only supported for top-level functions and methods with named parameters" and "cannot
+  destructure this type (no operator 'component1')"; the same caller against a kotlinc-built `Point`
+  compiled, which localized the defect to the WRITE side. `build_class_metadata` (IR → `metadata::
+  class_builder::build_class`) already existed and was byte-verified against kotlinc, but every in-tree
+  caller left it switched off. It is now ON in the shipping emit configuration. It is NOT unconditional
+  emission: a shape `build_class_metadata` has not verified declines individually and that class emits
+  no annotation exactly as before (companion / annotation class / enum entry / property- and
+  function-reference classes / secondary constructors / a non-interface without a primary constructor /
+  a multi-field or `var` `value class`) — an unverified payload once broke kotlin-reflect on a
+  box-corpus case, which is why it was gated at all. That list is a safety NET, not a proof: it gates
+  on class KIND, so a describable kind can still hold a MEMBER the builder models wrongly. Each such
+  shape has had to be found and added — the three below are the ones switching the default on
+  surfaced, and the honest expectation is that more exist. Byte parity IMPROVES rather than regresses,
+  since kotlinc annotates every class too.
+  ONE DEFINITION of the shipping emit configuration (`jvm::backend::shipping_emit_options`) is what
+  makes this reach every caller: the in-process test harness previously built its own `EmitOptions`
+  from `Default`, which silently omitted both the class metadata AND the `SourceFile` stamp — so a
+  test could pass on an artifact `krusty -d …` never writes. The CLI backend and `compile_in_process`
+  now share that one constructor; `EmitOptions::default()` remains the pre-class-metadata shape for a
+  caller that wants it, and `KRUSTY_NO_CLASS_METADATA` restores facade-only output for bisecting.
+  A **`data object` synthesizes no `copy`/`componentN`** — it is a singleton, so kotlinc gives it
+  `equals`/`hashCode`/`toString` only. krusty's METHOD emission already agreed, but the constant-pool
+  seeder and the metadata builder both keyed on `is_data` alone, so switching the annotation on made a
+  `data object` advertise a `copy()` its own class file does not define — a reader would have bound a
+  call that then fails at link time. Both now ask `synthesizes_data_class_members` (`is_data &&
+  !is_singleton`). This is the class of defect the gate could not see while the annotation was off:
+  a wrong payload is only observable once something writes it (`tests/sealed_interface_nested_e2e.rs::
+  data_object_has_no_copy`, extended to decode the emitted `@Metadata`).
+  **`data` synthesizes over the PRIMARY-CONSTRUCTOR properties, not over every field.** `c.fields` also
+  holds a BODY property's backing field, so `data class P(val x: Int) { val y: Int = 1 }` was described
+  with `component1`, `component2` and `copy(II)LP;` while the class file defines only `component1` and
+  `copy(I)LP;` — krusty's METHOD emission was right and matched kotlinc; only the record was wrong.
+  Real kotlinc reading it accepts `val (a, b) = p` and binds a `component2` that does not exist. The
+  builder and the constant-pool seeder now both take the `c.ctor_param_count` prefix, which makes the
+  `d2` string table byte-identical to kotlinc's for this source (`krusty_roundtrip_class_metadata_e2e::
+  a_body_property_adds_no_component_or_copy_parameter`).
+  **A VALUE-CLASS-typed CONSTRUCTOR PARAMETER withholds the record.** `class Holder(val id: ItemId)`
+  gets kotlinc's private-primary + synthetic `DefaultConstructorMarker` accessor ABI, which the
+  builder cannot describe: it named the PRIVATE `<init>(Ljava/lang/String;)V` (kotlinc names
+  `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`), typed `id` as `String`
+  instead of `LItemId;`, and dropped the getter's mangled `getId-YyT5sjE`. Real kotlinc reading that
+  record rejects `Holder(ItemId("OK"))` as a type mismatch, and a caller that satisfied it would
+  `invokespecial` the private constructor. `ir.has_value_param_ctor` — recorded by the value-class
+  pass BEFORE erasure loses the parameter's identity — is the signal; `vc_declared_sigs` cannot be,
+  since it holds non-synthesized FUNCTIONS only. Test:
+  `krusty_roundtrip_class_metadata_e2e::a_value_class_constructor_parameter_withholds_the_record`.
+  **Still open, same family:** a value-class-typed BODY PROPERTY (`class Holder { val k: K }`) is
+  still described, and described wrongly — the record says `k: String` with getter `getK`, while the
+  emitted method is the mangled `getK-XLNMDGE` (kotlinc: `k: LK;`, `getK-XLNMDGE`). A reader binding
+  `getK` gets a NoSuchMethodError. The accessor is not reachable from `c.methods` or by dispatch
+  receiver, so the mangled name has no signal at the builder; closing this needs the value-class pass
+  to record the mangled accessor per field.
+  **A VALUE-CLASS-INVOLVED member is WITHHELD — the write side is right, the read side is not.** The
+  value-class pass realizes such a member as a mangled method over the ERASED underlying, and the
+  byte-identity tests show krusty's record for one matches kotlinc exactly. What is missing is the
+  consumer: a caller that learns the Kotlin return from `@Metadata` still emits kotlinc's boxed
+  sequence — `invokevirtual Holder.make-XLNMDGE()Ljava/lang/String; checkcast K; K.unbox-impl()` —
+  and the `String` on the stack is not a `K`. `MetadataCallFacts` carries `value_class_params` for the
+  parameter side but has no return counterpart. Describing the member therefore converts a compile
+  ERROR ("unresolved reference 'make'", the file skips) into a run-time ClassCastException, or a
+  VerifyError once a fake override lands the receiver wrong. So `build_class_metadata` declines any
+  class with such a member — a `value class` with a declared member, or a plain class whose member's
+  signature mentions one (`ir.vc_declared_sigs` is the signal) — leaving every caller on the
+  descriptor path it used before. Reinstate the description together with the classpath value-class
+  RETURN model, not before. Tests: `krusty_roundtrip_class_metadata_e2e::
+  a_value_class_returning_member_is_withheld_and_its_caller_rejected` asserts BOTH halves (withheld,
+  and the caller rejected rather than bound), and the three
+  `data_class_metadata_wiring_e2e::*_matches_kotlinc_without_metadata` cases keep the codegen parity
+  those shapes had while pinning the decline.
+  The box corpus's `// MODULE:` path — the only place the gate compiles a DOWNSTREAM module against
+  krusty's own class output — now emits class metadata too, matching what ships; it is a net gain
+  (3466 → 3471 cases compiled, still 0 miscompiles). Keeping it off would have left the gate blind to
+  precisely the defects above: they surfaced only once that path wrote what the CLI writes.
+  Tests: `tests/krusty_roundtrip_class_metadata_e2e.rs` (the write side pinned by decoding the emitted
+  `Point.class`, plus `copy(y = …)`/destructuring and a plain class's member named arguments
+  round-tripping through krusty's own output). Still open, and NOT about class metadata: the generic
+  half of `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` — a facade record for
+  `fun <T : Comparable<T>> clampMax` keeps the ERASED bound, so the caller reports "operator '!='
+  cannot be applied to 'Comparable' and 'Int'".
 - **`suspend` function TYPE representation (`suspend (A..) -> R`).** kotlinc realizes it as
   `Function{n+1}<A.., Continuation<R>, Object>` — the arity is the logical parameter count PLUS one (a
   trailing continuation), the result erased to `Object`. krusty historically dropped the `suspend`

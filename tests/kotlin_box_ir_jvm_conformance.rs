@@ -559,12 +559,14 @@ fn compile_blocks(
         // cross-module extensions.
         let metadata = krusty::jvm::backend::facade_package_metadata(file, i as u32, &syms);
         let opts = ir_emit::EmitOptions {
-            // NO per-class `@Metadata` here: this path also compiles `// MODULE:` dependency
-            // chains, where a DOWNSTREAM module reads the emitted class metadata at compile time —
-            // the unverified value-class shapes mis-resolve there (VerifyError/CCE in the
-            // compileKotlinAgainstKotlin inline-class tests). Multi-file tests aren't byte-diffed
-            // yet, so only the `SourceFile` stamp is mirrored.
-            emit_class_metadata: false,
+            // Per-class `@Metadata` ON, as the CLI backend ships it — and this path is the ONLY
+            // place the gate exercises a DOWNSTREAM module READING it, since it compiles `// MODULE:`
+            // dependency chains. It was off while value-class-involved members were described
+            // wrongly (VerifyError/CCE across the compileKotlinAgainstKotlin inline-class chains);
+            // `build_class_metadata` now declines those shapes, and turning this on is a net gain
+            // (5 more cases compile because their downstream module can finally read the dependency).
+            // Multi-file tests aren't byte-diffed yet, so only the `SourceFile` stamp is mirrored.
+            emit_class_metadata: true,
             source_file: Some(format!(
                 "{}.kt",
                 blocks[i].0.rsplit('/').next().unwrap_or(&blocks[i].0)

@@ -261,6 +261,34 @@ impl JvmBackend {
     }
 }
 
+/// The per-file emit configuration krusty SHIPS with — ONE definition, so an in-process caller (the
+/// test harness, an embedder) emits exactly what `krusty -d …` does. It carries the class version
+/// (`-jvm-target`), the `SourceFile` name (the origin `.kt`; kotlinc uses the simple name,
+/// reconstructed from the stem — directories are already stripped), the `-module-name`, and the
+/// per-class `@Metadata` switch. Threaded explicitly into emission so every class (incl. synthetics)
+/// inherits it. A caller that wants the pre-class-metadata bytes uses `EmitOptions::default()`.
+pub fn shipping_emit_options(
+    stem: &str,
+    module_name: &str,
+    class_major: Option<u16>,
+    cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
+) -> crate::jvm::ir_emit::EmitOptions {
+    crate::jvm::ir_emit::EmitOptions {
+        class_major,
+        source_file: Some(format!("{stem}.kt")),
+        // kotlinc records `classModuleName` in @Metadata unless the module is the default `main`.
+        module_name: (module_name != "main").then(|| module_name.to_string()),
+        // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
+        // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
+        // second compilation sees no constructor/member parameter names (named arguments) and no
+        // `operator` marks (destructuring). A shape `build_class_metadata` has not verified against
+        // kotlinc declines individually and emits nothing, so this cannot write an unverified
+        // payload. `KRUSTY_NO_CLASS_METADATA` restores the facade-only output for bisecting.
+        emit_class_metadata: std::env::var_os("KRUSTY_NO_CLASS_METADATA").is_none(),
+        inner_class_resolver: Some(classpath_inner_class_resolver(cp)),
+    }
+}
+
 pub fn classpath_inner_class_resolver(
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
 ) -> crate::jvm::classfile::InnerClassResolver {
@@ -377,19 +405,7 @@ impl Backend for JvmBackend {
         let syms = checked.symbols;
         let module_name = checked.module_name;
 
-        // Per-file emit config: the class version (`-jvm-target`) and the `SourceFile` name (the origin
-        // `.kt`; kotlinc uses the simple name, reconstructed from the stem — directories already
-        // stripped). Threaded explicitly into emission so every class (incl. synthetics) carries it.
-        let emit_opts = crate::jvm::ir_emit::EmitOptions {
-            class_major: self.class_major,
-            source_file: Some(format!("{stem}.kt")),
-            // kotlinc records `classModuleName` in @Metadata unless the module is the default `main`.
-            module_name: (module_name != "main").then(|| module_name.to_string()),
-            // Opt-in (WIP): compute + emit `@Metadata` for supported shapes. Off unless requested, so
-            // the default emit is unchanged (an unverified payload breaks kotlin-reflect).
-            emit_class_metadata: std::env::var_os("KRUSTY_EMIT_CLASS_METADATA").is_some(),
-            inner_class_resolver: Some(classpath_inner_class_resolver(self.cp.clone())),
-        };
+        let emit_opts = shipping_emit_options(stem, module_name, self.class_major, self.cp.clone());
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)

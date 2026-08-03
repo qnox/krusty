@@ -310,12 +310,9 @@ pub fn compile_in_process(
     // The facade `@Metadata` the CLI backend writes (top-level fn/extension records) — without it a
     // SEPARATE compilation reading this output from the classpath cannot resolve extensions.
     let metadata = krusty::jvm::backend::facade_package_metadata(file, 0, &syms);
-    let opts = krusty::jvm::ir_emit::EmitOptions {
-        inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
-            cp.clone(),
-        )),
-        ..Default::default()
-    };
+    // The SHIPPING emit config (per-class `@Metadata`, `SourceFile`, …) — the same definition the CLI
+    // backend uses, so this helper can't drift from what `krusty -d …` writes.
+    let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
     let outputs = krusty::jvm::ir_emit::emit_all_with_opts(
         &ir,
         &facade,
@@ -374,15 +371,18 @@ pub fn compile_in_process_files(
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
-/// Like [`compile_in_process`], but forces the opt-in per-class `@kotlin.Metadata` on (default emit
-/// keeps it off — see [`krusty::jvm::ir_emit::EmitOptions::emit_class_metadata`]). Lets a test decode
-/// the metadata krusty computes from IR (the wiring), independent of the CLI env-var flag.
+/// Like [`compile_in_process`], but retaining the suspend pass's continuation metadata for emission,
+/// and pinning per-class `@kotlin.Metadata` ON explicitly rather than inheriting the shipping default
+/// — the byte-identity tests must exercise the computed payload whatever
+/// [`krusty::jvm::ir_emit::EmitOptions::emit_class_metadata`] defaults to (and whatever
+/// `KRUSTY_NO_CLASS_METADATA` is set to in the environment).
+///
+/// Takes a classpath (for sources referencing the kotlin stdlib or other jars) and stamps the
+/// `SourceFile` (`<stem>.kt`) exactly as the CLI backend does, so the emitted bytes match a
+/// `krusty -d …` (and thus kotlinc) run WITHOUT spawning a subprocess. This is the in-process path the
+/// byte-identity tests use, so their whole codepath is coverage-instrumented (a spawned CLI is not)
+/// and pays no per-run cold classpath scan.
 #[allow(dead_code)]
-/// Compile `src` in-process with krusty's opt-in class metadata ON and a classpath (for sources that
-/// reference the kotlin stdlib or other jars), stamping the `SourceFile` (`<stem>.kt`) exactly as the
-/// CLI backend does, so the emitted bytes match a `krusty -d …` (and thus kotlinc) run WITHOUT spawning
-/// a subprocess. This is the in-process path the byte-identity tests use, so their whole codepath is
-/// coverage-instrumented (a spawned CLI is not) and pays no per-run cold classpath scan.
 pub fn compile_in_process_metadata_cp(
     src: &str,
     stem: &str,

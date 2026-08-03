@@ -114,11 +114,14 @@ pub struct EmitOptions {
     /// `-module-name` value, recorded in each class's `@Metadata` (`classModuleName`). kotlinc omits it
     /// for the default module `main`; `None` here matches that.
     pub module_name: Option<String>,
-    /// Emit a computed `@kotlin.Metadata` for supported class shapes (WIP — [`build_class_metadata`]).
+    /// Emit a computed `@kotlin.Metadata` for supported class shapes ([`build_class_metadata`]).
     /// Byte-verified vs kotlinc for a plain `val`/`var`-property class and a `data class` (its IS_DATA
-    /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); other shapes are gated
-    /// out and emit no metadata. OFF by default: an unverified payload breaks kotlin-reflect (a
-    /// box-corpus case caught this), so the default emit stays unchanged until a shape is verified.
+    /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); a shape that is not
+    /// verified declines individually and emits no metadata, so this never writes an unverified
+    /// payload (one did break kotlin-reflect on a box-corpus case). The CLI backend turns this ON —
+    /// without it a krusty-compiled CLASS carries nothing a second krusty compilation can read. It
+    /// stays OFF in this `Default` so [`emit_all`]'s output is unchanged for callers that want the
+    /// pre-class-metadata bytes.
     pub emit_class_metadata: bool,
     pub inner_class_resolver: Option<InnerClassResolver>,
 }
@@ -260,6 +263,14 @@ fn init_body_constant_fields(ir: &IrFile, c: &IrClass) -> std::collections::Hash
     out
 }
 
+/// Does `data` on this class synthesize the `componentN`/`copy` family? A `data object` is a SINGLETON:
+/// kotlinc gives it `equals`/`hashCode`/`toString` ONLY — there is nothing to copy from and no
+/// primary-constructor property to destructure. Both the constant-pool seeder and the `@Metadata`
+/// builder ask this, so a data object cannot end up describing a `copy` its class file does not have.
+fn synthesizes_data_class_members(c: &crate::ir::IrClass) -> bool {
+    c.is_data && !c.is_singleton()
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -328,11 +339,21 @@ fn build_class_metadata(
     } else {
         std::collections::HashSet::new()
     };
+    let synthesizes_copy = synthesizes_data_class_members(c);
+    // `data` synthesizes over the PRIMARY-CONSTRUCTOR properties only — `c.fields` also holds the
+    // backing fields of body properties (`data class P(val x: Int) { val y = 1 }` has two fields but
+    // one component). Counting all of them advertised a `component2` the class file does not define,
+    // and a `copy(II)` where only `copy(I)` exists; real kotlinc reading that record accepts
+    // `val (a, b) = p` and binds a method that is not there.
+    let data_component_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
     let data_method_names: std::collections::HashSet<String> = if c.is_data {
-        let mut s: std::collections::HashSet<String> = (1..=c.fields.len())
+        let mut s: std::collections::HashSet<String> = (1..=data_component_fields.len())
             .map(|i| format!("component{i}"))
             .collect();
-        s.extend(["copy", "equals", "hashCode", "toString"].map(String::from));
+        s.extend(["equals", "hashCode", "toString"].map(String::from));
+        if synthesizes_copy {
+            s.insert("copy".to_string());
+        }
         s
     } else {
         std::collections::HashSet::new()
@@ -360,6 +381,45 @@ fn build_class_metadata(
                 && !value_method_names.contains(n)
         })
         .collect();
+    // VALUE-CLASS-INVOLVED MEMBERS: decline the whole class. The writer can produce kotlinc's exact
+    // payload for these (the byte-identity tests proved it) — what is missing is the READ half. The
+    // physical method already returns/takes the ERASED underlying, but a caller that learns the Kotlin
+    // return from `@Metadata` still emits kotlinc's boxed-form sequence — `invokevirtual I.f-XLNMDGE()
+    // Ljava/lang/String; checkcast K; invokevirtual K.unbox-impl()` — and the `String` on the stack is
+    // not a `K`: ClassCastException, or VerifyError once a fake override lands the receiver wrong.
+    // Reproduced for both shapes: a VALUE class with a declared member (`S("O").k`) and a PLAIN class
+    // whose member's signature mentions one (`I().f().v`, `C().foo("OK").s` inherited from `A`,
+    // `WhateverUseCase()(Result.failure(…))`). Withholding the record puts each caller back on the
+    // descriptor fallback, which is what it used before any class metadata was written. Reinstate this
+    // when the classpath value-class RETURN is modelled (`MetadataCallFacts` carries
+    // `value_class_params` but has no return counterpart). Pinned by the box corpus's
+    // `compileKotlinAgainstKotlin/inlineClasses/*` MODULE chains.
+    // The signal is the MANGLING itself, not `vc_declared_sigs`: that table holds non-synthesized
+    // FUNCTIONS only, so a value-class-typed CONSTRUCTOR PARAMETER (`class Holder(val id: ItemId)`,
+    // whose generated `getId-YyT5sjE` is "synthesized") and a value-class property GETTER both slip
+    // past it. A `-` cannot occur in a Kotlin source name, so it marks a value-class-mangled member
+    // exactly. `Holder` is the case that proves the wider net is needed: krusty described `id` as
+    // `String` (kotlinc: `LItemId;`), named the PRIVATE `<init>(Ljava/lang/String;)V` rather than
+    // kotlinc's `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`, and dropped the
+    // getter's mangled name — real kotlinc reading that record rejects `Holder(ItemId("OK"))` as a
+    // type mismatch, and a caller that satisfied it would `invokespecial` the private constructor.
+    // Scan by DISPATCH RECEIVER, not `c.methods`: a value-class property's mangled getter
+    // (`getK-XLNMDGE`) is realized as a function owned by this class without being listed there, so a
+    // `c.methods` scan misses it and the class goes on to describe a plain `getK` that does not exist.
+    let self_id = c.fq_name_id();
+    let has_mangled_member = ir
+        .functions
+        .iter()
+        .any(|f| f.name.contains('-') && f.dispatch_receiver == Some(self_id));
+    let has_value_class_member = declared_fids
+        .iter()
+        .any(|fid| ir.vc_declared_sigs.contains_key(fid));
+    if has_value_class_member
+        || (!c.is_value && (has_mangled_member || ir.has_value_param_ctor(&c.fq_name())))
+        || (c.is_value && !declared_fids.is_empty())
+    {
+        return None;
+    }
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let const_fields = init_body_constant_fields(ir, c);
     let mut props: Vec<PropMeta> = c
@@ -486,9 +546,8 @@ fn build_class_metadata(
     };
     let methods: Vec<FnMeta> = if c.is_data {
         let class_ty = Ty::obj(&c.fq_name());
-        let field_tys: Vec<Ty> = c.fields.iter().map(|f| f.ty).collect();
-        let mut m: Vec<FnMeta> = c
-            .fields
+        let field_tys: Vec<Ty> = data_component_fields.iter().map(|f| f.ty).collect();
+        let mut m: Vec<FnMeta> = data_component_fields
             .iter()
             .enumerate()
             .map(|(i, f)| FnMeta {
@@ -501,15 +560,20 @@ fn build_class_metadata(
                 jvm_sig_name: None,
             })
             .collect();
-        m.push(FnMeta {
-            name: "copy".into(),
-            params: c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect(),
-            ret: class_ty,
-            flags: COPY_FN_FLAGS,
-            params_have_defaults: true,
-            jvm_sig: boxed_fn_sig(&field_tys, class_ty),
-            jvm_sig_name: None,
-        });
+        if synthesizes_copy {
+            m.push(FnMeta {
+                name: "copy".into(),
+                params: data_component_fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty))
+                    .collect(),
+                ret: class_ty,
+                flags: COPY_FN_FLAGS,
+                params_have_defaults: true,
+                jvm_sig: boxed_fn_sig(&field_tys, class_ty),
+                jvm_sig_name: None,
+            });
+        }
         m.push(FnMeta {
             name: "equals".into(),
             params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
@@ -839,16 +903,18 @@ fn seed_plain_class_pool(
             fields: if c.is_data { &[] } else { &field_sigs },
         },
     );
-    if c.is_data {
+    if synthesizes_data_class_members(c) {
         let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
-        let data_fields: Vec<(String, String)> = c
-            .fields
+        // The synthesized members cover the PRIMARY-CONSTRUCTOR properties only; a body property has a
+        // backing field in `c.fields` but no `componentN` and no `copy` parameter (see
+        // `build_class_metadata`, which takes the same prefix).
+        let component_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
+        let data_fields: Vec<(String, String)> = component_fields
             .iter()
             .map(|f| (f.name.clone(), desc(f.ty)))
             .collect();
         // Per-field `hashCode` owner (interface field → `java/lang/Object`), recorded by `field_hash`.
-        let hashcode_owners: Vec<Option<String>> = c
-            .fields
+        let hashcode_owners: Vec<Option<String>> = component_fields
             .iter()
             .map(|f| ir.data_hashcode_owner(fq_name, &f.name).map(str::to_string))
             .collect();
