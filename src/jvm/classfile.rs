@@ -1550,6 +1550,13 @@ impl ClassWriter {
             } else {
                 code.local_entries()
                     .iter()
+                    // A `LocalVariableTable` `start_pc` must index the code array (JVMS §4.7.13) —
+                    // HotSpot's class-file parser rejects the whole class otherwise. A local DECLARED
+                    // in a region the emitter dropped as unreachable (`val y: Int = boom() ?: 1`) has
+                    // its start recorded past the last instruction and describes no live range, so it
+                    // goes with the code. Checked against the FINAL length, so a live local recorded
+                    // at the then-current end is kept.
+                    .filter(|(start, ..)| (*start as usize) < code.bytes.len())
                     .map(|(start, len, slot, nm, ds)| {
                         (
                             self.cp.utf8(nm),
@@ -2261,6 +2268,25 @@ pub struct CodeBuilder {
     line_marks: Vec<(u16, u16)>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
+    /// Whether the instruction stream is currently UNREACHABLE: an unconditional terminator
+    /// (`goto`/`athrow`/a `*return`) has been emitted and no label has been bound since. Instructions
+    /// appended in that state are dead code the type-checking verifier rejects — it demands a
+    /// stack-map frame at the first instruction after a terminator ("Expecting a stack map frame"),
+    /// and the tracked operand height there is meaningless ("Operand stack overflow"). Dead
+    /// instructions are therefore DROPPED rather than emitted.
+    ///
+    /// This is what makes a diverging expression usable in VALUE position generically: every
+    /// construct that consumes a value (a local's store, an outer call's `invoke`, a method's
+    /// implicit `return`) emits its consuming opcodes after the value, and when the value diverges
+    /// those opcodes are exactly this dead straight-line region. No per-construct divergence check is
+    /// needed at any consuming site.
+    ///
+    /// Reachability resumes at the next bound label ([`Self::bind`]/[`Self::bind_at`]) — a label is a
+    /// branch/handler target, hence a stack-map merge point — and at a spliced inline body
+    /// ([`Self::splice_inline`]), whose bytes carry their own relocated frames. All other bookkeeping
+    /// (operand-height tracking, `max_stack`, `max_locals`) runs unchanged while dead, so a revival
+    /// point sees exactly the state it saw before this suppression existed.
+    dead: bool,
 }
 
 impl CodeBuilder {
@@ -2277,6 +2303,7 @@ impl CodeBuilder {
             frames: Vec::new(),
             line_marks: Vec::new(),
             local_entries: Vec::new(),
+            dead: false,
         }
     }
 
@@ -2301,6 +2328,9 @@ impl CodeBuilder {
     /// of the line already in effect is dropped; a second mark at the same pc overwrites (the
     /// statement that actually begins an instruction wins, matching kotlinc's per-statement entries).
     pub fn mark_line(&mut self, line: u32) {
+        if self.dead {
+            return; // the statement it would mark is dropped dead code (see `dead`)
+        }
         if self.bytes.len() > u16::MAX as usize {
             return; // past the classfile pc range — an entry would silently wrap
         }
@@ -2512,6 +2542,11 @@ impl CodeBuilder {
         arg_words: i32,
         ret_words: i32,
     ) {
+        // A spliced body is never dropped as dead code: its callers pre-compute absolute offsets from
+        // the CURRENT `bytes` length and bind relocated frames/handlers there (`bind_at`), so skipping
+        // the bytes would leave those pointing past the code array. The relocated frames also make the
+        // spliced region a legitimate resumption point.
+        self.dead = false;
         let baseline = self.cur_stack - arg_words; // stack height once the prologue consumes the args
         if top_local > self.max_locals {
             self.max_locals = top_local;
@@ -2543,15 +2578,23 @@ impl CodeBuilder {
         self.labels.push(usize::MAX);
         Label(id)
     }
+    /// Bind `l` here. A label is a branch/handler target, so the instruction stream becomes
+    /// reachable again (see `dead`).
     pub fn bind(&mut self, l: Label) {
         self.labels[l.0 as usize] = self.bytes.len();
+        self.dead = false;
     }
     /// Bind a label at an explicit byte offset (used to attach a relocated StackMapTable frame to a
     /// position inside a spliced inline body, which is appended as raw bytes).
     pub fn bind_at(&mut self, l: Label, offset: usize) {
         self.labels[l.0 as usize] = offset;
+        self.dead = false;
     }
     fn branch(&mut self, opcode: u8, l: Label, delta: i32) {
+        if self.dead {
+            self.adjust(delta); // dropped dead code; height bookkeeping stays as it was
+            return;
+        }
         self.bytes.push(opcode);
         let pos = self.bytes.len();
         self.fixups.push((pos, l.0));
@@ -2560,6 +2603,7 @@ impl CodeBuilder {
     }
     pub fn goto(&mut self, l: Label) {
         self.branch(0xa7, l, 0);
+        self.dead = true; // unconditional transfer: what follows is unreachable
     }
     pub fn ifeq(&mut self, l: Label) {
         self.branch(0x99, l, -1);
@@ -2643,17 +2687,23 @@ impl CodeBuilder {
     }
 
     fn op(&mut self, byte: u8, stack_delta: i32) {
-        self.bytes.push(byte);
+        if !self.dead {
+            self.bytes.push(byte);
+        }
         self.adjust(stack_delta);
     }
     fn op_u1(&mut self, byte: u8, arg: u8, stack_delta: i32) {
-        self.bytes.push(byte);
-        self.bytes.push(arg);
+        if !self.dead {
+            self.bytes.push(byte);
+            self.bytes.push(arg);
+        }
         self.adjust(stack_delta);
     }
     fn op_u2(&mut self, byte: u8, arg: u16, stack_delta: i32) {
-        self.bytes.push(byte);
-        self.bytes.extend_from_slice(&arg.to_be_bytes());
+        if !self.dead {
+            self.bytes.push(byte);
+            self.bytes.extend_from_slice(&arg.to_be_bytes());
+        }
         self.adjust(stack_delta);
     }
 
@@ -2719,9 +2769,11 @@ impl CodeBuilder {
     /// `wide <op> <u2 index>` (JVMS §6.5 `wide`): the `wide`-prefixed form of a local load/store for a
     /// slot index that doesn't fit one byte (>= 256).
     fn op_wide(&mut self, op: u8, idx: u16, stack_delta: i32) {
-        self.bytes.push(0xc4);
-        self.bytes.push(op);
-        self.bytes.extend_from_slice(&idx.to_be_bytes());
+        if !self.dead {
+            self.bytes.push(0xc4);
+            self.bytes.push(op);
+            self.bytes.extend_from_slice(&idx.to_be_bytes());
+        }
         self.adjust(stack_delta);
     }
 
@@ -2881,6 +2933,10 @@ impl CodeBuilder {
     /// `iinc index, const` — increment a local int in place (no stack effect). A slot index >= 256
     /// needs the `wide` (0xc4) form (`wide iinc <u2 index> <s2 const>`).
     pub fn iinc(&mut self, idx: u16, delta: i8) {
+        if self.dead {
+            self.ensure_locals(idx + 1);
+            return;
+        }
         if idx <= 0xff {
             self.bytes.push(0x84);
             self.bytes.push(idx as u8);
@@ -2903,24 +2959,30 @@ impl CodeBuilder {
         self.op(0x93, 0);
     }
 
-    // returns
+    // returns — every one ends the path, so what follows is unreachable (see `dead`).
     pub fn ireturn(&mut self) {
         self.op(0xac, -1);
+        self.dead = true;
     }
     pub fn lreturn(&mut self) {
         self.op(0xad, -2);
+        self.dead = true;
     }
     pub fn freturn(&mut self) {
         self.op(0xae, -1);
+        self.dead = true;
     }
     pub fn dreturn(&mut self) {
         self.op(0xaf, -2);
+        self.dead = true;
     }
     pub fn areturn(&mut self) {
         self.op(0xb0, -1);
+        self.dead = true;
     }
     pub fn ret_void(&mut self) {
         self.op(0xb1, 0);
+        self.dead = true;
     }
 
     // calls / fields. `arg_words`/`ret_words` describe the stack effect from the descriptor.
@@ -2933,18 +2995,22 @@ impl CodeBuilder {
     }
     /// `invokeinterface <iface-methodref> <count> 0` — `count` = receiver + arg words.
     pub fn invokeinterface(&mut self, iref: u16, arg_words: i32, ret_words: i32) {
-        self.bytes.push(0xb9);
-        self.bytes.extend_from_slice(&iref.to_be_bytes());
-        self.bytes.push((arg_words + 1) as u8); // count includes the receiver
-        self.bytes.push(0);
+        if !self.dead {
+            self.bytes.push(0xb9);
+            self.bytes.extend_from_slice(&iref.to_be_bytes());
+            self.bytes.push((arg_words + 1) as u8); // count includes the receiver
+            self.bytes.push(0);
+        }
         self.adjust(ret_words - arg_words - 1);
     }
     /// `invokedynamic <indy-const> 0 0` — pops `arg_words`, pushes the call-site result (`ret_words`).
     pub fn invokedynamic(&mut self, indy_index: u16, arg_words: i32, ret_words: i32) {
-        self.bytes.push(0xba);
-        self.bytes.extend_from_slice(&indy_index.to_be_bytes());
-        self.bytes.push(0);
-        self.bytes.push(0);
+        if !self.dead {
+            self.bytes.push(0xba);
+            self.bytes.extend_from_slice(&indy_index.to_be_bytes());
+            self.bytes.push(0);
+            self.bytes.push(0);
+        }
         self.adjust(ret_words - arg_words);
     }
     pub fn getstatic(&mut self, fieldref: u16, words: i32) {
@@ -3056,6 +3122,7 @@ impl CodeBuilder {
     }
     pub fn athrow(&mut self) {
         self.op(0xbf, -1);
+        self.dead = true; // the path transfers to a handler: what follows is unreachable
     }
 
     /// `instanceof <class>` (pops ref, pushes int 0/1).

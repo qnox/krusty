@@ -475,6 +475,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a plain nullable receiver (no higher-order call involved). The value form (`val r = c?.let { return … }`)
   types `r` as `Nothing?`, which flows into any reference target. (Only the SAFE-call `?.` form is handled;
   a non-safe qualified `b.also { return … }` remains unsupported.) (`tests/qq1_safecall_diverging_scope_block_e2e.rs`).
+- **A receiver that can only be `null` — `null?.m()`, `Nothing?`, `Nothing`.** `Nothing` has no non-null
+  value, so a `?.` on a receiver typed `Null`, `Nothing?`, or `Nothing` never invokes the member: the whole
+  safe call is `null`. The lowerer folds it to `{ evaluate receiver; null }` — the receiver still runs for
+  its side effects, and a *diverging* receiver (`boom()?.toString()`) simply terminates there. This is one
+  rule for all three receiver types rather than a special case for the `null` literal; a `Nothing?` receiver
+  has no class internal to look a member up on, so no other lowering could serve it.
+  The fold bypasses member resolution entirely, which is sound only because the CHECKER reports an
+  unresolved member behind `?.` (next bullet). (`tests/safe_call_unresolved_member_e2e.rs`.)
+- **An unresolved member behind `?.` is a checker diagnostic, exactly as for the qualified form.**
+  `s?.thisDoesNotExist()` reports `unresolved reference 'thisDoesNotExist'.` at the member-name span,
+  matching kotlinc. Previously only the PROPERTY spelling (`s?.thisDoesNotExist`) reported — it routes
+  through `check_member` — while the CALL spelling exhausted every callable origin and returned a silent
+  `Ty::Error`. The consequences were that the backend bail ("this construct is not yet supported by the IR
+  backend") did frontend duty for a `String?` receiver, and that `null?.thisDoesNotExist()` compiled clean,
+  because the always-null fold returns before any backend check. The report is guarded by a diagnostic
+  checkpoint so an origin that already reported (a rejected classpath overload, an unmappable labelled call)
+  is not reported twice, and by an EXISTENCE probe (`member_name_exists_on`, shared with the qualified
+  arm's nullable-receiver check) so a member that exists but that this arm merely cannot SELECT stays a
+  silent `Ty::Error`. That distinction is the whole point: `d?.toInt()`, `b?.not()`, `f?.invoke(1)`, and an
+  arity mismatch like `s?.let(1)` are all real Kotlin krusty rejects in the BACKEND, and calling them
+  "unresolved reference" would tell the user their program is wrong. Only a name that exists nowhere on the
+  receiver is a typo.
+  A second consequence of no longer being silent: the qualified and safe-call arms must agree about what
+  EXISTS, so the classpath-less `String` table (`substring`/`indexOf`/`concat`/`trimIndent`/`trimMargin`,
+  consulted only when no stdlib is on the classpath) is shared by both. Those names are stdlib EXTENSIONS
+  on `kotlin.String` rather than members of it, so in the safe-call arm the table is consulted LAST — after
+  the source-extension fallback — and a user's own `fun String.concat(o: String): Int` wins.
+  Known gap: the checkpoint is taken after the receiver but before the arguments, so an argument that
+  itself reports (`s?.nope(undefinedVar)`) suppresses the member report — the program is still rejected,
+  with one diagnostic instead of two. (`tests/safe_call_unresolved_member_e2e.rs`.)
 - Lambdas `{ a, b -> … }`: a function type `(A,…) -> R` is the JVM interface
   `kotlin/jvm/functions/Function{arity}`. A non-capturing lambda compiles to `invokedynamic` bound by
   `LambdaMetafactory.metafactory` to a synthesized `private static` method `<enclosing>$lambda$<n>`
@@ -797,6 +827,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them
   would leave a dead branch target without the stackmap frame the JVM verifier requires (`VerifyError:
   Expecting a stack map frame` — seen with `try { throw …; <unreachable> } catch …`).
+- **Dead-code suppression in the emitter — divergence in VALUE position.** The rule above is a lowering
+  decision about *statements*; it cannot cover a diverging expression used as a VALUE, because the
+  consuming construct always emits opcodes after the value: a local's `istore`, an outer call's
+  `invokevirtual`, a method's implicit `return`. When the value diverges, those trailing opcodes are dead
+  straight-line bytecode the verifier rejects. `CodeBuilder` therefore tracks reachability directly: after
+  an unconditional terminator (`goto`, `athrow`, any `*return`) instructions are DROPPED until the next
+  bound label — a label is a branch/handler target, hence a stack-map merge point — or a spliced inline
+  body, whose bytes carry their own relocated frames. Operand-height tracking, `max_stack`, and
+  `max_locals` keep running while dead, so a resumption point sees the state it would have seen anyway;
+  `LineNumberTable`/`LocalVariableTable` entries that would land in (or one past) a dropped region are
+  dropped with it, since their `start_pc` must index the code array. Because this is a property of the
+  instruction stream, no consuming construct needs its own divergence check for a STRAIGHT-LINE dead
+  region — `boom()?.hashCode()`, `val y: Int = boom() ?: 1`, `println(boom())`, `boom().toString()`, and
+  `if (true) { boom(); 1 }` are all the same case.
+  **Known limit — a BRANCHY sibling still in the dead region.** `g(boom(), if (b) 1 else 2)` (and the
+  `when`/`&&`/`try` spellings, or an inline-spliced `5.let { … }`) binds a label inside the dropped
+  region: the bind revives emission for the construct's tail and its frame is registered at the region's
+  end offset, where `build_stackmap`'s same-offset dedup keeps the stale one — `VerifyError: Bad local
+  variable type` / `Expecting a stack map frame`. `splice_inline` is exempt from suppression for the same
+  structural reason (its callers pre-compute absolute offsets and `bind_at` relocated frames INSIDE the
+  body, never at its first byte). Both shapes fail on the pre-suppression compiler too; kotlinc accepts
+  them. Fixing them means making a bind inside a dead region not revive (and giving a spliced body an
+  entry frame), not another per-construct check.
+  Relatedly, a `Nothing`-returning REAL call is emitted with zero result words
+  (`slot_words(Nothing) == 0`) yet physically leaves a `Void`; the terminating
+  `throw KotlinNothingValueException()` re-declares that word before discarding it, or `max_stack` is
+  undercounted by whatever sits beneath it (`VerifyError: Operand stack overflow` on `println(boom())`).
+  (`tests/diverging_value_position_e2e.rs`.)
 - **A `for`-range `step` is evaluated exactly once** (hoisted to a temp before the loop), not per
   iteration — a side-effecting `step` (`a until b step sideEffect()`) must run a single time, matching
   kotlinc's evaluation order. `DeadCodeAndStep` in `tests/feature_box_e2e.rs`.

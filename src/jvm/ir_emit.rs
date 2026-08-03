@@ -8405,6 +8405,13 @@ impl<'a> Emitter<'a> {
         if !self.is_real_nothing_call(node) {
             return false;
         }
+        // The invoke was emitted with ZERO result words — `slot_words(Nothing)` is 0 because a
+        // `Nothing` call yields no VALUE — yet it physically leaves one `Void` word. Re-declare that
+        // word before discarding it: otherwise the tracked height sits one below the real stack from
+        // the invoke onwards, `max_stack` is undercounted by whatever this path pushes on top
+        // (`println(boom())` needs the `PrintStream` receiver underneath), and the JVM rejects the
+        // method with "Operand stack overflow".
+        code.set_stack((code.stack_height().max(0) + 1) as u16);
         code.pop();
         let cls = self.cw.class_ref("kotlin/KotlinNothingValueException");
         code.new_obj(cls);
