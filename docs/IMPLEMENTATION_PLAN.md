@@ -902,6 +902,21 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
   `Annotation`, and the collection read-only/mutable pairs `List`/`MutableList`→`java/util/List`, …).
   These are intrinsic (not stdlib `.class` files), so they seed `class_names` unconditionally. This
   resolves `class D : Comparable<D>` → `implements java/lang/Comparable` with no JDK on the classpath.
+  (RESOLUTION only — see the JDK-less codegen gaps below; such a class still bails out of the IR
+  backend when no JDK is present.)
+- ✅ **JDK-less MEMBER REALIZATION matches the JDK-present emit.** For a builtin member that resolves
+  with only `kotlin-stdlib.jar` on `-cp`, the emitted owner/name/descriptor/opcode are now identical
+  with and without a JDK — interface dispatch, the mapped `java.util` accessor name and the erased
+  descriptor all come from the builtin's own `.kotlin_builtins` entry. See the SPEC bullet and
+  `tests/no_jdk_builtin_emit_e2e.rs`. Remaining JDK-less codegen gaps, all measured against the same
+  source compiled with `JAVA_HOME` set, none of them member-realization facts:
+  - ⬜ A reference to a NESTED builtin (`java/util/Map$Entry`) emits no `InnerClasses` attribute — it
+    is read off the owner's class file. Metadata only: the code array and constant-pool member refs
+    match, and the class loads and runs.
+  - ⬜ `class D : Comparable<D>` / `class L : Iterable<T>` RESOLVE (above) but bail out of the IR
+    backend ("this construct is not yet supported by the IR backend"), so no class is emitted.
+  - ⬜ A `java.*` type with no `.kotlin_builtins` entry (`StringBuilder`) is unresolved entirely, so
+    it never reaches emit.
 - ✅ **Reject unresolved supertypes.** A class whose base/interface supertype resolves to none of
   {user class, classpath class, alias, mapped built-in} is rejected (skipped) instead of emitting a
   bare default-package name that would `NoClassDefFound` at load.

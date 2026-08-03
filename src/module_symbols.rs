@@ -523,6 +523,10 @@ fn fn_info(
         ret: sig.ret,
         physical_ret: sig.ret,
         suspend: sig.is_suspend(),
+        // A MODULE owner is always re-readable at the emit site (it is a class this compilation
+        // declares), so its interface-ness is derived there from the source declaration rather than
+        // carried here. Only a classpath/builtin callable needs the fact to travel with it.
+        owner_is_interface: false,
         inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
         default_call: false,
         vararg_elem: None,
@@ -567,6 +571,9 @@ fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> L
         ret,
         physical_ret: ret,
         suspend: false,
+        // See the note in the module `FunctionInfo` builder above: a module owner's interface-ness is
+        // derived at the emit site from the source declaration.
+        owner_is_interface: false,
         inline: InlineKind::None,
         default_call: false,
         vararg_elem: None,
