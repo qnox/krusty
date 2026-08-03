@@ -20604,6 +20604,35 @@ impl<'a> Checker<'a> {
         });
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
+        // A CLASSPATH member's lambda shape (`re?.replace(s) { m -> m.value }`). The providers
+        // above answer source members and extensions only, so a `?.` call to a library member
+        // whose parameter is a function type or a Java SAM interface left its lambda unshaped and
+        // the parameters typed as `Any` — one `?` away from what the qualified path already does.
+        // Probed only for lambda arguments the providers above leave unshaped, so a source member
+        // or extension shape always wins and the two never compete.
+        let unshaped_lambda_argument = args.iter().enumerate().any(|(index, &argument)| {
+            matches!(self.file.expr(argument), Expr::Lambda { .. })
+                && module_shape
+                    .as_ref()
+                    .and_then(|shape| shape.param_types.get(index))
+                    .and_then(Option::as_deref)
+                    .is_none()
+                && pts
+                    .and_then(|parameters| parameters.get(index))
+                    .is_none_or(Vec::is_empty)
+        });
+        let provider_member_expectations = unshaped_lambda_argument
+            .then(|| {
+                self.provider_member_lambda_expectations(
+                    call,
+                    crate::symbol_resolver::SymRecv::Value(receiver),
+                    name,
+                    args,
+                    &partial,
+                    explicit_type_args,
+                )
+            })
+            .flatten();
         args.iter()
             .enumerate()
             .map(|(i, &x)| {
@@ -20658,7 +20687,20 @@ impl<'a> Checker<'a> {
                             self.check_lambda_with_types(x, pt)
                         }
                     }
-                    _ => partial[i].unwrap_or_else(|| self.expr(x)),
+                    _ => {
+                        match provider_member_expectations
+                            .as_ref()
+                            .filter(|_| matches!(self.file.expr(x), Expr::Lambda { .. }))
+                            .and_then(|all| all.get(i))
+                            .and_then(Option::as_ref)
+                        {
+                            Some(expectation) => {
+                                let expectation = expectation.clone();
+                                self.check_lambda_with_expectation(x, &expectation, Some(name))
+                            }
+                            None => partial[i].unwrap_or_else(|| self.expr(x)),
+                        }
+                    }
                 }
             })
             .collect()

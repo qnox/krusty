@@ -1411,6 +1411,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instead of whichever parameter happens to share the source argument's position.
   Test: `tests/classpath_companion_ext_lambda_e2e.rs`.
 
+- **A SAFE call to a classpath member shapes its lambda argument exactly as the qualified call
+  does.** `re?.replace(s) { m -> m.value }` reaches the same `Regex.replace(CharSequence,
+  (MatchResult) -> CharSequence)` as `re.replace(…)`, so the `?` must not change how the lambda's
+  parameters bind. The safe-call argument seam (`Checker::ext_arg_tys`) consulted only SOURCE member
+  shapes and EXTENSION shapes; a classpath member's expectation had no provider there, so the
+  lambda's parameters typed as `Any` and a member read on them reported "unresolved reference". It
+  now falls back to the same `provider_member_lambda_expectations` the qualified path uses, against
+  the NON-NULL receiver (`?.` narrows the receiver before member lookup). The fallback is probed
+  only for lambda arguments the source-member and extension providers leave unshaped, so those
+  providers keep precedence and the two never compete — the same one-provider-at-a-time discipline
+  the qualified path applies. Because the expectation is the shared one, a receiver function type
+  (`Cfg.() -> String`) binds `this` and a plain function type binds its value parameters, through
+  `?.` as through `.`. Test: `tests/library_fun_type_lambda_param_e2e.rs`.
+
 - **Aliased imports (`import a.b.Member as Alias`).** The import map binds the alias directly to the
   full target for types and values. Ordinary lexical resolution handles local shadowing; lowering uses
   the resolved target member name.
