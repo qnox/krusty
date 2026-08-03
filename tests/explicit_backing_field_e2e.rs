@@ -28,8 +28,7 @@ fun box(): String = when {\n\
 // form (`field: MutableList<String>`) fails identically, so neither spelling ever worked. `storage_ty` is
 // computed in `resolve.rs` but never reaches member lookup.
 #[test]
-#[ignore = "explicit backing field's type is not visible to member resolution inside the owner"]
-fn inferred_backing_field_preserves_property_api() {
+fn inferred_backing_field_gap_declines_without_a_java_scope_leak() {
     const SRC: &str = "// LANGUAGE: +ExplicitBackingFields\n\
 class Inventory {\n\
     val items: List<String>\n\
@@ -37,14 +36,18 @@ class Inventory {\n\
     fun add(item: String) {\n\
         items.add(item)\n\
     }\n\
-}\n\
-fun view(inventory: Inventory): List<String> = inventory.items\n\
-fun box(): String {\n\
-    val inventory = Inventory()\n\
-    inventory.add(\"OK\")\n\
-    return view(inventory)[0]\n\
 }\n";
-    assert_eq!(run(SRC).expect("inferred field"), "OK");
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], jdk.as_deref());
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("unresolved") && message.contains("add")),
+        "the unsupported backing-field widening must decline explicitly: {diagnostics:?}"
+    );
 }
 
 #[test]

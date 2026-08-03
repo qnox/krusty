@@ -10,6 +10,8 @@ mod abstract_instantiation_check_e2e;
 mod abstract_member_check_e2e;
 #[path = "abstract_modifier_consistency_e2e.rs"]
 mod abstract_modifier_consistency_e2e;
+#[path = "annotated_setter_parameter_e2e.rs"]
+mod annotated_setter_parameter_e2e;
 #[path = "annotation_instantiation_e2e.rs"]
 mod annotation_instantiation_e2e;
 #[path = "anon_fun_statement_e2e.rs"]
@@ -108,6 +110,8 @@ mod catch_annotation_comma_e2e;
 mod checker_operator_methods_e2e;
 #[path = "class_body_e2e.rs"]
 mod class_body_e2e;
+#[path = "class_header_newline_e2e.rs"]
+mod class_header_newline_e2e;
 #[path = "class_literal_e2e.rs"]
 mod class_literal_e2e;
 #[path = "class_metadata_roundtrip.rs"]
@@ -856,6 +860,8 @@ mod resolver_regression_e2e;
 mod result_e2e;
 #[path = "run_noreceiver_e2e.rs"]
 mod run_noreceiver_e2e;
+#[path = "safe_call_any_member_e2e.rs"]
+mod safe_call_any_member_e2e;
 #[path = "safe_call_argument_list_e2e.rs"]
 mod safe_call_argument_list_e2e;
 #[path = "safe_call_e2e.rs"]

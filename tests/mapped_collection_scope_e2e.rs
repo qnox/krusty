@@ -67,6 +67,45 @@ fn remove_on_a_concrete_java_class_takes_the_element_overload() {
 }
 
 #[test]
+fn same_shaped_java_method_outside_the_collection_hierarchy_keeps_its_name() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    // Descriptor equality alone is insufficient: this method deliberately has the same
+    // `(I)Object` shape as `java.util.List.remove(int)`, but its class does not realize the mapped
+    // `MutableList.removeAt` obligation. The provider-derived rename must therefore leave `remove`
+    // visible and must not invent a `removeAt` member.
+    let java = [(
+        "Unrelated.java".to_string(),
+        r#"
+            package fixtures;
+            public final class Unrelated {
+                public Object remove(int index) { return index == 7 ? "OK" : "fail"; }
+            }
+        "#
+        .to_string(),
+    )];
+    let Some((classes, _)) = common::javac_compile(&java, &[]) else {
+        return;
+    };
+    let root = classes.parent().map(std::path::Path::to_path_buf);
+    let classpath = vec![classes, stdlib];
+    let output = common::compile_and_run_box(
+        "import fixtures.Unrelated\nfun box(): String = Unrelated().remove(7).toString()\n",
+        "Main",
+        &classpath,
+        Some(&jdk),
+    );
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output.as_deref(), Some("OK"));
+}
+
+#[test]
 fn remove_at_reaches_the_index_overload_on_both_shapes() {
     // The renamed member stays reachable under its Kotlin name on either receiver, and still emits
     // `remove(I)`.

@@ -108,6 +108,15 @@ exact `Int` parameter wins over adaptation to `Long`; non-literal `Int` values a
 Public static fields are valid class-qualified property reads, including in inferred property
 initializers.
 
+Public Java instance fields are valid value-qualified property reads. Selection uses the same
+classifier/property hierarchy for Java source stubs, compiled dependencies, and source/module
+subclasses: the nearest declaration wins, a private or static same-named field hides an inherited
+instance field, and an actual field wins over synthetic JavaBean getter discovery. Generic field
+types are substituted from the applied receiver; a raw receiver uses the descriptor-erased type.
+Resolution carries the exact declaring owner, field name, and opaque physical descriptor through the
+ordinary property-read node, including nullable safe-call lowering, rather than reclassifying the
+receiver by origin during lowering or emission.
+
 Static methods of **nested** Java classes resolve through all three kotlinc-accepted spellings —
 `Outer.Bus.notify(x)` with `Outer` imported, `Bus.notify(x)` with `import pkg.Outer.Bus`, and the
 fully-qualified `pkg.Outer.Bus.notify(x)`. A dotted qualifier chain maps to the JVM internal name
@@ -407,6 +416,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   an entry as `new Enum$ENTRY(name, ordinal, …)`. An abstract enum member requires every entry to
   override it (else the file is skipped, never miscompiled); property overrides in an entry body
   (`override val`) are not yet modeled — skipped.
+- **Every enum classifier has the synthetic `entries: EnumEntries<E>` property.** Resolution selects
+  the enum by semantic type identity, including nested and cross-file classifiers, then carries the
+  exact zero-argument static accessor advertised by that symbol provider into lowering. Source/module
+  and dependency shapes therefore share one target handoff; lowering never reconstructs a call from
+  the declaration origin. If a provider exposes the enum kind but no direct accessor realization, the
+  valid property is typed but rejected before emission with a stable boundary until an alternative
+  cached-mapping realization is implemented.
 - Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
   `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
   `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form
@@ -429,14 +445,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   qualified-access lowering used by `.`, so source/module members and extensions, classpath members
   and extensions, primitive intrinsics, array operations, and `kotlin/Any` virtuals do not acquire
   separate safe-call dispatch tables. Resolution likewise normalizes the receiver to its non-null
-  semantic type before selecting those targets; whether a primitive arrived boxed from `Int?` or
-  unboxed from `Int` is a lowering representation, not a callable origin. A statically non-null scalar
-  receiver delegates directly to the complete qualified operation; a nullable receiver's merge boxes
-  primitive member results so both branches are references, and composes with Elvis (`a?.m() ?: d`).
+  semantic type before selecting those targets. An applicable member still wins over an extension,
+  including an inherited universal member such as `Any.toString()` when the same-named extension is
+  declared on the receiver's superclass or interface; an inapplicable same-named overload does not
+  veto the applicable member. Whether a primitive arrived boxed from `Int?` or unboxed from `Int` is
+  a lowering representation, not a callable origin. A statically non-null scalar receiver delegates
+  directly to the complete qualified operation; a nullable receiver's merge boxes primitive member
+  results so both branches are references, and composes with Elvis (`a?.m() ?: d`).
   Primitive conversions, unmodelled builtin methods (`inc`/`dec`/`mod`/`rangeTo`), erased type-parameter
   receivers, local functions, and function-object `toString`/`hashCode` remain rejected rather than
   being rebound to a different origin or emitted with the wrong representation.
-  (`tests/safe_call_e2e.rs`, `tests/safe_call_primitive_e2e.rs`.)
+  (`tests/safe_call_e2e.rs`, `tests/safe_call_primitive_e2e.rs`,
+  `tests/safe_call_any_member_e2e.rs`.)
 - **Safe call whose scope block diverges — `x?.let { return … }` / `x?.run { throw … }` / `x?.also { … }`
   / `x?.apply { … }`.** A scope function whose lambda body is a non-local `return` (or `throw`) has block
   value type `Nothing`, so the whole safe call is `Nothing?` — `null` when the receiver is null, else
@@ -1030,11 +1050,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   including its own `remove(int)`. kotlinc handles exactly this in `LazyJavaClassMemberScope`
   (`isVisibleAsFunction` / `doesOverrideRenamedBuiltins` / `createRenamedCopy`): a Java method whose
   signature matches a renamed builtin is hidden under its JVM name and re-exposed under the Kotlin one.
-  krusty mirrors it with `names::renamed_java_member_source_name`, keyed on the JVM name AND descriptor
-  (only `remove(int)` is renamed, not `remove(Object)`) and returning the declaring interface so the
-  rename applies only inside that hierarchy — an unrelated class declaring `remove(index: Int): Any` is
-  untouched. Verified against kotlinc: `arrayListOf(10, 20, 30).remove(10)` removes the ELEMENT on both
-  `ArrayList` and `AbstractList` receivers, while `removeAt(0)` emits `remove(I)`.
+  krusty derives this read-side rename from the same `mapped_interface_members` semantic handoff used
+  for bridge emission. The selected mapping must match the JVM name AND full erased descriptor (only
+  `remove(int)` is renamed, not `remove(Object)`) and its declaring mapped interface must occur in the
+  concrete receiver's hierarchy. There is therefore no second reverse table to drift, and an unrelated
+  class declaring `remove(index: Int): Any` is untouched. Verified against kotlinc:
+  `arrayListOf(10, 20, 30).remove(10)` removes the ELEMENT on both `ArrayList` and `AbstractList`
+  receivers, while `removeAt(0)` emits `remove(I)`.
 
   Limited to the COLLECTION mapped builtins. `kotlin/String` also leaks its JVM class's members, but two of
   them are load-bearing: kotlinc reaches `String.substring` and `String.indexOf` through `kotlin.text`

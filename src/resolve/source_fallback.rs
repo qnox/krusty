@@ -408,6 +408,9 @@ fn join_callables(functions: FunctionSet, properties: PropertySet) -> Callables 
 
 fn merge_type(mut primary: LibraryType, fallback: LibraryType) -> LibraryType {
     primary.is_public |= fallback.is_public;
+    if primary.enum_entries_accessor.is_none() {
+        primary.enum_entries_accessor = fallback.enum_entries_accessor.clone();
+    }
     for candidate in fallback.constructors {
         if !primary
             .constructors
@@ -833,6 +836,7 @@ mod tests {
             kind: TypeKind::Class,
             supertypes: Default::default(),
             constructors: Vec::new(),
+            fields: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
             companion_consts: HashMap::new(),
@@ -844,6 +848,7 @@ mod tests {
             type_params: Vec::new(),
             sealed_subclasses: Default::default(),
             enum_entries: Vec::new(),
+            enum_entries_accessor: None,
             value_ctor_has_default: false,
             ctor_named_params: Vec::new(),
             value_class_properties: Vec::new(),
