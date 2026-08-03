@@ -963,16 +963,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
   The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
   new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
-- **Unsigned types `UInt`/`ULong`** — Kotlin inline classes over `Int`/`Long`; unboxed they ARE that JVM
-  primitive (descriptor `I`/`J`), with unsignedness driving operation/conversion choice (kotlinc hardcodes
-  these intrinsic mappings, so krusty mirrors them). Literals `1u`/`0xFFuL`; `+`/`-`/`*`/`==` use the signed
-  two's-complement opcodes; `/`/`%`/`<`/`>` use `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for
-  `ULong`); `toString`/templates use `Integer.toUnsignedString`; `UInt.toLong()` zero-extends via
-  `Integer.toUnsignedLong` (not the sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into
-  a reference context uses the inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and
-  `unbox-impl` on read, `is UInt` → `instanceof kotlin/UInt`) — never `Integer`, so identity and large
-  values are preserved. `tests/unsigned_e2e.rs`. (`UByte`/`UShort`, `UIntRange` value iteration, and unsigned
-  `when` subjects are not yet modeled — they cleanly skip.)
+- **Unsigned types `UByte`/`UShort`/`UInt`/`ULong`** — Kotlin inline classes over `Byte`/`Short`/`Int`/`Long`;
+  unboxed they ARE that JVM primitive (descriptor `B`/`S`/`I`/`J`), with unsignedness driving
+  operation/conversion choice (kotlinc hardcodes these intrinsic mappings, so krusty mirrors them). Literals
+  `1u`/`0xFFuL`; `+`/`-`/`*`/`==` use the signed two's-complement opcodes; `/`/`%`/`<`/`>` use
+  `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for `ULong`); `toString`/templates use
+  `Integer.toUnsignedString`; `UInt.toLong()` zero-extends via `Integer.toUnsignedLong` (not the
+  sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into a reference context uses the
+  inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and `unbox-impl` on read, `is UInt` →
+  `instanceof kotlin/UInt`) — never `Integer`, so identity and large values are preserved.
+  `tests/unsigned_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
+
+  Still unmodeled, all of them REJECTED or skipped rather than miscompiled: `UIntRange` value iteration;
+  and, for the narrow pair specifically, a `when` on a `UByte`/`UShort` subject (the arms-must-be-literals
+  gate can't be satisfied — a bare `200u` arm types as `UInt`, and `200u.toUByte()` is not a literal),
+  `is UByte`/`is UShort`, `UByteArray`/`UShortArray`, ranges and `in`-tests, `hashCode()`, the bitwise
+  members (`and`/`or`/`inv`), a mixed-width operand pair (`UByte + UInt`), and an operator called by name
+  (`a.plus(b)` — the checker doesn't surface the narrow receiver's metadata overloads). One known
+  DIVERGENCE, not a skip: the native unsigned types do not carry kotlinc's value-class NAME MANGLING on a
+  function that takes one — krusty emits `f(byte)` where kotlinc emits `f-7apg3OU(byte)`, pre-existing and
+  shared by `UInt`/`ULong`.
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
@@ -2290,6 +2300,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   test still skips the file: unsigned ORDERING differs from the signed compare above `Long.MAX`, and
   an unsigned `const val` comparand is not materialized yet. Test:
   `tests/feature_coverage_i_e2e.rs::unsigned_in_when`.
+- **An unsigned integer literal takes its EXPECTED type.** Kotlin types an integer literal from its
+  context, unsigned exactly like signed: `val a: UByte = 200u` is a `UByte` the same way
+  `val b: Byte = 100` is a `Byte`, and `val c: ULong = 7u` is a `ULong` (verified against the reference
+  `kotlinc`, which folds them to `bipush -56` / `ldc2_w 7L`). Absent an unsigned expected type the
+  literal is `UInt`; the parser already promotes anything above `UInt.MAX` to a `ULongLit`. A magnitude
+  that does NOT fit the expected type keeps `UInt`, so the ordinary initializer-mismatch diagnostic
+  reports it rather than the value silently truncating. The stored constant is the bit pattern of the
+  magnitude in the expected type's REPRESENTATION (`200u` as a `UByte` is the byte `-56`). Test:
+  `tests/feature_coverage_i_e2e.rs::unsigned_literal_takes_the_expected_type`.
+- **`UByte`/`UShort` operate as `UInt`.** Their representation is the SIGN-extended `byte`/`short` the
+  JVM loads, so every widening out of it masks first (`UByte.toInt()` is `iand 0xFF`, `UShort.toInt()`
+  is `iand 0xFFFF`) — exactly kotlinc's lowering. Kotlin gives them no arithmetic of their own: each
+  operator is defined as `toInt()` followed by the `UInt` operator, so `UByte + UByte` is a `UInt`, and
+  `/`/`%`/`<`/`>` route through the `UInt` platform helpers on the masked operands. `==`/`!=` stay on the
+  narrow representation — equality is BIT equality, identical either way. `toByte()`/`toShort()` are the
+  raw reinterpret (`200u.toByte()` is `-56`), so they emit nothing.
+
+  Two consequences of computing in the int category, each of which cost a miscompile before it was
+  pinned by a test. (1) The widened value must be carried as an `Int`: the emitter types a
+  `PrimitiveBinOp` from its LEFT operand, so the mask node inherited the narrow `byte`/`short` and any
+  consumer that BOXED it reached `Byte.valueOf` — which throws above 127 — or `Short.valueOf`, which
+  silently wraps to a negative. (2) `inc`/`dec` must truncate BACK with `i2b`/`i2s` (kotlinc emits
+  `iadd; i2b`), or the result leaves the canonical representation and stops comparing equal under the
+  bit equality of (1) — `(127u as UByte).inc() == 128u.toUByte()` was false. Tests:
+  `tests/feature_coverage_i_e2e.rs::{ubyte_and_ushort, ubyte_and_ushort_arithmetic_promotes_to_uint,
+  ubyte_and_ushort_comparison_is_unsigned, ubyte_and_ushort_conversions,
+  ubyte_and_ushort_interpolate_unsigned, widened_ubyte_and_ushort_box_as_int,
+  ubyte_and_ushort_inc_dec_wrap_in_representation}`.
+- **A sub-`Int` library constant inlines as its OWN narrow constant.** `Byte.MIN_VALUE`,
+  `Short.MAX_VALUE`, `Char.MAX_VALUE`, `UByte.MIN_VALUE` … all read back from the classpath as an integer
+  `ConstantValue`, but the constant's TYPE is the narrow one. Emitting `IrConst::Int` boxed them to
+  `Integer` in a vararg or erased-generic position, where `Intrinsics.areEqual` compares WRAPPER CLASSES —
+  so `x.id() != Byte.MIN_VALUE` (with `fun <T> T.id() = this`) was true for `x == -128`. Surfaced by
+  `codegen/box/evaluate/intrinsicConst/incDec.kt` once the `UByte`/`UShort` emit block-list was lifted and
+  the corpus stopped skipping that file.
 - **A deferred `var` body property.** `class C { var x: String }` — declared with a type and no
   initializer, assigned in an `init` block or a constructor body — is the same backing-field shape as
   a deferred `val`, plus the setter the plain property path already emits. A `var` with NO assignment
@@ -3047,9 +3092,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   JVM name up from the classpath by prefix (new `LibrarySet::mangled_member`, walking the superclass
   chain). The counted loop compares with `Integer/Long.compareUnsigned` so values past the signed sign bit
   iterate in unsigned order, and breaks at `i == last` before incrementing (overflow-safe). This is the
-  first piece of real inline-class infrastructure (the mangled-name lookup); `UByte`/`UShort` and unsigned
-  open-ranges/`step` are still unmodeled, so most unsigned-range corpus files (which mix all of these) stay
-  skipped — but the range-value iteration itself is correct (verified past the sign bit).
+  first piece of real inline-class infrastructure (the mangled-name lookup); unsigned open-ranges/`step`
+  are still unmodeled, so most unsigned-range corpus files stay skipped — but the range-value iteration
+  itself is correct (verified past the sign bit). (`UByte`/`UShort` were unmodeled at that pass; they are
+  first-class `Ty` variants now — see the unsigned-types entry above.)
 
 - **`if`/`when` branch join: primitive with `null` → boxed nullable wrapper.** When one branch of an
   `if`/`when` expression is a primitive and another is `null` (`if (c) true else null`), the result type is

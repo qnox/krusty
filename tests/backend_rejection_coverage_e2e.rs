@@ -21,44 +21,8 @@ fn rejects(src: &str) -> bool {
         .unwrap_or(false)
 }
 
-// --- Unsigned byte/short block-list (src/jvm/ir_emit.rs `ty_ok`/`callee_ok`; emit_all → None; the
-//     backend surfaces "this construct is not yet supported by the IR backend"). The corpus never
-//     uses `UByte`/`UShort` in a lowered function, so these bail branches are otherwise unreached. ---
-
-#[test]
-fn ubyte_conversion_rejected() {
-    // `200.toUByte()` returns a `UByte`, a block-listed stdlib value class.
-    assert!(rejects(
-        "fun main() { val x = 200.toUByte(); println(x) }\n"
-    ));
-}
-
-#[test]
-fn ubyte_literal_conversion_rejected() {
-    assert!(rejects("fun main() { println((1).toUByte()) }\n"));
-}
-
-#[test]
-fn ubyte_parameter_rejected() {
-    // A `UByte` parameter type puts the block-listed type into the method descriptor.
-    assert!(rejects(
-        "fun f(x: UByte): UByte = x\nfun main() { println(f(1.toUByte())) }\n"
-    ));
-}
-
-#[test]
-fn ushort_return_rejected() {
-    assert!(rejects(
-        "fun g(): UShort = 1.toUShort()\nfun main() { println(g()) }\n"
-    ));
-}
-
-#[test]
-fn ubyte_to_int_rejected() {
-    assert!(rejects(
-        "fun main() { val b = 5.toUByte(); println(b.toInt()) }\n"
-    ));
-}
+// (`UByte`/`UShort` used to be block-listed here. They are first-class `Ty` variants now — their
+//  round-trip coverage lives in `feature_coverage_i_e2e`.)
 
 // --- Mixed spread in a vararg call (`f(0, *a, 3)`) — lowered through the platform spread builder
 //     (`IntSpreadBuilder` here), so it is ACCEPTED. ---

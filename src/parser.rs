@@ -2676,6 +2676,8 @@ impl<'a> Parser<'a> {
                             | crate::types::Ty::Double
                             | crate::types::Ty::Boolean
                             | crate::types::Ty::Char
+                            | crate::types::Ty::UByte
+                            | crate::types::Ty::UShort
                             | crate::types::Ty::UInt
                             | crate::types::Ty::ULong
                     )
@@ -4755,6 +4757,8 @@ impl<'a> Parser<'a> {
                                 | crate::types::Ty::Double
                                 | crate::types::Ty::Boolean
                                 | crate::types::Ty::Char
+                                | crate::types::Ty::UByte
+                                | crate::types::Ty::UShort
                                 | crate::types::Ty::UInt
                                 | crate::types::Ty::ULong
                         ) && !t.is_specializable_bound()

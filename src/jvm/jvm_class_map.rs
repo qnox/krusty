@@ -245,6 +245,8 @@ pub fn kotlin_prim_to_wrapper(internal: &str) -> Option<&'static str> {
         "kotlin/Boolean" => "java/lang/Boolean",
         "kotlin/Char" => "java/lang/Character",
         // An unsigned type's boxed form is its own inline-class wrapper (`kotlin/UInt`), not a `java/lang/*`.
+        "kotlin/UByte" => "kotlin/UByte",
+        "kotlin/UShort" => "kotlin/UShort",
         "kotlin/UInt" => "kotlin/UInt",
         "kotlin/ULong" => "kotlin/ULong",
         _ => return None,

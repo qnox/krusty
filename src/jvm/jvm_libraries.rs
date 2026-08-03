@@ -3360,8 +3360,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
 
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {
         match ty {
-            Ty::UInt => Some(Ty::Int),
-            Ty::ULong => Some(Ty::Long),
+            u if u.is_unsigned() => u.scalar_value_repr(),
             _ => self.value_underlying_name(ty.obj_internal()?),
         }
     }
@@ -3652,8 +3651,8 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
             Ty::Double => "kotlin/jvm/internal/Ref$DoubleRef",
             Ty::Boolean => "kotlin/jvm/internal/Ref$BooleanRef",
             Ty::Char => "kotlin/jvm/internal/Ref$CharRef",
-            Ty::Byte => "kotlin/jvm/internal/Ref$ByteRef",
-            Ty::Short => "kotlin/jvm/internal/Ref$ShortRef",
+            Ty::Byte | Ty::UByte => "kotlin/jvm/internal/Ref$ByteRef",
+            Ty::Short | Ty::UShort => "kotlin/jvm/internal/Ref$ShortRef",
             _ => "kotlin/jvm/internal/Ref$ObjectRef",
         };
         Some(Ty::obj(internal))
@@ -3782,11 +3781,14 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 
         match op {
             RuntimeOp::UnsignedBox | RuntimeOp::UnsignedUnbox => {
-                let (owner, prim, repr) = match ty {
-                    Ty::UInt => ("kotlin/UInt", "I", Ty::Int),
-                    Ty::ULong => ("kotlin/ULong", "J", Ty::Long),
-                    _ => return None,
-                };
+                // Every unsigned type boxes through its OWN inline class (`kotlin/UByte`, …) over the
+                // signed primitive it erases to — one row derived from the `Ty`, not a per-type table.
+                if !ty.is_unsigned() {
+                    return None;
+                }
+                let owner = &ty.kotlin_class_internal()?.render();
+                let prim = crate::jvm::names::type_descriptor(ty);
+                let repr = ty.scalar_value_repr()?;
                 match op {
                     RuntimeOp::UnsignedBox => callable(
                         owner,

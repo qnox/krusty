@@ -109,8 +109,8 @@ impl IrConst {
     pub fn zero_for_value_type(ty: Ty) -> IrConst {
         match ty {
             Ty::Boolean => IrConst::Boolean(false),
-            Ty::Byte => IrConst::Byte(0),
-            Ty::Short => IrConst::Short(0),
+            Ty::Byte | Ty::UByte => IrConst::Byte(0),
+            Ty::Short | Ty::UShort => IrConst::Short(0),
             Ty::Int | Ty::UInt => IrConst::Int(0),
             Ty::Long | Ty::ULong => IrConst::Long(0),
             Ty::Float => IrConst::Float(0.0),

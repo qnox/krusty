@@ -2002,54 +2002,21 @@ fn apply_field_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: 
 }
 
 pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
-    const UNSUPPORTED_STDLIB_VALUE_CLASSES: &[&str] = &["kotlin/UByte", "kotlin/UShort"];
-
-    fn unsupported_stdlib_value_class(internal: &str) -> bool {
-        UNSUPPORTED_STDLIB_VALUE_CLASSES.contains(&internal)
-    }
-    fn mentions_unsupported_stdlib_value_class(s: &str) -> bool {
-        UNSUPPORTED_STDLIB_VALUE_CLASSES
-            .iter()
-            .any(|internal| s.contains(internal))
-    }
     fn ty_ok(t: &Ty) -> bool {
         match t.non_null() {
             Ty::Fun(s) => s.params.len() <= 22 && s.params.iter().all(ty_ok) && ty_ok(&s.ret),
-            Ty::Obj(internal, _) if unsupported_stdlib_value_class(&internal.render()) => false,
             Ty::Obj(_, type_args) => type_args.iter().all(ty_ok),
             _ => true,
         }
     }
     fn callee_ok(callee: &Callee) -> bool {
         match callee {
-            Callee::Static {
-                owner,
-                name: _,
-                descriptor,
-                ..
-            }
-            | Callee::Special {
-                owner,
-                name: _,
-                descriptor,
-                ..
-            } => {
-                !mentions_unsupported_stdlib_value_class(&owner.render())
-                    && !mentions_unsupported_stdlib_value_class(descriptor)
-            }
+            Callee::Static { .. } | Callee::Special { .. } => true,
             // A user (sibling-file) method carries `Ty`s; a classpath one a descriptor string.
-            Callee::Virtual {
-                owner,
-                descriptor,
-                params,
-                ..
-            } => {
-                !mentions_unsupported_stdlib_value_class(&owner.render())
-                    && match params {
-                        Some((ps, ret)) => ps.iter().all(ty_ok) && ty_ok(ret),
-                        None => !mentions_unsupported_stdlib_value_class(descriptor),
-                    }
-            }
+            Callee::Virtual { params, .. } => match params {
+                Some((ps, ret)) => ps.iter().all(ty_ok) && ty_ok(ret),
+                None => true,
+            },
             Callee::CrossFile { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
             Callee::Local(_) | Callee::LocalDefault(_) | Callee::External(_) => true,
         }
@@ -4531,6 +4498,8 @@ fn box_prim_free(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
         Ty::Char => ("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;"),
         Ty::Byte => ("java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;"),
         Ty::Short => ("java/lang/Short", "valueOf", "(S)Ljava/lang/Short;"),
+        Ty::UByte => ("kotlin/UByte", "box-impl", "(B)Lkotlin/UByte;"),
+        Ty::UShort => ("kotlin/UShort", "box-impl", "(S)Lkotlin/UShort;"),
         Ty::UInt => ("kotlin/UInt", "box-impl", "(I)Lkotlin/UInt;"),
         Ty::ULong => ("kotlin/ULong", "box-impl", "(J)Lkotlin/ULong;"),
         _ => return,
@@ -4551,6 +4520,8 @@ fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
         Ty::Byte => ("java/lang/Byte", "byteValue", "()B"),
         Ty::Short => ("java/lang/Short", "shortValue", "()S"),
         // An unsigned wrapper unboxes via its inline-class `unbox-impl` (a row, not a special case).
+        Ty::UByte => ("kotlin/UByte", "unbox-impl", "()B"),
+        Ty::UShort => ("kotlin/UShort", "unbox-impl", "()S"),
         Ty::UInt => ("kotlin/UInt", "unbox-impl", "()I"),
         Ty::ULong => ("kotlin/ULong", "unbox-impl", "()J"),
         _ => return,
@@ -9326,13 +9297,9 @@ impl<'a> Emitter<'a> {
                             let src = at
                                 .obj_internal()
                                 .and_then(|n| {
-                                    if n.matches("kotlin/UInt") {
-                                        Some(Ty::UInt)
-                                    } else if n.matches("kotlin/ULong") {
-                                        Some(Ty::ULong)
-                                    } else {
-                                        None
-                                    }
+                                    [Ty::UByte, Ty::UShort, Ty::UInt, Ty::ULong]
+                                        .into_iter()
+                                        .find(|u| u.kotlin_class_internal().is_some_and(|w| w == n))
                                 })
                                 .unwrap_or(target);
                             unbox_prim(self.cw, code, src);
@@ -10509,7 +10476,11 @@ impl<'a> Emitter<'a> {
         if name != "compareTo" || args.len() != 1 {
             return false;
         }
+        // `UByte`/`UShort` compare like kotlinc does: zero-extend both sides into an `int` and use the
+        // `UInt` comparator (they have no `compareUnsigned` of their own on the JDK side).
         let (logical, jdk_owner, prim_desc, repr) = match owner {
+            "kotlin/UByte" => (Ty::UByte, "java/lang/Integer", "I", Ty::Int),
+            "kotlin/UShort" => (Ty::UShort, "java/lang/Integer", "I", Ty::Int),
             "kotlin/UInt" => (Ty::UInt, "java/lang/Integer", "I", Ty::Int),
             "kotlin/ULong" => (Ty::ULong, "java/lang/Long", "J", Ty::Long),
             _ => return false,
@@ -10529,17 +10500,22 @@ impl<'a> Emitter<'a> {
         let from = self.value_ty(expr);
         self.emit_value(expr, code);
         if from.is_reference() {
-            let (owner, desc) = match logical {
-                Ty::UInt => ("kotlin/UInt", "()I"),
-                Ty::ULong => ("kotlin/ULong", "()J"),
-                _ => return,
+            let Some(owner) = logical.kotlin_class_internal().map(|n| n.render()) else {
+                return;
             };
-            let cls = self.cw.class_ref(owner);
+            let desc = format!("(){}", type_descriptor(logical));
+            let cls = self.cw.class_ref(&owner);
             code.checkcast(cls);
-            let m = self.cw.methodref(owner, "unbox-impl", desc);
-            code.invokevirtual(m, 0, slot_words(repr) as i32);
+            let m = self.cw.methodref(&owner, "unbox-impl", &desc);
+            code.invokevirtual(m, 0, slot_words(logical) as i32);
         } else {
-            emit_num_conv(from, repr, code);
+            emit_num_conv(from, logical.scalar_value_repr().unwrap_or(repr), code);
+        }
+        // A `UByte`/`UShort` now sits on the stack sign-extended from its `byte`/`short`; mask it into
+        // the unsigned value the comparator expects.
+        if let Some(mask) = logical.unsigned_widen_mask() {
+            code.push_int(mask, self.cw);
+            code.iand();
         }
     }
 
@@ -11911,6 +11887,8 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // Unsigned scalars are inline classes over the signed primitive; unboxed they ARE that primitive
         // (`UInt` = `int`, `ULong` = `long`) — same JVM slots and `istore`/`iload`/arithmetic. Unsigned
         // semantics live in the intrinsic calls (`Integer.compareUnsigned`, …) ir_lower already inserted.
+        Ty::UByte => Ty::Byte,
+        Ty::UShort => Ty::Short,
         Ty::UInt => Ty::Int,
         Ty::ULong => Ty::Long,
         Ty::Obj(fq_name, type_args) => match () {

@@ -61,6 +61,8 @@ fn is_conversion_call_name(name: &str) -> bool {
             | "toFloat"
             | "toDouble"
             | "toChar"
+            | "toUByte"
+            | "toUShort"
             | "toUInt"
             | "toULong"
     )
@@ -4754,6 +4756,31 @@ fn break_continue_stmt_tail_only(file: &ast::File, s: ast::StmtId) -> bool {
     }
 }
 
+/// The IR constant a selected library constant (`Int.MAX_VALUE`, `kotlin.math.PI`, …) inlines to —
+/// what kotlinc emits at every use site.
+///
+/// Every sub-`Int` constant (`Char.MAX_VALUE`, `Byte.MIN_VALUE`, `UByte.MIN_VALUE`, …) reads back from
+/// the classpath as an integer `ConstantValue`, but the constant's TYPE is the narrow one. Emit the
+/// narrow const so it boxes to `Character`/`Byte`/`Short` — not `Integer` — in a vararg or erased
+/// generic position, where the wrapper class decides `Intrinsics.areEqual`. The narrow unsigned types
+/// share their signed representation.
+fn library_const_ir(lc: &crate::libraries::LibraryConst) -> crate::ir::IrConst {
+    use crate::ir::IrConst;
+    use crate::libraries::LibConst;
+    match lc.value {
+        LibConst::Int(v) => match lc.ty.non_null() {
+            Ty::Char => IrConst::Char(char::from_u32(v as u32).unwrap_or('\0')),
+            Ty::Byte | Ty::UByte => IrConst::Byte(v as i8),
+            Ty::Short | Ty::UShort => IrConst::Short(v as i16),
+            _ => IrConst::Int(v),
+        },
+        LibConst::Long(v) => IrConst::Long(v),
+        LibConst::Float(v) => IrConst::Float(v),
+        LibConst::Double(v) => IrConst::Double(v),
+        LibConst::Str(ref v) => IrConst::String(v.clone()),
+    }
+}
+
 fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir::IrConst> {
     use crate::ir::IrConst;
     use ast::Expr;
@@ -4770,7 +4797,14 @@ fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir
         Expr::BoolLit(b) => IrConst::Boolean(*b),
         Expr::StringLit(s) => IrConst::String(s.clone()),
         Expr::CharLit(c) => IrConst::Char(*c),
-        Expr::UIntLit(v) => IrConst::Int(*v as i32),
+        // An unsigned literal stores the bit pattern of its magnitude in the declared type's
+        // representation (`200u` as a `UByte` is the byte -56), mirroring the signed arm above.
+        Expr::UIntLit(v) => match ty {
+            Ty::UByte => IrConst::Byte(*v as u8 as i8),
+            Ty::UShort => IrConst::Short(*v as u16 as i16),
+            Ty::ULong => IrConst::Long(*v as u32 as i64),
+            _ => IrConst::Int(*v as i32),
+        },
         Expr::ULongLit(v) => IrConst::Long(*v),
         _ => return None,
     })
@@ -10173,7 +10207,35 @@ impl<'a> Lower<'a> {
     }
 
     fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> Option<u32> {
-        self.runtime_call(RuntimeOp::UnsignedToString, ty, vec![val])
+        // A `UByte`/`UShort` prints through the `UInt` helper on its zero-extended value — the same
+        // decimal `kotlin/UByte.toString-impl` produces, without a second platform row.
+        let val = self.widen_unsigned(val, ty);
+        self.runtime_call(
+            RuntimeOp::UnsignedToString,
+            ty.unsigned_op_type()?,
+            vec![val],
+        )
+    }
+
+    /// Zero-extend an unsigned value out of its own representation into the `int` its operations run
+    /// in: `UByte`/`UShort` live in a SIGN-extended `byte`/`short`, so every widening masks first
+    /// (`iand 0xFF`), exactly as kotlinc lowers `UByte.toInt()`. A no-op for any other type.
+    ///
+    /// The result is coerced to `Int` explicitly. The emitter types a `PrimitiveBinOp` from its LEFT
+    /// operand, which here is still the narrow `byte`/`short` — so without this the masked value reads
+    /// back as a `Byte`/`Short` and any consumer that BOXES it (an erased generic argument, a vararg
+    /// element) picks `Byte.valueOf`/`Short.valueOf`. That throws above 127 for `UByte` and silently
+    /// wraps to a negative for `UShort`. The coercion emits no bytecode — `byte`/`short` and `int`
+    /// share the int stack category — it only carries the right type forward.
+    fn widen_unsigned(&mut self, value: u32, ty: Ty) -> u32 {
+        match ty.unsigned_widen_mask() {
+            Some(mask) => {
+                let m = self.emit_const(IrConst::Int(mask));
+                let masked = self.emit_primitive_bin_op(IrBinOp::BitAnd, value, m);
+                self.emit_type_op(IrTypeOp::ImplicitCoercion, masked, ty_to_ir(Ty::Int))
+            }
+            None => value,
+        }
     }
 
     fn ir_const_str(&mut self, s: String) -> u32 {
@@ -11650,6 +11712,15 @@ impl<'a> Lower<'a> {
             || lt == Ty::Boolean
             || rt == Ty::Boolean
         {
+            return None;
+        }
+        // A `UByte`/`UShort` operator called BY NAME (`a.plus(b)`) never reaches lowering today: the
+        // checker doesn't surface the narrow receiver's metadata overloads and rejects the call. Decline
+        // it rather than fall through to the generic path below, which would compute on the operands'
+        // SIGN-extended `byte`/`short` and silently produce a negative. (The `a + b` operator form is
+        // handled correctly in the binary-expression lowering, which zero-extends first.) If the checker
+        // gap closes, the file skips instead of miscompiling until this grows a real lowering + test.
+        if lt.unsigned_widen_mask().is_some() {
             return None;
         }
         // Unsigned `div`/`rem` need platform unsigned helpers (signed `+`/`-`/`*` share opcodes).
@@ -20058,9 +20129,18 @@ impl<'a> Lower<'a> {
         Some(match self.afile.expr(e).clone() {
             Expr::IntLit(v) => self.emit_const(IrConst::Int(v as i32)),
             Expr::LongLit(v) => self.emit_const(IrConst::Long(v)),
-            // Unsigned literals are the signed int/long bit pattern of their magnitude (`UInt.MAX` =
-            // 0xFFFFFFFFu reinterprets to int -1, which is what kotlinc stores).
-            Expr::UIntLit(v) => self.emit_const(IrConst::Int(v as u32 as i32)),
+            // Unsigned literals are the signed bit pattern of their magnitude in the REPRESENTATION of
+            // the type the checker gave them: `UInt.MAX` = 0xFFFFFFFFu reinterprets to int -1, and
+            // `200u` typed `UByte` is the byte -56 — which is what kotlinc stores in each case.
+            Expr::UIntLit(v) => {
+                let c = match self.info.ty(e).non_null() {
+                    Ty::UByte => IrConst::Byte(v as u8 as i8),
+                    Ty::UShort => IrConst::Short(v as u16 as i16),
+                    Ty::ULong => IrConst::Long(v as u32 as i64),
+                    _ => IrConst::Int(v as u32 as i32),
+                };
+                self.emit_const(c)
+            }
             Expr::ULongLit(v) => self.emit_const(IrConst::Long(v)),
             Expr::DoubleLit(v) => self.emit_const(IrConst::Double(v)),
             Expr::FloatLit(v) => self.emit_const(IrConst::Float(v)),
@@ -21317,19 +21397,7 @@ impl<'a> Lower<'a> {
         // package-level `const val` reached by name (`import kotlin.math.PI`). Both inline their
         // literal, which is what kotlinc emits at every use site.
         if let Some(lc) = self.info.resolved_library_companion_const(e) {
-            let c = match lc.value {
-                // `Char.MAX_VALUE`/`MIN_VALUE` read back as an integer ConstantValue, but the
-                // constant's type is `Char` — emit a `Char` const so it boxes to `Character` (not
-                // `Integer`) in a vararg/generic position.
-                crate::libraries::LibConst::Int(v) if lc.ty == Ty::Char => {
-                    IrConst::Char(char::from_u32(v as u32).unwrap_or('\0'))
-                }
-                crate::libraries::LibConst::Int(v) => IrConst::Int(v),
-                crate::libraries::LibConst::Long(v) => IrConst::Long(v),
-                crate::libraries::LibConst::Float(v) => IrConst::Float(v),
-                crate::libraries::LibConst::Double(v) => IrConst::Double(v),
-                crate::libraries::LibConst::Str(v) => IrConst::String(v),
-            };
+            let c = library_const_ir(&lc);
             return Some(self.emit_const(c));
         }
 
@@ -21935,19 +22003,7 @@ impl<'a> Lower<'a> {
             }
             // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / ... selected by the checker.
             if let Some(lc) = self.info.resolved_library_companion_const(e) {
-                let c = match lc.value {
-                    // `Char.MAX_VALUE`/`MIN_VALUE` read back as an integer ConstantValue, but the
-                    // constant's type is `Char` — emit a `Char` const so it boxes to `Character` (not
-                    // `Integer`) in a vararg/generic position.
-                    crate::libraries::LibConst::Int(v) if lc.ty == Ty::Char => {
-                        IrConst::Char(char::from_u32(v as u32).unwrap_or('\0'))
-                    }
-                    crate::libraries::LibConst::Int(v) => IrConst::Int(v),
-                    crate::libraries::LibConst::Long(v) => IrConst::Long(v),
-                    crate::libraries::LibConst::Float(v) => IrConst::Float(v),
-                    crate::libraries::LibConst::Double(v) => IrConst::Double(v),
-                    crate::libraries::LibConst::Str(v) => IrConst::String(v),
-                };
+                let c = library_const_ir(&lc);
                 return Some(self.emit_const(c));
             }
             if let Some(entry) = self.lower_resolved_enum_entry(e, &name) {
@@ -22087,6 +22143,41 @@ impl<'a> Lower<'a> {
             // `/`/`%` need target unsigned intrinsics. Comparisons use the platform unsigned
             // comparator and compare its result with zero.
             let lty = self.info.ty(lhs);
+            // A `UByte`/`UShort` operator IS the `UInt` one applied to both operands' `toInt()`
+            // (Kotlin defines them that way, and the checker typed the result `UInt` to match): mask
+            // each side out of its sign-extended `byte`/`short`, then run the `UInt` lowering. `==`/`!=`
+            // stay on the plain path — equality is BIT equality, identical on the narrow representation.
+            if lty.unsigned_widen_mask().is_some()
+                && self.info.ty(rhs) == lty
+                && matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Rem
+                        | BinOp::Lt
+                        | BinOp::Le
+                        | BinOp::Gt
+                        | BinOp::Ge
+                )
+            {
+                let op_ty = lty.unsigned_op_type()?;
+                let l = self.expr(lhs)?;
+                let l = self.widen_unsigned(l, lty);
+                let r = self.expr(rhs)?;
+                let r = self.widen_unsigned(r, lty);
+                return match op {
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        self.compare_ordered(op_ty, bin_to_ir(op)?, l, r)
+                    }
+                    BinOp::Div => self.runtime_call(RuntimeOp::UnsignedDivide, op_ty, vec![l, r]),
+                    BinOp::Rem => {
+                        self.runtime_call(RuntimeOp::UnsignedRemainder, op_ty, vec![l, r])
+                    }
+                    _ => Some(self.emit_primitive_bin_op(bin_to_ir(op)?, l, r)),
+                };
+            }
             if lty.is_unsigned()
                 && matches!(
                     op,
@@ -25040,7 +25131,8 @@ impl<'a> Lower<'a> {
             {
                 let rty = self.info.ty(receiver);
                 if args.is_empty()
-                    && (rty.is_unsigned() || matches!(name.as_str(), "toUInt" | "toULong"))
+                    && (rty.is_unsigned()
+                        || matches!(name.as_str(), "toUByte" | "toUShort" | "toUInt" | "toULong"))
                 {
                     if rty.is_unsigned() && name == "toString" {
                         let r = self.expr(receiver)?;
@@ -25055,7 +25147,25 @@ impl<'a> Lower<'a> {
                         } else {
                             IrBinOp::Add
                         };
-                        return Some(self.emit_primitive_bin_op(op, r, o));
+                        // `UByte`/`UShort` add in the int category, so the sum must be truncated back
+                        // into the `byte`/`short` the value lives in (`UByte.MAX.inc()` is `0`, and
+                        // kotlinc emits `iadd; i2b`). Skipping it left the result outside the canonical
+                        // representation, where `==` — BIT equality on that representation — stopped
+                        // matching the same value written as a literal. Widening the RECEIVER to `Int`
+                        // first is what makes the truncation land: the emitter types a `PrimitiveBinOp`
+                        // from its left operand, so a narrow lhs would make the sum read back as an
+                        // already-`byte` value and the coercion emit nothing. Neither widening step
+                        // costs an instruction (`byte`/`short` and `int` share the int stack category).
+                        // `UInt`/`ULong` already compute in their own width, so both steps are no-ops.
+                        let repr = self.scalar_value_repr(rty)?;
+                        let int_ir = ty_to_ir(repr.int_arithmetic_repr());
+                        let r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, int_ir);
+                        let sum = self.emit_primitive_bin_op(op, r, o);
+                        return Some(self.emit_type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            sum,
+                            ty_to_ir(repr),
+                        ));
                     }
                     if is_conversion_call_name(&name) {
                         let target = self.info.ty(e);
@@ -25063,6 +25173,21 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         let r = self.expr(receiver)?;
+                        let rrepr = self.scalar_value_repr(rty).unwrap_or(rty);
+                        let trepr = self.scalar_value_repr(target).unwrap_or(target);
+                        if rrepr == trepr {
+                            // identity reinterpret (UInt↔Int, ULong↔Long, UByte↔Byte, UInt→UInt)
+                            return Some(r);
+                        }
+                        // A `UByte`/`UShort` leaving its sign-extended `byte`/`short` zero-extends
+                        // first; from there it is an ordinary `Int` conversion.
+                        let (r, rrepr) = match rty.unsigned_widen_mask() {
+                            Some(_) => (self.widen_unsigned(r, rty), Ty::Int),
+                            None => (r, rrepr),
+                        };
+                        if rrepr == trepr {
+                            return Some(r); // e.g. `UByte.toInt()` — the mask IS the conversion
+                        }
                         if matches!(target, Ty::Long | Ty::ULong) {
                             // zero-extend the 32-bit unsigned value into a long
                             if let Some(call) =
@@ -25070,11 +25195,6 @@ impl<'a> Lower<'a> {
                             {
                                 return Some(call);
                             }
-                        }
-                        let rrepr = self.scalar_value_repr(rty).unwrap_or(rty);
-                        let trepr = self.scalar_value_repr(target).unwrap_or(target);
-                        if rrepr == trepr {
-                            return Some(r); // identity reinterpret (UInt↔Int, ULong↔Long, UInt→UInt)
                         }
                         if self.has_scalar_value_repr(rrepr) && self.has_scalar_value_repr(trepr) {
                             return Some(self.emit_type_op(

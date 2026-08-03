@@ -23,13 +23,16 @@ use crate::libraries::InlineKind;
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use std::collections::{HashMap, HashSet};
 
-/// The two stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
-/// their box/unbox lives on the classpath). Both erase to a signed primitive, so they contribute nothing
+/// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
+/// their box/unbox lives on the classpath). All erase to a signed primitive, so they contribute nothing
 /// to the erasure map and are skipped when probing referenced classes.
 type Under = HashMap<TypeName, Ty>;
 
 fn is_native_unsigned(fq: TypeName) -> bool {
-    fq.matches("kotlin/UInt") || fq.matches("kotlin/ULong")
+    fq.matches("kotlin/UByte")
+        || fq.matches("kotlin/UShort")
+        || fq.matches("kotlin/UInt")
+        || fq.matches("kotlin/ULong")
 }
 
 /// Whether an underlying fq name is an IEEE floating-point type. A value class over `Float`/`Double`
@@ -4816,7 +4819,8 @@ fn field_hash_ir(ir: &mut IrFile, v: ExprId, fq: &str, nonnull_ref_owner: Option
     match fq {
         // Unsigned underlyings are unboxed to the signed primitive; their `hashCode` is that primitive's
         // (`UInt.hashCode()` = the `Int` value itself; `ULong.hashCode()` = `Long.hashCode(long)`).
-        "kotlin/Int" | "kotlin/Short" | "kotlin/Byte" | "kotlin/Char" | "kotlin/UInt" => v,
+        "kotlin/Int" | "kotlin/Short" | "kotlin/Byte" | "kotlin/Char" | "kotlin/UByte"
+        | "kotlin/UShort" | "kotlin/UInt" => v,
         "kotlin/Boolean" => call(ir, "java/lang/Boolean", "(Z)I", v),
         "kotlin/Long" | "kotlin/ULong" => call(ir, "java/lang/Long", "(J)I", v),
         "kotlin/Double" => call(ir, "java/lang/Double", "(D)I", v),

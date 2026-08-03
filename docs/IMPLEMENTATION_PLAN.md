@@ -2573,6 +2573,21 @@ bodies exist only as jar bytecode):
   never emit unverified bytecode. Validate each step against the box conformance gate (0 FAIL) plus a
   byte-diff vs kotlinc for the spliced method.
 
+### Phase 439 — `UByte`/`UShort` as first-class types  ✅
+- Retires the `UNSUPPORTED_STDLIB_VALUE_CLASSES` block-list in `jvm_can_emit` (which refused any IR
+  mentioning `kotlin/UByte`/`kotlin/UShort`) by making both real `Ty` variants beside `UInt`/`ULong`.
+  This supersedes the "`UByte`/`UShort` still unmodeled" note on Phase 374 — unsigned open-ranges and
+  `step` remain unmodeled there.
+- The representation is the SIGN-extended `byte`/`short` the JVM loads, so every widening masks first
+  (`UByte.toInt()` = `iand 0xFF`); their operators are Kotlin's `toInt()`-then-`UInt` definition, so
+  arithmetic yields `UInt` and `/`/`%`/`<`/`>` use the `UInt` helpers on masked operands. An unsigned
+  literal now takes its expected type (`val a: UByte = 200u`). Full semantics in `docs/SPEC.md`.
+- Lifting the block-list un-skipped `codegen/box/evaluate/intrinsicConst/incDec.kt`, exposing a latent
+  miscompile unrelated to unsigned: sub-`Int` library constants inlined as `IrConst::Int` and so boxed to
+  `Integer` where `Intrinsics.areEqual` compares wrapper classes. Fixed via one shared `library_const_ir`.
+- Corpus 40/40; gate unchanged except the target test going green.
+  `tests/feature_coverage_i_e2e.rs` (7 cases).
+
 ### Phase 438 — loop-host lambda-frame context infrastructure; isolate the operand-baseline frontier  ✅
 - `splice_unified` now reports `lambda_host_locals`: the host's LIVE body locals at each lambda's invoke
   (the loop-body frame for a loop host — iterator/accumulator — not just the parameters), falling back to

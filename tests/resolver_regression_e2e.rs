@@ -52,20 +52,20 @@ fun box(): String {
     assert_eq!(out, "OK");
 }
 
+/// A metadata-resolved `toUShort()` returns the narrow unsigned value class, and its `toString`
+/// prints the UNSIGNED decimal — `40000` is the `short` `-25536` in the representation.
 #[test]
-fn unsigned_metadata_return_blocks_unsupported_inline_splice() {
-    let java_home = common::java_home();
-    let stdlib = common::stdlib_jar();
-    let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
+fn unsigned_narrow_metadata_return_round_trips() {
     let src = r#"
 fun box(): String {
     val x = 40000.toUShort()
-    return x.toString()
+    return if (x.toString() == "40000") "OK" else "x=$x"
 }
 "#;
-    assert!(
-        common::compile_in_process(src, "ResolverUnsignedReturn", &[stdlib], Some(&jdk)).is_none()
-    );
+    let Some(out) = run(src, "ResolverUnsignedReturn") else {
+        return;
+    };
+    assert_eq!(out, "OK");
 }
 
 #[test]
