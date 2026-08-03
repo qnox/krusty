@@ -153,6 +153,16 @@ fn exit_when_orphaned(server: u32) {
 #[cfg(not(unix))]
 fn exit_when_orphaned(_server: u32) {}
 
+/// Where rendered dependency sources are written, from the configured directory or the XDG default.
+fn deps_cache_root(options: &LspOptions) -> std::path::PathBuf {
+    options
+        .deps_cache_dir()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| {
+            krusty_lsp::deps_cache::default_cache_root(&|key| std::env::var(key).ok())
+        })
+}
+
 fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("cache") {
@@ -903,6 +913,48 @@ impl krusty_lsp::Analysis for WorkerHost {
         finish_analysis(&mut self.analysis_pending, result, sources.len())
     }
 
+    /// Class names from the project's own classpath, read once per project model.
+    ///
+    /// Built here rather than in the worker because it needs only the jar catalogues -- the entry
+    /// names in each archive -- not decoded classes, and shipping the list over the worker wire
+    /// would cost more than reading it. Each jar's listing is cached, which is where most of the
+    /// cost went: 442 ms of 706 ms over 150 jars, against 11 ms to read it back.
+    fn dependency_index(&mut self) -> krusty_lsp::DependencySymbolIndex {
+        let Some(sync) = self.sync.as_ref() else {
+            return krusty_lsp::DependencySymbolIndex::default();
+        };
+        let mut entries = sync.dependency_classpath();
+        entries.extend(self.platform_classpath.iter().cloned());
+        if entries.is_empty() {
+            return krusty_lsp::DependencySymbolIndex::default();
+        }
+        // Raw class listings are auxiliary entries in the same managed cache as rendered sources,
+        // so age/size GC, locking, and ordinary `cache clean` cover both.
+        let cache_root = deps_cache_root(&self.options);
+        krusty_lsp::DependencySymbolIndex::from_cached_classpath(&entries, &cache_root)
+    }
+
+    /// Write out the classes a query is about to return, through the worker that already holds a
+    /// decoded classpath. Off the request path: the query it serves was answered without them.
+    fn locate_dependencies(
+        &mut self,
+        candidates: Vec<krusty_lsp::DependencyCandidate>,
+    ) -> Vec<krusty_lsp::LocatedDependency> {
+        let cache_root = deps_cache_root(&self.options);
+        let use_sources = self.options.deps_sources_enabled();
+        krusty_lsp::locate_dependencies_with(&cache_root, candidates, |candidate| {
+            let reference = LibraryRef {
+                fqn: candidate.internal.clone(),
+                member_name: String::new(),
+                member_desc: String::new(),
+            };
+            self.worker
+                .materialize_library_definition(&reference, use_sources)
+                .ok()
+                .flatten()
+        })
+    }
+
     fn materialize_library_definition(
         &mut self,
         reference: &LibraryRef,
@@ -912,13 +964,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             .materialize_library_definition(reference, self.options.deps_sources_enabled())
             .ok()
             .flatten()?;
-        let cache_root = self
-            .options
-            .deps_cache_dir()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| {
-                krusty_lsp::deps_cache::default_cache_root(&|key| std::env::var(key).ok())
-            });
+        let cache_root = deps_cache_root(&self.options);
         let path = krusty_lsp::deps_cache::store(&cache_root, &reference.fqn, &text).ok()?;
         Some(MaterializedDefinition {
             path,

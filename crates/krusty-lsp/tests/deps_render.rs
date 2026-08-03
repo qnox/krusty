@@ -546,3 +546,150 @@ fn materialize_prefers_attached_source_and_honors_the_flag() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn the_real_stdlib_classpath_is_searchable_by_class_name() {
+    let cp = Rc::new(stdlib_classpath());
+    if cp.scan_types().is_empty() {
+        return;
+    }
+    let tree = cp.package_tree();
+    let index = krusty_lsp::DependencySymbolIndex::from_internal_names(
+        tree.classes().map(|(internal, _)| internal),
+    );
+
+    assert!(
+        index.class_count() > 100,
+        "the stdlib declares more than a handful of classes, got {}",
+        index.class_count()
+    );
+    assert!(index.is_complete());
+
+    let found = index.candidates("AbstractList", 8);
+    let listed = found
+        .iter()
+        .find(|candidate| candidate.internal == "kotlin/collections/AbstractList")
+        .expect("kotlin.collections.AbstractList is on the stdlib classpath");
+    assert_eq!(listed.name, "AbstractList");
+    assert_eq!(listed.package, "kotlin.collections");
+
+    // Every candidate must name a class the classpath can actually resolve. The internal name is
+    // derived from the package and the simple name rather than stored, so this is also what proves
+    // that derivation exact against a real jar rather than against fixtures.
+    let mut checked = 0;
+    for query in ["Iterable", "List", "Map", "Sequence", "Builder", "Entry"] {
+        for candidate in index.candidates(query, 32) {
+            assert!(
+                cp.find(&candidate.internal).is_some(),
+                "{} was indexed but the classpath cannot find it",
+                candidate.internal
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 20, "only {checked} candidates were checked");
+}
+
+#[test]
+fn a_ranked_dependency_class_becomes_a_file_with_a_range() {
+    let cp = Rc::new(stdlib_classpath());
+    if cp.scan_types().is_empty() {
+        return;
+    }
+    let index = krusty_lsp::DependencySymbolIndex::from_classpath(&cp);
+    let cache = std::env::temp_dir().join(format!(
+        "krusty-dep-locate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let candidates = index.candidates("AbstractList", 4);
+    assert!(!candidates.is_empty());
+    let located = krusty_lsp::locate_dependencies(&cp, &cache, candidates, false);
+
+    let listed = located
+        .iter()
+        .find(|found| found.candidate.internal == "kotlin/collections/AbstractList")
+        .expect("the ranked class must be locatable");
+    // A client that will not open a URI without a range needs both, and the file has to be on disk
+    // by the time the response leaves.
+    assert!(
+        listed.path.is_file(),
+        "{} was not written",
+        listed.path.display()
+    );
+    let text = std::fs::read_to_string(&listed.path).unwrap();
+    assert_eq!(text, listed.text);
+    assert_eq!(
+        &text[listed.span.lo as usize..listed.span.hi as usize],
+        "AbstractList"
+    );
+
+    std::fs::remove_dir_all(&cache).ok();
+}
+
+#[test]
+fn a_cached_classpath_yields_the_same_index_and_is_reused() {
+    let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+        return;
+    };
+    let entries = vec![stdlib];
+    let cp = Rc::new(Classpath::new(entries.clone()));
+    if cp.scan_types().is_empty() {
+        return;
+    }
+    let cache = std::env::temp_dir().join(format!(
+        "krusty-dep-cache-e2e-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let direct = krusty_lsp::DependencySymbolIndex::from_classpath(&cp);
+    let cold = krusty_lsp::DependencySymbolIndex::from_cached_classpath(&entries, &cache);
+    let warm = krusty_lsp::DependencySymbolIndex::from_cached_classpath(&entries, &cache);
+
+    // Reading a jar and reading its cached listing have to produce the same index, or a second
+    // session would search a different set than the first.
+    assert_eq!(cold.class_count(), direct.class_count());
+    assert_eq!(warm.class_count(), direct.class_count());
+    assert_eq!(
+        warm.candidates("AbstractList", 8),
+        direct.candidates("AbstractList", 8)
+    );
+    assert!(
+        cache.is_dir(),
+        "the cold build must have left something to reuse"
+    );
+
+    // Damage every cached listing. The index must come back identical, by reading the jars again:
+    // a cache is an optimisation, and a broken one is only ever allowed to cost time.
+    fn damage(directory: &std::path::Path) {
+        for entry in std::fs::read_dir(directory).unwrap().flatten() {
+            if entry.file_type().unwrap().is_dir() {
+                damage(&entry.path());
+            } else {
+                std::fs::write(entry.path(), "corrupt").unwrap();
+            }
+        }
+    }
+    damage(&cache);
+    let rebuilt = krusty_lsp::DependencySymbolIndex::from_cached_classpath(&entries, &cache);
+    assert_eq!(rebuilt.class_count(), direct.class_count());
+    assert_eq!(
+        rebuilt.candidates("AbstractList", 8),
+        direct.candidates("AbstractList", 8)
+    );
+    assert!(
+        direct.class_count() > 100,
+        "the stdlib declares more than this; a test that quietly indexed nothing would pass every \
+         assertion above it"
+    );
+
+    std::fs::remove_dir_all(&cache).ok();
+}

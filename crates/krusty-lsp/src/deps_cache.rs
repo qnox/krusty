@@ -34,7 +34,21 @@ fn content_dir(root: &Path, text: &str) -> PathBuf {
     hasher.write_str("dependency-source");
     hasher.write(text.as_bytes());
     let key = format!("{:016x}", hasher.finish().as_u64());
+    managed_entry_dir(root, &key)
+}
+
+/// One independently evictable entry under the shared dependency-cache lifecycle.
+///
+/// Dependency sources and auxiliary indexes use distinct names in this directory but share the
+/// same version root, access timestamp, global lock, age policy, byte ceiling, and `cache clean`
+/// behavior. Adding a second top-level cache tree would silently escape all of those bounds.
+pub(crate) fn managed_entry_dir(root: &Path, key: &str) -> PathBuf {
     root.join(format!("v{DEPS_STUB_FORMAT_VERSION}")).join(key)
+}
+
+pub(crate) fn touch_entry(directory: &Path) -> io::Result<()> {
+    fs::create_dir_all(directory)?;
+    fs::write(directory.join(".hit"), [])
 }
 
 fn encoded_internal_path(internal: &str) -> PathBuf {
@@ -68,7 +82,7 @@ fn global_lock_path(root: &Path) -> PathBuf {
         .join(format!(".{name}.lock"))
 }
 
-fn global_lock(root: &Path) -> io::Result<fs::File> {
+pub(crate) fn global_lock(root: &Path) -> io::Result<fs::File> {
     if let Some(parent) = root.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -82,7 +96,7 @@ pub fn store(root: &Path, internal: &str, text: &str) -> io::Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let _ = fs::write(content_dir(root, text).join(".hit"), []);
+    let _ = touch_entry(&content_dir(root, text));
     let lock_path = path.with_extension("lock");
     let lock = fs::File::create(&lock_path)?;
     lock.lock_exclusive()?;
