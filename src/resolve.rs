@@ -10110,6 +10110,14 @@ pub enum ExprLowering {
         name: String,
         descriptor: Option<String>,
     },
+    /// Kotlin's synthetic `EnumType.entries` property. `accessor` is the exact physical realization
+    /// advertised by the selected enum shape. Keeping the target here makes source, module, and
+    /// dependency providers use one semantic handoff; `None` means the property is valid Kotlin but
+    /// this provider exposes no direct accessor that the current backend can emit.
+    EnumEntriesRead {
+        owner: TypeName,
+        accessor: Option<Box<crate::libraries::LibraryMember>>,
+    },
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
@@ -17931,6 +17939,23 @@ impl<'a> Checker<'a> {
             .then_some(internal)
     }
 
+    fn enum_entries_target(
+        &self,
+        receiver: ExprId,
+    ) -> Option<(TypeName, Option<Box<crate::libraries::LibraryMember>>)> {
+        let owner = self.classifier_receiver_internal(receiver)?;
+        let classifier = self.resolved_type_name(owner)?;
+        if !classifier.is_enum() {
+            return None;
+        }
+        // Consume the provider's dedicated semantic capability rather than rediscovering a callable
+        // by name. The opaque physical owner/name/descriptor is carried to lowering verbatim.
+        Some((
+            owner,
+            classifier.enum_entries_accessor.clone().map(Box::new),
+        ))
+    }
+
     /// Source classes in lexical precedence order, including static enclosing classes.
     fn lexical_source_class_names(&self) -> Vec<TypeName> {
         let companion = self
@@ -22847,8 +22872,36 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // Kotlin exposes a synthetic `entries: EnumEntries<E>` property on every enum classifier.
+            // Recognize the classifier receiver directly, even when its provider has no direct accessor;
+            // this also handles `Outer.Mode.entries` without evaluating `Outer.Mode` as a value.
+            if name == "entries" {
+                if let Some((owner, accessor)) = self.enum_entries_target(receiver) {
+                    if let Some(access) = self.resolver().inaccessible_classifier_access(owner) {
+                        let reference = self.span(receiver);
+                        let display = self
+                            .dotted_full_path(receiver)
+                            .unwrap_or_else(|| owner.render().replace(['/', '$'], "."));
+                        self.diags.error_with_identity(
+                            reference,
+                            DiagnosticIdentity::ClassifierAccess {
+                                reference,
+                                classifier: owner,
+                            },
+                            inaccessible_classifier_message(&display, access),
+                        );
+                        return self.set(e, Ty::Error);
+                    }
+                    self.expr_lowers
+                        .insert(e, ExprLowering::EnumEntriesRead { owner, accessor });
+                    return self.set(
+                        e,
+                        Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(owner)]),
+                    );
+                }
+            }
             if let Some(field) = self
-                .classpath_type_receiver_internal(receiver)
+                .classifier_receiver_internal(receiver)
                 .and_then(|internal| self.resolver().static_field(internal, &name))
             {
                 let ty = self.record_external_static_field(Some(e), field);
@@ -28032,10 +28085,11 @@ impl<'a> Checker<'a> {
                 })
     }
 
-    /// The classpath internal name a bare class name resolves to — an explicit import first, then the
-    /// federated class-name seed (default/same-package/wildcard imports). Used to reach a classpath type's
-    /// `@Metadata` (e.g. constructor parameter names) from a simple-name constructor call.
-    fn classpath_class_internal_name(&self, name: &str) -> Option<TypeName> {
+    /// The semantic internal name a bare classifier resolves to — an explicit import first, then the
+    /// federated class-name seed (default/same-package/wildcard imports). Every caller consumes the
+    /// resulting classifier identity without branching on whether its shape came from this file, a
+    /// module source, or a dependency provider.
+    fn classifier_internal_name(&self, name: &str) -> Option<TypeName> {
         // Resolve through the same NESTED-type rewrite the positional-construction path uses: an
         // unqualified nested-type import (`import lib.Op.Apply`) stores the flat `lib/Op/Apply`, but the
         // class is `lib/Op$Apply`. `imported_type_internal` applies the `/`→`$` recovery (and wildcard
@@ -28050,10 +28104,10 @@ impl<'a> Checker<'a> {
             .or_else(|| self.syms.class_names.get(name))
     }
 
-    fn classpath_type_receiver_internal(&self, receiver: ExprId) -> Option<TypeName> {
+    fn classifier_receiver_internal(&self, receiver: ExprId) -> Option<TypeName> {
         match self.file.expr(receiver) {
             Expr::Name(name) if !self.value_root_shadows_classifier(name) => {
-                self.classpath_class_internal_name(name)
+                self.classifier_internal_name(name)
             }
             Expr::Member { .. } => {
                 let path = qualified_path(self.file, receiver)?;
@@ -28777,7 +28831,7 @@ impl<'a> Checker<'a> {
                     } else {
                         let qualified_top_level = if let Some(root) = self.dotted_root(*receiver) {
                             if !self.value_root_shadows_classifier(&root)
-                                && self.classpath_type_receiver_internal(*receiver).is_none()
+                                && self.classifier_receiver_internal(*receiver).is_none()
                             {
                                 if let Some(package) = qualified_path(self.file, *receiver) {
                                     let scope = [type_name(&package)];
@@ -28850,7 +28904,7 @@ impl<'a> Checker<'a> {
                 // top-level overloads and confirm the owning facade sits in the receiver's package.
                 if let Some(root) = self.dotted_root(receiver) {
                     if !self.value_root_shadows_classifier(&root)
-                        && self.classpath_type_receiver_internal(receiver).is_none()
+                        && self.classifier_receiver_internal(receiver).is_none()
                     {
                         if let Some(pkg) = qualified_path(self.file, receiver) {
                             let arg_tys = self.arg_tys(args);
@@ -29462,7 +29516,7 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 if let Expr::Member { .. } = self.file.expr(receiver) {
-                    if let Some(internal) = self.classpath_type_receiver_internal(receiver) {
+                    if let Some(internal) = self.classifier_receiver_internal(receiver) {
                         let fq = internal.render();
                         let explicit_type_args = self.explicit_call_type_args(call);
                         let arg_kinds = self.provider_member_lambda_arg_kinds(
@@ -31996,7 +32050,7 @@ impl<'a> Checker<'a> {
                     // Named classpath constructors use metadata names/defaults; lowering selects
                     // either the plain constructor or the default-argument synthetic.
                     if arg_names.is_some() || self.file.call_has_trailing_lambda.contains(&call.0) {
-                        if let Some(internal) = self.classpath_class_internal_name(&fname) {
+                        if let Some(internal) = self.classifier_internal_name(&fname) {
                             match self.record_named_library_constructor_name(
                                 call,
                                 internal,
@@ -34596,6 +34650,7 @@ val result = object { fun value(): String = captured }
             type_params: Vec::new(),
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: Vec::new(),
+            enum_entries_accessor: None,
             value_ctor_has_default: false,
             ctor_named_params: Vec::new(),
             value_class_properties: Vec::new(),
@@ -35715,6 +35770,7 @@ fun box(): String {
                     | "BoxedIterator"
                     | "TestMutex"
                     | "test/Factory"
+                    | "test/JavaState"
             ) {
                 return crate::libraries::ResolvedSymbols {
                     classifier: self.resolve_type(fqn).map(std::rc::Rc::new),
@@ -35955,6 +36011,7 @@ fun box(): String {
                     | "BoxedIterator"
                     | "TestMutex"
                     | "test/Factory"
+                    | "test/JavaState"
             )
             .then(|| {
                 let companion = if internal == "test/Factory" {
@@ -35985,7 +36042,11 @@ fun box(): String {
                 };
                 crate::libraries::LibraryType {
                     is_public: true,
-                    kind: crate::libraries::TypeKind::Class,
+                    kind: if internal == "test/JavaState" {
+                        crate::libraries::TypeKind::Enum
+                    } else {
+                        crate::libraries::TypeKind::Class
+                    },
                     supertypes: crate::types::TypeNameList::new(),
                     constructors: vec![],
                     members: vec![],
@@ -35998,7 +36059,12 @@ fun box(): String {
                     alias_target: None,
                     type_params: vec![],
                     sealed_subclasses: crate::types::TypeNameList::new(),
-                    enum_entries: vec![],
+                    enum_entries: if internal == "test/JavaState" {
+                        vec!["READY".to_string()]
+                    } else {
+                        Vec::new()
+                    },
+                    enum_entries_accessor: None,
                     value_ctor_has_default: false,
                     ctor_named_params: vec![],
                     value_class_properties: vec![],
@@ -36532,6 +36598,40 @@ fun box(): String {
             ),
             "checker must record the selected classpath getter for safe-call lowering"
         );
+    }
+
+    #[test]
+    fn source_enum_entries_property_resolves_for_bare_and_nested_classifiers() {
+        ok("enum class Direct { VALUE }\n\
+            class Owner { enum class Nested { VALUE } }\n\
+            fun inspect() { Direct.entries; Owner.Nested.entries }");
+    }
+
+    #[test]
+    fn enum_without_a_direct_entries_accessor_records_the_unavailable_realization() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "import test.JavaState\nfun inspect() { JavaState.entries }",
+            &mut diagnostics,
+        );
+        let entries = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::Member { name, .. } if name == "entries")
+                    .then_some(ExprId(index as u32))
+            })
+            .expect("source should contain the entries property");
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+        assert!(matches!(
+            info.expr_lowers.get(&entries),
+            Some(ExprLowering::EnumEntriesRead { accessor: None, .. })
+        ));
     }
 
     #[test]

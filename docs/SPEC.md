@@ -407,6 +407,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   an entry as `new Enum$ENTRY(name, ordinal, …)`. An abstract enum member requires every entry to
   override it (else the file is skipped, never miscompiled); property overrides in an entry body
   (`override val`) are not yet modeled — skipped.
+- **Every enum classifier has the synthetic `entries: EnumEntries<E>` property.** Resolution selects
+  the enum by semantic type identity, including nested and cross-file classifiers, then carries the
+  exact zero-argument static accessor advertised by that symbol provider into lowering. Source/module
+  and dependency shapes therefore share one target handoff; lowering never reconstructs a call from
+  the declaration origin. If a provider exposes the enum kind but no direct accessor realization, the
+  valid property is typed but rejected before emission with a stable boundary until an alternative
+  cached-mapping realization is implemented.
 - Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
   `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
   `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form

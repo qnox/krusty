@@ -132,6 +132,7 @@ return \"OK\"\n\
 #[test]
 fn enum_entries() {
     let src = "enum class Dir { N, E, S, W }\n\
+class Compass { enum class Point { N, S } }\n\
 fun box(): String {\n\
 val e = Dir.entries\n\
 if (e.size != 4) return \"f1\"\n\
@@ -140,6 +141,8 @@ if (e[3] != Dir.W) return \"f3\"\n\
 var count = 0\n\
 for (d in Dir.entries) count += d.ordinal\n\
 if (count != 6) return \"f4\"\n\
+val nested = Compass.Point.entries\n\
+if (nested.size != 2 || nested[1] != Compass.Point.S) return \"f5\"\n\
 return \"OK\"\n\
 }\n";
     run_ok(src, "EnumEntries2");

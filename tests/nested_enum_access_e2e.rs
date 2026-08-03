@@ -109,7 +109,10 @@ fun box(): String = if (Holder.READY == Mode.OTHER) "OK" else "FAIL"
 }
 
 #[test]
-fn enum_entry_from_another_source_file_uses_its_declaring_owner() {
+fn enum_entry_and_entries_property_from_another_source_file_use_the_declaring_owner() {
+    // This crosses the module-symbol provider boundary rather than reading the enum's AST directly.
+    // Both the entry field and synthetic property must retain the same semantic owner and exact
+    // physical target, proving that cross-file lowering does not need a separate source-origin path.
     if common::java_home().is_none() || common::stdlib_jar().is_none() {
         return;
     }
@@ -131,7 +134,11 @@ package app
 
 import sample.State
 
-fun box(): String = if (State.READY.name == "READY") "OK" else "FAIL"
+fun box(): String {
+    if (State.READY.name != "READY") return "FAIL:entry"
+    val entries = State.entries
+    return if (entries.size == 1 && entries[0] == State.READY) "OK" else "FAIL:entries"
+}
 "#,
         ),
     ]);

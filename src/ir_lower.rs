@@ -21051,6 +21051,28 @@ impl<'a> Lower<'a> {
         name: String,
     ) -> Option<u32> {
         let t = {
+            if let Some(ExprLowering::EnumEntriesRead { owner, accessor }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let Some(accessor) = accessor else {
+                    // The enum kind makes `entries` a valid semantic property, but not every symbol
+                    // provider advertises a direct static realization. Decline before emission until
+                    // an alternative realization (for example a generated cached mapping) is modeled;
+                    // never guess from whether the declaration came from source or a dependency.
+                    self.set_bail("enum entries has no direct accessor");
+                    return None;
+                };
+                let accessor = *accessor;
+                let target_owner = accessor.owner.unwrap_or(owner);
+                let target_name = accessor.physical_name.unwrap_or(accessor.name);
+                return Some(self.emit_static_call(
+                    target_owner,
+                    target_name,
+                    accessor.descriptor,
+                    accessor.inline,
+                    vec![],
+                ));
+            }
             if let Some(ExprLowering::IntrinsicProperty(member)) =
                 self.info.expr_lowers.get(&e).cloned()
             {
