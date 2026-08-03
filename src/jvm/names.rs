@@ -78,6 +78,11 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
             | "kotlin/reflect/KMutableProperty1",
             "name",
         ) => "getName",
+        // `MutableList.removeAt(Int)` is `java.util.List.remove(int)` — kotlinc's
+        // `BuiltinMethodsWithDifferentJvmName`, the same table as `CharSequence.get`/`Number.toInt`.
+        // The read-only `List` has no `removeAt`, so only the mutable Kotlin name and the erased JVM
+        // owner a `MutableList` call carries need an entry.
+        ("java/util/List" | "kotlin/collections/MutableList", "removeAt") => "remove",
         ("java/lang/Number", "toByte") => "byteValue",
         ("java/lang/Number", "toShort") => "shortValue",
         ("java/lang/Number", "toInt") => "intValue",

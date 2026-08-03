@@ -836,30 +836,41 @@ impl JvmLibraries {
             if !seen.insert(internal) {
                 continue;
             }
-            let Some(ci) = self.cp.find_name(internal) else {
-                continue;
+            let ci = self.cp.find_name(internal);
+            // A Kotlin builtin whose mapped JVM class is absent (a no-JDK compile) has no `.class` and
+            // so no class `Signature`; its `.kotlin_builtins` declaration carries the same two facts —
+            // the formals and the argument-carrying supertypes — so bind through that instead.
+            let (formals, supers) = match &ci {
+                Some(ci) => ci.signature.as_deref().and_then(parse_class_gsig).unzip(),
+                None => self.cp.builtin_class_gsig_name(internal).unzip(),
             };
-            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
+            if ci.is_none() && formals.is_none() {
+                continue;
+            }
             let formals = formals.unwrap_or_default();
             let binds: std::collections::HashMap<String, Ty> =
                 formals.iter().cloned().zip(targs.iter().copied()).collect();
             if internal == target {
                 return binds;
             }
-            if let Some(supers) = supers {
-                for sup in supers {
-                    if let Ty::Obj(sup_internal, sup_args) = sup {
-                        let sup_targs = ty_subst_all(sup_args, &binds);
-                        q.push_back((
-                            super::jvm_class_map::to_jvm_type_name(sup_internal),
-                            sup_targs,
-                        ));
+            match (supers, &ci) {
+                (Some(supers), _) => {
+                    for sup in supers {
+                        if let Ty::Obj(sup_internal, sup_args) = sup {
+                            let sup_targs = ty_subst_all(sup_args, &binds);
+                            q.push_back((
+                                super::jvm_class_map::to_jvm_type_name(sup_internal),
+                                sup_targs,
+                            ));
+                        }
                     }
                 }
-            } else {
-                for i in ci.interfaces.iter_ids().chain(ci.super_class) {
-                    q.push_back((i, vec![]));
+                (None, Some(ci)) => {
+                    for i in ci.interfaces.iter_ids().chain(ci.super_class) {
+                        q.push_back((i, vec![]));
+                    }
                 }
+                (None, None) => {}
             }
         }
         std::collections::HashMap::new()
@@ -1061,6 +1072,10 @@ impl JvmLibraries {
                                     is_iface,
                                     self.cp.builtin_supertypes_name(internal_name),
                                     self.builtin_members_for_type_name(internal_name),
+                                    self.cp
+                                        .builtin_class_gsig_name(internal_name)
+                                        .map(|(formals, _)| formals)
+                                        .unwrap_or_default(),
                                 ));
                             }
                             // Otherwise the backend's curated minimal ABI for the well-known mapped builtins.
@@ -2022,6 +2037,7 @@ fn builtin_library_type(
     is_interface: bool,
     supertypes: TypeNameList,
     members: Vec<LibraryMember>,
+    type_params: Vec<String>,
 ) -> LibraryType {
     LibraryType {
         is_public: true,
@@ -2040,7 +2056,7 @@ fn builtin_library_type(
         value_companion_fns: Vec::new(),
         value_underlying: None,
         alias_target: None,
-        type_params: Vec::new(),
+        type_params,
         sealed_subclasses: TypeNameList::new(),
         enum_entries: Vec::new(),
         value_ctor_has_default: false,
@@ -2824,9 +2840,13 @@ impl SymbolSource for JvmLibraries {
                             m.descriptor,
                             m.signature
                         );
-                        // The member's own decoded signature — NOT a re-parse of the raw attribute: the
-                        // decode also restores the receiver function-type marks the attribute cannot
-                        // spell, and re-parsing here would silently drop them again.
+                        // The provider-normalized signature is the single source of truth for every
+                        // carrier. For a `.class` member it also restores receiver function-type marks
+                        // that the raw JVM `Signature` attribute cannot spell; for a
+                        // `.kotlin_builtins` member there is no raw attribute at all, so the provider's
+                        // decoded signature is what preserves and binds its type parameters. Re-parsing
+                        // `m.signature` here would therefore lose facts in the former case and fail to
+                        // produce any signature in the latter.
                         let generic_sig = m.generic_sig.clone();
                         // A `suspend fun` member's physical method appends a `Continuation` parameter
                         // and erases its return to `Object`; present the LOGICAL signature (drop the
@@ -2961,12 +2981,7 @@ impl SymbolSource for JvmLibraries {
                         // JVM form (`java/util/Map`, when the member is found on a classpath supertype);
                         // map both to the builtin whose `@Metadata` declares the nullability.
                         let builtin_cn =
-                            super::jvm_class_map::jvm_collection_to_kotlin_type_name(cn)
-                                .or_else(|| {
-                                    super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(
-                                        cn,
-                                    )
-                                })
+                            super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(cn)
                                 .unwrap_or(cn);
                         let builtin_ret_nullable = !ret.is_reference()
                             && self.cp.builtin_member_ret_nullable_name(
@@ -3338,6 +3353,21 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 params: Vec::new(),
                 ret,
                 is_property: true,
+            });
+        }
+        // `MutableList.removeAt(Int): E` IS `java.util.List.remove(int)` — the function half of the
+        // same special-builtin renaming the properties above cover, so a class implementing
+        // `MutableList` must expose its `removeAt` override under the JVM name too. Keyed on the
+        // KOTLIN name, not the erased `java/util/List`: unlike `size`, this member exists only on the
+        // MUTABLE side, so a read-only `List` implementation that happens to declare an unrelated
+        // `removeAt` must not acquire a `remove(int)` bridge kotlinc would never emit.
+        if internal.matches("kotlin/collections/MutableList") {
+            members.push(crate::libraries::MappedInterfaceMember {
+                source_name: "removeAt".to_string(),
+                physical_name: "remove".to_string(),
+                params: vec![Ty::Int],
+                ret: Ty::obj("kotlin/Any"),
+                is_property: false,
             });
         }
         if internal.matches("kotlin/CharSequence") || internal.matches("java/lang/CharSequence") {
