@@ -140,12 +140,16 @@ mod classpath_covariant_override_e2e;
 mod classpath_ctor_vs_same_named_function_e2e;
 #[path = "classpath_data_copy_e2e.rs"]
 mod classpath_data_copy_e2e;
+#[path = "classpath_default_arg_subtype_e2e.rs"]
+mod classpath_default_arg_subtype_e2e;
 #[path = "classpath_default_args_e2e.rs"]
 mod classpath_default_args_e2e;
 #[path = "classpath_default_vararg_call_e2e.rs"]
 mod classpath_default_vararg_call_e2e;
 #[path = "classpath_enum_regex_vc_e2e.rs"]
 mod classpath_enum_regex_vc_e2e;
+#[path = "classpath_extension_default_implicit_receiver_e2e.rs"]
+mod classpath_extension_default_implicit_receiver_e2e;
 #[path = "classpath_function_reference_e2e.rs"]
 mod classpath_function_reference_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
@@ -158,6 +162,10 @@ mod classpath_jdk_static_e2e;
 mod classpath_jvmstatic_object_property_e2e;
 #[path = "classpath_member_metadata_alignment_e2e.rs"]
 mod classpath_member_metadata_alignment_e2e;
+#[path = "classpath_member_receiver_lambda_e2e.rs"]
+mod classpath_member_receiver_lambda_e2e;
+#[path = "classpath_named_arg_skips_default_e2e.rs"]
+mod classpath_named_arg_skips_default_e2e;
 #[path = "classpath_nested_ctor_reordered_named_valueclass_e2e.rs"]
 mod classpath_nested_ctor_reordered_named_valueclass_e2e;
 #[path = "classpath_nullable_arg_defaults_e2e.rs"]
@@ -170,6 +178,8 @@ mod classpath_nullable_param_e2e;
 mod classpath_nullable_param_toplevel_e2e;
 #[path = "classpath_number_conversion_e2e.rs"]
 mod classpath_number_conversion_e2e;
+#[path = "classpath_object_member_extension_import_e2e.rs"]
+mod classpath_object_member_extension_import_e2e;
 #[path = "classpath_object_member_import_e2e.rs"]
 mod classpath_object_member_import_e2e;
 #[path = "classpath_object_nested_e2e.rs"]
@@ -184,10 +194,12 @@ mod classpath_protected_member_e2e;
 mod classpath_qualified_nested_named_ctor_e2e;
 #[path = "classpath_receiver_lambda_e2e.rs"]
 mod classpath_receiver_lambda_e2e;
+#[path = "classpath_receiver_lambda_overload_e2e.rs"]
+mod classpath_receiver_lambda_overload_e2e;
+#[path = "classpath_reified_inline_toplevel_e2e.rs"]
+mod classpath_reified_inline_toplevel_e2e;
 #[path = "classpath_runblocking_e2e.rs"]
 mod classpath_runblocking_e2e;
-#[path = "classpath_runtest_e2e.rs"]
-mod classpath_runtest_e2e;
 #[path = "classpath_static_call_inference_e2e.rs"]
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]
@@ -196,16 +208,22 @@ mod classpath_subtype_ctor_arg_e2e;
 mod classpath_super_ctor_args_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
+#[path = "classpath_top_level_property_e2e.rs"]
+mod classpath_top_level_property_e2e;
 #[path = "classpath_type_ref_e2e.rs"]
 mod classpath_type_ref_e2e;
 #[path = "classpath_typealias_e2e.rs"]
 mod classpath_typealias_e2e;
 #[path = "classpath_unbound_callable_ref_e2e.rs"]
 mod classpath_unbound_callable_ref_e2e;
+#[path = "classpath_value_class_builder_e2e.rs"]
+mod classpath_value_class_builder_e2e;
 #[path = "classpath_value_class_default_e2e.rs"]
 mod classpath_value_class_default_e2e;
 #[path = "classpath_value_class_member_e2e.rs"]
 mod classpath_value_class_member_e2e;
+#[path = "classpath_value_class_param_e2e.rs"]
+mod classpath_value_class_param_e2e;
 #[path = "classpath_valueclass_param_ext_e2e.rs"]
 mod classpath_valueclass_param_ext_e2e;
 #[path = "classreader_e2e.rs"]
@@ -642,6 +660,8 @@ mod member_extension_default_args_e2e;
 mod member_extension_function_e2e;
 #[path = "member_extension_nested_hof_e2e.rs"]
 mod member_extension_nested_hof_e2e;
+#[path = "member_extension_property_e2e.rs"]
+mod member_extension_property_e2e;
 #[path = "member_infix_inference_e2e.rs"]
 mod member_infix_inference_e2e;
 #[path = "member_overloads_e2e.rs"]
@@ -832,6 +852,8 @@ mod resolver_regression_e2e;
 mod result_e2e;
 #[path = "run_noreceiver_e2e.rs"]
 mod run_noreceiver_e2e;
+#[path = "safe_call_any_member_e2e.rs"]
+mod safe_call_any_member_e2e;
 #[path = "safe_call_argument_list_e2e.rs"]
 mod safe_call_argument_list_e2e;
 #[path = "safe_call_e2e.rs"]
@@ -844,6 +866,8 @@ mod safe_call_let_destructure_e2e;
 mod safe_call_member_on_generic_result_e2e;
 #[path = "safe_call_prim_intrinsic_e2e.rs"]
 mod safe_call_prim_intrinsic_e2e;
+#[path = "safe_call_primitive_e2e.rs"]
+mod safe_call_primitive_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
 mod safe_cast_elvis_e2e;
 #[path = "sam_classpath_e2e.rs"]

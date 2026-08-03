@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
 use crate::jvm::names::{method_descriptor, parse_method_descriptor, type_descriptor};
-use crate::libraries::{CallSig, ReturnInfo};
+use crate::libraries::{CallSig, GenericSig, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
 use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
 
@@ -186,6 +186,44 @@ fn metadata_value_class_underlying(
     })
 }
 
+/// The VALUE CLASS each descriptor parameter position really has, per `@Metadata`.
+///
+/// A `@JvmInline value class` erases to its underlying in the descriptor, so the parsed parameter is
+/// `J`/`Ljava/lang/String;` while the source type is `Duration`/`Tag`. Overload selection compares the
+/// ARGUMENT's Kotlin type against the parameter, so without this a call passing the value class matches
+/// nothing. Only a position whose metadata names a value class AND whose descriptor carries exactly
+/// that value class's underlying is reported — anything else stays `None` and the erased type stands.
+///
+/// A NULLABLE value class is boxed (the descriptor carries the class itself), so it needs no recovery;
+/// `metadata_value_class_underlying` already returns `None` for it.
+fn value_class_param_types(
+    callable: &super::metadata::MetaFn,
+    desc_params: &[Ty],
+    extension: bool,
+    kept: usize,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> Vec<Option<Ty>> {
+    let mut out = vec![None; desc_params.len()];
+    // Descriptor layout: [extension receiver] [context params] [value params].
+    let logical = kept.saturating_sub(usize::from(extension));
+    let leading = logical.saturating_sub(callable.value_params.len());
+    for (index, parameter) in callable.value_params.iter().enumerate() {
+        let position = usize::from(extension) + leading + index;
+        let (Some(name), Some(declared)) = (parameter.ty, desc_params.get(position)) else {
+            continue;
+        };
+        let Some(underlying) =
+            metadata_value_class_underlying(name, parameter.nullable(), value_underlying)
+        else {
+            continue;
+        };
+        if underlying.non_null() == declared.non_null() {
+            out[position] = Some(Ty::obj_name(name));
+        }
+    }
+    out
+}
+
 /// Whether a `@Metadata` source value-parameter class name aligns with a JVM-descriptor parameter `Ty`.
 /// This keeps the hot overload-alignment path in borrowed names: mapped builtins compare through
 /// `to_jvm_internal`, arrays/functions use structural `Ty` facts, and no descriptor `String` is built just
@@ -218,6 +256,18 @@ fn meta_param_compat(
             prim => desc == prim,
         };
     }
+    // A value class erases to its UNDERLYING in the JVM descriptor (`kotlin/time/Duration` compiles to
+    // `J`, `Tag(val v: String)` to `Ljava/lang/String;`), while `@Metadata` names the class itself —
+    // admit the underlying, or every value-class-parametered function loses its metadata alignment
+    // (parameter names, defaults, kept-param count). Decided BEFORE the by-descriptor arms below: a
+    // REFERENCE underlying would otherwise be judged by the arm for its erasure (`Ty::String` asks only
+    // whether the metadata name IS `String`) and rejected before ever reaching the value-class case.
+    // The underlying normalizes like the mapped builtins above (`UInt` → `Int`).
+    if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
+        return erased.non_null() == desc.non_null()
+            || (erased.is_reference() && desc.is_reference())
+            || (ty_erases_to_object(*desc) && !desc.is_array());
+    }
     if name == ids.unit {
         *desc == Ty::Unit
     } else if name == ids.nothing {
@@ -230,16 +280,6 @@ fn meta_param_compat(
         crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
     }) {
         true
-    } else if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
-        // A value class erases to its UNDERLYING in the JVM descriptor (`kotlin/time/Duration`
-        // compiles to `J`), while `@Metadata` names the class itself — admit the underlying here
-        // or every value-class-parametered function loses its metadata alignment (parameter names,
-        // defaults, kept-param count). The underlying normalizes like the mapped builtins above
-        // (`UInt` → `Int`); a reference underlying or an `Object`-erased descriptor stays
-        // permissive, matching the erased-to-Object rule below.
-        erased.non_null() == desc.non_null()
-            || (erased.is_reference() && desc.is_reference())
-            || (ty_erases_to_object(*desc) && !desc.is_array())
     } else {
         ty_erases_to_object(*desc) && !desc.is_array()
     }
@@ -280,22 +320,23 @@ fn meta_param_exact(
             prim => desc == prim,
         };
     }
+    // A value class erases to its underlying — `runTest(timeout: Duration)` aligns its metadata against
+    // the erased `J` exactly only through it (unsigned underlyings normalize like the mapped builtins:
+    // `UInt` → `Int`). Decided BEFORE the by-descriptor arms below, or a REFERENCE underlying is judged
+    // by the arm for its erasure and rejected — see `meta_param_compat`.
+    if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
+        return erased.non_null() == desc.non_null();
+    }
     if name == ids.unit {
         *desc == Ty::Unit
     } else if name == ids.nothing {
         *desc == Ty::Nothing
     } else if matches!(*desc, Ty::String) {
         name == ids.string_kotlin || name == ids.string_java
-    } else if desc.obj_internal().is_some_and(|desc_internal| {
-        crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
-    }) {
-        true
     } else {
-        // A value class erases to its underlying — `runTest(timeout: Duration)` aligns its
-        // metadata against the erased `J` exactly only through it (unsigned underlyings
-        // normalize like the mapped builtins: `UInt` → `Int`).
-        metadata_value_class_underlying(name, nullable, value_underlying)
-            .is_some_and(|erased| erased.non_null() == desc.non_null())
+        desc.obj_internal().is_some_and(|desc_internal| {
+            crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
+        })
     }
 }
 
@@ -783,6 +824,13 @@ pub struct MetadataCallFacts {
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
     /// Leading context parameters (supplied implicitly by the caller, not positionally).
     pub context_count: usize,
+    /// Per DESCRIPTOR parameter position, the VALUE CLASS `@Metadata` declares there when the JVM
+    /// descriptor carries its erased underlying (`timeout: kotlin.time.Duration` ↔ `J`).
+    ///
+    /// The descriptor is the emit token and stays erased; resolution needs the Kotlin type, or a call
+    /// passing a `Duration` is checked against `Long` and no overload is applicable. `None` at a
+    /// position whose declared type is not a value class (the overwhelming majority).
+    pub value_class_params: Vec<Option<Ty>>,
 }
 
 impl MetadataCallFacts {
@@ -794,6 +842,7 @@ impl MetadataCallFacts {
             is_operator: false,
             contract: None,
             context_count: 0,
+            value_class_params: Vec::new(),
         }
     }
 }
@@ -887,50 +936,105 @@ struct BuiltinsFile {
 
 struct BuiltinClass {
     supertypes: TypeNameList,
+    /// The same supertypes carrying their type ARGUMENTS (`MutableList<E> : List<E>`) — the chain a
+    /// receiver's type argument travels up when no JVM class generic signature is available.
+    supertype_tys: Vec<Ty>,
+    /// The class's formal type-parameter names, in declaration order (`Map` → `[K, V]`).
+    formals: Vec<String>,
     members: Vec<BuiltinMember>,
     is_interface: bool,
     nullable_member_returns: Vec<(String, usize)>,
 }
 
+/// One decoded `.kotlin_builtins` member, in the ONE form that is not derivable: its declared
+/// (unerased) signature — its own formals, parameter types and return, including type parameters
+/// (`List<E>.get(Int): E`) and type arguments (`Set<Map.Entry<K, V>>`). A builtin member has no JVM
+/// `Signature` string, so this is the only carrier that lets a type-parameter return bind against the
+/// receiver's type arguments.
+///
+/// Deliberately NOT a [`crate::libraries::LibraryMember`]: the erased `params`/`ret`/`descriptor` a
+/// `LibraryMember` carries are [`builtin_erased`] of this signature, and the rest of its fields need
+/// the classpath (the `owner` mapping, the interface flag) which this decode does not have.
+/// [`Classpath::builtin_members_name`] is where the two are joined, and it memoizes its result.
 struct BuiltinMember {
     name: String,
-    params: Vec<BuiltinType>,
-    ret: BuiltinType,
+    generic_sig: GenericSig,
     is_property: bool,
     ret_nullable: bool,
 }
 
-enum BuiltinType {
-    Class(TypeName),
-    Param(String),
+/// The JVM erasure of a decoded builtin type: a type parameter erases to `Any` (`Object`), a class to
+/// itself with its type arguments dropped — exactly what a JVM descriptor records.
+fn builtin_erased(ty: Ty) -> Ty {
+    match ty {
+        // JVM erasure follows the primary declared bound (`<T : CharSequence>` erases to
+        // `CharSequence`), not unconditionally `Object`. Unbounded parameters already carry `Any?` as
+        // their bound, so the same recursive rule covers both cases and stays aligned with
+        // `names::type_descriptor` and bridge erasure.
+        Ty::TyParam(_, bound) => builtin_erased(*bound),
+        Ty::Nullable(inner) => builtin_erased(*inner),
+        Ty::Obj(name, args) if !args.is_empty() => Ty::obj_name(name),
+        other => other,
+    }
 }
 
-impl BuiltinType {
-    fn from_metadata(name: String) -> Self {
-        if name.contains('/') {
-            BuiltinType::Class(type_name(&name))
-        } else {
-            BuiltinType::Param(name)
-        }
-    }
+/// The JVM descriptor a builtin member's declared signature erases to.
+fn builtin_descriptor(sig: &GenericSig) -> String {
+    let params: String = sig
+        .params
+        .iter()
+        .map(|p| type_descriptor(builtin_erased(*p)))
+        .collect();
+    format!("({params}){}", type_descriptor(builtin_erased(sig.ret)))
+}
 
-    fn descriptor(&self) -> String {
-        match self {
-            BuiltinType::Class(name) => type_descriptor(kotlin_type_name_to_ty(*name)),
-            BuiltinType::Param(_) => "Ljava/lang/Object;".to_string(),
+/// A decoded `.kotlin_builtins` type as a [`Ty`]. `bounds` supplies each in-scope type parameter's
+/// declared upper bound; an unlisted one is `Any?`, matching the `@Metadata` generic-signature decoder.
+/// Nullability is applied in NESTED positions only — a top-level `T?` rides on the member's
+/// `ret_nullable` flag, since the descriptor it pairs with erases it — again mirroring that decoder.
+fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>, nested: bool) -> Ty {
+    use super::metadata::BuiltinTy;
+    let ty = match t {
+        BuiltinTy::Class { internal, args, .. } => {
+            let name = type_name(internal);
+            if args.is_empty() {
+                kotlin_type_name_to_ty(name)
+            } else {
+                let args: Vec<Ty> = args.iter().map(|a| builtin_ty(a, bounds, true)).collect();
+                Ty::obj_args_name(name, &args)
+            }
         }
-    }
-
-    fn ty(&self) -> Ty {
-        match self {
-            BuiltinType::Class(name) => kotlin_type_name_to_ty(*name),
-            BuiltinType::Param(name) => Ty::obj(name),
+        BuiltinTy::Param { name, .. } => {
+            let bound = bounds
+                .get(name)
+                .copied()
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+            Ty::ty_param(name, bound)
         }
+    };
+    if nested && t.nullable() && matches!(ty, Ty::TyParam(..)) {
+        Ty::nullable(ty)
+    } else {
+        ty
     }
+}
 
-    fn is_class(&self) -> bool {
-        matches!(self, BuiltinType::Class(_))
+/// The declared upper bound of each type parameter, keyed by name. Bounds are decoded with an EMPTY
+/// bound map so a recursive bound (`E : Comparable<E>`) terminates.
+fn builtin_bounds(
+    params: &[super::metadata::BuiltinTypeParam],
+    inherited: &HashMap<String, Ty>,
+) -> HashMap<String, Ty> {
+    let mut out = inherited.clone();
+    for p in params {
+        let bound = p
+            .bounds
+            .first()
+            .map(|b| builtin_ty(b, &HashMap::new(), false))
+            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+        out.insert(p.name.clone(), bound);
     }
+    out
 }
 
 impl BuiltinsFile {
@@ -940,29 +1044,55 @@ impl BuiltinsFile {
             let internal = type_name(&internal);
             let supertypes = class
                 .supertypes
-                .into_iter()
-                .map(|name| type_name(&name))
+                .iter()
+                .map(|name| type_name(name))
                 .collect::<Vec<_>>()
                 .into();
+            let class_bounds = builtin_bounds(&class.type_params, &HashMap::new());
+            let supertype_tys = class
+                .supertype_tys
+                .iter()
+                .map(|t| builtin_ty(t, &class_bounds, false))
+                .collect();
+            let formals: Vec<String> = class.type_params.iter().map(|p| p.name.clone()).collect();
             let members = class
                 .members
                 .into_iter()
-                .map(|m| BuiltinMember {
-                    name: m.name,
-                    params: m
-                        .params
-                        .into_iter()
-                        .map(BuiltinType::from_metadata)
-                        .collect(),
-                    ret: BuiltinType::from_metadata(m.ret),
-                    is_property: m.is_property,
-                    ret_nullable: m.ret_nullable,
+                .map(|m| {
+                    let bounds = builtin_bounds(&m.formals, &class_bounds);
+                    BuiltinMember {
+                        name: m.name,
+                        generic_sig: GenericSig {
+                            formals: m.formals.iter().map(|p| p.name.clone()).collect(),
+                            formal_bounds: m
+                                .formals
+                                .iter()
+                                .map(|p| {
+                                    p.bounds
+                                        .iter()
+                                        .map(|b| builtin_ty(b, &bounds, false))
+                                        .collect()
+                                })
+                                .collect(),
+                            receiver: None,
+                            params: m
+                                .params
+                                .iter()
+                                .map(|p| builtin_ty(p, &bounds, false))
+                                .collect(),
+                            ret: builtin_ty(&m.ret, &bounds, false),
+                        },
+                        is_property: m.is_property,
+                        ret_nullable: m.ret_nullable,
+                    }
                 })
                 .collect();
             file.classes.insert(
                 internal,
                 BuiltinClass {
                     supertypes,
+                    supertype_tys,
+                    formals,
                     members,
                     is_interface: class.is_interface,
                     nullable_member_returns: class.nullable_member_returns,
@@ -1730,6 +1860,13 @@ impl Classpath {
             is_operator: c.is_operator(),
             contract: c.contract.clone(),
             context_count: c.context_count,
+            value_class_params: value_class_param_types(
+                c,
+                desc_params,
+                extension,
+                end,
+                value_underlying,
+            ),
         }
     }
 
@@ -1754,6 +1891,9 @@ impl Classpath {
             is_operator: function.is_operator(),
             contract: function.contract.clone(),
             context_count: function.context_count,
+            // Members recover their logical value-class parameters on their own path (the mangled-member
+            // loop in `jvm_libraries`), so this facet stays empty here rather than duplicating it.
+            value_class_params: Vec::new(),
         })
     }
 
@@ -1948,27 +2088,34 @@ impl Classpath {
             .get_name(internal_id)
             .map(|class| {
                 class.members.iter().map(|m| {
-                    let pdesc: String = m.params.iter().map(BuiltinType::descriptor).collect();
-                    let descriptor = format!("({pdesc}){}", m.ret.descriptor());
-                    let ret = m.ret.ty();
-                    let physical_ret = if m.ret.is_class() {
-                        ret
-                    } else {
-                        Ty::obj("kotlin/Any")
-                    };
+                    // A `LibraryMember` states the member in its ERASED, JVM-descriptor shape (the form
+                    // a classpath member arrives in, and the form overload alignment compares against);
+                    // the declared shape rides along in `generic_sig`. Both are the one decoded builtin
+                    // signature, erased here.
+                    let descriptor = builtin_descriptor(&m.generic_sig);
+                    let params: Vec<Ty> = m
+                        .generic_sig
+                        .params
+                        .iter()
+                        .map(|p| builtin_erased(*p))
+                        .collect();
+                    let ret = builtin_erased(m.generic_sig.ret);
+                    let physical_ret = ret;
                     // The owner's JVM class: the kotlin↔JVM map (`kotlin/String` → `java/lang/String`), and for the
                     // non-collection mapped builtins (`kotlin/CharSequence` → `java/lang/CharSequence`, …) the
                     // emit-only simple-name mapping — the member virtual-dispatches on that JVM type.
                     let owner = crate::jvm::jvm_class_map::to_jvm_type_name(internal_id);
-                    // Interface dispatch: prefer the real class flag, but fall back to the curated mapped-builtin
-                    // answer when the `.class` reader can't load the owner (a JDK jimage krusty can't decode).
+                    // Interface dispatch: prefer the real class flag, else the builtin's OWN
+                    // `.kotlin_builtins` `CLASS_KIND` — a Kotlin builtin and the JVM class it maps to
+                    // always agree on interface-ness (`List`/`java.util.List`, `Number`/`java.lang
+                    // .Number`), and every member here comes from a builtins entry that carries the flag
+                    // — so no curated per-name table is needed (the old fallback covered a handful of
+                    // names and answered `false` for every `java/util/*`, emitting `invokevirtual` on an
+                    // interface).
                     let is_iface = self
                         .find_name(owner)
                         .map(|ci| ci.is_interface())
-                        .or_else(|| {
-                            crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface_name(owner)
-                        })
-                        .unwrap_or(false);
+                        .unwrap_or(class.is_interface);
                     // The READ direction of the property-accessor mapping (the WRITE direction is the
                     // bridge synthesis in `names::collection_property_stub_name`, reused here): a special
                     // `JavaToKotlinClassMap` collection stub (`keys` → `keySet`), the `CharSequence.length`
@@ -1990,12 +2137,15 @@ impl Classpath {
                         name: member_name,
                         owner: Some(owner),
                         physical_name: None,
-                        params: m.params.iter().map(BuiltinType::ty).collect(),
+                        params,
                         ret,
                         physical_ret,
                         descriptor,
                         signature: None,
-                        generic_sig: None,
+                        // A builtin member carries no JVM `Signature` string, so its DECODED signature
+                        // is the only record of a type-parameter return/parameter — without it a
+                        // generic member would resolve with an `Any`-erased return.
+                        generic_sig: Some(m.generic_sig.clone()),
                         // `ret_nullable` — the declared return nullability from the `.kotlin_builtins`
                         // `Type.nullable` flag (`Map.get(K): V?`); the JVM descriptor erases it.
                         flags: crate::libraries::LmFlags::default()
@@ -2004,7 +2154,9 @@ impl Classpath {
                         inline: crate::libraries::InlineKind::None,
                         // Builtin (`.kotlin_builtins`) members are all public API.
                         visibility: crate::libraries::Visibility::Public,
-                        call_sig: crate::libraries::CallSig::metadata_plain(m.params.len()),
+                        call_sig: crate::libraries::CallSig::metadata_plain(
+                            m.generic_sig.params.len(),
+                        ),
                     }
                 })
             })
@@ -2020,11 +2172,10 @@ impl Classpath {
     }
 
     /// Whether the Kotlin builtin `internal` declares its function member `name`/`arity` with a NULLABLE
-    /// return (`kotlin/collections/Map.get(K): V?`). A generic-return member is dropped from
-    /// `builtin_members` (its return is a bare type parameter), and the member that actually resolves such
-    /// a call is the erased classpath method (`java/util/Map.get` → `Object`) which carries no Kotlin
-    /// nullability — so the builtin's `Type.nullable` flag is the only surviving record. `false` when no
-    /// such member/builtin is recorded.
+    /// return (`kotlin/collections/Map.get(K): V?`). When the mapped JVM class IS on the classpath the
+    /// member that resolves such a call is the erased classpath method (`java/util/Map.get` → `Object`),
+    /// which carries no Kotlin nullability — so the builtin's `Type.nullable` flag is the only surviving
+    /// record. `false` when no such member/builtin is recorded.
     pub fn builtin_member_ret_nullable(&self, internal: &str, name: &str, arity: usize) -> bool {
         self.builtin_member_ret_nullable_name(type_name(internal), name, arity)
     }
@@ -2058,6 +2209,19 @@ impl Classpath {
         self.builtins_file_for_package(Self::builtins_package_for(internal))
             .get_name(internal)
             .is_some_and(|c| c.members.iter().any(|m| m.name == name && m.is_property))
+    }
+
+    /// The `.kotlin_builtins` analogue of a class generic signature: the builtin's formal
+    /// type-parameter names and its supertypes WITH type arguments (`MutableList<E> : List<E>`). This
+    /// is what lets a receiver's type argument bind (and travel up the hierarchy) when the mapped JVM
+    /// class — whose `Signature` normally carries these facts — is absent from the classpath.
+    /// `internal` may be the Kotlin name or its mapped JVM form (`java/util/List`).
+    pub fn builtin_class_gsig_name(&self, internal: TypeName) -> Option<(Vec<String>, Vec<Ty>)> {
+        let kotlin =
+            super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal);
+        self.builtins_file_for_package(Self::builtins_package_for(kotlin))
+            .get_name(kotlin)
+            .map(|c| (c.formals.clone(), c.supertype_tys.clone()))
     }
 
     /// Direct supertypes declared in `.kotlin_builtins` for a Kotlin builtin class.
@@ -4293,6 +4457,18 @@ fn build_jimage_index(path: &Path) -> Option<JimageIndex> {
 #[cfg(test)]
 mod fq_tests {
     use super::*;
+
+    #[test]
+    fn builtin_type_parameter_erasure_follows_its_primary_bound() {
+        let bounded = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
+        assert_eq!(
+            builtin_erased(bounded),
+            Ty::obj("kotlin/CharSequence"),
+            "a decoded builtins signature must use the same bound erasure as JVM descriptors"
+        );
+        let unbounded = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        assert_eq!(builtin_erased(unbounded), Ty::obj("kotlin/Any"));
+    }
 
     #[test]
     fn member_metadata_matches_the_jvm_descriptor() {

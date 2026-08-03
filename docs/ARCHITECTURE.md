@@ -169,6 +169,20 @@ boundary.
 
 - **No non-backend module depends on a backend.** `resolve.rs`/`types.rs` must not reference
   `jvm::`. (Helpers that traffic in JVM `ClassInfo`/descriptors belong in the backend.)
+- **Semantic behavior is independent of symbol origin and source spelling.** Once declarations have
+  entered the symbol model, resolution, checking, and lowering must not select a different algorithm
+  because a declaration came from the current file, another module, Java source, a classpath class,
+  Kotlin metadata, or a generated source. Loaders and decoders normalize missing facts at their
+  boundary; downstream code consumes the common facts. Likewise, a package, module, file, class, or
+  host path must not act as a routing key. A language or JVM rule that genuinely names a declaration
+  is represented once in the backend's documented semantic mapping, rather than by scattered
+  conditionals at use sites.
+- **Unsupported input has one explicit semantic boundary.** A not-yet-implemented language shape is
+  rejected with a stable reason before emission; it is not silently redirected to a weaker lookup,
+  dropped only for one declaration origin, or allowed to reach unverifiable bytecode. Returning an
+  `Option` or `Result` is not itself a violation: the caller must preserve the declared rejection
+  contract instead of inventing a fallback. Tests assert both successful behavior and intentional
+  rejection boundaries against general input shapes, never project-specific names or paths.
 - **No hardcoded type/alias tables.** Stdlib types resolve from the classpath; the Kotlin↔platform
   mapping is the ported `JavaToKotlinClassMap` (`jvm/jvm_class_map.rs`) — a *JVM-backend* table. WASM
   and JS backends carry their own mapping.

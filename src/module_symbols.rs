@@ -530,6 +530,7 @@ fn fn_info(
         context_count: sig.context_count,
         contract: sig.contract.clone(),
         generic_sig: sig.generic_sig.clone().map(Box::new),
+        singleton_dispatch: None,
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -572,6 +573,7 @@ fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> L
         context_count: 0,
         contract: None,
         generic_sig: None,
+        singleton_dispatch: None,
     }
 }
 

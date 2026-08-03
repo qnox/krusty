@@ -7315,7 +7315,11 @@ impl<'a> Emitter<'a> {
         // placeholders (`Object`), while the body's own calls demand the DECLARED parameter
         // types — a VerifyError (`multiModuleDefaultArgsCleanup`). The real call is
         // verifier-correct (null is assignable to the declared type), so decline outright.
-        if name.ends_with("$default") {
+        // A REIFIED inline has no such fallback: its compiled `$default` body carries a
+        // `reifiedOperationMarker` and throws when invoked, so declining here is a miscompile, not a
+        // safe retreat. Splice it — the omitted parameters' placeholders are typed from the DECLARED
+        // descriptor (see `splice_unified`), which is what made the general case unsound.
+        if name.ends_with("$default") && reified.is_empty() {
             return false;
         }
         let Some(body) = self.bodies.body(owner, name, descriptor) else {
