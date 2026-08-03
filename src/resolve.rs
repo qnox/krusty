@@ -29009,6 +29009,59 @@ impl<'a> Checker<'a> {
             .map(|(_, member)| member)
     }
 
+    /// Select a module member and derive the generic/lambda plan shared by every VALUE-like receiver.
+    ///
+    /// A regular expression receiver, an `object` singleton, and a source companion differ in how
+    /// lowering materializes the receiver, but that physical origin must not change overload scoring
+    /// or contextual lambda typing. Keeping the select -> specialize -> map sequence here prevents
+    /// those call paths from acquiring subtly different named/default/trailing-lambda behavior.
+    fn module_member_lambda_plan(
+        &mut self,
+        call: ExprId,
+        receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        partial_arg_tys: &[Option<Ty>],
+    ) -> (
+        Option<crate::libraries::LibraryMember>,
+        Option<GenericMemberPlan>,
+        Option<ModuleMemberLambdaShape>,
+    ) {
+        let argument_names = self.file.call_arg_names.get(&call.0).cloned();
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let member = self
+            .best_module_member_candidate(
+                &crate::module_symbols::ModuleSymbols::new(self.syms)
+                    .instance_members(receiver, name),
+                args,
+                partial_arg_tys,
+                argument_names.as_deref(),
+                trailing_lambda,
+            )
+            .cloned();
+        let generic = member.as_ref().and_then(|member| {
+            self.plan_generic_member(
+                receiver,
+                member.owner,
+                name,
+                Some(&member.params),
+                Some(partial_arg_tys),
+                argument_names.as_deref(),
+            )
+        });
+        let lambda = member.as_ref().and_then(|member| {
+            module_member_lambda_shape(
+                member,
+                generic.as_ref(),
+                args,
+                argument_names.as_deref(),
+                trailing_lambda,
+                self.member_inline_body_available(member),
+            )
+        });
+        (member, generic, lambda)
+    }
+
     fn check_applicable_module_member_call(
         &mut self,
         call: ExprId,
@@ -29041,8 +29094,6 @@ impl<'a> Checker<'a> {
         {
             return self.arg_tys(args);
         }
-        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         // Lambda positions stay `None` until the candidate supplies their parameter types.
         let partial: Vec<Option<Ty>> = args
             .iter()
@@ -29054,35 +29105,7 @@ impl<'a> Checker<'a> {
                 }
             })
             .collect();
-        let members =
-            crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(rt, name);
-        let shape = self
-            .best_module_member_candidate(
-                &members,
-                args,
-                &partial,
-                arg_names.as_deref(),
-                trailing_lambda,
-            )
-            .cloned()
-            .and_then(|member| {
-                let generic_member = self.plan_generic_member(
-                    rt,
-                    member.owner,
-                    name,
-                    Some(&member.params),
-                    Some(&partial),
-                    arg_names.as_deref(),
-                );
-                module_member_lambda_shape(
-                    &member,
-                    generic_member.as_ref(),
-                    args,
-                    arg_names.as_deref(),
-                    trailing_lambda,
-                    self.member_inline_body_available(&member),
-                )
-            });
+        let (_, _, shape) = self.module_member_lambda_plan(call, rt, name, args, &partial);
         // Non-lambda arguments keep the type from the pass above; re-typing them would duplicate
         // whatever diagnostics that pass reported.
         let Some(shape) = shape else {
@@ -30529,38 +30552,11 @@ impl<'a> Checker<'a> {
                         }
                     })
                     .collect::<Vec<_>>();
-                let method_sig: Option<crate::libraries::LibraryMember> = self
-                    .best_module_member_candidate(
-                        &crate::module_symbols::ModuleSymbols::new(self.syms)
-                            .instance_members(rt, &name),
-                        args,
-                        &generic_member_partial,
-                        arg_names.as_deref(),
-                        self.file.call_has_trailing_lambda.contains(&call.0),
-                    )
-                    .cloned();
-                // Preserve generic receiver bindings while typing member lambda arguments.
-                let generic_member: Option<GenericMemberPlan> =
-                    method_sig.as_ref().and_then(|member| {
-                        self.plan_generic_member(
-                            rt,
-                            member.owner,
-                            &name,
-                            Some(&member.params),
-                            Some(&generic_member_partial),
-                            arg_names.as_deref(),
-                        )
-                    });
-                let module_lambda_shape = method_sig.as_ref().and_then(|member| {
-                    module_member_lambda_shape(
-                        member,
-                        generic_member.as_ref(),
-                        args,
-                        arg_names.as_deref(),
-                        self.file.call_has_trailing_lambda.contains(&call.0),
-                        self.member_inline_body_available(member),
-                    )
-                });
+                // Selection and contextual lambda typing depend on the receiver's semantic members,
+                // not on whether lowering later obtains that receiver from an expression, an object
+                // singleton, or a companion field. Classifier receivers use this same planner above.
+                let (method_sig, generic_member, module_lambda_shape) =
+                    self.module_member_lambda_plan(call, rt, &name, args, &generic_member_partial);
                 crate::trace_compiler!(
                     "resolve",
                     "MCALL name={name} rt={rt:?} nargs={} generic_member={}",
