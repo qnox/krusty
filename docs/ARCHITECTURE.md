@@ -54,6 +54,11 @@ boundary.
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
   The request also carries the bounded set of enabled language-feature names derived from project
   compilation arguments and explicit LSP flags; per-source directives are applied inside the worker.
+  The worker is not a second server-CLI consumer: `exec` carries only its private mode marker and
+  supervisor PID. Before compiler initialization, the supervisor sends one bounded launch frame with
+  the already-composed project/JDK classpath; restarts use the same frame. This keeps arbitrarily many
+  individual classpath entries out of platform argument/environment size limits and gives initial
+  startup and project reconfiguration one classpath-composition rule.
 - Diagnostics use either pull responses with refresh requests or
   `textDocument/publishDiagnostics`, according to the client's capabilities. Compiler diagnostics
   are deduplicated by `(span, severity, kind, message)` before entering the LSP indexes.

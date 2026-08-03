@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use krusty::jvm::classfile::ClassWriter;
 use krusty_lsp::{read_framed, write_framed, MAX_MESSAGE_BYTES};
 use serde_json::{json, Value};
 
@@ -326,6 +327,100 @@ fn stdio_server_uses_the_compiler_worker_and_exits_cleanly() {
         }])
     );
 
+    server.shutdown_and_exit();
+}
+
+#[test]
+fn stdio_server_starts_a_worker_for_an_oversized_jps_classpath() {
+    const ENTRY_COUNT: usize = 2_752;
+    let project = TempProject::new("oversized-worker-classpath");
+    project.write(
+        ".idea/modules.xml",
+        r#"<project><component name="ProjectModuleManager"><modules>
+             <module filepath="$PROJECT_DIR$/app/app.iml" />
+           </modules></component></project>"#,
+    );
+    project.write(
+        "app/app.iml",
+        r#"<module><component name="NewModuleRootManager">
+             <content url="file://$MODULE_DIR$">
+               <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+             </content>
+             <orderEntry type="library" name="oversized" level="project" />
+           </component></module>"#,
+    );
+    let mut library =
+        String::from(r#"<component name="libraryTable"><library name="oversized"><CLASSES>"#);
+    let entry_suffix = "segment".repeat(10);
+    for index in 0..ENTRY_COUNT {
+        library.push_str(&format!(
+            r#"<root url="file://$PROJECT_DIR$/dependencies/component-{index:04}-{}" />"#,
+            entry_suffix
+        ));
+    }
+    library.push_str("</CLASSES></library></component>");
+    assert!(
+        library.len() > 128 * 1024,
+        "the JPS classpath must exceed the common Unix per-argument ceiling"
+    );
+    project.write(".idea/libraries/oversized.xml", &library);
+    let final_entry = project.path().join(format!(
+        "dependencies/component-{:04}-{entry_suffix}/oversized",
+        ENTRY_COUNT - 1
+    ));
+    std::fs::create_dir_all(&final_entry).expect("create final classpath entry");
+    std::fs::write(
+        final_entry.join("LastEntry.class"),
+        ClassWriter::new("oversized/LastEntry", "java/lang/Object").finish(),
+    )
+    .expect("write final classpath class");
+    let source = "import oversized.LastEntry\nfun identity(value: LastEntry): LastEntry = value\n";
+    let uri = project.uri("app/src/Main.kt");
+    project.write("app/src/Main.kt", source);
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+
+    let mut server = ServerProcess::start(&[]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    let mut saw_model = false;
+    let mut registered_watcher = false;
+    while !saw_model || !registered_watcher {
+        let message = server.receive().expect("project configuration message");
+        if message["method"] == "window/showMessage" {
+            let text = message["params"]["message"].as_str().unwrap_or_default();
+            assert!(
+                !text.contains("could not restart analysis worker"),
+                "oversized classpath must not enter the worker restart loop: {text}"
+            );
+        }
+        if message["method"] == "window/logMessage" {
+            saw_model |= message["params"]["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("2752 classpath entries"));
+        }
+        if message["method"] == "client/registerCapability" {
+            registered_watcher = true;
+            server.send(&json!({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": null
+            }));
+        }
+    }
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    assert!(server.await_diagnostics(&uri).is_empty());
     server.shutdown_and_exit();
 }
 
