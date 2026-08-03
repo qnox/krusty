@@ -181,11 +181,11 @@ impl CompletionSymbols {
                     },
                 });
             }
-            // `type_alias_targets` carries every alias's structural target — a FUNCTION type or a class
-            // type with its type arguments. A class target is already listed above from
-            // `type_aliases` (as a `Class`, with its target name); only a function target needs the
+            // `type_alias_fun` now also carries CLASS targets that have type arguments
+            // (`typealias Table<V> = Map<String, V>`). Those are already listed above from
+            // `type_aliases` as a `Class` with their target name; only a FUNCTION target wants the
             // arrow rendering and the `Interface` kind here.
-            for (alias, parameters, result_type) in &file.file.type_alias_targets {
+            for (alias, parameters, result_type) in &file.file.type_alias_fun {
                 if result_type.fun_params.is_empty() && result_type.name != "<fun>" {
                     continue;
                 }

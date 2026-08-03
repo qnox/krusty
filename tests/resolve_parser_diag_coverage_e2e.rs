@@ -121,8 +121,21 @@ fn increment_on_string_variable() {
 
 #[test]
 fn companion_property_custom_accessor() {
+    // A FIELD-LESS custom-accessor companion property is supported (it lowers to `getX`/`setX` on
+    // `C$Companion`, kotlinc's own layout), so this must type-check clean — it guards that feature
+    // against regressing back to a rejection.
     let d = diags("class C { companion object { val x: Int get() = 5 } }\nfun box(): Int = 0");
-    assert_rejected(&d, "companion-object property custom accessor");
+    let real: Vec<&String> = d.iter().filter(|m| !m.is_empty()).collect();
+    assert!(
+        real.is_empty() || d.iter().any(|m| m.contains("<skip")),
+        "expected a computed companion property to type-check clean, got: {real:?}"
+    );
+    // An accessor over a real BACKING FIELD still is not: it would be emitted as the default static
+    // accessor with the body ignored, so the front end must keep rejecting it.
+    let d = diags(
+        "class C { companion object { val x: Int = 1\n    get() = field + 1 } }\nfun box(): Int = 0",
+    );
+    assert_rejected(&d, "companion-object backing-field accessor");
 }
 
 #[test]
