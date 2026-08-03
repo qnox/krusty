@@ -2250,12 +2250,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/bounded_type_param_e2e.rs::comparable_operator_bounded_generic_called_with_primitive_runs`.
 - **`EnumName.entries`.** Kotlin 2.x's replacement for `values()`. The emitter already synthesized
   the `$ENTRIES` field and its `getEntries()` accessor on every enum class (that is what kotlinc's
-  byte-parity requires); only the READ had no resolution. The checker types `E.entries` as `List<E>` —
-  kotlinc types it `EnumEntries<E>`, which IS-A `List<E>`, and the list type is what makes `size`,
-  `[0]` and `for (x in …)` resolve while the accessor's actual return stays assignable to it. Lowering
-  emits the same `invokestatic <E>.getEntries()Lkotlin/enums/EnumEntries;` kotlinc does. Tests:
+  byte-parity requires); only the READ had no resolution. The checker types `E.entries` as
+  `EnumEntries<E>` — exactly what kotlinc types it — and `EnumEntries<E>` IS-A `List<E>`, so `size`,
+  `[0]` and `for (x in …)` resolve through ordinary supertype member lookup. Resolution goes through
+  ONE path for every enum: the classifier's semantic identity, then the `enum_entries_accessor`
+  capability its symbol provider advertises, recorded as `ExprLowering::EnumEntriesRead` and consumed
+  verbatim by lowering. An enum declared in the file being compiled is reached through that same
+  provider seam (`ModuleSymbols` publishes the synthetic accessor for module enums), so `entries` has
+  no source-origin branch on either side: a second checker arm that typed only `syms.enums`-backed
+  receivers as `List<E>` shadowed the provider arm, left no recorded lowering, and made lowering fall
+  through to evaluating the bare classifier receiver as a value (`expr Name` bail). Lowering emits the
+  same `invokestatic <E>.getEntries()Lkotlin/enums/EnumEntries;` kotlinc does. The sibling synthetic
+  members `values()`/`valueOf()` are NOT yet on this seam — they still gate on `syms.enums` and record
+  no lowering; converting them is separate work. Tests:
+  `src/resolve.rs::tests::source_enum_entries_records_the_declaring_owner_and_its_accessor`,
   `tests/feature_coverage_a_e2e.rs::enum_entries`,
-  `tests/feature_coverage_r_e2e.rs::enum_reflection_members`.
+  `tests/feature_coverage_r_e2e.rs::enum_reflection_members`,
+  `tests/feature_coverage_x_e2e.rs::enum_rich_members`,
+  `tests/nested_enum_access_e2e.rs::enum_entry_and_entries_property_from_another_source_file_use_the_declaring_owner`.
 - **`this@Inner` — a nested class's own qualified-this label.** The enclosing chain (`this@Outer`
   from an `inner class`) already resolved; the class's OWN label did not, because a nested declaration
   is flattened under its dotted name (`Outer.Inner`) and that dotted string was pushed as the label,
