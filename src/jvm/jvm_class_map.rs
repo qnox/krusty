@@ -283,25 +283,77 @@ pub fn to_jvm_internal(internal: &str) -> &str {
         .unwrap_or(internal)
 }
 
-/// The JVM-erasure identity groups: each group's Kotlin internal names plus the single JVM internal
-/// name they erase to. Group index is the erasure identity used by the id-keyed comparisons below.
-const ERASURE_GROUPS: &[(&[&str], &str)] = &[
-    (&["kotlin/Any"], "java/lang/Object"),
-    (&["kotlin/String"], "java/lang/String"),
-    (&["kotlin/CharSequence"], "java/lang/CharSequence"),
-    (&["kotlin/Throwable"], "java/lang/Throwable"),
-    (&["kotlin/Cloneable"], "java/lang/Cloneable"),
-    (&["kotlin/Number"], "java/lang/Number"),
-    (&["kotlin/Comparable"], "java/lang/Comparable"),
-    (&["kotlin/Enum"], "java/lang/Enum"),
-    (&["kotlin/Annotation"], "java/lang/annotation/Annotation"),
-    (&["kotlin/Nothing"], "java/lang/Void"),
+/// Which declaration supplies a mapped builtin's SOURCE member/supertype scope. This is part of the
+/// Kotlin↔JVM mapping itself, not a classpath-loading heuristic: `KotlinDeclaration` means the JVM class
+/// is only the physical realization and its Java API must not be joined into the Kotlin source scope.
+/// The other mapped builtins remain joined until krusty implements kotlinc's JVM-visible-method whitelist.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuiltinScopeProvenance {
+    JoinedWithJvm,
+    KotlinDeclaration,
+}
+
+/// The JVM-erasure identity groups: each group's Kotlin internal names, the single JVM internal name
+/// they erase to, and the semantic source-scope policy. Keeping all three facts in the same table prevents
+/// the classpath loader from reconstructing a parallel collection/String name list that can drift.
+const ERASURE_GROUPS: &[(&[&str], &str, BuiltinScopeProvenance)] = &[
+    (
+        &["kotlin/Any"],
+        "java/lang/Object",
+        BuiltinScopeProvenance::JoinedWithJvm,
+    ),
+    (
+        &["kotlin/String"],
+        "java/lang/String",
+        BuiltinScopeProvenance::KotlinDeclaration,
+    ),
+    (
+        &["kotlin/CharSequence"],
+        "java/lang/CharSequence",
+        BuiltinScopeProvenance::JoinedWithJvm,
+    ),
+    (
+        &["kotlin/Throwable"],
+        "java/lang/Throwable",
+        BuiltinScopeProvenance::JoinedWithJvm,
+    ),
+    (
+        &["kotlin/Cloneable"],
+        "java/lang/Cloneable",
+        BuiltinScopeProvenance::JoinedWithJvm,
+    ),
+    (
+        &["kotlin/Number"],
+        "java/lang/Number",
+        BuiltinScopeProvenance::JoinedWithJvm,
+    ),
+    (
+        &["kotlin/Comparable"],
+        "java/lang/Comparable",
+        BuiltinScopeProvenance::JoinedWithJvm,
+    ),
+    (
+        &["kotlin/Enum"],
+        "java/lang/Enum",
+        BuiltinScopeProvenance::JoinedWithJvm,
+    ),
+    (
+        &["kotlin/Annotation"],
+        "java/lang/annotation/Annotation",
+        BuiltinScopeProvenance::JoinedWithJvm,
+    ),
+    (
+        &["kotlin/Nothing"],
+        "java/lang/Void",
+        BuiltinScopeProvenance::JoinedWithJvm,
+    ),
     (
         &[
             "kotlin/collections/Iterable",
             "kotlin/collections/MutableIterable",
         ],
         "java/lang/Iterable",
+        BuiltinScopeProvenance::KotlinDeclaration,
     ),
     (
         &[
@@ -309,6 +361,7 @@ const ERASURE_GROUPS: &[(&[&str], &str)] = &[
             "kotlin/collections/MutableIterator",
         ],
         "java/util/Iterator",
+        BuiltinScopeProvenance::KotlinDeclaration,
     ),
     (
         &[
@@ -316,6 +369,7 @@ const ERASURE_GROUPS: &[(&[&str], &str)] = &[
             "kotlin/collections/MutableListIterator",
         ],
         "java/util/ListIterator",
+        BuiltinScopeProvenance::KotlinDeclaration,
     ),
     (
         &[
@@ -323,18 +377,22 @@ const ERASURE_GROUPS: &[(&[&str], &str)] = &[
             "kotlin/collections/MutableCollection",
         ],
         "java/util/Collection",
+        BuiltinScopeProvenance::KotlinDeclaration,
     ),
     (
         &["kotlin/collections/List", "kotlin/collections/MutableList"],
         "java/util/List",
+        BuiltinScopeProvenance::KotlinDeclaration,
     ),
     (
         &["kotlin/collections/Set", "kotlin/collections/MutableSet"],
         "java/util/Set",
+        BuiltinScopeProvenance::KotlinDeclaration,
     ),
     (
         &["kotlin/collections/Map", "kotlin/collections/MutableMap"],
         "java/util/Map",
+        BuiltinScopeProvenance::KotlinDeclaration,
     ),
     (
         &[
@@ -344,6 +402,7 @@ const ERASURE_GROUPS: &[(&[&str], &str)] = &[
             "kotlin/collections/MutableMap$MutableEntry",
         ],
         "java/util/Map$Entry",
+        BuiltinScopeProvenance::KotlinDeclaration,
     ),
 ];
 
@@ -355,6 +414,8 @@ struct BuiltinIds {
     jvm_builtin: FxHashMap<TypeName, (&'static str, TypeName)>,
     /// Groups whose JVM face is a `java/util/*` collection interface, as a bitmask by group index.
     collection_groups: u32,
+    /// Groups whose Kotlin metadata declaration replaces, rather than joins, the JVM source scope.
+    authoritative_scope_groups: u32,
     coll_to_kotlin: FxHashMap<TypeName, TypeName>,
     coll_to_kotlin_mutable: FxHashMap<TypeName, TypeName>,
     wrapper_prim: FxHashMap<TypeName, &'static str>,
@@ -372,11 +433,12 @@ fn builtin_ids() -> &'static BuiltinIds {
         let mut erasure_group = FxHashMap::default();
         let mut jvm_builtin = FxHashMap::default();
         let mut collection_groups = 0u32;
+        let mut authoritative_scope_groups = 0u32;
         let mut coll_to_kotlin = FxHashMap::default();
         let mut coll_to_kotlin_mutable = FxHashMap::default();
         let mut with_members = FxHashMap::default();
         let mut metadata_owner = FxHashMap::default();
-        for (group, (kotlin_names, jvm_name)) in ERASURE_GROUPS.iter().enumerate() {
+        for (group, (kotlin_names, jvm_name, scope)) in ERASURE_GROUPS.iter().enumerate() {
             let g = u8::try_from(group).expect("erasure group count fits u8");
             let jvm_id = tn(jvm_name);
             // Every erasure group is declared by a Kotlin builtin. Keeping the inverse beside the
@@ -394,6 +456,9 @@ fn builtin_ids() -> &'static BuiltinIds {
             jvm_builtin.insert(jvm_id, (*jvm_name, jvm_id));
             if jvm_name.starts_with("java/util/") {
                 collection_groups |= 1 << group;
+            }
+            if *scope == BuiltinScopeProvenance::KotlinDeclaration {
+                authoritative_scope_groups |= 1 << group;
             }
             if let Some(kotlin) = jvm_collection_to_kotlin(jvm_name) {
                 coll_to_kotlin.insert(jvm_id, tn(kotlin));
@@ -426,6 +491,7 @@ fn builtin_ids() -> &'static BuiltinIds {
             erasure_group,
             jvm_builtin,
             collection_groups,
+            authoritative_scope_groups,
             coll_to_kotlin,
             coll_to_kotlin_mutable,
             wrapper_prim,
@@ -438,12 +504,24 @@ fn builtin_ids() -> &'static BuiltinIds {
 /// Compare a semantic Kotlin/internal class name with a JVM-erased internal name without rendering the
 /// semantic name first.
 pub fn type_name_maps_to_jvm_internal(internal: TypeName, jvm_internal: &str) -> bool {
-    match ERASURE_GROUPS.iter().position(|(_, j)| *j == jvm_internal) {
+    match ERASURE_GROUPS
+        .iter()
+        .position(|(_, j, _)| *j == jvm_internal)
+    {
         Some(group) => {
             jvm_erasure_group(internal) == Some(u8::try_from(group).expect("group fits u8"))
         }
         None => internal.matches(jvm_internal),
     }
+}
+
+/// Whether a mapped builtin's decoded Kotlin declaration is authoritative for its source-level
+/// members and supertypes. This answers only the mapping-policy question; callers must separately
+/// verify that the declaration was actually decoded before replacing classfile data.
+pub fn mapped_builtin_has_authoritative_kotlin_scope(internal: TypeName) -> bool {
+    let ids = builtin_ids();
+    jvm_erasure_group(internal)
+        .is_some_and(|group| ids.authoritative_scope_groups & (1 << group) != 0)
 }
 
 fn jvm_erasure_group(internal: TypeName) -> Option<u8> {
@@ -508,8 +586,8 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
 mod tests {
     use super::{
         jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_name,
-        kotlin_prim_to_wrapper, to_jvm_internal, to_jvm_type_name, wrapper_internal,
-        wrapper_to_kotlin_prim_name,
+        kotlin_prim_to_wrapper, mapped_builtin_has_authoritative_kotlin_scope, to_jvm_internal,
+        to_jvm_type_name, wrapper_internal, wrapper_to_kotlin_prim_name,
     };
     use crate::types::{type_name, Ty};
 
@@ -606,5 +684,31 @@ mod tests {
             jvm_to_kotlin_builtin_metadata_name(type_name("demo/Foo")),
             None
         );
+    }
+
+    #[test]
+    fn builtin_scope_provenance_is_part_of_the_erasure_mapping() {
+        // Collections and String take their source API from the Kotlin declaration. The remaining
+        // mapped classes deliberately keep a joined JVM scope until the JVM-visible-method whitelist
+        // is implemented. Pinning both sides here prevents a caller from inferring policy from package
+        // names or growing another per-class exception list.
+        assert!(mapped_builtin_has_authoritative_kotlin_scope(type_name(
+            "kotlin/String"
+        )));
+        assert!(mapped_builtin_has_authoritative_kotlin_scope(type_name(
+            "kotlin/collections/List"
+        )));
+        assert!(mapped_builtin_has_authoritative_kotlin_scope(type_name(
+            "kotlin/collections/MutableMap"
+        )));
+        assert!(!mapped_builtin_has_authoritative_kotlin_scope(type_name(
+            "kotlin/CharSequence"
+        )));
+        assert!(!mapped_builtin_has_authoritative_kotlin_scope(type_name(
+            "kotlin/Throwable"
+        )));
+        assert!(!mapped_builtin_has_authoritative_kotlin_scope(type_name(
+            "example/UserType"
+        )));
     }
 }

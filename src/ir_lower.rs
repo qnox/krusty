@@ -23624,9 +23624,14 @@ impl<'a> Lower<'a> {
                 return self.lower_object_member_call(*internal, member, &args, e);
             }
             // `"""…""".trimIndent()` / `.trimMargin()` on a compile-time-constant string receiver:
-            // fold the stdlib transform to a string constant (kotlinc special-cases a constant
-            // receiver too). A non-constant receiver falls through and is skipped.
-            if args.is_empty() && matches!(name.as_str(), "trimIndent" | "trimMargin") {
+            // fold only the classpath-less fallback, identified by the ABSENCE of a checker-selected
+            // call target. A real source/classpath extension with the same spelling is semantically
+            // authoritative and must be emitted; folding by name alone would silently replace a user's
+            // `fun String.trimIndent()` body. A non-constant receiver still falls through and is skipped.
+            if args.is_empty()
+                && matches!(name.as_str(), "trimIndent" | "trimMargin")
+                && !self.info.resolved_calls.contains_key(&e)
+            {
                 if let Some(s) = const_string_value(self.afile, receiver) {
                     let folded = if name == "trimIndent" {
                         trim_indent(&s)

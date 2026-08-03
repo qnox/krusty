@@ -662,6 +662,8 @@ mod map_entry_destructure_e2e;
 mod map_get_nullable_elvis_e2e;
 #[path = "mapped_collection_scope_e2e.rs"]
 mod mapped_collection_scope_e2e;
+#[path = "mapped_string_scope_e2e.rs"]
+mod mapped_string_scope_e2e;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
