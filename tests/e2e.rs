@@ -130,6 +130,8 @@ mod classpath_collection_and_nested_named_e2e;
 mod classpath_collection_param_member_e2e;
 #[path = "classpath_companion.rs"]
 mod classpath_companion;
+#[path = "classpath_companion_ext_lambda_e2e.rs"]
+mod classpath_companion_ext_lambda_e2e;
 #[path = "classpath_companion_invoke_e2e.rs"]
 mod classpath_companion_invoke_e2e;
 #[path = "classpath_covariant_override_e2e.rs"]
@@ -640,6 +642,8 @@ mod member_extension_default_args_e2e;
 mod member_extension_function_e2e;
 #[path = "member_extension_nested_hof_e2e.rs"]
 mod member_extension_nested_hof_e2e;
+#[path = "member_extension_property_e2e.rs"]
+mod member_extension_property_e2e;
 #[path = "member_infix_inference_e2e.rs"]
 mod member_infix_inference_e2e;
 #[path = "member_overloads_e2e.rs"]
