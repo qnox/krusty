@@ -15138,11 +15138,20 @@ impl<'a> Lower<'a> {
         let mut a = vec![recv];
         let explicit_params = c.params.get(1..)?;
         let mut arg_prelude = Vec::new();
+        // Argument-to-parameter binding is a CHECKER decision. Lowering consumes the same semantic slot
+        // handoff for labelled, reordered, positional-default, and trailing-lambda calls; it must not
+        // rediscover a different mapping based on this callable's classpath-extension emit branch.
         if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
             let (slot_args, prelude) =
                 self.lower_call_slot_args_source_order(args, &slots, explicit_params, true)?;
             arg_prelude = prelude;
             if c.default_call {
+                // This emitter currently writes one 32-bit `$default` mask. The checker may faithfully
+                // record a larger semantic map for another consumer; decline here instead of shifting by
+                // an invalid amount or emitting an ABI shape this branch cannot represent.
+                if slots.len() > 32 {
+                    return None;
+                }
                 let mask: i32 = slots
                     .iter()
                     .enumerate()
@@ -20638,6 +20647,15 @@ impl<'a> Lower<'a> {
                 let receiver = self.coerce_argument_value(receiver, this_ty, target)?;
                 return Some(self.emit_extension_property_get(e, *getter, receiver));
             }
+            // A resolved TOP-LEVEL property read: the selected facade's static getter, no receiver. The
+            // callable carries its origin/owner, so this semantic handoff is identical for every provider.
+            if let Some(ExprLowering::TopLevelPropertyGet { getter }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let physical_ret = getter.physical_ret;
+                let call = self.emit_library_static_call(*getter, Vec::new(), false);
+                return Some(self.coerce_erased_call_result(e, call, &physical_ret, true));
+            }
             if let Some(ExprLowering::IntrinsicProperty(member)) =
                 self.info.expr_lowers.get(&e).cloned()
             {
@@ -22729,6 +22747,11 @@ impl<'a> Lower<'a> {
                             let (v, _) = self.lookup(src)?;
                             a.push(self.emit_get_value(v));
                         }
+                        // Both vectors are the PHYSICAL callable shape: signature collection prepends
+                        // context parameters to `params`, and parser normalization prepends the same
+                        // declarations to `FunDecl::params`, from which `param_meta` is built. Source
+                        // arguments address only the value suffix, so slice both vectors at the same
+                        // boundary before handing them to the origin-neutral argument mapper.
                         let (mut value_args, prelude) =
                             self.lower_args_defaulted(e, &meta[ctx_n..], &args, &params[ctx_n..])?;
                         a.append(&mut value_args);

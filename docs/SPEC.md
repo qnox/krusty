@@ -1454,6 +1454,59 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   This proto reader replaced a `d2` `$annotations` heuristic that a facade's annotated top-level property
   would have tripped. Resolves the alias as a constructor and in a type position. Test:
   `tests/classpath_typealias_e2e.rs`.
+- **A classpath TOP-LEVEL property is a value (`import kotlin.math.E; import pkg.plugin`).** A package's
+  namespace record carried its top-level FUNCTIONS and its EXTENSION properties but never its receiver-less
+  top-level properties, so every use site — explicit import, star import, same package — reported
+  "unresolved reference". The facade property scan now classifies by the accessors' receiver parameter
+  (`PropKind::TopLevel` when the getter takes none, `Extension` when it takes one), the resolver's
+  `resolve_top_level_property` selects it over the import scope (ambiguity across two in-scope packages is
+  no resolution), and a read lowers to the declaring facade's static getter (`ExprLowering::
+  TopLevelPropertyGet`). It is the LAST value rung: every enclosing scope shadows an imported property.
+  READS only so far: a `const val` top-level (no getter — its value inlines from a static field) and a
+  WRITE to a top-level `var` (the setter is decoded and carried, but assignment does not reach this rung)
+  are both still reported unresolved. Test: `tests/classpath_top_level_property_e2e.rs`.
+- **A RECEIVER function type survives the classpath decode (`configure: Cfg.() -> Unit`).** `Cfg.() -> Unit`
+  and `(Cfg) -> Unit` share one `Function1` erasure, so the distinction lives ONLY in `@Metadata`'s
+  `@kotlin.ExtensionFunctionType` type annotation. Two decoders dropped it: the metadata signature reader
+  (`parse_type_gsig_node` built `Ty::Fun` from the `kotlin/FunctionN` classifier alone) and every MEMBER,
+  whose signature comes from the JVM `Signature` attribute — which cannot spell it — and whose metadata call
+  facts omitted the per-parameter marks. Both now carry it: the metadata reader honors the annotation, and a
+  member's decoded signature is re-marked from metadata (`mark_receiver_fun_params`) and reused rather than
+  re-parsed. A lambda argument to such a parameter is shaped from the parameter itself
+  (one `LambdaCallShape`, the same vocabulary the module and extension shape providers speak, so a call
+  site types its lambda from ONE shape whatever the callable's origin) — for members and top-level alike,
+  and the
+  receiver comes from the generic signature (with its type ARGUMENTS bound by the call) in preference to
+  metadata's receiver CLASS. A `suspend` callable's physical signature appends a `Continuation` its source
+  parameter list does not have, so both alignments (the marks, and lambda specialization) drop it first.
+  A classpath CONSTRUCTOR with a receiver-lambda parameter (`Builder { … }`) is still not shaped — the
+  constructor query takes plain argument types and never sees the lambda literal. Tests:
+  `tests/classpath_member_receiver_lambda_e2e.rs`, `tests/classpath_receiver_lambda_overload_e2e.rs`.
+- **Omitting a defaulted argument does not change what an argument may be.** A classpath call that omits a
+  trailing default measured applicability with the platform-only "same erased shape" check, so any SUBTYPE
+  argument was rejected — `host(sub)` reported unresolved while `host(sub, 5)` resolved. The defaulted path
+  now asks the same assignability question the spelled-out path asks — and then RANKS: applicability admits
+  both `pick(b: Base, n: Int = 3)` and `pick(s: Sub, n: Int = 4)` for `pick(Sub())`, so the most specific
+  parameter shape is tried first (declaration order breaks ties). Test:
+  `tests/classpath_default_arg_subtype_e2e.rs`.
+- **An omitted default is recorded the same way however the receiver is spelled.** A classpath EXTENSION
+  call omitting a defaulted argument resolves to the `$default` synthetic, whose emit needs the call's
+  argument→parameter mapping. Only the explicit-receiver spelling recorded one, so the same call on an
+  IMPLICIT receiver (`build { tag("a") }`) skipped the whole file with "not yet supported by the IR
+  backend". The record exists to carry a mapping the call's own shape does not give (labels, reordering);
+  unlabelled, the shape gives it — positional arguments fill parameters left to right and a TRAILING
+  LAMBDA binds the LAST parameter, so an omitted default may sit BETWEEN them — and the emit derives it
+  instead of treating its absence as "unknown". Derived at the emit rather than recorded by the checker so the
+  paths that never reach it — an `inline` extension is SPLICED, never emitted as a `$default` call — keep
+  behaving as they did. A vararg call is excluded: its trailing slot is an array the emit builds, not an
+  omitted parameter, and so is a callable past 32 parameters, whose `$default` ABI takes several mask
+  ints the emit does not yet build. Test: `tests/classpath_extension_default_implicit_receiver_e2e.rs`.
+- **A failed constructor probe leaves the call's arguments as it found them.** For `Name(args)` where
+  `Name` is both a classpath class and a top-level function, the constructor is probed first; it re-checked
+  every argument with no expected type, overwriting a trailing lambda already shaped against the function's
+  receiver parameter with a bare `() -> Unit` — after which neither candidate accepted the call. The probe
+  now types only arguments the call has not typed yet. Test:
+  `tests/classpath_ctor_vs_same_named_function_e2e.rs`.
 - **A `suspend` member's return type is recovered from its `Continuation<T>` generic argument.** The
   generic argument carries a PRIMITIVE return BOXED (generics erase primitives to wrappers), so a non-null
   primitive return unboxes to its Kotlin primitive (`java/lang/Long` → `Ty::Long` via
@@ -1464,9 +1517,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return matches a source-spelled reference return instead of a divergent `Ty::Nullable`. Test:
   `tests/suspend_return_type_recovery_e2e.rs`.
 - **A generic-return builtin member's nullability is recovered from `.kotlin_builtins` metadata**
-  (`kotlin/collections/Map.get(K): V?`, `getOrDefault`, …). Such a member's return is a bare TYPE
-  PARAMETER, so `builtin_members` drops it, and the member that actually resolves the call is the erased
-  classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin nullability. The source `V?`
+  (`kotlin/collections/Map.get(K): V?`, `getOrDefault`, …). When the mapped JVM class IS on the classpath,
+  the member that resolves the call is the erased classpath method (`java/util/Map.get` → `Object`), which
+  carries no Kotlin nullability. The source `V?`
   survives only on the builtin's `Type.nullable` flag; `parse_builtins` records every function member's
   return-nullability (including the dropped ones) in `BuiltinClass.member_ret_nullable`, and the member
   walk (`Classpath::builtin_member_ret_nullable`) null-annotates the resolved return. Applied only to a
@@ -1475,6 +1528,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps its plain erased `Ty` (mirrors the suspend/`resolve_ty` policy above). This is why `m[k] ?: continue`
   correctly skips absent keys. NOT a hardcoded method list — the flag is read from `@Metadata`. Test:
   `tests/map_get_nullable_elvis_e2e.rs`.
+- **`.kotlin_builtins` types decode in full — type parameters AND type arguments.** A builtins `Type` is
+  either a `class_name` with `argument`s, or a reference to a declared `type_parameter` (by id, or by
+  `type_parameter_name`); the decoder resolves all three, and each `Class`/`Function`/`Property` carries
+  its own `type_parameter` table naming those ids. Members are therefore never dropped for having a
+  type-parameter type (`List<E>.get(index: Int): E`, `MutableList.removeAt(Int): E`), and a type argument
+  survives (`Map<K, V>.entries: Set<Map.Entry<K, V>>`). Since a builtin member has no JVM `Signature`
+  string, `builtin_members` also carries a DECODED `LibraryMember::generic_sig` (erased `params`/`ret`
+  matching the descriptor, declared ones in the signature), and `Classpath::builtin_class_gsig_name`
+  supplies the builtin's formals + argument-carrying supertypes where a class `Signature` normally would.
+  Together these let the member walk bind a type-parameter return against the receiver's type arguments
+  (`List<String>.get(1): String`) with NO JDK on the classpath — the `.kotlin_builtins` fallback
+  configuration, where the mapped JVM class (`java/util/List`) is absent. Scope: this makes the fallback
+  correct for RESOLUTION and type-checking (the LSP/analysis use). Its CODEGEN is separately broken and
+  predates this — with no `.class` to read accessors off, a builtin property read emits the JavaBean
+  getter (`getSize`/`getEntries`) instead of the `java.util` name, and a member descriptor keeps the
+  bound type argument. Do not treat a no-JDK compile's bytecode as loadable. Tests:
+  `tests/metadata_return_types.rs` (`builtins_decode_type_parameters_and_arguments`,
+  `builtin_generic_member_binds_receiver_argument_without_jdk`,
+  `builtin_generic_members_type_check_without_jdk`).
+- **`MutableList.removeAt(Int)` IS `java.util.List.remove(int)`** — the function half of kotlinc's
+  `BuiltinMethodsWithDifferentJvmName`/special-builtin renaming whose property half is
+  `size`/`keys`/`values`/`entries`. A call through a `MutableList` receiver emits the JVM name
+  (`names::mapped_builtin_virtual_name`), and a class implementing `MutableList` gets a `remove(int)`
+  bridge forwarding to its `removeAt` override (`mapped_interface_members` →
+  `bridges::mapped_interface_bridges`) — needed when the override is inherited from a NON-collection
+  supertype, which is the only place the two names can diverge. Unlike the `size` entry beside it, this
+  one is keyed on the KOTLIN name `kotlin/collections/MutableList`, not the erased `java/util/List`:
+  the renaming exists only on the mutable side, so a READ-ONLY `List` implementation that happens to
+  declare an unrelated `removeAt` must not acquire a `remove(int)` bridge. Tests: box corpus
+  `codegen/box/specialBuiltins/irrelevantRemoveAtOverride.kt`, and
+  `tests/metadata_return_types.rs::read_only_list_impl_gets_no_remove_bridge`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
   with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the call passes the Kotlin type

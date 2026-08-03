@@ -836,30 +836,41 @@ impl JvmLibraries {
             if !seen.insert(internal) {
                 continue;
             }
-            let Some(ci) = self.cp.find_name(internal) else {
-                continue;
+            let ci = self.cp.find_name(internal);
+            // A Kotlin builtin whose mapped JVM class is absent (a no-JDK compile) has no `.class` and
+            // so no class `Signature`; its `.kotlin_builtins` declaration carries the same two facts —
+            // the formals and the argument-carrying supertypes — so bind through that instead.
+            let (formals, supers) = match &ci {
+                Some(ci) => ci.signature.as_deref().and_then(parse_class_gsig).unzip(),
+                None => self.cp.builtin_class_gsig_name(internal).unzip(),
             };
-            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
+            if ci.is_none() && formals.is_none() {
+                continue;
+            }
             let formals = formals.unwrap_or_default();
             let binds: std::collections::HashMap<String, Ty> =
                 formals.iter().cloned().zip(targs.iter().copied()).collect();
             if internal == target {
                 return binds;
             }
-            if let Some(supers) = supers {
-                for sup in supers {
-                    if let Ty::Obj(sup_internal, sup_args) = sup {
-                        let sup_targs = ty_subst_all(sup_args, &binds);
-                        q.push_back((
-                            super::jvm_class_map::to_jvm_type_name(sup_internal),
-                            sup_targs,
-                        ));
+            match (supers, &ci) {
+                (Some(supers), _) => {
+                    for sup in supers {
+                        if let Ty::Obj(sup_internal, sup_args) = sup {
+                            let sup_targs = ty_subst_all(sup_args, &binds);
+                            q.push_back((
+                                super::jvm_class_map::to_jvm_type_name(sup_internal),
+                                sup_targs,
+                            ));
+                        }
                     }
                 }
-            } else {
-                for i in ci.interfaces.iter_ids().chain(ci.super_class) {
-                    q.push_back((i, vec![]));
+                (None, Some(ci)) => {
+                    for i in ci.interfaces.iter_ids().chain(ci.super_class) {
+                        q.push_back((i, vec![]));
+                    }
                 }
+                (None, None) => {}
             }
         }
         std::collections::HashMap::new()
@@ -1061,6 +1072,10 @@ impl JvmLibraries {
                                     is_iface,
                                     self.cp.builtin_supertypes_name(internal_name),
                                     self.builtin_members_for_type_name(internal_name),
+                                    self.cp
+                                        .builtin_class_gsig_name(internal_name)
+                                        .map(|(formals, _)| formals)
+                                        .unwrap_or_default(),
                                 ));
                             }
                             // Otherwise the backend's curated minimal ABI for the well-known mapped builtins.
@@ -1138,6 +1153,22 @@ impl JvmLibraries {
                 // The member's parsed generic signature — carries type-variable binding facts so a caller can
                 // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
                 member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                // The JVM `Signature` attribute cannot spell a RECEIVER function type — `Cfg.() -> Unit`
+                // and `(Cfg) -> Unit` share the `Function1` erasure — so restore the distinction from
+                // `@Metadata`'s per-parameter `@ExtensionFunctionType` mark. Without it a member's
+                // receiver-lambda parameter reads as an ordinary function type and no lambda matches it.
+                if let (Some(gsig), Some(metadata)) = (member.generic_sig.as_mut(), member_metadata)
+                {
+                    mark_receiver_fun_params(
+                        gsig,
+                        &metadata
+                            .value_params
+                            .iter()
+                            .map(metadata::MetaValueParam::recv_fun)
+                            .collect::<Vec<_>>(),
+                        metadata.is_suspend(),
+                    );
+                }
                 member.set_suspend(member_metadata.is_some_and(metadata::MetaFn::is_suspend));
                 let value_arity = member
                     .params
@@ -1187,9 +1218,9 @@ impl JvmLibraries {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
                 if m.name == "<init>" {
-                    // Parse the ctor's generic signature so the resolver can infer a construction's type
-                    // arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend signature strings.
-                    member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                    // The ctor's generic signature (decoded above, marks restored) lets the resolver infer a
+                    // construction's type arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend
+                    // signature strings. Re-parsing the raw attribute here would drop the receiver marks.
                     constructors.push(member);
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
@@ -1864,6 +1895,31 @@ fn canonicalize_jvm_collections(ty: Ty) -> Ty {
     }
 }
 
+/// Restore the RECEIVER function-type marks a JVM `Signature` attribute cannot carry: for each value
+/// parameter `@Metadata` marks `@kotlin.ExtensionFunctionType`, turn the decoded `(R, …) -> T` into
+/// `R.(…) -> T`. A `suspend` callable's physical signature appends a `Continuation` the source parameter
+/// list does not have, so it is dropped before aligning. Applied positionally, and skipped unless the two
+/// lists then align 1:1 — a mismatch means they describe different parameters.
+fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool], suspend: bool) {
+    let source_params = gsig.params.len().saturating_sub(usize::from(suspend));
+    if source_params != recv_fun.len() {
+        return;
+    }
+    for (param, &receiver_fun) in gsig.params.iter_mut().take(source_params).zip(recv_fun) {
+        let Ty::Fun(sig) = *param else { continue };
+        if !receiver_fun || sig.has_receiver || sig.params.is_empty() {
+            continue;
+        }
+        *param = Ty::fun_with_shape(
+            sig.params.clone(),
+            sig.ret,
+            sig.context_count,
+            true,
+            sig.suspend,
+        );
+    }
+}
+
 /// Count the `Byte`/`Short` primitive parameters in a JVM method descriptor — the "narrowing" measure
 /// used to prefer the widest among overloads krusty's `Byte`/`Short`/`Int` → `Int` collapse made
 /// indistinguishable. Object (`L…;`) and array (`[`) params are skipped (a `B`/`S` inside a class name
@@ -1981,6 +2037,7 @@ fn builtin_library_type(
     is_interface: bool,
     supertypes: TypeNameList,
     members: Vec<LibraryMember>,
+    type_params: Vec<String>,
 ) -> LibraryType {
     LibraryType {
         is_public: true,
@@ -1999,7 +2056,7 @@ fn builtin_library_type(
         value_companion_fns: Vec::new(),
         value_underlying: None,
         alias_target: None,
-        type_params: Vec::new(),
+        type_params,
         sealed_subclasses: TypeNameList::new(),
         enum_entries: Vec::new(),
         value_ctor_has_default: false,
@@ -2627,15 +2684,19 @@ impl SymbolSource for JvmLibraries {
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
             }
-            // Extension PROPERTIES declared by the facade — `arr.lastIndex`, `list.indices`. Metadata
-            // records the property with its REAL accessor names (`JvmPropertySignature`), so the getter
-            // name is authoritative, never a `getX` guess. Facade parts are merged in the shared cached
-            // decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
+            // PROPERTIES declared by the facade — receiver-less TOP-LEVEL ones (`val plugin: Plugin`)
+            // and EXTENSION ones (`arr.lastIndex`, `list.indices`). Both are the callable namespace's
+            // property half, and both differ only by whether the accessors take a receiver parameter.
+            // Metadata records the property with its REAL accessor names (`JvmPropertySignature`), so the
+            // getter name is authoritative, never a `getX` guess. Facade parts are merged in the shared
+            // cached decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
             let mprops = self.cp.meta_properties_name(facade);
             for mp in mprops.iter() {
-                if mp.name != name || !mp.is_extension {
-                    continue; // this property name, extension only
+                if mp.name != name {
+                    continue; // this property name
                 }
+                // The accessors' receiver parameter: present iff the property is an extension.
+                let receiver_params = usize::from(mp.is_extension);
                 let mp = mp.clone();
                 let property_gsig = mp.generic_sig.clone();
                 let Some(getter_sig) = mp.getter else {
@@ -2655,7 +2716,7 @@ impl SymbolSource for JvmLibraries {
                 let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
                     continue;
                 };
-                if gparams.len() != 1 {
+                if gparams.len() != receiver_params {
                     continue;
                 }
                 let generic_receiver = property_gsig.as_ref().and_then(|gsig| gsig.receiver);
@@ -2680,7 +2741,7 @@ impl SymbolSource for JvmLibraries {
                 );
                 let setter = mp.setter.and_then(|setter_sig| {
                     let (sparams, sret) = parse_method_desc(&setter_sig.desc)?;
-                    if sparams.len() != 2 || sret != Ty::Unit {
+                    if sparams.len() != receiver_params + 1 || sret != Ty::Unit {
                         return None;
                     }
                     if !facade_class.methods.iter().any(|method| {
@@ -2701,12 +2762,16 @@ impl SymbolSource for JvmLibraries {
                     ))
                 });
                 props.push(PropertyInfo {
-                    kind: PropKind::Extension,
-                    receiver: generic_receiver.or_else(|| {
-                        Some(
+                    kind: if mp.is_extension {
+                        PropKind::Extension
+                    } else {
+                        PropKind::TopLevel
+                    },
+                    receiver: mp.is_extension.then(|| {
+                        generic_receiver.unwrap_or_else(|| {
                             mp.receiver_class
-                                .map_or(Ty::obj("kotlin/Any"), Ty::obj_name),
-                        )
+                                .map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
+                        })
                     }),
                     formals: property_gsig
                         .as_ref()
@@ -2775,7 +2840,14 @@ impl SymbolSource for JvmLibraries {
                             m.descriptor,
                             m.signature
                         );
-                        let generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                        // The provider-normalized signature is the single source of truth for every
+                        // carrier. For a `.class` member it also restores receiver function-type marks
+                        // that the raw JVM `Signature` attribute cannot spell; for a
+                        // `.kotlin_builtins` member there is no raw attribute at all, so the provider's
+                        // decoded signature is what preserves and binds its type parameters. Re-parsing
+                        // `m.signature` here would therefore lose facts in the former case and fail to
+                        // produce any signature in the latter.
+                        let generic_sig = m.generic_sig.clone();
                         // A `suspend fun` member's physical method appends a `Continuation` parameter
                         // and erases its return to `Object`; present the LOGICAL signature (drop the
                         // continuation, recover the real return from the `Continuation<T>` type
@@ -2909,12 +2981,7 @@ impl SymbolSource for JvmLibraries {
                         // JVM form (`java/util/Map`, when the member is found on a classpath supertype);
                         // map both to the builtin whose `@Metadata` declares the nullability.
                         let builtin_cn =
-                            super::jvm_class_map::jvm_collection_to_kotlin_type_name(cn)
-                                .or_else(|| {
-                                    super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(
-                                        cn,
-                                    )
-                                })
+                            super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(cn)
                                 .unwrap_or(cn);
                         let builtin_ret_nullable = !ret.is_reference()
                             && self.cp.builtin_member_ret_nullable_name(
@@ -3286,6 +3353,21 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 params: Vec::new(),
                 ret,
                 is_property: true,
+            });
+        }
+        // `MutableList.removeAt(Int): E` IS `java.util.List.remove(int)` — the function half of the
+        // same special-builtin renaming the properties above cover, so a class implementing
+        // `MutableList` must expose its `removeAt` override under the JVM name too. Keyed on the
+        // KOTLIN name, not the erased `java/util/List`: unlike `size`, this member exists only on the
+        // MUTABLE side, so a read-only `List` implementation that happens to declare an unrelated
+        // `removeAt` must not acquire a `remove(int)` bridge kotlinc would never emit.
+        if internal.matches("kotlin/collections/MutableList") {
+            members.push(crate::libraries::MappedInterfaceMember {
+                source_name: "removeAt".to_string(),
+                physical_name: "remove".to_string(),
+                params: vec![Ty::Int],
+                ret: Ty::obj("kotlin/Any"),
+                is_property: false,
             });
         }
         if internal.matches("kotlin/CharSequence") || internal.matches("java/lang/CharSequence") {
