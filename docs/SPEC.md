@@ -2403,6 +2403,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reported "operator cannot be applied to 'Any' and 'Int'" before the operator was ever consulted —
   the expectation has to be supplied when the arguments are typed, not after selection. Test:
   `tests/inline_vc_suspend_coverage_e2e.rs::inline_operator_fun`.
+- **The `sequence {}` / `iterator {}` gate asks who `yield` belongs to.** Those builders drive a
+  suspend lambda through `yield`/`yieldAll` suspension points, a state machine the pass does not model,
+  so the file is skipped. The gate matched the SPELLING, so an ordinary user method
+  (`class Buildee<T> { fun yield(arg: T) }`) skipped its file for no reason. It now gates on the
+  resolved owner being `kotlin.sequences.SequenceScope` — or on the call being unresolved, where
+  nothing rules the builder out. Tests:
+  `tests/scope_function_value_arg_e2e.rs::apply_accepts_receiver_function_value_argument`,
+  `tests/lower_bail_reason_e2e.rs::gated_corpus_cases_report_precise_lower_bail`.
 
 ## 8. Success criteria for the PoC
 

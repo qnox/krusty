@@ -388,6 +388,11 @@ fn lower_file_at_reporting_impl(
     // `yieldAll` suspension points — a state machine the pass doesn't model. Skip the whole file rather
     // than emit a `Sequence`/`Iterator` whose `iterator()`/`next()` has no body (an `AbstractMethodError`
     // at the for-loop / terminal operation). Detected by the builder's `yield`/`yieldAll` calls anywhere.
+    //
+    // The BUILDER's `yield`/`yieldAll` are members of `kotlin.sequences.SequenceScope`. A call the
+    // checker resolved to any OTHER owner is an ordinary user method that happens to share the name
+    // (`class Buildee<T> { fun yield(arg: T) }`), and gating on the spelling alone skipped those files
+    // for no reason. An unresolved call is gated too — nothing rules out the builder.
     let uses_yield_builder = file.decls.iter().any(|&d| {
         let body = match file.decl(d) {
             Decl::Fun(f) => match &f.body {
@@ -409,8 +414,13 @@ fn lower_file_at_reporting_impl(
                 .collect(),
             _ => Vec::new(),
         };
+        let builder_scope = |call: AstExprId| {
+            info.resolved_call_owner(call)
+                .is_none_or(|owner| owner.matches("kotlin/sequences/SequenceScope"))
+        };
         body.into_iter().chain(class_bodies).any(|e| {
-            expr_tree_calls_name(file, e, "yield") || expr_tree_calls_name(file, e, "yieldAll")
+            expr_tree_calls_name_where(file, e, "yield", &builder_scope)
+                || expr_tree_calls_name_where(file, e, "yieldAll", &builder_scope)
         })
     });
     if uses_yield_builder {
@@ -26632,15 +26642,28 @@ fn ir_array_element(t: &Ty) -> Option<Ty> {
 /// shifts them) no guards are emitted.
 /// Whether the expression tree rooted at `e` contains a CALL to the unqualified `name` — recursing FULLY
 /// through nested lambdas AND statement bodies (so a `sequence { for (…) { yield(i) } }` is found).
-fn expr_tree_calls_name(file: &ast::File, e: AstExprId, name: &str) -> bool {
+/// Whether the expression tree contains a call to `name` that `accept` admits — so a caller can ask
+/// about the call's RESOLUTION, not only its spelling.
+fn expr_tree_calls_name_where(
+    file: &ast::File,
+    e: AstExprId,
+    name: &str,
+    accept: &dyn Fn(AstExprId) -> bool,
+) -> bool {
     if let Expr::Call { callee, .. } = file.expr(e) {
-        if matches!(file.expr(*callee), Expr::Name(n) if n == name) {
+        if matches!(file.expr(*callee), Expr::Name(n) if n == name) && accept(e) {
             return true;
         }
     }
-    file.any_child_expr(e, &mut |c| expr_tree_calls_name(file, c, name), &mut |s| {
-        file.any_child_stmt(s, &mut |c| expr_tree_calls_name(file, c, name))
-    })
+    file.any_child_expr(
+        e,
+        &mut |c| expr_tree_calls_name_where(file, c, name, accept),
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                expr_tree_calls_name_where(file, c, name, accept)
+            })
+        },
+    )
 }
 
 fn param_checks_for(
