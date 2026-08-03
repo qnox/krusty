@@ -1622,14 +1622,31 @@ impl MetaFn {
     }
 
     pub fn member_call_sig(&self) -> CallSig {
-        let mut sig = CallSig::metadata_member(
+        let (lambda_receivers, lambda_receiver_params) = self.lambda_receiver_shape();
+        let mut sig = CallSig::metadata_function(
             self.value_params.len(),
             self.value_params.iter().map(|p| p.name.clone()).collect(),
             self.value_params.iter().map(|p| p.has_default()).collect(),
+            lambda_receivers,
+            lambda_receiver_params,
+            self.value_params.iter().map(|p| p.materialized()).collect(),
             self.vararg_index(),
         );
         sig.platform_nullable_params = self.value_params.iter().map(|p| p.nullable()).collect();
         sig
+    }
+
+    /// Decode the semantic receiver-function shape once for every metadata function consumer.
+    /// A concrete `Recv.() -> R` carries both the receiver type and the mark; a generic
+    /// `T.() -> R` carries only the mark and recovers `T` after call-site substitution.
+    pub(super) fn lambda_receiver_shape(&self) -> (Vec<Option<Ty>>, Vec<bool>) {
+        (
+            self.value_params
+                .iter()
+                .map(|p| p.recv_fun_receiver.map(crate::types::Ty::obj_name))
+                .collect(),
+            self.value_params.iter().map(|p| p.recv_fun()).collect(),
+        )
     }
 
     pub fn vararg_index(&self) -> Option<usize> {

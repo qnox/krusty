@@ -31,7 +31,9 @@ use crate::runtime::{
     TargetRuntime,
 };
 use crate::symbol_resolver::{InheritedNestedClassifier, SymbolResolver};
-use crate::types::{existing_type_name, stored_value_ty, type_name, Ty, TypeName, Visibility};
+use crate::types::{
+    existing_type_name, stored_value_ty, ty_mentions_param, type_name, Ty, TypeName, Visibility,
+};
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
@@ -154,9 +156,10 @@ pub fn lower_file_at(
 
 /// [`lower_file_at`] with a caller-owned `bail` sink (see [`lower_file_reporting`]).
 ///
-/// Ensures enough same-thread stack for the `expr_depth` bound (500), so the depth guard — not the
-/// calling thread's stack — limits expression nesting without moving non-`Send` compiler state
-/// (see [`crate::wide_stack`]).
+/// Enter lowering on a same-thread grown stack segment; `Lower::expr` rechecks the remaining stack
+/// per recursion level so paths with large helper frames can chain further segments before
+/// reaching [`crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH`]. This keeps the explicit depth guard —
+/// not the calling thread's stack — authoritative without moving non-`Send` compiler state.
 pub fn lower_file_at_reporting(
     file: &ast::File,
     file_index: u32,
@@ -1371,6 +1374,94 @@ fn lower_file_at_reporting_impl(
                     });
                 methods.entry(gname).or_default().push((mi, fid, ty));
                 method_fids.push(fid);
+            }
+            // Member extension properties (`val Int.x: T get() = …`) → `getX(Recv)`/`setX(Recv, T)`
+            // INSTANCE methods (no backing field — an extension property can't have one): exactly a
+            // member extension FUNCTION of that name, dispatch `this` at slot 0 and the extension
+            // receiver as JVM param 0. Bodies lowered in pass 2; reads/writes call the accessor via
+            // the checker's ExprLowering/StmtLowering handoff.
+            for (pi, p) in c
+                .body_props
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| is_member_ext_prop(p))
+            {
+                let sig = member_extension_property_plan(syms, c, pi)?;
+                // Only the concrete shape: a receiver/return mentioning a class type parameter's own
+                // type erases through bounds the read/write handoff doesn't carry, and a value-class
+                // receiver/return needs the boxed/mangled form — both stay gated (skip, never
+                // miscompile).
+                if sig.has_type_params
+                    || ty_mentions_param(sig.receiver, &c.type_params)
+                    || ty_mentions_param(sig.ret, &c.type_params)
+                    || lo.value_class_underlying(sig.receiver.non_null()).is_some()
+                    || lo.value_class_underlying(sig.ret.non_null()).is_some()
+                {
+                    lo.set_bail("gate:member-ext-prop-generic");
+                    return None;
+                }
+                let (receiver_ir, ret_ir) = sig.ir_types(p);
+                let ret = sig.ret;
+                let gname = property_getter_name(&p.name);
+                let getter_params = [receiver_ir];
+                if registered_method_signature(&methods, &lo.ir, lo.runtime, &gname, &getter_params)
+                {
+                    // The physical accessor parameter signature is what Kotlin/JVM overload
+                    // resolution owns. A source function or previously synthesized accessor with
+                    // the same name and parameters cannot coexist, regardless of which Kotlin
+                    // declaration shape produced it.
+                    lo.set_bail("gate:member-ext-prop-signature-clash");
+                    return None;
+                }
+                let mi = method_fids.len() as u32;
+                let gfid = lo.ir.add_fun(IrFunction {
+                    name: gname.clone(),
+                    params: getter_params.to_vec(),
+                    ret: ret_ir,
+                    body: None,
+                    is_static: false,
+                    dispatch_receiver: Some(type_name(&internal)),
+                    param_checks: vec![None],
+                });
+                if p.visibility.is_private() {
+                    lo.ir.private_methods.insert(gfid);
+                }
+                // A fresh declaration (the gate excludes `override`) — keeps the backend's bridge
+                // derivation (#454) from synthesizing a bridge over a same-named inherited generic.
+                lo.ir.fresh_method_decls.push(gfid);
+                methods.entry(gname).or_default().push((mi, gfid, ret));
+                method_fids.push(gfid);
+                if p.is_var {
+                    let setter = p.setter.as_ref()?;
+                    let sname = property_setter_name(&p.name);
+                    let setter_params = [receiver_ir, ret_ir];
+                    if registered_method_signature(
+                        &methods,
+                        &lo.ir,
+                        lo.runtime,
+                        &sname,
+                        &setter_params,
+                    ) {
+                        lo.set_bail("gate:member-ext-prop-signature-clash");
+                        return None;
+                    }
+                    let mi = method_fids.len() as u32;
+                    let sfid = lo.ir.add_fun(IrFunction {
+                        name: sname.clone(),
+                        params: setter_params.to_vec(),
+                        ret: ty_to_ir(Ty::Unit),
+                        body: None,
+                        is_static: false,
+                        dispatch_receiver: Some(type_name(&internal)),
+                        param_checks: vec![None, None],
+                    });
+                    if setter.is_private {
+                        lo.ir.private_methods.insert(sfid);
+                    }
+                    lo.ir.fresh_method_decls.push(sfid);
+                    methods.entry(sname).or_default().push((mi, sfid, Ty::Unit));
+                    method_fids.push(sfid);
+                }
             }
             // Delegated body properties (`val/var x by Del()`) → a `getX()` (and `setX()` for a `var`)
             // instance method that calls the delegate's `getValue`/`setValue`. Bodies built in pass 2.
@@ -2817,6 +2908,64 @@ fn lower_file_at_reporting_impl(
                     let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                     let body = p.getter.clone().unwrap();
                     lo.lower_body(&body, &ret_ty, fid)?;
+                }
+                // Member extension property accessors → `getX(Recv)`/`setX(Recv, T)`: the
+                // member-ext-FUN scope layout — dispatch `this` at slot 0 (`$dispatch`), extension
+                // `this` at slot 1.
+                for (pi, p) in c
+                    .body_props
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| is_member_ext_prop(p))
+                {
+                    let sig = member_extension_property_plan(syms, c, pi)?;
+                    let (receiver_ir, ret_ir) = sig.ir_types(p);
+                    // Link the accessor by name AND parameter list: a plain computed property of the
+                    // same name registers `getX()` first, and receiver overloads share `getX` —
+                    // first-by-name would write this body into the wrong fid.
+                    let gname = property_getter_name(&p.name);
+                    let (_, _, gfid, _) =
+                        lo.link_local_method(&internal, &gname, &[receiver_ir])?;
+                    lo.scope.clear();
+                    lo.boxed_elem.clear();
+                    lo.next_value = 0;
+                    lo.cur_class = Some(type_name(&internal));
+                    lo.cur_fn_name = gname;
+                    lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
+                    lo.ir
+                        .fn_params
+                        .entry(gfid)
+                        .or_insert_with(|| FnParamInfo::names(vec!["$receiver".to_string()]));
+                    let dispatch_v = lo.fresh_value();
+                    lo.scope
+                        .push(("$dispatch".to_string(), dispatch_v, Ty::obj(&internal)));
+                    let this_v = lo.fresh_value();
+                    lo.scope.push(("this".to_string(), this_v, sig.receiver));
+                    let ret_ty = lo.ir.functions[gfid as usize].ret;
+                    lo.lower_body(&p.getter.clone().unwrap(), &ret_ty, gfid)?;
+                    if let Some(setter) = p.setter.as_ref().filter(|s| s.body.is_some()).cloned() {
+                        let sname = property_setter_name(&p.name);
+                        let (_, _, sfid, _) =
+                            lo.link_local_method(&internal, &sname, &[receiver_ir, ret_ir])?;
+                        lo.scope.clear();
+                        lo.boxed_elem.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(type_name(&internal));
+                        lo.cur_fn_name = sname;
+                        lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
+                        let setter_param = ast::setter_param_or_value(setter.param.as_ref());
+                        lo.ir.fn_params.entry(sfid).or_insert_with(|| {
+                            FnParamInfo::names(vec!["$receiver".to_string(), setter_param.clone()])
+                        });
+                        let dispatch_v = lo.fresh_value();
+                        lo.scope
+                            .push(("$dispatch".to_string(), dispatch_v, Ty::obj(&internal)));
+                        let this_v = lo.fresh_value();
+                        lo.scope.push(("this".to_string(), this_v, sig.receiver));
+                        let v_v = lo.fresh_value();
+                        lo.scope.push((setter_param, v_v, sig.ret));
+                        lo.lower_body(&setter.body.clone().unwrap(), &Ty::Unit, sfid)?;
+                    }
                 }
                 // Field-backed custom accessors (`val x = init get() = field…`): overwrite the default
                 // `getX`/`setX` body (built in pass 1) with the lowered custom accessor, binding the
@@ -4611,7 +4760,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || is_field_accessor_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || p.delegate.is_some())
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || is_field_accessor_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || is_member_ext_prop(p) || p.delegate.is_some())
 }
 
 /// An `enum class` the IR can emit: a primary constructor of `val`/`var` props, concrete (non-extension,
@@ -4859,6 +5008,125 @@ fn is_computed_prop(p: &ast::PropDecl) -> bool {
     // The type may be inferred from the getter body (`val xx get() = x`) — no explicit annotation needed.
 }
 
+/// A MEMBER EXTENSION PROPERTY (`class C { val Int.x: T get() = … }`): an extension receiver and a
+/// custom getter (plus a bodied custom setter for a `var`) — never an initializer, a `field` read,
+/// or a delegate (an extension property can't have a backing field). Its accessor lowers exactly
+/// like a member extension FUNCTION named `getX`/`setX` (dispatch `this` at slot 0, the extension
+/// receiver as JVM param 0). Still excluded SEMANTICALLY in pass 1 (the signature table is needed):
+/// a receiver/return mentioning a class type parameter's own type and a value-class
+/// receiver/return. Cross-class extension shapes (open/override/abstract) register no inherited
+/// accessor, so they stay gated here.
+fn is_member_ext_prop(p: &ast::PropDecl) -> bool {
+    p.receiver.is_some()
+        && !p.is_abstract
+        && !p.is_open
+        && !p.is_override
+        && !p.is_lateinit
+        && p.init.is_none()
+        && p.delegate.is_none()
+        && !p.getter_reads_field
+        && p.getter.is_some()
+        && p.context_params.is_empty()
+        && p.type_params.is_empty()
+        && (!p.is_var || p.setter.as_ref().is_some_and(|s| s.body.is_some()))
+}
+
+#[derive(Clone, Copy)]
+struct MemberExtensionPropertyPlan {
+    receiver: Ty,
+    ret: Ty,
+    has_type_params: bool,
+}
+
+impl MemberExtensionPropertyPlan {
+    /// Physical accessor types shared by both lowering passes. Declared `?` markers stay attached
+    /// for value-representation and metadata decisions without changing overload-slot selection.
+    fn ir_types(self, property: &ast::PropDecl) -> (Ty, Ty) {
+        let receiver = ty_to_ir(self.receiver);
+        let receiver = if property
+            .receiver
+            .as_ref()
+            .is_some_and(|reference| reference.nullable())
+        {
+            mark_nullable(receiver)
+        } else {
+            receiver
+        };
+        let ret = ty_to_ir(self.ret);
+        let ret = if property
+            .ty
+            .as_ref()
+            .is_some_and(|reference| reference.nullable())
+        {
+            mark_nullable(ret)
+        } else {
+            ret
+        };
+        (receiver, ret)
+    }
+}
+
+/// Resolve the declaration-time signature used by both accessor registration and body lowering.
+///
+/// The semantic table stores same-named extension properties in source order. Count every earlier
+/// receiver property—not only shapes the lowering gate currently accepts—because unsupported
+/// declarations still occupy their semantic slot. Keeping this calculation in one place prevents
+/// pass 1 from registering one overload while pass 2 links and overwrites another overload's body.
+fn member_extension_property_plan(
+    symbols: &FrontendSymbols,
+    class: &ast::ClassDecl,
+    property_index: usize,
+) -> Option<MemberExtensionPropertyPlan> {
+    let property = class.body_props.get(property_index)?;
+    let overload_index = class.body_props[..property_index]
+        .iter()
+        .filter(|candidate| candidate.name == property.name && candidate.receiver.is_some())
+        .count();
+    let signature = symbols
+        .classes
+        .get(&class.name)?
+        .member_ext_props(&property.name)
+        .get(overload_index)?;
+    Some(MemberExtensionPropertyPlan {
+        receiver: signature.receiver_ty(),
+        ret: signature.ret(),
+        has_type_params: !signature.type_params().is_empty(),
+    })
+}
+
+/// Whether a class method with this physical JVM signature is already registered.
+///
+/// The method table contains source methods and synthesized accessors together. Checking that one
+/// shared table prevents a new accessor from using a declaration-origin branch (method versus
+/// property, ordinary versus extension) to evade Kotlin/JVM's name-plus-physical-parameter rule.
+fn registered_method_signature(
+    methods: &HashMap<String, Vec<(u32, u32, Ty)>>,
+    ir: &IrFile,
+    runtime: &dyn TargetRuntime,
+    name: &str,
+    params: &[Ty],
+) -> bool {
+    // Ask the target runtime for the physical descriptor instead of approximating it from source
+    // types. Reference nullability and generic arguments are not descriptor components, and
+    // platform/value representations belong to the target rather than common lowering. A
+    // descriptor that cannot be formed is unsafe to register and is conservatively treated as
+    // occupied.
+    let Some(proposed) = runtime.method_descriptor(params, Ty::Unit) else {
+        return true;
+    };
+    methods.get(name).is_some_and(|overloads| {
+        overloads.iter().any(|(_, function, _)| {
+            ir.functions
+                .get(*function as usize)
+                .is_some_and(|function| {
+                    runtime
+                        .method_descriptor(&function.params, Ty::Unit)
+                        .is_none_or(|registered| registered == proposed)
+                })
+        })
+    })
+}
+
 /// A body property with a real backing field — neither a computed property (custom getter, no field)
 /// nor an `abstract` one (emitted as an abstract `getX()`, the field lives on the subclass) nor a
 /// delegated one (`by Del()` — its field is the synthetic `x$delegate`, accessor calls `getValue`).
@@ -4867,7 +5135,13 @@ fn is_backing_field_prop(p: &ast::PropDecl) -> bool {
     // `companion object`, or at top level, where it compiles to a `public static final` + `ConstantValue`
     // field (emitted on the static path) and every read is inlined. Excluding it here also suppresses the
     // `getX()` accessor (kotlinc emits none for a const).
-    !p.is_const && !is_computed_prop(p) && !p.is_abstract && p.delegate.is_none()
+    // An EXTENSION property can't have a backing field either (kotlinc rejects an initializer) —
+    // exclude it here so no shape ever synthesizes one for it.
+    !p.is_const
+        && !is_computed_prop(p)
+        && !p.is_abstract
+        && p.delegate.is_none()
+        && p.receiver.is_none()
 }
 
 /// A backing-field property whose accessor is CUSTOM and reads/writes `field` (`val x = init get() =
@@ -5952,7 +6226,11 @@ impl<'a> Lower<'a> {
             .scope
             .iter()
             .rev()
-            .find(|(name, _, ty)| name == "this" && *ty == receiver)
+            // A member extension scope names the dispatch receiver `$dispatch` (extension `this` is
+            // the extension receiver); the checker's recorded receiver type still selects the right
+            // one — when both are in scope with the same type, `.rev()` finds the extension `this`
+            // first (it shadows the dispatch receiver, matching resolution).
+            .find(|(name, _, ty)| (name == "this" || name == "$dispatch") && *ty == receiver)
             .map(|(_, value, _)| *value)?;
         Some(RecordedImplicitPropertyWrite {
             receiver_value: value,
@@ -14215,6 +14493,27 @@ impl<'a> Lower<'a> {
         None
     }
 
+    /// The accessor call for a MEMBER EXTENSION PROPERTY read: dispatch `this` from the
+    /// implicit-receiver scope (like a member extension function call), the read receiver coerced
+    /// to the declared extension receiver as JVM argument 0.
+    fn lower_member_extension_property_read(
+        &mut self,
+        recv: u32,
+        name: &str,
+        owner: TypeName,
+        ext_receiver: Ty,
+        prop_ty: Ty,
+    ) -> Option<u32> {
+        let gname = property_getter_name(name);
+        let dispatch = self.member_extension_dispatch_value(owner)?;
+        let recv = self.emit_type_op(IrTypeOp::ImplicitCoercion, recv, ty_to_ir(ext_receiver));
+        let method_params = vec![ext_receiver];
+        let (class, index, _, linked_ret) =
+            self.link_local_method(&owner.render(), &gname, &method_params)?;
+        let call = self.emit_method_call(class, index, dispatch, vec![Some(recv)]);
+        Some(self.coerce_to_static(call, prop_ty, linked_ret))
+    }
+
     fn lower_member_read_on(&mut self, recv: u32, rt: Ty, name: &str, e: AstExprId) -> Option<u32> {
         // Resolve against the NON-NULL type. A receiver whose static type keeps its `?` (a smart-cast /
         // `!!` value bound to a call-result local, whose narrowing krusty doesn't propagate to the read
@@ -14241,6 +14540,15 @@ impl<'a> Lower<'a> {
             }
             let read = self.add_property_read(recv, *owner, name, ty, *interface);
             return Some(read);
+        }
+        // A MEMBER EXTENSION PROPERTY read reached through the implicit-receiver path.
+        if let Some(ExprLowering::MemberExtensionPropertyRead {
+            owner,
+            receiver,
+            ty,
+        }) = self.info.expr_lowers.get(&e).cloned()
+        {
+            return self.lower_member_extension_property_read(recv, name, owner, receiver, ty);
         }
         let resolved = self.info.resolved_member(e).cloned().map(|r| {
             let m = r.member;
@@ -17568,6 +17876,25 @@ impl<'a> Lower<'a> {
             let write = self.add_property_write(r, owner, name, v, ty, interface);
             return Some(write);
         }
+        // A `var` MEMBER EXTENSION PROPERTY write (`i.foo = v` where `class C { var Int.foo }`) —
+        // the write analogue of the read in `lower_member_read_on`: call the owner's
+        // `setX(Recv, T)` accessor with dispatch `this` from the implicit-receiver scope.
+        if let Some(StmtLowering::MemberExtensionPropertyWrite {
+            owner,
+            receiver: recv_ty,
+            ty,
+        }) = self.info.stmt_lowers.get(&stmt).cloned()
+        {
+            let sname = property_setter_name(name);
+            let dispatch = self.member_extension_dispatch_value(owner)?;
+            let r = self.expr(receiver)?;
+            let r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, ty_to_ir(recv_ty));
+            let v = self.lower_arg(value, &ty_to_ir(ty))?;
+            let method_params = vec![recv_ty, ty];
+            let (class, index, _, _) =
+                self.link_local_method(&owner.render(), &sname, &method_params)?;
+            return Some(self.emit_method_call(class, index, dispatch, vec![Some(r), Some(v)]));
+        }
         // A property of a class THIS compilation declares. Same rule as everywhere else: name the
         // property, and let the backend decide whether the store is a direct field write (legal only
         // inside the declaring class, where the backing field is reachable) or the `setX()` accessor.
@@ -18835,11 +19162,15 @@ impl<'a> Lower<'a> {
         // Guard against a stack overflow on a pathologically deep expression (a stress test with
         // thousands of nested operators): bail past the limit so the file is skipped, not crashed.
         self.expr_depth += 1;
-        if self.expr_depth > 500 {
+        if self.expr_depth > crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH {
             self.expr_depth -= 1;
             return None;
         }
-        let r = self.expr_inner(e);
+        // Grow the stack per level, not only at the pass entry: a deep genuine nesting (e.g. a
+        // 450-level call chain) stacks frames far larger per level than the `&&`-chain sizing the
+        // entry reserve was measured against, so 500 levels can overrun any single grown segment
+        // (see [`crate::wide_stack`]; the checker's `expr_with_context` grows the same way).
+        let r = crate::wide_stack::on_wide_stack(|| self.expr_inner(e));
         self.expr_depth -= 1;
         // Record the expression's LOGICAL (source) type verbatim, keyed by its IR id — the value-class
         // pass reads it to recover a value's representation when the IR node alone is ambiguous (a library
@@ -20587,6 +20918,24 @@ impl<'a> Lower<'a> {
                     .unwrap_or_else(|| self.info.ty(receiver));
                 let receiver = self.lower_arg(receiver, &target)?;
                 return Some(self.emit_extension_property_get(e, *getter, receiver));
+            }
+            // A MEMBER EXTENSION PROPERTY read (`1.foo` where `class C { val Int.foo }`): the
+            // checker selected the declaring owner — call its `getX(Recv)` accessor with dispatch
+            // `this` from the implicit-receiver scope.
+            if let Some(ExprLowering::MemberExtensionPropertyRead {
+                owner,
+                receiver: ext_receiver,
+                ty,
+            }) = self.info.expr_lowers.get(&e).cloned()
+            {
+                let recv = self.expr(receiver)?;
+                return self.lower_member_extension_property_read(
+                    recv,
+                    &name,
+                    owner,
+                    ext_receiver,
+                    ty,
+                );
             }
             // Reading an annotation member (`a.x`, `a` typed as the annotation interface): the JVM
             // accessor is the bare member name `x()` (not `getX`), dispatched by `invokeinterface`.

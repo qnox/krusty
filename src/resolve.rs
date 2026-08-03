@@ -19,7 +19,7 @@ use crate::libraries::{
 use crate::names::{nested_internal_name_candidates, property_getter_name, property_setter_name};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
-use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
+use crate::types::{existing_type_name, ty_mentions_param, type_name, Ty, TypeName, Visibility};
 
 mod source_fallback;
 pub(crate) use source_fallback::SourceFallbackPlatform;
@@ -512,6 +512,47 @@ pub struct MemberExtPropSig {
     type_param_bounds: Vec<Ty>,
     is_var: bool,
     visibility: Visibility,
+    /// Accessor visibility is independent from the property's visibility (`public var ... private
+    /// set`). Keep it on the semantic signature, as ordinary [`DeclaredPropertySig`] does, so every
+    /// implicit-dispatch use is checked before lowering and no backend/source-origin branch has to
+    /// reconstruct it from syntax.
+    setter_visibility: Option<Visibility>,
+}
+
+impl MemberExtPropSig {
+    /// The DECLARED extension receiver (`Int` in `val Int.x: T`).
+    pub(crate) fn receiver_ty(&self) -> Ty {
+        self.receiver
+    }
+
+    /// The property's type (with getter-body inference already applied).
+    pub(crate) fn ret(&self) -> Ty {
+        self.ret
+    }
+
+    /// The property's own type parameters (`val <T> T.x`); empty for the supported shape.
+    pub(crate) fn type_params(&self) -> &[String] {
+        &self.type_params
+    }
+}
+
+/// Visibility of the setter declared by any body property.
+///
+/// Ordinary and member-extension properties use the same Kotlin accessor rule. Centralizing it
+/// keeps the semantic signatures consistent and prevents the extension path from becoming a
+/// syntax-origin special case that forgets `private set` while the ordinary path remembers it.
+fn declared_setter_visibility(property: &crate::ast::PropDecl) -> Option<Visibility> {
+    property.is_var.then(|| {
+        if property
+            .setter
+            .as_ref()
+            .is_some_and(|setter| setter.is_private)
+        {
+            Visibility::Private
+        } else {
+            property.visibility
+        }
+    })
 }
 
 /// Everything a caller needs about a declared Kotlin class.
@@ -1059,6 +1100,99 @@ fn call_arg_kind(file: &File, expression: ExprId, ty: Ty) -> CallArgKind {
     }
 }
 
+/// A lambda argument's expected shape at one parameter position of a selected classpath
+/// candidate: the VALUE parameter types, plus the receiver type when the parameter is a receiver
+/// function type (`Recv.() -> R`). The lambda checks against this shape so its implicit
+/// `this`/`it` bind exactly as kotlinc binds them.
+#[derive(Clone, Debug)]
+struct LambdaExpectation {
+    value_params: Vec<Ty>,
+    receiver: Option<Ty>,
+}
+
+/// The expected shape of a lambda argument against the selected candidate's `param`: a Kotlin
+/// function-typed parameter contributes its input types — the receiver of an
+/// `@ExtensionFunctionType` parameter (`Recv.() -> R`, marked on the call sig's
+/// `lambda_receiver_params`) split from the leading position — and a Java SAM interface
+/// contributes its single method's parameter types. Any other parameter gives no expectation.
+fn lambda_expectation(
+    lib: &dyn crate::libraries::SemanticPlatform,
+    candidate: &crate::libraries::LibraryMember,
+    index: usize,
+    param: Ty,
+) -> Option<LambdaExpectation> {
+    let has_receiver = candidate
+        .call_sig
+        .lambda_receiver_params
+        .get(index)
+        .copied()
+        .unwrap_or(false);
+    let metadata_receiver = candidate
+        .call_sig
+        .lambda_receivers
+        .get(index)
+        .copied()
+        .flatten();
+    match param.non_null() {
+        Ty::Fun(sig) => {
+            let (receiver, skip) = if has_receiver {
+                // A receiver mark without a receiver parameter means the call sig and the
+                // decoded type disagree — decline rather than type the lambda against a
+                // truncated shape. Prefer the call-site-substituted function input because it
+                // retains declaration type arguments and nullability (`List<String>`, not raw
+                // `List`). The compact metadata receiver stores only a classifier, so it is a
+                // recovery source when the function shape has been erased, never a precision
+                // upgrade. A generic `T.() -> R` also necessarily resolves through this
+                // substituted input because metadata has no receiver classifier for `T`.
+                let receiver = sig
+                    .params
+                    .get(sig.context_count)
+                    .copied()
+                    .or(metadata_receiver)?;
+                (Some(receiver), sig.context_count + 1)
+            } else {
+                (None, sig.context_count)
+            };
+            Some(LambdaExpectation {
+                value_params: sig.params.get(skip..).unwrap_or_default().to_vec(),
+                receiver,
+            })
+        }
+        param if has_receiver => {
+            // A metadata-primary receiver mark can outlive an absent JVM `Signature` (including a
+            // krusty-emitted provider). Preserve that semantic fact instead of dropping back to a
+            // standalone lambda. If CallSig carries decoded input types, split them exactly; else
+            // retain the erased FunctionN arity with `Error` placeholders so explicit lambda
+            // parameters still get the right count without inventing concrete types.
+            let receiver = metadata_receiver?;
+            let context_count = candidate
+                .call_sig
+                .lambda_context_counts
+                .get(index)
+                .copied()
+                .unwrap_or_default();
+            let decoded = candidate.call_sig.lambda_param_types.get(index);
+            let value_params = decoded
+                .filter(|params| !params.is_empty())
+                .map(|params| params.get(context_count + 1..).unwrap_or_default().to_vec())
+                .unwrap_or_else(|| {
+                    let arity = lib.function_like_arity(param).unwrap_or(1);
+                    vec![Ty::Error; arity.saturating_sub(context_count + 1)]
+                });
+            Some(LambdaExpectation {
+                value_params,
+                receiver: Some(receiver),
+            })
+        }
+        param => crate::symbol_resolver::classpath_sam_signature(lib, param).map(|sam| {
+            LambdaExpectation {
+                value_params: sam.params,
+                receiver: None,
+            }
+        }),
+    }
+}
+
 fn positional_candidate_score(
     params: &[Ty],
     vararg: bool,
@@ -1426,7 +1560,21 @@ type GenericMemberValueOperandSlots =
 
 type MappedNamedArgs = (Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>);
 
-type MemberExtensionProperty = (Ty, bool, Visibility, TypeName, ImplicitReceiver);
+/// One member extension property selected for a concrete receiver and implicit dispatch scope.
+///
+/// This used to be a positional tuple. Naming the independently meaningful receiver, dispatch,
+/// property, and accessor fields prevents a later handoff from accidentally checking the public
+/// property visibility when it is the setter's narrower visibility that governs a write.
+#[derive(Clone, Copy)]
+struct MemberExtensionProperty {
+    ty: Ty,
+    is_var: bool,
+    visibility: Visibility,
+    setter_visibility: Option<Visibility>,
+    owner: TypeName,
+    dispatch_receiver: ImplicitReceiver,
+    declared_receiver: Ty,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
@@ -5163,6 +5311,7 @@ fn collect_signatures_with_cp_impl(
                                         .collect::<Vec<_>>(),
                                     is_var: bp.is_var,
                                     visibility: bp.visibility,
+                                    setter_visibility: declared_setter_visibility(bp),
                                 });
                             continue;
                         }
@@ -5179,13 +5328,7 @@ fn collect_signatures_with_cp_impl(
                                 is_const: bp.is_const,
                                 getter_name: property_getter_name(&bp.name),
                                 setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
-                                setter_visibility: bp.is_var.then(|| {
-                                    if bp.setter.as_ref().is_some_and(|setter| setter.is_private) {
-                                        Visibility::Private
-                                    } else {
-                                        bp.visibility
-                                    }
-                                }),
+                                setter_visibility: declared_setter_visibility(bp),
                                 has_custom_getter: bp.getter.is_some() || bp.delegate.is_some(),
                                 // An abstract property is necessarily overridable even when its
                                 // source omitted the redundant `open` modifier.
@@ -6497,17 +6640,33 @@ fn take_unanimous_mapping_error<T>(
 }
 
 fn call_argument_parameter_indices(
-    args: &[ExprId],
+    argument_count: usize,
+    parameter_count: usize,
     names: Option<&[Option<String>]>,
     trailing_lambda: bool,
     sig: &CallSig,
 ) -> Option<Vec<usize>> {
-    let slots = map_call_sig_args_with_trailing(args, names, sig, trailing_lambda).ok()?;
-    args.iter()
+    // Map stable source indices rather than expression/type values. Expressions may be repeated
+    // syntactically and partial types deliberately contain several identical `None` entries for
+    // postponed lambdas; indices make the inversion unambiguous for every call origin.
+    let arguments = (0..argument_count).collect::<Vec<_>>();
+    let slots = map_call_args(
+        &arguments,
+        names,
+        &sig.param_names,
+        parameter_count,
+        sig.required,
+        &sig.param_defaults,
+        sig.vararg_index,
+        trailing_lambda,
+    )
+    .ok()?;
+    arguments
+        .into_iter()
         .map(|argument| {
             slots
                 .iter()
-                .position(|slot| slot.as_ref() == Some(argument))
+                .position(|slot| *slot == Some(argument))
                 .or(sig.vararg_index)
         })
         .collect()
@@ -6521,7 +6680,13 @@ fn module_member_lambda_shape(
     trailing_lambda: bool,
     is_inline: bool,
 ) -> Option<ModuleMemberLambdaShape> {
-    let indices = call_argument_parameter_indices(args, names, trailing_lambda, &member.call_sig)?;
+    let indices = call_argument_parameter_indices(
+        args.len(),
+        member.params.len(),
+        names,
+        trailing_lambda,
+        &member.call_sig,
+    )?;
     Some(ModuleMemberLambdaShape {
         param_types: indices
             .iter()
@@ -8404,24 +8569,6 @@ fn unify_ref(
     }
 }
 
-fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
-    match ty {
-        Ty::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
-        Ty::Obj(_, arguments) => arguments
-            .iter()
-            .any(|argument| ty_mentions_param(*argument, names)),
-        Ty::Fun(signature) => {
-            signature
-                .params
-                .iter()
-                .any(|parameter| ty_mentions_param(*parameter, names))
-                || ty_mentions_param(signature.ret, names)
-        }
-        Ty::Nullable(inner) => ty_mentions_param(*inner, names),
-        _ => false,
-    }
-}
-
 fn is_function_property_shape(ty: Ty) -> bool {
     matches!(ty, Ty::Fun(_)) || matches!(ty, Ty::Nullable(inner) if matches!(*inner, Ty::Fun(_)))
 }
@@ -9963,6 +10110,16 @@ pub enum ExprLowering {
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
     },
+    /// `recv.name` resolved to a MEMBER EXTENSION PROPERTY (`class C { val Int.x: T }`) — the
+    /// read lowers to a call of the owner's `getX(Recv)` accessor: the dispatch receiver comes
+    /// from the implicit-receiver scope (like a member extension function call), and `recv` is
+    /// passed as JVM argument 0. `owner` declares the property; `receiver` is the DECLARED
+    /// (substituted) extension receiver the accessor takes; `ty` is the property's type.
+    MemberExtensionPropertyRead {
+        owner: TypeName,
+        receiver: Ty,
+        ty: Ty,
+    },
     /// A Kotlin invoke-operator call (`a(args)`, equivalently `a.invoke(args)`) selected by the
     /// checker. The one convention covers both a function VALUE receiver (`Ty::Fun`, lowered to a
     /// direct function invocation) and a non-function receiver carrying a member `operator fun invoke`
@@ -10056,6 +10213,14 @@ pub enum StmtLowering {
         owner: TypeName,
         ty: Ty,
         interface: bool,
+    },
+    /// `recv.name = value` resolved to a `var` MEMBER EXTENSION PROPERTY — the write analogue of
+    /// [`ExprLowering::MemberExtensionPropertyRead`]. Lowering calls the owner's
+    /// `setX(Recv, T)` accessor with the dispatch receiver as `this`.
+    MemberExtensionPropertyWrite {
+        owner: TypeName,
+        receiver: Ty,
+        ty: Ty,
     },
     /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
     /// bytecode (kotlinc drops it at codegen). The lowerer skips it entirely.
@@ -12434,9 +12599,11 @@ pub fn check_file_in_source_set(
     check_file_on_checker_stack(file, file_index, Some(files), syms, diags)
 }
 
-/// Run the check with enough same-thread stack for the `expr_depth` bound (500), so the depth guard
-/// — not the calling thread's stack — limits expression nesting in every build profile without
-/// moving non-`Send` symbols or caller-defined platform state (see [`crate::wide_stack`]).
+/// Enter the check on a same-thread grown stack segment; `expr_with_context` rechecks the remaining
+/// stack per recursion level so paths with large helper frames can chain further segments before
+/// reaching [`crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH`]. This keeps the explicit depth guard —
+/// not the calling thread's stack — authoritative without moving non-`Send` symbols or
+/// caller-defined platform state (see [`crate::wide_stack`]).
 fn check_file_on_checker_stack(
     file: &File,
     file_index: u32,
@@ -14097,29 +14264,13 @@ impl<'a> Checker<'a> {
         None
     }
 
-    /// Map each source argument onto the parameter slot its LABEL names (`fold(onFailure = …,
-    /// onSuccess = …)`); unlabelled arguments stay positional. `None` when a label names no parameter
-    /// of this overload — that overload cannot take the call at all.
-    fn named_argument_map(
-        overload: &crate::libraries::FunctionInfo,
-        arg_names: &[Option<String>],
-        argument_count: usize,
-    ) -> Option<Vec<usize>> {
-        let param_names = &overload.call_sig.param_names;
-        (0..argument_count)
-            .map(|i| match arg_names.get(i).and_then(|n| n.as_ref()) {
-                Some(label) => param_names.iter().position(|p| p == label),
-                None => Some(i),
-            })
-            .collect()
-    }
-
     fn extension_lambda_shape(
         &self,
         receiver: Ty,
         name: &str,
         arg_tys: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let src = self.fed_source();
         let fs = crate::libraries::FunctionSet {
@@ -14147,24 +14298,18 @@ impl<'a> Checker<'a> {
                     Some(self.file_index),
                 )
             {
-                // A labelled argument binds by NAME, not by position: without this the lambda at
-                // source position 0 would be typed from parameter 0 and `fold(onFailure = …,
-                // onSuccess = …)` would compile each lambda against the other's parameter type.
-                let named = arg_names
-                    .filter(|names| names.iter().any(Option::is_some))
-                    .and_then(|names| Self::named_argument_map(o, names, arg_tys.len()));
-                let argument_map = match (arg_names, named) {
-                    (Some(names), None) if names.iter().any(Option::is_some) => continue,
-                    (_, Some(map)) => map,
-                    _ => {
-                        let Some(map) = crate::symbol_resolver::trailing_default_arg_indices(
-                            o.semantic_params().len(),
-                            arg_tys,
-                        ) else {
-                            continue;
-                        };
-                        map
-                    }
+                // Use the same semantic slot mapper as module/provider member expectations.
+                // This handles reordered names, omitted defaults, and syntactic trailing lambdas
+                // together; an origin-specific label-only map used to drift from real call
+                // recording whenever more than one of those features appeared in the same call.
+                let Some(argument_map) = call_argument_parameter_indices(
+                    arg_tys.len(),
+                    o.semantic_params().len(),
+                    arg_names,
+                    trailing_lambda,
+                    &o.call_sig,
+                ) else {
+                    continue;
                 };
                 let partial = self.lambda_overload_partially_applicable(
                     o,
@@ -19921,7 +20066,7 @@ impl<'a> Checker<'a> {
         // Guard against a stack overflow on a pathologically deep expression: past the limit the
         // expression types as `Error` (the file is skipped, never crashed).
         self.expr_depth += 1;
-        if self.expr_depth > 500 {
+        if self.expr_depth > crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH {
             self.expr_depth -= 1;
             return self.set(e, Ty::Error);
         }
@@ -19929,7 +20074,12 @@ impl<'a> Checker<'a> {
         // subexpression sees `None` unless a propagation site re-arms it via `expr_expected`.
         let expected = self.expected.take();
         let value_required = value_required || expected.is_some();
-        let t = self.expr_inner(e, expected, value_required);
+        // Grow the stack per level, not only at the `check_file` entry: one nesting level of a
+        // CALL expression stacks `expr_inner` + `check_call` (far larger unoptimized frames than
+        // a `&&`-chain level), so 500 levels overrun any single grown segment. The per-call check
+        // is a stack-pointer read; `stacker` chains further segments only when the current one
+        // runs low (see [`crate::wide_stack`]).
+        let t = crate::wide_stack::on_wide_stack(|| self.expr_inner(e, expected, value_required));
         self.expr_depth -= 1;
         t
     }
@@ -20033,14 +20183,20 @@ impl<'a> Checker<'a> {
         self.file.expr_uses_name(body, "it") && self.lookup("it").is_none()
     }
 
-    fn classpath_sam_param_types(
+    /// A lambda argument's expected shape at one parameter position of a semantic-provider
+    /// candidate: the
+    /// VALUE parameter types, plus the receiver type when the parameter is a receiver function
+    /// type (`Recv.() -> R`). The lambda checks against this shape so its implicit `this`/`it`
+    /// bind exactly as kotlinc binds them.
+    fn provider_member_lambda_expectations(
         &self,
+        call: ExprId,
         receiver: crate::symbol_resolver::SymRecv<'_>,
         name: &str,
         args: &[ExprId],
         partial: &[Option<Ty>],
         type_args: &[Ty],
-    ) -> Option<Vec<Option<Vec<Ty>>>> {
+    ) -> Option<Vec<Option<LambdaExpectation>>> {
         let provisional: Vec<Ty> = args
             .iter()
             .enumerate()
@@ -20055,28 +20211,91 @@ impl<'a> Checker<'a> {
             .zip(provisional)
             .map(|(&arg, ty)| call_arg_kind(self.file, arg, ty))
             .collect();
+        // The probe is MEMBER-only by construction: `selected_member` reads the instance-call,
+        // object-instance, or companion facet, never the extension facet — so the specialized
+        // params are value-param based and align with the argument positions below.
         let candidate = self
             .resolver()
-            .resolve_symbol_with_literal_and_lambda_args(receiver, name, &arg_kinds, type_args)?
-            .selected_member()?;
+            .resolve_symbol_with_literal_and_lambda_args(receiver, name, &arg_kinds, type_args)
+            .and_then(crate::symbol_resolver::Symbol::selected_member)
+            .or_else(|| {
+                // `Type.name(args)` whose member lives on the type's COMPANION OBJECT
+                // (`FactoryApi.create { … }`): the probe above sees neither a static nor an
+                // instance member of the type itself, so retry against the companion's type —
+                // the same fallback the call resolution below applies.
+                let internal = match receiver {
+                    crate::symbol_resolver::SymRecv::Type(internal) => type_name(internal),
+                    crate::symbol_resolver::SymRecv::TypeName(internal) => internal,
+                    _ => return None,
+                };
+                let companion = self
+                    .resolved_type_name(internal)?
+                    .companion_object
+                    .clone()?
+                    .1;
+                self.resolver()
+                    .resolve_symbol_with_literal_and_lambda_args(
+                        crate::symbol_resolver::SymRecv::Value(Ty::obj_name(companion)),
+                        name,
+                        &arg_kinds,
+                        type_args,
+                    )
+                    .and_then(crate::symbol_resolver::Symbol::selected_member)
+            })?;
+
+        // Expectations are consumed in SOURCE-ARGUMENT order, but the selected callable's types
+        // and receiver marks live in SEMANTIC-PARAMETER order. Named/default/trailing-lambda calls
+        // can make those orders differ (`two(b = { this }, a = { ... })`), so route through the
+        // same CallSig slot mapper used by call recording instead of adding a provider-specific
+        // positional assumption. A metadata-less Java member has no names/defaults to reorder, so
+        // its only valid shape is the positional identity map.
+        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let argument_parameters = if candidate.call_sig.has_param_names() {
+            call_argument_parameter_indices(
+                args.len(),
+                candidate.params.len(),
+                arg_names,
+                trailing_lambda,
+                &candidate.call_sig,
+            )?
+        } else if arg_names.is_none() && args.len() <= candidate.params.len() {
+            (0..args.len()).collect()
+        } else {
+            return None;
+        };
+
+        // Generic specialization expects arguments in parameter order. Use a lambda/error sentinel
+        // for omitted default slots: specialization deliberately skips lambda slots while inferring
+        // bindings from concrete non-lambda arguments, which is exactly the behavior an absent
+        // argument needs. Multiple source vararg elements may map to one slot; receiver-function
+        // varargs are not a meaningful Kotlin call shape, so the last mapped kind is sufficient.
+        let mut parameter_arg_kinds =
+            vec![CallArgKind::LambdaLiteral(Ty::Error); candidate.params.len()];
+        for (source_index, &parameter_index) in argument_parameters.iter().enumerate() {
+            let target = parameter_arg_kinds.get_mut(parameter_index)?;
+            *target = *arg_kinds.get(source_index)?;
+        }
+        let specialized_params = crate::symbol_resolver::specialized_lambda_member_params(
+            &candidate,
+            &parameter_arg_kinds,
+            type_args,
+        );
         Some(
-            crate::symbol_resolver::specialized_sam_member_params(
-                &candidate, &arg_kinds, type_args,
-            )
-            .into_iter()
-            .enumerate()
-            .map(|(index, param)| {
-                if arg_kinds
-                    .get(index)
-                    .is_some_and(|arg| arg.is_lambda_literal())
-                {
-                    crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, param)
-                        .map(|sam| sam.params)
-                } else {
-                    None
-                }
-            })
-            .collect(),
+            argument_parameters
+                .into_iter()
+                .enumerate()
+                .map(|(source_index, parameter_index)| {
+                    if !arg_kinds
+                        .get(source_index)
+                        .is_some_and(|arg| arg.is_lambda_literal())
+                    {
+                        return None;
+                    }
+                    let param = specialized_params.get(parameter_index).copied()?;
+                    lambda_expectation(&*self.syms.libraries, &candidate, parameter_index, param)
+                })
+                .collect(),
         )
     }
 
@@ -20128,12 +20347,14 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
-    /// Argument kinds for a classpath static/companion call whose parameters may be Java SAM
-    /// interfaces. Non-lambda arguments are checked normally; a lambda argument is checked against
-    /// the selected candidate's SPECIALIZED SAM parameter types (so `it` gets the SAM method's
-    /// parameter type, not `Any`), falling back to a plain check when no SAM signature applies.
-    fn classpath_sam_arg_kinds(
+    /// Argument kinds for a semantic-provider static/companion call whose parameters may be Java SAM
+    /// interfaces or Kotlin function types. Non-lambda arguments are checked normally; a lambda
+    /// argument is checked against the selected candidate's SPECIALIZED expectation (so `it` gets
+    /// the SAM method's parameter type, or `this` the `Recv.() -> R` receiver, not `Any`), falling
+    /// back to a plain check when no expectation applies.
+    fn provider_member_lambda_arg_kinds(
         &mut self,
+        call: ExprId,
         receiver: crate::symbol_resolver::SymRecv<'_>,
         name: &str,
         args: &[ExprId],
@@ -20143,8 +20364,8 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|&arg| (self.lambda_probe_ty(arg).is_none()).then(|| self.expr(arg)))
             .collect();
-        let lambda_params =
-            self.classpath_sam_param_types(receiver, name, args, &partial, type_args);
+        let lambda_params = self
+            .provider_member_lambda_expectations(call, receiver, name, args, &partial, type_args);
         args.iter()
             .enumerate()
             .map(|(index, &arg)| {
@@ -20152,9 +20373,11 @@ impl<'a> Checker<'a> {
                     match lambda_params
                         .as_ref()
                         .and_then(|all| all.get(index))
-                        .and_then(Option::as_deref)
+                        .and_then(Option::as_ref)
                     {
-                        Some(params) => self.check_lambda_with_types(arg, params),
+                        Some(expectation) => {
+                            self.check_lambda_with_expectation(arg, expectation, None)
+                        }
                         None => partial[index].unwrap_or_else(|| self.expr(arg)),
                     }
                 } else {
@@ -20163,6 +20386,21 @@ impl<'a> Checker<'a> {
                 call_arg_kind(self.file, arg, ty)
             })
             .collect()
+    }
+
+    /// Check a lambda argument against its provider expectation: with the receiver binding
+    /// (`this`) for a `Recv.() -> R` parameter, else against plain value parameter types.
+    fn check_lambda_with_expectation(
+        &mut self,
+        arg: ExprId,
+        expectation: &LambdaExpectation,
+        label: Option<&str>,
+    ) -> Ty {
+        if let Some(receiver) = expectation.receiver {
+            self.check_lambda_with_receiver_labeled(arg, receiver, &expectation.value_params, label)
+        } else {
+            self.check_lambda_with_types(arg, &expectation.value_params)
+        }
     }
 
     fn expect_library_call_arg(&mut self, expected: Ty, actual: Ty, expr: ExprId, context: &str) {
@@ -20246,7 +20484,13 @@ impl<'a> Checker<'a> {
                 materialized: None,
             });
         let shape = member_extension_shape.or_else(|| {
-            self.extension_lambda_shape(receiver, name, &partial, arg_names.as_deref())
+            self.extension_lambda_shape(
+                receiver,
+                name,
+                &partial,
+                arg_names.as_deref(),
+                trailing_lambda,
+            )
         });
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
@@ -20606,7 +20850,8 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let Some(argument_parameters) = call_argument_parameter_indices(
-                args,
+                args.len(),
+                signature.params.len(),
                 arg_names,
                 trailing_lambda,
                 &signature.call_sig(),
@@ -24258,7 +24503,8 @@ impl<'a> Checker<'a> {
             ..CallSig::default()
         };
         let argument_parameters = call_argument_parameter_indices(
-            call_args,
+            call_args.len(),
+            f.params.len(),
             self.file.call_arg_names.get(&call.0).map(Vec::as_slice),
             self.file.call_has_trailing_lambda.contains(&call.0),
             &call_sig,
@@ -26258,7 +26504,15 @@ impl<'a> Checker<'a> {
                             declared_receiver,
                             generic_receiver,
                         },
-                        (ty, sig.is_var, sig.visibility, owner, dispatch_receiver),
+                        MemberExtensionProperty {
+                            ty,
+                            is_var: sig.is_var,
+                            visibility: sig.visibility,
+                            setter_visibility: sig.setter_visibility,
+                            owner,
+                            dispatch_receiver,
+                            declared_receiver,
+                        },
                     ));
                 }
             }
@@ -26889,14 +27143,22 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner, dispatch_receiver))) => {
-                if visibility != Visibility::Public {
-                    self.reject_if_inaccessible(visibility, name, owner, span);
+            Ok(Some(property)) => {
+                if property.visibility != Visibility::Public {
+                    self.reject_if_inaccessible(property.visibility, name, property.owner, span);
                 }
                 if let Some(expression) = mexpr {
-                    self.mark_extension_receiver_used(expression, dispatch_receiver);
+                    self.mark_extension_receiver_used(expression, property.dispatch_receiver);
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::MemberExtensionPropertyRead {
+                            owner: property.owner,
+                            receiver: property.declared_receiver,
+                            ty: property.ty,
+                        },
+                    );
                 }
-                return Some(ty);
+                return Some(property.ty);
             }
             Err(()) => {
                 self.diags.error(
@@ -26970,10 +27232,10 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner, _))) => {
+            Ok(Some(property)) => {
                 return Some(PropertyReadProbe::Found {
-                    ty,
-                    access: Some((visibility, owner)),
+                    ty: property.ty,
+                    access: Some((property.visibility, property.owner)),
                 });
             }
             Err(()) => return Some(PropertyReadProbe::Ambiguous),
@@ -28981,7 +29243,8 @@ impl<'a> Checker<'a> {
                     if let Some(internal) = self.classpath_type_receiver_internal(receiver) {
                         let fq = internal.render();
                         let explicit_type_args = self.explicit_call_type_args(call);
-                        let arg_kinds = self.classpath_sam_arg_kinds(
+                        let arg_kinds = self.provider_member_lambda_arg_kinds(
+                            call,
                             crate::symbol_resolver::SymRecv::Type(&fq),
                             &name,
                             args,
@@ -29113,7 +29376,8 @@ impl<'a> Checker<'a> {
                             .or_else(|| self.imports.get(&cls).cloned());
                         if let Some(internal) = receiver_class {
                             let explicit_type_args = self.explicit_call_type_args(call);
-                            let arg_kinds = self.classpath_sam_arg_kinds(
+                            let arg_kinds = self.provider_member_lambda_arg_kinds(
+                                call,
                                 crate::symbol_resolver::SymRecv::Type(&internal),
                                 &name,
                                 args,
@@ -29320,7 +29584,13 @@ impl<'a> Checker<'a> {
                     });
                 let ext_lambda_shape = if member_ext_lambda_plan.is_none() {
                     ext_lambda_partial.as_ref().and_then(|partial| {
-                        self.extension_lambda_shape(rt, &name, partial, arg_names.as_deref())
+                        self.extension_lambda_shape(
+                            rt,
+                            &name,
+                            partial,
+                            arg_names.as_deref(),
+                            self.file.call_has_trailing_lambda.contains(&call.0),
+                        )
                     })
                 } else {
                     None
@@ -29377,9 +29647,10 @@ impl<'a> Checker<'a> {
                             .collect(),
                     )
                 });
-                let classpath_sam_pts = if ext_lambda_pts.is_none() {
+                let provider_member_lambda_pts = if ext_lambda_pts.is_none() {
                     let explicit_type_args = self.explicit_call_type_args(call);
-                    self.classpath_sam_param_types(
+                    self.provider_member_lambda_expectations(
+                        call,
                         crate::symbol_resolver::SymRecv::Value(rt),
                         &name,
                         args,
@@ -29450,9 +29721,13 @@ impl<'a> Checker<'a> {
                                     return c.check_lambda_with_types(a, pt);
                                 }
                             }
-                            if let Some(ref pts) = classpath_sam_pts {
-                                if let Some(pt) = pts.get(i).and_then(Option::as_deref) {
-                                    return c.check_lambda_with_types(a, pt);
+                            if let Some(ref pts) = provider_member_lambda_pts {
+                                if let Some(expectation) = pts.get(i).and_then(Option::as_ref) {
+                                    return c.check_lambda_with_expectation(
+                                        a,
+                                        expectation,
+                                        call_fn_name.as_deref(),
+                                    );
                                 }
                             }
                             if let Some(ref pts) = ext_lambda_pts {
@@ -29483,21 +29758,21 @@ impl<'a> Checker<'a> {
                         .collect()
                 });
                 let arg_kinds = self.call_arg_kinds(args);
-                let has_classpath_sam = classpath_sam_pts
+                let has_lambda_expectation = provider_member_lambda_pts
                     .as_ref()
                     .is_some_and(|params| params.iter().any(Option::is_some));
-                let classpath_arg_kinds: Vec<CallArgKind> = arg_kinds
+                let provider_member_arg_kinds: Vec<CallArgKind> = arg_kinds
                     .iter()
                     .map(|arg| {
                         match *arg {
-                            // A lambda probe is meaningful only when a classpath SAM candidate
+                            // A lambda probe is meaningful only when a semantic-provider candidate
                             // supplied its expected parameter shape. Without one, keep the checked
                             // function type and avoid letting the resolver reinterpret the lambda.
-                            CallArgKind::LambdaLiteral(ty) if !has_classpath_sam => {
+                            CallArgKind::LambdaLiteral(ty) if !has_lambda_expectation => {
                                 CallArgKind::Typed(ty)
                             }
                             // Integer provenance is independent of SAM inference and must reach
-                            // every classpath member path; collapsing it here rejects valid calls
+                            // every provider member path; collapsing it here rejects valid calls
                             // such as a literal `Int` argument for a Java `long` parameter.
                             arg => arg,
                         }
@@ -29588,7 +29863,7 @@ impl<'a> Checker<'a> {
                     if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
-                        &classpath_arg_kinds,
+                        &provider_member_arg_kinds,
                     ) {
                         let ret = m.ret;
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
@@ -29618,7 +29893,7 @@ impl<'a> Checker<'a> {
                     if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
-                        &classpath_arg_kinds,
+                        &provider_member_arg_kinds,
                     ) {
                         crate::trace_compiler!(
                             "resolve",
@@ -30658,7 +30933,8 @@ impl<'a> Checker<'a> {
                     .or_else(|| self.syms.single_fun(&fname));
                 let known_argument_parameters = known_sig.as_ref().and_then(|sig| {
                     call_argument_parameter_indices(
-                        args,
+                        args.len(),
+                        sig.params.len(),
                         arg_names.as_deref(),
                         self.file.call_has_trailing_lambda.contains(&call.0),
                         &sig.call_sig(),
@@ -30852,6 +31128,7 @@ impl<'a> Checker<'a> {
                                 &fname,
                                 this_member_partial.as_deref().unwrap_or_default(),
                                 arg_names.as_deref(),
+                                self.file.call_has_trailing_lambda.contains(&call.0),
                             )?;
                             shape.param_types.as_ref()?;
                             Some(shape)
@@ -30859,12 +31136,12 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
-                // A CLASSPATH member of an implicit receiver taking a SAM lambda
-                // (`Button().apply { addActionListener { … } }`): recover the SAM's parameter
-                // types the same way an explicit-receiver call does, so a lambda with no
-                // declared parameters types with the functional method's arity (`it` bound)
-                // instead of caching a zero-arity function type that no overload accepts.
-                let implicit_classpath_member_sam_pts = if implicit_member_lambda_enabled
+                // A semantic-provider member of an implicit receiver whose parameter takes a lambda
+                // (`Button().apply { addActionListener { … } }`): recover the expected shape the
+                // same way an explicit-receiver call does, so a lambda with no declared parameters
+                // types with the functional method's arity (`it` bound) instead of caching a
+                // zero-arity function type that no overload accepts.
+                let implicit_provider_member_lambda_pts = if implicit_member_lambda_enabled
                     && ordinary_this_member_lambda_shape.is_none()
                     && this_member_ext_lambda_plan.is_none()
                     && implicit_library_ext_lambda_shape.is_none()
@@ -30874,7 +31151,8 @@ impl<'a> Checker<'a> {
                     self.implicit_receiver_types()
                         .into_iter()
                         .find_map(|receiver| {
-                            self.classpath_sam_param_types(
+                            self.provider_member_lambda_expectations(
+                                call,
                                 crate::symbol_resolver::SymRecv::Value(receiver),
                                 &fname,
                                 args,
@@ -30894,12 +31172,23 @@ impl<'a> Checker<'a> {
                             .and_then(|shape| shape.param_types.clone())
                     })
                     .or_else(|| {
-                        // Shape providers above carry `Vec<Vec<Ty>>` (every slot known); the SAM
-                        // probe knows only the lambda slots — default the rest to empty.
-                        implicit_classpath_member_sam_pts.map(|slots| {
+                        // Shape providers above carry `Vec<Vec<Ty>>` (every slot known, a
+                        // receiver INCLUDED at index 0); the expectation probe knows only the
+                        // lambda slots — default the rest to empty.
+                        implicit_provider_member_lambda_pts.as_ref().map(|slots| {
                             slots
-                                .into_iter()
-                                .map(Option::unwrap_or_default)
+                                .iter()
+                                .map(|slot| {
+                                    slot.as_ref()
+                                        .map(|expectation| {
+                                            expectation
+                                                .receiver
+                                                .into_iter()
+                                                .chain(expectation.value_params.iter().copied())
+                                                .collect()
+                                        })
+                                        .unwrap_or_default()
+                                })
                                 .collect::<Vec<_>>()
                         })
                     });
@@ -30910,6 +31199,16 @@ impl<'a> Checker<'a> {
                         implicit_library_ext_lambda_shape
                             .as_ref()
                             .and_then(|shape| shape.receivers.clone())
+                    })
+                    .or_else(|| {
+                        implicit_provider_member_lambda_pts.as_ref().map(|slots| {
+                            slots
+                                .iter()
+                                .map(|slot| {
+                                    slot.as_ref().and_then(|expectation| expectation.receiver)
+                                })
+                                .collect::<Vec<_>>()
+                        })
                     });
                 let ctor_lambda_types: Option<Vec<(Ty, bool)>> = if !self
                     .lexical_value_declares(&fname)
@@ -33159,7 +33458,7 @@ impl<'a> Checker<'a> {
                 member_extension
                     .as_ref()
                     .ok()
-                    .and_then(|property| property.as_ref().map(|(ty, ..)| *ty))
+                    .and_then(|property| property.as_ref().map(|property| property.ty))
             })
             .or_else(|| {
                 extension_property
@@ -33218,20 +33517,37 @@ impl<'a> Checker<'a> {
             return;
         }
         match member_extension {
-            Ok(Some((lty, is_var, visibility, owner, dispatch_receiver))) => {
-                if visibility != Visibility::Public {
-                    self.reject_if_inaccessible(visibility, &name, owner, span);
+            Ok(Some(property)) => {
+                // A write is governed by the setter, not merely by the visibility of the readable
+                // property. Resolve that semantic fact here for every implicit-dispatch origin;
+                // lowering receives only an already-authorized accessor plan.
+                let write_visibility = property.setter_visibility.unwrap_or(property.visibility);
+                if write_visibility != Visibility::Public {
+                    self.reject_if_inaccessible(
+                        write_visibility,
+                        &name,
+                        property.owner,
+                        target_span,
+                    );
                 }
-                self.mark_extension_receiver_stmt_used(s, dispatch_receiver);
-                if !is_var {
+                self.mark_extension_receiver_stmt_used(s, property.dispatch_receiver);
+                if !property.is_var {
                     self.diags
                         .error(target_span, "'val' cannot be reassigned.".to_string());
                 }
                 self.expect_assignable(
-                    lty,
+                    property.ty,
                     vt,
                     self.value_diagnostic_span(value, vt),
                     "assignment",
+                );
+                self.stmt_lowers.insert(
+                    s,
+                    StmtLowering::MemberExtensionPropertyWrite {
+                        owner: property.owner,
+                        receiver: property.declared_receiver,
+                        ty: property.ty,
+                    },
                 );
             }
             Err(()) => {
@@ -33671,6 +33987,40 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
+
+    #[test]
+    fn receiver_lambda_expectation_survives_an_erased_provider_parameter() {
+        // A provider may carry the semantic receiver only in CallSig metadata while its physical
+        // parameter is an opaque callable object (no JVM/generic function signature). The checker
+        // must bind `this` from the origin-neutral call contract and must not recognize a concrete
+        // runtime callable class name to do so.
+        let erased_callable = Ty::obj("fixture/ErasedCallable");
+        let mut candidate = crate::libraries::LibraryMember::new(
+            "apply".to_string(),
+            vec![erased_callable],
+            Ty::Unit,
+            "(Ljava/lang/Object;)V".to_string(),
+        );
+        candidate.call_sig = CallSig::metadata_function(
+            1,
+            vec!["block".to_string()],
+            vec![false],
+            vec![Some(Ty::String)],
+            vec![true],
+            vec![false],
+            None,
+        );
+
+        let expectation = lambda_expectation(
+            &crate::libraries::EmptySymbolSource,
+            &candidate,
+            0,
+            erased_callable,
+        )
+        .expect("CallSig receiver metadata must survive erased provider parameters");
+        assert_eq!(expectation.receiver, Some(Ty::String));
+        assert!(expectation.value_params.is_empty());
+    }
 
     #[test]
     fn preinfer_worklist_finds_explicit_and_aliased_dependencies() {
