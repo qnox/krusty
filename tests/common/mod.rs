@@ -390,7 +390,7 @@ pub fn compile_in_process_metadata_cp(
 ) -> Option<Vec<(String, Vec<u8>)>> {
     use krusty::diag::DiagSink;
     use krusty::frontend::{check_file, collect_signatures_with_cp};
-    use krusty::jvm::ir_emit::{EmitOptions, EmitRun};
+    use krusty::jvm::ir_emit::EmitRun;
     use krusty::jvm::names::file_class_name;
 
     let _pg = ProfGuard::new("krusty");
@@ -427,15 +427,11 @@ pub fn compile_in_process_metadata_cp(
         &mut continuation_metadata,
     )
     .ok()?;
-    let opts = EmitOptions {
-        emit_class_metadata: true,
-        // Match the CLI backend (`{stem}.kt`) so the bytes equal a `krusty -d …` run.
-        source_file: Some(format!("{stem}.kt")),
-        inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
-            cp.clone(),
-        )),
-        ..Default::default()
-    };
+    let mut opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
+    // This differential helper tests the metadata writer itself, so keep that feature enabled even
+    // when `KRUSTY_NO_CLASS_METADATA` asks shipping callers to omit it for a diagnostic bisect. All
+    // other fields still come from the shared shipping constructor and therefore cannot drift.
+    opts.emit_class_metadata = true;
     let run = EmitRun::default();
     // Facade `@Metadata` (k = 2, top-level fn/extension records), exactly as the CLI backend and
     // `compile_in_process` pass it — `None` for a class-only source, so today's byte-identity

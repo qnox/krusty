@@ -273,9 +273,15 @@ pub fn shipping_emit_options(
     class_major: Option<u16>,
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
 ) -> crate::jvm::ir_emit::EmitOptions {
+    // Module/conformance inputs may retain a source-relative prefix (`helpers/Foo`) even though the
+    // CLI has already reduced its input to `Foo`. `SourceFile` is a simple filename on every JVM
+    // class, so normalize at this shared boundary instead of making each non-CLI caller grow its own
+    // path branch. Accept both separators because Kotlin testdata names are logical source paths and
+    // are not guaranteed to use the host platform's separator.
+    let source_stem = stem.rsplit(['/', '\\']).next().unwrap_or(stem);
     crate::jvm::ir_emit::EmitOptions {
         class_major,
-        source_file: Some(format!("{stem}.kt")),
+        source_file: Some(format!("{source_stem}.kt")),
         // kotlinc records `classModuleName` in @Metadata unless the module is the default `main`.
         module_name: (module_name != "main").then(|| module_name.to_string()),
         // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
@@ -707,6 +713,41 @@ mod tests {
     use super::*;
     use crate::diag::DiagSink;
     use crate::frontend::{collect_signatures, parse_source_with_detected_features};
+
+    /// Every caller supplies a logical source stem, but module/corpus callers can retain directories
+    /// that the CLI has already stripped. The shared constructor must own that normalization so all
+    /// emitted `SourceFile` attributes contain the JVM-required simple filename on either path style.
+    #[test]
+    fn shipping_emit_options_normalize_logical_source_paths() {
+        let cp = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
+        let unix = shipping_emit_options("suite/nested/Foo", "main", None, cp.clone());
+        let windows = shipping_emit_options("suite\\nested\\Bar", "main", None, cp);
+
+        assert_eq!(unix.source_file.as_deref(), Some("Foo.kt"));
+        assert_eq!(windows.source_file.as_deref(), Some("Bar.kt"));
+    }
+
+    /// These are not arbitrary emitter unit tests: each claims to compile or survey the bytes that
+    /// krusty ships. Pin that architectural boundary so adding a new `EmitOptions` field cannot leave
+    /// one of those pipelines on a subtly different artifact shape. A focused differential helper may
+    /// mutate the returned options afterward (for example, force metadata despite a bisect env var),
+    /// but it must still begin with the complete shared configuration.
+    #[test]
+    fn shipping_pipelines_do_not_reimplement_emit_options() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in [
+            "src/bin/survey.rs",
+            "tests/common/mod.rs",
+            "tests/kotlin_box_ir_jvm_conformance.rs",
+        ] {
+            let text =
+                std::fs::read_to_string(root.join(relative)).expect("read shipping pipeline");
+            assert!(
+                !text.contains("EmitOptions {"),
+                "{relative} must start from jvm::backend::shipping_emit_options instead of duplicating the shipping configuration",
+            );
+        }
+    }
 
     #[test]
     fn prepare_module_symbols_records_cross_file_facades() {
