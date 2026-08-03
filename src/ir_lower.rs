@@ -8862,7 +8862,19 @@ impl<'a> Lower<'a> {
         // a declaration-wide name scan would both conflate overloads and miss receiver syntax.
         // Function-value/operator invokes additionally use their dedicated checked lowering below.
         let callees = std::cell::RefCell::new(Vec::new());
-        collect_calls(self.afile, body, &callees, descend_nested_bodies);
+        let stmts = std::cell::RefCell::new(Vec::new());
+        collect_call_sites(self.afile, body, &callees, &stmts, descend_nested_bodies);
+        // A CONVENTION call (`b[i]`, `b += x`, `a < b`) desugars to a call the AST never spells as
+        // one. Its selected target is recorded against the index/operator expression — or, for a
+        // compound assignment, against the statement — so ask those tables before the call scan
+        // below, which only understands `Expr::Call` shapes.
+        if stmts
+            .borrow()
+            .iter()
+            .any(|&s| self.info.convention_stmt_suspends(s))
+        {
+            return true;
+        }
         let module_symbols = crate::module_symbols::ModuleSymbols::new(self.syms);
         callees.into_inner().into_iter().any(|call| {
             // Resolved call metadata below is provider-neutral and is the primary source of truth.
@@ -8877,13 +8889,24 @@ impl<'a> Lower<'a> {
                     .iter()
                     .any(|member| member.suspend())
             };
-            if self
-                .info
-                .resolved_calls
-                .get(&call)
-                .is_some_and(ResolvedCall::is_suspend)
-            {
+            // Covers the ordinary `Expr::Call` target AND the convention forms, whose selected
+            // operator is recorded against the index/operator expression instead.
+            if self.info.convention_call_suspends(call) {
                 return true;
+            }
+            // A SOURCE-class member `compareTo` driving `<`/`<=`/`>`/`>=` is typed straight to
+            // `Boolean` without recording a target, so the table above cannot see it. Ask the same
+            // canonical member walk the plain-call fallback below uses.
+            if let ast::Expr::Binary { op, lhs, .. } = self.afile.expr(call) {
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                    && self
+                        .info
+                        .ty(*lhs)
+                        .obj_internal()
+                        .is_some_and(|i| source_method_suspends(i, "compareTo"))
+                {
+                    return true;
+                }
             }
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
@@ -8996,7 +9019,8 @@ impl<'a> Lower<'a> {
     /// for local, module, member, extension, and classpath targets without exposing any target name.
     fn body_calls_suspend_inline(&self, body: AstExprId) -> bool {
         let calls = std::cell::RefCell::new(Vec::new());
-        collect_calls(self.afile, body, &calls, true);
+        let stmts = std::cell::RefCell::new(Vec::new());
+        collect_call_sites(self.afile, body, &calls, &stmts, true);
         calls.into_inner().into_iter().any(|call| {
             self.info
                 .resolved_calls
@@ -16487,6 +16511,8 @@ impl<'a> Lower<'a> {
                 parameter,
                 owner,
                 source,
+                // Suspend-ness drives the coroutine CLASSIFICATION scan, not this emission arm.
+                suspend: _,
             } => {
                 let recv_key = receiver.erased_recv();
                 let selected_params = vec![parameter];
@@ -16527,6 +16553,7 @@ impl<'a> Lower<'a> {
                 owner,
                 parameter,
                 interface,
+                suspend: _,
             } => {
                 let r = self.expr(lhs)?;
                 let a = self.lower_arg(rhs, &parameter)?;
@@ -25566,39 +25593,55 @@ fn outer_local_access_stmt(
     }
 }
 
-/// Collect every `Call` expr in `e` (incl. nested) — to resolve a call's suspend-ness via its `Invoke`
-/// lowering (a suspend function value / invoke operator) or the checker-selected [`ResolvedCall`].
-/// Retaining expression identity, rather than only callee text, is what keeps overload selection exact.
-fn collect_calls(
+/// Every expression and statement in `e` (incl. nested) that MAY carry a checker-selected call
+/// target: the `Expr::Call` and `Expr::SafeCall` nodes, plus the CONVENTION forms that desugar to a
+/// call without ever being spelled as one (`b[i]`, `a + b`, `a < b`, `-a`, `a..b`, `x in r`, `a++`,
+/// and the compound assignment `b += x`, which is a STATEMENT).
+///
+/// Retaining expression identity, rather than only callee text, is what keeps overload selection
+/// exact. Both sinks are then looked up in the checker's resolved-target tables by id, so
+/// over-collecting is harmless — a node with no recorded target simply never matches.
+fn collect_call_sites(
     file: &ast::File,
     e: AstExprId,
-    out: &std::cell::RefCell<Vec<AstExprId>>,
+    exprs: &std::cell::RefCell<Vec<AstExprId>>,
+    stmts: &std::cell::RefCell<Vec<ast::StmtId>>,
     descend_nested_bodies: bool,
 ) {
     // Enforce the execution boundary at the recursive entry, not only in the expression-child
     // callback. A lambda can be reached directly from a statement (`val task = { pause() }`) or can
     // itself be a function's expression body; both routes bypass the child callback that first tried
     // to implement this rule. Treating every entry uniformly prevents a deferred lambda body from
-    // being charged to the ordinary function which merely allocates it.
+    // being charged to the ordinary function which merely allocates it. The full suspend-lambda scan
+    // opts in to descending; the file-level caller-context gate stops here.
     if !descend_nested_bodies && matches!(file.expr(e), ast::Expr::Lambda { .. }) {
         return;
     }
-    if matches!(file.expr(e), ast::Expr::Call { .. }) {
-        out.borrow_mut().push(e);
+    if matches!(
+        file.expr(e),
+        ast::Expr::Call { .. }
+            | ast::Expr::SafeCall { .. }
+            | ast::Expr::Index { .. }
+            | ast::Expr::Binary { .. }
+            | ast::Expr::Unary { .. }
+            | ast::Expr::IncDec { .. }
+            | ast::Expr::InRange { .. }
+            | ast::Expr::RangeTo { .. }
+    ) {
+        exprs.borrow_mut().push(e);
     }
     file.any_child_expr(
         e,
         &mut |c| {
-            // A lambda executes in its own function/coroutine context. The full suspend-lambda scan
-            // opts in to descending; the file-level caller-context gate stops here.
-            collect_calls(file, c, out, descend_nested_bodies);
+            collect_call_sites(file, c, exprs, stmts, descend_nested_bodies);
             false
         },
         &mut |s| {
-            // A local function likewise owns its call context and is checked/lowered separately.
+            stmts.borrow_mut().push(s);
+            // A local function owns its own call context and is checked/lowered separately.
             if descend_nested_bodies || !matches!(file.stmt(s), Stmt::LocalFun(_)) {
                 file.any_child_stmt(s, &mut |c| {
-                    collect_calls(file, c, out, descend_nested_bodies);
+                    collect_call_sites(file, c, exprs, stmts, descend_nested_bodies);
                     false
                 });
             }

@@ -9835,6 +9835,26 @@ pub enum SyntheticOperatorCall {
 }
 
 impl SyntheticOperatorCall {
+    /// Every convention key, so a scan can ask "was ANY operator selected here?" without knowing
+    /// which spelling the source used. Keep in sync with the variants above.
+    pub(crate) const ALL: [Self; 15] = [
+        Self::RangeTo,
+        Self::Contains,
+        Self::Set,
+        Self::Put,
+        Self::Plus,
+        Self::Minus,
+        Self::Times,
+        Self::Div,
+        Self::Rem,
+        Self::UnaryMinus,
+        Self::UnaryPlus,
+        Self::Not,
+        Self::Inc,
+        Self::Dec,
+        Self::CompareTo,
+    ];
+
     fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "rangeTo" => Self::RangeTo,
@@ -10495,14 +10515,28 @@ pub enum CompoundAssignmentTarget {
         owner: TypeName,
         parameter: Ty,
         interface: bool,
+        suspend: bool,
     },
     SourceExtension {
         receiver: Ty,
         parameter: Ty,
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
+        suspend: bool,
     },
     LibraryExtension(Box<crate::libraries::LibraryCallable>),
+}
+
+impl CompoundAssignmentTarget {
+    /// Whether the operator this compound assignment desugars to is a `suspend` function — i.e.
+    /// whether the statement is a SUSPENSION POINT. A compound assignment never appears as an
+    /// `Expr::Call`, so a call-shaped scan cannot see this; the coroutine classification asks here.
+    pub(crate) fn suspends(&self) -> bool {
+        match self {
+            Self::Member { suspend, .. } | Self::SourceExtension { suspend, .. } => *suspend,
+            Self::LibraryExtension(callable) => callable.suspend,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -10533,6 +10567,33 @@ impl TypeInfo {
             StmtLowering::PlusAssign(target) => Some(target),
             _ => None,
         }
+    }
+
+    /// Whether a CONVENTION call selected at expression `expr_id` targets a `suspend` function —
+    /// indexed access (`b[i]`), an arithmetic/comparison operator (`a + b`, `a < b`), or a unary
+    /// operator. None of these is an `Expr::Call`, so a call-shaped scan cannot see the suspension
+    /// point; the coroutine classification in lowering asks here instead.
+    pub(crate) fn convention_call_suspends(&self, expr_id: ExprId) -> bool {
+        self.resolved_calls
+            .get(&expr_id)
+            .is_some_and(ResolvedCall::is_suspend)
+            || SyntheticOperatorCall::ALL.iter().any(|&key| {
+                self.resolved_operator_calls
+                    .get(&(expr_id, key))
+                    .is_some_and(ResolvedCall::is_suspend)
+            })
+    }
+
+    /// Statement form of [`Self::convention_call_suspends`]: a compound assignment (`b += x`) and
+    /// the statement-position operators record their selected target against the STATEMENT.
+    pub(crate) fn convention_stmt_suspends(&self, stmt_id: StmtId) -> bool {
+        SyntheticOperatorCall::ALL.iter().any(|&key| {
+            self.resolved_stmt_operator_calls
+                .get(&(stmt_id, key))
+                .is_some_and(ResolvedCall::is_suspend)
+        }) || self
+            .compound_assignment_target(stmt_id)
+            .is_some_and(CompoundAssignmentTarget::suspends)
     }
 
     /// Whether a lambda has an implicit receiver.
@@ -33718,6 +33779,7 @@ impl<'a> Checker<'a> {
                 owner,
                 params,
                 interface,
+                suspend,
                 ..
             } => {
                 let [parameter] = params.as_slice() else {
@@ -33727,6 +33789,7 @@ impl<'a> Checker<'a> {
                     owner,
                     parameter: *parameter,
                     interface,
+                    suspend,
                 }
             }
             ResolvedCall::ModuleExtension {
@@ -33734,6 +33797,7 @@ impl<'a> Checker<'a> {
                 params,
                 owner,
                 source,
+                suspend,
                 ..
             } => {
                 let [parameter] = params.as_slice() else {
@@ -33744,6 +33808,7 @@ impl<'a> Checker<'a> {
                     parameter: *parameter,
                     owner,
                     source,
+                    suspend,
                 }
             }
             ResolvedCall::Extension(callable) => {
