@@ -2320,6 +2320,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison node so the branch/stackmap shape stays the one every other comparison uses. Tests:
   `tests/feature_coverage_v_e2e.rs::lateinit_and_isinitialized`,
   `tests/implicit_this_callable_ref_e2e.rs::lateinit_is_initialized_runs` (the box-corpus case).
+- **`Array(n) { … }` with an ARRAY element.** `Array(3) { i -> IntArray(3) { j -> … } }` was rejected
+  because the loop-fill's StackMapTable interacted badly with surrounding loops. That interaction is
+  gone — the nested fill verifies and runs, including reading and writing through both dimensions —
+  so the rejection is removed. Verified against the box corpus, which is the oracle for the frame
+  shapes this touches. Test: `tests/feature_coverage_h_e2e.rs::two_dimensional_arrays`.
 
 ## 8. Success criteria for the PoC
 

@@ -24463,15 +24463,6 @@ impl<'a> Checker<'a> {
             self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
             let lam = self.check_lambda_with_types(args[1], &[Ty::Int]);
             let elem = lam.fun_ret().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            // A nested-array element (`Array(n) { DoubleArray(m) }`) trips the loop-fill's
-            // StackMapTable interaction with surrounding loops — skip rather than VerifyError.
-            if elem.is_array() {
-                self.diags.error(
-                    span,
-                    "krusty: Array(n) {…} with an array element is not supported".to_string(),
-                );
-                return Some(Ty::Error);
-            }
             // `Array(n) { … }` is always the reference `Array<T>` (`Obj("kotlin/Array", [T])`), distinct
             // from a primitive array. The element stays LOGICAL `T` (a primitive `Int` reads as `Int`,
             // not a boxed wrapper); the backend owns the physical boxed/value-class array layout.
