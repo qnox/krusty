@@ -12856,7 +12856,11 @@ impl<'a> Lower<'a> {
                 owner,
                 source,
                 vararg,
+                requires_splice,
             } => {
+                if requires_splice {
+                    return None;
+                }
                 // The recorded receiver matches the call site directly, or in its NON-NULL form
                 // (a safe call records the non-null receiver — and a nullable PRIMITIVE keys
                 // apart from the unboxed one under `erased_recv`, so compare both ways). The
@@ -12929,12 +12933,9 @@ impl<'a> Lower<'a> {
                     .and_then(|(file, declaration)| {
                         self.syms
                             .source_extension_function(file, ast::DeclId(declaration))
-                            .and_then(|(declared, _)| {
-                                declared
-                                    .non_null()
-                                    .is_ty_param()
-                                    .then(|| declared.erased_recv())
-                            })
+                            // A sibling facade's static descriptor is defined by the declaration,
+                            // not by the possibly-more-specific call-site receiver.
+                            .map(|(declared, _)| declared.erased_recv())
                     })
                     .unwrap_or(receiver);
                 let receiver_value =
