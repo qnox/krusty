@@ -4813,6 +4813,11 @@ fn is_simple_interface(c: &ast::ClassDecl) -> bool {
         && c.companion_base.is_none()
         && c.companion_supertypes.is_empty()
         && companion_props_lowerable(c)
+        // A JVM interface field is implicitly `public static final` — there is no non-final form — so
+        // an interface companion `var` has no representation on this path at all. A CLASS companion
+        // `var` does (a plain static field, written with `putstatic`), which is why
+        // `companion_props_lowerable` admits one.
+        && c.companion_props.iter().all(|p| !p.is_var)
         && c.props.is_empty()
         // Abstract properties (`val x: T`, no initializer/getter) become abstract `getX()`/`setX()`
         // — non-extension only: an extension's accessor takes the receiver as its first parameter,
@@ -4903,9 +4908,14 @@ fn ast_init_is_jvm_default(file: &ast::File, e: AstExprId) -> bool {
 /// initialized in the constructor body rather than at the declaration.
 ///
 /// A deferred `var` is the same shape — the only difference is the synthesized setter, which the plain
-/// backing-field path already emits. (A `var` reachable with no assignment at all is only well-formed
-/// when an earlier initializer DIVERGES, e.g. `val x: String = TODO()`; kotlinc emits the field and
-/// throws before any store, so there is nothing extra to lower.)
+/// backing-field path already emits.
+///
+/// NOTE this gate is purely STRUCTURAL: it does not verify that the property is definitely assigned.
+/// kotlinc rejects `class C { var x: Int }` ("Property must be initialized"), while krusty emits the
+/// field with its zero value; the shape is only well-formed when an earlier initializer DIVERGES
+/// (`val t: String = TODO()` makes the rest unreachable). Admitting `var` widens a definite-assignment
+/// hole that already existed for `val` rather than introducing one — closing it needs real flow
+/// analysis in the checker, which is where the diagnostic belongs.
 fn is_deferred_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none()
         && !p.is_lateinit
@@ -5405,8 +5415,13 @@ impl<'a> Lower<'a> {
     ///
     /// A nested declaration is flattened into `file.decls` under its dotted name, so this is the key
     /// `object_const_lits` / `companion_consts` record it under. Without the chain, only a top-level
-    /// `Obj.CONST` matched and a nested `Outer.Obj.CONST` fell through to a bail. A path rooted in a
-    /// value (`a.b.c`) simply misses both maps, so no extra guard is needed.
+    /// `Obj.CONST` matched and a nested `Outer.Obj.CONST` fell through to a bail.
+    ///
+    /// A path rooted in a VALUE (`a.b.c`) normally misses both maps — but not when the root name
+    /// collides with a classifier (`val Registry = …` beside `class Registry { object Const { … } }`),
+    /// where the local should shadow the type. The single-`Name` form has the same hole, so this is a
+    /// pre-existing shadowing gap the chain inherits rather than one it introduces; the fix is to
+    /// consult the lexical scope before these maps, for both forms at once.
     fn dotted_class_path(&self, e: AstExprId) -> Option<String> {
         match self.afile.expr(e) {
             Expr::Name(n) => Some(n.clone()),
@@ -16570,9 +16585,16 @@ impl<'a> Lower<'a> {
             self.info.stmt_lowers.get(&s).cloned()
         {
             if let Stmt::AssignMember { value, .. } = self.afile.stmt(s).clone() {
-                let index = self.ir.statics.iter().position(|static_field| {
+                // `ir.statics` holds only the statics of the file being LOWERED, so a companion
+                // declared in another file of the module has no index here. Writing one needs an
+                // external static store, which the IR has no node for (`ExternalStaticField` is a read
+                // only) — decline with a NAMED reason instead of skipping the file silently.
+                let Some(index) = self.ir.statics.iter().position(|static_field| {
                     static_field.owner == Some(owner) && static_field.name == name
-                })? as u32;
+                }) else {
+                    return self.bail("companion-static write to another file");
+                };
+                let index = index as u32;
                 let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
                 return Some(self.emit_set_static(index, lowered));
             }
@@ -21632,9 +21654,10 @@ impl<'a> Lower<'a> {
                 // the primitive comparison — a `VerifyError` on a reference operand.
                 let lt = self.recv_ty(lhs);
                 let rt = self.info.ty(rhs);
-                // Reference right operand only — matches the checker guard (a primitive arg to an
-                // erased generic `Comparable.compareTo(Object)` would need a box not applied here).
-                if rt.is_reference() {
+                // Non-null reference right operand only — matches the checker guard (a primitive arg
+                // to an erased generic `Comparable.compareTo(Object)` would need a box not applied
+                // here; a nullable one would NPE inside the callee).
+                if rt.is_reference() && !rt.is_nullable() {
                     if let Some(resolved) =
                         self.info.resolved_member(e).cloned().filter(|resolved| {
                             resolved.member.name == "compareTo" && resolved.ret == Ty::Int

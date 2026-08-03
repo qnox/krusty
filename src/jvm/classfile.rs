@@ -2382,9 +2382,42 @@ impl CodeBuilder {
             .filter(|(off, _, _)| (*off as usize) < code_len)
             .collect();
         entries.sort_by_key(|&(off, _, _)| off);
-        // Multiple labels may be bound at the same offset (e.g. `next` and `end` in an all-diverging
-        // `when`). Keep only the first frame at each offset; duplicates would underflow the delta.
-        entries.dedup_by_key(|(off, _, _)| *off);
+        // Several labels can be bound at the SAME offset — a loop's `end` and the following
+        // statement's `start`, or `next`/`end` in an all-diverging `when`. One frame is emitted for
+        // that offset, and it must hold on EVERY edge reaching it, so the frames are MERGED: the
+        // locals are their common prefix, everything past the first divergence reverting to `top`.
+        //
+        // Keeping the first (a plain dedup) silently claimed a local that a later edge does not have.
+        // `for (v in …) …` immediately followed by `while (…) …` binds the loop's end and the while's
+        // head at one offset; the `for` frame still named its synthetic index, the `while`'s back edge
+        // chopped it, and the back edge became narrower than its own target — a class that fails
+        // verification ("Inconsistent stackmap frames").
+        let merged: Vec<(u32, Vec<VerifType>, Vec<VerifType>)> = {
+            let mut out: Vec<(u32, Vec<VerifType>, Vec<VerifType>)> = Vec::new();
+            for (off, locals, stack) in entries {
+                match out.last_mut() {
+                    Some((previous_off, previous_locals, previous_stack))
+                        if *previous_off == off =>
+                    {
+                        let common = previous_locals
+                            .iter()
+                            .zip(locals.iter())
+                            .take_while(|(a, b)| verif_eq(a, b, cp))
+                            .count();
+                        previous_locals.truncate(common);
+                        // An operand stack that differs between edges into one offset is a lowering
+                        // bug, not something a frame can reconcile; keep the shorter so the entry
+                        // stays describable rather than asserting one edge's view over the other.
+                        if stack.len() < previous_stack.len() {
+                            previous_stack.clone_from(stack);
+                        }
+                    }
+                    _ => out.push((off, locals.clone(), stack.clone())),
+                }
+            }
+            out
+        };
+        let entries = merged;
 
         let mut body = Vec::new();
         u2(&mut body, entries.len() as u16);
@@ -2397,7 +2430,9 @@ impl CodeBuilder {
         let mut prev_off: i64 = -1;
         // `None` = no usable baseline yet (malformed descriptor): the first frame is forced to
         // `full_frame`. Borrows (the baseline, then each emitted frame's locals) — no per-frame clone.
-        let mut prev_locals: Option<&[VerifType]> = initial_locals;
+        // Owned: each entry's locals are moved out of `entries` as it is emitted, so the previous
+        // frame cannot be a borrow into that vector.
+        let mut prev_locals: Option<Vec<VerifType>> = initial_locals.map(<[VerifType]>::to_vec);
         fn full(
             body: &mut Vec<u8>,
             delta: u16,
@@ -2423,7 +2458,7 @@ impl CodeBuilder {
                 offset - prev_off as u32 - 1
             } as u16;
             prev_off = offset as i64;
-            let (same_locals, shares_prefix, p) = match prev_locals {
+            let (same_locals, shares_prefix, p) = match prev_locals.as_deref() {
                 Some(prev) => {
                     let common = locals.len().min(prev.len());
                     let prefix_eq = locals[..common]
@@ -2464,7 +2499,7 @@ impl CodeBuilder {
                 }
                 write_verif_type(&stack[0], &mut body, cp);
             } else {
-                full(&mut body, delta, locals, stack, cp);
+                full(&mut body, delta, &locals, &stack, cp);
             }
             prev_locals = Some(locals);
         }
