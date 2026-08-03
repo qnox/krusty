@@ -1034,6 +1034,12 @@ impl<'a> Parser<'a> {
         index
     }
 
+    /// Consume physical line breaks without consuming an explicit `;`, which the lexer also represents
+    /// as `Newline`.
+    fn skip_plain_newlines(&mut self) {
+        self.i = self.after_plain_newlines(self.i);
+    }
+
     /// Consume physical line breaks only when `expected` follows them. A failed lookahead leaves the
     /// parser at the original newline so the enclosing declaration can terminate normally.
     fn skip_plain_newlines_before(&mut self, expected: TokenKind) {
@@ -2147,6 +2153,14 @@ impl<'a> Parser<'a> {
         if !self.eat(TokenKind::LParen) {
             return None;
         }
+        self.skip_plain_newlines();
+        // A setter parameter is an ordinary value parameter in Kotlin's grammar, so it may carry
+        // annotations (`set(@MagicConstant(...) value)`). They do not affect the accessor ABI, but
+        // must be parsed so the parameter name and the rest of the enclosing class stay aligned.
+        while self.at(TokenKind::At) {
+            let _ = self.skip_annotation();
+            self.skip_plain_newlines();
+        }
         let name = if self.at(TokenKind::Ident) {
             let n = self.text().to_string();
             self.bump();
@@ -2154,8 +2168,14 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        self.skip_plain_newlines();
         if self.eat(TokenKind::Colon) {
+            self.skip_plain_newlines();
             let _ = self.parse_type();
+            self.skip_plain_newlines();
+        }
+        if self.eat(TokenKind::Comma) {
+            self.skip_plain_newlines();
         }
         self.expect(TokenKind::RParen, "')'");
         name
