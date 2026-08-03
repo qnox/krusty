@@ -1797,8 +1797,6 @@ fn build_state_machine(
             spilled.push((idx, spill_field_ty(ty)));
         }
     }
-    // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
-    // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
     if consecutive_temp_suspensions(ir, &stmts, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
     {
@@ -2326,15 +2324,7 @@ fn build_lambda_state_machine(
             spilled.push((idx, spill_field_ty(ty)));
         }
     }
-    // The spill-shape bail applies only to a RECEIVER lambda's machine (leading `this` field): the
-    // plain lambda's restore handles sub-int spills (a `Boolean` across try/catch, e2e-verified),
-    // while the receiver form's restore mis-slots them (the corpus intLikeVarSpilling shapes).
-    let receiver_lambda = ir.classes[class_id as usize]
-        .fields
-        .first()
-        .is_some_and(|f| f.name == "this");
-    if (receiver_lambda && spill_shape_unmodeled(&spilled))
-        || consecutive_temp_suspensions(ir, &stmts, &suspend_set)
+    if consecutive_temp_suspensions(ir, &stmts, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
         || tail_suspending_loop(ir, &stmts, &suspend_set)
     {
@@ -5064,18 +5054,6 @@ fn spill_field_ty(ty: Ty) -> Ty {
     } else {
         ty
     }
-}
-
-/// A spilled-local shape the state machine's uniform restore doesn't model yet: kotlinc's per-kind
-/// positional spilling coerces INT-LIKE sub-int locals (`I$N` restored with `i2b`/`i2s`/`i2c`),
-/// restores an array-typed local with its exact frame type, and null-checks a NULLABLE reference
-/// restore; krusty's restore emits none of these, so such a machine would fail verification (or
-/// corrupt a frame type) — bail (skip, never miscompile).
-fn spill_shape_unmodeled(spilled: &[(u32, Ty)]) -> bool {
-    spilled.iter().any(|(_, t)| {
-        matches!(t, Ty::Byte | Ty::Short | Ty::Char | Ty::Boolean)
-            || t.non_null().array_elem().is_some()
-    })
 }
 
 /// A suspending body iterating a `kotlin.ranges` PROGRESSION object (`for (x in 20L..30L step 5L)` —
