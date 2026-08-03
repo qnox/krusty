@@ -919,6 +919,27 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Kotlin class headers allow `NL*` before the supertype-list colon. The lexer also represents an
+    /// explicit `;` as `Newline`, so only advance when plain line breaks are followed by `:`; a semicolon
+    /// must continue to terminate the declaration.
+    fn skip_plain_newlines_before_supertype_colon(&mut self) {
+        let mut next = self.i;
+        while self
+            .t
+            .get(next)
+            .is_some_and(|token| token.kind == TokenKind::Newline && token.text(self.src) != ";")
+        {
+            next += 1;
+        }
+        if self
+            .t
+            .get(next)
+            .is_some_and(|token| token.kind == TokenKind::Colon)
+        {
+            self.i = next;
+        }
+    }
+
     /// Kotlin treats a newline before `||`, `&&`, or `?:` as a line CONTINUATION, not a statement
     /// terminator (`cond\n  && other`, `x\n  ?: default`): the operator cannot begin a statement, so
     /// the expression keeps going. Peek past the newline(s); if such an operator follows, consume them
@@ -3294,6 +3315,7 @@ impl<'a> Parser<'a> {
         let mut base_args = Vec::new();
         let mut delegations = Vec::new();
         let mut delegation_exprs = Vec::new();
+        self.skip_plain_newlines_before_supertype_colon();
         if self.eat(TokenKind::Colon) {
             loop {
                 self.skip_newlines();
@@ -8719,6 +8741,28 @@ mod tests {
             "constructor after semicolon was attached to First"
         );
         assert!(find_class("Second").annotations.is_empty());
+    }
+
+    #[test]
+    fn semicolon_does_not_continue_into_a_supertype_list() {
+        let mut diagnostics = DiagSink::new();
+        let source = "open class Base\nclass Derived; : Base()\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let derived = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) if class.name == "Derived" => Some(class),
+                _ => None,
+            })
+            .expect("Derived class");
+
+        assert!(derived.supertypes.is_empty());
+        assert!(diagnostics.diags.iter().any(|diagnostic| {
+            diagnostic.msg == "expected a top-level declaration"
+                && &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize] == ":"
+        }));
     }
 
     #[test]
