@@ -28,6 +28,25 @@ fun box(): String = C().tag()\n";
     assert_eq!(run(SRC).expect("interface extension on implementor"), "OK");
 }
 
+#[test]
+fn cross_file_extension_uses_the_declared_interface_receiver_descriptor() {
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            (
+                "Extensions",
+                "interface I\n\
+                 fun I.tag(): String = \"OK\"\n",
+            ),
+            (
+                "Main",
+                "class C : I\n\
+                 fun box(): String = C().tag()\n",
+            ),
+        ],
+        "cross-file extension declared receiver descriptor",
+    );
+}
+
 // NOTE: a NON-inline generic/`Any`-receiver extension called on a subtype
 // (`fun <T> T.self()` / `fun Any.tag()` on `D()`) is a distinct, deliberately-unimplemented
 // feature — the checker leaves it unresolved (it needs erased-`Object` boxing at the call, see the

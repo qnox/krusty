@@ -471,6 +471,32 @@ fn reified_inline_extension_cross_file_still_rejects() {
     );
 }
 
+#[test]
+fn reified_value_parameter_inline_extension_cross_file_still_rejects() {
+    const LIB: &str = "interface I\n\
+                       inline fun <reified T : Any> I.check(value: T?): Boolean {\n\
+                       \x20   T::class\n\
+                       \x20   return value != null\n\
+                       }\n";
+    const MAIN: &str = "class C : I\n\
+                        fun box(): String = if (C().check(1)) \"OK\" else \"fail\"\n";
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    assert!(
+        common::compile_and_run_box_files(
+            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+            &[stdlib],
+            Some(&jdk)
+        )
+        .is_none(),
+        "cross-file call to a reified value-parameter extension must be rejected, never emitted"
+    );
+}
+
 /// Guard: a SUSPEND inline extension CPS-lowers per call — it stays splice-only and the
 /// cross-file call still rejects.
 #[test]

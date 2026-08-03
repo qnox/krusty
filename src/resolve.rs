@@ -1640,6 +1640,8 @@ pub struct SymbolTable {
     unemitted_fn_facades_by_decl: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands keyed by source declaration.
     pub source_generic_value_operand_slots: HashMap<(u32, u32), Vec<u32>>,
+    /// Source functions whose reified parameters require call-site splicing.
+    source_reified_functions: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands for source members.
     pub(crate) source_generic_member_value_operand_slots: GenericMemberValueOperandSlots,
     pub source_projected_return_hazards: std::collections::HashSet<(u32, u32)>,
@@ -1678,6 +1680,7 @@ impl Default for SymbolTable {
             fn_facades_by_decl: HashMap::new(),
             unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
             source_generic_value_operand_slots: HashMap::new(),
+            source_reified_functions: std::collections::HashSet::new(),
             source_generic_member_value_operand_slots: HashMap::new(),
             source_projected_return_hazards: std::collections::HashSet::new(),
             ext_prop_facades_by_decl: HashMap::new(),
@@ -1779,6 +1782,10 @@ impl SymbolTable {
                 .into_iter()
                 .map(|((file, declaration), slots)| ((file + offset, declaration), slots))
                 .collect();
+        self.source_reified_functions = std::mem::take(&mut self.source_reified_functions)
+            .into_iter()
+            .map(|(file, declaration)| (file + offset, declaration))
+            .collect();
         self.source_projected_return_hazards =
             std::mem::take(&mut self.source_projected_return_hazards)
                 .into_iter()
@@ -4458,6 +4465,9 @@ fn collect_signatures_with_cp_impl(
             match file.decl(d) {
                 Decl::Fun(f) => {
                     let source_key = (i as u32, d.0);
+                    if !f.reified_type_params.is_empty() {
+                        table.source_reified_functions.insert(source_key);
+                    }
                     let value_operand_slots = generic_value_operand_slots(f, &[]);
                     if !value_operand_slots.is_empty() {
                         table
@@ -9359,6 +9369,9 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
+        /// The selected declaration has reified type parameters, so a direct facade call is unsound.
+        /// Same-file lowering may splice it first; every remaining path must bail.
+        requires_splice: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -13453,6 +13466,12 @@ impl<'a> Checker<'a> {
         Some((selected, signature))
     }
 
+    fn source_extension_requires_splice(&self, selected: &crate::libraries::FunctionInfo) -> bool {
+        selected
+            .source_key
+            .is_some_and(|source| self.syms.source_reified_functions.contains(&source))
+    }
+
     fn check_source_extension_call_args(
         &mut self,
         call: ExprId,
@@ -15293,6 +15312,7 @@ impl<'a> Checker<'a> {
             .selected_source_extension(receiver, name, &arg_kinds)
             .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
         {
+            let requires_splice = self.source_extension_requires_splice(&selected);
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
             let owner = sig
                 .source_file
@@ -15313,6 +15333,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
+                    requires_splice,
                 },
             ));
         }
@@ -21660,6 +21681,7 @@ impl<'a> Checker<'a> {
                 .selected_source_extension(at, "get", &index_kinds)
                 .filter(|(_, signature)| signature.is_operator())
             {
+                let requires_splice = self.source_extension_requires_splice(&selected);
                 for (i, &pt) in sig.params.iter().enumerate() {
                     self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                 }
@@ -21683,6 +21705,7 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
+                        requires_splice,
                     },
                 );
                 return self.set(e, sig.ret);
@@ -22851,6 +22874,7 @@ impl<'a> Checker<'a> {
                     .selected_source_extension(lt, "compareTo", &rhs_kind)
                     .filter(|(_, signature)| signature.is_operator() && signature.ret == Ty::Int)
                 {
+                    let requires_splice = self.source_extension_requires_splice(&selected);
                     let Some(param) = signature.single_param() else {
                         return self.check_binary(op, lt, rt, self.span(e));
                     };
@@ -22873,6 +22897,7 @@ impl<'a> Checker<'a> {
                             owner,
                             source: selected.source_key,
                             vararg: selected.call_sig.vararg,
+                            requires_splice,
                         },
                     );
                     return self.set(e, Ty::Boolean);
@@ -24050,6 +24075,7 @@ impl<'a> Checker<'a> {
         arg_kinds: &[CallArgKind],
     ) -> Option<Ty> {
         let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
+        let requires_splice = self.source_extension_requires_splice(&selected);
         // Validate against the resolver's instantiated value parameters, not the declaration's
         // potentially generic signature. This is the contract the former qualified-call block used;
         // retaining it here prevents helper reuse from accepting a safe call that selected a generic
@@ -24085,6 +24111,7 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
+                requires_splice,
             },
         );
         // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
@@ -25443,6 +25470,7 @@ impl<'a> Checker<'a> {
             );
         }
         if matches!(fi.callable.origin, Origin::Module { .. }) {
+            let requires_splice = self.source_extension_requires_splice(&fi);
             let (file, declaration) = fi.source_key?;
             let (_, signature) = self
                 .syms
@@ -25470,6 +25498,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
+                    requires_splice,
                 },
             );
             self.resolved_call_arg_slots.insert(call, slots);
