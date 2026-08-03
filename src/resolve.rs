@@ -19,7 +19,7 @@ use crate::libraries::{
 use crate::names::{nested_internal_name_candidates, property_getter_name, property_setter_name};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
-use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
+use crate::types::{existing_type_name, ty_mentions_param, type_name, Ty, TypeName, Visibility};
 
 mod source_fallback;
 pub(crate) use source_fallback::SourceFallbackPlatform;
@@ -512,6 +512,47 @@ pub struct MemberExtPropSig {
     type_param_bounds: Vec<Ty>,
     is_var: bool,
     visibility: Visibility,
+    /// Accessor visibility is independent from the property's visibility (`public var ... private
+    /// set`). Keep it on the semantic signature, as ordinary [`DeclaredPropertySig`] does, so every
+    /// implicit-dispatch use is checked before lowering and no backend/source-origin branch has to
+    /// reconstruct it from syntax.
+    setter_visibility: Option<Visibility>,
+}
+
+impl MemberExtPropSig {
+    /// The DECLARED extension receiver (`Int` in `val Int.x: T`).
+    pub(crate) fn receiver_ty(&self) -> Ty {
+        self.receiver
+    }
+
+    /// The property's type (with getter-body inference already applied).
+    pub(crate) fn ret(&self) -> Ty {
+        self.ret
+    }
+
+    /// The property's own type parameters (`val <T> T.x`); empty for the supported shape.
+    pub(crate) fn type_params(&self) -> &[String] {
+        &self.type_params
+    }
+}
+
+/// Visibility of the setter declared by any body property.
+///
+/// Ordinary and member-extension properties use the same Kotlin accessor rule. Centralizing it
+/// keeps the semantic signatures consistent and prevents the extension path from becoming a
+/// syntax-origin special case that forgets `private set` while the ordinary path remembers it.
+fn declared_setter_visibility(property: &crate::ast::PropDecl) -> Option<Visibility> {
+    property.is_var.then(|| {
+        if property
+            .setter
+            .as_ref()
+            .is_some_and(|setter| setter.is_private)
+        {
+            Visibility::Private
+        } else {
+            property.visibility
+        }
+    })
 }
 
 /// Everything a caller needs about a declared Kotlin class.
@@ -1519,7 +1560,21 @@ type GenericMemberValueOperandSlots =
 
 type MappedNamedArgs = (Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>);
 
-type MemberExtensionProperty = (Ty, bool, Visibility, TypeName, ImplicitReceiver);
+/// One member extension property selected for a concrete receiver and implicit dispatch scope.
+///
+/// This used to be a positional tuple. Naming the independently meaningful receiver, dispatch,
+/// property, and accessor fields prevents a later handoff from accidentally checking the public
+/// property visibility when it is the setter's narrower visibility that governs a write.
+#[derive(Clone, Copy)]
+struct MemberExtensionProperty {
+    ty: Ty,
+    is_var: bool,
+    visibility: Visibility,
+    setter_visibility: Option<Visibility>,
+    owner: TypeName,
+    dispatch_receiver: ImplicitReceiver,
+    declared_receiver: Ty,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
@@ -5248,6 +5303,7 @@ fn collect_signatures_with_cp_impl(
                                         .collect::<Vec<_>>(),
                                     is_var: bp.is_var,
                                     visibility: bp.visibility,
+                                    setter_visibility: declared_setter_visibility(bp),
                                 });
                             continue;
                         }
@@ -5264,13 +5320,7 @@ fn collect_signatures_with_cp_impl(
                                 is_const: bp.is_const,
                                 getter_name: property_getter_name(&bp.name),
                                 setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
-                                setter_visibility: bp.is_var.then(|| {
-                                    if bp.setter.as_ref().is_some_and(|setter| setter.is_private) {
-                                        Visibility::Private
-                                    } else {
-                                        bp.visibility
-                                    }
-                                }),
+                                setter_visibility: declared_setter_visibility(bp),
                                 has_custom_getter: bp.getter.is_some() || bp.delegate.is_some(),
                                 // An abstract property is necessarily overridable even when its
                                 // source omitted the redundant `open` modifier.
@@ -8511,24 +8561,6 @@ fn unify_ref(
     }
 }
 
-fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
-    match ty {
-        Ty::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
-        Ty::Obj(_, arguments) => arguments
-            .iter()
-            .any(|argument| ty_mentions_param(*argument, names)),
-        Ty::Fun(signature) => {
-            signature
-                .params
-                .iter()
-                .any(|parameter| ty_mentions_param(*parameter, names))
-                || ty_mentions_param(signature.ret, names)
-        }
-        Ty::Nullable(inner) => ty_mentions_param(*inner, names),
-        _ => false,
-    }
-}
-
 fn is_function_property_shape(ty: Ty) -> bool {
     matches!(ty, Ty::Fun(_)) || matches!(ty, Ty::Nullable(inner) if matches!(*inner, Ty::Fun(_)))
 }
@@ -10070,6 +10102,16 @@ pub enum ExprLowering {
     ExtensionPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
     },
+    /// `recv.name` resolved to a MEMBER EXTENSION PROPERTY (`class C { val Int.x: T }`) — the
+    /// read lowers to a call of the owner's `getX(Recv)` accessor: the dispatch receiver comes
+    /// from the implicit-receiver scope (like a member extension function call), and `recv` is
+    /// passed as JVM argument 0. `owner` declares the property; `receiver` is the DECLARED
+    /// (substituted) extension receiver the accessor takes; `ty` is the property's type.
+    MemberExtensionPropertyRead {
+        owner: TypeName,
+        receiver: Ty,
+        ty: Ty,
+    },
     /// A Kotlin invoke-operator call (`a(args)`, equivalently `a.invoke(args)`) selected by the
     /// checker. The one convention covers both a function VALUE receiver (`Ty::Fun`, lowered to a
     /// direct function invocation) and a non-function receiver carrying a member `operator fun invoke`
@@ -10163,6 +10205,14 @@ pub enum StmtLowering {
         owner: TypeName,
         ty: Ty,
         interface: bool,
+    },
+    /// `recv.name = value` resolved to a `var` MEMBER EXTENSION PROPERTY — the write analogue of
+    /// [`ExprLowering::MemberExtensionPropertyRead`]. Lowering calls the owner's
+    /// `setX(Recv, T)` accessor with the dispatch receiver as `this`.
+    MemberExtensionPropertyWrite {
+        owner: TypeName,
+        receiver: Ty,
+        ty: Ty,
     },
     /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
     /// bytecode (kotlinc drops it at codegen). The lowerer skips it entirely.
@@ -26347,7 +26397,15 @@ impl<'a> Checker<'a> {
                             declared_receiver,
                             generic_receiver,
                         },
-                        (ty, sig.is_var, sig.visibility, owner, dispatch_receiver),
+                        MemberExtensionProperty {
+                            ty,
+                            is_var: sig.is_var,
+                            visibility: sig.visibility,
+                            setter_visibility: sig.setter_visibility,
+                            owner,
+                            dispatch_receiver,
+                            declared_receiver,
+                        },
                     ));
                 }
             }
@@ -26978,14 +27036,22 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner, dispatch_receiver))) => {
-                if visibility != Visibility::Public {
-                    self.reject_if_inaccessible(visibility, name, owner, span);
+            Ok(Some(property)) => {
+                if property.visibility != Visibility::Public {
+                    self.reject_if_inaccessible(property.visibility, name, property.owner, span);
                 }
                 if let Some(expression) = mexpr {
-                    self.mark_extension_receiver_used(expression, dispatch_receiver);
+                    self.mark_extension_receiver_used(expression, property.dispatch_receiver);
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::MemberExtensionPropertyRead {
+                            owner: property.owner,
+                            receiver: property.declared_receiver,
+                            ty: property.ty,
+                        },
+                    );
                 }
-                return Some(ty);
+                return Some(property.ty);
             }
             Err(()) => {
                 self.diags.error(
@@ -27059,10 +27125,10 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner, _))) => {
+            Ok(Some(property)) => {
                 return Some(PropertyReadProbe::Found {
-                    ty,
-                    access: Some((visibility, owner)),
+                    ty: property.ty,
+                    access: Some((property.visibility, property.owner)),
                 });
             }
             Err(()) => return Some(PropertyReadProbe::Ambiguous),
@@ -33342,7 +33408,7 @@ impl<'a> Checker<'a> {
                 member_extension
                     .as_ref()
                     .ok()
-                    .and_then(|property| property.as_ref().map(|(ty, ..)| *ty))
+                    .and_then(|property| property.as_ref().map(|property| property.ty))
             })
             .or_else(|| {
                 extension_property
@@ -33401,20 +33467,37 @@ impl<'a> Checker<'a> {
             return;
         }
         match member_extension {
-            Ok(Some((lty, is_var, visibility, owner, dispatch_receiver))) => {
-                if visibility != Visibility::Public {
-                    self.reject_if_inaccessible(visibility, &name, owner, span);
+            Ok(Some(property)) => {
+                // A write is governed by the setter, not merely by the visibility of the readable
+                // property. Resolve that semantic fact here for every implicit-dispatch origin;
+                // lowering receives only an already-authorized accessor plan.
+                let write_visibility = property.setter_visibility.unwrap_or(property.visibility);
+                if write_visibility != Visibility::Public {
+                    self.reject_if_inaccessible(
+                        write_visibility,
+                        &name,
+                        property.owner,
+                        target_span,
+                    );
                 }
-                self.mark_extension_receiver_stmt_used(s, dispatch_receiver);
-                if !is_var {
+                self.mark_extension_receiver_stmt_used(s, property.dispatch_receiver);
+                if !property.is_var {
                     self.diags
                         .error(target_span, "'val' cannot be reassigned.".to_string());
                 }
                 self.expect_assignable(
-                    lty,
+                    property.ty,
                     vt,
                     self.value_diagnostic_span(value, vt),
                     "assignment",
+                );
+                self.stmt_lowers.insert(
+                    s,
+                    StmtLowering::MemberExtensionPropertyWrite {
+                        owner: property.owner,
+                        receiver: property.declared_receiver,
+                        ty: property.ty,
+                    },
                 );
             }
             Err(()) => {

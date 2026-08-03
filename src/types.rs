@@ -1160,6 +1160,27 @@ impl Ty {
     }
 }
 
+/// Whether `ty` mentions any of the named type parameters (`T` itself, `List<T>`, `(T) -> T`,
+/// `T?`). A pure `Ty` predicate shared by the checker (generic-shape classification) and lowering
+/// (generic-shape gates).
+pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
+    match ty {
+        Ty::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
+        Ty::Obj(_, arguments) => arguments
+            .iter()
+            .any(|argument| ty_mentions_param(*argument, names)),
+        Ty::Fun(signature) => {
+            signature
+                .params
+                .iter()
+                .any(|parameter| ty_mentions_param(*parameter, names))
+                || ty_mentions_param(signature.ret, names)
+        }
+        Ty::Nullable(inner) => ty_mentions_param(*inner, names),
+        _ => false,
+    }
+}
+
 /// Kotlin declaration visibility — the modifier on a `fun`/`val`/`class` (from source) or the
 /// `@Metadata`/bytecode flags of a library declaration. `PRIVATE_TO_THIS` folds into `Private`;
 /// `LOCAL` is not represented (locals are never surfaced as declarations). This records what a
