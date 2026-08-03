@@ -10143,6 +10143,10 @@ pub enum ExprLowering {
         /// Whether that declaring owner is an interface. This is target-neutral type shape; a backend
         /// that has no compiled declaration to inspect still needs it to realize virtual dispatch.
         interface: bool,
+        /// Exact physical field selected by the same declaration walk that selected the property.
+        /// `None` leaves realization to the property declaration; `Some` prevents a backend from
+        /// replacing a Java field with a same-named synthetic accessor.
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
     },
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
@@ -27343,6 +27347,7 @@ impl<'a> Checker<'a> {
                         ExprLowering::MemberPropertyRead {
                             owner,
                             interface: self.resolved_owner_is_interface(owner),
+                            field: None,
                         },
                     );
                 }
@@ -27359,6 +27364,24 @@ impl<'a> Checker<'a> {
                         .applied_declared_member_prop_ty(rt, owner, name, ty),
                 );
             }
+            // An actual field declaration outranks JavaBean accessor synthesis on the same receiver.
+            // Ask the shared declaration walk here, before the method-derived property path, and carry
+            // its exact target so later phases never repeat an origin-specific lookup.
+            if let Some((owner, ty, interface, Some(field))) =
+                self.resolver().member_property_type(rt, name)
+            {
+                if let Some(expression) = mexpr {
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::MemberPropertyRead {
+                            owner,
+                            interface,
+                            field: Some(Box::new(field)),
+                        },
+                    );
+                }
+                return Some(ty);
+            }
             if let Some(m) = self.resolve_external_inherited_property(internal_name, name) {
                 let ret = m.ret;
                 if let Some(me) = mexpr {
@@ -27369,6 +27392,7 @@ impl<'a> Checker<'a> {
                             owner,
                             interface: m.member.is_interface()
                                 || self.resolved_owner_is_interface(owner),
+                            field: None,
                         },
                     );
                     self.resolved_calls.insert(me, ResolvedCall::Member(m));
@@ -27395,6 +27419,7 @@ impl<'a> Checker<'a> {
                                 owner,
                                 interface: m.member.is_interface()
                                     || self.resolved_owner_is_interface(owner),
+                                field: None,
                             },
                         );
                     }
@@ -27407,10 +27432,18 @@ impl<'a> Checker<'a> {
             // it need not go through any method — the backend realizes the read from the owner's own
             // declaration. Resolution owes the site only the property's type. It stays a MEMBER, so it is
             // decided here, ahead of any extension property of the same name.
-            if let Some((owner, ty, interface)) = self.resolver().member_property_type(rt, name) {
+            if let Some((owner, ty, interface, field)) =
+                self.resolver().member_property_type(rt, name)
+            {
                 if let Some(me) = mexpr {
-                    self.expr_lowers
-                        .insert(me, ExprLowering::MemberPropertyRead { owner, interface });
+                    self.expr_lowers.insert(
+                        me,
+                        ExprLowering::MemberPropertyRead {
+                            owner,
+                            interface,
+                            field: field.map(Box::new),
+                        },
+                    );
                 }
                 return Some(ty);
             }
@@ -27489,6 +27522,9 @@ impl<'a> Checker<'a> {
                     access: self.effective_property_visibility(internal_name, name),
                 });
             }
+            if let Some((_, ty, _, Some(_))) = self.resolver().member_property_type(rt, name) {
+                return Some(PropertyReadProbe::Found { ty, access: None });
+            }
             if let Some(member) = self.resolve_external_inherited_property(internal_name, name) {
                 return Some(PropertyReadProbe::Found {
                     ty: member.ret,
@@ -27502,6 +27538,9 @@ impl<'a> Checker<'a> {
                     ty: member.ret,
                     access: None,
                 });
+            }
+            if let Some((_, ty, _, _)) = self.resolver().member_property_type(rt, name) {
+                return Some(PropertyReadProbe::Found { ty, access: None });
             }
         }
         match self.member_extension_property(rt, name) {
@@ -34639,6 +34678,7 @@ val result = object { fun value(): String = captured }
             kind: crate::libraries::TypeKind::Class,
             supertypes: crate::types::TypeNameList::new(),
             constructors: Vec::new(),
+            fields: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
             companion_consts: HashMap::new(),
@@ -36049,6 +36089,7 @@ fun box(): String {
                     },
                     supertypes: crate::types::TypeNameList::new(),
                     constructors: vec![],
+                    fields: vec![],
                     members: vec![],
                     companion,
                     companion_consts: HashMap::new(),

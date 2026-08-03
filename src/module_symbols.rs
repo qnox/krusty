@@ -171,6 +171,7 @@ impl<'a> ModuleSymbols<'a> {
             kind,
             supertypes: supertypes.into(),
             constructors,
+            fields: Vec::new(),
             members,
             companion,
             companion_consts: HashMap::new(),

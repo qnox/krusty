@@ -14241,12 +14241,27 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
+        self.add_property_read_target(receiver, owner, name, ty, interface, None)
+    }
+
+    /// Construct a property read with the exact declaration target selected by resolution. The caller
+    /// does not classify source/module/classpath origins; it merely forwards the semantic selection.
+    fn add_property_read_target(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        ty: Ty,
+        interface: bool,
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
+    ) -> u32 {
         let read = self.ir.add_expr(IrExpr::PropertyRead {
             receiver,
             owner,
             name: name.to_string(),
             ty,
             interface,
+            field,
             operation: None,
         });
         self.record_property_declaration_type(read, owner, name, ty);
@@ -14617,13 +14632,17 @@ impl<'a> Lower<'a> {
         // decision, made from the owner's declaration. Without the record the read resolved to something
         // else, and the caller's other paths handle it.
         let ty = self.info.ty(e);
-        if let Some(ExprLowering::MemberPropertyRead { owner, interface }) =
-            self.info.expr_lowers.get(&e)
+        if let Some(ExprLowering::MemberPropertyRead {
+            owner,
+            interface,
+            field,
+        }) = self.info.expr_lowers.get(&e)
         {
             if self.source_property_read_needs_generic_value_class_box(*owner, name, e) {
                 return None;
             }
-            let read = self.add_property_read(recv, *owner, name, ty, *interface);
+            let read =
+                self.add_property_read_target(recv, *owner, name, ty, *interface, field.clone());
             return Some(read);
         }
         // A MEMBER EXTENSION PROPERTY read reached through the implicit-receiver path.
@@ -21253,7 +21272,20 @@ impl<'a> Lower<'a> {
                 };
                 // All property realizations use the same semantic read operation. The backend owns
                 // the field-versus-accessor decision, including computed and delegated properties.
-                self.lower_field_read_on(recv, &recv_internal, &name, e, slot_ty)?
+                match self.lower_field_read_on(recv, &recv_internal, &name, e, slot_ty) {
+                    Some(read) => read,
+                    None if matches!(
+                        self.info.expr_lowers.get(&e),
+                        Some(ExprLowering::MemberPropertyRead { field: Some(_), .. })
+                    ) =>
+                    {
+                        // The receiver is emitted in this file, but the selected declaration may be
+                        // inherited from any provider. Forward the checker-selected target through the
+                        // ordinary member-read path instead of branching on that provider's origin.
+                        self.lower_member_read_on(recv, rt, &name, e)?
+                    }
+                    None => return None,
+                }
             } else {
                 // A property read on a builtin/library/another-file receiver (`s.length`,
                 // `list.size`, a sibling class's `getX()`): resolved generically through the shared

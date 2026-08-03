@@ -55,6 +55,71 @@ fn cleanup(classes_dir: &std::path::Path) {
     }
 }
 
+/// A public Java instance field is a Kotlin property, including when it is inherited and its
+/// declared generic type is specialized by the receiver's superclass chain. Keep this in the
+/// compiler harness: the contract is frontend typing plus executable JVM lowering, not LSP wiring.
+#[test]
+fn public_java_instance_fields_are_typed_and_executable() {
+    let java_classpath = common::classpath_jars_for("");
+    let Some((java_dir, _)) = common::javac_compile(
+        &[
+            (
+                "p/Box.java".to_string(),
+                "package p; public class Box<T extends CharSequence> { public final T value; public final kotlin.jvm.functions.Function0<Integer> callback = () -> 1; public Box() { this.value = null; } public Box(T value) { this.value = value; } public T getValue() { throw new AssertionError(\"getter must not win over field\"); } public String getCallback() { return \"getter\"; } }"
+                    .to_string(),
+            ),
+            (
+                "p/StringBox.java".to_string(),
+                "package p; public final class StringBox extends Box<String> { public StringBox(String value) { super(value); } }"
+                    .to_string(),
+            ),
+        ],
+        &java_classpath,
+    ) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let source = r#"
+class SourceBox : p.Box<String>()
+class ShadowBox : p.Box<String>() { val value: Int = 7 }
+
+fun nullableValueLength(box: p.Box<String>?): Int = box?.value?.length ?: 0
+fun directValue(box: p.Box<String>): String = box.value
+
+fun box(): String {
+    val direct: String = directValue(p.StringBox("O"))
+    val inherited: String = p.StringBox("K").value
+    val sourceInherited: String = SourceBox().value
+    return if (ShadowBox().value == 7) direct + inherited + sourceInherited else "FAIL"
+}
+"#;
+    let Some(jdk) = common::jdk_modules() else {
+        cleanup(&java_dir);
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let mut classpath = common::classpath_jars_for(source);
+    classpath.push(java_dir.clone());
+    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(&jdk));
+    assert!(
+        diagnostics.is_empty(),
+        "public Java fields should resolve as Kotlin properties: {diagnostics:?}"
+    );
+    let result = common::compile_and_run_box(source, "Main", &classpath, Some(&jdk));
+    let nullable_diagnostics = common::front_end_diagnostics(
+        "fun invalid(box: p.Box<String>?): Int = box.callback()",
+        &classpath,
+        Some(&jdk),
+    );
+    cleanup(&java_dir);
+
+    assert_eq!(result.as_deref(), Some("OKnull"));
+    assert_eq!(
+        nullable_diagnostics,
+        ["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'p.Box<String>?'."]
+    );
+}
+
 /// The CIRCULAR direction (slice 2, Kotlin-first): Java extends a Kotlin class, Kotlin calls the
 /// Java class. Pipeline: signature stubs from the Java source (`krusty::jvm::java_stub`, no
 /// javac) → krusty compiles Kotlin against the stub dir → real javac compiles the Java against

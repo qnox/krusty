@@ -428,6 +428,7 @@ mod tests {
                     kind: crate::libraries::TypeKind::Class,
                     supertypes: vec![self.owner.clone()].into(),
                     constructors: vec![],
+                    fields: vec![],
                     members: vec![],
                     companion: vec![],
                     companion_consts: std::collections::HashMap::new(),

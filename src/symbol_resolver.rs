@@ -1802,7 +1802,16 @@ impl<'a> SymbolResolver<'a> {
     /// finding one. Returns the selected declaration owner and its interface shape beside the logical
     /// property type so lowering does not rediscover either from a source-specific table. Nearest
     /// declaration wins, as for any member.
-    pub fn member_property_type(&self, recv: Ty, name: &str) -> Option<(TypeName, Ty, bool)> {
+    pub fn member_property_type(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<(
+        TypeName,
+        Ty,
+        bool,
+        Option<crate::libraries::InstanceFieldRef>,
+    )> {
         let receiver_accessible = !recv.is_nullable()
             && recv
                 .kotlin_class_internal()
@@ -1816,23 +1825,67 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: &self.lexical_classes,
             receiver: Some(recv),
         };
-        self.src
-            .property_members(recv, name)
-            .overloads
-            .into_iter()
-            .filter(|property| {
-                property.kind == PropKind::Member
-                    && property.context_count == 0
-                    && member_visible(Some(&access), property.visibility, property.owner)
-            })
-            .min_by_key(|property| property.receiver_rank)
-            .map(|property| {
+        // Walk properties and physical fields together, one classifier rung at a time. This is the
+        // single precedence boundary for same-file, module, dependency-source, and compiled shapes:
+        // a declaration on the nearest classifier wins, and an unreadable/static field still hides an
+        // inherited readable field. Providers only report declarations; none performs its own MRO walk.
+        let mut queue = std::collections::VecDeque::from([recv]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = queue.pop_front() {
+            let internal = current.obj_internal()?;
+            if !seen.insert(internal) {
+                continue;
+            }
+            let shape = self.src.resolve_type_name(internal)?;
+            let local_property = self
+                .src
+                .property_members(current, name)
+                .overloads
+                .into_iter()
+                .filter(|property| {
+                    property.kind == PropKind::Member
+                        && property.context_count == 0
+                        && property.receiver_rank == 0
+                })
+                .min_by_key(|property| property.receiver_rank);
+            if let Some(property) = local_property {
+                if !member_visible(Some(&access), property.visibility, property.owner) {
+                    return None;
+                }
                 let interface = self
                     .src
                     .resolve_type_name(property.owner)
                     .is_some_and(|owner| owner.is_interface());
-                (property.owner, property.ty, interface)
-            })
+                return Some((property.owner, property.ty, interface, None));
+            }
+            if let Some(field) = shape.fields.iter().find(|field| field.name == name) {
+                if field.is_static || field.visibility != crate::types::Visibility::Public {
+                    return None;
+                }
+                let arguments = current.type_args();
+                let fully_applied = shape.type_params.len() == arguments.len();
+                let ty = if fully_applied {
+                    let bindings = shape
+                        .type_params
+                        .iter()
+                        .cloned()
+                        .zip(arguments.iter().copied())
+                        .collect();
+                    ty_subst(field.ty, &bindings)
+                } else {
+                    field.erased_ty
+                };
+                let target = crate::libraries::InstanceFieldRef {
+                    owner: internal,
+                    name: field.name.clone(),
+                    ty,
+                    descriptor: field.descriptor.clone(),
+                };
+                return Some((internal, ty, shape.is_interface(), Some(target)));
+            }
+            queue.extend(self.src.direct_supertypes(current));
+        }
+        None
     }
 
     /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance
@@ -5126,6 +5179,7 @@ mod tests {
             kind: TypeKind::Class,
             supertypes: supertypes.into(),
             constructors,
+            fields: vec![],
             members: vec![],
             companion: vec![],
             companion_consts: std::collections::HashMap::new(),
