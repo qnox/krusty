@@ -37043,6 +37043,63 @@ fun box(): String {
             fun inspect() { Direct.entries; Owner.Nested.entries }");
     }
 
+    /// A source-declared enum must reach the SAME provider seam a classpath enum reaches: the checker
+    /// records `EnumEntriesRead` carrying the declaring owner and the provider's dedicated accessor
+    /// capability. Typing `entries` without recording the read leaves lowering with only the bare
+    /// classifier receiver to evaluate, which is not a value.
+    #[test]
+    fn source_enum_entries_records_the_declaring_owner_and_its_accessor() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "enum class Direct { VALUE }\n\
+             class Owner { enum class Nested { VALUE } }\n\
+             fun inspect() { Direct.entries; Owner.Nested.entries }",
+            &mut diagnostics,
+        );
+        let reads = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                matches!(expression, Expr::Member { name, .. } if name == "entries")
+                    .then_some(ExprId(index as u32))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reads.len(), 2);
+        let files = vec![file];
+        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::toolchain::stdlib_classpath(),
+        ));
+        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+
+        let owners = ["Direct", "Owner$Nested"];
+        for (read, owner) in reads.into_iter().zip(owners) {
+            let Some(ExprLowering::EnumEntriesRead {
+                owner: recorded,
+                accessor,
+            }) = info.expr_lowers.get(&read)
+            else {
+                panic!("source enum '{owner}' did not record an entries read for lowering");
+            };
+            assert_eq!(recorded.render(), owner);
+            let accessor = accessor
+                .as_ref()
+                .unwrap_or_else(|| panic!("source enum '{owner}' lost its entries accessor"));
+            assert_eq!(
+                accessor.owner.map(|owner| owner.render()).as_deref(),
+                Some(owner)
+            );
+            assert_eq!(accessor.physical_name.as_deref(), Some("getEntries"));
+            assert_eq!(accessor.descriptor, "()Lkotlin/enums/EnumEntries;");
+            assert_eq!(
+                info.ty(read),
+                Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj(owner)])
+            );
+        }
+    }
+
     #[test]
     fn enum_without_a_direct_entries_accessor_records_the_unavailable_realization() {
         let mut diagnostics = DiagSink::new();
