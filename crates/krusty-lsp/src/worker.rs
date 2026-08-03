@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
 use krusty::features::LangFeatures;
-use krusty::jvm::classpath::Classpath;
+use krusty::jvm::classpath::{platform_jdk_modules, Classpath};
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::source::{SourceInput, SourceKind};
 use serde::{Deserialize, Serialize};
@@ -272,6 +272,16 @@ struct WorkerProcess {
     stdout: Option<BufReader<ChildStdout>>,
 }
 
+#[derive(Serialize)]
+struct WorkerLaunchConfiguration<'a> {
+    classpath: &'a [PathBuf],
+}
+
+#[derive(Deserialize)]
+struct OwnedWorkerLaunchConfiguration {
+    classpath: Vec<PathBuf>,
+}
+
 struct BoundedVec {
     bytes: Vec<u8>,
     limit: usize,
@@ -366,6 +376,13 @@ fn encode_response(analyses: &[AnalysisResponse]) -> io::Result<Vec<u8>> {
     Ok(response.bytes)
 }
 
+fn encode_launch_configuration(classpath: &[PathBuf]) -> io::Result<Vec<u8>> {
+    let mut configuration = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
+    serde_json::to_writer(&mut configuration, &WorkerLaunchConfiguration { classpath })
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    Ok(configuration.bytes)
+}
+
 fn response_wire_bytes(analyses: &[AnalysisResponse]) -> io::Result<usize> {
     crate::analysis::serialized_json_wire_bytes(analyses).map_err(json_io)
 }
@@ -453,7 +470,8 @@ where
 }
 
 impl WorkerProcess {
-    fn spawn(executable: &Path, arguments: &[String]) -> io::Result<Self> {
+    fn spawn(executable: &Path, arguments: &[String], classpath: &[PathBuf]) -> io::Result<Self> {
+        let configuration = encode_launch_configuration(classpath)?;
         let mut child = Command::new(executable)
             .arg("--analysis-worker")
             // Supply the identity rather than making the child discover it after exec. If the
@@ -478,6 +496,7 @@ impl WorkerProcess {
             stdin,
             stdout: Some(BufReader::new(stdout)),
         };
+        write_framed(&mut process.stdin, &configuration)?;
         process.wait_until_ready()?;
         Ok(process)
     }
@@ -613,6 +632,7 @@ impl Drop for WorkerProcess {
 pub struct AnalysisWorker {
     executable: PathBuf,
     arguments: Vec<String>,
+    classpath: Vec<PathBuf>,
     process: WorkerProcess,
     restart_required: bool,
     analyses: usize,
@@ -621,11 +641,17 @@ pub struct AnalysisWorker {
 }
 
 impl AnalysisWorker {
-    pub fn spawn(executable: PathBuf, arguments: Vec<String>) -> io::Result<Self> {
-        let process = WorkerProcess::spawn(&executable, &arguments)?;
+    pub fn spawn(
+        executable: PathBuf,
+        arguments: Vec<String>,
+        classpath: Vec<PathBuf>,
+    ) -> io::Result<Self> {
+        let arguments = worker_process_arguments(&arguments);
+        let process = WorkerProcess::spawn(&executable, &arguments, &classpath)?;
         Ok(Self {
             executable,
             arguments,
+            classpath,
             process,
             restart_required: false,
             analyses: 0,
@@ -638,7 +664,7 @@ impl AnalysisWorker {
         let _ = self.process.child.kill();
         let _ = self.process.child.wait();
         self.restart_required = true;
-        let replacement = WorkerProcess::spawn(&self.executable, &self.arguments)?;
+        let replacement = WorkerProcess::spawn(&self.executable, &self.arguments, &self.classpath)?;
         self.process = replacement;
         self.restart_required = false;
         self.analyses = 0;
@@ -649,16 +675,17 @@ impl AnalysisWorker {
     ///
     /// The worker interns compiler-global types for its whole lifetime, so this cannot be applied in
     /// place — the process is replaced, which is exactly the bounded-restart path the supervisor
-    /// already relies on. The classpath and JDK launch arguments are rebuilt from the parameters;
-    /// unrelated arguments keep their order. When nothing would change, the worker is left running.
+    /// already relies on. The parent resolves the complete classpath from the project entries and
+    /// JDK, then sends it through the replacement worker's framed stdin. When nothing would change,
+    /// the worker is left running.
     pub fn reconfigure(
         &mut self,
         classpath: &[PathBuf],
         jdk_home: Option<&Path>,
         no_jdk: bool,
     ) -> io::Result<()> {
-        let arguments = replace_launch_arguments(&self.arguments, classpath, jdk_home, no_jdk);
-        if arguments == self.arguments {
+        let classpath = configured_worker_classpath(classpath, jdk_home, no_jdk);
+        if classpath == self.classpath {
             return if self.restart_required {
                 self.restart()
             } else {
@@ -668,8 +695,8 @@ impl AnalysisWorker {
         let _ = self.process.child.kill();
         let _ = self.process.child.wait();
         self.restart_required = true;
-        let replacement = WorkerProcess::spawn(&self.executable, &arguments)?;
-        self.arguments = arguments;
+        let replacement = WorkerProcess::spawn(&self.executable, &self.arguments, &classpath)?;
+        self.classpath = classpath;
         self.process = replacement;
         self.restart_required = false;
         self.analyses = 0;
@@ -1045,6 +1072,27 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
     Ok(())
 }
 
+/// Read the supervisor-resolved classpath before initializing the worker.
+///
+/// The classpath deliberately crosses the framed stdin pipe rather than the process argument or
+/// environment vectors. Both vectors share the platform's `exec` size ceiling, which large JPS
+/// workspaces can exceed before the worker process starts.
+pub fn run_configured_analysis_worker<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> io::Result<()> {
+    let body = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "analysis worker launch configuration missing",
+        )
+    })?;
+    let configuration =
+        serde_json::from_slice::<OwnedWorkerLaunchConfiguration>(&body).map_err(json_io)?;
+    drop(body);
+    run_analysis_worker(reader, writer, configuration.classpath)
+}
+
 /// Stub `java_sources` onto `classpath` so Kotlin sources resolve Java declarations that no compiled
 /// class covers. Returns whether an overlay was installed, so the caller knows to clear it.
 fn set_java_stub_overlay(classpath: &Classpath, java_sources: &[String]) -> bool {
@@ -1196,16 +1244,8 @@ fn json_io(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
-/// Rebuild a worker argument vector with a fresh classpath and JDK: drop every existing
-/// `-cp`/`-classpath` pair, `-jdk-home` pair, and `-no-jdk` flag, then re-add them from the
-/// parameters. The worker resolves JDK modules from `-jdk-home` (or `JAVA_HOME`) itself, so the
-/// classpath here carries project entries only. Unrelated arguments keep their order.
-fn replace_launch_arguments(
-    arguments: &[String],
-    classpath: &[PathBuf],
-    jdk_home: Option<&Path>,
-    no_jdk: bool,
-) -> Vec<String> {
+/// Keep resolved classpath and JDK configuration out of the worker's `exec` argument vector.
+fn worker_process_arguments(arguments: &[String]) -> Vec<String> {
     let mut rebuilt = Vec::with_capacity(arguments.len());
     let mut index = 0;
     while index < arguments.len() {
@@ -1218,29 +1258,21 @@ fn replace_launch_arguments(
             }
         }
     }
-    if no_jdk {
-        rebuilt.push("-no-jdk".to_string());
-    } else if let Some(jdk_home) = jdk_home {
-        rebuilt.push("-jdk-home".to_string());
-        rebuilt.push(jdk_home.to_string_lossy().into_owned());
-    }
-    if !classpath.is_empty() {
-        rebuilt.push("-cp".to_string());
-        rebuilt.push(join_classpath(classpath));
-    }
     rebuilt
 }
 
-fn join_classpath(classpath: &[PathBuf]) -> String {
-    std::env::join_paths(classpath)
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| {
-            classpath
-                .iter()
-                .map(|path| path.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(if cfg!(windows) { ";" } else { ":" })
-        })
+fn configured_worker_classpath(
+    classpath: &[PathBuf],
+    jdk_home: Option<&Path>,
+    no_jdk: bool,
+) -> Vec<PathBuf> {
+    let mut configured = classpath.to_vec();
+    if !no_jdk {
+        if let Some(modules) = platform_jdk_modules(jdk_home) {
+            configured.push(modules);
+        }
+    }
+    configured
 }
 
 #[cfg(test)]
@@ -1538,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn reconfigure_replaces_classpath_and_jdk_while_keeping_other_arguments() {
+    fn worker_process_arguments_keep_classpath_and_jdk_out_of_exec() {
         let arguments = vec![
             "--stdio".to_string(),
             "-cp".to_string(),
@@ -1546,27 +1578,16 @@ mod tests {
             "-jdk-home".to_string(),
             "/old-jdk".to_string(),
         ];
-        let rebuilt = replace_launch_arguments(
-            &arguments,
-            &[PathBuf::from("a.jar"), PathBuf::from("classes")],
-            Some(Path::new("/jdk21")),
-            false,
-        );
-        let expected_cp = join_classpath(&[PathBuf::from("a.jar"), PathBuf::from("classes")]);
+        let rebuilt = worker_process_arguments(&arguments);
         assert_eq!(
             rebuilt,
-            vec![
-                "--stdio".to_string(),
-                "-jdk-home".to_string(),
-                "/jdk21".to_string(),
-                "-cp".to_string(),
-                expected_cp,
-            ]
+            vec!["--stdio".to_string()],
+            "the classpath must cross the worker pipe instead of the exec argument vector"
         );
     }
 
     #[test]
-    fn reconfigure_honors_no_jdk_and_an_empty_classpath() {
+    fn worker_process_arguments_drop_no_jdk_with_an_empty_classpath() {
         let arguments = vec![
             "-jdk-home".to_string(),
             "/old-jdk".to_string(),
@@ -1574,9 +1595,31 @@ mod tests {
             "old.jar".to_string(),
         ];
         assert_eq!(
-            replace_launch_arguments(&arguments, &[], None, true),
-            vec!["-no-jdk".to_string()]
+            worker_process_arguments(&arguments),
+            Vec::<String>::new(),
+            "the parent resolves the complete worker classpath before spawning it"
         );
+    }
+
+    #[test]
+    fn launch_configuration_carries_a_classpath_larger_than_exec_arguments() {
+        let classpath = (0..2_752)
+            .map(|index| {
+                PathBuf::from(format!(
+                    "/workspace/out/production/module-{index:04}-{}",
+                    "component".repeat(8)
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let encoded = encode_launch_configuration(&classpath).unwrap();
+
+        assert!(
+            encoded.len() > 128 * 1024,
+            "the fixture must exceed the common Unix per-argument ceiling"
+        );
+        let decoded = serde_json::from_slice::<OwnedWorkerLaunchConfiguration>(&encoded).unwrap();
+        assert_eq!(decoded.classpath, classpath);
     }
 
     #[test]
@@ -1609,10 +1652,12 @@ mod tests {
         };
         let request = encode_materialize_request(&reference, true).unwrap();
         let mut input = Vec::new();
+        let configuration = encode_launch_configuration(std::slice::from_ref(&classes)).unwrap();
+        write_framed(&mut input, &configuration).unwrap();
         write_framed(&mut input, &request).unwrap();
         let mut output = Vec::new();
 
-        run_analysis_worker(&mut Cursor::new(input), &mut output, vec![classes]).unwrap();
+        run_configured_analysis_worker(&mut Cursor::new(input), &mut output).unwrap();
 
         let mut output = Cursor::new(output);
         assert_eq!(

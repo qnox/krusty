@@ -172,11 +172,9 @@ fn main() {
         exit_when_orphaned(server);
         let stdin = io::stdin();
         let stdout = io::stdout();
-        if let Err(error) = krusty_lsp::run_analysis_worker(
-            &mut stdin.lock(),
-            &mut stdout.lock(),
-            options.effective_classpath(),
-        ) {
+        if let Err(error) =
+            krusty_lsp::run_configured_analysis_worker(&mut stdin.lock(), &mut stdout.lock())
+        {
             eprintln!("krusty-lsp worker: {error}");
             std::process::exit(1);
         }
@@ -186,6 +184,7 @@ fn main() {
     let worker = AnalysisWorker::spawn(
         std::env::current_exe().expect("locate krusty-lsp executable"),
         arguments,
+        options.effective_classpath(),
     )
     .unwrap_or_else(|error| {
         eprintln!("krusty-lsp: cannot start analysis worker: {error}");
