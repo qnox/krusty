@@ -30337,14 +30337,6 @@ impl<'a> Checker<'a> {
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
                     }
-                    match (name.as_str(), arg_tys.as_slice()) {
-                        ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => {
-                            return Ty::String;
-                        }
-                        ("indexOf", [Ty::String]) => return Ty::Int,
-                        ("concat", [Ty::String]) => return Ty::String,
-                        _ => {}
-                    }
                     // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile
                     // time on a string-literal receiver (codegen rejects a non-literal receiver).
                     if matches!(name.as_str(), "trimIndent" | "trimMargin") && arg_tys.is_empty() {
@@ -30530,6 +30522,23 @@ impl<'a> Checker<'a> {
                         ("hashCode", 0) => return Ty::Int,
                         ("toString", 0) => return Ty::String,
                         ("equals", 1) if !rt.is_nullable() => return Ty::Boolean,
+                        _ => {}
+                    }
+                }
+                // The `kotlin.text` extensions that ARE the Kotlin API for these names — typed, but not
+                // resolved, for a CLASSPATH-FREE check (no stdlib jar, so no `StringsKt` to bind and no
+                // `java.lang.String` classfile either). It must stay BELOW the extension section: these
+                // three type an expression WITHOUT recording a call target, so reaching them ahead of a
+                // real resolution leaves the IR lowerer with nothing to emit ("unrecorded qualified call
+                // target"). That is precisely what `kotlin/String` taking its scope from the builtins
+                // exposed — the Java member set had been covering them, and above the extensions this
+                // arm silently took over and the front end accepted what the backend then bailed on.
+                if rt == Ty::String && !unknown_named_arg {
+                    match (name.as_str(), arg_tys.as_slice()) {
+                        ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => {
+                            return Ty::String;
+                        }
+                        ("indexOf", [Ty::String]) => return Ty::Int,
                         _ => {}
                     }
                 }
@@ -30747,10 +30756,13 @@ impl<'a> Checker<'a> {
                         || {
                             matches!(
                                 (non_null, name.as_str(), arg_tys.as_slice()),
+                                // The same three shapes the classpath-free typing fallback covers, and
+                                // no more: `concat` came out with it, so a nullable-receiver
+                                // `s.concat("x")` now reports the unresolved reference kotlinc reports
+                                // rather than "only safe (?.) calls are allowed".
                                 (Ty::String, "substring", [Ty::Int])
                                     | (Ty::String, "substring", [Ty::Int, Ty::Int])
                                     | (Ty::String, "indexOf", [Ty::String])
-                                    | (Ty::String, "concat", [Ty::String])
                             )
                         }
                         || (name == CALLABLE_INVOKE_OPERATOR && matches!(non_null, Ty::Fun(_)))
@@ -39170,7 +39182,9 @@ fun box(): String {
         ok("fun f(s: String): String = s.substring(1)");
         ok("fun f(s: String): String = s.substring(1, 3)");
         ok("fun f(s: String): Int = s.indexOf(\"x\")");
-        ok("fun f(s: String): String = s.concat(\"y\")");
+        // (`concat` is a `java.lang.String` method with no Kotlin counterpart — kotlinc reports it as
+        // unresolved, so the classpath-free fallback must not invent it either. Covered with the rest of
+        // the Java-only member set in `mapped_string_scope_e2e`, which checks against a real stdlib.)
         err_contains(
             "fun f(s: String): String = s.substring(\"x\")",
             "unresolved reference 'substring'.",

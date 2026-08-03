@@ -1058,13 +1058,54 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `arrayListOf(10, 20, 30).remove(10)` removes the ELEMENT on both `ArrayList` and `AbstractList`
   receivers, while `removeAt(0)` emits `remove(I)`.
 
-  Limited to the COLLECTION mapped builtins. `kotlin/String` also leaks its JVM class's members, but two of
-  them are load-bearing: kotlinc reaches `String.substring` and `String.indexOf` through `kotlin.text`
-  EXTENSIONS (an `@InlineOnly` splice down to the Java member, and `StringsKt.indexOf$default`), a path
-  krusty does not yet cover — today they resolve only via the leak. Everything else on `String` (`replace`,
-  `split`, `trim`, `uppercase`, `startsWith`, `contains`, `get`, `length`, `plus`, `compareTo`) already
-  resolves as an extension or a builtin member. Widening this to the remaining mapped builtins is gated on
-  those two, not on anything in the member-scope model.
+  The COLLECTIONS **and `kotlin/String`**. `java.lang.String`'s method set had been leaking wholesale into
+  the Kotlin scope — measured against kotlinc 2.4.10, 18 names it reports as unresolved (`getChars`,
+  `concat`, `replaceAll`, `equalsIgnoreCase`, `compareToIgnoreCase`, `getBytes`, `strip*`, `transform`,
+  `indent`, …). One of them miscompiled rather than merely over-accepting: `java.lang.String.split(String)`
+  splits on a REGEX and returns `Array<String>`, so it shadowed Kotlin's literal-delimiter
+  `CharSequence.split(vararg delimiters: String): List<String>` and `"abcdef".split("c")` produced the wrong
+  type from the wrong semantics. Making the builtins authoritative closes all 18.
+
+  Two things had to move with it. The three shapes the Java set had been covering — `substring(Int)`,
+  `substring(Int, Int)`, `indexOf(String)` — are `kotlin.text` EXTENSIONS (an `@InlineOnly` splice down to
+  the Java member, and `StringsKt.indexOf$default`), and the extension seam resolves all three; what stopped
+  them was a hardcoded `rt == Ty::String` arm in the checker that typed them WITHOUT recording a call
+  target. Sitting above the extension section it took over the moment the Java members went away, so the
+  front end accepted the call and the IR lowerer bailed with "unrecorded qualified call target". It now sits
+  BELOW that section, where it is only what it was always meant to be: a typing fallback for a
+  CLASSPATH-FREE check, with no `StringsKt` to bind. Emitted bytecode matches kotlinc exactly —
+  `substring` → `invokevirtual java/lang/String.substring`, `indexOf` → `invokestatic
+  kotlin/text/StringsKt.indexOf$default`. Second, the authoritative test is the PRESENCE of the decoded
+  `.kotlin_builtins` declaration, never a non-empty member or supertype vector — an authoritative
+  declaration is allowed to state an empty set, and switching only half the shape would recreate the leak.
+  Presence is also what keeps a classpath carrying a JDK but no kotlin-stdlib correct: nothing decodes
+  there, so `String` keeps the JVM class's supertypes instead of being left with none (it would otherwise
+  lose `CharSequence`, `Comparable` and `Any`, and every subtype test against them would fail).
+
+  One supertype survives the replacement: `java/io/Serializable`. It is not a Kotlin type, so it appears in
+  no `.kotlin_builtins` declaration — but kotlinc still reports a mapped builtin as implementing it whenever
+  the Java class does, adding it back in `JvmBuiltInsCustomizer.getSupertypes` (`isSerializableInJava`).
+  Dropping it made `val v: java.io.Serializable = "abc"` an error against a kotlinc that accepts it. The
+  mapped COLLECTIONS never exposed this: `java/util/List` does not implement `Serializable`, and a concrete
+  `java.util` class that does (`ArrayList`) is not an authoritative name. A member-name probe cannot see
+  supertypes, so this needs its own coverage. Tests: `tests/mapped_string_scope_e2e.rs`.
+
+  Still NOT the remaining mapped builtins, and the reason is a mechanism krusty does not have. kotlinc does
+  not hide every Java method on a mapped type: `JvmBuiltInsCustomizer` re-admits an explicit whitelist
+  (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) on top of the builtins scope. Measured against
+  kotlinc, making the remaining names authoritative would WRONGLY reject `java.lang.CharSequence.chars` /
+  `codePoints`, `java.lang.Enum.name` / `ordinal`, and `java.lang.Throwable.fillInStackTrace` /
+  `getLocalizedMessage` / `getStackTrace` / `getSuppressed` / `initCause` / `setStackTrace` — all of which
+  kotlinc keeps. (`kotlin/Throwable` is also the one place a leak survives in the other direction: kotlinc
+  hides `getCause`/`getMessage` in favour of the `cause`/`message` properties, and krusty still accepts
+  them.) A residual leak still reaches `String` itself, one rung up from `kotlin/CharSequence` — kept
+  JOINED precisely so `chars`/`codePoints` survive. Its size is **JDK-DEPENDENT**, because it is whatever
+  `java.lang.CharSequence` happens to declare: `charAt` on every JDK, plus `getChars` as of **JDK 25**,
+  which added it as a `default` method. That makes any negative test over the `String` scope invalid if it
+  probes a name `CharSequence` also declares — `getChars` passes such a probe on a JDK 21 developer machine
+  and fails on a JDK 25 CI runner. Probe `java.lang.String`-ONLY members (`concat`, `replaceAll`,
+  `equalsIgnoreCase`, `compareToIgnoreCase`, `getBytes`). Widening further is gated on porting that
+  whitelist, not on anything in the member-scope model.
 
 - **Kotlin members on JVM-mapped built-ins (`CharSequence`/`Number`/`Comparable`).** kotlinc maps these
   Kotlin types to JVM classes (`java/lang/CharSequence`, …) but their Kotlin API differs from the JVM

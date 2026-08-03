@@ -1384,22 +1384,28 @@ impl JvmLibraries {
                     format!("({})V", type_descriptor(Ty::String)),
                 ));
             }
-            // A MAPPED Kotlin COLLECTION (`kotlin/collections/MutableList`, …) takes BOTH its members
-            // and its supertypes from the `.kotlin_builtins` declaration — that declaration IS its
-            // Kotlin API, and the JVM class it maps to is only its physical realization. Carrying the
-            // JVM class's own members or interfaces instead would put `java.util.List`'s surplus method
-            // set (`remove(int)`, `stream`, `toArray`, `getFirst` — none of them Kotlin members) into
-            // the Kotlin scope, directly or one rung up through `java/util/List` as a supertype. That
-            // is what let `list.remove(10)` bind remove-BY-INDEX. The builtins decode to the same
-            // erased descriptors and the same JVM owner, so nothing physical changes: names stay in
-            // source terms and the Kotlin → JVM rename happens at emit
-            // (`names::mapped_builtin_virtual_name`), as for every other mapped member.
+            // A MAPPED Kotlin COLLECTION (`kotlin/collections/MutableList`, …) or `kotlin/String` takes
+            // BOTH its members and its supertypes from the `.kotlin_builtins` declaration — that
+            // declaration IS its Kotlin API, and the JVM class it maps to is only its physical
+            // realization. Carrying the JVM class's own members or interfaces instead would put
+            // `java.util.List`'s surplus method set (`remove(int)`, `stream`, `toArray`, `getFirst` —
+            // none of them Kotlin members) into the Kotlin scope, directly or one rung up through
+            // `java/util/List` as a supertype. That is what let `list.remove(10)` bind remove-BY-INDEX,
+            // and what let `"abcdef".split("c")` bind `java.lang.String.split`, which splits on a REGEX
+            // and returns an array. The builtins decode to the same erased descriptors and the same JVM
+            // owner, so nothing physical changes: names stay in source terms and the Kotlin → JVM rename
+            // happens at emit (`names::mapped_builtin_virtual_name`), as for every other mapped member.
             //
-            // Only the collections, for now. Applying it to `kotlin/String` also removes
-            // `String.substring`/`indexOf`, which kotlinc reaches through `kotlin.text` EXTENSIONS (an
-            // `@InlineOnly` splice down to the Java member, and `StringsKt.indexOf$default`) — a path
-            // krusty does not yet cover, so today they resolve only because `java.lang.String`'s member
-            // set leaks in. Widening this is gated on closing that gap, not on anything here.
+            // NOT the remaining mapped builtins, and not for want of anything here: kotlinc does not
+            // hide every Java method on a mapped type either. `JvmBuiltInsCustomizer` re-admits an
+            // explicit whitelist (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) over the builtins
+            // scope, and krusty has no equivalent — so widening to `kotlin/CharSequence` would wrongly
+            // drop `chars`/`codePoints`, to `kotlin/Enum` `name`/`ordinal`, and to `kotlin/Throwable`
+            // `getStackTrace`/`initCause`/`fillInStackTrace`/… , every one of which kotlinc keeps.
+            // Leaving `kotlin/CharSequence` joined is also why whatever `java.lang.CharSequence` declares
+            // still reaches `String` one rung up — `charAt` on every JDK, plus `getChars` as of JDK 25,
+            // which added it as a `default` method. That is the price of keeping `chars`/`codePoints`,
+            // and it makes the residual leak JDK-DEPENDENT. See docs/SPEC.md.
             let rendered_internal = internal_name.render();
             let is_mapped_builtin =
                 super::jvm_class_map::to_jvm_internal(&rendered_internal) != rendered_internal;
@@ -1413,14 +1419,32 @@ impl JvmLibraries {
             // declaration, not a non-empty member vector, is the capability: an authoritative
             // declaration is allowed to state an empty member or supertype set, and falling back to
             // only half of the Java shape would recreate the very scope leak this branch prevents.
+            // That same presence test is what keeps a classpath carrying a JDK but NO kotlin-stdlib
+            // correct: nothing decodes there, so `kotlin/String` keeps the JVM class's supertypes
+            // rather than being left with none (it would otherwise lose `CharSequence`, `Comparable`
+            // and `Any`, and every subtype test against them would start failing).
             let kotlin_scope_is_authoritative = is_mapped_builtin
                 && self.cp.builtin_is_interface(&rendered_internal).is_some()
-                && super::jvm_class_map::jvm_collection_to_kotlin_type_name(
+                && (super::jvm_class_map::jvm_collection_to_kotlin_type_name(
                     super::jvm_class_map::to_jvm_type_name(internal_name),
                 )
-                .is_some();
+                .is_some()
+                    || internal_name.matches("kotlin/String"));
             let mut supertypes = TypeNameList::new();
-            if !kotlin_scope_is_authoritative {
+            if kotlin_scope_is_authoritative {
+                // `java/io/Serializable` survives the replacement. It is not a Kotlin type and so is
+                // absent from every `.kotlin_builtins` declaration, but kotlinc still reports a mapped
+                // builtin as implementing it whenever the Java class does — `JvmBuiltInsCustomizer`
+                // adds it back in `getSupertypes` (`isSerializableInJava`). Dropping it made
+                // `val v: java.io.Serializable = "abc"` an error against a kotlinc that accepts it.
+                // The mapped COLLECTIONS never noticed: `java/util/List` does not implement it, and a
+                // concrete `java.util` class that does (`ArrayList`) is not an authoritative name.
+                for s in ci.interfaces.iter_ids() {
+                    if s.matches("java/io/Serializable") {
+                        supertypes.push_name(s);
+                    }
+                }
+            } else {
                 for s in ci.interfaces.iter_ids() {
                     supertypes.push_name(s);
                 }
