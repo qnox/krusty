@@ -107,6 +107,47 @@ fun box(): String {{ var r = 0; builder {{ val b = Box(1); r = b[1] }}; return i
     assert_eq!(run(&src).expect("suspend operator get runs"), "OK");
 }
 
+/// The convention scan also feeds the stricter `suspend inline` safety gate. A generated suspend
+/// lambda state machine cannot splice an inline callee, so it must decline before emitting a direct
+/// call to a method whose physical ABI is not the source signature. This is the convention-spelling
+/// counterpart of the plain-call regression in `suspend_receiver_lambda_e2e`; value-returning `plus`
+/// deliberately selects its target through `resolved_operator_calls`, not `resolved_calls`.
+#[test]
+fn suspend_inline_operator_plus_in_suspend_lambda_reaches_the_inline_gate() {
+    let src = format!(
+        "{BUILDER}\
+class Box(val v: Int) {{ suspend inline operator fun plus(i: Int): Box = Box(v + i) }}\n\
+fun box(): String {{ var r = 0; builder {{ var b = Box(1); b += 2; r = b.v }}; return \"unreachable: $r\" }}\n"
+    );
+    common::assert_inline_source_lower_bail(&src, "gate:suspend-inline-call-in-suspend-lambda");
+}
+
+/// The statement-keyed half of the same safety rule. `plusAssign` is retained as a specialized
+/// `CompoundAssignmentTarget`, so that target must carry the exact selected suspend/inline
+/// capabilities instead of reducing them to the suspension bit used by state-machine discovery.
+#[test]
+fn suspend_inline_operator_plus_assign_in_suspend_lambda_reaches_the_inline_gate() {
+    let src = format!(
+        "{BUILDER}\
+class Box(var v: Int) {{ suspend inline operator fun plusAssign(i: Int) {{ v += i }} }}\n\
+fun box(): String {{ var r = 0; builder {{ val b = Box(1); b += 2; r = b.v }}; return \"unreachable: $r\" }}\n"
+    );
+    common::assert_inline_source_lower_bail(&src, "gate:suspend-inline-call-in-suspend-lambda");
+}
+
+/// Relational syntax must record the same exact selected target as every other operator. A former
+/// source-only hierarchy fallback could answer only “suspends”, losing the inline capability and
+/// bypassing the state-machine safety gate.
+#[test]
+fn suspend_inline_operator_compare_to_in_suspend_lambda_reaches_the_inline_gate() {
+    let src = format!(
+        "{BUILDER}\
+class Box(val v: Int) {{ suspend inline operator fun compareTo(other: Box): Int = v - other.v }}\n\
+fun box(): String {{ var r = false; builder {{ r = Box(1) < Box(2) }}; return \"unreachable: $r\" }}\n"
+    );
+    common::assert_inline_source_lower_bail(&src, "gate:suspend-inline-call-in-suspend-lambda");
+}
+
 #[test]
 fn suspend_operator_plus_convention_is_a_suspension_point() {
     // `b += 2` against a value-returning `plus` desugars to `b = b.plus(2)` — a synthetic
@@ -124,7 +165,7 @@ fn suspend_operator_plus_assign_convention_is_a_suspension_point() {
     // The in-place spelling. A `Unit`-returning `plusAssign` mutates the receiver, so the checker
     // records it as a `CompoundAssignmentTarget` against the STATEMENT — the one convention key
     // neither the call scan nor the expression tables reach. Distinct from the `plus` case above:
-    // only this shape exercises `CompoundAssignmentTarget::suspends()`.
+    // only this shape exercises the specialized target's retained callable capabilities.
     let src = format!(
         "{BUILDER}\
 class Box(var v: Int) {{ suspend operator fun plusAssign(i: Int) {{ v += i }} }}\n\
@@ -135,9 +176,9 @@ fun box(): String {{ var r = 0; builder {{ val b = Box(1); b += 2; r = b.v }}; r
 
 #[test]
 fn suspend_operator_compare_to_convention_is_a_suspension_point() {
-    // A SOURCE-class member `compareTo` driving `<` is typed straight to `Boolean` with no recorded
-    // target at all, so the classifier falls back to the canonical member walk. Nothing else covers
-    // that arm.
+    // A SOURCE-class member `compareTo` driving `<` records the same exact operator target that
+    // lowering emits. The suspend classifier consumes its capabilities without a source-only
+    // hierarchy/name fallback.
     let src = format!(
         "{BUILDER}\
 class Box(val v: Int) {{ suspend operator fun compareTo(o: Box): Int = v - o.v }}\n\

@@ -8894,20 +8894,6 @@ impl<'a> Lower<'a> {
             if self.info.convention_call_suspends(call) {
                 return true;
             }
-            // A SOURCE-class member `compareTo` driving `<`/`<=`/`>`/`>=` is typed straight to
-            // `Boolean` without recording a target, so the table above cannot see it. Ask the same
-            // canonical member walk the plain-call fallback below uses.
-            if let ast::Expr::Binary { op, lhs, .. } = self.afile.expr(call) {
-                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
-                    && self
-                        .info
-                        .ty(*lhs)
-                        .obj_internal()
-                        .is_some_and(|i| source_method_suspends(i, "compareTo"))
-                {
-                    return true;
-                }
-            }
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
             // operator on a class receiver.
@@ -9021,12 +9007,18 @@ impl<'a> Lower<'a> {
         let calls = std::cell::RefCell::new(Vec::new());
         let stmts = std::cell::RefCell::new(Vec::new());
         collect_call_sites(self.afile, body, &calls, &stmts, true);
-        calls.into_inner().into_iter().any(|call| {
-            self.info
-                .resolved_calls
-                .get(&call)
-                .is_some_and(ResolvedCall::is_suspend_inline)
-        })
+        // Ask the same centralized convention-target query as suspension discovery. Looking only in
+        // `resolved_calls` handles plain/index/safe calls but misses arithmetic/unary targets stored in
+        // `resolved_operator_calls` and statement forms such as `plusAssign`; that mismatch promoted
+        // the lambda to a state machine, then let it emit an unspliceable direct call from a state.
+        stmts
+            .into_inner()
+            .into_iter()
+            .any(|stmt| self.info.convention_stmt_is_suspend_inline(stmt))
+            || calls
+                .into_inner()
+                .into_iter()
+                .any(|call| self.info.convention_call_is_suspend_inline(call))
     }
 
     fn lower_suspend_lambda(
@@ -16511,8 +16503,8 @@ impl<'a> Lower<'a> {
                 parameter,
                 owner,
                 source,
-                // Suspend-ness drives the coroutine CLASSIFICATION scan, not this emission arm.
-                suspend: _,
+                // Selected call capabilities drive coroutine CLASSIFICATION, not emission.
+                capabilities: _,
             } => {
                 let recv_key = receiver.erased_recv();
                 let selected_params = vec![parameter];
@@ -16553,7 +16545,7 @@ impl<'a> Lower<'a> {
                 owner,
                 parameter,
                 interface,
-                suspend: _,
+                capabilities: _,
             } => {
                 let r = self.expr(lhs)?;
                 let a = self.lower_arg(rhs, &parameter)?;
@@ -16575,7 +16567,10 @@ impl<'a> Lower<'a> {
                     vec![a],
                 ))
             }
-            CompoundAssignmentTarget::LibraryExtension(c) => {
+            CompoundAssignmentTarget::LibraryExtension {
+                callable: c,
+                capabilities: _,
+            } => {
                 if c.params.len() == 2 {
                     let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                     let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
@@ -21497,88 +21492,26 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // A class `compareTo(o): Int` drives relational operators.
+            // Every non-builtin relational convention is emitted from the checker's exact selected
+            // `compareTo` target. Source/classpath members and extensions therefore share argument
+            // adaptation, suspend marking, and inline capability handling; lowering never reselects by
+            // receiver class or declaration name.
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
-                // A user `compareTo` EXTENSION on a nullable primitive (`Long?.compareTo`): the
-                // checker typed the comparison Boolean through it (the builtin needs a non-null
-                // receiver). Call it and compare its Int result with 0. The boxed-wrapper key can
-                // never be produced by a non-null primitive operand, so this cannot shadow the
-                // builtin comparison. Nullable-primitive ONLY, matching the checker's gate (a
-                // nullable REFERENCE erases to the non-null form's key).
-                if lty.nullable_primitive().is_some() {
-                    if let Some(selected) =
-                        self.info.resolved_operator_call(e, "compareTo").cloned()
-                    {
-                        let l = self.expr(lhs)?;
-                        let (cmp, ret) = self.lower_selected_op_call(
-                            l,
-                            lty,
-                            "compareTo",
-                            &[rhs],
-                            selected,
-                            Some(e),
-                        )?;
-                        if ret != Ty::Int {
-                            return None;
-                        }
-                        let zero = self.emit_const(IrConst::Int(0));
-                        return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
+                if let Some(selected) = self.info.resolved_operator_call(e, "compareTo").cloned() {
+                    let l = self.expr(lhs)?;
+                    let (cmp, ret) = self.lower_selected_op_call(
+                        l,
+                        lty,
+                        "compareTo",
+                        &[rhs],
+                        selected,
+                        Some(e),
+                    )?;
+                    if ret != Ty::Int {
+                        return None;
                     }
-                    if let Some(fid) = self.unique_ext_fun_id_by_arity(lty, "compareTo", 1) {
-                        let params = self.ir.functions[fid as usize].params.clone();
-                        if params.len() == 2 {
-                            let l = self.lower_arg(lhs, &params[0])?;
-                            let r = self.lower_arg(rhs, &params[1])?;
-                            let cmp = self.emit_local_call(fid, vec![l, r]);
-                            let zero = self.emit_const(IrConst::Int(0));
-                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                        }
-                    }
-                }
-                if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string()) {
-                    if let Some((class, index, mfid, _)) =
-                        self.resolve_method(&internal, "compareTo")
-                    {
-                        let params = self.ir.functions[mfid as usize].params.clone();
-                        if let [param] = params.as_slice() {
-                            let l = self.expr(lhs)?;
-                            let r = self.lower_arg(rhs, param)?;
-                            let cmp = self.emit_method_call(class, index, l, vec![Some(r)]);
-                            let zero = self.emit_const(IrConst::Int(0));
-                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                        }
-                    }
-                    // A CLASSPATH `Comparable` type (`class Money : Comparable<Money>` compiled
-                    // separately): `compareTo` is a classpath member, not user IR. The checker records
-                    // the selected member on the binary expression; lowering only emits that target.
-                    let lt = self.recv_ty(lhs);
-                    let rt = self.info.ty(rhs);
-                    // Reference right operand only — matches the checker guard (a primitive arg to an
-                    // erased generic `Comparable.compareTo(Object)` would need a box not applied here).
-                    if rt.is_reference() {
-                        if let Some(resolved) =
-                            self.info.resolved_member(e).cloned().filter(|resolved| {
-                                resolved.member.name == "compareTo" && resolved.ret == Ty::Int
-                            })
-                        {
-                            let l = self.expr(lhs)?;
-                            let param = resolved.member.params.first().copied().unwrap_or(rt);
-                            let r = self.lower_arg(rhs, &ty_to_ir(param))?;
-                            let owner_fallback = lt
-                                .kotlin_class_internal()
-                                .unwrap_or_else(crate::types::wk::any);
-                            let cmp = self.emit_library_member_call(
-                                l,
-                                owner_fallback,
-                                resolved.member,
-                                resolved.ret,
-                                resolved.suspend,
-                                vec![r],
-                            );
-                            let zero = self.emit_const(IrConst::Int(0));
-                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                        }
-                    }
+                    let zero = self.emit_const(IrConst::Int(0));
+                    return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                 }
             }
             // A library operator function on a reference receiver (`list + x` → `CollectionsKt.plus(list,

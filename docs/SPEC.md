@@ -244,11 +244,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   value-returning `b += x` — which desugars to `b = b.plus(x)`, an EXPRESSION),
   `resolved_stmt_operator_calls[(stmt, op)]` (statement-position `a++`/`a--`, and an index STORE
   `b[i] = v`, both of which are statements with no expression to key), and
-  `CompoundAssignmentTarget::suspends()` (the in-place `b += x` selecting a `Unit`-returning
-  `plusAssign`, recorded against the statement — which is why that target carries its own `suspend`
-  bit). One shape records no target at all: a SOURCE-class member `compareTo` driving
-  `<`/`<=`/`>`/`>=` is typed straight to `Boolean`, so the classifier falls back to the same
-  canonical member walk (`ModuleSymbols::instance_members`) the plain-call path uses.
+  `CompoundAssignmentTarget` (the in-place `b += x` selecting a `Unit`-returning `plusAssign`,
+  recorded against the statement — the specialized emission target retains the selected callable
+  capabilities). Relational syntax records its selected `compareTo` under the same operator table for
+  source/classpath members and extensions; neither classification nor lowering reselects it by class
+  name or symbol origin.
   Missing any of these misclassifies the ENCLOSING lambda as non-suspend, which is the dangerous
   direction: the callee still gets its CPS signature while the call site keeps the pre-CPS
   descriptor, and the resulting `NoSuchMethodError` is swallowed by the driving `Continuation` —
@@ -426,8 +426,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and reads each checker's exact provider-neutral `ResolvedCall`; it does not reselect by name or branch
   on local/module/classpath origin. Consequently an unrelated same-named declaration cannot suppress a
   valid ordinary call. The same exact target drives `Lower::ast_body_suspends`, so that ordinary call is
-  not falsely promoted to a state machine either. The selected suspend-inline target bails. Corpus
-  `coroutines/kt15017.kt` and the collision regression in `tests/suspend_receiver_lambda_e2e.rs`.
+  not falsely promoted to a state machine either. This applies equally to convention syntax: the
+  expression/statement target queries expose one selected capability pair across `resolved_calls`,
+  `resolved_operator_calls`, `resolved_stmt_operator_calls`, and the specialized compound-assignment
+  target. Without that shared query, a `suspend inline operator fun plus` promoted the lambda to a
+  state machine but escaped this stricter gate because its target was not in `resolved_calls`; the
+  generated state then emitted an unspliceable direct call. The selected suspend-inline target bails.
+  Corpus `coroutines/kt15017.kt`, the collision regression in
+  `tests/suspend_receiver_lambda_e2e.rs`, and the expression/statement convention regressions in
+  `tests/coroutine_intrinsics_e2e.rs`.
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
