@@ -87,8 +87,10 @@ fn safe_to_string_evaluates_its_receiver_once() {
 
 #[test]
 fn safe_to_string_on_a_collection_receiver() {
-    // The shape from the template renderer that first hit this: a nullable value of an interface
-    // type, stringified through `?.toString()`.
+    // Keep an interface-backed standard-library receiver in the matrix. Unlike the source classes
+    // above, `List` obtains its members through decoded dependency metadata and its runtime
+    // implementation is selected by the library. The same member-first rule must therefore survive
+    // both declaration origins without a classpath-only safe-call branch.
     const SRC: &str = "fun box(): String {\n\
         val l: List<String>? = listOf(\"O\", \"K\")\n\
         val s = l?.toString() ?: \"F\"\n\
