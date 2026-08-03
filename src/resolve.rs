@@ -1605,6 +1605,11 @@ pub struct SymbolTable {
     pub context_prop_names: std::collections::HashSet<String>,
     /// Top-level *computed* properties (`val g: T get() = …`): a `getG()` static method, no field.
     pub computed_props: std::collections::HashSet<String>,
+    /// `(source file, declaration)` → the `@JvmName` spelling of a top-level function whose emitted
+    /// method name differs from its source name. A CROSS-FILE caller resolves the callee by source
+    /// name but must emit the annotated one, and the callee's AST is out of its reach — so the name
+    /// is recorded here, where the collect pass can see every file. Absent = the two agree.
+    pub toplevel_jvm_names: HashMap<(u32, u32), String>,
     /// Simple names declared as `object` singletons (accessed via `Name.member`).
     pub objects: std::collections::HashSet<String>,
     /// Declared `enum` types (simple name → entry names), accessed via `Name.ENTRY`.
@@ -1669,6 +1674,7 @@ impl Default for SymbolTable {
             context_props: HashMap::new(),
             context_prop_names: std::collections::HashSet::new(),
             computed_props: std::collections::HashSet::new(),
+            toplevel_jvm_names: HashMap::new(),
             objects: std::collections::HashSet::new(),
             enums: HashMap::new(),
             static_classifier_values: HashMap::new(),
@@ -4724,8 +4730,19 @@ fn collect_signatures_with_cp_impl(
                     } else {
                         let key = erased_params_semantic_key(&sig);
                         let overloads = table.funs.entry(f.name.clone()).or_default();
+                        // A platform declaration clash is decided on the emitted JVM NAME, not the
+                        // source name: `g(String)` and `g(String?)` erase to the same descriptor and
+                        // clash only while both are spelled `g`, so an `@JvmName` on either one
+                        // separates them (kotlinc's rule). Overload SELECTION is unaffected — the
+                        // source name still keys `table.funs` above.
+                        let jvm_name = f.jvm_name(file);
+                        if jvm_name != f.name {
+                            table
+                                .toplevel_jvm_names
+                                .insert((i as u32, d.0), jvm_name.clone());
+                        }
                         let group_index =
-                            top_level_fun_groups.get_or_insert((package, f.name.clone(), key));
+                            top_level_fun_groups.get_or_insert((package, jvm_name, key));
                         let group = &mut top_level_fun_groups.groups[group_index].1;
                         let private = f.visibility.is_private();
                         let current = TopLevelFunctionConflictDecl {
@@ -5822,6 +5839,13 @@ fn collect_signatures_with_cp_impl(
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
                                 None => p
                                     .init
+                                    // A field-less custom-accessor property has no initializer, so its
+                                    // EXPRESSION getter body is what determines the type — inferred
+                                    // exactly as an initializer would be (`val X get() = 0` → `Int`).
+                                    .or(match p.getter.as_ref() {
+                                        Some(FunBody::Expr(e)) => Some(*e),
+                                        _ => None,
+                                    })
                                     .map(|i| {
                                         infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)
                                     })
@@ -5933,14 +5957,22 @@ fn collect_signatures_with_cp_impl(
                         .iter()
                         .zip(companion_property_scope.iter())
                         .map(|(p, (name, ty, _))| {
-                            if *ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
+                            let is_computed = crate::ast::is_computed_companion_prop(p);
+                            if *ty == Ty::Error
+                                && p.ty.is_none()
+                                && (p.init.is_some() || is_computed)
+                            {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
                             }
-                            // Custom accessors on a `companion object` property are emitted as the
-                            // default static getter/setter (the body is ignored) — reject rather
+                            // A FIELD-LESS custom-accessor companion property IS its accessors: it
+                            // lowers to `getX`/`setX` on the synthesized `C$Companion`, which is
+                            // kotlinc's own layout. Every OTHER accessor shape here — a getter that
+                            // reads `field`, a visibility-only `private set`, an accessor on a
+                            // `const` or delegated property — would still be emitted as the default
+                            // static accessor with the body ignored, so keep rejecting those rather
                             // than miscompile.
-                            if p.getter.is_some() || p.setter.is_some() {
-                                diags.error(p.span, "krusty: companion-object property custom accessors are not supported".to_string());
+                            if (p.getter.is_some() || p.setter.is_some()) && !is_computed {
+                                diags.error(p.span, "krusty: this companion-object property accessor shape is not supported".to_string());
                             }
                             (name.clone(), (*ty, p.visibility, p.is_var))
                         })
@@ -7863,6 +7895,22 @@ fn infer_lit_ty_scoped(
     infer_lit_ty_p(file, e, class_names, fun_rets, props, src, &env)
 }
 
+/// Property reads the compiler realizes directly rather than through a declared getter.
+///
+/// `Char.code` has no member to resolve at all (`Char` is a primitive and `code` is a stdlib
+/// extension), so only this list knows it; `String.length` and an array's `size` are realized
+/// directly for the same reason the lowerer emits them inline. The checker and the signature-phase
+/// inference must agree on the set: a read the checker types but inference does not know leaves a
+/// top-level property's type uninferred, even though the identical read checks fine inside a
+/// function body.
+fn intrinsic_property_read(receiver: Ty, name: &str) -> Option<Ty> {
+    match (receiver, name) {
+        (Ty::String, "length") | (Ty::Char, "code") => Some(Ty::Int),
+        (_, "size") if receiver.array_elem().is_some() => Some(Ty::Int),
+        _ => None,
+    }
+}
+
 fn infer_lit_ty_p(
     file: &File,
     e: ExprId,
@@ -7987,6 +8035,11 @@ fn infer_lit_ty_p(
             // Property read (`s.length`, `list.size`, `vc.value`). Use the scoped resolver so an
             // imported extension property such as `Char.code` can resolve through its getter.
             let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, env);
+            // A compiler-realized read first, exactly as the checker does — `Char.code` resolves
+            // through no getter at all, so the resolver below would leave it `Ty::Error`.
+            if let Some(intrinsic) = intrinsic_property_read(rt, name) {
+                return intrinsic;
+            }
             if let Some(m) = resolver
                 .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
                 .and_then(crate::symbol_resolver::Symbol::property)
@@ -12297,6 +12350,45 @@ fn check_file_at_impl_mode(
                                     "companion property",
                                 );
                             }
+                        }
+                        // A field-less custom-accessor companion property lowers to accessor METHODS
+                        // on the companion, so their bodies need checking like any other body — the
+                        // initializer-only walk above left the setter's parameter untyped, which the
+                        // lowerer then had no type for.
+                        let prop_ty = c
+                            .syms
+                            .classes
+                            .get(&cl.name)
+                            .and_then(|class| class.static_props.get(&p.name))
+                            .map(|&(ty, _, _)| ty)
+                            .unwrap_or(Ty::Error);
+                        if let Some(getter) = &p.getter {
+                            match getter {
+                                FunBody::Expr(g) => {
+                                    let gt = c.expr_expected(*g, prop_ty);
+                                    c.expect_assignable(prop_ty, gt, c.span(*g), "getter body");
+                                }
+                                FunBody::Block(g) => {
+                                    c.with_ret(prop_ty, |c| {
+                                        let _ = c.expr_statement(*g);
+                                    });
+                                }
+                                FunBody::None => {}
+                            }
+                        }
+                        if let Some(body) = p.setter.as_ref().and_then(|s| s.body.as_ref()) {
+                            c.push_scope();
+                            let pname = crate::ast::setter_param_or_value(
+                                p.setter.as_ref().and_then(|s| s.param.as_ref()),
+                            );
+                            c.declare(&pname, prop_ty, true);
+                            c.with_ret(Ty::Unit, |c| match body {
+                                FunBody::Expr(g) | FunBody::Block(g) => {
+                                    let _ = c.expr_statement(*g);
+                                }
+                                FunBody::None => {}
+                            });
+                            c.pop_scope();
                         }
                     }
                     for (method_index, m) in cl.companion_methods.iter().enumerate() {
@@ -19521,15 +19613,34 @@ impl<'a> Checker<'a> {
     /// that cannot name them passes none, which yields the RAW reference type — and a raw
     /// `KProperty0` erases `get()` to the bound, so `(::foo).get().value` does not resolve.
     fn property_ref_ty(&self, arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty> {
-        // A type still mentioning a type parameter is not the use site's answer — the declaration's
-        // `T.() -> String` is `Int.() -> String` at `Int::foo`, and recording the former types the
-        // `set` argument as a zero-parameter function (box
-        // `callableReference/property/extensionPropertyWithExtensionType.kt`). Fall back to the RAW
-        // reference type, which asserts nothing, rather than to a type that is wrong.
-        let args = if args.iter().any(|arg| arg.mentions_ty_param()) {
-            &[][..]
-        } else {
+        // Arguments are attached only when the reference lowering can realize them, keeping the
+        // checker in lock-step with it. Anything else falls back to the RAW reference type, which
+        // asserts nothing, rather than to a type that is wrong or to one whose accessor the
+        // synthesized reference class cannot call:
+        //
+        //  * A type still mentioning a type parameter is not the use site's answer — the
+        //    declaration's `T.() -> String` is `Int.() -> String` at `Int::foo`, and recording the
+        //    former types the `set` argument as a zero-parameter function (box
+        //    `callableReference/property/extensionPropertyWithExtensionType.kt`).
+        //  * A VALUE-class-typed property has a `@JvmName`-mangled accessor (`getZ-<hash>`) that the
+        //    reference class does not spell. BOTH flavours must be tested: `ty_is_value_class` sees
+        //    only a SOURCE value class, so a CLASSPATH one — `UInt`, and every other stdlib
+        //    `@JvmInline` — needs the provider's `value_underlying` probe. Without that second arm
+        //    `class H(val u: UInt)` typed `(h::u).get()` as `UInt` while the reference still returned
+        //    an erased `Integer`, and the read threw `ClassCastException` instead of skipping.
+        //  * A property typed as a function WITH a receiver (or context parameters) is not realized
+        //    as a plain `FunctionN` there.
+        let realizable = |&t: &Ty| {
+            let t = t.non_null();
+            !t.mentions_ty_param()
+                && !self.ty_is_value_class(t)
+                && self.syms.libraries.value_underlying(t).is_none()
+                && !matches!(t, Ty::Fun(sig) if sig.has_receiver || sig.context_count > 0)
+        };
+        let args: &[Ty] = if args.iter().all(realizable) {
             args
+        } else {
+            &[]
         };
         self.syms
             .libraries
@@ -26782,9 +26893,10 @@ impl<'a> Checker<'a> {
     /// being checked, `self.this_ty`), by Kotlin's rules. `public` and `internal` are always accessible
     /// (a resolved user member is in-module; cross-module `internal` is a separate, later concern).
     /// `private` reaches the declaring class and classes lexically nested inside it (an inner/nested
-    /// class or the companion, whose JVM internal name is `<owner>$…`); `protected` reaches those plus
-    /// any subclass of `owner`. At a top-level site (no enclosing class) a non-public member is
-    /// inaccessible.
+    /// class or the companion, whose JVM internal name is `<owner>$…`), plus — in the other direction
+    /// — a class whose own COMPANION declares the member, since a companion's members are in the
+    /// containing class's scope. `protected` reaches those plus any subclass of `owner`. At a
+    /// top-level site (no enclosing class) a non-public member is inaccessible.
     fn member_accessible(&self, vis: Visibility, owner: TypeName) -> bool {
         match vis {
             Visibility::Public | Visibility::Internal => true,
@@ -26799,10 +26911,16 @@ impl<'a> Checker<'a> {
                 self.lexical_source_class_names()
                     .into_iter()
                     .any(|enclosing| {
-                        let enclosing_prefix = format!("{}$", enclosing.render());
+                        // Reaching DOWN from an enclosing class is the COMPANION's privilege alone:
+                        // its members belong to the containing class's scope. A sibling nested
+                        // class's private member is not in that scope — kotlinc rejects `C.ZZZ`
+                        // reading `C.Inner`'s private member, and the companion reading it too — so
+                        // this arm names the companion instead of admitting every nested owner.
+                        let companion_of_enclosing =
+                            owner.matches(&format!("{}$Companion", enclosing.render()));
                         enclosing == owner
                             || enclosing.starts_with(&nested_prefix)
-                            || owner.starts_with(&enclosing_prefix)
+                            || companion_of_enclosing
                             // `protected` additionally reaches from a subclass of the owner.
                             || (vis == Visibility::Protected
                                 && self
@@ -38869,6 +38987,32 @@ fun box(): String {
             "class C { private fun choose(value: Int) = value; fun choose(value: String) = value }\n\
              fun box(): Int = C().choose(1)",
             "it is private in 'C'",
+        );
+    }
+
+    #[test]
+    fn private_companion_member_reaches_the_containing_class_body() {
+        // A `companion object`'s `private` members are in scope throughout the CONTAINING class's
+        // body — including its nested classes, at any depth. kotlinc accepts all of these (it routes
+        // the call through a synthetic `access$…` bridge); krusty widens the companion method to
+        // public instead, so the only question here is the front-end check.
+        ok("class C {\n  companion object { private fun make(): Int = 1 }\n  fun f(): Int = make()\n}");
+        ok("class C {\n  companion object { private fun make(): Int = 1 }\n  class ZZZ { fun f(): Int = C.make() }\n}");
+        ok("class C {\n  companion object { private fun make(): Int = 1 }\n  class ZZZ { class Deep { fun f(): Int = C.make() } }\n}");
+        // The widening is the COMPANION's alone, and reaches only the containing class. A sibling
+        // nested class's private member stays private to itself (kotlinc rejects both directions)…
+        err_contains(
+            "class C {\n  class Inner { private fun m(): Int = 1 }\n  class ZZZ { fun f(x: C.Inner): Int = x.m() }\n}",
+            "it is private in 'C$Inner'",
+        );
+        err_contains(
+            "class C {\n  class Inner { private fun m(): Int = 1 }\n  companion object { fun f(x: C.Inner): Int = x.m() }\n}",
+            "it is private in 'C$Inner'",
+        );
+        // …and an unrelated top-level class still cannot reach the companion's private member.
+        err_contains(
+            "class C { companion object { private fun m(): Int = 1 } }\nclass D { fun f(): Int = C.m() }",
+            "it is private in 'C$Companion'",
         );
     }
 

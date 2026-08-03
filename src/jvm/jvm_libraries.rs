@@ -3377,7 +3377,13 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             (1, true) => "kotlin/reflect/KMutableProperty1",
             _ => return None,
         };
-        Some(Ty::obj_args(internal, args))
+        // `KProperty0<V>` / `KProperty1<T, V>`: carrying the arguments is what lets `get()` report
+        // the property's type rather than the erased `Object` upper bound. An argument list of the
+        // wrong length (or one that could not be determined) leaves the reference raw, as before.
+        if args.len() == arity + 1 && !args.contains(&Ty::Error) {
+            return Some(Ty::obj_args(internal, args));
+        }
+        Some(Ty::obj(internal))
     }
 
     fn class_literal_type(&self) -> Option<Ty> {
