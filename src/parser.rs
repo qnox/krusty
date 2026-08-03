@@ -1034,8 +1034,9 @@ impl<'a> Parser<'a> {
         index
     }
 
-    /// Consume physical line breaks without consuming an explicit `;`, which the lexer also represents
-    /// as `Newline`.
+    /// Advance over physical line breaks while preserving an explicit semicolon as a declaration
+    /// boundary. Mutating callers share the same lexer distinction as lookahead callers through
+    /// `after_plain_newlines`; there must not be a second newline-scanning implementation here.
     fn skip_plain_newlines(&mut self) {
         self.i = self.after_plain_newlines(self.i);
     }
@@ -2148,15 +2149,18 @@ impl<'a> Parser<'a> {
         Some(())
     }
 
-    /// Parse a setter's optional `(param)` (type annotation discarded). Returns the param name.
+    /// Parse a setter's optional `(param)` and return its parameter name.
+    ///
+    /// Kotlin gives setter parameters a deliberately narrower grammar than ordinary function
+    /// parameters: annotations are allowed, while the property supplies the value type. Keep this
+    /// parser narrow instead of routing through `parse_param_list`, which would require a type and
+    /// admit unrelated modifiers/defaults. Annotation values are parsed through the common annotation
+    /// grammar and then discarded because `PropAccessor` has no parameter-metadata contract.
     fn parse_setter_param(&mut self) -> Option<String> {
         if !self.eat(TokenKind::LParen) {
             return None;
         }
         self.skip_plain_newlines();
-        // A setter parameter is an ordinary value parameter in Kotlin's grammar, so it may carry
-        // annotations (`set(@MagicConstant(...) value)`). They do not affect the accessor ABI, but
-        // must be parsed so the parameter name and the rest of the enclosing class stay aligned.
         while self.at(TokenKind::At) {
             let _ = self.skip_annotation();
             self.skip_plain_newlines();
@@ -2169,11 +2173,16 @@ impl<'a> Parser<'a> {
             None
         };
         self.skip_plain_newlines();
+        // Keep accepting the historical optional type annotation for recovery/compatibility, but use
+        // the ordinary type parser so a complex type cannot desynchronize the enclosing class body.
         if self.eat(TokenKind::Colon) {
             self.skip_plain_newlines();
             let _ = self.parse_type();
             self.skip_plain_newlines();
         }
+        // Kotlin permits a trailing comma in a multiline parameter list. There is exactly one setter
+        // parameter, so consume only the comma; a second parameter remains visible to `expect` as an
+        // error instead of being silently accepted.
         if self.eat(TokenKind::Comma) {
             self.skip_plain_newlines();
         }
