@@ -1842,7 +1842,10 @@ fn build_state_machine(
     }
     // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
     // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
-    if spills_bottom_typed_local(&spilled) || suspending_over_progression(ir, b, &suspend_set) {
+    if spills_bottom_typed_local(&spilled)
+        || suspension_operand_writes_local(ir, b, &suspend_set)
+        || suspending_over_progression(ir, b, &suspend_set)
+    {
         return false;
     }
     // The spilled value parameters — captured at continuation construction (in spilled order).
@@ -2391,10 +2394,9 @@ fn build_lambda_state_machine(
     // A RECEIVER lambda additionally keeps the hoisted-temp bail: its restore reloads the leading
     // `this`/capture fields on every entry, and a temp spilled beside them lands in the wrong slot
     // (the corpus `suspendCallsInArguments` shape). The PLAIN lambda's temps are e2e-verified.
-    if (receiver_lambda
-        && (spill_shape_unmodeled(&spilled)
-            || consecutive_temp_suspensions(ir, &stmts, &suspend_set)))
+    if (receiver_lambda && spill_shape_unmodeled(&spilled))
         || spills_bottom_typed_local(&spilled)
+        || suspension_operand_writes_local(ir, b, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
         || tail_suspending_loop(ir, &stmts, &suspend_set)
     {
@@ -5398,16 +5400,37 @@ fn tail_suspending_loop(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32
     hit
 }
 
-/// TWO consecutive compiler-temp suspension bindings (`val t1 = susp(); val t2 = susp()`, hoisted from
-/// one expression `a() + b()`). The named machine and the plain lambda machine restore such a temp per
-/// resume arm (`live_temp_scopes`); the RECEIVER lambda's restore does not — its leading `this`/capture
-/// fields shift the positional slots. Bail there (skip, never miscompile).
-fn consecutive_temp_suspensions(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32>) -> bool {
-    let temp_susp = |s: ExprId| {
-        matches!(&ir.exprs[s as usize], IrExpr::Variable { named: false, init: Some(i), .. }
-            if is_suspension_point(ir, unwrap_suspend_cast(ir, *i, suspend_set, false), suspend_set))
-    };
-    stmts.windows(2).any(|w| temp_susp(w[0]) && temp_susp(w[1]))
+/// A suspension whose own RECEIVER/ARGUMENTS write a local (`foo(i++)`). The spill stores are emitted
+/// ahead of the call, so such a write lands in the local but never in the field, and the resume then
+/// restores the PRE-evaluation value — a silent wrong answer (`bars(foo(i++), foo(i++))` yields
+/// `"1;1;"`). kotlinc has its arguments on the operand stack before its `putfield`s, so its spill
+/// always sees the post-evaluation state. Modelling that needs the operands materialized into typed
+/// temps ahead of the spill; until then, bail (skip, never miscompile).
+fn suspension_operand_writes_local(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    fn writes_local(ir: &IrFile, e: ExprId) -> bool {
+        if matches!(ir.exprs[e as usize], IrExpr::SetValue { .. }) {
+            return true;
+        }
+        let mut found = false;
+        for_each_child(&ir.exprs, e, &mut |c| found = found || writes_local(ir, c));
+        found
+    }
+    let mut points: HashSet<ExprId> = HashSet::new();
+    collect_suspension_points(ir, b, suspend_set, &mut points);
+    points.iter().any(|&p| {
+        let IrExpr::Call {
+            dispatch_receiver,
+            args,
+            ..
+        } = &ir.exprs[p as usize]
+        else {
+            return false;
+        };
+        dispatch_receiver
+            .iter()
+            .chain(args.iter())
+            .any(|&o| writes_local(ir, o))
+    })
 }
 
 /// True if `e`'s subtree binds the result of a suspension to a value(inline)-class-typed local. An

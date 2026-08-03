@@ -275,12 +275,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   what keeps the per-kind field maxima at kotlinc's count: a dead temp would inflate them. kotlinc
   spills a live operand the same way (`a() + b()` stores its partial `StringBuilder` in `L$0` and
   restores it in every later arm). Proven: `runBlocking { pick(0) + pick(1) + pick(2) }` → `"abc"`
-  (`tests/feature_coverage_j_e2e.rs::suspend_when_branch_around_suspend_calls`). Two shapes the temps
-  model does NOT cover keep skipping (box-corpus-proven, never miscompiled): a RECEIVER lambda
-  (`suspend Controller.() -> Unit`), whose restore reloads leading `this`/capture fields that displace a
-  temp's positional slot (`consecutive_temp_suspensions`, corpus `suspendCallsInArguments`); and a
-  spilled local of type `Nothing`, whose expression never yields a value, so the slot has no JVM type
-  and merges to `top` at a join ("Bad local variable type" — `spills_bottom_typed_local`).
+  (`tests/feature_coverage_j_e2e.rs::suspend_when_branch_around_suspend_calls`). The model covers a
+  RECEIVER lambda too — its leading `this`/capture fields do NOT displace a temp's positional slot
+  (`tests/suspend_e2e.rs::suspend_receiver_lambda_spills_hoisted_temps`). A spilled local of type
+  `Nothing` still bails: its expression never yields a value, so the slot has no JVM type and merges to
+  `top` at a join ("Bad local variable type" — `spills_bottom_typed_local`).
+- **`suspend fun` — a suspension whose own ARGUMENT writes a local is refused, not miscompiled.** The
+  spill stores are emitted ahead of the call, so an argument's update to a spilled local (`foo(i++)`)
+  lands in the local but never in the field, and the resume restores the PRE-evaluation value —
+  `bars(foo(i++), foo(i++))` silently answered `"1;1;"` instead of `"1;2;"`. kotlinc has its arguments
+  on the operand stack before its `putfield`s, so its spill always sees the post-evaluation state;
+  modelling that needs the receiver/arguments materialized into typed temps ahead of the spill. Until
+  then `suspension_operand_writes_local` skips the file. This was the actual cause of the corpus
+  `suspendCallsInArguments` divergence — a silent wrong answer in an otherwise-accepted shape, not a
+  spill-slot displacement (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_still_skips`).
 - **`suspend fun` — a `Nothing?` local live across a suspension is REMATERIALIZED, not spilled.**
   `var x = null` has exactly one possible value, so kotlinc gives it no continuation field and re-emits
   `aconst_null; astore` in each resume arm. Spilling it instead is wrong twice over: the local's

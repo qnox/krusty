@@ -2179,3 +2179,73 @@ fun box(): String = runBlocking { baz() }\n";
         "a bottom-typed local live across a suspension must rematerialize as null"
     );
 }
+
+/// Hoisted temps crossing a suspension inside a RECEIVER lambda (`suspend Controller.() -> Unit`).
+///
+/// The leading `this`/capture fields were suspected of displacing a temp's positional spill slot; they
+/// do not — the corpus failure this shape used to show was the argument-evaluation ordering covered by
+/// `suspend_call_whose_argument_writes_a_local_still_skips`.
+#[test]
+fn suspend_receiver_lambda_spills_hoisted_temps() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+class Controller { var result = \"\" }\n\
+\n\
+fun builder(c: suspend Controller.() -> Unit): String {\n\
+    val cc = Controller()\n\
+    c.startCoroutine(cc, Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    return cc.result\n\
+}\n\
+suspend fun foo(i: Int): String = \"$i;\"\n\
+suspend fun bars(p1: String, p2: String): String = p1 + p2\n\
+fun box(): String = builder { result = bars(foo(1), foo(2)) }\n";
+    let Some(out) = common::compile_and_run_box(
+        src,
+        "SuspendRecvLambdaTemps",
+        &[stdlib],
+        Some(jdk.as_path()),
+    ) else {
+        panic!(
+            "SuspendRecvLambdaTemps: the front end accepted the source, so lowering/emit bailed"
+        );
+    };
+    assert_eq!(
+        out.trim(),
+        "1;2;",
+        "receiver-lambda temps must survive resumption"
+    );
+}
+
+/// A suspension whose own ARGUMENT writes a local (`foo(i++)`) is still skipped.
+///
+/// The spill stores are emitted ahead of the call, so the argument's update to `i` lands in the local
+/// but never in the field, and the resume restores the pre-increment value — `bars(foo(i++), foo(i++))`
+/// silently yielded `"1;1;"` instead of `"1;2;"`. Until the operands are materialized into typed temps
+/// ahead of the spill, the file must be REFUSED rather than answer wrongly.
+#[test]
+fn suspend_call_whose_argument_writes_a_local_still_skips() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun foo(i: Int): String = \"$i;\"\n\
+suspend fun bars(p1: String, p2: String): String = p1 + p2\n\
+fun box(): String = runBlocking {\n\
+    var i = 1\n\
+    val a = foo(i++)\n\
+    val b = foo(i++)\n\
+    bars(a, b)\n\
+}\n";
+    assert!(
+        common::compile_and_run_box(src, "SuspendArgWrites", &[stdlib], Some(jdk.as_path()))
+            .is_none(),
+        "a suspension whose argument writes a live local must be skipped, never miscompiled"
+    );
+}
