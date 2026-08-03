@@ -2756,10 +2756,13 @@ fn emit_class(
         let desc = ir_type_desc(&s.ty);
         // A `private const val`/`private val` on an object/companion keeps its declared visibility
         // (kotlinc: PRIVATE static final; const reads are inlined so no cross-class getstatic needs it).
+        // A `var` is reassignable, so it must NOT carry ACC_FINAL — a `putstatic` on a final field
+        // outside `<clinit>` is an IllegalAccessError.
+        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
         let acc = if s.visibility.is_private() {
-            0x001A // PRIVATE | STATIC | FINAL
+            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
-            0x0019 // PUBLIC | STATIC | FINAL
+            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
         };
         if let Some(cv) = const_value_idx(ir, s.init, &mut cw) {
             cw.add_field_const(acc, &s.name, &desc, cv);
@@ -7660,7 +7663,15 @@ impl<'a> Emitter<'a> {
                 // Within the facade write the field directly; from another class go through `setX()` —
                 // or, for a PRIVATE top-level property (no public setter), the `access$set<X>$p` bridge.
                 let private = self.ir.statics[index as usize].visibility.is_private();
-                if self.owner == facade || is_const {
+                // A static declaring an OWNER lives on that class (a companion property is a static
+                // field on the outer class), so it is written directly there — the facade's
+                // accessor-or-bridge dance below is for the facade's own top-level properties.
+                if let Some(owner) = self.ir.statics[index as usize].owner {
+                    let fref = self
+                        .cw
+                        .fieldref(&owner.render(), &name, &type_descriptor(jt));
+                    code.putstatic(fref, slot_words(jt) as i32);
+                } else if self.owner == facade || is_const {
                     let fref = self.cw.fieldref(&facade, &name, &type_descriptor(jt));
                     code.putstatic(fref, slot_words(jt) as i32);
                 } else {

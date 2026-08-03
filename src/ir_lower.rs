@@ -1881,7 +1881,7 @@ fn lower_file_at_reporting_impl(
                     name: cp.name.clone(),
                     ty: ty_to_ir(cty),
                     init,
-                    is_var: false,
+                    is_var: cp.is_var,
                     is_const: cp.is_const,
                     owner: Some(type_name(&internal)),
                     custom_accessor: false,
@@ -16559,6 +16559,20 @@ impl<'a> Lower<'a> {
     }
 
     fn stmt_inner(&mut self, s: crate::ast::StmtId) -> Option<u32> {
+        // `C.prop = value` on a companion (static) property — the write mirror of the `getstatic
+        // C.prop` read. The checker resolved the owner and property type; the static itself was
+        // registered while lowering the companion's declarations.
+        if let Some(StmtLowering::CompanionStaticWrite { owner, name, ty }) =
+            self.info.stmt_lowers.get(&s).cloned()
+        {
+            if let Stmt::AssignMember { value, .. } = self.afile.stmt(s).clone() {
+                let index = self.ir.statics.iter().position(|static_field| {
+                    static_field.owner == Some(owner) && static_field.name == name
+                })? as u32;
+                let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
+                return Some(self.emit_set_static(index, lowered));
+            }
+        }
         // A compound assignment routed to an `opAssign` operator (checker-selected) — emit the call.
         if let Some(StmtLowering::PlusAssign(target)) = self.info.stmt_lowers.get(&s) {
             if let Stmt::Assign { value, .. }

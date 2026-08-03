@@ -2304,8 +2304,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class a companion `val` already uses. Test:
   `tests/feature_coverage_r_e2e.rs::companion_member_unqualified_from_instance`.
 
-  Still open: WRITING a companion `var` through the class name (`C.created = 3`). The read is a
-  `getstatic`; the write needs a static-field-write lowering hook that does not exist yet.
+  A companion `var` is also WRITTEN through the class name (`C.created = 3`). The receiver is a
+  CLASS NAME, not a value, so the checker resolves the target through the same `static_props` the read
+  uses instead of typing the receiver as an expression — a class whose companion is not a first-class
+  value would otherwise be reported unresolved. Two emitter facts follow from `var`: an owner-scoped
+  static drops `ACC_FINAL` (a `putstatic` on a final field outside `<clinit>` is an
+  `IllegalAccessError`), and a static that declares an owner is written directly on that class rather
+  than through the facade's accessor/bridge path. Test:
+  `tests/resolve_parse_deep_coverage_e2e.rs::companion_member_from_instance`.
 
 ## 8. Success criteria for the PoC
 

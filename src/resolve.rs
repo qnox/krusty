@@ -10244,6 +10244,14 @@ pub enum StmtLowering {
     LocalFunction(Box<LocalFunInfo>),
     /// A compound assignment (`target op= rhs`) selected as an in-place `opAssign` operator call.
     PlusAssign(CompoundAssignmentTarget),
+    /// `C.prop = value` where `prop` is a companion (static) property of a same-file class. The
+    /// receiver is a CLASS NAME, not a value, so the write is a static store on the outer class —
+    /// the mirror of the `getstatic C.prop` the read already emits.
+    CompanionStaticWrite {
+        owner: TypeName,
+        name: String,
+        ty: Ty,
+    },
     /// A bare property write selected on an implicit receiver other than a lexical local. Lowering
     /// uses the recorded receiver instead of assuming the innermost `this`.
     ImplicitPropertyWrite {
@@ -33814,10 +33822,61 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether a same-file class's companion declares `name` as a `var` (so it may be reassigned).
+    fn companion_property_is_var(&self, class_name: &str, name: &str) -> bool {
+        self.file.decls.iter().any(|&declaration| {
+            matches!(self.file.decl(declaration), Decl::Class(class)
+                if class.name == class_name
+                    && class
+                        .companion_props
+                        .iter()
+                        .any(|property| property.name == name && property.is_var))
+        })
+    }
+
     fn stmt_assign_member(&mut self, s: StmtId, receiver: ExprId, name: String, value: ExprId) {
         // `recv.prop op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
         if self.try_in_place_assignment(s, value) {
             return;
+        }
+        // `C.prop = value` where `prop` is a companion (static) property: the receiver is a CLASS
+        // NAME, not a value, so it must NOT be typed as an expression — a class without a
+        // first-class companion instance would be reported as an unresolved reference. The read
+        // (`getstatic C.prop`) already resolves through the same `static_props`.
+        if let Expr::Name(class_name) = self.file.expr(receiver).clone() {
+            if !self.value_root_shadows_classifier(&class_name) {
+                if let Some((property_ty, visibility)) = self
+                    .syms
+                    .classes
+                    .get(&class_name)
+                    .and_then(|class| class.static_props.get(&name).copied())
+                {
+                    let owner = self
+                        .syms
+                        .classes
+                        .get(&class_name)
+                        .map(ClassSig::internal_name)
+                        .unwrap_or_else(|| type_name(&class_name));
+                    self.reject_if_inaccessible(visibility, &name, owner, self.span(receiver));
+                    if !self.companion_property_is_var(&class_name, &name) {
+                        self.diags.error(
+                            self.file.stmt_spans[s.0 as usize],
+                            format!("val cannot be reassigned: '{name}'"),
+                        );
+                    }
+                    let value_ty = self.expr(value);
+                    self.expect_assignable(property_ty, value_ty, self.span(value), "assignment");
+                    self.stmt_lowers.insert(
+                        s,
+                        StmtLowering::CompanionStaticWrite {
+                            owner,
+                            name,
+                            ty: property_ty,
+                        },
+                    );
+                    return;
+                }
+            }
         }
         let rt = self.expr(receiver);
         let source_property = if rt.is_nullable() {
