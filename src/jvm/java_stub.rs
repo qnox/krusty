@@ -369,7 +369,12 @@ impl Resolver<'_> {
             params: d.record_components.iter().map(|(_, t)| t.clone()).collect(),
             ret: None,
             throws: Vec::new(),
-            access: ACC_PUBLIC,
+            access: ACC_PUBLIC
+                | if d.record_is_varargs {
+                    crate::java_source::ACC_VARARGS
+                } else {
+                    0
+                },
         };
         let ctors: Vec<&Member> = if is_record {
             let canonical_descriptor =
@@ -896,6 +901,30 @@ mod tests {
         assert!(reg.is_vararg(), "method varargs flag");
         let ctor = ci.method("<init>", "([I)V").expect("varargs ctor");
         assert!(ctor.is_vararg(), "constructor varargs flag");
+    }
+
+    #[test]
+    fn record_component_varargs_mark_the_canonical_constructor() {
+        let out = stubs(
+            "public record Set(String... values) {}",
+            &["java/lang/Record", "java/lang/String", "java/lang/Object"],
+        )
+        .expect("stub");
+        let class = parse_class(&out[0].1).expect("parse stub");
+        let constructor = class
+            .method("<init>", "([Ljava/lang/String;)V")
+            .expect("canonical constructor");
+
+        assert!(constructor.is_vararg());
+    }
+
+    #[test]
+    fn nonfinal_varargs_parameter_is_rejected() {
+        assert!(stubs(
+            "public class Broken { void call(String... values, int count) {} }",
+            &["java/lang/String", "java/lang/Object"],
+        )
+        .is_none());
     }
 
     #[test]

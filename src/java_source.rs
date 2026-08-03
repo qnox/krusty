@@ -142,6 +142,7 @@ pub(crate) struct RawDecl {
     pub(crate) fields: Vec<(String, SrcType, u16)>,
     pub(crate) enum_constants: Vec<String>,
     pub(crate) record_components: Vec<(String, SrcType)>,
+    pub(crate) record_is_varargs: bool,
 }
 
 impl RawDecl {
@@ -700,11 +701,11 @@ fn type_decl_with_access(
     } else {
         Vec::new()
     };
-    let record_components = if kind == DeclKind::Record {
+    let (record_components, record_is_varargs) = if kind == DeclKind::Record {
         p.eat_punct('(').then_some(())?;
         record_component_list(p)?
     } else {
-        Vec::new()
+        (Vec::new(), false)
     };
     let mut superclass = None;
     let mut interfaces = Vec::new();
@@ -754,6 +755,7 @@ fn type_decl_with_access(
         fields: Vec::new(),
         enum_constants: Vec::new(),
         record_components,
+        record_is_varargs,
     };
 
     if kind == DeclKind::Enum {
@@ -933,6 +935,7 @@ fn annotation_type_decl(
         fields: Vec::new(),
         enum_constants: Vec::new(),
         record_components: Vec::new(),
+        record_is_varargs: false,
     };
 
     loop {
@@ -976,20 +979,26 @@ fn annotation_type_decl(
 /// an array, exactly as javac compiles it.
 fn param_list(p: &mut P) -> Option<(Vec<SrcType>, bool)> {
     let mut out = Vec::new();
-    let mut varargs = false;
     if p.eat_punct(')') {
-        return Some((out, varargs));
+        return Some((out, false));
     }
     loop {
         let _ = modifiers(p)?; // `final`, annotations
         let mut ty = src_type(p)?;
-        if p.eat_punct('.') {
+        let parameter_is_varargs = if p.eat_punct('.') {
             p.eat_punct('.').then_some(())?;
             p.eat_punct('.').then_some(())?;
             ty.array += 1;
-            varargs = true;
-        }
+            true
+        } else {
+            false
+        };
         let _name = p.ident()?;
+        if parameter_is_varargs {
+            out.push(ty);
+            p.eat_punct(')').then_some(())?;
+            return Some((out, true));
+        }
         // C-style array suffix on the NAME (`int a[]`).
         while p.eat_punct('[') {
             p.eat_punct(']').then_some(())?;
@@ -1000,30 +1009,37 @@ fn param_list(p: &mut P) -> Option<(Vec<SrcType>, bool)> {
             continue;
         }
         p.eat_punct(')').then_some(())?;
-        return Some((out, varargs));
+        return Some((out, false));
     }
 }
 
-fn record_component_list(p: &mut P) -> Option<Vec<(String, SrcType)>> {
+fn record_component_list(p: &mut P) -> Option<(Vec<(String, SrcType)>, bool)> {
     let mut out = Vec::new();
     if p.eat_punct(')') {
-        return Some(out);
+        return Some((out, false));
     }
     loop {
         let _ = modifiers(p)?;
         let mut ty = src_type(p)?;
-        if p.eat_punct('.') {
+        let component_is_varargs = if p.eat_punct('.') {
             p.eat_punct('.').then_some(())?;
             p.eat_punct('.').then_some(())?;
             ty.array += 1;
-        }
+            true
+        } else {
+            false
+        };
         let name = p.ident()?;
         out.push((name, ty));
+        if component_is_varargs {
+            p.eat_punct(')').then_some(())?;
+            return Some((out, true));
+        }
         if p.eat_punct(',') {
             continue;
         }
         p.eat_punct(')').then_some(())?;
-        return Some(out);
+        return Some((out, false));
     }
 }
 
