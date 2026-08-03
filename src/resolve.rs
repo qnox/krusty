@@ -10040,6 +10040,12 @@ pub enum ExprLowering {
         name: String,
         descriptor: Option<String>,
     },
+    /// Kotlin's synthetic `EnumType.entries` property. `physical_accessor` is true when the enum owns
+    /// `getEntries()`; Java enums need a separate cached mappings lowering and are safely declined.
+    EnumEntriesRead {
+        owner: TypeName,
+        physical_accessor: bool,
+    },
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
@@ -17776,6 +17782,23 @@ impl<'a> Checker<'a> {
             .then_some(internal)
     }
 
+    fn enum_entries_owner(&self, receiver: ExprId) -> Option<(TypeName, bool)> {
+        let owner = self.classpath_type_receiver_internal(receiver)?;
+        let classifier = self.resolved_type_name(owner)?;
+        if !classifier.is_enum() {
+            return None;
+        }
+        // Source shapes retain a hidden physical-accessor marker; compiled Kotlin enums expose the
+        // real static method. Java enums have neither: their source-level property is still valid, but
+        // lowering requires kotlinc's cached `$EntriesMappings` synthesis and must be declined for now.
+        let has_accessor = classifier.companion.iter().any(|member| {
+            (member.name == "getEntries" || member.physical_name.as_deref() == Some("getEntries"))
+                && member.params.is_empty()
+                && member.descriptor == "()Lkotlin/enums/EnumEntries;"
+        });
+        Some((owner, has_accessor))
+    }
+
     /// Source classes in lexical precedence order, including static enclosing classes.
     fn lexical_source_class_names(&self) -> Vec<TypeName> {
         let companion = self
@@ -22691,6 +22714,39 @@ impl<'a> Checker<'a> {
                         self.resolved_library_companion_consts.insert(e, c);
                         return self.set(e, ty);
                     }
+                }
+            }
+            // Kotlin exposes a synthetic `entries: EnumEntries<E>` property on enum classifiers,
+            // including Java enums. Recognize the classifier receiver directly; this also handles
+            // a nested chain (`Outer.Mode.entries`) without evaluating `Outer.Mode` as a value.
+            if name == "entries" {
+                if let Some((owner, physical_accessor)) = self.enum_entries_owner(receiver) {
+                    if let Some(access) = self.resolver().inaccessible_classifier_access(owner) {
+                        let reference = self.span(receiver);
+                        let display = self
+                            .dotted_full_path(receiver)
+                            .unwrap_or_else(|| owner.render().replace(['/', '$'], "."));
+                        self.diags.error_with_identity(
+                            reference,
+                            DiagnosticIdentity::ClassifierAccess {
+                                reference,
+                                classifier: owner,
+                            },
+                            inaccessible_classifier_message(&display, access),
+                        );
+                        return self.set(e, Ty::Error);
+                    }
+                    self.expr_lowers.insert(
+                        e,
+                        ExprLowering::EnumEntriesRead {
+                            owner,
+                            physical_accessor,
+                        },
+                    );
+                    return self.set(
+                        e,
+                        Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(owner)]),
+                    );
                 }
             }
             if let Some(field) = self
@@ -35358,6 +35414,7 @@ fun box(): String {
                     | "BoxedIterator"
                     | "TestMutex"
                     | "test/Factory"
+                    | "test/JavaState"
             ) {
                 return crate::libraries::ResolvedSymbols {
                     classifier: self.resolve_type(fqn).map(std::rc::Rc::new),
@@ -35598,6 +35655,7 @@ fun box(): String {
                     | "BoxedIterator"
                     | "TestMutex"
                     | "test/Factory"
+                    | "test/JavaState"
             )
             .then(|| {
                 let companion = if internal == "test/Factory" {
@@ -35628,7 +35686,11 @@ fun box(): String {
                 };
                 crate::libraries::LibraryType {
                     is_public: true,
-                    kind: crate::libraries::TypeKind::Class,
+                    kind: if internal == "test/JavaState" {
+                        crate::libraries::TypeKind::Enum
+                    } else {
+                        crate::libraries::TypeKind::Class
+                    },
                     supertypes: crate::types::TypeNameList::new(),
                     constructors: vec![],
                     members: vec![],
@@ -35641,7 +35703,11 @@ fun box(): String {
                     alias_target: None,
                     type_params: vec![],
                     sealed_subclasses: crate::types::TypeNameList::new(),
-                    enum_entries: vec![],
+                    enum_entries: if internal == "test/JavaState" {
+                        vec!["READY".to_string()]
+                    } else {
+                        Vec::new()
+                    },
                     value_ctor_has_default: false,
                     ctor_named_params: vec![],
                     value_class_properties: vec![],
@@ -36175,6 +36241,43 @@ fun box(): String {
             ),
             "checker must record the selected classpath getter for safe-call lowering"
         );
+    }
+
+    #[test]
+    fn source_enum_entries_property_resolves_for_bare_and_nested_classifiers() {
+        ok("enum class Direct { VALUE }\n\
+            class Owner { enum class Nested { VALUE } }\n\
+            fun inspect() { Direct.entries; Owner.Nested.entries }");
+    }
+
+    #[test]
+    fn java_enum_entries_resolves_but_declines_kotlin_accessor_lowering() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "import test.JavaState\nfun inspect() { JavaState.entries }",
+            &mut diagnostics,
+        );
+        let entries = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::Member { name, .. } if name == "entries")
+                    .then_some(ExprId(index as u32))
+            })
+            .expect("source should contain the entries property");
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+        assert!(matches!(
+            info.expr_lowers.get(&entries),
+            Some(ExprLowering::EnumEntriesRead {
+                physical_accessor: false,
+                ..
+            })
+        ));
     }
 
     #[test]

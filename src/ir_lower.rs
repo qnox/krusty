@@ -20629,6 +20629,23 @@ impl<'a> Lower<'a> {
         name: String,
     ) -> Option<u32> {
         let t = {
+            if let Some(ExprLowering::EnumEntriesRead {
+                owner,
+                physical_accessor,
+            }) = self.info.expr_lowers.get(&e).cloned()
+            {
+                if !physical_accessor {
+                    self.set_bail("Java enum entries mapping");
+                    return None;
+                }
+                return Some(self.emit_static_call(
+                    owner,
+                    "getEntries".to_string(),
+                    "()Lkotlin/enums/EnumEntries;".to_string(),
+                    crate::libraries::InlineKind::None,
+                    vec![],
+                ));
+            }
             if let Some(ExprLowering::IntrinsicProperty(member)) =
                 self.info.expr_lowers.get(&e).cloned()
             {

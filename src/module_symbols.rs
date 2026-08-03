@@ -79,7 +79,7 @@ impl<'a> ModuleSymbols<'a> {
                     .map(move |s| lib_member(n, s, c.internal_name(), c.is_interface()))
             })
             .collect();
-        let companion = c
+        let mut companion: Vec<LibraryMember> = c
             .static_methods
             .iter()
             .map(|(n, s)| lib_member(n, s, c.internal_name(), c.is_interface()))
@@ -124,6 +124,23 @@ impl<'a> ModuleSymbols<'a> {
         } else {
             crate::libraries::TypeKind::Class
         };
+        if enum_entries.is_some() {
+            // Source enums emit this synthetic accessor even though it has no source declaration.
+            // Give it a non-source `name` so ordinary call resolution cannot expose `getEntries()`;
+            // consumers that model the `entries` property identify its physical JVM name instead.
+            let mut entries = LibraryMember::new(
+                "<get-enum-entries>".to_string(),
+                Vec::new(),
+                Ty::obj_args(
+                    "kotlin/enums/EnumEntries",
+                    &[Ty::obj_name(c.internal_name())],
+                ),
+                "()Lkotlin/enums/EnumEntries;".to_string(),
+            );
+            entries.owner = Some(c.internal_name());
+            entries.physical_name = Some("getEntries".to_string());
+            companion.push(entries);
+        }
         let enum_entries = enum_entries.unwrap_or_default();
         let sealed_subclasses = if c.is_sealed() {
             self.syms.subclass_names_of(c.internal_name()).into()
@@ -945,6 +962,13 @@ mod tests {
         let phase = source.resolve_type("sample/Phase").unwrap();
         assert!(phase.is_enum());
         assert_eq!(phase.enum_entries, ["FIRST", "SECOND"]);
+        let entries = phase
+            .companion
+            .iter()
+            .find(|member| member.physical_name.as_deref() == Some("getEntries"))
+            .expect("source enum shape should retain its synthetic entries accessor");
+        assert_eq!(entries.name, "<get-enum-entries>");
+        assert_eq!(entries.descriptor, "()Lkotlin/enums/EnumEntries;");
     }
 
     #[test]
