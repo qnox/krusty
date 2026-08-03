@@ -16581,9 +16581,16 @@ impl<'a> Lower<'a> {
             self.info.stmt_lowers.get(&s).cloned()
         {
             if let Stmt::AssignMember { value, .. } = self.afile.stmt(s).clone() {
-                let index = self.ir.statics.iter().position(|static_field| {
+                // `ir.statics` holds only the statics of the file being LOWERED, so a companion
+                // declared in another file of the module has no index here. Writing one needs an
+                // external static store, which the IR has no node for (`ExternalStaticField` is a read
+                // only) — decline with a NAMED reason instead of skipping the file silently.
+                let Some(index) = self.ir.statics.iter().position(|static_field| {
                     static_field.owner == Some(owner) && static_field.name == name
-                })? as u32;
+                }) else {
+                    return self.bail("companion-static write to another file");
+                };
+                let index = index as u32;
                 let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
                 return Some(self.emit_set_static(index, lowered));
             }

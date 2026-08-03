@@ -2320,12 +2320,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison node so the branch/stackmap shape stays the one every other comparison uses. Tests:
   `tests/feature_coverage_v_e2e.rs::lateinit_and_isinitialized`,
   `tests/implicit_this_callable_ref_e2e.rs::lateinit_is_initialized_runs` (the box-corpus case).
-- **`Array(n) { … }` with an ARRAY element stays rejected.** The loop-fill's StackMapTable interacts
-  badly with an ENCLOSING loop, so the nested fill is declined rather than emitted as a class file that
-  fails verification. The interaction needs a surrounding loop to appear — a straight-line
-  `Array(n) { IntArray(m) }` misleadingly compiles and runs — which is why the rejection must be pinned
-  by a case that has one. Test:
-  `tests/backend_rejection_coverage_e2e.rs::nested_array_fill_inside_a_loop_rejected`.
+- **`Array(n) { … }` with an ARRAY element stays rejected** — a BLANKET rejection of any array element,
+  not a shape-sensitive one. It masks a general StackMapTable defect that is not array-specific: a `for`
+  loop directly followed by a `while` emits a `while`-head frame that still names the `for`'s synthetic
+  index/bound slots, while the `while`'s own back-edge frame CHOPs them, so the back edge is narrower
+  than its target and the class fails verification. `fun box(): String { var t = 0; for (v in 0 until 2)
+  t += v; while (t > 100) t -= 1; return "OK" }` reproduces it with no array at all, on this branch and
+  on master alike; it stays hidden because `while`-then-`for`, `for`-then-`for`, and any statement
+  between the two loops are all fine. Fixing the frame emission retires this rejection. Tests:
+  `tests/backend_rejection_coverage_e2e.rs::nested_array_fill_inside_a_loop_rejected`,
+  `tests/feature_coverage_h_e2e.rs::two_dimensional_array_construction_is_declined`.
+- **A companion `var` is written only within the file that declares it.** `ir.statics` holds the
+  statics of the file being lowered, and the IR has no external static STORE (`ExternalStaticField` is a
+  read), so a cross-file write declines with a named bail. The cross-file READ works, and the checker
+  accepts the write — mutability is a symbol-table fact, so it is not misreported as
+  `val cannot be reassigned`. Test:
+  `tests/backend_rejection_coverage_e2e.rs::cross_file_companion_var_write_declined`.
 - **A package-level `const val` reached by name (`import kotlin.math.PI`).** A `const` has no
   accessor, so it is absent from the property namespace — which models properties by their accessors —
   and the import bound nothing while `import kotlin.math.sqrt` (a function from the same package)

@@ -92,6 +92,45 @@ fn nested_array_fill_inside_a_loop_rejected() {
     );
 }
 
+// --- A companion `var` WRITE reaches only a companion declared in the file being lowered: `ir.statics`
+//     holds that file's statics, and the IR has no external static STORE (`ExternalStaticField` is a
+//     read). The read works cross-file; only the write is declined, with a named bail rather than a
+//     silent whole-file skip. ---
+
+#[test]
+fn cross_file_companion_var_write_declined() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    // Same file: the write lowers and runs.
+    common::expect_box_ok_with_stdlib(
+        "class Holder { companion object { var counter: Int = 1 } }\n\
+         fun box(): String { Holder.counter = 42; return if (Holder.counter == 42) \"OK\" else \"f\" }\n",
+        "SameFile",
+    );
+    // Another file of the same module: the checker accepts it (mutability is a symbol-table fact, so
+    // it is NOT reported as `val cannot be reassigned`) and lowering declines.
+    let sources = [
+        "class Holder { companion object { var counter: Int = 1 } }\n",
+        "fun box(): String { Holder.counter = 42; return \"OK\" }\n",
+    ];
+    let diagnostics = common::front_end_diagnostics_files(&sources, &[stdlib], Some(jdk.as_path()));
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.contains("cannot be reassigned")),
+        "a cross-file companion `var` is still a `var`: {diagnostics:?}"
+    );
+    assert_eq!(
+        common::compile_and_run_box_files(
+            &[("Holder", sources[0]), ("Main", sources[1])],
+            &[common::stdlib_jar()],
+            Some(common::jdk_modules().as_path()),
+        ),
+        None,
+        "the cross-file write has no external static store yet, so the file must decline"
+    );
+}
+
 // --- Mixed spread in a vararg call (`f(0, *a, 3)`) — lowered through the platform spread builder
 //     (`IntSpreadBuilder` here), so it is ACCEPTED. ---
 

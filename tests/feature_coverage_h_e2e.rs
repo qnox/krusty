@@ -64,19 +64,30 @@ fn arrays_arrayof_and_iteration() {
     run_ok(src, "ArraysArrayOf");
 }
 
+/// A 2-D array built with `Array(n) { IntArray(m) { … } }` is DECLINED, not compiled: the fill loop's
+/// StackMapTable is unsound next to another loop, so emitting it would produce a class that fails
+/// verification. The rejection is blanket (any array element), pinned by
+/// `tests/backend_rejection_coverage_e2e.rs::nested_array_fill_inside_a_loop_rejected`; the underlying
+/// frame defect is NOT array-specific — a `for` loop directly followed by a `while` reproduces it with
+/// no array at all — so this becomes a positive test once that is fixed.
 #[test]
-fn two_dimensional_arrays() {
-    let src = "fun box(): String {\n\
+fn two_dimensional_array_construction_is_declined() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(
+        "fun box(): String {\n\
         val grid: Array<IntArray> = Array(3) { i -> IntArray(3) { j -> i * 3 + j } }\n\
-        var sum = 0\n\
-        for (row in grid) for (v in row) sum += v\n\
-        if (sum != 36) return \"f1\"\n\
-        if (grid[1][2] != 5) return \"f2\"\n\
-        grid[0][0] = 100\n\
-        if (grid[0][0] != 100) return \"f3\"\n\
-        return \"OK\"\n\
-    }\n";
-    run_ok(src, "TwoDimArrays");
+        return if (grid[1][2] == 5) \"OK\" else \"f\"\n\
+    }\n",
+        &[stdlib],
+        Some(jdk.as_path()),
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.contains("Array(n) {…} with an array element")),
+        "the nested fill must be declined rather than emitted: {diagnostics:?}"
+    );
 }
 
 #[test]

@@ -24462,11 +24462,12 @@ impl<'a> Checker<'a> {
             self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
             let lam = self.check_lambda_with_types(args[1], &[Ty::Int]);
             let elem = lam.fun_ret().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            // A nested-array element (`Array(n) { DoubleArray(m) }`) trips the loop-fill's
-            // StackMapTable interaction with SURROUNDING loops — skip rather than emit a class file
-            // that fails verification. The interaction needs an enclosing loop to show up, so a
-            // straight-line `Array(n) { IntArray(m) }` misleadingly runs fine; see
-            // `tests/backend_rejection_coverage_e2e.rs::nested_array_fill_inside_a_loop_rejected`.
+            // A nested-array element (`Array(n) { DoubleArray(m) }`) is declined rather than emitted
+            // as a class file that fails verification. The defect is NOT array-specific: a `for` loop
+            // directly followed by a `while` emits a `while`-head frame naming the `for`'s synthetic
+            // index/bound slots, which the loop's own back edge then CHOPs, so the edge is narrower
+            // than its target. This blanket rejection only removes the ARRAY route into it; fixing the
+            // frame emission retires it. See docs/SPEC.md.
             if elem.is_array() {
                 self.diags.error(
                     span,
