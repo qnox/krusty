@@ -7,6 +7,10 @@
 //!   Function extension method_signature = 100 → JvmMethodSignature { name = 1, desc = 2 }.
 //! String ids index the `d2` table.
 
+use super::classfile::{
+    ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED,
+    ACC_PUBLIC, ACC_STATIC,
+};
 use super::classreader::ClassInfo;
 use crate::libraries::{CallSig, GenericSig, ParamList};
 use crate::types::{intern, type_name, Ty, TypeName};
@@ -2997,6 +3001,10 @@ pub struct BuiltinClass {
     /// `Enum`) — from the `@Metadata` `CLASS_KIND` flag. Needed when reporting a classless builtin whose
     /// JVM class is absent (a no-JDK compile), so member calls emit the right invoke opcode.
     pub is_interface: bool,
+    /// The JVM class access flags the same `Class.flags` word describes (`public static interface
+    /// abstract` for `kotlin/collections/Map.Entry`) — what an `InnerClasses` entry naming this builtin
+    /// has to carry when the mapped JVM owner has no class file to read it off.
+    pub access: u16,
     /// Nullable returns for declared function members keyed by `(name, value-arity)` (`Map.get(K): V?`,
     /// `firstOrNull(): T?`). A call may still resolve to the ERASED classpath method (`java/util/Map.get`
     /// returns `Object`), which carries no Kotlin nullability — this is then the only surviving record
@@ -3432,10 +3440,54 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                 type_params,
                 nullable_member_returns,
                 is_interface: (flags >> 6) & 0x7 == 1,
+                access: builtin_class_access(flags),
             },
         );
     }
     out
+}
+
+/// The JVM class access flags a `.kotlin_builtins` `Class.flags` word describes.
+///
+/// The word packs `HAS_ANNOTATIONS` (bit 0), `VISIBILITY` (bits 1..4), `MODALITY` (bits 4..6),
+/// `CLASS_KIND` (bits 6..9 — the field [`BuiltinClass::is_interface`] already reads) and `IS_INNER`
+/// (bit 9). Each maps onto the JVM flag the compiler that produced the mapped `java.*` class file
+/// emitted, so a nesting fact recovered from the builtin agrees byte-for-byte with the one read off
+/// that class file: `kotlin/collections/Map.Entry` is a public, non-inner (hence `ACC_STATIC`) nested
+/// interface, exactly the `0x0609` `java/util/Map$Entry` carries.
+fn builtin_class_access(flags: u64) -> u16 {
+    // VISIBILITY: 0 INTERNAL, 1 PRIVATE, 2 PROTECTED, 3 PUBLIC, 4 PRIVATE_TO_THIS, 5 LOCAL. Only the
+    // two that survive to a JVM flag are named; everything else is package-private (no bit).
+    let visibility = match (flags >> 1) & 0x7 {
+        3 => ACC_PUBLIC,
+        2 => ACC_PROTECTED,
+        1 | 4 => ACC_PRIVATE,
+        _ => 0,
+    };
+    // MODALITY: 0 FINAL, 1 OPEN, 2 ABSTRACT, 3 SEALED. `sealed` is abstract on the JVM.
+    let modality = match (flags >> 4) & 0x3 {
+        0 => ACC_FINAL,
+        2 | 3 => ACC_ABSTRACT,
+        _ => 0,
+    };
+    // CLASS_KIND: 0 CLASS, 1 INTERFACE, 2 ENUM_CLASS, 3 ENUM_ENTRY, 4 ANNOTATION_CLASS, 5 OBJECT,
+    // 6 COMPANION_OBJECT. An interface is always `ACC_ABSTRACT` regardless of its declared modality.
+    let kind = match (flags >> 6) & 0x7 {
+        1 => ACC_INTERFACE | ACC_ABSTRACT,
+        2 => ACC_ENUM,
+        4 => ACC_ANNOTATION | ACC_INTERFACE | ACC_ABSTRACT,
+        _ => 0,
+    };
+    // A nested class that is not `inner` is `static`; a top-level class is never nested, so the flag is
+    // simply ignored by a caller that is not building an `InnerClasses` entry.
+    let inner = if (flags >> 9) & 1 == 1 { 0 } else { ACC_STATIC };
+    // An interface has no meaningful modality bit of its own (`ACC_FINAL` on an interface is illegal).
+    let modality = if kind & ACC_INTERFACE != 0 {
+        0
+    } else {
+        modality
+    };
+    visibility | modality | kind | inner
 }
 
 /// The Kotlin names of every `suspend` function in a class's `@Metadata` (from the `IS_SUSPEND` flag
@@ -3551,6 +3603,45 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
         facades.push(join(loc, short));
     }
     Some((pkg, facades))
+}
+
+#[cfg(test)]
+mod builtin_class_access_tests {
+    use super::builtin_class_access;
+
+    /// A `.kotlin_builtins` `Class.flags` word, assembled from the field positions the decoder reads.
+    fn flags(visibility: u64, modality: u64, kind: u64, is_inner: bool) -> u64 {
+        visibility << 1 | modality << 4 | kind << 6 | u64::from(is_inner) << 9
+    }
+
+    /// Every arm has to land on the flags the compiler that produced the mapped `java.*` class file
+    /// emitted, since the recovered `InnerClasses` entry is compared byte-for-byte against that one.
+    /// The nested INTERFACE case is the one a JDK-less compile actually hits today
+    /// (`kotlin/collections/Map.Entry` ⇒ the `0x0609` `java/util/Map$Entry` carries); the rest pin the
+    /// mapping so a later builtin of another shape cannot silently pick up wrong flags.
+    #[test]
+    fn builtin_class_flags_map_to_jvm_access() {
+        // public abstract interface, nested (not `inner`) — public static interface abstract.
+        assert_eq!(builtin_class_access(flags(3, 2, 1, false)), 0x0609);
+        // public final class, nested — public static final (what `MethodHandles$Lookup` carries).
+        assert_eq!(builtin_class_access(flags(3, 0, 0, false)), 0x0019);
+        // The same class declared `inner`: an inner class is not static.
+        assert_eq!(builtin_class_access(flags(3, 0, 0, true)), 0x0011);
+        // public abstract class — abstract survives, final does not appear.
+        assert_eq!(builtin_class_access(flags(3, 2, 0, false)), 0x0409);
+        // `sealed` is abstract on the JVM.
+        assert_eq!(builtin_class_access(flags(3, 3, 0, false)), 0x0409);
+        // public enum class — public static final enum.
+        assert_eq!(builtin_class_access(flags(3, 0, 2, false)), 0x4019);
+        // public annotation class — an annotation interface.
+        assert_eq!(builtin_class_access(flags(3, 2, 4, false)), 0x2609);
+        // private and protected keep their own bit; `internal` has no JVM flag (package-private).
+        assert_eq!(builtin_class_access(flags(1, 0, 0, false)), 0x001a);
+        assert_eq!(builtin_class_access(flags(2, 0, 0, false)), 0x001c);
+        assert_eq!(builtin_class_access(flags(0, 0, 0, false)), 0x0018);
+        // `open` is neither final nor abstract.
+        assert_eq!(builtin_class_access(flags(3, 1, 0, false)), 0x0009);
+    }
 }
 
 #[cfg(test)]

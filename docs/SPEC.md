@@ -1629,12 +1629,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     rebuilt from the substituted use-site type (`getKey:()Ljava/lang/String;`, which no class declares).
   Interface-ness for an owner with no class file likewise comes from the builtin `CLASS_KIND`
   (`Classpath::owner_is_interface`), replacing a curated JVM-name table that omitted every `java/util/*`
-  and so answered "class" for all of them. Remaining known divergence: a reference to a NESTED builtin
-  (`java/util/Map$Entry`) does not emit the `InnerClasses` attribute, which is read off the owner's
-  class file — metadata only; the code array and constant-pool member refs match and the class loads
-  and runs. Tests: `tests/no_jdk_builtin_emit_e2e.rs` (each defect as a `box()` that is actually LOADED
-  and RUN on a JVM, plus a byte-for-byte JDK-less vs JDK-present emit comparison — a diagnostics-only
-  assertion cannot see any of this, which is how all three shipped green).
+  and so answered "class" for all of them. A fourth fact travels the same route:
+  - **The nesting relation.** A reference to a NESTED builtin (`java/util/Map$Entry`) makes the class
+    carry an `InnerClasses` entry, which `backend::classpath_inner_class_resolver` read off the
+    enclosing class file; with no JDK the attribute vanished entirely. A `$`-separated JVM name
+    decomposes structurally, its enclosing half maps back to a Kotlin builtin, and the
+    `.kotlin_builtins` fragment declares the nested class (`kotlin/collections/Map.Entry`) with the
+    `Class.flags` word that yields the JVM access flags the entry records
+    (`Classpath::builtin_nested_class` over `metadata::builtin_class_access`). Requiring that
+    declaration to exist is what keeps a `$` that is merely part of a mangled name from being reported
+    as nesting. VISIBILITY/MODALITY/CLASS_KIND/IS_INNER map onto ACC flags the same way kotlinc's own
+    class emit does, so the recovered entry equals the one javac put in `java/util/Map` byte for byte.
+  Tests: `tests/no_jdk_builtin_emit_e2e.rs` (each defect as a `box()` that is actually LOADED and RUN on
+  a JVM, plus a byte-for-byte JDK-less vs JDK-present emit comparison — a diagnostics-only assertion
+  cannot see any of this, which is how all of them shipped green) and
+  `metadata::builtin_class_access_tests` for the flag-word mapping.
 - **`MutableList.removeAt(Int)` IS `java.util.List.remove(int)`** — the function half of kotlinc's
   `BuiltinMethodsWithDifferentJvmName`/special-builtin renaming whose property half is
   `size`/`keys`/`values`/`entries`. A call through a `MutableList` receiver emits the JVM name

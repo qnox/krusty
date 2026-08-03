@@ -943,6 +943,8 @@ struct BuiltinClass {
     formals: Vec<String>,
     members: Vec<BuiltinMember>,
     is_interface: bool,
+    /// The builtin's own JVM class access flags, as an `InnerClasses` entry records them.
+    access: u16,
     nullable_member_returns: Vec<(String, usize)>,
 }
 
@@ -1095,6 +1097,7 @@ impl BuiltinsFile {
                     formals,
                     members,
                     is_interface: class.is_interface,
+                    access: class.access,
                     nullable_member_returns: class.nullable_member_returns,
                 },
             );
@@ -2064,6 +2067,33 @@ impl Classpath {
         self.builtins_file_for_package(type_name("kotlin/collections"))
     }
 
+    /// The nesting relation behind a mapped JVM name, when the enclosing JVM class has no class file to
+    /// read its `InnerClasses` attribute off (no JDK on the classpath). Takes the nested JVM name
+    /// (`java/util/Map$Entry`) and answers with the enclosing JVM name, the nested simple name, and the
+    /// access flags an `InnerClasses` entry records — the same triple
+    /// [`super::backend::classpath_inner_class_resolver`] otherwise reads off `java/util/Map.class`.
+    ///
+    /// The relation is not invented: a `$`-separated JVM name decomposes structurally, the enclosing
+    /// half maps back to its Kotlin builtin, and the `.kotlin_builtins` fragment carries the nested
+    /// declaration (`kotlin/collections/Map.Entry`) with its own flags. Requiring that declaration to
+    /// exist is what keeps this from claiming a nesting relation for a `$` that is merely part of a
+    /// mangled name.
+    ///
+    /// `None` for a non-nested name, a non-builtin enclosing type, or a nested name no builtin declares.
+    pub fn builtin_nested_class(&self, jvm_internal: &str) -> Option<(String, String, u16)> {
+        let (jvm_outer, simple) = jvm_internal.rsplit_once('$')?;
+        let outer_id = type_name(jvm_outer);
+        let kotlin_outer = super::jvm_class_map::jvm_collection_to_kotlin_type_name(outer_id)
+            .or_else(|| super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(outer_id))?;
+        // A `.kotlin_builtins` fragment names a nested class with a DOTTED tail on the slashed package
+        // (`kotlin/collections/Map.Entry`), so the package the fragment is looked up by stays the
+        // enclosing class's package.
+        let nested = type_name(&format!("{}.{simple}", kotlin_outer.render()));
+        let file = self.builtins_file_for_package(Self::builtins_package_for(kotlin_outer));
+        let class = file.get_name(nested)?;
+        Some((jvm_outer.to_string(), simple.to_string(), class.access))
+    }
+
     /// How reading a builtin PROPERTY is realized on its mapped JVM owner, when that owner has no class
     /// file to read the realization off (no JDK on the classpath). Takes the JVM owner
     /// (`java/util/List`) and the Kotlin property name (`size`, `keys`, `key`), and answers with the
@@ -2111,7 +2141,7 @@ impl Classpath {
                     // The member's OWN descriptor, which is already erased (`Map.Entry.key: K` is
                     // `()Ljava/lang/Object;`). Rebuilding it from the use-site logical type would emit
                     // `getKey:()Ljava/lang/String;`, a method no class declares.
-                    descriptor: member.descriptor.clone(),
+                    descriptor: builtin_descriptor(&member.generic_sig),
                     is_static: false,
                     is_interface: class.is_interface,
                 });

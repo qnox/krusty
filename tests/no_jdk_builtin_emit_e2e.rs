@@ -111,11 +111,10 @@ fun box(): String {
 /// simply supplies, from `java/util/List.class`, the same facts the builtin entry already carries. A
 /// divergence here is the general form of all three defects above, and catches ones no `box()` covers.
 ///
-/// Deliberately uses no NESTED builtin type: a reference to `java/util/Map$Entry` also emits an
-/// `InnerClasses` attribute, which is read off the owner's class file and so is still absent on a
-/// JDK-less classpath. That is a metadata-only divergence (the code array and constant-pool member
-/// refs match, and the class loads and runs — see the generic-property test above), tracked
-/// separately from the dispatch/naming/erasure facts this asserts.
+/// Includes a NESTED builtin reference (`m.entries.first().key` → `java/util/Map$Entry`), which also
+/// makes the class carry an `InnerClasses` attribute. That nesting fact used to be read only off the
+/// owner's class file, so it silently vanished on a JDK-less classpath; it comes from the builtin's own
+/// `.kotlin_builtins` entry (`kotlin/collections/Map.Entry`) instead.
 #[test]
 fn no_jdk_emit_matches_jdk_emit_for_builtin_members() {
     let (Some(stdlib), Some(jdk)) = (common::stdlib_jar(), common::jdk_modules()) else {
@@ -129,6 +128,7 @@ fun v(m: Map<String, Int>): Collection<Int> = m.values
 fun g(l: List<String>): String = l.get(0)
 fun e(l: List<String>): Boolean = l.isEmpty()
 fun i(l: List<String>): Iterator<String> = l.iterator()
+fun n(m: Map<String, Int>): String = m.entries.first().key
 "#;
     let jars = [stdlib];
     let with_jdk = common::compile_in_process(src, "cmp", &jars, Some(&jdk))
