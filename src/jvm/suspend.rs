@@ -140,6 +140,7 @@ pub fn lower_suspend(
                         params: &prefix,
                         scope: Vec::new(),
                         pending: Vec::new(),
+                        temps_only: false,
                         out: Default::default(),
                     };
                     // Walk the WHOLE body block — an expression-bodied fn (`= withLock { … }`)
@@ -1841,7 +1842,9 @@ fn build_state_machine(
     }
     // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
     // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
-    if consecutive_temp_suspensions(ir, &stmts, &suspend_set)
+    if spills_bottom_typed_local(&spilled)
+        || suspension_operand_writes_local(ir, b, &suspend_set, &spilled)
+        || suspending_cross_loop_labeled_jump(ir, b, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
     {
         return false;
@@ -1914,11 +1917,15 @@ fn build_state_machine(
             params: &param_caps,
             scope: Vec::new(),
             pending: Vec::new(),
+            temps_only: false,
             out: Default::default(),
         };
         w.walk_stmts(&stmts);
         w.out
     });
+    // The hoisted temps of a multi-suspension expression exist only in the FINAL body, so they are
+    // collected here and merged into the pre-splice named-by-scope lists.
+    merge_live_temps(&mut susp_scopes, live_temp_scopes(ir, b, &suspend_set));
     for (cvar, ev) in &catch_spills {
         for scope in susp_scopes.values_mut() {
             for e in &mut scope.values {
@@ -2181,6 +2188,16 @@ fn build_state_machine(
                 };
                 ss.push(k(ir, restore));
             }
+            for local in rematerialized_nulls(list) {
+                let n = k(ir, IrExpr::Const(IrConst::Null));
+                ss.push(k(
+                    ir,
+                    IrExpr::SetValue {
+                        var: local,
+                        value: n,
+                    },
+                ));
+            }
         }
         ss.extend(st.iter().copied());
         let recv = k(ir, IrExpr::GetValue(cont_v));
@@ -2375,8 +2392,13 @@ fn build_lambda_state_machine(
         .fields
         .first()
         .is_some_and(|f| f.name == "this");
+    // A RECEIVER lambda additionally keeps the hoisted-temp bail: its restore reloads the leading
+    // `this`/capture fields on every entry, and a temp spilled beside them lands in the wrong slot
+    // (the corpus `suspendCallsInArguments` shape). The PLAIN lambda's temps are e2e-verified.
     if (receiver_lambda && spill_shape_unmodeled(&spilled))
-        || consecutive_temp_suspensions(ir, &stmts, &suspend_set)
+        || spills_bottom_typed_local(&spilled)
+        || suspension_operand_writes_local(ir, b, &suspend_set, &spilled)
+        || suspending_cross_loop_labeled_jump(ir, b, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
         || tail_suspending_loop(ir, &stmts, &suspend_set)
     {
@@ -2386,18 +2408,22 @@ fn build_lambda_state_machine(
     // The PRE-SPLICE per-suspension scope lists (captured in `lower_suspend`); a lambda has no
     // value-param prefix (captures/params live in leading fields, reloaded each entry). A lambda
     // fid the prelude never visited (not in `suspend_funs`) falls back to a post-transform walk.
-    let susp_scopes = captured_scopes.unwrap_or_else(|| {
+    let mut susp_scopes = captured_scopes.unwrap_or_else(|| {
         let mut w = ScopeWalk {
             ir,
             suspend_set: &suspend_set,
             params: &[],
             scope: Vec::new(),
             pending: Vec::new(),
+            temps_only: false,
             out: Default::default(),
         };
         w.walk_stmts(&stmts);
         w.out
     });
+    // See the twin in `build_state_machine`: the hoisted temps of a multi-suspension expression exist
+    // only in the FINAL body, so they are collected here and merged into the captured lists.
+    merge_live_temps(&mut susp_scopes, live_temp_scopes(ir, b, &suspend_set));
     let mut live_calls: HashSet<ExprId> = HashSet::new();
     collect_suspension_points(ir, b, &suspend_set, &mut live_calls);
     let mut layout = SpillLayout::default();
@@ -2562,6 +2588,16 @@ fn build_lambda_state_machine(
                     IrExpr::SetValue {
                         var: local,
                         value: init,
+                    },
+                ));
+            }
+            for local in rematerialized_nulls(list) {
+                let n = k(ir, IrExpr::Const(IrConst::Null));
+                ss.push(k(
+                    ir,
+                    IrExpr::SetValue {
+                        var: local,
+                        value: n,
                     },
                 ));
             }
@@ -2871,14 +2907,28 @@ impl Flat<'_> {
     /// Bind a suspension result from `cont.result` (loaded into `r`) at a resume state's entry.
     /// A spilled local's slot is pre-declared in the machine PROLOGUE (zero-initialized), so assign
     /// it; a non-spilled local is declared here.
-    fn bind_from_r(&mut self, out: &mut Vec<ExprId>, local: u32, ty: &Ty, _resume: usize) {
+    fn bind_from_r(
+        &mut self,
+        out: &mut Vec<ExprId>,
+        local: u32,
+        ty: &Ty,
+        _resume: usize,
+        call: ExprId,
+    ) {
         crate::trace_compiler!(
             "suspend",
             "bind_from_r local={local} ty={ty:?} spilled={}",
             self.is_spilled(local)
         );
         let rg = self.gv(self.r_v);
-        let unb = unbox(self.ir, rg, ty);
+        // A value-class result crossed the `Object` CPS boundary BOXED (the value-class pass boxed the
+        // callee's tail); the local holds the erased underlying, so undo the box here.
+        let unb = match suspend_call_fid(self.ir, call, self.suspend)
+            .and_then(|fid| self.ir.suspend_boxed_value_class_returns.get(&fid).copied())
+        {
+            Some(x) => unbox_value_class(self.ir, rg, x, ty),
+            None => unbox(self.ir, rg, ty),
+        };
         self.mark_assigned(local);
         if self.is_spilled(local) {
             out.push(self.add(IrExpr::SetValue {
@@ -3078,7 +3128,7 @@ impl Flat<'_> {
                 let br_resume = self.new_state();
                 self.emit_suspension(&mut bb, uvalue, br_resume);
                 let mut rs: Vec<ExprId> = Vec::new();
-                self.bind_from_r(&mut rs, local, ty, br_resume);
+                self.bind_from_r(&mut rs, local, ty, br_resume, uvalue);
                 self.goto(&mut rs, merge);
                 self.states[br_resume] = rs;
             } else {
@@ -3241,7 +3291,7 @@ impl Flat<'_> {
                 self.states[cur] = out;
                 let mut rs: Vec<ExprId> = Vec::new();
                 if let Some((local, ty)) = bind {
-                    self.bind_from_r(&mut rs, local, &ty, resume);
+                    self.bind_from_r(&mut rs, local, &ty, resume, call);
                 }
                 self.states[resume] = rs;
                 self.flatten(&stmts[i + 1..], resume, after);
@@ -3775,52 +3825,124 @@ struct ScopeWalk<'a> {
     ir: &'a IrFile,
     suspend_set: &'a HashSet<u32>,
     params: &'a [(u32, Ty)],
-    scope: Vec<(u32, Ty, Option<String>)>,
+    scope: Vec<ScopeEntry>,
     /// Exprs that may still execute after the current walk point (rest-of-list statements, whole
     /// enclosing loops).
     pending: Vec<ExprId>,
+    /// Snapshot ONLY the unnamed temps that are LIVE at each suspension, with no parameter prefix —
+    /// the complementary pass run over the FINAL body (see [`live_temp_scopes`]). The default (false)
+    /// snapshots the parameter prefix plus the NAMED locals in scope.
+    temps_only: bool,
     out: SuspensionScopes,
+}
+
+/// Per-suspension lists of the unnamed TEMPS live across each suspension, walked over the FINAL
+/// (post-splice, post-hoist) body. The named-by-scope lists are captured PRE-SPLICE — before
+/// `hoist_suspensions` even creates the temps that a multi-suspension expression (`a() + b()`) needs —
+/// so the temps can only be collected here, once the body has its final shape. Merged into the
+/// captured lists by [`merge_live_temps`].
+fn live_temp_scopes(ir: &IrFile, body: ExprId, suspend_set: &HashSet<u32>) -> SuspensionScopes {
+    let mut w = ScopeWalk {
+        ir,
+        suspend_set,
+        params: &[],
+        scope: Vec::new(),
+        pending: Vec::new(),
+        temps_only: true,
+        out: Default::default(),
+    };
+    w.walk(body);
+    w.out
+}
+
+/// Append each suspension's live temps to its captured scope list. Only suspensions the capture
+/// already knows are extended: a list's PARAMETER prefix comes from the capture, and a state whose
+/// restores would silently lose it must keep behaving as before.
+fn merge_live_temps(scopes: &mut SuspensionScopes, temps: SuspensionScopes) {
+    for (call, temp_scope) in temps {
+        let Some(scope) = scopes.get_mut(&call) else {
+            continue;
+        };
+        for entry in temp_scope.values {
+            if !scope.values.iter().any(|e| e.0 == entry.0) {
+                scope.values.push(entry);
+            }
+        }
+    }
+}
+
+/// One lexically in-scope local of a [`ScopeWalk`]. `named` distinguishes a source variable (always
+/// snapshotted while in scope, kotlinc's rule) from a compiler TEMP (snapshotted only while live).
+struct ScopeEntry {
+    slot: u32,
+    ty: Ty,
+    name: Option<String>,
+    named: bool,
 }
 
 impl ScopeWalk<'_> {
     fn push_decl(&mut self, st: ExprId) {
         if let IrExpr::Variable {
-            index,
-            ty,
-            named: true,
-            ..
+            index, ty, named, ..
         } = self.ir.exprs[st as usize]
         {
-            if !self.scope.iter().any(|(l, _, _)| *l == index) {
+            if !self.scope.iter().any(|e| e.slot == index) {
                 // Every NAMED source variable participates (kotlinc's scope rule; kind decides the
-                // field family: references L$, ints I$, …).
-                self.scope.push((
-                    index,
-                    spill_field_ty(ty),
-                    self.ir.value_names.get(&st).cloned(),
-                ));
+                // field family: references L$, ints I$, …). An unnamed TEMP is admitted too, but
+                // `snapshot` filters it by liveness.
+                self.scope.push(ScopeEntry {
+                    slot: index,
+                    ty: spill_field_ty(ty),
+                    name: self.ir.value_names.get(&st).cloned(),
+                    named,
+                });
             }
         }
     }
     fn snapshot(&mut self, call: ExprId) {
         let mut snapshot = SuspensionScope {
-            values: self.params.to_vec(),
+            values: if self.temps_only {
+                Vec::new()
+            } else {
+                self.params.to_vec()
+            },
             names: std::collections::HashMap::new(),
         };
-        for &(slot, ref ty, ref name) in &self.scope {
-            // NAMED vars spill by scope (kotlinc's rule). An unnamed temp NEVER gets a slot —
-            // kotlinc holds those on the operand stack; every splice-materialization local that
-            // kotlinc names is emitted `named` at its lowering site. A krusty-only temp that
-            // genuinely crossed a suspension would fail loudly in the box corpus, not silently
-            // diverge (the arm restores wouldn't cover it). (kotlinc's `nullOutSpilledVariable`
-            // stores are FIELD HYGIENE — clearing a previous state's spill of a now-dead var —
-            // and never allocate positions beyond some state's live list.)
-            snapshot.values.push((slot, ty.clone()));
+        // NAMED vars spill by SCOPE (kotlinc's rule) — every splice-materialization local kotlinc
+        // names is emitted `named` at its lowering site, so scope and liveness agree for them.
+        // An unnamed TEMP spills by LIVENESS instead: it is a materialized operand, and kotlinc
+        // likewise gives a live operand a field (`a() + b()` stores its partial `StringBuilder` in
+        // `L$0` and restores it in every later arm). Admitting a DEAD temp would only inflate the
+        // per-kind field maxima past kotlinc's; admitting none at all leaves a temp that genuinely
+        // crosses a suspension spilled but never restored (a null/`Bad local variable type` arm).
+        // (kotlinc's `nullOutSpilledVariable` stores are FIELD HYGIENE — clearing a previous
+        // state's spill of a now-dead var — and never allocate positions beyond some state's live
+        // list.)
+        let live: Vec<(u32, Ty, Option<String>)> = self
+            .scope
+            .iter()
+            .filter(|e| {
+                if self.temps_only {
+                    !e.named && self.pending_reads(e.slot)
+                } else {
+                    e.named
+                }
+            })
+            .map(|e| (e.slot, e.ty, e.name.clone()))
+            .collect();
+        for (slot, ty, name) in live {
+            snapshot.values.push((slot, ty));
             if let Some(name) = name {
-                snapshot.names.insert(slot, name.clone());
+                snapshot.names.insert(slot, name);
             }
         }
         self.out.insert(call, snapshot);
+    }
+    /// Whether any expression that may still execute after the current walk point reads `slot` — the
+    /// liveness test for an unnamed temp (rest-of-list statements, plus whole enclosing loops, which
+    /// re-run their subtrees on the back-edge).
+    fn pending_reads(&self, slot: u32) -> bool {
+        self.pending.iter().any(|&p| expr_reads(self.ir, p, slot))
     }
     fn walk_stmts(&mut self, stmts: &[ExprId]) {
         let base = self.scope.len();
@@ -3898,9 +4020,13 @@ impl ScopeWalk<'_> {
                     // The catch variable is in scope (named) for the catch body. When the body
                     // suspends, the machine builder remaps it to a fresh exception-spill local and
                     // REWRITES the captured lists to that index (`catch_spills` remap below).
-                    if !self.scope.iter().any(|(l, _, _)| *l == c.var) {
-                        self.scope
-                            .push((c.var, Ty::obj(&c.exc_internal.render()), c.name.clone()));
+                    if !self.scope.iter().any(|e| e.slot == c.var) {
+                        self.scope.push(ScopeEntry {
+                            slot: c.var,
+                            ty: Ty::obj(&c.exc_internal.render()),
+                            name: c.name.clone(),
+                            named: true,
+                        });
                     }
                     self.walk(c.body);
                     self.close_scope(base);
@@ -4860,6 +4986,30 @@ fn unbox(ir: &mut IrFile, value: ExprId, target: &Ty) -> ExprId {
     })
 }
 
+/// Unwrap a BOXED value-class resume value: `checkcast X` then `X.unbox-impl()`, yielding the erased
+/// underlying `target` the resumed local is typed as. Mirrors kotlinc, which boxes a value-class result
+/// at the CPS `areturn` (`X.box-impl`) because the continuation boundary is `Object`-typed.
+fn unbox_value_class(ir: &mut IrFile, value: ExprId, x: TypeName, target: &Ty) -> ExprId {
+    let boxed = ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: value,
+        type_operand: Ty::obj_name(x),
+    });
+    let descriptor =
+        crate::jvm::names::method_descriptor(&[], super::ir_emit::ir_ty_to_jvm(&target.non_null()));
+    ir.add_expr(IrExpr::Call {
+        callee: crate::ir::Callee::Virtual {
+            owner: x,
+            name: "unbox-impl".to_string(),
+            descriptor,
+            params: None,
+            interface: false,
+        },
+        dispatch_receiver: Some(boxed),
+        args: vec![],
+    })
+}
+
 /// Whether narrowing an erased `Object` resume value to `t` needs an explicit `checkcast` — a concrete
 /// reference class (`Config`), `String`, or an array. `kotlin/Any` (already `Object`) and primitives do
 /// NOT; crucially a BOXED-primitive object type (`Obj("kotlin/Int")`, a spilled `Int`) also does not —
@@ -5032,9 +5182,27 @@ const SPILL_KIND_ORDER: [char; 9] = ['L', 'I', 'J', 'F', 'D', 'Z', 'C', 'B', 'S'
 
 /// Annotate each scope-list entry with its kind and position WITHIN that kind (kotlinc's
 /// per-suspension positional slot).
+/// A local of the BOTTOM type (`var x = null` — `Ty::Null`) has exactly ONE possible value, so kotlinc
+/// gives it no continuation field and REMATERIALIZES it (`aconst_null; astore`) in every resume arm.
+/// Keeping it out of the spill layout is also what keeps its verification type `null` — assignable to
+/// any reference — where restoring it from an `Object`-typed field would widen the slot and break the
+/// next typed use of it (`bar(x: String?, …)` → "Bad type on operand stack").
+fn is_rematerialized_null(ty: &Ty) -> bool {
+    matches!(ty.non_null(), Ty::Null)
+}
+
+/// The entries of a suspension's scope list that a resume arm rematerializes rather than reloads.
+fn rematerialized_nulls(list: &[(u32, Ty)]) -> Vec<u32> {
+    list.iter()
+        .filter(|(_, t)| is_rematerialized_null(t))
+        .map(|&(l, _)| l)
+        .collect()
+}
+
 fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
     let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
     list.iter()
+        .filter(|(_, ty)| !is_rematerialized_null(ty))
         .map(|&(l, ty)| {
             let k = spill_kind(&ty);
             let c = counts.entry(k).or_insert(0);
@@ -5055,6 +5223,9 @@ impl SpillLayout {
     fn add_list(&mut self, list: &[(u32, Ty)]) {
         let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
         for (_, ty) in list {
+            if is_rematerialized_null(ty) {
+                continue;
+            }
             *counts.entry(spill_kind(ty)).or_insert(0) += 1;
         }
         for (k, c) in counts {
@@ -5118,6 +5289,16 @@ fn spill_shape_unmodeled(spilled: &[(u32, Ty)]) -> bool {
         matches!(t, Ty::Byte | Ty::Short | Ty::Char | Ty::Boolean)
             || t.non_null().array_elem().is_some()
     })
+}
+
+/// A spilled local of type `Nothing`: an expression of the bottom type never yields a value, so the
+/// slot has no JVM type at all and merges to `top` at a control-flow join, where the spill's `aload`
+/// fails verification ("Bad local variable type"). (`Ty::Null` — the always-`null` `var x = null` — is
+/// handled instead of gated; see [`is_rematerialized_null`].) Bail (skip, never miscompile).
+fn spills_bottom_typed_local(spilled: &[(u32, Ty)]) -> bool {
+    spilled
+        .iter()
+        .any(|(_, t)| matches!(t.non_null(), Ty::Nothing))
 }
 
 /// A suspending body iterating a `kotlin.ranges` PROGRESSION object (`for (x in 20L..30L step 5L)` —
@@ -5221,16 +5402,105 @@ fn tail_suspending_loop(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32
     hit
 }
 
-/// TWO consecutive compiler-temp suspension bindings (`val t1 = susp(); val t2 = susp()`, hoisted
-/// from one expression `a() + b()`): the FIRST temp's value must be restored across the SECOND
-/// suspension, which the positional resume-arm restore doesn't model for unnamed temps yet — the
-/// resumed arm reads a null field. Bail (skip, never miscompile).
-fn consecutive_temp_suspensions(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32>) -> bool {
-    let temp_susp = |s: ExprId| {
-        matches!(&ir.exprs[s as usize], IrExpr::Variable { named: false, init: Some(i), .. }
-            if is_suspension_point(ir, unwrap_suspend_cast(ir, *i, suspend_set, false), suspend_set))
-    };
-    stmts.windows(2).any(|w| temp_susp(w[0]) && temp_susp(w[1]))
+/// A labeled `break`/`continue` that leaves an INNER loop for an OUTER one, inside a suspending body.
+/// The flattener gives each loop its own states and routes an unlabeled jump through them, but a jump
+/// that crosses a loop boundary lands on a state the assembler never reaches through the normal
+/// dispatch, so the target instruction gets no stackmap frame ("Expecting a stack map frame"). Not
+/// specific to any receiver shape — a plain `suspend fun test(c: Ctl)` with `break@outer` reproduces
+/// it. Bail (skip, never emit an unverifiable method).
+fn suspending_cross_loop_labeled_jump(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    fn walk(ir: &IrFile, e: ExprId, enclosing: &mut Vec<(Option<String>, bool)>, found: &mut bool) {
+        match &ir.exprs[e as usize] {
+            IrExpr::While {
+                label, post_test, ..
+            } => {
+                enclosing.push((label.clone(), *post_test));
+                for_each_child(&ir.exprs, e, &mut |c| walk(ir, c, enclosing, found));
+                enclosing.pop();
+                return;
+            }
+            // Innermost-targeting is what the flattener models; anything above it is not. Only the
+            // POST-TEST (`do … while`) lowering actually mis-frames: its condition sits after the body,
+            // so the crossing jump's target is a state the dispatch never falls into. A pre-test
+            // `for`/`while` cross-loop jump assembles correctly (verified against kotlinc), so it must
+            // NOT be refused — nested labeled loops are ordinary Kotlin.
+            IrExpr::Break { label: Some(l) } | IrExpr::Continue { label: Some(l) }
+                if enclosing.len() > 1
+                    && enclosing
+                        .last()
+                        .is_none_or(|(inner, _)| inner.as_ref() != Some(l))
+                    && enclosing.iter().any(|(_, post_test)| *post_test) =>
+            {
+                *found = true;
+            }
+            _ => {}
+        }
+        for_each_child(&ir.exprs, e, &mut |c| walk(ir, c, enclosing, found));
+    }
+    if !expr_calls_suspend(ir, b, suspend_set) {
+        return false;
+    }
+    let mut enclosing = Vec::new();
+    let mut found = false;
+    walk(ir, b, &mut enclosing, &mut found);
+    found
+}
+
+/// A suspension whose own RECEIVER/ARGUMENTS write a local (`foo(i++)`). The spill stores are emitted
+/// ahead of the call, so such a write lands in the local but never in the field, and the resume then
+/// restores the PRE-evaluation value — a silent wrong answer (`bars(foo(i++), foo(i++))` yields
+/// `"1;1;"`). kotlinc has its arguments on the operand stack before its `putfield`s, so its spill
+/// always sees the post-evaluation state. Modelling that needs the operands materialized into typed
+/// temps ahead of the spill; until then, bail (skip, never miscompile).
+fn suspension_operand_writes_local(
+    ir: &IrFile,
+    b: ExprId,
+    suspend_set: &HashSet<u32>,
+    spilled: &[(u32, Ty)],
+) -> bool {
+    // Only a SPILLED slot can lose the write — a slot the machine never stores keeps whatever the
+    // local holds — and only if something OUTSIDE the operand reads it: a scratch variable whose every
+    // read is inside the operand itself (`foo(run { t = 2; t })`) is re-assigned before each read, so
+    // the stale field is never observed. Reads are counted rather than located, since the operand
+    // subtree cannot be subtracted from the body's own walk.
+    fn count_reads(ir: &IrFile, e: ExprId, idx: u32) -> usize {
+        let mut n = usize::from(matches!(ir.exprs[e as usize], IrExpr::GetValue(i) if i == idx));
+        for_each_child(&ir.exprs, e, &mut |c| n += count_reads(ir, c, idx));
+        n
+    }
+    fn written_slots(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
+        if let IrExpr::SetValue { var, .. } = ir.exprs[e as usize] {
+            out.push(var);
+        }
+        for_each_child(&ir.exprs, e, &mut |c| written_slots(ir, c, out));
+    }
+    let mut points: HashSet<ExprId> = HashSet::new();
+    collect_suspension_points(ir, b, suspend_set, &mut points);
+    points.iter().any(|&p| {
+        // Both call shapes suspend: `Call` is a static/top-level callee, `MethodCall` a same-file
+        // member (`c.foo(i++)`), whose receiver is just as much an operand as its arguments.
+        let (receiver, args): (Option<ExprId>, Vec<ExprId>) = match &ir.exprs[p as usize] {
+            IrExpr::Call {
+                dispatch_receiver,
+                args,
+                ..
+            } => (*dispatch_receiver, args.clone()),
+            IrExpr::MethodCall { receiver, args, .. } => {
+                (Some(*receiver), args.iter().flatten().copied().collect())
+            }
+            _ => return false,
+        };
+        receiver.iter().chain(args.iter()).any(|&o| {
+            let mut written = Vec::new();
+            written_slots(ir, o, &mut written);
+            written.sort_unstable();
+            written.dedup();
+            written.iter().any(|&slot| {
+                spilled.iter().any(|&(s, _)| s == slot)
+                    && count_reads(ir, b, slot) > count_reads(ir, o, slot)
+            })
+        })
+    })
 }
 
 /// True if `e`'s subtree binds the result of a suspension to a value(inline)-class-typed local. An

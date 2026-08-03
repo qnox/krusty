@@ -18417,37 +18417,6 @@ impl<'a> Checker<'a> {
         seen
     }
 
-    /// The subclasses a non-exhaustive `when` should name. Kotlin exhaustiveness is over the LEAVES of
-    /// the sealed hierarchy: `sealed class Node { sealed class Leaf : Node() … }` is fully covered by
-    /// arms for every subclass of `Leaf`, so an uncovered sealed subclass expands into its own
-    /// subclasses (transitively). A subclass the arms DO cover stays as itself — `is Leaf ->` covers the
-    /// whole `Leaf` branch and must not be re-reported through its children.
-    fn sealed_leaves_to_report(
-        &self,
-        roots: Vec<TypeName>,
-        covered: &std::collections::HashSet<TypeName>,
-    ) -> Vec<TypeName> {
-        let mut leaves = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut pending = roots;
-        while let Some(subclass) = pending.pop() {
-            if !seen.insert(subclass) {
-                continue;
-            }
-            let children = self
-                .resolved_type_name(subclass)
-                .map(|shape| shape.sealed_subclasses.iter_ids().collect::<Vec<_>>())
-                .unwrap_or_default();
-            if covered.contains(&subclass) || children.is_empty() {
-                leaves.push(subclass);
-            } else {
-                pending.extend(children);
-            }
-        }
-        leaves.sort_by_key(|subclass| subclass.render());
-        leaves
-    }
-
     fn when_sealed_missing_branches(
         &self,
         subject_ty: Option<Ty>,
@@ -18496,10 +18465,42 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let mut missing = self
-            .sealed_leaves_to_report(subclasses, &covered)
+        // A sealed subclass that is ITSELF sealed is covered when all of ITS subclasses are: the
+        // hierarchy is a tree, and only its LEAVES can be instantiated. `sealed class Node { sealed
+        // class Leaf : Node(); … }` covered by `IntLeaf`/`StrLeaf`/`Branch` is exhaustive, and
+        // demanding `is Leaf` asked for a branch kotlinc rejects as redundant. The depth cap only
+        // guards against a malformed hierarchy looping.
+        fn uncovered_leaves(
+            checker: &Checker<'_>,
+            subclass: TypeName,
+            covered: &std::collections::HashSet<TypeName>,
+            depth: u32,
+            out: &mut Vec<TypeName>,
+        ) {
+            if covered.contains(&subclass) {
+                return;
+            }
+            let nested: Vec<TypeName> = (depth < 16)
+                .then(|| checker.resolved_type_name(subclass))
+                .flatten()
+                .map(|shape| shape.sealed_subclasses.iter_ids().collect())
+                .unwrap_or_default();
+            if nested.is_empty() {
+                out.push(subclass);
+                return;
+            }
+            for child in nested {
+                uncovered_leaves(checker, child, covered, depth + 1, out);
+            }
+        }
+        let mut uncovered = Vec::new();
+        for subclass in subclasses {
+            uncovered_leaves(self, subclass, &covered, 0, &mut uncovered);
+        }
+        uncovered.sort_by_key(|subclass| subclass.render());
+        uncovered.dedup();
+        let mut missing = uncovered
             .into_iter()
-            .filter(|subclass| !covered.contains(subclass))
             .map(|subclass| {
                 let rendered = subclass.render();
                 let name = rendered.rsplit(['/', '$', '.']).next().unwrap_or(&rendered);

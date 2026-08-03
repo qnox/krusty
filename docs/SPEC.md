@@ -262,6 +262,106 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`invokestatic check(Continuation)` with no continuation argument → an operand-stack VerifyError).
   Proven: `if (c && check()) return 1` drives `bar(true)`→1, `bar(false)`→2
   (`tests/suspend_e2e.rs::suspend_fun_suspension_in_and_condition`).
+- **`suspend fun` — an unnamed TEMP that is live across a suspension gets a spill slot.** Hoisting a
+  multi-suspension expression (`a() + b() + c()`) materializes one unnamed `Variable` per operand, so
+  the first operand's value must survive the *later* suspensions. The per-suspension scope snapshot
+  (`ScopeWalk`, kotlinc's positional-spill model — see `docs/POSITIONAL_SPILLS.md`) previously admitted
+  only `named: true` variables, so those temps were in the spilled union (hence stored) but in no
+  resume arm's restore list (hence read back as `null`/a wrongly-typed slot). A NAMED variable still
+  spills by lexical SCOPE (kotlinc's rule — every splice-materialization local is emitted `named` at its
+  lowering site, so scope and liveness agree for them); an unnamed TEMP now spills by LIVENESS: it is
+  included exactly when some expression that may still execute — a later statement of an enclosing list,
+  or a whole enclosing loop, which re-runs on the back-edge — reads it. Liveness rather than scope is
+  what keeps the per-kind field maxima at kotlinc's count: a dead temp would inflate them. kotlinc
+  spills a live operand the same way (`a() + b()` stores its partial `StringBuilder` in `L$0` and
+  restores it in every later arm). Proven: `runBlocking { pick(0) + pick(1) + pick(2) }` → `"abc"`
+  (`tests/feature_coverage_j_e2e.rs::suspend_when_branch_around_suspend_calls`). The model covers a
+  RECEIVER lambda too — its leading `this`/capture fields do NOT displace a temp's positional slot
+  (`tests/suspend_e2e.rs::suspend_receiver_lambda_spills_hoisted_temps`). A spilled local of type
+  `Nothing` still bails: its expression never yields a value, so the slot has no JVM type and merges to
+  `top` at a join ("Bad local variable type" — `spills_bottom_typed_local`).
+- **`suspend fun` — a `suspend` EXTENSION called through an explicit receiver is a suspension point.**
+  `ast_body_suspends` classified the CALLER's body as leaf for `Ctl(40).run2()`: a top-level suspend
+  extension reached that way is a `Member` callee, invisible to the bare-`Name` scan, and it is not an
+  instance member of the receiver's type, so the resolved-member scan misses it too. The lambda then got
+  no state machine and the call emitted without a `Continuation` ("call arity mismatch").
+  `collect_member_call_names` closes it, matched by name against the file's suspend EXTENSIONS only so
+  the (documented, safe) over-approximation stays narrow. An extension body may now suspend on a MEMBER
+  of its receiver — the receiver is an ordinary parameter and the member call threads its own
+  continuation, so `gate:extension-suspend-fn-member-suspension` is retired
+  (`tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member`). Two residual shapes the
+  corpus proved are NOT about extensions keep their own bails: a cross-loop labeled jump (below), and a
+  suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
+  (`Controller.run(c: suspend Controller.() -> Unit)`), which is not routed to `lower_suspend_lambda`,
+  so its lambda class is a plain `FunctionN` that never threads a continuation
+  (`gate:suspend-lambda-into-member-parameter`).
+- **`suspend fun` — a cross-loop labeled `break`/`continue` is refused, not miscompiled.** The flattener
+  gives each loop its own states and routes an unlabeled jump through them; a labeled jump that leaves an
+  INNER loop for an OUTER one lands on a state the assembler never reaches through the normal dispatch,
+  so the target instruction gets no stackmap frame and the method fails verification ("Expecting a stack
+  map frame"). Pre-existing and NOT receiver- or extension-specific — a plain `suspend fun test(c: Ctl)`
+  with `break@outer` reproduces it on an unmodified tree. Only the POST-TEST (`do … while`) lowering is
+  affected: its condition sits after the body, so the crossing jump targets a state the dispatch never
+  falls into. A cross-loop jump between PRE-TEST loops (`for`/`while`) assembles correctly and is left
+  alone — nested labeled loops are ordinary Kotlin. `suspending_cross_loop_labeled_jump` skips only the
+  post-test form (`tests/suspend_e2e.rs::suspend_cross_loop_labeled_break_still_skips` and
+  `::suspend_cross_loop_labeled_jump_between_pretest_loops_runs`; corpus
+  `coroutines/controlFlow/doubleBreak`).
+- **`suspend fun` — a suspension whose own ARGUMENT writes a local is refused, not miscompiled.** The
+  spill stores are emitted ahead of the call, so an argument's update to a spilled local (`foo(i++)`)
+  lands in the local but never in the field, and the resume restores the PRE-evaluation value —
+  `bars(foo(i++), foo(i++))` silently answered `"1;1;"` instead of `"1;2;"`. kotlinc has its arguments
+  on the operand stack before its `putfield`s, so its spill always sees the post-evaluation state;
+  modelling that needs the receiver/arguments materialized into typed temps ahead of the spill. Until
+  then `suspension_operand_writes_local` skips the file. It covers both suspending call shapes — a
+  static `Call` and a same-file member `MethodCall`, whose RECEIVER (`cs[i++].foo()`) is as much an
+  operand as its arguments — and fires only when the written slot is SPILLED and read somewhere outside
+  the operand: a scratch whose every read is inside the operand itself (`foo(run { t = 2; t })`) is
+  re-assigned before each read, so its stale field is never observed. This was the actual cause of the
+  corpus `suspendCallsInArguments` divergence — a silent wrong answer in an otherwise-accepted shape,
+  not a spill-slot displacement
+  (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_still_skips`,
+  `::suspend_member_call_whose_operand_writes_a_local_still_skips`,
+  `::suspend_operand_write_to_a_locally_dead_scratch_runs`).
+- **`suspend fun` — a `Nothing?` local live across a suspension is REMATERIALIZED, not spilled.**
+  `var x = null` has exactly one possible value, so kotlinc gives it no continuation field and re-emits
+  `aconst_null; astore` in each resume arm. Spilling it instead is wrong twice over: the local's
+  verification type widens from `null` to the field's `Object`, so the next typed use of it
+  (`bar(x: String?, …)`) fails with "Bad type on operand stack", and the extra field diverges from
+  kotlinc's count. `is_rematerialized_null` keeps such a local out of the spill layout and out of
+  `kind_positions`, and each arm restores it with `Const(Null)`. Continuation fields are then identical
+  to kotlinc's for the corpus `varSpilling/nullSpilling` shape (`L$0` for the crossing `String` temp,
+  `result`, `label`)
+  (`tests/suspend_e2e.rs::suspend_bottom_typed_local_across_a_suspension_is_rematerialized`).
+- **`suspend fun` — a top-level `suspend` EXTENSION function.** `suspend fun Counter.next(): Int` needs
+  no CPS machinery of its own: an extension receiver is already lowered to an ordinary LEADING static
+  parameter, so the coroutine pass appends the `Continuation` after it (`next(Counter, Continuation)
+  Object`) and threads call sites like any other static suspend call. The only thing missing was the
+  registration — pass 1b's extension branch never pushed the `FunId` into `ir.suspend_funs`, so the
+  pass saw neither the declaration nor its call sites (the call site then kept its pre-CPS arity: "call
+  arity mismatch"). Registering it there retires the blanket `gate:extension-suspend-fn` file skip.
+  Proven: `suspend fun Counter.next()` suspending on `bump(base)` → 42
+  (`tests/feature_coverage_s_e2e.rs::suspend_extension_function_on_user_type`). Two extension shapes
+  still skip. (1) An extension body that suspends on a MEMBER of its receiver: a member suspension
+  resumes against the machine's `this`, which an extension has not got — its receiver is a parameter
+  slot — so the resumed call would target the wrong instance. Fixed: see the next entry. (2) An
+  `inline suspend` extension, spliced at its call sites where the splice and the CPS rewrite do not
+  compose — the caller's machine inlines the pre-CPS body and drops the assignment it performs
+  (`suspend { r = 1.plusOne() }` leaves `r` at 0):
+  `tests/cross_file_inline_call_e2e.rs::suspend_inline_extension_cross_file_still_rejects`.
+- **`suspend fun` returning a `@JvmInline value class` — the result crosses the CPS boundary BOXED.**
+  A CPS return is `Object`, so a non-null value-class result cannot ride in its erased underlying form:
+  kotlinc emits `X.box-impl` before the `areturn` and `checkcast X` + `X.unbox-impl()` on the resume
+  side. The value-class pass runs BEFORE the coroutine pass and erases `X` to its underlying everywhere,
+  so it now boxes such a suspend function's tail (the same `box_ref_tail` a lambda's erased `Object`
+  result uses) and records the class in `ir.suspend_boxed_value_class_returns`; the coroutine pass's
+  `bind_from_r` consults that record and unwraps the box instead of applying the ordinary
+  `Object`→declared-type coercion. Value-class knowledge stays in the value-class pass — the record
+  carries only the erasure it deliberately did NOT apply. Byte-identical to kotlinc for
+  `suspend fun distance(): Meters` (`constructor-impl` → `box-impl` → `areturn`). A CROSS-UNIT suspend
+  call whose logical return is a value class (`ir.suspend_calls`, a callee in another file with no such
+  record) still skips the file. Proven: `runBlocking { compute() }` where `compute` binds `distance()`
+  and reads `m.v` → 42 (`tests/feature_coverage_s_e2e.rs::suspend_returns_value_class`).
 - **`@Metadata` writer — the suspend round-trip.** krusty now emits a `@kotlin.Metadata` annotation on
   a file facade that has top-level `suspend fun`s, so its OWN compiled output is consumable as a
   classpath dependency (a suspend fn's physical method is `Object foo(…, Continuation)` — only
@@ -2413,13 +2513,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   range's elements box to their inline class, which krusty erases to the signed primitive. Tests:
   `tests/feature_coverage_p_e2e.rs::when_comma_conditions_and_mixed_is_in`,
   `::when_widened_subject_boxes_every_primitive_comparand`.
-- **`when` exhaustiveness expands a NESTED sealed hierarchy.** `sealed class Node { sealed class Leaf
-  : Node(); data class IntLeaf … : Leaf(); data class StrLeaf … : Leaf(); data class Branch … :
-  Node() }` is exhaustively covered by `is IntLeaf` / `is StrLeaf` / `is Branch` — Kotlin's rule is
-  over the LEAVES of the sealed tree, and a sealed class is abstract, so covering all of `Leaf`'s
-  subclasses covers `Leaf`. An uncovered sealed subclass expands into its own subclasses,
-  transitively; one the arms DO cover (`is Leaf ->`) stays as itself and must not be re-reported
-  through its children. Test: `tests/feature_coverage_r_e2e.rs::nested_sealed_hierarchy`.
 - **`private` visibility is LEXICAL, and the JVM's is not.** A nested (non-`inner`) class, the
   companion and an `inline` body spliced into a caller all sit inside the owner's braces, so Kotlin
   lets them reach its private members; each is a SEPARATE class file, so `invokespecial` on a private
@@ -2491,6 +2584,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor-alias registration and classifier lookups are keyed by. Tests:
   `tests/feature_coverage_r_e2e.rs::typealias_in_signatures_and_bodies`,
   `tests/feature_coverage_x_e2e.rs::typealias_function_and_generic`.
+- **Sealed exhaustiveness descends the hierarchy.** A sealed subclass that is ITSELF sealed is
+  covered when all of ITS subclasses are: the hierarchy is a tree and only its LEAVES can be
+  instantiated. Checking only the DIRECT subclasses reported
+  `sealed class Node { sealed class Leaf : Node(); … }` covered by `IntLeaf`/`StrLeaf`/`Branch` as
+  non-exhaustive, demanding an `is Leaf` branch kotlinc rejects as redundant. A subclass the arms DO
+  cover (`is Leaf ->`) stands for its whole branch and is not re-reported through its children. The
+  same tree is walked when deciding which arms COVER something: an `object` arm may name a subclass of
+  a nested sealed class, so membership is tested against every sealed descendant rather than the direct
+  subclasses alone. Tests: `tests/feature_coverage_r_e2e.rs::nested_sealed_hierarchy`,
+  `resolve::tests::nested_sealed_hierarchy_is_exhausted_by_its_leaves`,
+  `::covering_a_nested_sealed_class_directly_covers_its_branch`,
+  `::a_missing_nested_sealed_leaf_is_reported_by_name`.
 
 ## 8. Success criteria for the PoC
 

@@ -459,12 +459,43 @@ fn lower_file_at_reporting_impl(
         })
         .collect();
     if !top_suspend.is_empty() || !member_suspend.is_empty() {
-        // Extension suspend fns aren't modeled. (A leaf member suspend fn IS — its CPS signature on the
-        // instance method; a member suspension point is skipped by the pass.)
+        // A top-level `suspend` EXTENSION is modeled: its receiver is an ordinary leading static
+        // parameter, so the coroutine pass appends the CPS `Continuation` after it and threads call
+        // sites like any other static suspend call (registered in `suspend_funs` in pass 1b).
+        // EXCEPT one shape: an extension body that suspends on a MEMBER of its receiver
+        // (`suspend fun Controller.test() { … foo() … }` reaching `Controller.foo()` through the implicit
+        // receiver). A member suspension resumes against the machine's `this`, which an extension has
+        // not got — its receiver is a parameter slot — so the resumed call would target the wrong
+        // instance. Skip the file (never miscompile) until member suspension points are threaded.
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
-                if f.is_suspend() && f.receiver.is_some() {
+                if !f.is_suspend() || f.receiver.is_none() {
+                    continue;
+                }
+                // An INLINE suspend extension is spliced at its call sites, where the splice and the CPS
+                // rewrite do not compose: the caller's machine inlines the pre-CPS body and drops the
+                // assignment it performs (`suspend { r = 1.plusOne() }` leaves `r` at 0). Keep skipping.
+                if f.is_inline() {
                     return lo.bail("gate:extension-suspend-fn");
+                }
+                let body = match &f.body {
+                    FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+                    FunBody::None => None,
+                };
+                let _ = body;
+                // A suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
+                // (`Controller.run(c: suspend Controller.() -> Unit)`) is not routed to
+                // `lower_suspend_lambda`, so the lambda class is a plain `FunctionN` whose body never
+                // threads a continuation — driven as a coroutine it silently completes without running
+                // the machine. Skip the file (never miscompile) while an extension suspend fn is in play.
+                if file.decls.iter().any(|&d| match file.decl(d) {
+                    Decl::Class(c) => c
+                        .methods
+                        .iter()
+                        .any(|m| m.params.iter().any(|parameter| parameter.ty.fun_suspend())),
+                    _ => false,
+                }) {
+                    return lo.bail("gate:suspend-lambda-into-member-parameter");
                 }
             }
         }
@@ -2360,6 +2391,12 @@ fn lower_file_at_reporting_impl(
                 // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
                 if f.visibility.is_private() {
                     lo.ir.private_methods.insert(id);
+                }
+                // Tag a `suspend` extension exactly like a plain top-level `suspend fun`: the receiver
+                // is already an ordinary leading static parameter, so the coroutine pass appends the
+                // CPS `Continuation` after it and threads call sites unchanged.
+                if f.is_suspend() {
+                    lo.ir.suspend_funs.push(id);
                 }
             } else {
                 let sig = syms.funs.get(&f.name)?.iter().find(|sig| {
@@ -9138,6 +9175,33 @@ impl<'a> Lower<'a> {
             .any(|n| susp_names.contains(n))
         {
             return true;
+        }
+        // Top-level suspend EXTENSIONS reached through an explicit receiver (`Ctl(40).run2()`). Such a
+        // call is a `Member` callee, so the bare-`Name` scan above misses it, and it is not an instance
+        // member of the receiver's type, so the resolved-member scan below misses it too — leaving the
+        // body classified as leaf and its call emitted without a `Continuation` ("call arity mismatch").
+        // Matched by name against the EXTENSIONS only, keeping the over-approximation narrow.
+        let susp_ext_names: std::collections::HashSet<&str> = self
+            .afile
+            .decls
+            .iter()
+            .filter_map(|&d| match self.afile.decl(d) {
+                ast::Decl::Fun(f) if f.is_suspend() && f.receiver.is_some() => {
+                    Some(f.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        if !susp_ext_names.is_empty() {
+            let member_names = std::cell::RefCell::new(Vec::new());
+            collect_member_call_names(self.afile, body, &member_names);
+            if member_names
+                .into_inner()
+                .iter()
+                .any(|n| susp_ext_names.contains(n.as_str()))
+            {
+                return true;
+            }
         }
         // A MEMBER / invoke-operator suspend call (`getResult()` = `GetResult.suspend operator fun
         // invoke()`, `x.m()` where `m` is `suspend`) is invisible to the top-level-name check above —
@@ -26190,6 +26254,35 @@ fn collect_calls(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<As
         &mut |s| {
             file.any_child_stmt(s, &mut |c| {
                 collect_calls(file, c, out);
+                false
+            });
+            false
+        },
+    );
+}
+
+/// The NAME of each call made through an explicit receiver (`x.f()`). A top-level `suspend` EXTENSION
+/// reached that way is neither a bare `Name` call nor an instance member of the receiver's type, so it
+/// is invisible to both of [`Lowering::ast_body_suspends`]'s scans without this.
+fn collect_member_call_names(
+    file: &ast::File,
+    e: AstExprId,
+    out: &std::cell::RefCell<Vec<String>>,
+) {
+    if let ast::Expr::Call { callee, .. } = file.expr(e) {
+        if let ast::Expr::Member { name, .. } = file.expr(*callee) {
+            out.borrow_mut().push(name.clone());
+        }
+    }
+    file.any_child_expr(
+        e,
+        &mut |c| {
+            collect_member_call_names(file, c, out);
+            false
+        },
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                collect_member_call_names(file, c, out);
                 false
             });
             false
