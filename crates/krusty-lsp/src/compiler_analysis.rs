@@ -936,6 +936,59 @@ mod tests {
     }
 
     #[test]
+    fn source_set_resolves_inherited_nested_enum_from_unbuilt_java_base() {
+        let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+            return;
+        };
+        let Some(jdk_modules) = krusty::toolchain::jdk_modules() else {
+            return;
+        };
+        let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+            stdlib,
+            jdk_modules,
+        ]));
+        classpath.prepare_for_source_analysis();
+        let java_sources = [(
+            String::new(),
+            "package fixtures; public class Parent { \
+             public enum DialogStyle { NO_STYLE, COMPACT } \
+             protected DialogStyle getStyle() { return DialogStyle.NO_STYLE; } }"
+                .into(),
+        )];
+        let stubs = krusty::jvm::java_stub::stub_classes(
+            &java_sources,
+            krusty::jvm::java_stub::StubMode::Lenient,
+            &|candidate| {
+                classpath
+                    .find_name(krusty::types::type_name(candidate))
+                    .is_some()
+            },
+        )
+        .expect("Java stubs");
+        assert!(
+            stubs
+                .iter()
+                .any(|(name, _)| name == "fixtures/Parent$DialogStyle"),
+            "nested enum stub"
+        );
+        classpath.set_stub_overlay(stubs);
+
+        let source = "package consumer\n\
+                      import fixtures.Parent\n\
+                      class Child : Parent() {\n\
+                      \u{20} override fun getStyle(): DialogStyle = DialogStyle.COMPACT\n\
+                      }";
+        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let analysis = analyze_source_set(&[source], platform);
+
+        assert!(
+            analysis.files[0].diagnostics.is_empty(),
+            "{:?}",
+            analysis.files[0].diagnostics
+        );
+    }
+
+    #[test]
     fn source_set_resolves_inherited_java_getter_as_property() {
         let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
             return;

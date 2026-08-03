@@ -214,6 +214,12 @@ boundary.
   once; providers do not repeat inheritance lookup. When a readable field is selected, its complete
   owner/name/type and opaque backend token travel with the semantic property read, so lowering never
   reconstructs a target from a file/module/classpath branch or a receiver's spelling.
+- **Generated classfile overlays preserve declaration structure, not encoded-name guesses.** A Java
+  source stub records the parser's syntactic enclosing declaration and simple name, then emits the
+  member type's exact `InnerClasses` self entry. Visibility and inherited-classifier lookup consume
+  that structural entry; they never split `$` out of a JVM name, because `$` is also legal inside a
+  Java identifier. One semantic access-flag derivation feeds both the class header and self entry so
+  interface, annotation, enum, record, and class modifiers cannot drift between the two views.
 - **Unsupported input has one explicit semantic boundary.** A not-yet-implemented language shape is
   rejected with a stable reason before emission; it is not silently redirected to a weaker lookup,
   dropped only for one declaration origin, or allowed to reach unverifiable bytecode. Returning an
