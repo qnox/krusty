@@ -1233,15 +1233,27 @@ impl JvmLibraries {
                     // read as a plain `(Scope) -> Unit` and no lambda argument bound `this`. Restore
                     // them from the class's `@Metadata` CONSTRUCTOR records, matched by source arity
                     // (the same evidence `ctor_named_params` uses for names/defaults).
+                    //
+                    // Arity is the ONLY alignment available here, so it must also be the test of
+                    // whether the record belongs to THIS `<init>`. With two constructors of the same
+                    // arity the record cannot be attributed, and stamping one's marks on both rewrites
+                    // an ordinary `(Cfg) -> Unit` parameter into a receiver function type — which makes
+                    // a valid call to the OTHER constructor unresolvable. Mark only when the arity
+                    // identifies exactly one record; an ambiguous class keeps the erased reading.
+                    let unique_record = {
+                        let mut same_arity = ctor_param_lists
+                            .iter()
+                            .filter(|params| params.recv_fun.len() == member.params.len());
+                        match (same_arity.next(), same_arity.next()) {
+                            (Some(params), None) => Some(params),
+                            _ => None,
+                        }
+                    };
                     if let (Some(gsig), Some(recv_fun)) = (
                         member.generic_sig.as_mut(),
-                        ctor_param_lists
-                            .iter()
-                            .find(|params| {
-                                params.recv_fun.len() == member.params.len()
-                                    && params.recv_fun.iter().any(|&is_receiver| is_receiver)
-                            })
-                            .map(|params| params.recv_fun.clone()),
+                        unique_record
+                            .map(|params| params.recv_fun.clone())
+                            .filter(|marks| marks.iter().any(|&is_receiver| is_receiver)),
                     ) {
                         mark_receiver_fun_params(gsig, &recv_fun, false);
                         // Publish the recovered shape the two ways constructor resolution reads it:

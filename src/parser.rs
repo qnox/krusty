@@ -6849,9 +6849,10 @@ impl<'a> Parser<'a> {
         seen && self.t.get(i).is_some_and(|t| t.kind == TokenKind::LBrace)
     }
 
-    /// Record `labels` as the explicit labels of `expr` when it is a lambda literal. On any other
-    /// expression a label is a semantic no-op; on a lambda it REPLACES the implicit callee-name label
-    /// that a `return@…` inside the body targets.
+    /// Record the explicit label of `expr` when it is a lambda literal. On any other expression a
+    /// label is a semantic no-op; on a lambda it REPLACES the implicit callee-name label that a
+    /// `return@…` inside the body targets. A chain (`a@ b@ { … }`) keeps the INNERMOST label — the one
+    /// written closest to the lambda — since the table holds one label per lambda.
     fn record_lambda_labels(&mut self, expr: ExprId, labels: Vec<String>) {
         if labels.is_empty() || !matches!(self.file.expr(expr), Expr::Lambda { .. }) {
             return;

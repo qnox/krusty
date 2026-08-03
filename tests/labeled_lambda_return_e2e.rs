@@ -77,3 +77,17 @@ fn a_labelled_return_crosses_a_nested_foreach_splice() {
         }\n";
     common::expect_box_ok_with_stdlib(src, "NestedLabelledReturn");
 }
+
+/// A labelled lambda VALUE — not an argument, so never spliced. Its `return@lbl` is a local return
+/// from the closure method itself, which the closure route lowers correctly; recording the label must
+/// not make the return-lowering guard mistake it for an unmodelled splice and skip the file. The
+/// splice form of such a lambda is withheld, since splicing would turn that same return non-local.
+#[test]
+fn a_standalone_labelled_lambda_returns_locally() {
+    let src = "fun box(): String {\n\
+        \x20 val f = lbl@{ x: Int -> if (x > 1) return@lbl \"big\"; \"small\" }\n\
+        \x20 val r = f(2) + f(0)\n\
+        \x20 return if (r == \"bigsmall\") \"OK\" else \"r=$r\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(src, "StandaloneLabelledLambda");
+}

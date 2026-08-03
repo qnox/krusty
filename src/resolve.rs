@@ -17634,11 +17634,17 @@ impl<'a> Checker<'a> {
                 ConstructorParameterConstraint::Concrete if lambda_literal => {
                     matches!(expected.non_null(), Ty::Fun(_))
                 }
-                // A numeric argument reaches a wider primitive slot the same way it does at a function
+                // A numeric argument reaches another primitive slot the same way it does at a function
                 // call (`L(b: Long)` accepts `L(1)`): the emit site inserts the conversion. Subtyping
                 // alone rejected it, so every constructor with a `Long`/`Double`/… parameter was
                 // unreachable from an integer literal — the one call origin that did not admit the
-                // widening `expect_assignable` applies everywhere else.
+                // conversion `expect_assignable` applies everywhere else.
+                //
+                // `accepts_numeric` is the shared predicate and is deliberately the SAME one those
+                // origins use, so this inherits their leniency rather than inventing a constructor
+                // rule: it also admits `Int` into `Byte`/`Short`, where kotlinc requires an explicit
+                // conversion. Narrowing that predicate is a project-wide decision (the plain-call and
+                // classpath-constructor origins already take it), not one to fork here.
                 ConstructorParameterConstraint::Concrete => {
                     self.receiver_is_assignable(actual, expected)
                         || expected.accepts_numeric(actual)
@@ -28394,10 +28400,21 @@ impl<'a> Checker<'a> {
         }
         let internal = self.syms.class_names.get(name)?;
         let classifier = self.resolved_type_name(internal)?;
-        let constructor = classifier
-            .constructors
-            .iter()
-            .find(|member| member.params.len() == arity)?;
+        // Arity alone must also decide WHETHER a constructor can answer: this runs before overload
+        // selection, so with two same-arity constructors the first one's parameter shapes would be
+        // imposed on a call meant for the other — typing a lambda against a receiver it does not have.
+        // Answer only when the arity identifies one constructor; otherwise the lambda keeps the
+        // expected-type-free shape it had before this federation.
+        let constructor = {
+            let mut same_arity = classifier
+                .constructors
+                .iter()
+                .filter(|member| member.params.len() == arity);
+            match (same_arity.next(), same_arity.next()) {
+                (Some(member), None) => member,
+                _ => return None,
+            }
+        };
         Some(
             constructor
                 .params

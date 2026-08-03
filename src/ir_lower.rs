@@ -236,6 +236,7 @@ fn lower_file_at_reporting_impl(
         reified_subst: Vec::new(),
         inline_return: Vec::new(),
         inline_lambda_ret: Vec::new(),
+        closure_label: None,
         foreach_splice: Vec::new(),
         fn_body_tail: None,
     };
@@ -5405,6 +5406,11 @@ pub(crate) struct Lower<'a> {
     /// function result), so the return-lowering routes it through the frame instead of emitting a
     /// real `Return` the suspend flattener can't model inside the splice's `try`/`finally`.
     inline_lambda_ret: Vec<(String, u32, String, Ty, bool)>,
+    /// The explicit label of the lambda whose body is being lowered as a real CLOSURE, when a
+    /// `return@<that label>` in it is this closure method's own return (see `lower_lambda_sam`).
+    /// `None` while lowering anything else, which is what makes an explicit label reaching no splice
+    /// frame a skip rather than a real return out of the enclosing function.
+    closure_label: Option<String>,
     /// Active `forEach` lambda splices, innermost last: `(source label, IR loop label)`. `forEach` is
     /// spliced into a for-each LOOP rather than through a result-slot frame, so a `return@<label>` in
     /// its body is the loop's `continue`, not a break to a result slot. The source label is the
@@ -8679,11 +8685,25 @@ impl<'a> Lower<'a> {
         // closure method, not a non-local return of the enclosing fn. Lower its body with `cur_ret_ty`
         // set to the closure's own return type so `return` coerces to and `areturn`s that type.
         let is_anon_fun = self.afile.anon_fun_lambdas.contains(&e.0);
-        let saved_ret_ty = if is_anon_fun {
+        // A LABELLED lambda lowered as a real closure owns its `return@<own label>` the same way: the
+        // label is local to this lambda, so it is this closure method's own return. That holds only
+        // while no BARE `return` shares the body — a bare return is non-local and needs the enclosing
+        // function's type, and the two cannot both drive `cur_ret_ty`. Registering the label here is
+        // what lets the closure route serve a labelled lambda; without it the return-lowering guard
+        // (which cannot otherwise tell this from an unmodelled splice) would skip the whole file.
+        let own_closure_label = self
+            .afile
+            .lambda_labels
+            .get(&e.0)
+            .filter(|_| !body_has_bare_return(self.afile, body))
+            .cloned();
+        let saved_ret_ty = if is_anon_fun || own_closure_label.is_some() {
             Some(std::mem::replace(&mut self.cur_ret_ty, sig.ret))
         } else {
             None
         };
+        let owns_labelled_return = own_closure_label.is_some();
+        let saved_closure_label = std::mem::replace(&mut self.closure_label, own_closure_label);
         // A `var` declared INSIDE this lambda's body and mutated by a further (non-inline) closure
         // (`{ var v = …; call { v = … }; v }`) needs a `Ref` holder so the nested write is observed.
         // UNION the body-local shared cells with the inherited set (captured enclosing cells stay boxed)
@@ -8700,6 +8720,7 @@ impl<'a> Lower<'a> {
         let ve = self.expr(body);
         self.foreach_splice = saved_foreach;
         self.inline_lambda_ret = saved_lam_frames;
+        self.closure_label = saved_closure_label;
         self.shared_cell_vars = saved_cells;
         if let Some(rt) = saved_ret_ty {
             self.cur_ret_ty = rt;
@@ -8794,7 +8815,12 @@ impl<'a> Lower<'a> {
             arity: arity as u8,
             captures: capture_vals,
             sam: sam.map(|(i, m, descriptor, _)| (i, m, descriptor)),
-            inline_body: Some(inline_body),
+            // The mirror of the bare-return rule above. A `return@<own label>` was lowered as THIS
+            // closure method's own return, which is only correct while the method exists: spliced
+            // through `inline_body` the very same node becomes a non-local return of the enclosing
+            // function, carrying the wrong type. Withhold the splice form so the lambda can only be
+            // emitted as the closure it was lowered as.
+            inline_body: (!owns_labelled_return).then_some(inline_body),
         }))
     }
 
@@ -15733,10 +15759,6 @@ impl<'a> Lower<'a> {
         Some(result)
     }
 
-    /// Inline a scope function over an ALREADY-LOWERED receiver value (`recv_val`) — the shared core for
-    /// a safe-call scope fn (`s?.let { … }`). Binds `recv_val` to a fresh slot named `pname` (`it` for
-    /// `let`/`also`, `this` for `run`/`apply` — which also clears `cur_class`), lowers the body, and
-    /// yields the body value or the receiver (`returns_receiver`). Returns the inlined block value.
     /// The label a `return@…` inside `lambda`'s body targets: the EXPLICIT label written on the literal
     /// (`run outer@{ … }`), else the implicit one — the name of the callee it is an argument to.
     fn lambda_label(&self, lambda: AstExprId, implicit: &str) -> String {
@@ -15780,6 +15802,20 @@ impl<'a> Lower<'a> {
         if self.info.ty(body) == Ty::Nothing {
             return None;
         }
+        // The result slot is framed as `result` (the call's type, which the checker takes from the
+        // body's TAIL). A `return@label` whose value has an unrelated type stores through the same
+        // slot, and the two stackmap frames for it then disagree — the class fails to load. The
+        // checker does not fold labelled-return values into the call type, so verify the agreement
+        // here and skip when it does not hold.
+        let labelled_tys: std::cell::RefCell<Vec<Ty>> = std::cell::RefCell::new(Vec::new());
+        self.collect_labeled_return_tys(body, label, &labelled_tys);
+        if labelled_tys
+            .into_inner()
+            .iter()
+            .any(|&returned| returned != result && returned != Ty::Nothing)
+        {
+            return None;
+        }
         let brk = format!("$lamret${}", self.fresh_value());
         if result != Ty::Unit && result != Ty::Nothing {
             let slot = self.fresh_value();
@@ -15811,6 +15847,10 @@ impl<'a> Lower<'a> {
         Some(self.emit_block(vec![loopw], Some(unit)))
     }
 
+    /// Inline a scope function over an ALREADY-LOWERED receiver value (`recv_val`) — the shared core for
+    /// a safe-call scope fn (`s?.let { … }`). Binds `recv_val` to a fresh slot named `pname` (`it` for
+    /// `let`/`also`, `this` for `run`/`apply` — which also clears `cur_class`), lowers the body, and
+    /// yields the body value or the receiver (`returns_receiver`). Returns the inlined block value.
     fn lower_scope_inline_on(
         &mut self,
         recv_val: u32,
@@ -16728,6 +16768,11 @@ impl<'a> Lower<'a> {
                     if e.is_none() {
                         return Some(self.emit_continue(Some(loop_label)));
                     }
+                    // `forEach`'s lambda returns `Unit`, so the only value a `return@forEach` can
+                    // carry is `Unit` itself — there is no result slot to store it in. Falling through
+                    // would emit a real return inside a value-returning method (a verifier error at
+                    // class load), so skip.
+                    return self.bail("valued return through a forEach splice");
                 }
                 // A `return@label` matching an active spliced-lambda frame is a LOCAL return from that
                 // lambda: break to the lambda's end label (`Unit` result — run any value for effect). A
@@ -16756,9 +16801,10 @@ impl<'a> Lower<'a> {
                 // caller — a miscompile (a `String`-returning `box()` doing `areturn` on an `Int`).
                 // No frame matched ⇒ this splice route does not model the label yet: skip.
                 if frame.is_none()
-                    && ret_label
-                        .as_deref()
-                        .is_some_and(|lbl| self.is_explicit_lambda_label(lbl))
+                    && ret_label.as_deref().is_some_and(|lbl| {
+                        self.is_explicit_lambda_label(lbl)
+                            && self.closure_label.as_deref() != Some(lbl)
+                    })
                 {
                     return self.bail("unmodeled labelled lambda return");
                 }
@@ -19673,7 +19719,8 @@ impl<'a> Lower<'a> {
                     // EXPLICIT lambda label with no frame names a lambda this route does not model, and
                     // emitting a real function return for it would be a miscompile. Skip both.
                     if self.inline_lambda_ret.iter().any(|(l, ..)| l == lbl)
-                        || self.is_explicit_lambda_label(lbl)
+                        || (self.is_explicit_lambda_label(lbl)
+                            && self.closure_label.as_deref() != Some(lbl.as_str()))
                     {
                         return None;
                     }
