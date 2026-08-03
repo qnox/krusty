@@ -2332,6 +2332,59 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`kotlin/math/MathKt.PI`) and the ordinary external-static-field path inlines its `ConstantValue`,
   which is what kotlinc emits at every use site. Test:
   `tests/resolve_parse_deep_coverage_e2e.rs::import_top_level_math`.
+- **An `open` property is read and written through its ACCESSOR, even inside the declaring class.**
+  A subclass `override val`/`var` replaces the base's `get<Name>()`/`set<Name>()`, never the base's
+  own private backing field, so a `getfield`/`putfield` from a base member would touch the base's
+  storage and silently bypass the override. kotlinc emits `invokevirtual get<Name>()` for exactly
+  this reason (a FINAL property keeps the direct field access, and a constructor's property
+  INITIALIZER stays a `putfield` in both compilers). The rule lives in the two places that choose a
+  realization — `ir_lower::implicit_source_property_field` for a bare `name` and
+  `jvm::ir_emit::direct_field_access` for a qualified one — which replaces the whole-file
+  `gate:base-reads-override-internally` bail that used to skip any class whose base read an
+  overridden property. Test: `tests/class_body_e2e.rs::open_property_virtual_dispatch`.
+- **A `when` subject compares against a BOXED primitive comparand.** `when (x: Any) { 1, 2, 3 -> … }`
+  is valid Kotlin: `Int` is a subtype of `Any`, so the comparison can be non-trivially true, and
+  kotlinc emits `Intrinsics.areEqual(x, Integer.valueOf(1))`. Comparability therefore tests the
+  subject and the comparand in their REFERENCE forms (a primitive boxes to its Kotlin class, `String`
+  names `kotlin/String`), and lowering boxes the comparand instead of rejecting the mixed
+  primitive/reference compare. The converse — a primitive subject with a reference comparand
+  (`when (i: Int) { null -> … }`) — has no such form and is still refused. Two comparand kinds keep
+  bailing in LOWERING (the comparability rule above is unconditional, matching kotlinc): an unsigned
+  one boxes to its own inline class rather than a plain wrapper, and a FLOAT/DOUBLE one compares by
+  IEEE `==` whenever the subject is a primitive, which `Double.equals` is not (`-0.0 != 0.0`,
+  `NaN == NaN`) — which of the two applies turns on whether an earlier `is` arm smart-casts the
+  SUBJECT to the primitive, per-arm narrowing the lowering does not model (corpus case
+  `ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt`). Tests:
+  `tests/feature_coverage_p_e2e.rs::when_comma_conditions_and_mixed_is_in`,
+  `::when_widened_subject_boxes_every_primitive_comparand`.
+- **`x in a..b` over a WIDENED value.** `when (x: Any) { in 4..10 -> … }` compiles: kotlinc lowers it
+  to `CollectionsKt.contains(4..10, x)`, and an `IntRange` is not a `Collection`, so that walks the
+  range comparing with `equals` — true exactly when `x` is a BOXED element of the range. krusty keeps
+  its comparison chain and guards it with the `instanceof` that fact implies (`x is Integer &&
+  4 <= x.intValue() <= 10`). The guard must short-circuit, so it is a branch, not the eager `iand`:
+  unboxing a value of another class would throw. A value type unrelated to the boxed element
+  (`x: String in 4..10`) is still rejected. The widened form is `Iterable<T>.contains`, so only
+  `Int`/`Long`/`Char` elements qualify: a floating-point range is a `ClosedFloatingPointRange`, not an
+  `Iterable` (kotlinc rejects `x: Any in 1.0..2.0` outright); a `Byte`/`Short` range is really an
+  `IntRange`, whose elements box to `Integer` rather than the bound's own wrapper; and an unsigned
+  range's elements box to their inline class, which krusty erases to the signed primitive. Tests:
+  `tests/feature_coverage_p_e2e.rs::when_comma_conditions_and_mixed_is_in`,
+  `::when_widened_subject_boxes_every_primitive_comparand`.
+- **`when` exhaustiveness expands a NESTED sealed hierarchy.** `sealed class Node { sealed class Leaf
+  : Node(); data class IntLeaf … : Leaf(); data class StrLeaf … : Leaf(); data class Branch … :
+  Node() }` is exhaustively covered by `is IntLeaf` / `is StrLeaf` / `is Branch` — Kotlin's rule is
+  over the LEAVES of the sealed tree, and a sealed class is abstract, so covering all of `Leaf`'s
+  subclasses covers `Leaf`. An uncovered sealed subclass expands into its own subclasses,
+  transitively; one the arms DO cover (`is Leaf ->`) stays as itself and must not be re-reported
+  through its children. Test: `tests/feature_coverage_r_e2e.rs::nested_sealed_hierarchy`.
+- **`yield` is an ordinary identifier, not the coroutine builder.** Kotlin has no `yield` keyword, so
+  a user's own `fun yield(arg: T)` member is a plain call. The unsupported shape is the
+  `sequence {}` / `iterator {}` BUILDER, whose suspend state machine is not modeled, so the lowering
+  gate now requires both halves — a `yield`/`yieldAll` call AND an unqualified `sequence`/`iterator`
+  builder call to supply the `SequenceScope` receiver those calls suspend on. A `SequenceScope`
+  receiver reached any other way is a suspend extension/member, which the suspend gate already skips.
+  Tests: `tests/scope_function_value_arg_e2e.rs::apply_accepts_receiver_function_value_argument`,
+  `tests/lower_bail_reason_e2e.rs::gated_corpus_cases_report_precise_lower_bail`.
 
 ## 8. Success criteria for the PoC
 

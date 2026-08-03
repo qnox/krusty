@@ -178,6 +178,45 @@ fun box(): String {\n\
     run_ok(src, "WhenCommaMixedIsIn");
 }
 
+/// The rest of the widened-subject shapes: `Long`/`Char`/`Boolean` as boxed `==` comparands, and the
+/// three range kinds — over `Int`, `Long` and `Char` elements — plus `!in`, over a reference value.
+/// Verified against kotlinc, which lowers these to `Intrinsics.areEqual(x, <Wrapper>.valueOf(…))` and
+/// `CollectionsKt.contains(range, x)`. `contains` compares with `equals`, so a value of the WRONG
+/// boxed type is never in the range (`3` is not in `1L..5L`) — pinned here because the lowering's
+/// `instanceof` guard is what has to reproduce that.
+#[test]
+fn when_widened_subject_boxes_every_primitive_comparand() {
+    let src = "fun k(x: Any): String = when (x) {\n\
+    1L -> \"long\"\n\
+    'c' -> \"char\"\n\
+    true -> \"bool\"\n\
+    !in 100..200 -> \"outside\"\n\
+    else -> \"inside\"\n\
+}\n\
+fun down(x: Any): Boolean = x in 10 downTo 4\n\
+fun until(x: Any): Boolean = x in 4..<10\n\
+fun chars(x: Any): Boolean = x in 'a'..'z'\n\
+fun longs(x: Any): Boolean = x in 1L..5L\n\
+fun box(): String {\n\
+    if (k(1L) != \"long\") return \"f1\"\n\
+    if (k('c') != \"char\") return \"f2\"\n\
+    if (k(true) != \"bool\") return \"f3\"\n\
+    if (k(150) != \"inside\") return \"f5\"\n\
+    if (k(\"z\") != \"outside\") return \"f6\"\n\
+    if (!down(7)) return \"f7\"\n\
+    if (down(2)) return \"f8\"\n\
+    if (down(\"x\")) return \"f9\"\n\
+    if (!until(9)) return \"f10\"\n\
+    if (until(10)) return \"f11\"\n\
+    if (!chars('b')) return \"f12\"\n\
+    if (chars(1)) return \"f13\"\n\
+    if (!longs(3L)) return \"f14\"\n\
+    if (longs(3)) return \"f15\"\n\
+    return \"OK\"\n\
+}\n";
+    run_ok(src, "WhenWidenedSubject");
+}
+
 #[test]
 fn when_returning_unit() {
     let src = "fun box(): String {\n\

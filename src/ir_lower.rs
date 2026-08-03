@@ -387,33 +387,40 @@ fn lower_file_at_reporting_impl(
     // The `sequence {}` / `iterator {}` coroutine BUILDERS drive a suspend LAMBDA through `yield`/
     // `yieldAll` suspension points — a state machine the pass doesn't model. Skip the whole file rather
     // than emit a `Sequence`/`Iterator` whose `iterator()`/`next()` has no body (an `AbstractMethodError`
-    // at the for-loop / terminal operation). Detected by the builder's `yield`/`yieldAll` calls anywhere.
-    let uses_yield_builder = file.decls.iter().any(|&d| {
-        let body = match file.decl(d) {
-            Decl::Fun(f) => match &f.body {
-                FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
-                FunBody::None => None,
-            },
-            Decl::Property(p) => p.init,
-            _ => None,
-        };
-        let class_bodies: Vec<AstExprId> = match file.decl(d) {
-            Decl::Class(c) => c
-                .methods
-                .iter()
-                .filter_map(|m| match &m.body {
+    // at the for-loop / terminal operation). It is the BUILDER that is unsupported, so the gate needs
+    // both halves of the shape: a `yield`/`yieldAll` call AND an unqualified `sequence`/`iterator`
+    // builder call to supply the `SequenceScope` receiver those calls suspend on. `yield` is an ordinary
+    // identifier in Kotlin (it is not a keyword), so the call alone says nothing — a user's own
+    // `fun yield(…)` member is a plain call the pass lowers like any other. A `SequenceScope` receiver
+    // reached any other way is a suspend extension/member, which the suspend gate below already skips.
+    let file_calls = |names: &[&str]| {
+        file.decls.iter().any(|&d| {
+            let body = match file.decl(d) {
+                Decl::Fun(f) => match &f.body {
                     FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
                     FunBody::None => None,
-                })
-                .chain(c.body_props.iter().filter_map(|p| p.init))
-                .collect(),
-            _ => Vec::new(),
-        };
-        body.into_iter().chain(class_bodies).any(|e| {
-            expr_tree_calls_name(file, e, "yield") || expr_tree_calls_name(file, e, "yieldAll")
+                },
+                Decl::Property(p) => p.init,
+                _ => None,
+            };
+            let class_bodies: Vec<AstExprId> = match file.decl(d) {
+                Decl::Class(c) => c
+                    .methods
+                    .iter()
+                    .filter_map(|m| match &m.body {
+                        FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+                        FunBody::None => None,
+                    })
+                    .chain(c.body_props.iter().filter_map(|p| p.init))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            body.into_iter()
+                .chain(class_bodies)
+                .any(|e| names.iter().any(|n| expr_tree_calls_name(file, e, n)))
         })
-    });
-    if uses_yield_builder {
+    };
+    if file_calls(&["yield", "yieldAll"]) && file_calls(&["sequence", "iterator"]) {
         return lo.bail("gate:yield-builder");
     }
 
@@ -2669,45 +2676,10 @@ fn lower_file_at_reporting_impl(
                         }
                     }
                     // A property redeclared in the subclass (`override val field`) overrides the base's
-                    // `getX()`, so external access dispatches virtually to the subclass field — correct.
-                    // But a *base-class member that reads the property internally* reads the field
-                    // directly (not via `getX`), bypassing the override. Bail only then.
-                    let own_fields: Vec<&String> = c
-                        .props
-                        .iter()
-                        .filter(|p| p.is_property)
-                        .map(|p| &p.name)
-                        .chain(c.body_props.iter().map(|p| &p.name))
-                        .collect();
-                    let base_name = c.base_class.clone();
-                    let base_decl = base_name.as_ref().and_then(|bn| {
-                        file.decls.iter().find_map(|&d| match file.decl(d) {
-                            Decl::Class(bc) if bc.name == *bn => Some(bc),
-                            _ => None,
-                        })
-                    });
-                    for fname in own_fields {
-                        if lo.resolve_field_name(super_int, fname).is_some() {
-                            // A base with its own base, or a base member reading `fname`, risks the
-                            // internal-read bypass — bail conservatively; else the override is safe.
-                            let unsafe_base = base_decl.map_or(true, |bd| {
-                                bd.base_class.is_some()
-                                    || bd.methods.iter().any(|m| match &m.body {
-                                        FunBody::Expr(e) | FunBody::Block(e) => {
-                                            file.expr_uses_name(*e, fname)
-                                        }
-                                        FunBody::None => false,
-                                    })
-                                    || bd.body_props.iter().any(|p| {
-                                        p.init.map_or(false, |e| file.expr_uses_name(e, fname))
-                                    })
-                            });
-                            if unsafe_base {
-                                lo.set_bail("gate:base-reads-override-internally");
-                                return None;
-                            }
-                        }
-                    }
+                    // `getX()`, and every access — including a base member reading it internally — now
+                    // goes through that accessor, so the override is never bypassed. See
+                    // `ir_lower::implicit_source_property_field` and `jvm::ir_emit::direct_field_access`,
+                    // which decline the raw backing field for an `open` property.
                 }
                 // An interface's abstract methods have no body; its DEFAULT methods (with a body) are
                 // lowered like instance methods (fall through to the normal method-body loop below).
@@ -6313,6 +6285,17 @@ impl<'a> Lower<'a> {
         name: &str,
         writable: bool,
     ) -> Option<(u32, u32)> {
+        // An OPEN property is reached through its accessor even from inside the declaring class: a
+        // subclass `override val`/`var` replaces the ACCESSOR, not the base's private backing field, so
+        // a direct field access from a base member would read/write the base's own storage and bypass
+        // the override. kotlinc emits `invokevirtual get<Name>()`/`set<Name>()` there for that reason.
+        if self
+            .syms
+            .declared_member_prop(owner, name)
+            .is_some_and(|(_, property)| property.is_open)
+        {
+            return None;
+        }
         if !self.can_access_source_private(owner)
             || (writable
                 && self
@@ -21978,6 +21961,16 @@ impl<'a> Lower<'a> {
                 }
                 return Some(contains_v);
             }
+            // A WIDENED value over a primitive range (`when (x: Any) { in 4..10 -> … }`). kotlinc
+            // emits `CollectionsKt.contains(4..10, x)`, whose result is true exactly when `x` is a
+            // BOXED element of the range — the range is not a `Collection`, so `contains` walks it
+            // comparing with `equals`, and a value of any other class never matches. That is the
+            // ordinary comparison chain on the unboxed value, guarded by an `instanceof` on the boxed
+            // element type. The guard must SHORT-CIRCUIT (a `when`, not the eager `iand`): unboxing a
+            // value of another class would throw.
+            if self.info.ty(value).is_reference() {
+                return self.lower_widened_in_range(value, start, end, kind, negated);
+            }
             // Evaluate the bounds then the value once each (source order: start, end, value —
             // matching kotlinc's `start..end` then `.contains(value)`), into temps, then a
             // comparison chain. `!in` uses the De Morgan dual so no logical-not node is needed.
@@ -22043,6 +22036,75 @@ impl<'a> Lower<'a> {
             self.emit_block(vec![var_s, var_e, var_v], Some(cond))
         };
         Some(t)
+    }
+
+    /// `x in a..b` where `x` is a REFERENCE (`Any`) and the bounds are primitive — see the call site in
+    /// [`Self::expr_inner_in_range`] for why this is the boxed-element test kotlinc's
+    /// `CollectionsKt.contains` performs. Evaluation order matches the primitive chain (bounds, then
+    /// value); only the unboxing and the comparisons sit behind the `instanceof` guard.
+    fn lower_widened_in_range(
+        &mut self,
+        value: AstExprId,
+        start: AstExprId,
+        end: AstExprId,
+        kind: ast::RangeKind,
+        negated: bool,
+    ) -> Option<u32> {
+        use crate::ast::RangeKind;
+        let elem = self.info.ty(start);
+        // Only the element types the checker admits for this shape — see
+        // `resolve::in_range_widened_value` for why a floating-point, `Byte`/`Short`, or unsigned
+        // range is not a boxed-element test.
+        if !matches!(elem, Ty::Int | Ty::Long | Ty::Char) {
+            return None;
+        }
+        let boxed = elem.boxed_ref()?;
+        let value_ty = self.info.ty(value);
+        let s = self.expr(start)?;
+        let sv = self.fresh_value();
+        let var_s = self.emit_variable(sv, ty_to_ir(elem), Some(s));
+        let en = self.expr(end)?;
+        let ev = self.fresh_value();
+        let var_e = self.emit_variable(ev, ty_to_ir(elem), Some(en));
+        let v = self.expr(value)?;
+        let vv = self.fresh_value();
+        let var_v = self.emit_variable(vv, ty_to_ir(value_ty), Some(v));
+
+        let boxed_read = self.emit_get_value(vv);
+        let guard = self.emit_type_op(IrTypeOp::InstanceOf, boxed_read, ty_to_ir(boxed));
+        // Inside the guarded branch the value is known to be a boxed element — unbox it once into a
+        // temp so both comparisons read the same primitive.
+        let boxed_read = self.emit_get_value(vv);
+        let unboxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, boxed_read, ty_to_ir(elem));
+        let uv = self.fresh_value();
+        let var_u = self.emit_variable(uv, ty_to_ir(elem), Some(unboxed));
+        // `downTo` runs high→low, so membership is `end <= value <= start` — swap the bounds.
+        let (lo, hi, hi_strict) = match kind {
+            RangeKind::Through => (sv, ev, false),
+            RangeKind::Until => (sv, ev, true),
+            RangeKind::DownTo => (ev, sv, false),
+        };
+        let lo_read = self.emit_get_value(lo);
+        let u_read = self.emit_get_value(uv);
+        let c1 = self.compare_ordered(elem, IrBinOp::Le, lo_read, u_read)?;
+        let u_read = self.emit_get_value(uv);
+        let hi_read = self.emit_get_value(hi);
+        let c2 = self.compare_ordered(
+            elem,
+            if hi_strict { IrBinOp::Lt } else { IrBinOp::Le },
+            u_read,
+            hi_read,
+        )?;
+        let mut in_chain = self.emit_primitive_bin_op(IrBinOp::And, c1, c2);
+        if negated {
+            let f = self.emit_const(IrConst::Boolean(false));
+            in_chain = self.emit_primitive_bin_op(IrBinOp::Eq, in_chain, f);
+        }
+        let hit = self.emit_block(vec![var_u], Some(in_chain));
+        // A value of any other class is not in the range — so `in` is false there and `!in` is true.
+        let miss = self.emit_const(IrConst::Boolean(negated));
+        let selected = self.emit_when(vec![(Some(guard), hit), (None, miss)]);
+        Some(self.emit_block(vec![var_s, var_e, var_v], Some(selected)))
     }
 
     fn expr_inner_inc_dec(
@@ -22498,6 +22560,33 @@ impl<'a> Lower<'a> {
         Some(t)
     }
 
+    /// The boxed type a `when` comparand must be lowered to, when the SUBJECT is a reference and the
+    /// comparand is a primitive (`when (x: Any) { 1 -> … }`): kotlinc compares the boxed value through
+    /// `Intrinsics.areEqual`. The nullable form is the boxed CARRIER here — a non-null `Int` still
+    /// lowers to the JVM `int`. `None` when the arm needs no boxing, or for a comparand whose boxed
+    /// `equals` is not Kotlin `==`:
+    ///
+    /// * an UNSIGNED comparand boxes to its own inline class rather than a plain wrapper;
+    /// * a FLOAT/DOUBLE comparand compares by IEEE `==` whenever the subject is a primitive, and
+    ///   `Double.equals` is not that relation (`-0.0 != 0.0`, `NaN == NaN`). Which of the two applies
+    ///   depends on whether an enclosing/earlier `is` test smart-casts the SUBJECT to the primitive
+    ///   for this arm — per-arm subject narrowing this lowering does not model — so the whole shape
+    ///   is skipped rather than risk the wrong equality. Corpus case:
+    ///   `ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt`.
+    fn when_boxed_comparand(&self, subject_ty: Ty, condition: AstExprId) -> Option<Ty> {
+        if !subject_ty.is_reference() || is_when_test(self.afile, condition) {
+            return None;
+        }
+        let ct = self.info.ty(condition);
+        if !self.has_scalar_value_repr(ct)
+            || ct.is_unsigned()
+            || matches!(ct, Ty::Double | Ty::Float)
+        {
+            return None;
+        }
+        ct.nullable_boxed()
+    }
+
     fn expr_inner_when(
         &mut self,
         e: AstExprId,
@@ -22549,8 +22638,8 @@ impl<'a> Lower<'a> {
             // behavior-preserving for an exhaustive `when`.
             let has_else = arms.iter().any(|a| a.conditions.is_empty());
             let make_last_else = !has_else && self.info.ty(e) != Ty::Unit && !arms.is_empty();
-            if let Some(subj) = subject {
-                let st = self.info.ty(subj);
+            let subj_ty = subject.map(|subj| self.info.ty(subj));
+            if let Some(st) = subj_ty {
                 for arm in &arms {
                     for &c in &arm.conditions {
                         // `is`/`in` conditions are complete boolean tests, not `==` comparands —
@@ -22558,8 +22647,14 @@ impl<'a> Lower<'a> {
                         if is_when_test(self.afile, c) {
                             continue;
                         }
+                        // A REFERENCE subject with a primitive comparand (`when (x: Any) { 1 -> … }`)
+                        // is not a bad-typed compare: it is the BOXED comparison kotlinc emits
+                        // (`Intrinsics.areEqual(x, Integer.valueOf(1))`), so the comparand is boxed
+                        // below instead. Only the converse (a primitive subject, a reference
+                        // comparand) has no such form and still bails.
                         if self.has_scalar_value_repr(st)
                             != self.has_scalar_value_repr(self.info.ty(c))
+                            && self.when_boxed_comparand(st, c).is_none()
                         {
                             return None;
                         }
@@ -22609,7 +22704,10 @@ impl<'a> Lower<'a> {
                                 Some((v, _)) => self.emit_get_value(v),
                                 None => self.expr(subject?)?,
                             };
-                            let cv = self.expr(c)?;
+                            let cv = match subj_ty.and_then(|st| self.when_boxed_comparand(st, c)) {
+                                Some(boxed) => self.lower_arg(c, &ty_to_ir(boxed))?,
+                                None => self.expr(c)?,
+                            };
                             self.emit_primitive_bin_op(IrBinOp::Eq, s, cv)
                         };
                         cond = Some(match cond {
