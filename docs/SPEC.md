@@ -424,6 +424,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   *promotion* between `Char` and `Int`, but both share the int stack slot, so the op runs on ints; a `Char`
   result is truncated back with `i2c` (Kotlin wraps mod 2^16, so `Char.MAX_VALUE + 1 == Char.MIN_VALUE`),
   matching kotlinc's `isub`/`iadd` + `i2c`. A `Char - Char` distance stays a plain `Int`.
+- **A `Char` is a UTF-16 code UNIT, not a code point.** The surrogate range `D800..DFFF` therefore holds
+  legal `Char` values (`Char.MIN_HIGH_SURROGATE == '\uD800'`, `Char.MAX_LOW_SURROGATE == '\uDFFF'`) even
+  though those are not valid Unicode scalar values. `IrConst::Char` accordingly carries a raw `u16`, not a
+  Rust `char`: routing the value through `char::from_u32` yields `None` on a lone surrogate, and inlining
+  a classpath `Char` constant used to fold that `None` to NUL — `Char.MIN_HIGH_SURROGATE.code` printed
+  `0` where kotlinc prints `55296`, a silent wrong value. The same rule holds one level up, in the AST:
+  `Expr::CharLit` is a `u16` and `unquote_char` takes a `\uXXXX` escape verbatim, so a *source* literal
+  `'\uD800'` keeps its code unit too (it used to fold to NUL by the same round-trip). A `char` that
+  reaches either from a code POINT truncates with the JVM's own `i2c`, since a well-formed `Char`
+  literal is always in the BMP. Tests: `CharSurrogateConst` and `CharSurrogateLiteral` in
+  `tests/feature_box_e2e.rs`.
+- **A `Char` constant folded into a string renders as the CHARACTER, not its code unit.** The constant
+  string evaluator behind the `trimIndent`/`trimMargin` fold accepts a `Char` (`${'$'}` is the idiomatic
+  way to write a literal `$` in a template), so it must spell the character out. A code unit that is not
+  a scalar value has no Rust `String` spelling at all, so the evaluator reports "not a constant" rather
+  than substituting a stand-in; the file then hits the existing "`trimIndent` on a non-constant receiver"
+  gap and is rejected with a diagnostic. kotlinc folds that case — krusty's is a **loud bail, not a wrong
+  value**, and closing it needs a UTF-16 representation for string constants (`IrConst::String` is a Rust
+  `String`, which cannot hold a lone surrogate either). Test: `ConstCharTemplateFold` in
+  `tests/feature_box_e2e.rs`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
