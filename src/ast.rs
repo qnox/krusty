@@ -1178,6 +1178,10 @@ pub struct File {
     pub call_has_trailing_lambda: std::collections::HashSet<u32>,
     /// End offset of the parenthesized portion of calls with trailing lambdas.
     pub trailing_call_close_paren_ends: std::collections::HashMap<u32, u32>,
+    /// Explicit label on a lambda literal (`run rr@{ … }`), keyed by the lambda's `ExprId`. A lambda
+    /// otherwise takes its label from the function it is passed to (`return@run`), which is why an
+    /// explicit one has to be carried separately for `return@rr` to find its frame.
+    pub lambda_labels: std::collections::HashMap<u32, String>,
     /// `ExprId`s of `Expr::Call`s produced from infix-call syntax (`a foo b`). The callee is still the
     /// ordinary `Member { receiver: a, name: "foo" }`, but resolver/lowering need the source form for
     /// primitive builtin names where Kotlin treats `a rem b` differently from `a.rem(b)`.
@@ -1322,6 +1326,7 @@ impl File {
         self.non_adjacent_member_dot_spans = Default::default();
         self.call_has_trailing_lambda = Default::default();
         self.trailing_call_close_paren_ends = Default::default();
+        self.lambda_labels = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
         self.anonymous_object_classes = Default::default();
