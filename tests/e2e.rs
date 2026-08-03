@@ -642,6 +642,8 @@ mod member_extension_default_args_e2e;
 mod member_extension_function_e2e;
 #[path = "member_extension_nested_hof_e2e.rs"]
 mod member_extension_nested_hof_e2e;
+#[path = "member_extension_property_e2e.rs"]
+mod member_extension_property_e2e;
 #[path = "member_infix_inference_e2e.rs"]
 mod member_infix_inference_e2e;
 #[path = "member_overloads_e2e.rs"]
@@ -844,6 +846,8 @@ mod safe_call_let_destructure_e2e;
 mod safe_call_member_on_generic_result_e2e;
 #[path = "safe_call_prim_intrinsic_e2e.rs"]
 mod safe_call_prim_intrinsic_e2e;
+#[path = "safe_call_primitive_e2e.rs"]
+mod safe_call_primitive_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
 mod safe_cast_elvis_e2e;
 #[path = "sam_classpath_e2e.rs"]

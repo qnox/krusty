@@ -31,7 +31,9 @@ use crate::runtime::{
     TargetRuntime,
 };
 use crate::symbol_resolver::{InheritedNestedClassifier, SymbolResolver};
-use crate::types::{existing_type_name, stored_value_ty, type_name, Ty, TypeName, Visibility};
+use crate::types::{
+    existing_type_name, stored_value_ty, ty_mentions_param, type_name, Ty, TypeName, Visibility,
+};
 
 // --- Lower-bail diagnostics ----------------------------------------------------------------------
 // `lower_file` returns `None` (silently skips a file) for any construct outside the IR subset. That is
@@ -1372,6 +1374,94 @@ fn lower_file_at_reporting_impl(
                     });
                 methods.entry(gname).or_default().push((mi, fid, ty));
                 method_fids.push(fid);
+            }
+            // Member extension properties (`val Int.x: T get() = …`) → `getX(Recv)`/`setX(Recv, T)`
+            // INSTANCE methods (no backing field — an extension property can't have one): exactly a
+            // member extension FUNCTION of that name, dispatch `this` at slot 0 and the extension
+            // receiver as JVM param 0. Bodies lowered in pass 2; reads/writes call the accessor via
+            // the checker's ExprLowering/StmtLowering handoff.
+            for (pi, p) in c
+                .body_props
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| is_member_ext_prop(p))
+            {
+                let sig = member_extension_property_plan(syms, c, pi)?;
+                // Only the concrete shape: a receiver/return mentioning a class type parameter's own
+                // type erases through bounds the read/write handoff doesn't carry, and a value-class
+                // receiver/return needs the boxed/mangled form — both stay gated (skip, never
+                // miscompile).
+                if sig.has_type_params
+                    || ty_mentions_param(sig.receiver, &c.type_params)
+                    || ty_mentions_param(sig.ret, &c.type_params)
+                    || lo.value_class_underlying(sig.receiver.non_null()).is_some()
+                    || lo.value_class_underlying(sig.ret.non_null()).is_some()
+                {
+                    lo.set_bail("gate:member-ext-prop-generic");
+                    return None;
+                }
+                let (receiver_ir, ret_ir) = sig.ir_types(p);
+                let ret = sig.ret;
+                let gname = property_getter_name(&p.name);
+                let getter_params = [receiver_ir];
+                if registered_method_signature(&methods, &lo.ir, lo.runtime, &gname, &getter_params)
+                {
+                    // The physical accessor parameter signature is what Kotlin/JVM overload
+                    // resolution owns. A source function or previously synthesized accessor with
+                    // the same name and parameters cannot coexist, regardless of which Kotlin
+                    // declaration shape produced it.
+                    lo.set_bail("gate:member-ext-prop-signature-clash");
+                    return None;
+                }
+                let mi = method_fids.len() as u32;
+                let gfid = lo.ir.add_fun(IrFunction {
+                    name: gname.clone(),
+                    params: getter_params.to_vec(),
+                    ret: ret_ir,
+                    body: None,
+                    is_static: false,
+                    dispatch_receiver: Some(type_name(&internal)),
+                    param_checks: vec![None],
+                });
+                if p.visibility.is_private() {
+                    lo.ir.private_methods.insert(gfid);
+                }
+                // A fresh declaration (the gate excludes `override`) — keeps the backend's bridge
+                // derivation (#454) from synthesizing a bridge over a same-named inherited generic.
+                lo.ir.fresh_method_decls.push(gfid);
+                methods.entry(gname).or_default().push((mi, gfid, ret));
+                method_fids.push(gfid);
+                if p.is_var {
+                    let setter = p.setter.as_ref()?;
+                    let sname = property_setter_name(&p.name);
+                    let setter_params = [receiver_ir, ret_ir];
+                    if registered_method_signature(
+                        &methods,
+                        &lo.ir,
+                        lo.runtime,
+                        &sname,
+                        &setter_params,
+                    ) {
+                        lo.set_bail("gate:member-ext-prop-signature-clash");
+                        return None;
+                    }
+                    let mi = method_fids.len() as u32;
+                    let sfid = lo.ir.add_fun(IrFunction {
+                        name: sname.clone(),
+                        params: setter_params.to_vec(),
+                        ret: ty_to_ir(Ty::Unit),
+                        body: None,
+                        is_static: false,
+                        dispatch_receiver: Some(type_name(&internal)),
+                        param_checks: vec![None, None],
+                    });
+                    if setter.is_private {
+                        lo.ir.private_methods.insert(sfid);
+                    }
+                    lo.ir.fresh_method_decls.push(sfid);
+                    methods.entry(sname).or_default().push((mi, sfid, Ty::Unit));
+                    method_fids.push(sfid);
+                }
             }
             // Delegated body properties (`val/var x by Del()`) → a `getX()` (and `setX()` for a `var`)
             // instance method that calls the delegate's `getValue`/`setValue`. Bodies built in pass 2.
@@ -2818,6 +2908,64 @@ fn lower_file_at_reporting_impl(
                     let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                     let body = p.getter.clone().unwrap();
                     lo.lower_body(&body, &ret_ty, fid)?;
+                }
+                // Member extension property accessors → `getX(Recv)`/`setX(Recv, T)`: the
+                // member-ext-FUN scope layout — dispatch `this` at slot 0 (`$dispatch`), extension
+                // `this` at slot 1.
+                for (pi, p) in c
+                    .body_props
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| is_member_ext_prop(p))
+                {
+                    let sig = member_extension_property_plan(syms, c, pi)?;
+                    let (receiver_ir, ret_ir) = sig.ir_types(p);
+                    // Link the accessor by name AND parameter list: a plain computed property of the
+                    // same name registers `getX()` first, and receiver overloads share `getX` —
+                    // first-by-name would write this body into the wrong fid.
+                    let gname = property_getter_name(&p.name);
+                    let (_, _, gfid, _) =
+                        lo.link_local_method(&internal, &gname, &[receiver_ir])?;
+                    lo.scope.clear();
+                    lo.boxed_elem.clear();
+                    lo.next_value = 0;
+                    lo.cur_class = Some(type_name(&internal));
+                    lo.cur_fn_name = gname;
+                    lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
+                    lo.ir
+                        .fn_params
+                        .entry(gfid)
+                        .or_insert_with(|| FnParamInfo::names(vec!["$receiver".to_string()]));
+                    let dispatch_v = lo.fresh_value();
+                    lo.scope
+                        .push(("$dispatch".to_string(), dispatch_v, Ty::obj(&internal)));
+                    let this_v = lo.fresh_value();
+                    lo.scope.push(("this".to_string(), this_v, sig.receiver));
+                    let ret_ty = lo.ir.functions[gfid as usize].ret;
+                    lo.lower_body(&p.getter.clone().unwrap(), &ret_ty, gfid)?;
+                    if let Some(setter) = p.setter.as_ref().filter(|s| s.body.is_some()).cloned() {
+                        let sname = property_setter_name(&p.name);
+                        let (_, _, sfid, _) =
+                            lo.link_local_method(&internal, &sname, &[receiver_ir, ret_ir])?;
+                        lo.scope.clear();
+                        lo.boxed_elem.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(type_name(&internal));
+                        lo.cur_fn_name = sname;
+                        lo.cur_tparams = class_tparams(file, c, &*syms.libraries);
+                        let setter_param = ast::setter_param_or_value(setter.param.as_ref());
+                        lo.ir.fn_params.entry(sfid).or_insert_with(|| {
+                            FnParamInfo::names(vec!["$receiver".to_string(), setter_param.clone()])
+                        });
+                        let dispatch_v = lo.fresh_value();
+                        lo.scope
+                            .push(("$dispatch".to_string(), dispatch_v, Ty::obj(&internal)));
+                        let this_v = lo.fresh_value();
+                        lo.scope.push(("this".to_string(), this_v, sig.receiver));
+                        let v_v = lo.fresh_value();
+                        lo.scope.push((setter_param, v_v, sig.ret));
+                        lo.lower_body(&setter.body.clone().unwrap(), &Ty::Unit, sfid)?;
+                    }
                 }
                 // Field-backed custom accessors (`val x = init get() = field…`): overwrite the default
                 // `getX`/`setX` body (built in pass 1) with the lowered custom accessor, binding the
@@ -4612,7 +4760,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || is_field_accessor_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || p.delegate.is_some())
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || is_field_accessor_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || is_member_ext_prop(p) || p.delegate.is_some())
 }
 
 /// An `enum class` the IR can emit: a primary constructor of `val`/`var` props, concrete (non-extension,
@@ -4860,6 +5008,125 @@ fn is_computed_prop(p: &ast::PropDecl) -> bool {
     // The type may be inferred from the getter body (`val xx get() = x`) — no explicit annotation needed.
 }
 
+/// A MEMBER EXTENSION PROPERTY (`class C { val Int.x: T get() = … }`): an extension receiver and a
+/// custom getter (plus a bodied custom setter for a `var`) — never an initializer, a `field` read,
+/// or a delegate (an extension property can't have a backing field). Its accessor lowers exactly
+/// like a member extension FUNCTION named `getX`/`setX` (dispatch `this` at slot 0, the extension
+/// receiver as JVM param 0). Still excluded SEMANTICALLY in pass 1 (the signature table is needed):
+/// a receiver/return mentioning a class type parameter's own type and a value-class
+/// receiver/return. Cross-class extension shapes (open/override/abstract) register no inherited
+/// accessor, so they stay gated here.
+fn is_member_ext_prop(p: &ast::PropDecl) -> bool {
+    p.receiver.is_some()
+        && !p.is_abstract
+        && !p.is_open
+        && !p.is_override
+        && !p.is_lateinit
+        && p.init.is_none()
+        && p.delegate.is_none()
+        && !p.getter_reads_field
+        && p.getter.is_some()
+        && p.context_params.is_empty()
+        && p.type_params.is_empty()
+        && (!p.is_var || p.setter.as_ref().is_some_and(|s| s.body.is_some()))
+}
+
+#[derive(Clone, Copy)]
+struct MemberExtensionPropertyPlan {
+    receiver: Ty,
+    ret: Ty,
+    has_type_params: bool,
+}
+
+impl MemberExtensionPropertyPlan {
+    /// Physical accessor types shared by both lowering passes. Declared `?` markers stay attached
+    /// for value-representation and metadata decisions without changing overload-slot selection.
+    fn ir_types(self, property: &ast::PropDecl) -> (Ty, Ty) {
+        let receiver = ty_to_ir(self.receiver);
+        let receiver = if property
+            .receiver
+            .as_ref()
+            .is_some_and(|reference| reference.nullable())
+        {
+            mark_nullable(receiver)
+        } else {
+            receiver
+        };
+        let ret = ty_to_ir(self.ret);
+        let ret = if property
+            .ty
+            .as_ref()
+            .is_some_and(|reference| reference.nullable())
+        {
+            mark_nullable(ret)
+        } else {
+            ret
+        };
+        (receiver, ret)
+    }
+}
+
+/// Resolve the declaration-time signature used by both accessor registration and body lowering.
+///
+/// The semantic table stores same-named extension properties in source order. Count every earlier
+/// receiver property—not only shapes the lowering gate currently accepts—because unsupported
+/// declarations still occupy their semantic slot. Keeping this calculation in one place prevents
+/// pass 1 from registering one overload while pass 2 links and overwrites another overload's body.
+fn member_extension_property_plan(
+    symbols: &FrontendSymbols,
+    class: &ast::ClassDecl,
+    property_index: usize,
+) -> Option<MemberExtensionPropertyPlan> {
+    let property = class.body_props.get(property_index)?;
+    let overload_index = class.body_props[..property_index]
+        .iter()
+        .filter(|candidate| candidate.name == property.name && candidate.receiver.is_some())
+        .count();
+    let signature = symbols
+        .classes
+        .get(&class.name)?
+        .member_ext_props(&property.name)
+        .get(overload_index)?;
+    Some(MemberExtensionPropertyPlan {
+        receiver: signature.receiver_ty(),
+        ret: signature.ret(),
+        has_type_params: !signature.type_params().is_empty(),
+    })
+}
+
+/// Whether a class method with this physical JVM signature is already registered.
+///
+/// The method table contains source methods and synthesized accessors together. Checking that one
+/// shared table prevents a new accessor from using a declaration-origin branch (method versus
+/// property, ordinary versus extension) to evade Kotlin/JVM's name-plus-physical-parameter rule.
+fn registered_method_signature(
+    methods: &HashMap<String, Vec<(u32, u32, Ty)>>,
+    ir: &IrFile,
+    runtime: &dyn TargetRuntime,
+    name: &str,
+    params: &[Ty],
+) -> bool {
+    // Ask the target runtime for the physical descriptor instead of approximating it from source
+    // types. Reference nullability and generic arguments are not descriptor components, and
+    // platform/value representations belong to the target rather than common lowering. A
+    // descriptor that cannot be formed is unsafe to register and is conservatively treated as
+    // occupied.
+    let Some(proposed) = runtime.method_descriptor(params, Ty::Unit) else {
+        return true;
+    };
+    methods.get(name).is_some_and(|overloads| {
+        overloads.iter().any(|(_, function, _)| {
+            ir.functions
+                .get(*function as usize)
+                .is_some_and(|function| {
+                    runtime
+                        .method_descriptor(&function.params, Ty::Unit)
+                        .is_none_or(|registered| registered == proposed)
+                })
+        })
+    })
+}
+
 /// A body property with a real backing field — neither a computed property (custom getter, no field)
 /// nor an `abstract` one (emitted as an abstract `getX()`, the field lives on the subclass) nor a
 /// delegated one (`by Del()` — its field is the synthetic `x$delegate`, accessor calls `getValue`).
@@ -4868,7 +5135,13 @@ fn is_backing_field_prop(p: &ast::PropDecl) -> bool {
     // `companion object`, or at top level, where it compiles to a `public static final` + `ConstantValue`
     // field (emitted on the static path) and every read is inlined. Excluding it here also suppresses the
     // `getX()` accessor (kotlinc emits none for a const).
-    !p.is_const && !is_computed_prop(p) && !p.is_abstract && p.delegate.is_none()
+    // An EXTENSION property can't have a backing field either (kotlinc rejects an initializer) —
+    // exclude it here so no shape ever synthesizes one for it.
+    !p.is_const
+        && !is_computed_prop(p)
+        && !p.is_abstract
+        && p.delegate.is_none()
+        && p.receiver.is_none()
 }
 
 /// A backing-field property whose accessor is CUSTOM and reads/writes `field` (`val x = init get() =
@@ -5953,7 +6226,11 @@ impl<'a> Lower<'a> {
             .scope
             .iter()
             .rev()
-            .find(|(name, _, ty)| name == "this" && *ty == receiver)
+            // A member extension scope names the dispatch receiver `$dispatch` (extension `this` is
+            // the extension receiver); the checker's recorded receiver type still selects the right
+            // one — when both are in scope with the same type, `.rev()` finds the extension `this`
+            // first (it shadows the dispatch receiver, matching resolution).
+            .find(|(name, _, ty)| (name == "this" || name == "$dispatch") && *ty == receiver)
             .map(|(_, value, _)| *value)?;
         Some(RecordedImplicitPropertyWrite {
             receiver_value: value,
@@ -10821,7 +11098,7 @@ impl<'a> Lower<'a> {
         arg: AstExprId,
         result_ty: Ty,
     ) -> Option<u32> {
-        let lt = self.info.ty(recv);
+        let lt = self.info.ty(recv).non_null();
         // Bitwise/shift operator-methods (`a.and(b)`, `a shl b`, …) are stdlib intrinsics on `Int`/`Long`
         // only — kotlinc maps them to `iand`/`ishl`/… . `and`/`or`/`xor` take the receiver's own type;
         // the shifts take an `Int` count (no numeric promotion). Recognized here so both the plain `.`
@@ -10867,7 +11144,7 @@ impl<'a> Lower<'a> {
                 _ => None,
             };
             if let Some(op) = bop {
-                let l = self.expr(recv)?;
+                let l = self.lower_arg(recv, &ty_to_ir(lt))?;
                 let rt = if shift { Ty::Int } else { lt };
                 let r = self.lower_arg(arg, &ty_to_ir(rt))?;
                 return Some(self.emit_primitive_bin_op(op, l, r));
@@ -10881,13 +11158,17 @@ impl<'a> Lower<'a> {
                 _ => None,
             };
             if let Some(op) = bop {
-                let l = self.expr(recv)?;
+                // Request the semantic primitive operand instead of reading the receiver expression
+                // verbatim. A direct qualified call is already an unboxed `Boolean`, while a safe call
+                // substitutes its boxed `Boolean?` temp; `lower_arg` makes those representations feed
+                // the same operation by inserting the required unbox only in the latter case.
+                let l = self.lower_arg(recv, &ty_to_ir(Ty::Boolean))?;
                 let r = self.lower_arg(arg, &ty_to_ir(Ty::Boolean))?;
                 return Some(self.emit_primitive_bin_op(op, l, r));
             }
         }
         let op = BinOp::from_arith_operator_name(name)?;
-        let (lt, rt) = (self.info.ty(recv), self.info.ty(arg));
+        let (lt, rt) = (self.info.ty(recv).non_null(), self.info.ty(arg));
         if !self.has_scalar_value_repr(lt)
             || !self.has_scalar_value_repr(rt)
             || lt == Ty::Boolean
@@ -10907,7 +11188,9 @@ impl<'a> Lower<'a> {
             return self.runtime_call(runtime_op, lt, vec![l, r]);
         }
         let irop = bin_to_ir(op)?;
-        let mut l = self.expr(recv)?;
+        // The receiver may carry a boxed form (`i?.plus(3)` — the value is the safe call's
+        // non-null temp): `lower_arg` inserts the unbox; a direct `.` call coerces nothing.
+        let mut l = self.lower_arg(recv, &ty_to_ir(lt))?;
         let mut r = self.expr(arg)?;
         // Compute in the operands' common stack representation — the numeric-promoted type, or plain
         // `Int` for the int-category types (`Char`/`Byte`/`Short`) that share the int stack but have no
@@ -10925,10 +11208,14 @@ impl<'a> Lower<'a> {
             r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, op_ir);
         }
         let raw = self.emit_primitive_bin_op(irop, l, r);
-        Some(match self.scalar_value_repr(result_ty) {
-            Some(rep) if rep != op_ty => {
-                self.emit_type_op(IrTypeOp::ImplicitCoercion, raw, ty_to_ir(result_ty))
-            }
+        // The result repr is the NON-NULL form: a safe call's `Char?` result still narrows the
+        // int-category `op_ty` to `char` (`i2c`) — the nullable merge then boxes `Character`.
+        Some(match self.scalar_value_repr(result_ty.non_null()) {
+            Some(rep) if rep != op_ty => self.emit_type_op(
+                IrTypeOp::ImplicitCoercion,
+                raw,
+                ty_to_ir(result_ty.non_null()),
+            ),
             _ => raw,
         })
     }
@@ -10940,7 +11227,7 @@ impl<'a> Lower<'a> {
         name: &str,
         result_ty: Ty,
     ) -> Option<u32> {
-        let receiver_ty = self.info.ty(recv);
+        let receiver_ty = self.info.ty(recv).non_null();
         if receiver_ty == Ty::Boolean && name == "not" && result_ty == Ty::Boolean {
             let value = self.expr(recv)?;
             let false_value = self.emit_const(IrConst::Boolean(false));
@@ -10948,16 +11235,18 @@ impl<'a> Lower<'a> {
         }
         if !receiver_ty.is_numeric()
             || !matches!(name, "unaryPlus" | "unaryMinus")
-            || !self.has_scalar_value_repr(result_ty)
+            || !self.has_scalar_value_repr(result_ty.non_null())
         {
             return None;
         }
-        let result_ir = ty_to_ir(result_ty);
+        // The op runs on the unboxed value (the result repr is the NON-NULL form); a safe
+        // call's nullable merge boxes it after.
+        let result_ir = ty_to_ir(result_ty.non_null());
         let value = self.lower_arg(recv, &result_ir)?;
         if name == "unaryPlus" {
             return Some(value);
         }
-        Some(self.emit_primitive_neg(value, result_ty))
+        Some(self.emit_primitive_neg(value, result_ty.non_null()))
     }
 
     /// Resolve a field by name, walking the superclass chain. Returns the *owning* class id, the
@@ -12529,7 +12818,15 @@ impl<'a> Lower<'a> {
                 source,
                 vararg,
             } => {
-                if target != name || receiver.erased_recv() != recv_ty.erased_recv() {
+                // The recorded receiver matches the call site directly, or in its NON-NULL form
+                // (a safe call records the non-null receiver — and a nullable PRIMITIVE keys
+                // apart from the unboxed one under `erased_recv`, so compare both ways). The
+                // argument coercion below still uses the real `recv_ty` (unboxing the boxed
+                // receiver when needed).
+                if target != name
+                    || (receiver.erased_recv() != recv_ty.erased_recv()
+                        && receiver.erased_recv() != recv_ty.non_null().erased_recv())
+                {
                     return None;
                 }
                 let exact_local = source
@@ -14153,6 +14450,48 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Emit the checker-selected call to a receiver-function value on an already evaluated receiver.
+    /// Both nullable safe calls and the statically-non-null collapse use this one semantic handoff;
+    /// callers supply only the receiver representation they own, and this helper coerces it to the
+    /// selected function's folded first parameter before invoking the recorded value origin.
+    fn lower_receiver_fn_invoke_on(
+        &mut self,
+        call: AstExprId,
+        receiver: u32,
+        receiver_ty: Ty,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        let ExprLowering::ReceiverFnInvoke {
+            name,
+            params,
+            ret,
+            origin,
+            implicit_receiver: _,
+            suspend,
+        } = self.info.expr_lowers.get(&call).cloned()?
+        else {
+            return None;
+        };
+        if args.len() + 1 != params.len() {
+            return None;
+        }
+        let receiver = self.coerce_argument_value(receiver, receiver_ty, params[0])?;
+        let function = self.receiver_fn_value(&name, origin)?;
+        let mut lowered = vec![receiver];
+        for (&argument, parameter) in args.iter().zip(&params[1..]) {
+            lowered.push(self.lower_arg(argument, &ty_to_ir(*parameter))?);
+        }
+        let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
+            func: function,
+            args: lowered,
+            ret: ty_to_ir(ret),
+        });
+        if suspend {
+            self.ir.suspend_calls.insert(invoke, ret);
+        }
+        Some(invoke)
+    }
+
     fn implicit_receivers(&self) -> Vec<(u32, Ty)> {
         self.scope
             .iter()
@@ -14200,6 +14539,27 @@ impl<'a> Lower<'a> {
         None
     }
 
+    /// The accessor call for a MEMBER EXTENSION PROPERTY read: dispatch `this` from the
+    /// implicit-receiver scope (like a member extension function call), the read receiver coerced
+    /// to the declared extension receiver as JVM argument 0.
+    fn lower_member_extension_property_read(
+        &mut self,
+        recv: u32,
+        name: &str,
+        owner: TypeName,
+        ext_receiver: Ty,
+        prop_ty: Ty,
+    ) -> Option<u32> {
+        let gname = property_getter_name(name);
+        let dispatch = self.member_extension_dispatch_value(owner)?;
+        let recv = self.emit_type_op(IrTypeOp::ImplicitCoercion, recv, ty_to_ir(ext_receiver));
+        let method_params = vec![ext_receiver];
+        let (class, index, _, linked_ret) =
+            self.link_local_method(&owner.render(), &gname, &method_params)?;
+        let call = self.emit_method_call(class, index, dispatch, vec![Some(recv)]);
+        Some(self.coerce_to_static(call, prop_ty, linked_ret))
+    }
+
     fn lower_member_read_on(&mut self, recv: u32, rt: Ty, name: &str, e: AstExprId) -> Option<u32> {
         // Resolve against the NON-NULL type. A receiver whose static type keeps its `?` (a smart-cast /
         // `!!` value bound to a call-result local, whose narrowing krusty doesn't propagate to the read
@@ -14226,6 +14586,15 @@ impl<'a> Lower<'a> {
             }
             let read = self.add_property_read(recv, *owner, name, ty, *interface);
             return Some(read);
+        }
+        // A MEMBER EXTENSION PROPERTY read reached through the implicit-receiver path.
+        if let Some(ExprLowering::MemberExtensionPropertyRead {
+            owner,
+            receiver,
+            ty,
+        }) = self.info.expr_lowers.get(&e).cloned()
+        {
+            return self.lower_member_extension_property_read(recv, name, owner, receiver, ty);
         }
         let resolved = self.info.resolved_member(e).cloned().map(|r| {
             let m = r.member;
@@ -17553,6 +17922,25 @@ impl<'a> Lower<'a> {
             let write = self.add_property_write(r, owner, name, v, ty, interface);
             return Some(write);
         }
+        // A `var` MEMBER EXTENSION PROPERTY write (`i.foo = v` where `class C { var Int.foo }`) —
+        // the write analogue of the read in `lower_member_read_on`: call the owner's
+        // `setX(Recv, T)` accessor with dispatch `this` from the implicit-receiver scope.
+        if let Some(StmtLowering::MemberExtensionPropertyWrite {
+            owner,
+            receiver: recv_ty,
+            ty,
+        }) = self.info.stmt_lowers.get(&stmt).cloned()
+        {
+            let sname = property_setter_name(name);
+            let dispatch = self.member_extension_dispatch_value(owner)?;
+            let r = self.expr(receiver)?;
+            let r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, ty_to_ir(recv_ty));
+            let v = self.lower_arg(value, &ty_to_ir(ty))?;
+            let method_params = vec![recv_ty, ty];
+            let (class, index, _, _) =
+                self.link_local_method(&owner.render(), &sname, &method_params)?;
+            return Some(self.emit_method_call(class, index, dispatch, vec![Some(r), Some(v)]));
+        }
         // A property of a class THIS compilation declares. Same rule as everywhere else: name the
         // property, and let the backend decide whether the store is a direct field write (legal only
         // inside the declaring class, where the backing field is reachable) or the `setX()` accessor.
@@ -19468,32 +19856,47 @@ impl<'a> Lower<'a> {
                 let nullc = self.emit_const(IrConst::Null);
                 return Some(self.emit_block(vec![recv], Some(nullc)));
             }
-            // A primitive receiver can never be null, so `a?.foo(b)` is a vacuous safe call (kotlinc
-            // warns "unnecessary safe call") ≡ `a.foo(b)`. Fold an arithmetic operator-method call to
-            // the plain primitive op — `var a = 10; a?.plus(10)` works like `a.plus(10)`.
-            if !rty.is_reference() {
-                if let Some([arg]) = args.as_deref() {
-                    if let Some(r) =
-                        self.lower_prim_op_method(receiver, &name, *arg, self.info.ty(e))
-                    {
-                        return Some(r);
-                    }
-                } else if args.as_deref().is_some_and(<[_]>::is_empty) {
-                    if let Some(r) =
-                        self.lower_prim_unary_op_method(receiver, &name, self.info.ty(e))
-                    {
-                        return Some(r);
-                    }
+            // Match the checker's semantic collapse for an unnecessary safe call on a statically
+            // non-null scalar receiver, but delegate the WHOLE operation to qualified lowering. This
+            // is intentionally not the former primitive-operator shortcut: the generic handoff also
+            // covers source/module extensions, classpath extensions, Any methods, and properties, so
+            // adding a new callable origin cannot require another `?.` dispatch arm. Nullable primitive
+            // receivers are references and continue into the boxed null-check structure below.
+            if !rty.is_reference() && self.has_scalar_value_repr(rty) && result_ty != Ty::Error {
+                // Receiver-function syntax has its own checker-selected target rather than an ordinary
+                // member/extension target. It still obeys the same non-null collapse; consume that
+                // semantic record through the shared helper before delegating ordinary operations.
+                if matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ReceiverFnInvoke { .. })
+                ) {
+                    let receiver_value = self.expr(receiver)?;
+                    return self.lower_receiver_fn_invoke_on(
+                        e,
+                        receiver_value,
+                        rty,
+                        args.as_deref().unwrap_or_default(),
+                    );
                 }
+                return match &args {
+                    Some(arguments) => {
+                        self.expr_inner_call_member(e, arguments.clone(), receiver, name)
+                    }
+                    None => self.expr_inner_member(e, receiver, name),
+                };
             }
-            // The receiver must be a reference (the `?.` null-check is on an object). The result may be
-            // a reference OR a nullable-primitive (`s?.length` : `Int?`) — the assembly below boxes the
-            // primitive member value into the wrapper (`null` in the other branch). The one scalar
-            // exception is a property read whose receiver and result were both proven non-null by flow
-            // analysis; it is lowered through the ordinary property path below, without a null branch.
+            // The receiver must be a reference (the `?.` null-check is on an object) OR a scalar
+            // primitive. A NON-NULL primitive was collapsed generically above; a NULLABLE primitive
+            // (`Int?`) is boxed here. The temp slot carries that boxed form and the member runs on the
+            // unboxed value. The
+            // result may be a reference OR a nullable-primitive (`s?.length` : `Int?`) — the
+            // assembly below boxes the primitive member value into the wrapper (`null` in the other
+            // branch). The one scalar exception is a property read whose receiver and result were
+            // both proven non-null by flow analysis; it is lowered through the ordinary property
+            // path below, without a null branch.
             let proven_nonnull_scalar_property =
                 args.is_none() && !rty.is_nullable() && self.has_scalar_value_repr(result_ty);
-            if !rty.is_reference()
+            if (!rty.is_reference() && !self.has_scalar_value_repr(rty))
                 || (!result_ty.is_reference()
                     && result_ty.nullable_primitive().is_none()
                     && result_ty != Ty::Unit
@@ -19509,9 +19912,10 @@ impl<'a> Lower<'a> {
                 type_name("kotlin/String")
             } else if let Some(i) = nn.obj_internal() {
                 i
-            } else if self.has_scalar_value_repr(nn) {
-                // A nullable-PRIMITIVE receiver (`Int?` in a chained `?.let`) has no class internal —
-                // the scope-fn path (tried first) unboxes it; a placeholder owner suffices.
+            } else if self.has_scalar_value_repr(nn) || matches!(nn, Ty::Fun(_)) {
+                // A nullable-PRIMITIVE receiver (`Int?` in a chained `?.let`) or a FUNCTION value
+                // (`lambda?.let { it() }`) has no class internal — the scope-fn path (tried first)
+                // handles the value itself; a placeholder owner suffices.
                 crate::types::wk::any()
             } else {
                 // A non-object, non-primitive receiver (e.g. a literal `null?.…`): unsupported — bail.
@@ -19535,6 +19939,13 @@ impl<'a> Lower<'a> {
                 };
             }
             let rv = self.expr(receiver)?;
+            // A NON-NULL primitive receiver: the temp slot is the boxed (`Int?`) form — box before
+            // storing, so the slot type and value agree.
+            let rv = if rty.is_reference() {
+                rv
+            } else {
+                self.emit_type_op(IrTypeOp::ImplicitCoercion, rv, mark_nullable(ty_to_ir(rty)))
+            };
             let v = self.fresh_value();
             // The `?.` receiver is NULLABLE by construction — carry that into the temp's IrType (`Ty`
             // drops it). For a value-class receiver this keeps it BOXED (`MyC?` → `LMyC;`), so storing
@@ -19544,6 +19955,16 @@ impl<'a> Lower<'a> {
             let nullc = self.emit_const(IrConst::Null);
             let cond = self.emit_primitive_bin_op(IrBinOp::Ne, get1, nullc);
             let recv2 = self.emit_get_value(v);
+            // The member runs on the UNBOXED value of a non-null primitive receiver (a user
+            // extension's first parameter is the primitive, not the wrapper). Every other
+            // receiver keeps its boxed form — which is exactly the representation the receiver
+            // expr's type implies (`Int?` is boxed), so `index_subst` below can map the receiver
+            // expr to `recv2` and let the ordinary coercion machinery do its job.
+            let recv2 = if rty.is_reference() {
+                recv2
+            } else {
+                self.emit_type_op(IrTypeOp::ImplicitCoercion, recv2, ty_to_ir(nn))
+            };
             // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): inline it with the
             // non-null receiver `recv2`; the surrounding null-check + nullable-wrap below make the
             // whole `s?.…` yield `null` when `s` is null.
@@ -19555,172 +19976,30 @@ impl<'a> Lower<'a> {
             // A receiver-function-typed value in scope reached by `?.` (`b?.f()`, checker-selected
             // [`ExprLowering::ReceiverFnInvoke`]): invoke the local function value with the
             // non-null receiver as the folded-first argument.
-            let member = if let Some(ExprLowering::ReceiverFnInvoke {
-                name,
-                params,
-                ret,
-                origin,
-                implicit_receiver: _,
-                suspend,
-            }) = self.info.expr_lowers.get(&e).cloned()
-            {
-                let arg_list = args.clone().unwrap_or_default();
-                if arg_list.len() + 1 != params.len() {
-                    return None;
-                }
-                let func = self.receiver_fn_value(&name, origin)?;
-                let mut a = vec![recv2];
-                for (&arg, p) in arg_list.iter().zip(&params[1..]) {
-                    a.push(self.lower_arg(arg, &ty_to_ir(*p))?);
-                }
-                let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
-                    func,
-                    args: a,
-                    ret: ty_to_ir(ret),
-                });
-                // Suspension point (`b?.f()` on a `suspend Bar.() -> R` value): record for the
-                // coroutine pass, same as the plain member-syntax site.
-                if suspend {
-                    self.ir.suspend_calls.insert(invoke, ret);
-                }
-                invoke
+            let member = if matches!(
+                self.info.expr_lowers.get(&e),
+                Some(ExprLowering::ReceiverFnInvoke { .. })
+            ) {
+                self.lower_receiver_fn_invoke_on(e, recv2, nn, args.as_deref().unwrap_or_default())?
             } else if let Some(m) = self.lower_safe_scope_member(recv2, rty, &name, &args) {
                 from_scope_fn = true;
                 m
             } else {
-                match args {
+                // The member access on the non-null receiver is EXACTLY the qualified access:
+                // re-lowering the receiver expr yields the temp value via `index_subst` (whose
+                // representation matches the receiver expr's type), so the prim-op fold, the
+                // `kotlin/Any` virtuals, array intrinsics, library members, recorded calls, and
+                // the extension paths all apply unchanged. `?.` adds only the null check and the
+                // nullable merge.
+                self.index_subst.insert(receiver, recv2);
+                let member = match &args {
                     Some(args) => {
-                        if let Some(target @ ResolvedCall::ModuleMember { .. }) =
-                            self.info.resolved_calls.get(&e).cloned().filter(|target| {
-                                matches!(
-                                    target,
-                                    ResolvedCall::ModuleMember {
-                                        name: target_name,
-                                        inline,
-                                        ..
-                                    } if target_name == &name && inline.can_inline()
-                                )
-                            })
-                        {
-                            self.lower_inline_fn_call(
-                                &name,
-                                &args,
-                                e.0,
-                                Some(InlineReceiver::Value(recv2)),
-                                None,
-                                Some(&target),
-                            )?
-                        } else if let Some(target @ ResolvedCall::ModuleMember { .. }) =
-                            self.info.resolved_calls.get(&e).cloned()
-                        {
-                            self.lower_module_member_call(recv2, &target, &args, e)?
-                        } else if let Some(target @ ResolvedCall::ModuleMemberExtension { .. }) =
-                            self.info.resolved_calls.get(&e).cloned()
-                        {
-                            self.lower_module_member_extension_call(recv2, &target, &args, e)?
-                        } else if let Some(target @ ResolvedCall::ModuleExtension { .. }) =
-                            self.info.resolved_calls.get(&e).cloned()
-                        {
-                            self.lower_selected_op_call(recv2, nn, &name, &args, target, Some(e))?
-                                .0
-                        } else if let Some((class, index, fid, physical_ret)) =
-                            self.resolve_method(&internal, &name)
-                        {
-                            let params = self.ir.functions[fid as usize].params.clone();
-                            if args.len() != params.len() {
-                                return None;
-                            }
-                            let (a, arg_prelude) =
-                                self.lower_call_args_in_slot_order(e, &args, &params)?;
-                            let call = self.emit_method_call(
-                                class,
-                                index,
-                                recv2,
-                                a.into_iter().map(Some).collect(),
-                            );
-                            let call = if arg_prelude.is_empty() {
-                                call
-                            } else {
-                                self.wrap_arg_prelude(call, arg_prelude)
-                            };
-                            self.coerce_to_static(call, result_ty, physical_ret)
-                        } else if let Some(fid) =
-                            self.unique_ext_fun_id_by_arity(nn, &name, args.len())
-                        {
-                            // A same-module EXTENSION function via safe call (`s?.id()` where
-                            // `fun String.id()` is declared in this module): a static call whose first
-                            // argument is the (already non-null) receiver, exactly as the qualified
-                            // call lowers it. Stdlib/classpath extensions take the `lower_ext_call_on`
-                            // fallback below.
-                            let params = self.ir.functions[fid as usize].params.clone();
-                            if params.len() != args.len() + 1 {
-                                return None;
-                            }
-                            let (lowered, arg_prelude) =
-                                self.lower_call_args_in_slot_order(e, &args, &params[1..])?;
-                            let mut a = vec![recv2];
-                            a.extend(lowered);
-                            let call = self.emit_local_call(fid, a);
-                            self.wrap_arg_prelude(call, arg_prelude)
-                        } else {
-                            // A classpath instance method (`s?.substring(1)`).
-                            if let Some(resolved) = self.info.resolved_member(e).cloned() {
-                                if resolved.member.name != name {
-                                    return None;
-                                }
-                                if let Some(call) = self.lower_library_default_member_call(
-                                    recv2, nn, e, &resolved, &args,
-                                ) {
-                                    call
-                                } else {
-                                    let m = resolved.member;
-                                    let (a, arg_prelude) = if m.call_sig.vararg {
-                                        (
-                                            self.lower_library_member_vararg_args(
-                                                Some(e),
-                                                &args,
-                                                &m,
-                                            )?,
-                                            Vec::new(),
-                                        )
-                                    } else {
-                                        if m.params.len() != args.len() {
-                                            return None;
-                                        }
-                                        let params = m.params.clone();
-                                        self.lower_call_args_in_slot_order(e, &args, &params)?
-                                    };
-                                    let ret = resolved.ret;
-                                    let physical_ret = m.physical_ret;
-                                    let call = self.emit_library_member_call(
-                                        recv2,
-                                        internal_id,
-                                        m,
-                                        ret,
-                                        resolved.suspend,
-                                        a,
-                                    );
-                                    let call = self.wrap_arg_prelude(call, arg_prelude);
-                                    self.coerce_to_static(call, ret, physical_ret)
-                                }
-                            } else {
-                                // A stdlib EXTENSION via safe call (`s?.uppercase()`) — inline it on
-                                // the non-null receiver, the same path as the qualified call.
-                                self.lower_ext_call_on(recv2, nn, &name, &args, e)?
-                            }
-                        }
+                        self.expr_inner_call_member(e, args.clone(), receiver, name.clone())
                     }
-                    None => {
-                        if let Some(read) =
-                            self.lower_field_read_on(recv2, &internal, &name, e, None)
-                        {
-                            read
-                        } else {
-                            // A classpath property (`list?.size`) — a zero-arg accessor.
-                            self.lower_member_read_on(recv2, nn, &name, e)?
-                        }
-                    }
-                }
+                    None => self.expr_inner_member(e, receiver, name.clone()),
+                };
+                self.index_subst.remove(&receiver);
+                member?
             };
             let member_diverges = self.ir.expr_diverges_by(member, &|_, _| false);
             crate::trace_compiler!(
@@ -20673,6 +20952,24 @@ impl<'a> Lower<'a> {
                 let receiver = self.lower_arg(receiver, &target)?;
                 return Some(self.emit_extension_property_get(e, *getter, receiver));
             }
+            // A MEMBER EXTENSION PROPERTY read (`1.foo` where `class C { val Int.foo }`): the
+            // checker selected the declaring owner — call its `getX(Recv)` accessor with dispatch
+            // `this` from the implicit-receiver scope.
+            if let Some(ExprLowering::MemberExtensionPropertyRead {
+                owner,
+                receiver: ext_receiver,
+                ty,
+            }) = self.info.expr_lowers.get(&e).cloned()
+            {
+                let recv = self.expr(receiver)?;
+                return self.lower_member_extension_property_read(
+                    recv,
+                    &name,
+                    owner,
+                    ext_receiver,
+                    ty,
+                );
+            }
             // Reading an annotation member (`a.x`, `a` typed as the annotation interface): the JVM
             // accessor is the bare member name `x()` (not `getX`), dispatched by `invokeinterface`.
             if let Ty::Obj(internal, _) = self.info.ty(receiver) {
@@ -20695,7 +20992,7 @@ impl<'a> Lower<'a> {
                     ));
                 }
             }
-            let rt = self.recv_ty(receiver);
+            let rt = self.recv_ty(receiver).non_null();
             if self.info.resolved_member(e).is_some() {
                 let recv = self.expr(receiver)?;
                 let recv = if rt.is_reference()
@@ -20770,8 +21067,10 @@ impl<'a> Lower<'a> {
                 }
             }
             if rt == Ty::Char && name == "code" {
-                // `c.code` → the `Char`'s code unit as an `Int` (a no-op coercion on the JVM stack).
-                let c = self.expr(receiver)?;
+                // `c.code` → the `Char`'s code unit as an `Int` (a no-op coercion on the JVM
+                // stack). `lower_arg` unboxes a boxed receiver first (a safe call's `Char?`
+                // temp) — a target-type coercion would checkcast the wrong wrapper.
+                let c = self.lower_arg(receiver, &ty_to_ir(rt))?;
                 self.emit_type_op(IrTypeOp::ImplicitCoercion, c, ty_to_ir(Ty::Int))
             } else if rt.array_elem().is_some() && name == "size" {
                 let a = self.expr(receiver)?;
@@ -23076,8 +23375,18 @@ impl<'a> Lower<'a> {
             if let Some(v) = self.lower_fq_toplevel_call(receiver, &name, &args, e) {
                 return Some(v);
             }
-            // Exact named user-member calls reorder arguments before positional lowering.
-            if self.afile.call_arg_names.contains_key(&e.0) {
+            // Exact named user-member calls reorder arguments before positional lowering. Only
+            // when the checker SELECTED a member: when it selected an extension instead (a
+            // same-named member whose parameters don't fit the named arguments), reordering
+            // onto the member would bind the values to the wrong parameters — a VerifyError or
+            // wrong call. The extension arms below own that selection.
+            if self.afile.call_arg_names.contains_key(&e.0)
+                && !self
+                    .info
+                    .resolved_calls
+                    .get(&e)
+                    .is_some_and(ResolvedCall::is_extension)
+            {
                 if let Some(internal) = self.info.ty(receiver).obj_internal() {
                     if let Some((_, _, fid, _)) = self.resolve_method_name(internal, &name) {
                         let params_len = self.ir.functions[fid as usize].params.len();
@@ -23211,21 +23520,18 @@ impl<'a> Lower<'a> {
             }
             if let ([arg], true) = (
                 &args[..],
-                self.has_scalar_value_repr(self.info.ty(receiver))
-                    && !matches!(
-                        self.info.resolved_calls.get(&e),
-                        Some(
-                            ResolvedCall::Extension(_)
-                                | ResolvedCall::ModuleExtension { .. }
-                                | ResolvedCall::ModuleMemberExtension { .. }
-                        )
-                    ),
+                self.has_scalar_value_repr(self.info.ty(receiver).non_null())
+                    && !self
+                        .info
+                        .resolved_calls
+                        .get(&e)
+                        .is_some_and(ResolvedCall::is_extension),
             ) {
                 if let Some(r) = self.lower_prim_op_method(receiver, &name, *arg, self.info.ty(e)) {
                     return Some(r);
                 }
             }
-            if args.is_empty() && self.has_scalar_value_repr(self.info.ty(receiver)) {
+            if args.is_empty() && self.has_scalar_value_repr(self.info.ty(receiver).non_null()) {
                 if let Some(r) = self.lower_prim_unary_op_method(receiver, &name, self.info.ty(e)) {
                     return Some(r);
                 }
@@ -23726,7 +24032,7 @@ impl<'a> Lower<'a> {
         name: String,
     ) -> Option<u32> {
         let t = {
-            let rt = self.recv_ty(receiver);
+            let rt = self.recv_ty(receiver).non_null();
             let module_target = self.info.resolved_calls.get(&e).cloned();
             if let Some(target @ ResolvedCall::ModuleMemberExtension { .. }) =
                 module_target.as_ref()
