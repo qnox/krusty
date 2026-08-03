@@ -156,6 +156,15 @@ impl ClassInfo {
         self.this_class.matches(internal)
     }
 
+    /// This class's structural `InnerClasses` self entry, if it is a genuine member/local/anonymous
+    /// class. Consumers use this relation for member-only flags and nesting metadata; they must not
+    /// reconstruct it by splitting the encoded class name because `$` is legal in an identifier.
+    pub fn inner_class_self(&self) -> Option<&InnerClassRef> {
+        self.inner_classes
+            .iter()
+            .find(|entry| self.this_class_matches(&entry.inner))
+    }
+
     pub fn super_class(&self) -> Option<String> {
         self.super_class.map(TypeName::render)
     }

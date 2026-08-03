@@ -405,6 +405,7 @@ impl LibraryCallable {
             physical_ret,
             descriptor: descriptor.into(),
             suspend: false,
+            owner_is_interface: false,
             inline: InlineKind::None,
             default_call: false,
             vararg_elem: None,
@@ -487,6 +488,13 @@ pub struct LibraryCallable {
     /// `Continuation` (and a lambda whose body calls one becomes a coroutine state machine). The checker
     /// records this on the resolved callable so the lowerer never re-queries the library for it.
     pub suspend: bool,
+    /// [`owner`](Self::owner) is an INTERFACE, so the call dispatches with `invokeinterface`. Carried on
+    /// the selected callable because the owner's own declaration may not be re-readable at the call
+    /// site: a mapped builtin's JVM owner (`java/util/List`) has no class file when no JDK is on the
+    /// classpath, and the fact then exists only on the `.kotlin_builtins` member this callable was
+    /// selected from. Dropping it emitted `invokevirtual` on an interface — an
+    /// `IncompatibleClassChangeError` at class-load time.
+    pub owner_is_interface: bool,
     /// The callee's inline-ness in one field (was `is_inline` + `must_inline`): [`InlineKind::CanInline`]
     /// for a Kotlin `inline` function the backend MAY splice instead of emitting an `invokestatic`,
     /// [`InlineKind::MustInline`] for a non-public `@InlineOnly` callee the backend MUST splice (no legal
@@ -1140,6 +1148,11 @@ impl FunctionInfo {
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
         member.set_suspend(self.flags.suspend);
+        // Interface-ness travels with the selected overload for the same reason `suspend` does: it is a
+        // fact about the DECLARATION, and the emit site may have no way to re-derive it (a mapped
+        // builtin's JVM owner has no class file on a JDK-less classpath). Round-tripping the member
+        // through `FunctionInfo` must not lose it, or the call emits `invokevirtual` on an interface.
+        member.set_is_interface(self.callable.owner_is_interface);
         // Keep source call shape coupled to the selected overload.
         member.call_sig = self.call_sig.clone();
         member

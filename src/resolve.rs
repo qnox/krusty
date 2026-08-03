@@ -1072,16 +1072,29 @@ fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
 /// silent `Ty::Error` instead of reporting.) The two arms consult it at DIFFERENT points — the
 /// safe-call arm after its source-extension fallback, the qualified arm before its extension
 /// resolution, which is pre-existing ordering this extraction deliberately left alone.
+const BUILTIN_STRING_MEMBER_SIGNATURES: &[(&str, &[Ty], Ty)] = &[
+    ("substring", &[Ty::Int], Ty::String),
+    ("substring", &[Ty::Int, Ty::Int], Ty::String),
+    ("indexOf", &[Ty::String], Ty::Int),
+    ("concat", &[Ty::String], Ty::String),
+    // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile time on a
+    // string-literal receiver (codegen rejects a non-literal receiver).
+    ("trimIndent", &[], Ty::String),
+    ("trimMargin", &[], Ty::String),
+];
+
 fn builtin_string_member_ret(name: &str, arg_tys: &[Ty]) -> Option<Ty> {
-    match (name, arg_tys) {
-        ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => Some(Ty::String),
-        ("indexOf", [Ty::String]) => Some(Ty::Int),
-        ("concat", [Ty::String]) => Some(Ty::String),
-        // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile time on a
-        // string-literal receiver (codegen rejects a non-literal receiver).
-        ("trimIndent" | "trimMargin", []) => Some(Ty::String),
-        _ => None,
-    }
+    BUILTIN_STRING_MEMBER_SIGNATURES
+        .iter()
+        .find_map(|&(candidate, params, ret)| {
+            (candidate == name && params == arg_tys).then_some(ret)
+        })
+}
+
+fn builtin_string_member_exists(name: &str) -> bool {
+    BUILTIN_STRING_MEMBER_SIGNATURES
+        .iter()
+        .any(|(candidate, _, _)| *candidate == name)
 }
 
 /// Recognize and safely fold the integer-constant syntax accepted at call sites.
@@ -2781,11 +2794,14 @@ impl SymbolTable {
             if !seen_owners.insert(owner) {
                 continue;
             }
+            // A CLASSPATH owner in the chain: its methods aren't source declarations, so it
+            // contributes nothing and its own supertypes aren't walked. Keep whatever the SOURCE
+            // classes below it already contributed rather than discarding the walk — a source class
+            // extending a library class (`class C : ArrayList<Int>() { override fun removeAt(…) }`)
+            // still has its own declaration matched, which is what a `super.` call and the mapped-
+            // interface bridge both need. Bailing out here made such an override invisible.
             let Some(class) = self.class_by_type_name(owner) else {
-                if include_interfaces {
-                    continue;
-                }
-                return None;
+                continue;
             };
             for signature in class.methods_named(name) {
                 // An override has the same JVM parameter signature as its parent. Keep the
@@ -4379,6 +4395,10 @@ fn collect_signatures_with_cp_impl(
             names
         })
         .collect();
+    let anonymous_lexical_scopes = files
+        .iter()
+        .map(anonymous_lexical_class_scope)
+        .collect::<Vec<_>>();
     let source_classifier_visibility = files
         .iter()
         .flat_map(|file| {
@@ -4489,6 +4509,7 @@ fn collect_signatures_with_cp_impl(
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
+        let anonymous_lexical_scope = &anonymous_lexical_scopes[i];
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
@@ -4900,10 +4921,7 @@ fn collect_signatures_with_cp_impl(
                     }
                 }
                 Decl::Class(c) => {
-                    let anonymous_object = file
-                        .anonymous_object_classes
-                        .values()
-                        .any(|declaration| *declaration == d);
+                    let anonymous_object = anonymous_lexical_scope.declarations.contains(&d);
                     let internal = class_names
                         .get(&c.name)
                         .map(TypeName::render)
@@ -4949,12 +4967,12 @@ fn collect_signatures_with_cp_impl(
                     // type is a hoisted top-level `Decl::Class` named `Outer.Inner`; map its last segment.
                     let class_names = {
                         let mut ext = class_names.clone();
-                        let inheritor = type_name(&class_internal(file, &c.name));
-                        let lexical_inheritors =
-                            crate::symbol_resolver::lexical_enclosing_classifier_names(
-                                inheritor,
-                                |candidate| source_direct_supertypes.contains_key(&candidate),
-                            );
+                        let lexical_inheritors = declaration_lexical_class_names(
+                            file,
+                            d,
+                            anonymous_lexical_scope,
+                            |candidate| source_direct_supertypes.contains_key(&candidate),
+                        );
                         let mut referenced_types = std::collections::HashSet::new();
                         collect_class_type_names(file, c, &mut referenced_types);
                         for name in &referenced_types {
@@ -9388,6 +9406,11 @@ pub enum ResolvedCall {
         physical_params: Vec<Ty>,
         ret: Ty,
         physical_ret: Ty,
+        /// Selected callable capabilities. These stay on the semantic target so every later consumer
+        /// answers "does this exact call suspend/require splicing?" without looking the source name up
+        /// again or branching on whether the declaration came from this file or a dependency.
+        inline: InlineKind,
+        suspend: bool,
         interface: bool,
         /// The semantic vararg slot. Its presence is the vararg flag and its value drives packing.
         vararg_index: Option<usize>,
@@ -9401,11 +9424,11 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
-        /// The selected callable's generic [`InlineKind::MustInline`] capability: a direct fallback
-        /// is semantically illegal even if a facade method is physically emitted to publish inline
-        /// code. Same-file lowering may splice it first; every remaining path must bail. Carrying
-        /// the resolved capability keeps lowering independent of source syntax and symbol origin.
-        requires_splice: bool,
+        /// Selected callable capabilities. Carrying the complete semantic facts, rather than only a
+        /// derived `requires_splice` bit, lets safety gates distinguish `suspend inline` from ordinary
+        /// inline calls and keeps those gates independent of declaration name and symbol origin.
+        inline: InlineKind,
+        suspend: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -9442,6 +9465,51 @@ impl ResolvedCall {
             Self::ModuleExtension { owner, .. } => *owner,
             Self::ModuleTopLevel(_) | Self::LocalFunction(_) => None,
         }
+    }
+
+    /// Whether this exact checker-selected call suspends. This is the common classification consumed
+    /// by AST-level coroutine discovery before an IR suspension set exists.
+    pub(crate) fn is_suspend(&self) -> bool {
+        match self {
+            Self::Member(resolved) => resolved.suspend,
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => callable.suspend,
+            Self::Companion(member) => member.suspend(),
+            Self::ModuleMember { suspend, .. }
+            | Self::ModuleMemberExtension { suspend, .. }
+            | Self::ModuleExtension { suspend, .. } => *suspend,
+            Self::ModuleTopLevel(callable) => callable.suspend,
+            Self::LocalFunction(callable) => callable.sig.is_suspend(),
+        }
+    }
+
+    /// Inline capability of the exact selected target. `None` means an ordinary callable, while the
+    /// stronger states preserve whether splicing is optional or mandatory.
+    fn inline_kind(&self) -> InlineKind {
+        match self {
+            Self::Member(resolved) => resolved.member.inline,
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => callable.inline,
+            Self::Companion(member) => member.inline,
+            Self::ModuleMember { inline, .. }
+            | Self::ModuleMemberExtension { inline, .. }
+            | Self::ModuleExtension { inline, .. } => *inline,
+            Self::ModuleTopLevel(callable) => callable.inline,
+            Self::LocalFunction(callable) => {
+                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice())
+            }
+        }
+    }
+
+    /// Whether this EXACT checker-selected call is both suspending and inline. A suspend lambda's
+    /// state-machine body cannot currently splice such a callee, so lowering must decline it before
+    /// emitting a direct call. Keeping this classification on the resolved target is important: a
+    /// name-wide lookup would conflate overloads and unrelated members, while origin-specific probes
+    /// would make source, sibling-module, and classpath calls disagree.
+    pub(crate) fn is_suspend_inline(&self) -> bool {
+        self.is_suspend() && self.inline_kind().can_inline()
     }
 }
 
@@ -9578,12 +9646,87 @@ struct MatchedCtorDelegation {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedSuperCall {
-    pub owner: TypeName,
-    pub interface: bool,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub descriptor: Option<String>,
+pub enum ResolvedSuperCall {
+    /// A SOURCE base-class method or interface-default method. Its JVM name IS the source name and its
+    /// signature is the one this module will emit, so there is nothing to carry beyond the shape.
+    Source {
+        owner: TypeName,
+        interface: bool,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
+    /// A CLASSPATH base-class method — the selected library member, exactly as
+    /// [`ResolvedCall::Member`] carries one for an ordinary member call. It already states every JVM
+    /// fact the lowerer needs (its own `name`, which is the physical one when the Kotlin name renames
+    /// it; its `descriptor`; and its erased `physical_ret`, which the logical `ret` may narrow after
+    /// binding the base's type arguments), so none of those are re-stated here as parallel fields.
+    Classpath(Box<crate::libraries::LibraryMember>),
+}
+
+impl ResolvedSuperCall {
+    /// The parameter types a call site's arguments are lowered against.
+    pub fn params(&self) -> &[Ty] {
+        match self {
+            ResolvedSuperCall::Source { params, .. } => params,
+            ResolvedSuperCall::Classpath(member) => &member.params,
+        }
+    }
+
+    /// The declaring type the call dispatches to, when it is known. `None` only for a classpath member
+    /// whose owner the library reader could not name.
+    pub fn owner(&self) -> Option<TypeName> {
+        match self {
+            ResolvedSuperCall::Source { owner, .. } => Some(*owner),
+            ResolvedSuperCall::Classpath(member) => member.owner,
+        }
+    }
+
+    /// The LOGICAL result type of the call — what the checker gave the expression.
+    pub fn ret(&self) -> Ty {
+        match self {
+            ResolvedSuperCall::Source { ret, .. } => *ret,
+            ResolvedSuperCall::Classpath(member) => member.ret,
+        }
+    }
+
+    /// The name to emit the call under. A source target uses the name written at the call site; a
+    /// classpath member states its own, which differs whenever its Kotlin name renames the JVM one
+    /// (`MutableList.removeAt` IS `java.util.List.remove(int)`).
+    pub fn emitted_name<'a>(&'a self, source_name: &'a str) -> &'a str {
+        match self {
+            ResolvedSuperCall::Source { .. } => source_name,
+            ResolvedSuperCall::Classpath(member) => &member.name,
+        }
+    }
+
+    /// The target's own descriptor, when it has one. `None` for a source target, whose descriptor the
+    /// backend derives from the signature it is about to emit.
+    pub fn descriptor(&self) -> Option<&str> {
+        match self {
+            ResolvedSuperCall::Source { .. } => None,
+            ResolvedSuperCall::Classpath(member) => Some(&member.descriptor),
+        }
+    }
+
+    /// Whether the target is an interface method (an interface-default `super` call).
+    pub fn interface(&self) -> bool {
+        match self {
+            ResolvedSuperCall::Source { interface, .. } => *interface,
+            ResolvedSuperCall::Classpath(_) => false,
+        }
+    }
+
+    /// The target's ERASED result type, when it differs from the logical [`Self::ret`] — a generic
+    /// classpath member returns `Object` physically while `ret` is the type recovered from the base's
+    /// bound arguments. `None` when nothing was erased and the result needs no coercion.
+    pub fn erased_ret(&self) -> Option<Ty> {
+        match self {
+            ResolvedSuperCall::Source { .. } => None,
+            ResolvedSuperCall::Classpath(member) => {
+                (member.physical_ret != member.ret).then_some(member.physical_ret)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -10564,6 +10707,8 @@ fn make_checker<'a>(
         this_extension_receiver: None,
         this_narrow: None,
         this_labels: Vec::new(),
+        lexical_class_context: Vec::new(),
+        exact_anonymous_class_roots: std::collections::HashSet::new(),
         extension_receiver_labels: Vec::new(),
         field_ty: None,
         companion_of: None,
@@ -10884,10 +11029,10 @@ fn install_anonymous_object_captures(
 }
 
 /// Walk expression/statement arenas iteratively from already-identified declaration roots and
-/// record every anonymous-object construction encountered. Keeping the arena walk separate from
-/// `File::any_decl_expr` lets the AST layer describe generic containment while this pass supplies
-/// capture-specific targets and completeness accounting.
-fn record_capture_targets(
+/// record every requested expression encountered. Keeping this traversal generic is important:
+/// capture discovery and lexical-owner discovery ask the same structural containment question, and
+/// neither should grow an origin-specific AST walk that can drift as expression shapes are added.
+fn record_expression_targets(
     file: &File,
     targets: &std::collections::HashSet<ExprId>,
     roots: impl IntoIterator<Item = ExprId>,
@@ -10935,7 +11080,7 @@ fn record_function_capture_targets(
         roots.push(expression);
         false
     });
-    record_capture_targets(file, targets, roots, discovered)
+    record_expression_targets(file, targets, roots, discovered)
 }
 
 /// Kotlin gives these unqualified instance methods a fixed return even when source omits the
@@ -11065,7 +11210,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
             });
             let mut declaration_targets = std::collections::HashSet::new();
             let owns_target =
-                record_capture_targets(file, &targets, roots, &mut declaration_targets);
+                record_expression_targets(file, &targets, roots, &mut declaration_targets);
             if owns_target {
                 if let Decl::Class(class) = file.decl(*declaration) {
                     class_plans.insert(
@@ -11080,7 +11225,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
         .collect::<std::collections::HashSet<_>>();
     let script_body = file
         .script_body
-        .is_some_and(|body| record_capture_targets(file, &targets, [body], &mut discovered));
+        .is_some_and(|body| record_expression_targets(file, &targets, [body], &mut discovered));
     // Keep capture analysis conservative as the AST evolves. If a parser change retains an
     // anonymous construction outside the generic declaration-root inventory, retain the old
     // full-file semantic pass rather than silently treating that construction as capture-free.
@@ -11100,6 +11245,106 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
             std::collections::HashMap::new()
         },
     }
+}
+
+#[derive(Default)]
+struct AnonymousLexicalClassScope {
+    owners: HashMap<DeclId, DeclId>,
+    declarations: std::collections::HashSet<DeclId>,
+}
+
+impl AnonymousLexicalClassScope {
+    /// The declaration followed by its structurally recorded anonymous-object owners, nearest first.
+    /// This is the single graph walk used by signature collection, pre-inference, and the main checker;
+    /// central cycle protection prevents those phases from disagreeing on malformed/recovered input.
+    fn declaration_chain(&self, declaration: DeclId) -> Vec<DeclId> {
+        let mut chain = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut current = Some(declaration);
+        while let Some(candidate) = current {
+            if !visited.insert(candidate) {
+                break;
+            }
+            chain.push(candidate);
+            current = self.owners.get(&candidate).copied();
+        }
+        chain
+    }
+}
+
+/// The source class whose expression tree contains each hoisted anonymous-object construction.
+/// Anonymous classes are file-level synthetic declarations, but their superclass arguments retain
+/// the lexical classifier scope of the construction site (`object : Base(Inner()) {}` inside `Outer`
+/// may name `Outer.Inner` unqualified). This map preserves that source relationship without making
+/// the anonymous class an `inner` class or changing its runtime capture ABI.
+fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
+    if file.anonymous_object_classes.is_empty() {
+        return AnonymousLexicalClassScope::default();
+    }
+    let mut owners = HashMap::new();
+    let declarations = file
+        .anonymous_object_classes
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let targets = file
+        .anonymous_object_classes
+        .keys()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    for &owner in &file.decls {
+        if !matches!(file.decl(owner), Decl::Class(_)) {
+            continue;
+        }
+        let mut roots = Vec::new();
+        file.any_decl_expr(owner, &mut |expression| {
+            roots.push(expression);
+            false
+        });
+        let mut constructions = std::collections::HashSet::new();
+        record_expression_targets(file, &targets, roots, &mut constructions);
+        for construction in constructions {
+            if let Some(&anonymous) = file.anonymous_object_classes.get(&construction) {
+                owners.entry(anonymous).or_insert(owner);
+            }
+        }
+    }
+    AnonymousLexicalClassScope {
+        owners,
+        declarations,
+    }
+}
+
+/// Classifier roots visible from a declaration in nearest-first order. Ordinary nested declarations
+/// may derive their source parents from their hoisted internal name; anonymous declarations may not —
+/// their generated `$` name is exact, and their parents come only from the structural ownership map.
+fn declaration_lexical_class_names(
+    file: &File,
+    declaration: DeclId,
+    scope: &AnonymousLexicalClassScope,
+    mut exists: impl FnMut(TypeName) -> bool,
+) -> Vec<TypeName> {
+    let mut classes = Vec::new();
+    for candidate in scope.declaration_chain(declaration) {
+        if let Decl::Class(class) = file.decl(candidate) {
+            let internal = type_name(&class_internal(file, &class.name));
+            if scope.declarations.contains(&candidate) {
+                if !classes.contains(&internal) {
+                    classes.push(internal);
+                }
+            } else {
+                for lexical in crate::symbol_resolver::lexical_enclosing_classifier_names(
+                    internal,
+                    &mut exists,
+                ) {
+                    if !classes.contains(&lexical) {
+                        classes.push(lexical);
+                    }
+                }
+            }
+        }
+    }
+    classes
 }
 
 fn discover_anonymous_object_captures_at(file: &File, file_index: u32, syms: &mut SymbolTable) {
@@ -11255,15 +11500,27 @@ fn file_may_depend_on_preinfer_names(
 /// class methods). Returns the names of changed signatures so the module fixpoint can revisit only
 /// files that may depend on them. Runs on a scratch `DiagSink` (inference diagnostics are not the real
 /// check's).
+#[cfg(test)]
 fn preinfer_returns_pass(
     file: &File,
     file_index: u32,
     syms: &mut SymbolTable,
 ) -> PreinferPassResult {
+    let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    preinfer_returns_pass_with_owners(file, file_index, syms, &anonymous_lexical_scope)
+}
+
+fn preinfer_returns_pass_with_owners(
+    file: &File,
+    file_index: u32,
+    syms: &mut SymbolTable,
+    anonymous_lexical_scope: &AnonymousLexicalClassScope,
+) -> PreinferPassResult {
     let mut scratch = DiagSink::new();
     let mut pre = make_checker(file, file_index, None, &*syms, &mut scratch);
     let mut inferred_member_ext_rets = Vec::new();
     for &d in &file.decls {
+        pre.set_anonymous_lexical_class_context(d, anonymous_lexical_scope);
         if let Decl::Fun(f) = file.decl(d) {
             if function_needs_return_preinfer(f) {
                 let resolve = class_internal_resolver(pre.syms);
@@ -11445,6 +11702,10 @@ pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &m
 fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
     discover_anonymous_object_captures(files, syms);
     let saved = diags.current_file();
+    let anonymous_lexical_scopes = files
+        .iter()
+        .map(anonymous_lexical_class_scope)
+        .collect::<Vec<_>>();
     let candidates = files
         .iter()
         .map(file_has_preinfer_candidates)
@@ -11457,7 +11718,15 @@ fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &
                 continue;
             }
             diags.set_file(i as u32);
-            changed_names.extend(preinfer_returns_pass(file, i as u32, syms).changed_names);
+            changed_names.extend(
+                preinfer_returns_pass_with_owners(
+                    file,
+                    i as u32,
+                    syms,
+                    &anonymous_lexical_scopes[i],
+                )
+                .changed_names,
+            );
         }
         if changed_names.is_empty() {
             break;
@@ -11489,6 +11758,7 @@ fn check_file_at_impl_mode(
     if !capture_discovery {
         discover_anonymous_object_captures_at(file, file_index, syms);
     }
+    let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     // Pre-infer EXPRESSION-body return types (top-level functions AND class methods) and patch the
     // signature table BEFORE the main check — so a call to `fun m() = f()` resolves to its real return,
     // not the collection default `Unit`. Without this, a method whose return couldn't be inferred at
@@ -11499,7 +11769,9 @@ fn check_file_at_impl_mode(
     // dependency chain is shallow; an unresolvable case simply stops improving).
     if !capture_discovery {
         for _pass in 0..8 {
-            if !preinfer_returns_pass(file, file_index, syms).changed() {
+            if !preinfer_returns_pass_with_owners(file, file_index, syms, &anonymous_lexical_scope)
+                .changed()
+            {
                 break;
             }
         }
@@ -11526,6 +11798,7 @@ fn check_file_at_impl_mode(
             continue;
         }
         c.scopes.truncate(base_scope_depth);
+        c.set_anonymous_lexical_class_context(d, &anonymous_lexical_scope);
         match file.decl(d) {
             Decl::Fun(f) => {
                 let resolve = class_internal_resolver(c.syms);
@@ -12804,6 +13077,8 @@ struct MemberExtensionFunctionCandidate {
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
     is_operator: bool,
+    inline: InlineKind,
+    suspend: bool,
     owner: TypeName,
 }
 
@@ -12818,6 +13093,8 @@ impl MemberExtensionFunctionCandidate {
             physical_params: self.physical_params.clone(),
             ret: self.ret,
             physical_ret: self.physical_ret,
+            inline: self.inline,
+            suspend: self.suspend,
             interface,
             vararg_index: self.call_sig.vararg_index,
         }
@@ -12969,6 +13246,12 @@ struct Checker<'a> {
     /// nothing but classes between) lowers via the inner class's `this$0`. Anything else type-checks but
     /// the lowerer skips it (it can't yet reach a captured / multi-level outer receiver).
     this_labels: Vec<(String, Ty, bool)>,
+    /// Source class owners of a hoisted anonymous-object declaration, nearest first. They contribute
+    /// lexical classifier scope but are not implicit runtime receivers (captures remain a separate ABI).
+    lexical_class_context: Vec<TypeName>,
+    /// Anonymous classifiers in the current structural ownership chain. Their generated `$` names are
+    /// exact roots, never evidence of lexical parents; those come only from `lexical_class_context`.
+    exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
     extension_receiver_labels: Vec<(usize, Span)>,
     /// The backing-field type while checking a property accessor body — makes the `field`
     /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
@@ -13499,15 +13782,6 @@ impl<'a> Checker<'a> {
             contract: None,
         };
         Some((selected, signature))
-    }
-
-    fn source_extension_requires_splice(&self, selected: &crate::libraries::FunctionInfo) -> bool {
-        // Inline fallback legality is part of the resolved callable's semantic state. In
-        // particular, a reified source extension may have a physically emitted facade so another
-        // compilation can read and splice its body, while calling that erased method directly is
-        // still illegal. Reading `InlineKind::MustInline` keeps that distinction independent of
-        // source-file keys and avoids a reified-only side index or per-origin lowering branches.
-        selected.flags.inline.must_inline()
     }
 
     fn check_source_extension_call_args(
@@ -14820,13 +15094,13 @@ impl<'a> Checker<'a> {
             .and_then(Symbol::instance)
     }
 
-    fn resolve_super_instance_name(
+    fn resolve_super_instance_ty(
         &self,
-        internal: TypeName,
+        recv: Ty,
         name: &str,
         args: &[CallArgKind],
     ) -> Option<crate::libraries::LibraryMember> {
-        self.resolver().resolve_super_instance(internal, name, args)
+        self.resolver().resolve_super_instance(recv, name, args)
     }
     fn resolve_companion_with_literal_args(
         &self,
@@ -15353,7 +15627,8 @@ impl<'a> Checker<'a> {
             .selected_source_extension(receiver, name, &arg_kinds)
             .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
         {
-            let requires_splice = self.source_extension_requires_splice(&selected);
+            let inline = selected.flags.inline;
+            let suspend = selected.flags.suspend;
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
             let owner = sig
                 .source_file
@@ -15374,7 +15649,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
-                    requires_splice,
+                    inline,
+                    suspend,
                 },
             ));
         }
@@ -18053,15 +18329,24 @@ impl<'a> Checker<'a> {
             .as_deref()
             .and_then(|class| self.syms.classes.get(class))
             .map(ClassSig::internal_name);
-        let roots = companion.into_iter().chain(
-            self.this_labels
-                .iter()
-                .rev()
-                .filter(|(_, _, is_class)| *is_class)
-                .filter_map(|(_, receiver, _)| receiver.obj_internal()),
-        );
+        let roots = companion
+            .into_iter()
+            .chain(
+                self.this_labels
+                    .iter()
+                    .rev()
+                    .filter(|(_, _, is_class)| *is_class)
+                    .filter_map(|(_, receiver, _)| receiver.obj_internal()),
+            )
+            .chain(self.lexical_class_context.iter().copied());
         let mut classes = Vec::new();
         for owner in roots {
+            if self.exact_anonymous_class_roots.contains(&owner) {
+                if !classes.contains(&owner) {
+                    classes.push(owner);
+                }
+                continue;
+            }
             for internal in
                 crate::symbol_resolver::lexical_enclosing_classifier_names(owner, |candidate| {
                     self.syms.class_by_type_name(candidate).is_some()
@@ -18073,6 +18358,38 @@ impl<'a> Checker<'a> {
             }
         }
         classes
+    }
+
+    /// Install the source-class ownership chain for a hoisted anonymous-object declaration. The AST
+    /// relation is acyclic, but retain explicit cycle detection so malformed/recovered trees cannot
+    /// spin forever without imposing an arbitrary nesting limit on valid generated Kotlin.
+    fn set_anonymous_lexical_class_context(
+        &mut self,
+        declaration: DeclId,
+        scope: &AnonymousLexicalClassScope,
+    ) {
+        self.lexical_class_context.clear();
+        self.exact_anonymous_class_roots.clear();
+        for (index, candidate) in scope.declaration_chain(declaration).into_iter().enumerate() {
+            if let Decl::Class(class) = self.file.decl(candidate) {
+                if let Some(internal) = self
+                    .syms
+                    .classes
+                    .get(&class.name)
+                    .map(ClassSig::internal_name)
+                {
+                    // The current declaration already enters through `this_labels`; only structural
+                    // owners belong in the supplemental context. Anonymous roots at either position
+                    // stay exact so a `$` in their generated name never invents another source owner.
+                    if index > 0 {
+                        self.lexical_class_context.push(internal);
+                    }
+                    if scope.declarations.contains(&candidate) {
+                        self.exact_anonymous_class_roots.insert(internal);
+                    }
+                }
+            }
+        }
     }
 
     fn source_package_name(&self) -> TypeName {
@@ -20719,6 +21036,25 @@ impl<'a> Checker<'a> {
         });
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
+        // A SEMANTIC-PROVIDER member's lambda shape (`re?.replace(s) { m -> m.value }`). The
+        // providers above answer source members and extensions only, so a `?.` call to a library
+        // member whose parameter is a function type or a Java SAM interface left its lambda
+        // unshaped and the parameters typed as `Any` — one `?` away from what the qualified path
+        // already does. Callable precedence is a WHOLE-CALL decision: once a source member or an
+        // extension supplies a shape, never fill an empty slot from a different provider candidate.
+        // This is the qualified path's rule too and keeps two-lambda calls from combining
+        // expectations belonging to callables that cannot both be selected.
+        let provider_member_expectations = (module_shape.is_none() && shape.is_none()).then(|| {
+            self.provider_member_lambda_expectations(
+                call,
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                args,
+                &partial,
+                explicit_type_args,
+            )
+        });
+        let provider_member_expectations = provider_member_expectations.flatten();
         args.iter()
             .enumerate()
             .map(|(i, &x)| {
@@ -20773,7 +21109,19 @@ impl<'a> Checker<'a> {
                             self.check_lambda_with_types(x, pt)
                         }
                     }
-                    _ => partial[i].unwrap_or_else(|| self.expr(x)),
+                    _ => {
+                        match provider_member_expectations
+                            .as_ref()
+                            .and_then(|all| all.get(i))
+                            .and_then(Option::as_ref)
+                        {
+                            Some(expectation) => {
+                                let expectation = expectation.clone();
+                                self.check_lambda_with_expectation(x, &expectation, Some(name))
+                            }
+                            None => partial[i].unwrap_or_else(|| self.expr(x)),
+                        }
+                    }
                 }
             })
             .collect()
@@ -21725,7 +22073,8 @@ impl<'a> Checker<'a> {
                 .selected_source_extension(at, "get", &index_kinds)
                 .filter(|(_, signature)| signature.is_operator())
             {
-                let requires_splice = self.source_extension_requires_splice(&selected);
+                let inline = selected.flags.inline;
+                let suspend = selected.flags.suspend;
                 for (i, &pt) in sig.params.iter().enumerate() {
                     self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                 }
@@ -21749,7 +22098,8 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
-                        requires_splice,
+                        inline,
+                        suspend,
                     },
                 );
                 return self.set(e, sig.ret);
@@ -22345,7 +22695,7 @@ impl<'a> Checker<'a> {
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
-                        } else if let Ty::Obj(internal, _) = recv {
+                        } else if let Ty::Obj(_, _) = recv {
                             // Source members take precedence over extensions and classpath members.
                             let arg_names = self.file.call_arg_names.get(&e.0).cloned();
                             let full_arg_tys =
@@ -22401,23 +22751,25 @@ impl<'a> Checker<'a> {
                                     if labelled {
                                         return None;
                                     }
-                                    self.resolve_instance_name(internal, &name, &arg_tys)
-                                        .map(|m| {
-                                            let ret = m.ret;
-                                            let suspend = m.suspend();
-                                            self.resolved_calls.insert(
-                                                e,
-                                                ResolvedCall::Member(
-                                                    crate::symbol_resolver::ResolvedMember {
-                                                        member: m,
-                                                        ret,
-                                                        projected_return_hazard: false,
-                                                        suspend,
-                                                    },
-                                                ),
-                                            );
-                                            ret
-                                        })
+                                    // Reuse the qualified path's VALUE-receiver resolver. Besides
+                                    // carrying lambda/integer-literal provenance for SAM conversion,
+                                    // it preserves the complete semantic receiver and returns the
+                                    // canonical `ResolvedMember`; resolving by bare class name here
+                                    // would create a second selection path and duplicate selected-
+                                    // member reconstruction below the common resolver.
+                                    let arg_kinds: Vec<CallArgKind> = a
+                                        .iter()
+                                        .zip(&arg_tys)
+                                        .map(|(&x, &ty)| call_arg_kind(self.file, x, ty))
+                                        .collect();
+                                    self.resolve_instance_member_with_literal_and_lambda_args(
+                                        recv, &name, &arg_kinds,
+                                    )
+                                    .map(|member| {
+                                        let ret = member.ret;
+                                        self.resolved_calls.insert(e, ResolvedCall::Member(member));
+                                        ret
+                                    })
                                 })
                                 .or_else(|| {
                                     self.check_member_extension_function_call(
@@ -22551,7 +22903,7 @@ impl<'a> Checker<'a> {
             // stay a silent `Ty::Error` so the backend bail reports the gap honestly.
             if result == Ty::Error
                 && self.diags.diags.len() == checkpoint
-                && !self.member_name_exists_on(rt.non_null(), &name, &member_arg_tys)
+                && !self.member_name_exists_on(rt.non_null(), &name)
             {
                 self.diags.error(
                     self.member_name_span(e, &name),
@@ -22968,7 +23320,8 @@ impl<'a> Checker<'a> {
                     .selected_source_extension(lt, "compareTo", &rhs_kind)
                     .filter(|(_, signature)| signature.is_operator() && signature.ret == Ty::Int)
                 {
-                    let requires_splice = self.source_extension_requires_splice(&selected);
+                    let inline = selected.flags.inline;
+                    let suspend = selected.flags.suspend;
                     let Some(param) = signature.single_param() else {
                         return self.check_binary(op, lt, rt, self.span(e));
                     };
@@ -22991,7 +23344,8 @@ impl<'a> Checker<'a> {
                             owner,
                             source: selected.source_key,
                             vararg: selected.call_sig.vararg,
-                            requires_splice,
+                            inline,
+                            suspend,
                         },
                     );
                     return self.set(e, Ty::Boolean);
@@ -24169,7 +24523,8 @@ impl<'a> Checker<'a> {
         arg_kinds: &[CallArgKind],
     ) -> Option<Ty> {
         let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
-        let requires_splice = self.source_extension_requires_splice(&selected);
+        let inline = selected.flags.inline;
+        let suspend = selected.flags.suspend;
         // Validate against the resolver's instantiated value parameters, not the declaration's
         // potentially generic signature. This is the contract the former qualified-call block used;
         // retaining it here prevents helper reuse from accepting a safe call that selected a generic
@@ -24205,7 +24560,8 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
-                requires_splice,
+                inline,
+                suspend,
             },
         );
         // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
@@ -25564,7 +25920,8 @@ impl<'a> Checker<'a> {
             );
         }
         if matches!(fi.callable.origin, Origin::Module { .. }) {
-            let requires_splice = self.source_extension_requires_splice(&fi);
+            let inline = fi.flags.inline;
+            let suspend = fi.flags.suspend;
             let (file, declaration) = fi.source_key?;
             let (_, signature) = self
                 .syms
@@ -25592,7 +25949,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
-                    requires_splice,
+                    inline,
+                    suspend,
                 },
             );
             self.resolved_call_arg_slots.insert(call, slots);
@@ -27336,6 +27694,11 @@ impl<'a> Checker<'a> {
                 argument_parameters: instantiated.argument_parameters,
                 visibility: shape.function.signature.visibility,
                 is_operator: shape.is_operator,
+                inline: InlineKind::from_flags(
+                    shape.function.signature.is_inline(),
+                    shape.function.signature.requires_splice(),
+                ),
+                suspend: shape.function.signature.is_suspend(),
                 owner: shape.owner,
             });
         }
@@ -27668,7 +28031,7 @@ impl<'a> Checker<'a> {
     ///
     /// Shared by the qualified arm's nullable-receiver probe and the safe-call arm's unresolved-member
     /// report so both agree about what exists. Side-effect free: it reports nothing itself.
-    fn member_name_exists_on(&self, recv: Ty, name: &str, arg_tys: &[Ty]) -> bool {
+    fn member_name_exists_on(&self, recv: Ty, name: &str) -> bool {
         self.resolver()
             .resolve_symbol(
                 crate::symbol_resolver::SymRecv::Value(recv),
@@ -27678,9 +28041,15 @@ impl<'a> Checker<'a> {
             )
             .map(crate::symbol_resolver::Symbol::overloads)
             .is_some_and(|overloads| !overloads.is_empty())
-            || (recv == Ty::String && builtin_string_member_ret(name, arg_tys).is_some())
+            // Existence deliberately ignores applicability. Keep the fallback's names and selectable
+            // shapes in one table, but do not call an existing `substring` "unresolved" merely because
+            // this invocation has the wrong arity/type and the no-classpath checker cannot select it.
+            || (recv == Ty::String && builtin_string_member_exists(name))
             || (name == CALLABLE_INVOKE_OPERATOR && matches!(recv, Ty::Fun(_)))
-            || (name == "equals" && arg_tys.len() == 1 && recv.is_reference())
+            // Kotlin's universal names exist independently of the invocation shape. Primitive and
+            // `Nothing` receivers still inherit these semantic names even when this checker arm cannot
+            // select a wrong-arity spelling; applicability must not leak back into typo detection.
+            || matches!(name, "toString" | "hashCode" | "equals")
             // A callable PROPERTY (`val f: () -> Int`) is invoked with the same spelling.
             || self.probe_property_read(recv, name).is_some()
     }
@@ -29653,10 +30022,21 @@ impl<'a> Checker<'a> {
                             .is_none_or(|t| internal.qualifier_matches(t))
                     };
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        let sup = self
-                            .syms
-                            .class_by_type_name(internal)
-                            .and_then(|c| c.super_internal);
+                        let declared = self.syms.class_by_type_name(internal);
+                        let sup = declared.and_then(|c| c.super_internal);
+                        // The base spelled WITH its declared type arguments (`ArrayList<Int>`) — a
+                        // classpath member query is receiver-coupled, so these are what recover a
+                        // generic return (`removeAt(i): E` → `Int`) instead of erasing it to `Any`.
+                        let applied_sup = sup.map(|s| {
+                            let args = declared
+                                .map(|c| c.super_type_args.clone())
+                                .unwrap_or_default();
+                            if args.is_empty() {
+                                Ty::obj_name(s)
+                            } else {
+                                Ty::obj_args_name(s, &args)
+                            }
+                        });
                         if let Some(sup) = sup.filter(|s| matches_qual(*s)) {
                             // A user base-class method.
                             if let Some((owner, sig)) = self
@@ -29667,31 +30047,23 @@ impl<'a> Checker<'a> {
                                 self.expect_call_args(&sig.params, false, args, &arg_tys);
                                 self.resolved_super_calls.insert(
                                     call,
-                                    ResolvedSuperCall {
+                                    ResolvedSuperCall::Source {
                                         owner,
                                         interface: false,
                                         params: sig.params.clone(),
                                         ret: sig.ret,
-                                        descriptor: None,
                                     },
                                 );
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            if let Some(m) =
-                                self.resolve_super_instance_name(sup, &name, &arg_kinds)
-                            {
-                                self.resolved_super_calls.insert(
-                                    call,
-                                    ResolvedSuperCall {
-                                        owner: sup,
-                                        interface: false,
-                                        params: m.params.clone(),
-                                        ret: m.ret,
-                                        descriptor: Some(m.descriptor.clone()),
-                                    },
-                                );
-                                return m.ret;
+                            if let Some(m) = applied_sup.and_then(|recv| {
+                                self.resolve_super_instance_ty(recv, &name, &arg_kinds)
+                            }) {
+                                let ret = m.ret;
+                                self.resolved_super_calls
+                                    .insert(call, ResolvedSuperCall::Classpath(Box::new(m)));
+                                return ret;
                             }
                         }
                         // An INTERFACE DEFAULT method: a class `C : I` with `super.foo()` dispatches to
@@ -29713,12 +30085,11 @@ impl<'a> Checker<'a> {
                             self.expect_call_args(&sig.params, false, args, &arg_tys);
                             self.resolved_super_calls.insert(
                                 call,
-                                ResolvedSuperCall {
+                                ResolvedSuperCall::Source {
                                     owner: *iface,
                                     interface: true,
                                     params: sig.params.clone(),
                                     ret: sig.ret,
-                                    descriptor: None,
                                 },
                             );
                             return sig.ret;
@@ -30745,8 +31116,8 @@ impl<'a> Checker<'a> {
                         }
                         _ => false,
                     };
-                    let exists_on_non_null = self.member_name_exists_on(non_null, &name, &arg_tys)
-                        || callable_property_exists;
+                    let exists_on_non_null =
+                        self.member_name_exists_on(non_null, &name) || callable_property_exists;
                     if exists_on_non_null {
                         self.report_nullable_receiver_call(call, rt);
                         return Ty::Error;
@@ -34970,6 +35341,25 @@ val result = object { fun value(): String = captured }
     }
 
     #[test]
+    fn anonymous_object_records_its_lexical_source_class_owner() {
+        let source = "open class Base(value: Any)\n\
+                      class Outer {\n\
+                      \u{20} fun build() = object : Base(Inner()) {}\n\
+                      \u{20} private inner class Inner\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let scope = anonymous_lexical_class_scope(&file);
+        let (&anonymous, &owner) = scope.owners.iter().next().expect("anonymous owner");
+        assert!(file
+            .anonymous_object_classes
+            .values()
+            .any(|id| *id == anonymous));
+        assert!(matches!(file.decl(owner), Decl::Class(class) if class.name == "Outer"));
+    }
+
+    #[test]
     fn nested_class_outer_label_uses_the_simple_declaration_name() {
         let (errors, _) = check(
             "class Outer {\n\
@@ -35314,7 +35704,7 @@ class Child : Base() {
         let mut targets = info
             .resolved_super_calls
             .values()
-            .map(|target| (target.owner.render(), target.params.clone()))
+            .filter_map(|target| Some((target.owner()?.render(), target.params().to_vec())))
             .collect::<Vec<_>>();
         targets.sort_by_key(|(_, params)| format!("{params:?}"));
         assert_eq!(
@@ -35640,8 +36030,8 @@ class Child : Middle() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Base");
-        assert_eq!(target.params, vec![Ty::Int]);
+        assert_eq!(target.owner().map(|o| o.render()).as_deref(), Some("Base"));
+        assert_eq!(target.params(), vec![Ty::Int]);
     }
 
     #[test]
@@ -35679,8 +36069,8 @@ class Child : Base() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Grand");
-        assert_eq!(target.params, vec![Ty::Int]);
+        assert_eq!(target.owner().map(|o| o.render()).as_deref(), Some("Grand"));
+        assert_eq!(target.params(), vec![Ty::Int]);
     }
 
     #[test]

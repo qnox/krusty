@@ -1554,9 +1554,13 @@ impl ClassWriter {
                     // HotSpot's class-file parser rejects the whole class otherwise. A local DECLARED
                     // in a region the emitter dropped as unreachable (`val y: Int = boom() ?: 1`) has
                     // its start recorded past the last instruction and describes no live range, so it
-                    // goes with the code. Checked against the FINAL length, so a live local recorded
-                    // at the then-current end is kept.
-                    .filter(|(start, ..)| (*start as usize) < code.bytes.len())
+                    // goes with the code. A later live branch target can grow the method past that
+                    // offset, so also discard a zero-length entry: its initializing store and entire
+                    // source range were dropped even though `start_pc` now happens to index resumed
+                    // code. This keeps debug metadata tied to emitted ranges, never offset coincidence.
+                    .filter(|(start, len, ..)| {
+                        (*start as usize) < code.bytes.len() && *len != Some(0)
+                    })
                     .map(|(start, len, slot, nm, ds)| {
                         (
                             self.cp.utf8(nm),
@@ -3415,5 +3419,41 @@ mod tests {
         code.iadd(); // -1 => 1
         code.ireturn();
         assert_eq!(code.max_stack, 2);
+    }
+
+    #[test]
+    fn dead_emission_revives_only_at_an_emitted_branch_target() {
+        let mut cw = ClassWriter::new("Scratch", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        let live = code.new_label();
+        let dead_only = code.new_label();
+
+        code.goto(live);
+        let terminator_end = code.bytes.len();
+        code.push_int(7, &mut cw);
+        code.ifeq(dead_only); // dropped, so it records no arrival edge
+        code.bind(dead_only);
+        code.push_int(8, &mut cw);
+        assert_eq!(code.bytes.len(), terminator_end);
+
+        code.bind(live); // the emitted `goto` proves arrival here
+        code.ret_void();
+        assert_eq!(code.bytes.last(), Some(&0xb1));
+        assert_eq!(code.bytes.len(), terminator_end + 1);
+    }
+
+    #[test]
+    fn zero_length_local_from_dropped_code_is_not_attached_to_resumed_code() {
+        let mut cw = ClassWriter::new("DeadLocalKt", "java/lang/Object");
+        let mut code = CodeBuilder::new(0);
+        let live = code.new_label();
+        code.goto(live);
+        let dropped_start = code.bytes.len() as u16;
+        code.add_local_entry(dropped_start, Some(0), 0, "dropped", "I");
+        code.bind(live);
+        code.ret_void();
+
+        cw.add_method(ACC_PUBLIC | ACC_STATIC, "m", "()V", &code);
+        assert!(cw.methods[0].lvt.is_empty());
     }
 }

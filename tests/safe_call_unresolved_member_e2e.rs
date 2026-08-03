@@ -123,6 +123,9 @@ fn unselectable_but_existing_members_are_not_called_unresolved() {
     // `Ty::Error` stands and the backend reports the gap.
     assert_accepted("fun f(s: String?): Any? = s?.let(1)\n");
     assert_accepted("fun f(s: String?): Any? = s?.substring(9, 9, 9)\n");
+    assert_accepted("fun f(i: Int?): Any? = i?.toString(1)\n");
+    assert_accepted("fun f(i: Int?): Any? = i?.hashCode(1)\n");
+    assert_accepted("fun f(i: Int?): Any? = i?.equals()\n");
 }
 
 /// The classpath-less `String` table stands in for stdlib EXTENSIONS (`kotlin.String` has no
@@ -139,6 +142,24 @@ fn user_string_extension_outranks_the_classpath_less_table() {
     assert!(
         d.is_empty(),
         "the source extension must win over the builtin `concat` table, got {d:?}"
+    );
+}
+
+/// The no-classpath fallback's NAME still exists when this particular invocation cannot select one
+/// of its recorded shapes. Existence and applicability are separate questions: this compiler may
+/// lack the overload diagnostic, but it must not claim that `substring` itself is unresolved.
+#[test]
+fn classpath_less_string_overload_mismatch_is_not_called_unresolved() {
+    let diagnostics = common::front_end_diagnostics(
+        "fun f(s: String?): Any? = s?.substring(9, 9, 9)\n",
+        &[],
+        None,
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|message| !message.contains("unresolved reference 'substring'.")),
+        "an existing fallback name must not be reported unresolved: {diagnostics:?}"
     );
 }
 
