@@ -2482,6 +2482,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nothing rules the builder out. Tests:
   `tests/scope_function_value_arg_e2e.rs::apply_accepts_receiver_function_value_argument`,
   `tests/lower_bail_reason_e2e.rs::gated_corpus_cases_report_precise_lower_bail`.
+- **A typealias keeps its target's type ARGUMENTS.** The parser recorded only the target's head name
+  and skipped the rest of the line, so `typealias IntList = List<Int>` aliased a RAW `List` and
+  `for (x in xs)` handed back the erased bound ("operator cannot be applied to 'Int' and 'Any'"). An
+  alias whose target carries type arguments now expands STRUCTURALLY, through the same pass and
+  use-site substitution the function-type aliases already used (`typealias Table<V> = Map<String, V>`
+  → `Table<Int>` is `Map<String, Int>`). A bare `typealias A = Foo` keeps the name map, which the
+  constructor-alias registration and classifier lookups are keyed by. Tests:
+  `tests/feature_coverage_r_e2e.rs::typealias_in_signatures_and_bodies`,
+  `tests/feature_coverage_x_e2e.rs::typealias_function_and_generic`.
 
 ## 8. Success criteria for the PoC
 
@@ -3442,3 +3451,81 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `definitely_non_null_type_e2e::generic_function_constructor_still_requires_a_function_argument`
   and
   `definitely_non_null_type_e2e::concrete_secondary_beats_an_incompatible_generic_function_primary`.
+
+- **A companion object's `private` members are in scope throughout the containing class.** Member
+  access is decided on the LEXICAL enclosing chain, not the receiver chain — a nested (non-`inner`)
+  class has no outer receiver at all, yet sits inside its outer class's body. On top of that, a member
+  declared `private` inside `companion object` is reachable from the containing class's body and from
+  every class nested inside it, at any depth (`C.ZZZ`, `C.ZZZ.Deep`), because a companion's members
+  belong to the containing class's scope. That downward reach is the COMPANION's alone: a sibling
+  nested class's own `private` member stays out of reach in both directions (`C.ZZZ` cannot read
+  `C.Inner`'s private member, nor can the companion), and an unrelated top-level class still cannot
+  reach the companion's private member. Tests:
+  `resolve::tests::private_companion_member_reaches_the_containing_class_body`,
+  `companion_e2e::property_inferred_from_generic_companion_method`.
+
+- **A field-less `companion object` property is its accessors.** `companion object { val ZERO: T get()
+  = … }` has no static field anywhere: it lowers to `getZERO()` (plus `setX(T)` for a `var` with a
+  bodied setter) on the synthesized `C$Companion`, exactly as kotlinc emits it, and `C.ZERO` /
+  `C.LEVEL = v` compile to `getstatic C.Companion; invokevirtual`. Declaring the accessors beside the
+  companion's own methods gives them the same name mangling a companion method already gets, so a
+  value-class-typed accessor emits kotlinc's spelling (`getZERO-dNj3LFw()I`). The property type comes
+  from the declared type, or is inferred from an expression getter body the way an initializer would
+  be. Accessor bodies are type-checked like any other body — without that the setter's parameter had
+  no type. Because there is no field, EVERY read routes through the accessor, not only the qualified
+  `C.X` form: an unqualified read from an instance method, from a companion method, or from a member
+  initializer goes through the same getter (they are the reads the checker records as static-field
+  reads, so one choke point covers them). Every OTHER accessor shape on a companion property — a
+  getter reading `field`, a visibility-only `private set`, a `var` whose custom setter is `private`
+  (the synthesized `setX` is unconditionally public, so accepting one would allow a write kotlinc
+  rejects), an accessor on a `const` or delegated property — would still be emitted as the default
+  static accessor with the body ignored, so those stay rejected. An unqualified WRITE to such a
+  property is still an unresolved reference, as it was before. Tests:
+  `companion_e2e::companion_property_custom_accessors_run`,
+  `companion_e2e::computed_companion_property_reads_outside_a_qualified_receiver`,
+  `feature_coverage_q_e2e::value_class_companion_function`.
+
+- **`@JvmName` on a top-level function names the emitted method, and decides the clash.** The
+  annotation's constant string is the bytecode method name; call sites still resolve by the SOURCE
+  name, and each emits the annotated spelling — a same-file call and a callable reference through the
+  resolved function's own name, a CROSS-file call through a module-wide table keyed by declaration,
+  since that caller cannot see the callee's AST. A callable reference keeps the Kotlin name for
+  reflection and targets the JVM name for its invoke. Scope: top-level FUNCTIONS with a constant
+  string argument. A top-level EXTENSION is not renamed (nor is its clash key), and a non-literal
+  argument falls back to the source name — both are ABI divergences from kotlinc, not miscompiles.
+  Because a platform
+  declaration clash is a statement about JVM signatures, the top-level overload-conflict key uses the
+  emitted name rather than the source name: `fun g(x: String)` and `fun g(x: String?)` erase to one
+  descriptor and conflict while both are spelled `g`, but not once `@JvmName("gNullable")` separates
+  them — and, in the other direction, two distinct source names collapsed onto one `@JvmName` DO
+  conflict. Overload selection is unaffected; it still keys on the source name. Tests:
+  `frontend::tests::jvm_name_decides_the_top_level_clash`,
+  `jvm_name_toplevel_e2e::jvm_name_is_emitted_for_every_call_path`,
+  `resolve_parse_deep_coverage_e2e::overload_by_nullability`.
+
+- **A property reference carries its type arguments.** `::p` / `obj::p` is `KProperty0<V>` (or
+  `KMutableProperty0<V>`) and `Type::p` is `KProperty1<T, V>`, not the raw class — so `get()` reports
+  the property's own type and a member read on the result (`p.get().value`) resolves. Every reference
+  form supplies them: top-level, implicit-`this`, bound member, bound extension, unbound member,
+  unbound extension, object, and classpath. The arguments are semantic only; emission is unchanged
+  (annotating the result with its type already compiled before this). A reference whose arguments
+  cannot be determined stays raw rather than binding a wrong type, and so does one whose property
+  type the reference lowering cannot realize — a VALUE-class-typed property, whose accessor is
+  mangled (`getZ-<hash>`) and which the synthesized reference class does not spell (both flavours
+  count: a source `@JvmInline` class and a CLASSPATH one such as `UInt`, which is why the test asks
+  the provider as well as the source table), or a property
+  typed as a function WITH a receiver or context parameters, which is not realized as a plain
+  `FunctionN` there. Keeping the checker in lock-step with the lowerer that way leaves those cases
+  as clean skips instead of a `NoSuchMethodError`/`ClassCastException` at run time. Tests:
+  `mutable_property_ref_e2e::property_reference_get_reports_the_property_type`,
+  `toplevel_property_ref_e2e::toplevel_property_refs_run`.
+
+- **Compiler-realized property reads are one list, shared by checking and signature inference.**
+  `"s".length`, `c.code`, and an array's `size` are realized directly rather than through a declared
+  getter — `Char.code` in particular resolves through no getter at all, since `Char` is a primitive
+  and `code` is a stdlib extension. The checker and the signature-phase initializer inference read
+  the same `intrinsic_property_read` list, so a top-level `const val code = a.code` infers `Int`
+  instead of reporting "cannot infer the type of property"; before, the identical read type-checked
+  inside a function body or under an explicit type annotation but not when a top-level property's
+  type had to be inferred from it. Test:
+  `toplevel_property_inference_e2e::toplevel_property_cross_reference`.

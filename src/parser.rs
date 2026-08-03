@@ -1363,23 +1363,39 @@ impl<'a> Parser<'a> {
                             t.name.clone()
                         }
                     } else if self.at(TokenKind::Ident) {
-                        let mut name = self.text().to_string();
-                        self.bump();
-                        while self.at(TokenKind::Dot) {
-                            self.bump();
-                            if self.at(TokenKind::Ident) {
-                                name.push('.');
-                                name.push_str(self.text());
-                                self.bump();
-                            } else {
-                                break;
+                        // Parse the target as a full type — a dotted FQN and its type ARGUMENTS alike.
+                        // Discarding the arguments made `typealias IntList = List<Int>` an alias for a
+                        // raw `List`, so `for (x in xs)` handed back the erased bound.
+                        let t = self.parse_type();
+                        let tparam_names: Option<Vec<String>> = alias_targs
+                            .iter()
+                            .map(|a| {
+                                (a.fun_params.is_empty()
+                                    && a.targs.is_empty()
+                                    && !a.name.is_empty()
+                                    && a.name != "<fun>"
+                                    && a.name != "*")
+                                    .then(|| a.name.clone())
+                            })
+                            .collect();
+                        // An alias whose target carries type arguments expands STRUCTURALLY, through
+                        // the same pass and substitution the function-type aliases use. A bare
+                        // `typealias A = Foo` keeps the name map, which the constructor-alias
+                        // registration and the classifier lookups are keyed by.
+                        if let Some(tparam_names) = tparam_names {
+                            if !alias.is_empty() && !t.targs.is_empty() {
+                                self.file.type_alias_fun.push((
+                                    alias.clone(),
+                                    tparam_names,
+                                    t.clone(),
+                                ));
                             }
                         }
-                        // Skip any remaining tokens on this line (e.g. generic args).
+                        // Skip any remaining tokens on this line.
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
                         }
-                        name
+                        t.name.clone()
                     } else {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
@@ -2709,7 +2725,7 @@ impl<'a> Parser<'a> {
         // Annotations consumed by `skip_decl_prefix` before this function, attached here (mirrors how
         // classes take them) so function-annotation plugins can see them; otherwise they are discarded.
         let annotations = self.take_pending_annotations();
-        let _ = self.take_pending_annotation_args(); // a function decl doesn't carry annotation args yet
+        let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
@@ -2745,6 +2761,7 @@ impl<'a> Parser<'a> {
                 flags: FdFlags::default(),
                 visibility: Visibility::Public,
                 annotations,
+                annotation_args,
                 decl_line: 0, // filled by the parser post-pass
                 body_close_line: 0,
             };
@@ -2820,6 +2837,7 @@ impl<'a> Parser<'a> {
                 .with_is_tailrec(is_tailrec),
             visibility: Visibility::Public,
             annotations,
+            annotation_args,
             decl_line: 0, // filled by the parser post-pass
             body_close_line: 0,
         }
