@@ -22878,6 +22878,22 @@ impl<'a> Checker<'a> {
                         return self.set(e, Ty::Boolean);
                     }
                 }
+                // A source `enum class` compares through the `compareTo` it INHERITS from
+                // `java.lang.Enum`, which no member lookup on the enum itself reports. Resolve it on
+                // the supertype instead — the parameter is the erased `Enum`, so lowering casts the
+                // right operand to it, exactly as kotlinc does.
+                if lt == rt && self.is_enum_type(lt) {
+                    let enum_ty = Ty::obj_name(crate::types::wk::java_enum());
+                    if let Some(member) =
+                        self.resolve_instance_member(enum_ty, "compareTo", &[enum_ty])
+                    {
+                        if member.ret == Ty::Int {
+                            crate::trace_compiler!("resolve", "enum compareTo drives comparison");
+                            self.resolved_calls.insert(e, ResolvedCall::Member(member));
+                            return self.set(e, Ty::Boolean);
+                        }
+                    }
+                }
             }
             self.check_binary(op, lt, rt, self.span(e))
         };

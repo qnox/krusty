@@ -316,6 +316,7 @@ pub mod wk {
         continuation => "kotlin/coroutines/Continuation",
         any => "kotlin/Any",
         java_object => "java/lang/Object",
+        java_enum => "java/lang/Enum",
     }
 }
 

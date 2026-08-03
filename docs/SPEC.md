@@ -2228,9 +2228,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   primitive argument would need a box this path doesn't apply. Test:
   `tests/feature_coverage_v_e2e.rs::string_chunked_and_compare`.
 
-  Still open: a source `enum class`, whose `compareTo` is inherited from `java.lang.Enum` rather than
-  declared or reachable through the library set. kotlinc emits `checkcast java/lang/Enum` then
-  `invokevirtual <E>.compareTo(Ljava/lang/Enum;)I`.
+  A source `enum class` compares the same way, through the `compareTo` it INHERITS from
+  `java.lang.Enum` — which no member lookup on the enum itself reports, so it is resolved on the
+  SUPERTYPE. The parameter is the erased `Enum`, so the right operand is cast to it. krusty emits
+  `invokevirtual java/lang/Enum.compareTo(Ljava/lang/Enum;)I` where kotlinc emits a `checkcast` plus
+  `invokevirtual <E>.compareTo(Ljava/lang/Enum;)I`; both dispatch to the same method, and this matches
+  what krusty already emitted for an EXPLICIT `a.compareTo(b)` on an enum. Test:
+  `tests/feature_coverage_r_e2e.rs::enum_comparison_ordering`.
 
 ## 8. Success criteria for the PoC
 
