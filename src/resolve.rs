@@ -456,7 +456,8 @@ pub enum CtorDefaultValue {
     Double(f64),
     Float(f32),
     Bool(bool),
-    Char(char),
+    /// A UTF-16 code unit, matching `ast::Expr::CharLit` / `IrConst::Char`.
+    Char(u16),
     Str(String),
     Null,
     /// An `object` singleton default (`= EmptyCoroutineContext`) — read as `getstatic <internal>.INSTANCE`.

@@ -100,7 +100,10 @@ pub enum IrConst {
     Long(i64),
     Float(f32),
     Double(f64),
-    Char(char),
+    /// A Kotlin `Char` — one UTF-16 code UNIT, not a code point. Lone surrogates (D800..DFFF) are
+    /// legal `Char` values (`Char.MIN_HIGH_SURROGATE`), so this cannot be a Rust `char`: converting
+    /// through `char::from_u32` rejects them and silently folds them to NUL.
+    Char(u16),
     String(String),
     Null,
 }
@@ -115,7 +118,7 @@ impl IrConst {
             Ty::Long | Ty::ULong => IrConst::Long(0),
             Ty::Float => IrConst::Float(0.0),
             Ty::Double => IrConst::Double(0.0),
-            Ty::Char => IrConst::Char('\0'),
+            Ty::Char => IrConst::Char(0),
             _ => IrConst::Null,
         }
     }

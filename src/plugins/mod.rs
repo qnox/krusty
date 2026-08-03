@@ -229,7 +229,7 @@ impl<'a> PluginContext<'a> {
             .iter()
             .position(|a| annotation_simple_name(a) == annotation)?;
         let arg = p.annotation_args.get(i).and_then(|args| args.first())?;
-        const_string_value(file, *arg)
+        file.const_string_value(*arg)
     }
 
     pub fn property_has_annotation_simple(
@@ -352,50 +352,6 @@ fn canonical_type_name(file: &crate::ast::File, name: &str) -> String {
         .iter()
         .find_map(|(a, t)| (a == name).then(|| t.clone()))
         .unwrap_or_else(|| name.to_string())
-}
-
-fn const_string_value(file: &crate::ast::File, e: crate::ast::ExprId) -> Option<String> {
-    const_string_value_d(file, e, 0)
-}
-
-fn const_string_value_d(
-    file: &crate::ast::File,
-    e: crate::ast::ExprId,
-    depth: u32,
-) -> Option<String> {
-    if depth > 32 {
-        return None;
-    }
-    match file.expr(e) {
-        crate::ast::Expr::StringLit(s) => Some(s.clone()),
-        crate::ast::Expr::CharLit(c) => Some(c.to_string()),
-        crate::ast::Expr::Name(n) => top_level_const_string_d(file, n, depth + 1),
-        crate::ast::Expr::Template(parts) => {
-            let mut out = String::new();
-            for p in parts {
-                match p {
-                    crate::ast::TemplatePart::Str(s) => out.push_str(s),
-                    crate::ast::TemplatePart::Expr(x) => {
-                        out.push_str(&const_string_value_d(file, *x, depth + 1)?)
-                    }
-                }
-            }
-            Some(out)
-        }
-        _ => None,
-    }
-}
-
-fn top_level_const_string_d(file: &crate::ast::File, name: &str, depth: u32) -> Option<String> {
-    if depth > 32 {
-        return None;
-    }
-    file.decls.iter().find_map(|&d| match file.decl(d) {
-        crate::ast::Decl::Property(p) if p.name == name => p
-            .init
-            .and_then(|i| const_string_value_d(file, i, depth + 1)),
-        _ => None,
-    })
 }
 
 fn no_target_type_descriptor(_ty: Ty) -> Option<String> {

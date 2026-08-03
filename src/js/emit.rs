@@ -253,7 +253,9 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             IrConst::Byte(v) => v.to_string(),
             IrConst::Float(v) => v.to_string(),
             IrConst::Double(v) => v.to_string(),
-            IrConst::Char(c) => format!("{:?}", c),
+            // A `Char` is a UTF-16 code unit; `\uXXXX` reproduces it exactly (JS strings admit lone
+            // surrogates, so no code-point round-trip is needed).
+            IrConst::Char(c) => format!("'\\u{c:04X}'"),
             IrConst::String(s) => js_string(s),
             IrConst::Null => "null".to_string(),
         },
