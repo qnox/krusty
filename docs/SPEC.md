@@ -1602,14 +1602,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   supplies the builtin's formals + argument-carrying supertypes where a class `Signature` normally would.
   Together these let the member walk bind a type-parameter return against the receiver's type arguments
   (`List<String>.get(1): String`) with NO JDK on the classpath — the `.kotlin_builtins` fallback
-  configuration, where the mapped JVM class (`java/util/List`) is absent. Scope: this makes the fallback
-  correct for RESOLUTION and type-checking (the LSP/analysis use). Its CODEGEN is separately broken and
-  predates this — with no `.class` to read accessors off, a builtin property read emits the JavaBean
-  getter (`getSize`/`getEntries`) instead of the `java.util` name, and a member descriptor keeps the
-  bound type argument. Do not treat a no-JDK compile's bytecode as loadable. Tests:
+  configuration, where the mapped JVM class (`java/util/List`) is absent. Tests:
   `tests/metadata_return_types.rs` (`builtins_decode_type_parameters_and_arguments`,
   `builtin_generic_member_binds_receiver_argument_without_jdk`,
   `builtin_generic_members_type_check_without_jdk`).
+- **A JDK-less compile EMITS the same bytecode a JDK-present one does.** Every realization fact the
+  backend normally reads off the mapped JVM class file — interface-ness, the physical accessor name,
+  the erased descriptor — is also carried by the builtin's own `.kotlin_builtins` entry, so the absence
+  of `java/util/List.class` changes what the compiler READS, never what it emits. Three facts have to
+  survive that route, and each was independently lost before:
+  - **Interface dispatch.** `Classpath::builtin_members_name` takes interface-ness from the builtin's
+    `CLASS_KIND`, but a `LibraryMember` round-trips through `FunctionInfo`/`LibraryCallable` during
+    overload selection, which dropped the bit — so the call site fell back to
+    `library_type_is_interface(owner)`, which cannot answer for an absent `java/util/List`.
+    `LibraryCallable::owner_is_interface` now carries it and `FunctionInfo::member_with_return`
+    restores it, the same way `suspend` travels with the selected overload.
+  - **The physical accessor name.** A property read asks `MethodBodies::property_read_access` for the
+    owner's declared accessor; with no class file that returned `None` and the backend invented the
+    JavaBean getter (`getSize`, `getEntries`). `Classpath::property_read_access` now falls back to
+    `builtin_property_read_access`, which walks the builtins supertype closure and answers with the
+    mapped `java.util` spelling (`size`, `keySet`, `entrySet`) from the same
+    `builtin_property_jvm_name` mapping the member table uses — one definition, so a call and a
+    property read of the same builtin cannot disagree.
+  - **Return erasure.** That fallback also supplies the member's OWN (already erased) descriptor, so a
+    type-parameter-typed property emits `getKey:()Ljava/lang/Object;` + `checkcast`, not a descriptor
+    rebuilt from the substituted use-site type (`getKey:()Ljava/lang/String;`, which no class declares).
+  Interface-ness for an owner with no class file likewise comes from the builtin `CLASS_KIND`
+  (`Classpath::owner_is_interface`), replacing a curated JVM-name table that omitted every `java/util/*`
+  and so answered "class" for all of them. Remaining known divergence: a reference to a NESTED builtin
+  (`java/util/Map$Entry`) does not emit the `InnerClasses` attribute, which is read off the owner's
+  class file — metadata only; the code array and constant-pool member refs match and the class loads
+  and runs. Tests: `tests/no_jdk_builtin_emit_e2e.rs` (each defect as a `box()` that is actually LOADED
+  and RUN on a JVM, plus a byte-for-byte JDK-less vs JDK-present emit comparison — a diagnostics-only
+  assertion cannot see any of this, which is how all three shipped green).
 - **`MutableList.removeAt(Int)` IS `java.util.List.remove(int)`** — the function half of kotlinc's
   `BuiltinMethodsWithDifferentJvmName`/special-builtin renaming whose property half is
   `size`/`keys`/`values`/`entries`. A call through a `MutableList` receiver emits the JVM name

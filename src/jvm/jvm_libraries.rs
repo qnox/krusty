@@ -3218,6 +3218,11 @@ impl SymbolSource for JvmLibraries {
                             inline: m.inline,
                             suspend,
                             signature: m.signature.clone(),
+                            // Whether the dispatch owner is an interface is the MEMBER's fact here.
+                            // For a mapped builtin resolved with no JDK on the classpath the JVM
+                            // owner (`java/util/List`) has no class file, so the call site cannot
+                            // recover it later — carry it on the selected callable.
+                            owner_is_interface: m.is_interface(),
                             ..LibraryCallable::library(
                                 m.owner.as_ref().cloned().unwrap_or(cn),
                                 m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
