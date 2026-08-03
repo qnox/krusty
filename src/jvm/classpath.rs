@@ -2083,8 +2083,7 @@ impl Classpath {
     pub fn builtin_nested_class(&self, jvm_internal: &str) -> Option<(String, String, u16)> {
         let (jvm_outer, simple) = jvm_internal.rsplit_once('$')?;
         let outer_id = type_name(jvm_outer);
-        let kotlin_outer = super::jvm_class_map::jvm_collection_to_kotlin_type_name(outer_id)
-            .or_else(|| super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(outer_id))?;
+        let kotlin_outer = super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(outer_id)?;
         // A `.kotlin_builtins` fragment names a nested class with a DOTTED tail on the slashed package
         // (`kotlin/collections/Map.Entry`), so the package the fragment is looked up by stays the
         // enclosing class's package.
@@ -2114,8 +2113,7 @@ impl Classpath {
         // never emits a reference to a class that does not exist at runtime.
         let jvm_owner_id = super::jvm_class_map::to_jvm_type_name(type_name(owner));
         let jvm_owner = jvm_owner_id.render();
-        let kotlin = super::jvm_class_map::jvm_collection_to_kotlin_type_name(jvm_owner_id)
-            .or_else(|| super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(jvm_owner_id))
+        let kotlin = super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(jvm_owner_id)
             .unwrap_or(jvm_owner_id);
         let mut queue = std::collections::VecDeque::from([kotlin]);
         let mut seen = std::collections::HashSet::new();
@@ -3921,12 +3919,7 @@ impl super::inline::MethodBodies for Classpath {
             .or_else(|| {
                 let owner_id = type_name(owner);
                 let kotlin =
-                    crate::jvm::jvm_class_map::jvm_collection_to_kotlin_type_name(owner_id)
-                        .or_else(|| {
-                            crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(
-                                owner_id,
-                            )
-                        })
+                    crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(owner_id)
                         .unwrap_or(owner_id);
                 self.builtin_is_interface_name(kotlin)
             })

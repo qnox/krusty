@@ -3210,7 +3210,11 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
     for cb in &classes {
         let mut cp = Pb { b: cb, i: 0 };
         let mut fq = None;
-        let mut flags = 0u64;
+        // `Class.flags` has the protobuf default PUBLIC FINAL (`6`). Keep wire-format defaulting at
+        // the decode boundary, as the ordinary `@Metadata` class reader does, so every consumer sees
+        // the semantic flag word. Treating omission as zero conflates it with an explicitly INTERNAL
+        // declaration and forces downstream JVM-specific code to guess which input it received.
+        let mut flags = 6u64;
         let mut supids: Vec<u64> = Vec::new();
         let mut types: Vec<&[u8]> = Vec::new();
         let mut funcs: Vec<&[u8]> = Vec::new();
@@ -3221,7 +3225,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
             match (tag >> 3, tag & 7) {
                 // Class.flags = 1 (varint). `CLASS_KIND` occupies bits 6..8 (after HAS_ANNOTATIONS,
                 // VISIBILITY[3], MODALITY[2]); 1 = INTERFACE.
-                (1, 0) => flags = cp.varint().unwrap_or(0),
+                (1, 0) => flags = cp.varint().unwrap_or(6),
                 (3, 0) => fq = cp.varint(),
                 (2, 2) => {
                     // supertype_id (packed) — indexes the class's type_table.
@@ -3457,10 +3461,10 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
 /// interface, exactly the `0x0609` `java/util/Map$Entry` carries.
 fn builtin_class_access(flags: u64) -> u16 {
     // VISIBILITY: 0 INTERNAL, 1 PRIVATE, 2 PROTECTED, 3 PUBLIC, 4 PRIVATE_TO_THIS, 5 LOCAL. `internal`
-    // is PUBLIC on the JVM — kotlinc mangles the NAME rather than narrowing the flag — and shares that
-    // arm, which also makes the all-zero word a `Class` message omitting `flags` decodes to (every
-    // `kotlin/*Array`, `kotlin/String`, `kotlin/Int`) land on a legal public class. `local` has no
-    // enclosing-declaration visibility to record, so it stays package-private.
+    // is PUBLIC on the JVM — kotlinc mangles the NAME rather than narrowing the flag. An omitted field
+    // has already become the protobuf default `6` at the parse boundary; zero here therefore means an
+    // explicit INTERNAL declaration, not a second encoding of omission. `local` has no enclosing-
+    // declaration visibility to record, so it stays package-private.
     let visibility = match (flags >> 1) & 0x7 {
         0 | 3 => ACC_PUBLIC,
         2 => ACC_PROTECTED,
@@ -3661,9 +3665,11 @@ mod builtin_class_access_tests {
         // `kotlin/Any` — public OPEN class. Its modality is the one that pins MODALITY at bits 4..6:
         // read one bit over and it would decode as ABSTRACT or FINAL.
         assert_eq!(builtin_class_access(0x0016), 0x0009);
-        // A `Class` message may carry no `flags` field at all (`kotlin/String`, `kotlin/Int`,
-        // `kotlin/Array` and every `kotlin/*Array` omit it), which decodes as the all-zero word. That
-        // must still land on a legal public final class, not a package-private one.
+        // The protobuf default for an omitted `Class.flags` field is PUBLIC FINAL (`6`). The parser
+        // supplies that word before this decoder runs; it must land on public static final.
+        assert_eq!(builtin_class_access(6), 0x0019);
+        // An EXPLICIT zero is INTERNAL FINAL. Internal classes are public in JVM bytecode because
+        // Kotlin enforces the visibility through metadata/name mangling rather than the ACC bits.
         assert_eq!(builtin_class_access(0), 0x0019);
     }
 }

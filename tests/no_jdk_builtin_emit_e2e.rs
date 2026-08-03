@@ -62,6 +62,27 @@ fun box(): String {
     );
 }
 
+/// The generic JVM→builtin metadata mapping covers mapped classes outside the collection-specific
+/// table too. `CharSequence.length` must therefore recover both its plain physical name (`length`, not
+/// `getLength`) and its interface dispatch bit from `kotlin/CharSequence` with no JDK class available.
+#[test]
+fn builtin_noncollection_property_read_runs_without_jdk() {
+    let src = r#"
+fun box(): String {
+    val text: CharSequence = "shape"
+    return if (text.length == 5) "OK" else "FAIL length=" + text.length
+}
+"#;
+    let Some(out) = run_no_jdk_box(src, "nojdk_noncollection_property") else {
+        eprintln!("skip: no kotlin-stdlib jar / JDK to run on");
+        return;
+    };
+    assert_eq!(
+        out, "OK",
+        "no-JDK noncollection property read returned {out:?}"
+    );
+}
+
 /// A builtin member CALL on a mapped interface owner must use `invokeinterface`. With no JDK the
 /// interface flag has to survive the resolution round trip from the `.kotlin_builtins` entry; when it
 /// is dropped the class fails to load with `IncompatibleClassChangeError`.
@@ -129,6 +150,7 @@ fun g(l: List<String>): String = l.get(0)
 fun e(l: List<String>): Boolean = l.isEmpty()
 fun i(l: List<String>): Iterator<String> = l.iterator()
 fun n(m: Map<String, Int>): String = m.entries.first().key
+fun q(s: CharSequence): Int = s.length
 "#;
     let jars = [stdlib];
     let with_jdk = common::compile_in_process(src, "cmp", &jars, Some(&jdk))

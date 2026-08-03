@@ -3451,10 +3451,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
+        // One identity table owns every Kotlin builtin and its mapped JVM face. This capability used
+        // to be inferred from three partial maps (Kotlin spelling, collection inverse, and a curated
+        // interface-name subset), so adding a mapped class could change the answer depending on which
+        // unrelated facet happened to list it.
         internal.starts_with("kotlin/")
-            || super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(internal).is_some()
-            || super::jvm_class_map::jvm_collection_to_kotlin_type_name(internal).is_some()
-            || super::jvm_class_map::jvm_mapped_builtin_is_interface_name(internal).is_some()
+            || super::jvm_class_map::type_name_to_jvm_builtin_internal(internal).is_some()
     }
 
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {

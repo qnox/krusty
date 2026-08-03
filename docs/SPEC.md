@@ -1690,7 +1690,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     class emit does, so the recovered entry equals the one javac put in `java/util/Map` byte for byte.
     Two arms are worth naming: `internal` is `ACC_PUBLIC` (kotlinc mangles the NAME, it does not narrow
     the flag), and a `Class` message may omit `flags` entirely (`kotlin/String`, `kotlin/Int`, every
-    `kotlin/*Array`), whose all-zero word must therefore still decode to a public final class.
+    `kotlin/*Array`). The parser applies the protobuf default `6` (`public final`) at its wire boundary;
+    omission therefore never masquerades as the explicit zero word for `internal` in later phases.
   Tests: `tests/no_jdk_builtin_emit_e2e.rs` (each defect as a `box()` that is actually LOADED and RUN on
   a JVM, plus a byte-for-byte JDK-less vs JDK-present emit comparison — a diagnostics-only assertion
   cannot see any of this, which is how all of them shipped green) and
