@@ -2517,6 +2517,58 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Still open: a labelled return from a stdlib HOF whose lambda is routed through the bytecode splicer
   (`xs.sumOf tag@{ … return@tag 0 … }`). Withholding the splice form leaves that route no body to
   inline, and the closure fallback does not reach it, so the file skips.
+- **An `open` property is read and written through its ACCESSOR, even inside the declaring class.**
+  A subclass `override val`/`var` replaces the base's `get<Name>()`/`set<Name>()`, never the base's
+  own private backing field, so a `getfield`/`putfield` from a base member would touch the base's
+  storage and silently bypass the override. kotlinc emits `invokevirtual get<Name>()` for exactly
+  this reason. A FINAL property keeps the direct field access; so does a PRIVATE one, which has no
+  synthesized accessor to call (`private open` is not valid Kotlin, so this only decides what an input
+  kotlinc rejects compiles to). A constructor's property INITIALIZER stays a `putfield` in both
+  compilers — the field must be stored before any subclass accessor could run — while an `init { }`
+  assignment to an open `var` goes through the setter, again as kotlinc does. A `val` has no setter at
+  all, so the deferred initialization Kotlin permits for one (`open val c: B` assigned in `init { }`
+  under `-ProhibitOpenValDeferredInitialization`) stays a `putfield`; every write rule is therefore
+  conditioned on the property being a `var`.
+
+  This holds only if EVERY access path applies it, and the paths do not share one implementation: a
+  bare `name` read/write and an `x++` go through `ir_lower::open_source_property`, a qualified
+  `this.name` through `jvm::ir_emit::direct_field_access`, keyed on `IrProperty::is_open`. That flag
+  must therefore be set for a PRIMARY-CONSTRUCTOR property as well as a body one — both forms are
+  overridable, and a review found the two sites disagreeing for the constructor form, so a bare write
+  in a base member silently stored into the base's own field. It replaces the whole-file
+  `gate:base-reads-override-internally` bail, which used to skip any class whose base read an
+  overridden property. Tests: `tests/class_body_e2e.rs::open_property_virtual_dispatch`,
+  `::open_property_virtual_dispatch_through_a_grandparent`,
+  `::open_property_writes_and_constructor_declarations_dispatch_virtually`,
+  `::open_var_init_block_writes_through_the_setter`.
+- **A `when` subject compares against a BOXED primitive comparand.** `when (x: Any) { 1, 2, 3 -> … }`
+  is valid Kotlin: `Int` is a subtype of `Any`, so the comparison can be non-trivially true, and
+  kotlinc emits `Intrinsics.areEqual(x, Integer.valueOf(1))`. Comparability therefore tests the
+  subject and the comparand in their REFERENCE forms (a primitive boxes to its Kotlin class, `String`
+  names `kotlin/String`), and lowering boxes the comparand instead of rejecting the mixed
+  primitive/reference compare. The converse — a primitive subject with a reference comparand
+  (`when (i: Int) { null -> … }`) — has no such form and is still refused. Two comparand kinds keep
+  bailing in LOWERING (the comparability rule above is unconditional, matching kotlinc): an unsigned
+  one boxes to its own inline class rather than a plain wrapper, and a FLOAT/DOUBLE one compares by
+  IEEE `==` whenever the subject is a primitive, which `Double.equals` is not (`-0.0 != 0.0`,
+  `NaN == NaN`) — which of the two applies turns on whether an earlier `is` arm smart-casts the
+  SUBJECT to the primitive, per-arm narrowing the lowering does not model (corpus case
+  `ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt`). Tests:
+  `tests/feature_coverage_p_e2e.rs::when_comma_conditions_and_mixed_is_in`,
+  `::when_widened_subject_boxes_every_primitive_comparand`.
+- **`x in a..b` over a WIDENED value.** `when (x: Any) { in 4..10 -> … }` compiles: kotlinc lowers it
+  to `CollectionsKt.contains(4..10, x)`, and an `IntRange` is not a `Collection`, so that walks the
+  range comparing with `equals` — true exactly when `x` is a BOXED element of the range. krusty keeps
+  its comparison chain and guards it with the `instanceof` that fact implies (`x is Integer &&
+  4 <= x.intValue() <= 10`). The guard must short-circuit, so it is a branch, not the eager `iand`:
+  unboxing a value of another class would throw. A value type unrelated to the boxed element
+  (`x: String in 4..10`) is still rejected. The widened form is `Iterable<T>.contains`, so only
+  `Int`/`Long`/`Char` elements qualify: a floating-point range is a `ClosedFloatingPointRange`, not an
+  `Iterable` (kotlinc rejects `x: Any in 1.0..2.0` outright); a `Byte`/`Short` range is really an
+  `IntRange`, whose elements box to `Integer` rather than the bound's own wrapper; and an unsigned
+  range's elements box to their inline class, which krusty erases to the signed primitive. Tests:
+  `tests/feature_coverage_p_e2e.rs::when_comma_conditions_and_mixed_is_in`,
+  `::when_widened_subject_boxes_every_primitive_comparand`.
 - **`private` visibility is LEXICAL, and the JVM's is not.** A nested (non-`inner`) class, the
   companion and an `inline` body spliced into a caller all sit inside the owner's braces, so Kotlin
   lets them reach its private members; each is a SEPARATE class file, so `invokespecial` on a private
@@ -2592,8 +2644,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   covered when all of ITS subclasses are: the hierarchy is a tree and only its LEAVES can be
   instantiated. Checking only the DIRECT subclasses reported
   `sealed class Node { sealed class Leaf : Node(); … }` covered by `IntLeaf`/`StrLeaf`/`Branch` as
-  non-exhaustive, demanding an `is Leaf` branch kotlinc rejects as redundant. Test:
-  `tests/feature_coverage_r_e2e.rs::nested_sealed_hierarchy`.
+  non-exhaustive, demanding an `is Leaf` branch kotlinc rejects as redundant. A subclass the arms DO
+  cover (`is Leaf ->`) stands for its whole branch and is not re-reported through its children. The
+  same tree is walked when deciding which arms COVER something: an `object` arm may name a subclass of
+  a nested sealed class, so membership is tested against every sealed descendant rather than the direct
+  subclasses alone. Tests: `tests/feature_coverage_r_e2e.rs::nested_sealed_hierarchy`,
+  `resolve::tests::nested_sealed_hierarchy_is_exhausted_by_its_leaves`,
+  `::covering_a_nested_sealed_class_directly_covers_its_branch`,
+  `::a_missing_nested_sealed_leaf_is_reported_by_name`.
 
 ## 8. Success criteria for the PoC
 

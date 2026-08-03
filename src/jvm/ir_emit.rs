@@ -8073,6 +8073,7 @@ impl<'a> Emitter<'a> {
         let class = self.ir.classes.iter().find(|c| c.fq_name_matches(owner))?;
         // The write analogue: a declared setter is user code and must not be bypassed.
         let declared = class.properties.iter().find(|p| p.name == name);
+        let direct_field = self.direct_field_access(owner, declared, true);
         if let Some(declared) = declared.filter(|p| p.needs_access_bridge && self.owner != owner) {
             let ty = declared
                 .backing_field
@@ -8121,11 +8122,11 @@ impl<'a> Emitter<'a> {
             is_static: false,
             is_interface: class.is_interface,
         };
-        if let Some(setter) = setter.filter(|_| self.owner != owner || field.is_none()) {
+        if let Some(setter) = setter.filter(|_| !direct_field || field.is_none()) {
             return Some(accessor(setter));
         }
         let field = field?;
-        if self.owner != owner {
+        if !direct_field {
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: setter_name,
@@ -8157,6 +8158,7 @@ impl<'a> Emitter<'a> {
         // through it — the accessor is user code, and a direct field load would skip it. Only a plain
         // backing-field property may be read directly, and only from inside the declaring class.
         let declared = class.properties.iter().find(|p| p.name == name);
+        let direct_field = self.direct_field_access(owner, declared, false);
         if let Some(getter) = declared.and_then(|p| p.getter) {
             let f = &self.ir.functions[getter as usize];
             return Some(PropertyAccess::Accessor {
@@ -8191,7 +8193,7 @@ impl<'a> Emitter<'a> {
                     .is_some_and(|rest| rest.starts_with('-'));
             (named && f.params.is_empty()).then_some(f)
         });
-        if let Some(accessor) = accessor.filter(|_| self.owner != owner || field.is_none()) {
+        if let Some(accessor) = accessor.filter(|_| !direct_field || field.is_none()) {
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: accessor.name.clone(),
@@ -8228,7 +8230,7 @@ impl<'a> Emitter<'a> {
         };
         // Outside the declaring class the backing field is private, so the read goes through the
         // accessor — the one synthesized for this declaration, which carries no IR method of its own.
-        if self.owner != owner {
+        if !direct_field {
             return Some(PropertyAccess::Accessor {
                 owner: owner.to_string(),
                 name: accessor_name,
@@ -8243,6 +8245,32 @@ impl<'a> Emitter<'a> {
             descriptor: type_descriptor(ir_ty_to_jvm(&field.ty)),
             is_static: false,
         })
+    }
+
+    /// Whether a property of `owner` may be reached as its raw backing FIELD from the class currently
+    /// being emitted. Only inside the declaring class (the field is private everywhere else) — and only
+    /// for a FINAL property. An `open`/`override` property is redeclared by subclasses, which replace its
+    /// ACCESSOR, not the base's own private storage: a `getfield` from a base method would read the
+    /// base's field and silently bypass the override. kotlinc emits `invokevirtual get<Name>()` inside
+    /// the class for exactly that reason, so the accessor is the only correct realization here.
+    ///
+    /// Two exemptions, both because the accessor an `open` property would be reached through does not
+    /// exist:
+    ///
+    /// * a PRIVATE property has no synthesized accessor at all (kotlinc reads it directly in-class).
+    ///   `private open` is not valid Kotlin — kotlinc reports "'open' is incompatible with 'private'"
+    ///   — so this only decides what an input krusty accepts but kotlinc rejects compiles to, and the
+    ///   raw field is the realization that at least links.
+    /// * a `val` has no SETTER, so a `writable` access to one can only be the deferred initialization
+    ///   Kotlin permits in a constructor/`init` block, which kotlinc also emits as a `putfield`.
+    fn direct_field_access(
+        &self,
+        owner: &str,
+        declared: Option<&crate::ir::IrProperty>,
+        writable: bool,
+    ) -> bool {
+        self.owner == owner
+            && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
     }
 
     /// Emit one already-chosen realization of a property read: push the receiver (or drop it, when the
