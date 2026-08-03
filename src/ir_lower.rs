@@ -8965,24 +8965,26 @@ impl<'a> Lower<'a> {
         (names.len() == slots).then_some(names)
     }
 
-    /// Whether a `Unit`-typed tail value must be replaced by "run it, then yield the `Unit` singleton".
-    /// True exactly for the nodes that leave NOTHING on the operand stack: a call (to a function, a
-    /// method, or a function VALUE) returning `Unit` emits a `void` invocation, and a `Unit` `try` emits
-    /// its branches for effect. Every other `Unit`-typed node already yields the singleton (an assignment
-    /// and a `when` without `else` lower to an explicit `Unit`).
+    /// Whether a `Unit`-typed tail value should be replaced by "run it, then yield the `Unit` singleton".
     ///
-    /// A tail that SUSPENDS keeps its own shape instead, so the coroutine flattener still sees it: for a
-    /// call that means the call node itself (its arguments are evaluated unconditionally and hoist ahead
-    /// of it), for a `try` it means anywhere inside (the suspension sits in control flow the flattener
-    /// rewrites in place). Only meaningful for a value already known to be `Unit`-typed — the callee's
-    /// own return type is not consulted here.
+    /// Several `Unit` tails leave NOTHING on the operand stack — a call (to a function, a method, or a
+    /// function VALUE) returning `Unit` emits a `void` invocation; a `try`, a `when` and a safe call emit
+    /// their branches for effect; a block ends in one of those. Binding such a tail to the machine's
+    /// result temp stores from an empty stack. The ones that DO leave a value (an assignment, a `when`
+    /// without `else`) are popped in statement position, so running every `Unit` tail for effect and
+    /// yielding the singleton is uniformly correct — and it is what the leaf form already does.
+    ///
+    /// The exception is a tail that SUSPENDS: it keeps its own shape so the coroutine flattener still
+    /// sees it. For a CALL that means the call node itself — its arguments are evaluated unconditionally
+    /// and hoist ahead of it, so a suspending argument is no reason to leave the void call unwrapped. For
+    /// anything else it means anywhere inside, because the suspension sits in control flow the flattener
+    /// rewrites in place (corpus `coroutines/varSpilling/kt75926`).
     fn unit_tail_needs_unit_value(&self, e: u32) -> bool {
         match self.ir.exprs[e as usize] {
             IrExpr::Call { .. } | IrExpr::MethodCall { .. } | IrExpr::InvokeFunction { .. } => {
                 !self.ir_expr_suspends(e)
             }
-            IrExpr::Try { .. } => !self.ir_subtree_suspends(e),
-            _ => false,
+            _ => !self.ir_subtree_suspends(e),
         }
     }
 
@@ -9192,6 +9194,11 @@ impl<'a> Lower<'a> {
         // Set when the body needs the general (multi-suspension / control-flow) lambda-mode machine,
         // built by the coroutine pass from the plain `invokeSuspend` body.
         let mut needs_pass_sm = false;
+        // One checked semantic body type drives BOTH invokeSuspend forms. In particular, `Unit?`
+        // denotes the same effect-only tail whether an internal suspension selects the general state
+        // machine or the body stays on the leaf path; reconstructing that classification separately
+        // is what previously left the leaf safe-call case behind.
+        let body_ty = self.info.ty(body);
         let inv_susp_body = if body_suspends {
             // Single-suspension lambda (`{ foo() }` or `{ val a = foo(); <tail> }`), no captures (gated
             // above). The continuation is `this`: thread it into the call, dispatch on `this.label`.
@@ -9235,7 +9242,7 @@ impl<'a> Lower<'a> {
             // `tmp` goes ABOVE the body's locals (next_value still points past them here).
             let tmp_idx = self.next_value;
             self.next_value = saved_next_sm;
-            let body_ty = ty_to_ir(self.info.ty(body));
+            let body_ir_ty = ty_to_ir(body_ty);
             let (mut b_stmts, b_val) = match &self.ir.exprs[body_val as usize] {
                 IrExpr::Block {
                     stmts,
@@ -9248,7 +9255,9 @@ impl<'a> Lower<'a> {
             // stack underflow`). Materialize the `Unit` singleton after the effect — the same coercion a
             // `Unit` value gets in argument position. A SUSPENDING tail keeps its own shape (see
             // `unit_tail_needs_unit_value`): its value is the CPS result the machine propagates.
-            let b_val = if self.info.ty(body) == Ty::Unit && self.unit_tail_needs_unit_value(b_val)
+            // A safe call's `Unit?` is a `Unit` tail too — the value is discarded either way, and both
+            // arms of the null test leave the stack as they found it.
+            let b_val = if body_ty.non_null() == Ty::Unit && self.unit_tail_needs_unit_value(b_val)
             {
                 self.unit_value_after_effect(b_val)
             } else {
@@ -9257,7 +9266,7 @@ impl<'a> Lower<'a> {
             // Bind the body value to a temp (`val tmp = <value>; return box(tmp)`) so a CONDITIONAL
             // suspension in the value (`if (c) foo() else 7`) surfaces as a `Variable{init: When}`
             // the flattener's `stmt_cond_suspension` handles — not a raw `return box(When)`.
-            b_stmts.push(self.emit_variable(tmp_idx, body_ty, Some(b_val)));
+            b_stmts.push(self.emit_variable(tmp_idx, body_ir_ty, Some(b_val)));
             let tmpg = self.emit_get_value(tmp_idx);
             let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, tmpg, object_ir.clone());
             b_stmts.push(self.emit_return(Some(boxed)));
@@ -9288,10 +9297,13 @@ impl<'a> Lower<'a> {
             self.scope = saved_scope;
             self.next_value = saved_next;
             let body_val = body_val?;
-            let body_ty = self.info.ty(body);
-            if body_ty == Ty::Unit {
-                // A `suspend () -> Unit` lambda: run the body for effect, then return the `Unit`
-                // singleton — boxing a Unit-typed (no-value) body would `areturn` an empty stack.
+            if body_ty.non_null() == Ty::Unit {
+                // A leaf `suspend () -> Unit` lambda follows the same semantic rule as the general
+                // state-machine branch above. Include `Unit?`: a safe call on a void member has that
+                // checked type, but this IR lowers both its present and null arms for effect and leaves
+                // no value to box. Run the body, then return the singleton; recognizing only exact
+                // `Unit` here would still `areturn` an empty stack whenever the lambda had no internal
+                // suspension and therefore never entered the general-machine path.
                 stmts.push(body_val);
                 let unit = self.emit_unit();
                 stmts.push(self.emit_return(Some(unit)));
