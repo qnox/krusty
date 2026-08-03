@@ -673,6 +673,28 @@ fn specialize_property(mut property: PropertyInfo, receiver: Ty) -> PropertyInfo
     property
 }
 
+/// Extract the property half of a namespace record. The namespace arrives behind a shared memo handle, so
+/// candidates are cloned into the selection's owned working set; both top-level and extension-property
+/// selection consume this exact helper, preventing their `Properties`/`Both` handling from drifting when
+/// [`crate::libraries::Callables`] gains another mixed shape.
+fn property_overloads(callables: &crate::libraries::Callables) -> Vec<PropertyInfo> {
+    match callables {
+        crate::libraries::Callables::Properties(properties)
+        | crate::libraries::Callables::Both { properties, .. } => properties.overloads.clone(),
+        crate::libraries::Callables::None | crate::libraries::Callables::Functions(_) => Vec::new(),
+    }
+}
+
+/// Source visibility for package-level properties, applied BEFORE ambiguity/receiver ranking. A JVM
+/// `internal`/private declaration may still have a public bytecode accessor, so accessor flags alone must
+/// never make it callable from another module. Module-origin facts remain governed by the module's
+/// file-aware [`SymbolSource`] overlay (which admits same-file private and hides sibling private); applying
+/// a second, file-blind filter here would incorrectly reject the former.
+fn source_property_visible(property: &PropertyInfo) -> bool {
+    property.visibility == Visibility::Public
+        || matches!(property.getter.origin, Origin::Module { .. })
+}
+
 fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> Ty {
     let mut binds = seeded_gsig_binds(gsig, targs);
     if let Some(recv_sig) = gsig.receiver {
@@ -1702,15 +1724,10 @@ impl<'a> SymbolResolver<'a> {
         let mut candidates = self
             .symbols_in_scope(name)
             .into_iter()
-            .flat_map(|(_, symbols)| match &symbols.callables {
-                crate::libraries::Callables::Properties(properties) => properties.overloads.clone(),
-                crate::libraries::Callables::Both { properties, .. } => {
-                    properties.overloads.clone()
-                }
-                _ => Vec::new(),
-            })
+            .flat_map(|(_, symbols)| property_overloads(&symbols.callables))
             .filter(|property| property.kind == PropKind::TopLevel)
-            .filter(|property| property.context_count == 0);
+            .filter(|property| property.context_count == 0)
+            .filter(source_property_visible);
         let selected = candidates.next()?;
         candidates.next().is_none().then_some(selected)
     }
@@ -1725,15 +1742,10 @@ impl<'a> SymbolResolver<'a> {
         let mut candidates = self
             .symbols_in_scope(name)
             .into_iter()
-            .flat_map(|(_, symbols)| match &symbols.callables {
-                crate::libraries::Callables::Properties(properties) => properties.overloads.clone(),
-                crate::libraries::Callables::Both { properties, .. } => {
-                    properties.overloads.clone()
-                }
-                _ => Vec::new(),
-            })
+            .flat_map(|(_, symbols)| property_overloads(&symbols.callables))
             .filter(|property| property.kind == PropKind::Extension)
             .filter(|property| property.context_count == 0)
+            .filter(source_property_visible)
             .filter_map(|property| {
                 let declared = ty_subst(property.receiver?, &std::collections::HashMap::new());
                 if receiver.is_nullable() && !declared.is_nullable() {
@@ -2735,6 +2747,29 @@ impl<'a> SymbolResolver<'a> {
         )
     }
 
+    /// Select a `$default` candidate with the SAME strict-dominance primitive every other overload
+    /// family uses. Candidates with mutually assignable supplied shapes are semantically equivalent;
+    /// sorting by declared arity first makes the documented secondary rule (fill fewer defaults) choose
+    /// which equivalent fact survives de-duplication. Incomparable maximal shapes remain ambiguous rather
+    /// than falling through to classpath/declaration order.
+    fn select_default_candidate<'b>(
+        &self,
+        candidates: impl IntoIterator<Item = &'b FunctionInfo>,
+        args: &[Ty],
+        slots: Option<&[usize]>,
+    ) -> CandidateSelection<&'b FunctionInfo> {
+        let mut applicable = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                Some((self.default_call_shape(candidate, args, slots)?, candidate))
+            })
+            .collect::<Vec<_>>();
+        applicable.sort_by_key(|(_, candidate)| candidate.callable.params.len());
+        unique_most_specific(applicable, |_, sub, sup| {
+            resolution_subtype(self.lib, &self.src, sub, sup)
+        })
+    }
+
     fn default_arg_mapping(
         &self,
         info: &FunctionInfo,
@@ -2898,40 +2933,10 @@ impl<'a> SymbolResolver<'a> {
             Some(callable)
         };
         let fsd = function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default")));
-        // Applicability alone does not choose: with `pick(b: Base, n: Int = 3)` and `pick(s: Sub, n: Int
-        // = 4)` both in scope, `pick(Sub())` fits BOTH, and the answer is the most specific one — the same
-        // rule the all-arguments-spelled-out path applies. Order the applicable synthetics so a candidate
-        // no other dominates is tried first; declaration order breaks ties, as before.
-        let applicable: Vec<(Vec<Ty>, &FunctionInfo)> = fsd
-            .top_level()
-            .filter_map(|o| Some((self.default_call_shape(o, args, slots)?, o)))
-            .collect();
-        let dominated: Vec<bool> = applicable
-            .iter()
-            .map(|(shape, _)| {
-                applicable.iter().any(|(other, _)| {
-                    other.len() == shape.len()
-                        && other != shape
-                        && other.iter().zip(shape).all(|(&other, &own)| {
-                            resolution_subtype(self.lib, &self.src, other, own)
-                        })
-                })
-            })
-            .collect();
-        let mut order: Vec<usize> = (0..applicable.len()).collect();
-        // Specificity first; then FEWER omitted defaults — `manyFirst("x")` against
-        // `manyFirst(a, b = 1)` and `manyFirst(a, b = 1, c = 2)` is the two-parameter one, whichever
-        // order the classpath lists them in. Declaration order breaks what is left.
-        order.sort_by_key(|&index| {
-            (
-                usize::from(dominated[index]),
-                applicable[index].1.callable.params.len(),
-            )
-        });
-        for index in order {
-            if let Some(callable) = try_default(applicable[index].1) {
-                return Some(callable);
-            }
+        match self.select_default_candidate(fsd.top_level(), args, slots) {
+            CandidateSelection::Selected(candidate) => return try_default(candidate),
+            CandidateSelection::Ambiguous => return None,
+            CandidateSelection::None => {}
         }
         // A `@JvmName`/value-class-mangled base (`sourceName` → `sourceName-<hash>`) mangles its
         // `$default` synthetic too. The import scope only knows the SOURCE spelling (`{name}$default` maps through
@@ -2939,6 +2944,7 @@ impl<'a> SymbolResolver<'a> {
         // facade package. Probed LAST: an unmangled name never reaches this (the common case pays no
         // extra scope query).
         let mut seen_spellings = std::collections::HashSet::new();
+        let mut mangled_defaults = Vec::new();
         for base in function_set_from_symbols(self.symbols_in_scope(name)).into_top_level() {
             let spelling = base.callable.name.clone();
             if spelling == name || !seen_spellings.insert(spelling.clone()) {
@@ -2950,13 +2956,12 @@ impl<'a> SymbolResolver<'a> {
             let fqn = crate::types::type_name_child(pkg, &format!("{spelling}$default"));
             let record = self.src.resolve_symbols_name(fqn);
             let fs = function_set_from_symbols(std::iter::once((fqn, record)));
-            for o in fs.top_level() {
-                if let Some(callable) = try_default(o) {
-                    return Some(callable);
-                }
-            }
+            mangled_defaults.extend(fs.into_top_level());
         }
-        None
+        match self.select_default_candidate(mangled_defaults.iter(), args, slots) {
+            CandidateSelection::Selected(candidate) => try_default(candidate),
+            CandidateSelection::None | CandidateSelection::Ambiguous => None,
+        }
     }
 
     fn resolve_top_level_inline_only_callable(

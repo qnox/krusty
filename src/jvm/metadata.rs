@@ -126,7 +126,7 @@ fn parse_type_gsig_node(
     let mut tp_id = None;
     let mut tpn_id = None;
     let mut nullable = false;
-    let mut anno_id = None;
+    let mut receiver_fun = false;
     let mut args: Vec<Ty> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
@@ -165,20 +165,26 @@ fn parse_type_gsig_node(
                 let n = pb.varint()? as usize;
                 let abody = pb.bytes(n)?;
                 let mut ap = Pb { b: abody, i: 0 };
+                let mut annotation_id = None;
                 while !ap.at_end() {
                     let at = ap.varint()?;
                     match (at >> 3, at & 7) {
-                        (1, 0) => anno_id = ap.varint(),
+                        (1, 0) => annotation_id = ap.varint(),
                         (_, w) => ap.skip(w)?,
                     }
                 }
+                // `Type.annotation` is REPEATED. Receiver-ness is the presence of ONE semantic marker,
+                // not a property of whichever annotation happened to be serialized last. Accumulate the
+                // predicate while walking the field so adding an unrelated type-use annotation cannot
+                // erase an earlier `@ExtensionFunctionType` mark (protobuf preserves no useful ordering
+                // contract between independent annotations).
+                receiver_fun |= annotation_id
+                    .and_then(|id| resolve_class_name(records, d2, id as usize))
+                    .is_some_and(|name| name == "kotlin/ExtensionFunctionType");
             }
             (_, w) => pb.skip(w)?,
         }
     }
-    let receiver_fun = anno_id
-        .and_then(|id| resolve_class_name(records, d2, id as usize))
-        .is_some_and(|name| name == "kotlin/ExtensionFunctionType");
     let ty = if let Some(id) = class_id {
         let internal = resolve_class_name(records, d2, id as usize)?;
         gsig_from_kotlin_class(&internal, args, receiver_fun)
@@ -628,13 +634,13 @@ fn parse_type_class_name(body: &[u8]) -> Option<u64> {
 }
 
 /// For a function-type `Type` (`kotlin/FunctionN`), recover whether it is a RECEIVER function type
-/// (`Recv.(…) -> R`) and the receiver's class id: returns `(annotation_id, first_argument_class_id)`,
-/// where `annotation_id` is the `Type.annotation` (field 100) `Annotation.id` (which a caller checks
-/// resolves to `kotlin/ExtensionFunctionType`) and the first `Type.argument` (field 1) carries the
-/// receiver type. Either is `None` when absent.
-fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
+/// (`Recv.(…) -> R`) and the receiver's class id: returns `(annotation_ids, first_argument_class_id)`,
+/// where `annotation_ids` contains EVERY repeated `Type.annotation` (field 100) `Annotation.id` (a caller
+/// checks whether any resolves to `kotlin/ExtensionFunctionType`) and the first `Type.argument` (field 1)
+/// carries the receiver type. The receiver id is `None` when absent.
+fn parse_type_recv_fun(body: &[u8]) -> (Vec<u64>, Option<u64>) {
     let mut pb = Pb { b: body, i: 0 };
-    let mut anno_id = None;
+    let mut annotation_ids = Vec::new();
     let mut arg0_class = None;
     let mut seen_arg = false;
     while !pb.at_end() {
@@ -678,7 +684,14 @@ fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
                 while !ap.at_end() {
                     let Some(at) = ap.varint() else { break };
                     match (at >> 3, at & 7) {
-                        (1, 0) => anno_id = ap.varint(),
+                        (1, 0) => {
+                            if let Some(id) = ap.varint() {
+                                // `Type.annotation` is repeated. Preserve the whole semantic set so a
+                                // later, unrelated type-use annotation cannot overwrite an earlier
+                                // receiver-function marker in this lightweight parameter decoder.
+                                annotation_ids.push(id);
+                            }
+                        }
                         (_, w) => {
                             if ap.skip(w).is_none() {
                                 break;
@@ -694,7 +707,7 @@ fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
             }
         }
     }
-    (anno_id, arg0_class)
+    (annotation_ids, arg0_class)
 }
 
 /// `Function.flags` bit for `suspend` (kotlin metadata `Flags.IS_SUSPEND`, function flag bit 13).
@@ -724,7 +737,7 @@ struct ParsedValueParam {
     name_id: u64,
     has_default: bool,
     materialized: bool,
-    recv_fun: (Option<u64>, Option<u64>),
+    recv_fun: (Vec<u64>, Option<u64>),
     /// The raw `ValueParameter.type` (field 3) `Type` message body — decoded to a signature [`Ty`] with the
     /// enclosing type-parameter table (needs `records`/`d2`, so it happens in `decode_functions`).
     type_body: Vec<u8>,
@@ -882,7 +895,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 let mut tid = None;
                 let mut nid = 0u64;
                 let mut vflags = 0u64;
-                let mut recv_ids = (None, None);
+                let mut recv_ids = (Vec::new(), None);
                 let mut type_body = Vec::new();
                 let mut vararg_elem_body = None;
                 while !vp.at_end() {
@@ -1962,13 +1975,10 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                         .value_params
                         .iter()
                         .map(|p| {
-                            let recv_fun_ty = p
-                                .recv_fun
-                                .0
-                                .and_then(|id| resolve_class_name(records, d2, id as usize))
-                                .map(|name| type_name(&name));
-                            let recv_fun = recv_fun_ty
-                                .is_some_and(|name| name.matches("kotlin/ExtensionFunctionType"));
+                            let recv_fun = p.recv_fun.0.iter().copied().any(|id| {
+                                resolve_class_name(records, d2, id as usize)
+                                    .is_some_and(|name| name == "kotlin/ExtensionFunctionType")
+                            });
                             MetaValueParam {
                                 ty: p
                                     .class_id
@@ -3210,7 +3220,8 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 mod module_reader_tests {
     use super::{
         decode_properties, parse_function, parse_receiver_type_gsig, parse_type_alias,
-        parse_type_gsig, parse_type_gsig_node, primary_erasure_bounds, read_kotlin_module, MetaCtx,
+        parse_type_gsig, parse_type_gsig_node, parse_type_recv_fun, primary_erasure_bounds,
+        read_kotlin_module, MetaCtx,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
@@ -3323,6 +3334,47 @@ mod module_reader_tests {
             parse_type_gsig(&type_parameter, &[], &[], &parameters),
             Some(Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any"))))
         );
+    }
+
+    #[test]
+    fn receiver_function_mark_is_independent_of_type_annotation_order() {
+        // Type.class_name = d2[0] (`Function1`), followed by its receiver and return type arguments.
+        // Type.annotation is extension field 100 (tag varint `a2 06`); each nested Annotation stores its
+        // class-name id in field 1. Two copies exercise the repeated-field contract in both orders: an
+        // unrelated annotation after `ExtensionFunctionType` must not overwrite the receiver marker.
+        let prefix = [
+            0x30, 0x00, // Function1
+            0x12, 0x04, 0x12, 0x02, 0x30, 0x01, // argument[0] = String receiver
+            0x12, 0x04, 0x12, 0x02, 0x30, 0x02, // argument[1] = Unit return
+        ];
+        let extension_annotation = [0xa2, 0x06, 0x02, 0x08, 0x03];
+        let unrelated_annotation = [0xa2, 0x06, 0x02, 0x08, 0x04];
+        let d2 = [
+            "kotlin/Function1".to_string(),
+            "kotlin/String".to_string(),
+            "kotlin/Unit".to_string(),
+            "kotlin/ExtensionFunctionType".to_string(),
+            "sample/TypeUseMarker".to_string(),
+        ];
+        let expected = Ty::fun_with_shape(vec![Ty::String], Ty::Unit, 0, true, false);
+        for (annotations, expected_ids) in [
+            ([extension_annotation, unrelated_annotation], vec![3, 4]),
+            ([unrelated_annotation, extension_annotation], vec![4, 3]),
+        ] {
+            let body = prefix
+                .into_iter()
+                .chain(annotations.into_iter().flatten())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parse_type_recv_fun(&body),
+                (expected_ids, Some(1)),
+                "the lightweight value-parameter decoder must preserve every annotation too"
+            );
+            assert_eq!(
+                parse_type_gsig(&body, &[], &d2, &HashMap::new()),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

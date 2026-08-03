@@ -6623,6 +6623,36 @@ fn call_requires_argument_slots(
                 && signature.required < signature.param_names.len()))
 }
 
+/// Map an already-selected, unlabelled call's source expressions to semantic parameter slots. Selection
+/// has already established which omissions are legal; this helper records only the syntax-independent
+/// positional rule plus Kotlin's trailing-lambda rule. It deliberately knows nothing about callable
+/// origin (module/classpath/file) or emission — every lowerer receives the same slot handoff.
+fn unlabelled_argument_slots(
+    args: &[ExprId],
+    parameter_count: usize,
+    trailing_lambda: bool,
+) -> Option<Vec<Option<ExprId>>> {
+    if args.len() > parameter_count || (trailing_lambda && args.is_empty()) {
+        return None;
+    }
+    let trailing = usize::from(trailing_lambda && args.len() < parameter_count);
+    let positional = args.len().checked_sub(trailing)?;
+    let last = parameter_count.checked_sub(trailing)?;
+    Some(
+        (0..parameter_count)
+            .map(|parameter| {
+                if trailing != 0 && parameter == last {
+                    args.last().copied()
+                } else if parameter < positional {
+                    Some(args[parameter])
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    )
+}
+
 /// The one mapping failure worth reporting, when every candidate failed for the SAME reason.
 ///
 /// Equality is over the whole failure, deliberately. Agreeing only on the first error is not enough:
@@ -24471,8 +24501,7 @@ impl<'a> Checker<'a> {
         if let Some(ret) = self.record_extension_call_with_slots(call, name, rt, args, &[]) {
             return Some(ret);
         }
-        if let Some(ret) =
-            self.record_library_extension_call_with_arg_kinds(Some(call), name, rt, &arg_kinds, &[])
+        if let Some(ret) = self.record_extension_call_from_args(call, name, rt, args, arg_tys, &[])
         {
             return Some(ret);
         }
@@ -24982,13 +25011,37 @@ impl<'a> Checker<'a> {
                 });
         }
         let arg_kinds = self.checked_call_arg_kinds(args);
-        self.record_library_extension_call_with_arg_kinds(
+        let resolved = self.record_library_extension_call_with_arg_kinds(
             Some(call),
             name,
             receiver,
             &arg_kinds,
             type_args,
-        )
+        );
+        if resolved.is_some() {
+            // The selected callable is the semantic authority for whether this is a `$default` call.
+            // Record its unlabelled omission/trailing-lambda mapping HERE, beside resolution, rather than
+            // asking only the classpath-extension emitter to reconstruct it from AST shape. The extension
+            // receiver occupies `params[0]`; `resolved_call_arg_slots` describes source VALUE parameters.
+            let parameter_count = match self.resolved_calls.get(&call) {
+                Some(ResolvedCall::Extension(callable))
+                    if callable.default_call && callable.vararg_elem.is_none() =>
+                {
+                    callable.params.len().checked_sub(1)
+                }
+                _ => None,
+            }
+            .filter(|&parameter_count| args.len() < parameter_count);
+            if let Some(parameter_count) = parameter_count {
+                let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                if let Some(slots) =
+                    unlabelled_argument_slots(args, parameter_count, trailing_lambda)
+                {
+                    self.resolved_call_arg_slots.insert(call, slots);
+                }
+            }
+        }
+        resolved
     }
 
     /// Select a labelled extension call without recording a call or diagnostic.

@@ -55,3 +55,18 @@ fn a_classpath_top_level_property_is_an_argument_and_a_receiver() {
         }\n";
     common::expect_box_ok_against("cptoplevelpropuse", LIB, main);
 }
+
+/// Kotlin `internal` is SOURCE visibility even though its file-facade getter is public JVM bytecode.
+/// Namespace discovery must filter on metadata visibility before selection; otherwise an explicit import
+/// can read a dependency's internal state merely because the backend accessor happens to be invocable.
+#[test]
+fn a_classpath_internal_top_level_property_does_not_leak_through_its_public_getter() {
+    const PRIVATE_LIB: &str = "package lib\ninternal val hiddenCounter: Int = 9\n";
+    let main = "import lib.hiddenCounter\nfun use(): Int = hiddenCounter\n";
+    let Some(diagnostics) =
+        common::diagnostics_against("cptoplevelpropinternal", PRIVATE_LIB, main)
+    else {
+        return;
+    };
+    assert_eq!(diagnostics, ["unresolved reference 'hiddenCounter'."]);
+}

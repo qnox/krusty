@@ -89,3 +89,27 @@ fn the_overload_filling_fewer_defaults_wins() {
     common::expect_box_ok_against("cpdefaultcountmany", MANY_FIRST, main);
     common::expect_box_ok_against("cpdefaultcountfew", FEW_FIRST, main);
 }
+
+/// Two supplied-argument shapes can be simultaneously applicable without either being more specific.
+/// That is an ambiguity, not a declaration-order tie: choosing the first `$default` synthetic would make
+/// dependency archive order observable and silently call a different function after a harmless rebuild.
+#[test]
+fn incomparable_defaulted_overloads_remain_ambiguous() {
+    const OVERLOADS: &str = "package lib\n\
+         interface Left\n\
+         interface Right\n\
+         class Both : Left, Right\n\
+         fun choose(value: Left, n: Int = 1): String = \"left\"\n\
+         fun choose(value: Right, n: Int = 2): String = \"right\"\n";
+    let main = "import lib.Both\n\
+        import lib.choose\n\
+        fun use(): String = choose(Both())\n";
+    let Some(diagnostics) = common::diagnostics_against("cpdefaultambiguous", OVERLOADS, main)
+    else {
+        return;
+    };
+    assert!(
+        !diagnostics.is_empty(),
+        "incomparable defaulted overloads must not select by declaration order"
+    );
+}

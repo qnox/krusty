@@ -15138,50 +15138,20 @@ impl<'a> Lower<'a> {
         let mut a = vec![recv];
         let explicit_params = c.params.get(1..)?;
         let mut arg_prelude = Vec::new();
-        // An UNLABELLED call has no recorded slot mapping — the record exists to carry a mapping the
-        // call's own shape does not already give (labels, reordering). Unlabelled, the shape gives it:
-        // positional arguments fill parameters left to right and a TRAILING LAMBDA binds the LAST
-        // parameter, so an omitted default can sit BETWEEN them (`configure("x") { … }` omitting a middle
-        // default) — filling left to right there would pass the lambda in the omitted parameter's slot.
-        // Deriving the mapping keeps both spellings of one call on one path instead of skipping the file
-        // for the unlabelled one. A vararg call is excluded: its trailing slot is an array the emit
-        // builds, not an omitted parameter.
-        let slots = self
-            .info
-            .resolved_call_arg_slots
-            .get(&e)
-            .cloned()
-            .or_else(|| {
-                // Past 32 parameters the `$default` ABI takes SEVERAL mask ints, which the mask built
-                // below does not yet emit; keep the loud skip rather than route a call into an emit that
-                // cannot express it.
-                (c.default_call
-                    && c.vararg_elem.is_none()
-                    && explicit_params.len() <= 32
-                    && args.len() < explicit_params.len())
-                .then(|| {
-                    let trailing_lambda =
-                        self.afile.call_has_trailing_lambda.contains(&e.0) && !args.is_empty();
-                    let positional = args.len() - usize::from(trailing_lambda);
-                    let last = explicit_params.len() - 1;
-                    (0..explicit_params.len())
-                        .map(|parameter| {
-                            if trailing_lambda && parameter == last {
-                                args.last().copied()
-                            } else if parameter < positional {
-                                Some(args[parameter])
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                })
-            });
-        if let Some(slots) = slots {
+        // Argument-to-parameter binding is a CHECKER decision. Lowering consumes the same semantic slot
+        // handoff for labelled, reordered, positional-default, and trailing-lambda calls; it must not
+        // rediscover a different mapping based on this callable's classpath-extension emit branch.
+        if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
             let (slot_args, prelude) =
                 self.lower_call_slot_args_source_order(args, &slots, explicit_params, true)?;
             arg_prelude = prelude;
             if c.default_call {
+                // This emitter currently writes one 32-bit `$default` mask. The checker may faithfully
+                // record a larger semantic map for another consumer; decline here instead of shifting by
+                // an invalid amount or emitting an ABI shape this branch cannot represent.
+                if slots.len() > 32 {
+                    return None;
+                }
                 let mask: i32 = slots
                     .iter()
                     .enumerate()
@@ -20677,7 +20647,8 @@ impl<'a> Lower<'a> {
                 let receiver = self.coerce_argument_value(receiver, this_ty, target)?;
                 return Some(self.emit_extension_property_get(e, *getter, receiver));
             }
-            // A classpath TOP-LEVEL property read: the facade's static getter, no receiver.
+            // A resolved TOP-LEVEL property read: the selected facade's static getter, no receiver. The
+            // callable carries its origin/owner, so this semantic handoff is identical for every provider.
             if let Some(ExprLowering::TopLevelPropertyGet { getter }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
