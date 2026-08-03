@@ -573,15 +573,21 @@ fn the_real_stdlib_classpath_is_searchable_by_class_name() {
     assert_eq!(listed.name, "AbstractList");
     assert_eq!(listed.package, "kotlin.collections");
 
-    // Every candidate must name a class the classpath can actually resolve, or the location step
-    // would have nothing to render.
-    for candidate in index.candidates("Iterable", 8) {
-        assert!(
-            cp.find(&candidate.internal).is_some(),
-            "{} was indexed but the classpath cannot find it",
-            candidate.internal
-        );
+    // Every candidate must name a class the classpath can actually resolve. The internal name is
+    // derived from the package and the simple name rather than stored, so this is also what proves
+    // that derivation exact against a real jar rather than against fixtures.
+    let mut checked = 0;
+    for query in ["Iterable", "List", "Map", "Sequence", "Builder", "Entry"] {
+        for candidate in index.candidates(query, 32) {
+            assert!(
+                cp.find(&candidate.internal).is_some(),
+                "{} was indexed but the classpath cannot find it",
+                candidate.internal
+            );
+            checked += 1;
+        }
     }
+    assert!(checked > 20, "only {checked} candidates were checked");
 }
 
 #[test]

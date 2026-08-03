@@ -9,6 +9,12 @@
 //! source, and rendering is on demand — for the symbols a query actually returns, never ahead of
 //! time. Ranking therefore happens here, over names, and produces candidates; turning a candidate
 //! into something a client can open is a separate step, taken for as few as possible.
+//!
+//! Building it costs about **6 µs per class**, measured across disjoint slices of a real Gradle
+//! cache at 4k, 28k, 55k and 79k classes — steady enough that class count, not jar count, is what
+//! predicts the cost. A dependency set of 200,000 classes is therefore a little over a second, once
+//! per project model. Jar count predicts poorly: a 200-jar slice held fewer classes than a 100-jar
+//! one.
 
 use std::collections::HashMap;
 
@@ -18,11 +24,14 @@ use crate::analysis::{
 
 /// Ceiling on classes retained for one project's dependencies.
 ///
-/// Sized from what jars actually hold: over a 40-jar sample, the median declares 71 non-synthetic
-/// classes and the mean 1,105, the mean being dragged by one jar with 33,213. A project resolving a
-/// few hundred jars therefore lands in the tens of thousands, and this leaves an order of magnitude
-/// of room. A dependency set that somehow exceeds it stops growing rather than the process.
-pub const MAX_DEPENDENCY_CLASSES: usize = 256 * 1024;
+/// Measured against real dependency sets rather than guessed: 100 jars declare 91,182 classes,
+/// 200 declare 219,272, and 400 declare 392,275. A 256k ceiling truncated the 400-jar set exactly,
+/// which is a large but ordinary enterprise dependency graph, so it sits above that.
+///
+/// The cost of the ceiling is memory, and an entry is deliberately three `u32`s plus interned
+/// names — the slashed internal name is *derived* rather than stored, because one per class is the
+/// largest table there would be and it is recoverable from the package and the name.
+pub const MAX_DEPENDENCY_CLASSES: usize = 1024 * 1024;
 
 /// A class the classpath declares, ranked but not yet located.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,13 +47,12 @@ pub struct DependencyCandidate {
 /// Class names from one classpath, ordered for the same rung ladder the source index uses.
 #[derive(Default)]
 pub struct DependencySymbolIndex {
-    /// `(name id, package id, internal id)`, one per class.
-    entries: Vec<[u32; 3]>,
+    /// `(name id, package id)`, one per class.
+    entries: Vec<[u32; 2]>,
     names: Vec<String>,
     lowercase_names: Vec<String>,
     initials: Vec<String>,
     packages: Vec<String>,
-    internals: Vec<String>,
     by_name: Vec<u32>,
     by_initials: Vec<u32>,
     complete: bool,
@@ -88,9 +96,7 @@ impl DependencySymbolIndex {
             };
             let name_id = intern(&simple, &mut result.names, &mut name_ids);
             let package_id = intern(&package, &mut result.packages, &mut package_ids);
-            let internal_id = result.internals.len() as u32;
-            result.internals.push(internal);
-            result.entries.push([name_id, package_id, internal_id]);
+            result.entries.push([name_id, package_id]);
         }
         result.rebuild_search_order();
         result
@@ -322,10 +328,12 @@ impl DependencySymbolIndex {
 
     fn candidate(&self, index: u32) -> Option<DependencyCandidate> {
         let entry = self.entries.get(index as usize)?;
+        let package = self.packages.get(entry[1] as usize)?;
+        let name = self.names.get(entry[0] as usize)?;
         Some(DependencyCandidate {
-            internal: self.internals.get(entry[2] as usize)?.clone(),
-            package: self.packages.get(entry[1] as usize)?.clone(),
-            name: self.names.get(entry[0] as usize)?.clone(),
+            internal: internal_name(package, name),
+            package: package.clone(),
+            name: name.clone(),
         })
     }
 }
@@ -347,6 +355,18 @@ fn split_internal_name(internal: &str) -> Option<(String, String)> {
         return None;
     }
     Some((package, class.replace('$', ".")))
+}
+
+/// Rebuild the slashed internal name from the two parts it was split into.
+///
+/// The inverse of [`split_internal_name`], and exact: a package segment never contains `.`, and the
+/// only `.` in a simple name is the nesting this introduced.
+fn internal_name(package: &str, name: &str) -> String {
+    let nested = name.replace('.', "$");
+    if package.is_empty() {
+        return nested;
+    }
+    format!("{}/{nested}", package.replace('.', "/"))
 }
 
 fn intern(value: &str, table: &mut Vec<String>, ids: &mut HashMap<String, u32>) -> u32 {
@@ -511,6 +531,29 @@ mod tests {
         // The dependency layer is the widest one there is; answering an empty query from it would
         // return an arbitrary slice of every jar on the classpath.
         assert!(index.candidates("", 8).is_empty());
+    }
+
+    #[test]
+    fn the_internal_name_survives_being_split_and_rebuilt() {
+        // The index stores a package and a name and derives the internal name from them, which is
+        // the largest table it would otherwise hold. That trade is only sound if it round-trips.
+        for internal in [
+            "kotlin/collections/AbstractList",
+            "java/util/Map$Entry",
+            "java/util/Map$Entry$Nested",
+            "Rooted",
+            "single/Segment",
+        ] {
+            let index = index(&[internal]);
+            let candidate = index
+                .candidates(&index.names[0].clone(), 4)
+                .into_iter()
+                .find(|candidate| candidate.internal == internal);
+            assert!(
+                candidate.is_some(),
+                "{internal} did not survive the split and rebuild"
+            );
+        }
     }
 
     #[test]
