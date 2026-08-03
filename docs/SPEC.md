@@ -280,6 +280,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/suspend_e2e.rs::suspend_receiver_lambda_spills_hoisted_temps`). A spilled local of type
   `Nothing` still bails: its expression never yields a value, so the slot has no JVM type and merges to
   `top` at a join ("Bad local variable type" — `spills_bottom_typed_local`).
+- **`suspend fun` — a `suspend` EXTENSION called through an explicit receiver is a suspension point.**
+  `ast_body_suspends` classified the CALLER's body as leaf for `Ctl(40).run2()`: a top-level suspend
+  extension reached that way is a `Member` callee, invisible to the bare-`Name` scan, and it is not an
+  instance member of the receiver's type, so the resolved-member scan misses it too. The lambda then got
+  no state machine and the call emitted without a `Continuation` ("call arity mismatch").
+  `collect_member_call_names` closes it, matched by name against the file's suspend EXTENSIONS only so
+  the (documented, safe) over-approximation stays narrow. An extension body may now suspend on a MEMBER
+  of its receiver — the receiver is an ordinary parameter and the member call threads its own
+  continuation, so `gate:extension-suspend-fn-member-suspension` is retired
+  (`tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member`). Two residual shapes the
+  corpus proved are NOT about extensions keep their own bails: a cross-loop labeled jump (below), and a
+  suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
+  (`Controller.run(c: suspend Controller.() -> Unit)`), which is not routed to `lower_suspend_lambda`,
+  so its lambda class is a plain `FunctionN` that never threads a continuation
+  (`gate:suspend-lambda-into-member-parameter`).
+- **`suspend fun` — a cross-loop labeled `break`/`continue` is refused, not miscompiled.** The flattener
+  gives each loop its own states and routes an unlabeled jump through them; a labeled jump that leaves an
+  INNER loop for an OUTER one lands on a state the assembler never reaches through the normal dispatch,
+  so the target instruction gets no stackmap frame and the method fails verification ("Expecting a stack
+  map frame"). Pre-existing and NOT receiver- or extension-specific — a plain `suspend fun test(c: Ctl)`
+  with `break@outer` reproduces it on an unmodified tree. `suspending_cross_loop_labeled_jump` skips the
+  file until the flattener models the cross-loop transfer
+  (`tests/suspend_e2e.rs::suspend_cross_loop_labeled_break_still_skips`; corpus
+  `coroutines/controlFlow/doubleBreak`).
 - **`suspend fun` — a suspension whose own ARGUMENT writes a local is refused, not miscompiled.** The
   spill stores are emitted ahead of the call, so an argument's update to a spilled local (`foo(i++)`)
   lands in the local but never in the field, and the resume restores the PRE-evaluation value —
@@ -310,10 +334,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/feature_coverage_s_e2e.rs::suspend_extension_function_on_user_type`). Two extension shapes
   still skip. (1) An extension body that suspends on a MEMBER of its receiver: a member suspension
   resumes against the machine's `this`, which an extension has not got — its receiver is a parameter
-  slot — so the resumed call would target the wrong instance
-  (`gate:extension-suspend-fn-member-suspension`; corpus `controlFlow/doubleBreak`,
-  `suspendFunctionAsCoroutine/handleException`;
-  `tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member_still_skips`). (2) An
+  slot — so the resumed call would target the wrong instance. Fixed: see the next entry. (2) An
   `inline suspend` extension, spliced at its call sites where the splice and the CPS rewrite do not
   compose — the caller's machine inlines the pre-CPS body and drops the assignment it performs
   (`suspend { r = 1.plusOne() }` leaves `r` at 0):

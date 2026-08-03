@@ -1844,6 +1844,7 @@ fn build_state_machine(
     // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
     if spills_bottom_typed_local(&spilled)
         || suspension_operand_writes_local(ir, b, &suspend_set)
+        || suspending_cross_loop_labeled_jump(ir, b, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
     {
         return false;
@@ -2397,6 +2398,7 @@ fn build_lambda_state_machine(
     if (receiver_lambda && spill_shape_unmodeled(&spilled))
         || spills_bottom_typed_local(&spilled)
         || suspension_operand_writes_local(ir, b, &suspend_set)
+        || suspending_cross_loop_labeled_jump(ir, b, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
         || tail_suspending_loop(ir, &stmts, &suspend_set)
     {
@@ -5398,6 +5400,43 @@ fn tail_suspending_loop(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32
         }
     }
     hit
+}
+
+/// A labeled `break`/`continue` that leaves an INNER loop for an OUTER one, inside a suspending body.
+/// The flattener gives each loop its own states and routes an unlabeled jump through them, but a jump
+/// that crosses a loop boundary lands on a state the assembler never reaches through the normal
+/// dispatch, so the target instruction gets no stackmap frame ("Expecting a stack map frame"). Not
+/// specific to any receiver shape — a plain `suspend fun test(c: Ctl)` with `break@outer` reproduces
+/// it. Bail (skip, never emit an unverifiable method).
+fn suspending_cross_loop_labeled_jump(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    fn walk(ir: &IrFile, e: ExprId, enclosing: &mut Vec<Option<String>>, found: &mut bool) {
+        match &ir.exprs[e as usize] {
+            IrExpr::While { label, .. } => {
+                enclosing.push(label.clone());
+                for_each_child(&ir.exprs, e, &mut |c| walk(ir, c, enclosing, found));
+                enclosing.pop();
+                return;
+            }
+            // Innermost-targeting is what the flattener models; anything above it is not.
+            IrExpr::Break { label: Some(l) } | IrExpr::Continue { label: Some(l) }
+                if enclosing.len() > 1
+                    && enclosing
+                        .last()
+                        .is_none_or(|inner| inner.as_ref() != Some(l)) =>
+            {
+                *found = true;
+            }
+            _ => {}
+        }
+        for_each_child(&ir.exprs, e, &mut |c| walk(ir, c, enclosing, found));
+    }
+    if !expr_calls_suspend(ir, b, suspend_set) {
+        return false;
+    }
+    let mut enclosing = Vec::new();
+    let mut found = false;
+    walk(ir, b, &mut enclosing, &mut found);
+    found
 }
 
 /// A suspension whose own RECEIVER/ARGUMENTS write a local (`foo(i++)`). The spill stores are emitted

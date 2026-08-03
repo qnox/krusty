@@ -2096,15 +2096,14 @@ public class M {\n\
     );
 }
 
-/// An extension `suspend fun` whose body suspends on a MEMBER of its receiver is still skipped.
+/// An extension `suspend fun` whose body suspends on a MEMBER of its receiver.
 ///
-/// A member suspension point resumes against the state machine's `this`; an extension has no `this`
-/// (its receiver is an ordinary parameter slot), so the resumed call would target the wrong instance.
-/// The file must be REFUSED, never emitted (`gate:extension-suspend-fn-member-suspension`). The plain
-/// extension shape — suspending on a top-level `suspend fun` — is modeled and covered by
-/// `feature_coverage_s_e2e::suspend_extension_function_on_user_type`.
+/// `ast_body_suspends` classified the CALLER's lambda as leaf here: a top-level suspend EXTENSION
+/// reached through an explicit receiver (`Ctl(40).run2()`) is a `Member` callee, so the bare-`Name`
+/// scan missed it, and it is not an instance member of the receiver's type, so the resolved-member
+/// scan missed it too — the call then emitted without a `Continuation` ("call arity mismatch").
 #[test]
-fn suspend_extension_suspending_on_a_receiver_member_still_skips() {
+fn suspend_extension_suspending_on_a_receiver_member() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let src = "import kotlin.coroutines.*\n\
@@ -2125,10 +2124,55 @@ fun box(): String {\n\
     val r = runBlocking { Ctl(40).run2() }\n\
     return if (r == 42) \"OK\" else \"FAIL:$r\"\n\
 }\n";
-    assert!(
+    let Some(out) =
         common::compile_and_run_box(src, "SuspendExtMember", &[stdlib], Some(jdk.as_path()))
+    else {
+        panic!("SuspendExtMember: the front end accepted the source, so lowering/emit bailed");
+    };
+    assert_eq!(
+        out.trim(),
+        "OK",
+        "a suspend extension may suspend on a member of its receiver"
+    );
+}
+
+/// A labeled `break` that leaves an INNER loop for an OUTER one, inside a suspending body, is skipped.
+///
+/// The flattener gives each loop its own states; a jump crossing a loop boundary lands on a state the
+/// assembler never reaches through the normal dispatch, so the target gets no stackmap frame. This is
+/// not receiver- or extension-specific — the plain `suspend fun` below reproduced an unverifiable
+/// method (`VerifyError: Expecting a stack map frame`) before the bail.
+#[test]
+fn suspend_cross_loop_labeled_break_still_skips() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+class Ctl { var count = 0 }\n\
+suspend fun bump(c: Ctl) { c.count++ }\n\
+suspend fun test(c: Ctl): Int {\n\
+    outer@do {\n\
+        bump(c)\n\
+        inner@do {\n\
+            if (c.count > 1) break@outer\n\
+            break@inner\n\
+        } while (false)\n\
+    } while (true)\n\
+    return c.count\n\
+}\n\
+fun box(): String {\n\
+    val r = runBlocking { test(Ctl()) }\n\
+    return if (r == 2) \"OK\" else \"FAIL:$r\"\n\
+}\n";
+    assert!(
+        common::compile_and_run_box(src, "SuspendCrossLoopBreak", &[stdlib], Some(jdk.as_path()))
             .is_none(),
-        "an extension suspend fn suspending on a receiver member must be skipped, never emitted"
+        "a cross-loop labeled jump in a suspending body must be skipped, never emitted"
     );
 }
 

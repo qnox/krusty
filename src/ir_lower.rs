@@ -471,8 +471,20 @@ fn lower_file_at_reporting_impl(
                     FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
                     FunBody::None => None,
                 };
-                if body.is_some_and(|e| member_suspend.iter().any(|n| file.expr_uses_name(e, n))) {
-                    return lo.bail("gate:extension-suspend-fn-member-suspension");
+                let _ = body;
+                // A suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
+                // (`Controller.run(c: suspend Controller.() -> Unit)`) is not routed to
+                // `lower_suspend_lambda`, so the lambda class is a plain `FunctionN` whose body never
+                // threads a continuation — driven as a coroutine it silently completes without running
+                // the machine. Skip the file (never miscompile) while an extension suspend fn is in play.
+                if file.decls.iter().any(|&d| match file.decl(d) {
+                    Decl::Class(c) => c
+                        .methods
+                        .iter()
+                        .any(|m| m.params.iter().any(|parameter| parameter.ty.fun_suspend())),
+                    _ => false,
+                }) {
+                    return lo.bail("gate:suspend-lambda-into-member-parameter");
                 }
             }
         }
@@ -8945,6 +8957,33 @@ impl<'a> Lower<'a> {
             .any(|n| susp_names.contains(n))
         {
             return true;
+        }
+        // Top-level suspend EXTENSIONS reached through an explicit receiver (`Ctl(40).run2()`). Such a
+        // call is a `Member` callee, so the bare-`Name` scan above misses it, and it is not an instance
+        // member of the receiver's type, so the resolved-member scan below misses it too — leaving the
+        // body classified as leaf and its call emitted without a `Continuation` ("call arity mismatch").
+        // Matched by name against the EXTENSIONS only, keeping the over-approximation narrow.
+        let susp_ext_names: std::collections::HashSet<&str> = self
+            .afile
+            .decls
+            .iter()
+            .filter_map(|&d| match self.afile.decl(d) {
+                ast::Decl::Fun(f) if f.is_suspend() && f.receiver.is_some() => {
+                    Some(f.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        if !susp_ext_names.is_empty() {
+            let member_names = std::cell::RefCell::new(Vec::new());
+            collect_member_call_names(self.afile, body, &member_names);
+            if member_names
+                .into_inner()
+                .iter()
+                .any(|n| susp_ext_names.contains(n.as_str()))
+            {
+                return true;
+            }
         }
         // A MEMBER / invoke-operator suspend call (`getResult()` = `GetResult.suspend operator fun
         // invoke()`, `x.m()` where `m` is `suspend`) is invisible to the top-level-name check above —
@@ -25713,6 +25752,35 @@ fn collect_calls(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<As
         &mut |s| {
             file.any_child_stmt(s, &mut |c| {
                 collect_calls(file, c, out);
+                false
+            });
+            false
+        },
+    );
+}
+
+/// The NAME of each call made through an explicit receiver (`x.f()`). A top-level `suspend` EXTENSION
+/// reached that way is neither a bare `Name` call nor an instance member of the receiver's type, so it
+/// is invisible to both of [`Lowering::ast_body_suspends`]'s scans without this.
+fn collect_member_call_names(
+    file: &ast::File,
+    e: AstExprId,
+    out: &std::cell::RefCell<Vec<String>>,
+) {
+    if let ast::Expr::Call { callee, .. } = file.expr(e) {
+        if let ast::Expr::Member { name, .. } = file.expr(*callee) {
+            out.borrow_mut().push(name.clone());
+        }
+    }
+    file.any_child_expr(
+        e,
+        &mut |c| {
+            collect_member_call_names(file, c, out);
+            false
+        },
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                collect_member_call_names(file, c, out);
                 false
             });
             false
