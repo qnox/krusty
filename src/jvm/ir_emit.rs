@@ -6597,6 +6597,7 @@ struct PropertyOperation<'a> {
     name: &'a str,
     ty: &'a Ty,
     interface: bool,
+    instance_field: Option<&'a str>,
 }
 
 struct Emitter<'a> {
@@ -7788,11 +7789,27 @@ impl<'a> Emitter<'a> {
     /// to ask, so it falls back to the JVM convention kotlinc itself follows: `get<Name>()`.
     fn emit_property_read(&mut self, operation: PropertyOperation<'_>, code: &mut CodeBuilder) {
         use crate::jvm::inline::PropertyAccess;
+        if let Some(descriptor) = operation.instance_field {
+            let access = PropertyAccess::Field {
+                owner: operation.owner.to_string(),
+                name: operation.name.to_string(),
+                descriptor: descriptor.to_string(),
+                is_static: false,
+            };
+            return self.emit_realized_property_read(
+                operation.receiver,
+                access,
+                operation.ty,
+                true,
+                code,
+            );
+        }
         if let Some(access) = self.declared_property_read_access(operation.owner, operation.name) {
             return self.emit_realized_property_read(
                 operation.receiver,
                 access,
                 operation.ty,
+                false,
                 code,
             );
         }
@@ -7833,7 +7850,7 @@ impl<'a> Emitter<'a> {
                 is_interface: operation.interface
                     || self.bodies.owner_is_interface(operation.owner),
             });
-        self.emit_realized_property_read(operation.receiver, access, operation.ty, code)
+        self.emit_realized_property_read(operation.receiver, access, operation.ty, false, code)
     }
 
     /// Realize `IrExpr::PropertyWrite` — the write analogue of [`Self::emit_property_read`], and the same
@@ -8218,6 +8235,7 @@ impl<'a> Emitter<'a> {
         receiver: crate::ir::ExprId,
         access: crate::jvm::inline::PropertyAccess,
         ty: &Ty,
+        exact_field: bool,
         code: &mut CodeBuilder,
     ) {
         use crate::jvm::inline::PropertyAccess;
@@ -8323,6 +8341,19 @@ impl<'a> Emitter<'a> {
             box_prim_free(self.cw, code, physical);
         } else if !physical.is_jvm_scalar() && logical.is_jvm_scalar() {
             unbox_prim(self.cw, code, logical);
+        } else if exact_field
+            && physical.is_reference()
+            && logical.is_reference()
+            && type_descriptor(physical) != type_descriptor(logical)
+        {
+            // A generic Java field's descriptor erases to its formal bound (`CharSequence` for
+            // `T : CharSequence`), while this applied read may be `String`. Preserve the selected
+            // field descriptor for `getfield`, then narrow its result to the logical binding.
+            let internal = ref_internal(logical);
+            if internal != "java/lang/Object" {
+                let class = self.cw.class_ref(&internal);
+                code.checkcast(class);
+            }
         } else if !self.is_value_class_ty(ty) {
             // A value class has no runtime type of its own — its values ARE the erased underlying — so
             // narrowing to one would `checkcast` to a class the value is not an instance of.
@@ -8465,14 +8496,16 @@ impl<'a> Emitter<'a> {
                 name,
                 ty,
                 interface,
+                instance_field,
                 operation,
             } => {
-                let (receiver, owner, name, ty, interface, operation) = (
+                let (receiver, owner, name, ty, interface, instance_field, operation) = (
                     *receiver,
                     owner.render(),
                     name.clone(),
                     *ty,
                     *interface,
+                    instance_field.as_deref(),
                     operation.unwrap_or(e),
                 );
                 self.emit_property_read(
@@ -8483,6 +8516,7 @@ impl<'a> Emitter<'a> {
                         name: &name,
                         ty: &ty,
                         interface,
+                        instance_field,
                     },
                     code,
                 );
@@ -8513,6 +8547,7 @@ impl<'a> Emitter<'a> {
                         name: &name,
                         ty: &ty,
                         interface,
+                        instance_field: None,
                     },
                     value,
                     code,

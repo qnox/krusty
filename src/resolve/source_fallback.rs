@@ -1,6 +1,6 @@
 use crate::libraries::{
-    CallSig, Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropKind,
-    PropertyInfo, PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype,
+    CallSig, Callables, FunctionInfo, FunctionSet, InstanceFieldRef, LibraryMember, LibraryType,
+    PropKind, PropertyInfo, PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype,
     StaticFieldRef,
 };
 use crate::module_symbols::ModuleSymbols;
@@ -707,6 +707,39 @@ impl SemanticPlatform for SourceFallbackPlatform {
             SourceTypeAccess::Absent => self.platform.static_field_name(internal, name),
             SourceTypeAccess::Accessible(_) | SourceTypeAccess::Inaccessible => None,
         }
+    }
+
+    fn instance_field(&self, receiver: Ty, name: &str) -> Option<InstanceFieldRef> {
+        let mut work = vec![receiver];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = work.pop() {
+            let Some(internal) = current.obj_internal() else {
+                continue;
+            };
+            if !seen.insert(internal) {
+                continue;
+            }
+            match self.source_type_access(internal) {
+                SourceTypeAccess::Absent => {
+                    if let Some(field) = self.platform.instance_field(current, name) {
+                        return Some(field);
+                    }
+                }
+                SourceTypeAccess::Accessible(_) => {
+                    if !self
+                        .source()
+                        .property_members(current, name)
+                        .overloads
+                        .is_empty()
+                    {
+                        return None;
+                    }
+                    work.extend(self.source().direct_supertypes(current));
+                }
+                SourceTypeAccess::Inaccessible => {}
+            }
+        }
+        None
     }
 
     fn library_value_form(&self, ty: Ty) -> Ty {

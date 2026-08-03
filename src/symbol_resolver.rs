@@ -1745,13 +1745,46 @@ impl<'a> SymbolResolver<'a> {
         self.lib.static_field_name(internal, name)
     }
 
+    fn instance_field(
+        &self,
+        receiver: Ty,
+        name: &str,
+    ) -> Option<crate::libraries::InstanceFieldRef> {
+        let Some(module) = self.module else {
+            return self.lib.instance_field(receiver, name);
+        };
+        let mut work = vec![receiver];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = work.pop() {
+            let Some(internal) = current.obj_internal() else {
+                continue;
+            };
+            if !seen.insert(internal) {
+                continue;
+            }
+            if module.resolve_type_name(internal).is_some() {
+                if !module.property_members(current, name).overloads.is_empty() {
+                    return None;
+                }
+                work.extend(module.direct_supertypes(current));
+            } else if let Some(field) = self.lib.instance_field(current, name) {
+                return Some(field);
+            }
+        }
+        None
+    }
+
     /// The declared type of the member property `name` on `recv` — the property itself, with no accessor
     /// in the answer. A property is a declaration, not a method: whether the target realizes reading it
     /// through a method at all is not a resolution question, so a read must not be made to depend on
     /// finding one. Returns the selected declaration owner and its interface shape beside the logical
     /// property type so lowering does not rediscover either from a source-specific table. Nearest
     /// declaration wins, as for any member.
-    pub fn member_property_type(&self, recv: Ty, name: &str) -> Option<(TypeName, Ty, bool)> {
+    pub fn member_property_type(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<(TypeName, Ty, bool, Option<String>)> {
         let receiver_accessible = !recv.is_nullable()
             && recv
                 .kotlin_class_internal()
@@ -1765,7 +1798,8 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: &self.lexical_classes,
             receiver: Some(recv),
         };
-        self.src
+        if let Some(property) = self
+            .src
             .property_members(recv, name)
             .overloads
             .into_iter()
@@ -1780,8 +1814,13 @@ impl<'a> SymbolResolver<'a> {
                     .src
                     .resolve_type_name(property.owner)
                     .is_some_and(|owner| owner.is_interface());
-                (property.owner, property.ty, interface)
+                (property.owner, property.ty, interface, None)
             })
+        {
+            return Some(property);
+        }
+        self.instance_field(recv, name)
+            .map(|field| (field.owner, field.ty, false, Some(field.descriptor)))
     }
 
     /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance

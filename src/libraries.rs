@@ -115,6 +115,14 @@ pub struct StaticFieldRef {
     pub constant: Option<LibraryConst>,
 }
 
+/// A runtime-valued public instance field exposed as a source-level property by a compiled platform.
+#[derive(Clone, Debug)]
+pub struct InstanceFieldRef {
+    pub owner: TypeName,
+    pub ty: Ty,
+    pub descriptor: String,
+}
+
 /// Source-level services exposed by compiled libraries.
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Semantic interface/class used by the platform libraries to model a function value of `arity`.
@@ -140,6 +148,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     }
 
     fn static_field_name(&self, _internal: TypeName, _name: &str) -> Option<StaticFieldRef> {
+        None
+    }
+
+    /// A public, non-static field selected through `receiver`'s class hierarchy.
+    fn instance_field(&self, _receiver: Ty, _name: &str) -> Option<InstanceFieldRef> {
         None
     }
 

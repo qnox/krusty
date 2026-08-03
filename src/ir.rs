@@ -252,6 +252,9 @@ pub enum IrExpr {
         /// Semantic owner shape selected by resolution. A JVM backend normally reads this from the
         /// compiled declaration, but a sibling source file has no classfile in the shared classpath yet.
         interface: bool,
+        /// Resolution selected a platform instance field declaration. Backends must preserve that
+        /// declaration identity instead of preferring a same-named synthetic property accessor.
+        instance_field: Option<String>,
         /// Stable identity assigned by [`IrFile::add_expr`]. Backend passes can move/clone an operation
         /// into a new expression slot; this identity follows the node so side-table realization facts do
         /// not accidentally remain attached to the obsolete arena index.

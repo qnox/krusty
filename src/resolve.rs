@@ -10071,6 +10071,10 @@ pub enum ExprLowering {
         /// Whether that declaring owner is an interface. This is target-neutral type shape; a backend
         /// that has no compiled declaration to inspect still needs it to realize virtual dispatch.
         interface: bool,
+        /// The selected declaration is a platform instance field, rather than a source property.
+        /// This lets lowering cross a source-defined receiver hierarchy without treating an
+        /// otherwise-unlowerable source property (notably a `const val`) as an accessor call.
+        instance_field: Option<String>,
     },
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
@@ -26974,6 +26978,7 @@ impl<'a> Checker<'a> {
                         ExprLowering::MemberPropertyRead {
                             owner,
                             interface: self.resolved_owner_is_interface(owner),
+                            instance_field: None,
                         },
                     );
                 }
@@ -26990,6 +26995,23 @@ impl<'a> Checker<'a> {
                         .applied_declared_member_prop_ty(rt, owner, name, ty),
                 );
             }
+            // A public Java field is a declaration in its own right and wins over a same-named
+            // synthetic JavaBean property. Preserve that selection before external getter lookup.
+            if let Some((owner, ty, interface, Some(descriptor))) =
+                self.resolver().member_property_type(rt, name)
+            {
+                if let Some(expression) = mexpr {
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::MemberPropertyRead {
+                            owner,
+                            interface,
+                            instance_field: Some(descriptor),
+                        },
+                    );
+                }
+                return Some(ty);
+            }
             if let Some(m) = self.resolve_external_inherited_property(internal_name, name) {
                 let ret = m.ret;
                 if let Some(me) = mexpr {
@@ -27000,6 +27022,7 @@ impl<'a> Checker<'a> {
                             owner,
                             interface: m.member.is_interface()
                                 || self.resolved_owner_is_interface(owner),
+                            instance_field: None,
                         },
                     );
                     self.resolved_calls.insert(me, ResolvedCall::Member(m));
@@ -27012,6 +27035,7 @@ impl<'a> Checker<'a> {
             // answered here and recorded. Lowering must not re-ask it: `recv.name` is then a property
             // read, and only how the target realizes it is left to decide.
             let is_property = self.syms.libraries.member_is_property(rt, name);
+            let declared_property = self.resolver().member_property_type(rt, name);
             if let Some(m) = self.resolve_property_member(rt, name) {
                 let ret = m.ret;
                 if let Some(me) = mexpr {
@@ -27026,6 +27050,7 @@ impl<'a> Checker<'a> {
                                 owner,
                                 interface: m.member.is_interface()
                                     || self.resolved_owner_is_interface(owner),
+                                instance_field: None,
                             },
                         );
                     }
@@ -27038,10 +27063,16 @@ impl<'a> Checker<'a> {
             // it need not go through any method — the backend realizes the read from the owner's own
             // declaration. Resolution owes the site only the property's type. It stays a MEMBER, so it is
             // decided here, ahead of any extension property of the same name.
-            if let Some((owner, ty, interface)) = self.resolver().member_property_type(rt, name) {
+            if let Some((owner, ty, interface, instance_field)) = declared_property {
                 if let Some(me) = mexpr {
-                    self.expr_lowers
-                        .insert(me, ExprLowering::MemberPropertyRead { owner, interface });
+                    self.expr_lowers.insert(
+                        me,
+                        ExprLowering::MemberPropertyRead {
+                            owner,
+                            interface,
+                            instance_field,
+                        },
+                    );
                 }
                 return Some(ty);
             }
@@ -27112,6 +27143,9 @@ impl<'a> Checker<'a> {
                     access: self.effective_property_visibility(internal_name, name),
                 });
             }
+            if let Some((_, ty, _, Some(_))) = self.resolver().member_property_type(rt, name) {
+                return Some(PropertyReadProbe::Found { ty, access: None });
+            }
             if let Some(member) = self.resolve_external_inherited_property(internal_name, name) {
                 return Some(PropertyReadProbe::Found {
                     ty: member.ret,
@@ -27125,6 +27159,9 @@ impl<'a> Checker<'a> {
                     ty: member.ret,
                     access: None,
                 });
+            }
+            if let Some((_, ty, _, _)) = self.resolver().member_property_type(rt, name) {
+                return Some(PropertyReadProbe::Found { ty, access: None });
             }
         }
         match self.member_extension_property(rt, name) {

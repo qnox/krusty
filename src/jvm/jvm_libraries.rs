@@ -19,7 +19,7 @@ use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
     RangeConstruction, RuntimeCtor, RuntimeOp,
 };
-use crate::symbol_resolver::{ty_subst, ty_subst_all};
+use crate::symbol_resolver::ty_subst;
 use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
@@ -584,7 +584,10 @@ impl JvmLibraries {
             if let Some(supers) = supers {
                 for sup in supers {
                     if let Ty::Obj(sup_internal, sup_args) = sup {
-                        let sup_targs = ty_subst_all(sup_args, &binds);
+                        let sup_targs = sup_args
+                            .iter()
+                            .map(|ty| ty_subst_preserving_unbound(*ty, &binds))
+                            .collect();
                         q.push_back((
                             super::jvm_class_map::to_jvm_type_name(sup_internal),
                             sup_targs,
@@ -1481,18 +1484,127 @@ fn has_free_ty_params(ty: Ty) -> bool {
 }
 
 fn parse_concrete_field_gsig(signature: &str, erased_descriptor: &str) -> Option<Ty> {
+    let (ty, has_free) = parse_field_gsig(signature, erased_descriptor, None)?;
+    (!has_free).then_some(ty)
+}
+
+/// Parse a field signature without losing projection information or accepting a signature whose
+/// erasure disagrees with the field descriptor. Type parameters may remain for a caller that can
+/// substitute them from an applied receiver; [`parse_concrete_field_gsig`] rejects them.
+fn parse_field_gsig(
+    signature: &str,
+    erased_descriptor: &str,
+    declaring_class_signature: Option<&str>,
+) -> Option<(Ty, bool)> {
     if !matches!(signature.as_bytes().first(), Some(b'L' | b'T' | b'[')) {
         return None;
     }
     let parsed = parse_gsig_inner(signature, true)?;
+    let erasure = field_type_parameter_erasure(signature, declaring_class_signature)
+        .or(parsed.erasure.as_deref().map(str::to_string));
     if !parsed.rest.is_empty()
-        || parsed.erasure.as_deref() != Some(erased_descriptor)
-        || parsed.has_free
+        || erasure.as_deref() != Some(erased_descriptor)
         || parsed.field_inexact
     {
         return None;
     }
-    Some(canonicalize_jvm_collections(parsed.ty))
+    Some((canonicalize_jvm_collections(parsed.ty), parsed.has_free))
+}
+
+/// Descriptor erasure for a field whose outermost signature type is a declaring-class type variable,
+/// including arrays of that variable. The JVM erases such a variable to its leftmost declared bound,
+/// not unconditionally to `Object`.
+fn field_type_parameter_erasure(
+    signature: &str,
+    declaring_class_signature: Option<&str>,
+) -> Option<String> {
+    let mut element = signature;
+    let mut dimensions = 0;
+    while let Some(rest) = element.strip_prefix('[') {
+        dimensions += 1;
+        element = rest;
+    }
+    let name = element.strip_prefix('T')?.strip_suffix(';')?;
+    let (formals, bounds, _) = parse_formals(declaring_class_signature?);
+    let by_name: std::collections::HashMap<&str, Ty> = formals
+        .iter()
+        .zip(&bounds)
+        .filter_map(|(formal, bounds)| {
+            bounds
+                .first()
+                .copied()
+                .map(|bound| (formal.as_str(), bound))
+        })
+        .collect();
+    let mut bound = *by_name.get(name)?;
+    let mut seen = std::collections::HashSet::new();
+    while let Ty::TyParam(next, _) = bound {
+        if !seen.insert(next) {
+            return None;
+        }
+        bound = *by_name.get(next)?;
+    }
+    Some(format!(
+        "{}{}",
+        "[".repeat(dimensions),
+        type_descriptor(bound)
+    ))
+}
+
+fn field_type_parameters_bound(ty: Ty, bindings: &std::collections::HashMap<String, Ty>) -> bool {
+    fn bound(
+        ty: Ty,
+        bindings: &std::collections::HashMap<String, Ty>,
+        seen: &mut std::collections::HashSet<&'static str>,
+    ) -> bool {
+        match ty {
+            Ty::TyParam(name, _) => {
+                seen.insert(name)
+                    && bindings
+                        .get(name)
+                        .is_some_and(|ty| bound(*ty, bindings, seen))
+            }
+            Ty::Fun(signature) => {
+                signature
+                    .params
+                    .iter()
+                    .all(|ty| bound(*ty, bindings, &mut seen.clone()))
+                    && bound(signature.ret, bindings, &mut seen.clone())
+            }
+            Ty::Obj(_, arguments) => arguments
+                .iter()
+                .all(|ty| bound(*ty, bindings, &mut seen.clone())),
+            Ty::Nullable(inner) => bound(*inner, bindings, seen),
+            _ => true,
+        }
+    }
+    bound(ty, bindings, &mut std::collections::HashSet::new())
+}
+
+fn ty_subst_preserving_unbound(ty: Ty, bindings: &std::collections::HashMap<String, Ty>) -> Ty {
+    match ty {
+        Ty::TyParam(name, _) => bindings.get(name).copied().unwrap_or(ty),
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|ty| ty_subst_preserving_unbound(*ty, bindings))
+                .collect(),
+            ty_subst_preserving_unbound(signature.ret, bindings),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            name,
+            &arguments
+                .iter()
+                .map(|ty| ty_subst_preserving_unbound(*ty, bindings))
+                .collect::<Vec<_>>(),
+        ),
+        Ty::Nullable(inner) => Ty::nullable(ty_subst_preserving_unbound(*inner, bindings)),
+        _ => ty,
+    }
 }
 
 fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
@@ -2801,6 +2913,63 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         None
     }
 
+    fn instance_field(
+        &self,
+        receiver: Ty,
+        name: &str,
+    ) -> Option<crate::libraries::InstanceFieldRef> {
+        let internal = receiver.obj_internal()?;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(super::jvm_class_map::to_jvm_type_name(internal));
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = queue.pop_front() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let Some(class) = self.cp.find_name(current) else {
+                continue;
+            };
+            let metadata_property = metadata::class_properties(&class)
+                .iter()
+                .find(|property| property.name == name && !property.is_extension);
+            if metadata_property.is_some_and(|property| {
+                property.getter.is_some() || property.visibility != Visibility::Public
+            }) {
+                return None;
+            }
+            if let Some(field) = class.fields.iter().find(|field| field.name == name) {
+                if field.access & crate::jvm::classreader::ACC_STATIC != 0
+                    || field.access & crate::jvm::classreader::ACC_PUBLIC == 0
+                {
+                    return None;
+                }
+                let ty = field
+                    .signature
+                    .as_deref()
+                    .and_then(|signature| {
+                        parse_field_gsig(signature, &field.descriptor, class.signature.as_deref())
+                    })
+                    .and_then(|(ty, has_free)| {
+                        let bindings = self.receiver_type_bindings_name(receiver, current);
+                        (!has_free || field_type_parameters_bound(ty, &bindings))
+                            .then(|| canonicalize_jvm_collections(ty_subst(ty, &bindings)))
+                    })
+                    .unwrap_or_else(|| field_desc_to_ty(&field.descriptor));
+                return Some(crate::libraries::InstanceFieldRef {
+                    owner: current,
+                    ty,
+                    descriptor: field.descriptor.clone(),
+                });
+            }
+            if metadata_property.is_some() {
+                return None;
+            }
+            queue.extend(class.super_class);
+            queue.extend(class.interfaces.iter_ids());
+        }
+        None
+    }
+
     fn extension_receiver_rank(&self, recv: Ty, decl_recv: Ty) -> Option<u32> {
         // VALUE-CLASS receivers match by IDENTITY, never by erasing to the underlying: a `UInt` receiver
         // binds only a `UInt` extension (`UInt.downTo` → `UIntProgression`), never `Int`'s — they share the
@@ -3523,8 +3692,8 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, parse_class_gsig, parse_concrete_field_gsig, parse_method_desc,
-        parse_method_gsig,
+        desc_to_ty, parse_class_gsig, parse_concrete_field_gsig, parse_field_gsig,
+        parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::SemanticPlatform;
     use crate::types::type_name;
@@ -3683,7 +3852,98 @@ mod tests {
     }
 
     #[test]
+    fn inaccessible_or_static_field_hides_an_inherited_instance_field() {
+        let sources = [
+            (
+                String::new(),
+                "package p; public class Base { public int value; }".into(),
+            ),
+            (
+                String::new(),
+                "package p; public class PrivateChild extends Base { private int value; }".into(),
+            ),
+            (
+                String::new(),
+                "package p; public class StaticChild extends Base { public static int value; }"
+                    .into(),
+            ),
+        ];
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &sources,
+            crate::jvm::java_stub::StubMode::Strict,
+            &|candidate| candidate == "java/lang/Object",
+        )
+        .expect("Java field-hiding stubs");
+        let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
+        classpath.set_stub_overlay(stubs);
+        let libraries = super::JvmLibraries::new(classpath);
+
+        assert_eq!(
+            libraries
+                .instance_field(Ty::obj("p/Base"), "value")
+                .map(|field| field.ty),
+            Some(Ty::Int)
+        );
+        for child in ["p/PrivateChild", "p/StaticChild"] {
+            assert!(
+                libraries.instance_field(Ty::obj(child), "value").is_none(),
+                "{child}.value must not expose Base.value"
+            );
+        }
+    }
+
+    #[test]
+    fn instance_field_specializes_parameters_and_erases_unbound_ones() {
+        let sources = [
+            (
+                String::new(),
+                "package p; public class Generic<T> { public T value; public java.util.List<T> values; }"
+                    .into(),
+            ),
+            (
+                String::new(),
+                "package p; public class Strings extends Generic<String> {}".into(),
+            ),
+        ];
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &sources,
+            crate::jvm::java_stub::StubMode::Strict,
+            &|candidate| candidate.starts_with("java/"),
+        )
+        .expect("generic Java field stubs");
+        let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
+        classpath.set_stub_overlay(stubs);
+        let libraries = super::JvmLibraries::new(classpath);
+
+        assert_eq!(
+            libraries
+                .instance_field(Ty::obj("p/Strings"), "value")
+                .map(|field| field.ty),
+            Some(Ty::String),
+            "an exact type variable must be specialized through the receiver hierarchy"
+        );
+        let raw_values = libraries
+            .instance_field(Ty::obj("p/Generic"), "values")
+            .expect("public raw field")
+            .ty;
+        assert!(
+            matches!(raw_values, Ty::Obj(_, arguments) if arguments.is_empty()),
+            "an unbound field parameter must fall back to its erased descriptor, got {raw_values:?}"
+        );
+    }
+
+    #[test]
     fn field_generic_signature_rejects_wildcards_and_projections() {
+        assert_eq!(
+            parse_field_gsig(
+                "TT;",
+                "Ljava/lang/CharSequence;",
+                Some("<T::Ljava/lang/CharSequence;>Ljava/lang/Object;"),
+            )
+            .map(|(ty, _)| ty),
+            Some(Ty::ty_param("T", Ty::obj("kotlin/Any"))),
+            "a field type variable must erase through its declaring-class bound"
+        );
         for signature in [
             "Ljava/util/List<*>;",
             "Ljava/util/List<+Ljava/lang/String;>;",
@@ -3692,6 +3952,11 @@ mod tests {
             "Lkotlin/jvm/functions/Function1<-Ljava/lang/String;+Ljava/lang/Long;>;",
         ] {
             let descriptor = format!("L{};", &signature[1..signature.find('<').unwrap()]);
+            assert_eq!(
+                parse_field_gsig(signature, &descriptor, None),
+                None,
+                "field parser accepted lossy signature {signature}"
+            );
             assert_eq!(
                 parse_concrete_field_gsig(signature, &descriptor),
                 None,

@@ -13905,12 +13905,25 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
+        self.add_property_read_kind(receiver, owner, name, ty, interface, None)
+    }
+
+    fn add_property_read_kind(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        ty: Ty,
+        interface: bool,
+        instance_field: Option<String>,
+    ) -> u32 {
         let read = self.ir.add_expr(IrExpr::PropertyRead {
             receiver,
             owner,
             name: name.to_string(),
             ty,
             interface,
+            instance_field,
             operation: None,
         });
         self.record_property_declaration_type(read, owner, name, ty);
@@ -14218,13 +14231,23 @@ impl<'a> Lower<'a> {
         // decision, made from the owner's declaration. Without the record the read resolved to something
         // else, and the caller's other paths handle it.
         let ty = self.info.ty(e);
-        if let Some(ExprLowering::MemberPropertyRead { owner, interface }) =
-            self.info.expr_lowers.get(&e)
+        if let Some(ExprLowering::MemberPropertyRead {
+            owner,
+            interface,
+            instance_field,
+        }) = self.info.expr_lowers.get(&e)
         {
             if self.source_property_read_needs_generic_value_class_box(*owner, name, e) {
                 return None;
             }
-            let read = self.add_property_read(recv, *owner, name, ty, *interface);
+            let read = self.add_property_read_kind(
+                recv,
+                *owner,
+                name,
+                ty,
+                *interface,
+                instance_field.clone(),
+            );
             return Some(read);
         }
         let resolved = self.info.resolved_member(e).cloned().map(|r| {
@@ -20806,7 +20829,23 @@ impl<'a> Lower<'a> {
                 };
                 // All property realizations use the same semantic read operation. The backend owns
                 // the field-versus-accessor decision, including computed and delegated properties.
-                self.lower_field_read_on(recv, &recv_internal, &name, e, slot_ty)?
+                match self.lower_field_read_on(recv, &recv_internal, &name, e, slot_ty) {
+                    Some(read) => read,
+                    None if matches!(
+                        self.info.expr_lowers.get(&e),
+                        Some(ExprLowering::MemberPropertyRead {
+                            instance_field: Some(_),
+                            ..
+                        })
+                    ) =>
+                    {
+                        // The receiver is source-defined, but the selected declaration may live beyond
+                        // the source hierarchy (for example a Java field inherited by a Kotlin class).
+                        // Reuse the checker-recorded property owner instead of reclassifying by origin.
+                        self.lower_member_read_on(recv, rt, &name, e)?
+                    }
+                    None => return None,
+                }
             } else {
                 // A property read on a builtin/library/another-file receiver (`s.length`,
                 // `list.size`, a sibling class's `getX()`): resolved generically through the shared
