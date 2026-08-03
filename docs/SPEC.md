@@ -429,14 +429,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   qualified-access lowering used by `.`, so source/module members and extensions, classpath members
   and extensions, primitive intrinsics, array operations, and `kotlin/Any` virtuals do not acquire
   separate safe-call dispatch tables. Resolution likewise normalizes the receiver to its non-null
-  semantic type before selecting those targets; whether a primitive arrived boxed from `Int?` or
-  unboxed from `Int` is a lowering representation, not a callable origin. A statically non-null scalar
-  receiver delegates directly to the complete qualified operation; a nullable receiver's merge boxes
-  primitive member results so both branches are references, and composes with Elvis (`a?.m() ?: d`).
+  semantic type before selecting those targets. An applicable member still wins over an extension,
+  including an inherited universal member such as `Any.toString()` when the same-named extension is
+  declared on the receiver's superclass or interface; an inapplicable same-named overload does not
+  veto the applicable member. Whether a primitive arrived boxed from `Int?` or unboxed from `Int` is
+  a lowering representation, not a callable origin. A statically non-null scalar receiver delegates
+  directly to the complete qualified operation; a nullable receiver's merge boxes primitive member
+  results so both branches are references, and composes with Elvis (`a?.m() ?: d`).
   Primitive conversions, unmodelled builtin methods (`inc`/`dec`/`mod`/`rangeTo`), erased type-parameter
   receivers, local functions, and function-object `toString`/`hashCode` remain rejected rather than
   being rebound to a different origin or emitted with the wrong representation.
-  (`tests/safe_call_e2e.rs`, `tests/safe_call_primitive_e2e.rs`.)
+  (`tests/safe_call_e2e.rs`, `tests/safe_call_primitive_e2e.rs`,
+  `tests/safe_call_any_member_e2e.rs`.)
 - **Safe call whose scope block diverges — `x?.let { return … }` / `x?.run { throw … }` / `x?.also { … }`
   / `x?.apply { … }`.** A scope function whose lambda body is a non-local `return` (or `throw`) has block
   value type `Nothing`, so the whole safe call is `Nothing?` — `null` when the receiver is null, else

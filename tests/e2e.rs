@@ -852,6 +852,8 @@ mod resolver_regression_e2e;
 mod result_e2e;
 #[path = "run_noreceiver_e2e.rs"]
 mod run_noreceiver_e2e;
+#[path = "safe_call_any_member_e2e.rs"]
+mod safe_call_any_member_e2e;
 #[path = "safe_call_argument_list_e2e.rs"]
 mod safe_call_argument_list_e2e;
 #[path = "safe_call_e2e.rs"]
