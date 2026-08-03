@@ -20057,10 +20057,18 @@ impl<'a> Lower<'a> {
                     _ => None,
                 })
                 .is_some_and(|body| self.info.ty(body) == Ty::Nothing);
-            // A statically-`null` receiver (`null?.toString()`): the receiver is always null, so the
-            // member is never invoked and the whole safe call is `null`. Run the receiver for any side
-            // effects (a bare `null` literal has none), then yield `null`.
-            if rty == Ty::Null {
+            // A receiver that can only ever be `null`: the `null` literal (`null?.toString()`) and
+            // `Nothing`/`Nothing?` (`val n: Nothing? = null; n?.toString()` — `Nothing` has no non-null
+            // value, and a non-nullable `Nothing` receiver diverges before the member could run). The
+            // member is never invoked, so the whole safe call is `null`. Run the receiver for any side
+            // effects (a bare `null` literal has none; a diverging receiver terminates here and the
+            // unreachable `null` is dropped by the emitter), then yield `null`.
+            //
+            // This fold bypasses the member lookup entirely, which is sound only because the CHECKER
+            // reports an unresolved member behind `?.` (see `resolve::expr_inner_safe_call`); before
+            // that, `Nothing?` was deliberately kept out of this arm so the backend bail would still
+            // reject `n?.thisDoesNotExist()`.
+            if rty == Ty::Null || rty.non_null() == Ty::Nothing {
                 let recv = self.expr(receiver)?;
                 let nullc = self.emit_const(IrConst::Null);
                 return Some(self.emit_block(vec![recv], Some(nullc)));
