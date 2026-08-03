@@ -169,6 +169,70 @@ fun n(m: Map<String, Int>): String = m.entries.first().key
     }
 }
 
+/// What the recovered `InnerClasses` entry must SAY, asserted directly rather than only against the
+/// JDK-present emit. The comparison above is anchored to the JDK today because its other side reads
+/// `java/util/Map.class` — but both sides run the same resolver, so a restructure that routed the
+/// JDK-present path through the builtins fallback too would leave it passing on whatever flags the
+/// decode happened to produce. `0x0609` (`public static interface abstract`) is what javac put in
+/// `java/util/Map`, and it is not negotiable.
+#[test]
+fn recovered_inner_class_entry_carries_the_jdk_flags() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
+        return;
+    };
+    let src = "fun n(m: Map<String, Int>): String = m.entries.first().key\n";
+    let classes = common::compile_in_process(src, "innercls", &[stdlib], None)
+        .expect("must compile with no JDK on the classpath");
+    let (name, bytes) = classes.first().expect("must emit a class file");
+    let info = krusty::jvm::classreader::parse_class(bytes)
+        .unwrap_or_else(|e| panic!("{name} must be a readable class file: {e:?}"));
+    let entry = info
+        .inner_classes
+        .iter()
+        .find(|e| e.inner == "java/util/Map$Entry")
+        .unwrap_or_else(|| {
+            panic!(
+                "{name} must carry an InnerClasses entry for the nested builtin it references; got {:?}",
+                info.inner_classes
+            )
+        });
+    assert_eq!(entry.outer.as_deref(), Some("java/util/Map"));
+    assert_eq!(entry.name.as_deref(), Some("Entry"));
+    assert_eq!(
+        entry.access, 0x0609,
+        "the entry must carry the flags java/util/Map records for Map$Entry \
+         (public static interface abstract), not whatever the builtins decode defaults to"
+    );
+}
+
+/// The guardrails that keep the `$`-decomposition from INVENTING a nesting relation. Requiring the
+/// `.kotlin_builtins` fragment to actually declare the nested class is the whole reason a `$` that is
+/// merely part of a mangled name, a lambda class, or a non-builtin owner cannot be reported as nesting.
+#[test]
+fn builtin_nested_class_only_answers_for_declared_nestings() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
+        return;
+    };
+    let cp = krusty::jvm::classpath::Classpath::new(vec![stdlib]);
+    assert_eq!(
+        cp.builtin_nested_class("java/util/Map$Entry"),
+        Some(("java/util/Map".to_string(), "Entry".to_string(), 0x0609)),
+        "the one nesting a JDK-less compile actually has to recover"
+    );
+    // Not nested at all — no `$` to decompose.
+    assert_eq!(cp.builtin_nested_class("java/util/Map"), None);
+    // A `$` that is part of a mangled name, not a nesting: the enclosing half maps to no builtin.
+    assert_eq!(cp.builtin_nested_class("com/example/Foo$bar$1"), None);
+    assert_eq!(cp.builtin_nested_class("MainKt$main$1"), None);
+    // The enclosing half maps to a builtin, but the fragment declares no such nested class — the
+    // decomposition alone must not be enough.
+    assert_eq!(cp.builtin_nested_class("java/util/Map$Absent"), None);
+    // Multi-level: the enclosing half is itself the mapped nested name, which declares nothing under it.
+    assert_eq!(cp.builtin_nested_class("java/util/Map$Entry$Deeper"), None);
+}
+
 /// Printable ASCII runs of 3+ characters in a class file — its constant-pool names and descriptors.
 /// A crude extraction on purpose: this only has to make an assertion failure readable.
 fn printable_tokens(bytes: &[u8]) -> Vec<String> {

@@ -3456,10 +3456,13 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
 /// that class file: `kotlin/collections/Map.Entry` is a public, non-inner (hence `ACC_STATIC`) nested
 /// interface, exactly the `0x0609` `java/util/Map$Entry` carries.
 fn builtin_class_access(flags: u64) -> u16 {
-    // VISIBILITY: 0 INTERNAL, 1 PRIVATE, 2 PROTECTED, 3 PUBLIC, 4 PRIVATE_TO_THIS, 5 LOCAL. Only the
-    // two that survive to a JVM flag are named; everything else is package-private (no bit).
+    // VISIBILITY: 0 INTERNAL, 1 PRIVATE, 2 PROTECTED, 3 PUBLIC, 4 PRIVATE_TO_THIS, 5 LOCAL. `internal`
+    // is PUBLIC on the JVM — kotlinc mangles the NAME rather than narrowing the flag — and shares that
+    // arm, which also makes the all-zero word a `Class` message omitting `flags` decodes to (every
+    // `kotlin/*Array`, `kotlin/String`, `kotlin/Int`) land on a legal public class. `local` has no
+    // enclosing-declaration visibility to record, so it stays package-private.
     let visibility = match (flags >> 1) & 0x7 {
-        3 => ACC_PUBLIC,
+        0 | 3 => ACC_PUBLIC,
         2 => ACC_PROTECTED,
         1 | 4 => ACC_PRIVATE,
         _ => 0,
@@ -3635,12 +3638,33 @@ mod builtin_class_access_tests {
         assert_eq!(builtin_class_access(flags(3, 0, 2, false)), 0x4019);
         // public annotation class — an annotation interface.
         assert_eq!(builtin_class_access(flags(3, 2, 4, false)), 0x2609);
-        // private and protected keep their own bit; `internal` has no JVM flag (package-private).
+        // private and protected keep their own bit; `internal` is PUBLIC on the JVM (kotlinc mangles
+        // the NAME instead of narrowing the flag), so it must not come out package-private.
         assert_eq!(builtin_class_access(flags(1, 0, 0, false)), 0x001a);
         assert_eq!(builtin_class_access(flags(2, 0, 0, false)), 0x001c);
-        assert_eq!(builtin_class_access(flags(0, 0, 0, false)), 0x0018);
+        assert_eq!(builtin_class_access(flags(0, 0, 0, false)), 0x0019);
         // `open` is neither final nor abstract.
         assert_eq!(builtin_class_access(flags(3, 1, 0, false)), 0x0009);
+    }
+
+    /// The arm assertions above assemble the flag word with the very shifts the decoder reads back, so
+    /// they pin the MAPPING but say nothing about the OFFSETS — moving `IS_INNER` a bit over would keep
+    /// them all green. These are `Class.flags` words as they actually appear in the stdlib's shipped
+    /// `.kotlin_builtins` fragments, so they pin the layout itself.
+    #[test]
+    fn real_builtins_flag_words_decode_to_jvm_access() {
+        // `kotlin/collections/Map.Entry` — public abstract interface, not `inner`. Anchors VISIBILITY
+        // and CLASS_KIND, and is the one word a JDK-less compile actually decodes today; the entry it
+        // produces is compared byte-for-byte against `java/util/Map$Entry`'s in
+        // `tests/no_jdk_builtin_emit_e2e.rs`.
+        assert_eq!(builtin_class_access(0x0066), 0x0609);
+        // `kotlin/Any` — public OPEN class. Its modality is the one that pins MODALITY at bits 4..6:
+        // read one bit over and it would decode as ABSTRACT or FINAL.
+        assert_eq!(builtin_class_access(0x0016), 0x0009);
+        // A `Class` message may carry no `flags` field at all (`kotlin/String`, `kotlin/Int`,
+        // `kotlin/Array` and every `kotlin/*Array` omit it), which decodes as the all-zero word. That
+        // must still land on a legal public final class, not a package-private one.
+        assert_eq!(builtin_class_access(0), 0x0019);
     }
 }
 
