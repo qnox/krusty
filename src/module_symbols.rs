@@ -162,6 +162,11 @@ impl<'a> ModuleSymbols<'a> {
                 .iter()
                 .map(|(_, has_default)| *has_default)
                 .collect(),
+            recv_fun: c
+                .ctor_params
+                .iter()
+                .map(|parameter| matches!(parameter.non_null(), Ty::Fun(sig) if sig.has_receiver))
+                .collect(),
             vararg: c.ctor_vararg,
         })
         .into_iter()

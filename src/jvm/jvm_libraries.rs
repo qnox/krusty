@@ -1103,6 +1103,10 @@ impl JvmLibraries {
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
             let meta_fns = metadata::class_functions(&ci);
+            // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
+            // source-level shape survives (a receiver function type erases to `FunctionN` in both the
+            // descriptor and the `Signature`).
+            let ctor_param_lists = metadata::class_constructor_params(&ci);
             for m in &ci.methods {
                 if m.is_bridge()
                     && ci.methods.iter().any(|target| {
@@ -1224,6 +1228,57 @@ impl JvmLibraries {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
                 if m.name == "<init>" {
+                    // A constructor is NOT in `class_functions`, so the shared member alignment above
+                    // left its receiver-function marks unrestored: `DslBase(init: Scope.() -> Unit)`
+                    // read as a plain `(Scope) -> Unit` and no lambda argument bound `this`. Restore
+                    // them from the class's `@Metadata` CONSTRUCTOR records, matched by source arity
+                    // (the same evidence `ctor_named_params` uses for names/defaults).
+                    //
+                    // Arity is the ONLY alignment available here, so it must also be the test of
+                    // whether the record belongs to THIS `<init>`. With two constructors of the same
+                    // arity the record cannot be attributed, and stamping one's marks on both rewrites
+                    // an ordinary `(Cfg) -> Unit` parameter into a receiver function type — which makes
+                    // a valid call to the OTHER constructor unresolvable. Mark only when the arity
+                    // identifies exactly one record; an ambiguous class keeps the erased reading.
+                    let unique_record = {
+                        let mut same_arity = ctor_param_lists
+                            .iter()
+                            .filter(|params| params.recv_fun.len() == member.params.len());
+                        match (same_arity.next(), same_arity.next()) {
+                            (Some(params), None) => Some(params),
+                            _ => None,
+                        }
+                    };
+                    if let (Some(gsig), Some(recv_fun)) = (
+                        member.generic_sig.as_mut(),
+                        unique_record
+                            .map(|params| params.recv_fun.clone())
+                            .filter(|marks| marks.iter().any(|&is_receiver| is_receiver)),
+                    ) {
+                        mark_receiver_fun_params(gsig, &recv_fun, false);
+                        // Publish the recovered shape the two ways constructor resolution reads it:
+                        // the parameter TYPE (overload/lambda matching walks `params`) and the call
+                        // sig's per-parameter receiver flags. Only a receiver-function parameter is
+                        // replaced — every other parameter keeps its descriptor-derived erasure, so
+                        // constructor selection is unchanged for them.
+                        let generic = member.generic_sig.as_ref().map(|g| g.params.clone());
+                        if let Some(generic) = generic.filter(|g| g.len() == member.params.len()) {
+                            for (param, shape) in member.params.iter_mut().zip(&generic) {
+                                if matches!(shape.non_null(), Ty::Fun(sig) if sig.has_receiver) {
+                                    *param = *shape;
+                                }
+                            }
+                        }
+                        member.call_sig.lambda_receiver_params = recv_fun;
+                        member.call_sig.lambda_receivers = member
+                            .params
+                            .iter()
+                            .map(|param| match param.non_null() {
+                                Ty::Fun(sig) if sig.has_receiver => sig.params.first().copied(),
+                                _ => None,
+                            })
+                            .collect();
+                    }
                     // The ctor's generic signature (decoded above, marks restored) lets the resolver infer a
                     // construction's type arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend
                     // signature strings. Re-parsing the raw attribute here would drop the receiver marks.

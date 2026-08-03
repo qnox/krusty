@@ -237,6 +237,8 @@ fn lower_file_at_reporting_impl(
         reified_subst: Vec::new(),
         inline_return: Vec::new(),
         inline_lambda_ret: Vec::new(),
+        closure_label: None,
+        foreach_splice: Vec::new(),
         fn_body_tail: None,
     };
     lo.ir.source_line_count = file.source_line_count;
@@ -1721,13 +1723,24 @@ fn lower_file_at_reporting_impl(
                     let fty_ir = lo.ir.classes[id as usize].fields[fidx].ty;
                     let property_ir = ty_to_ir(*property_ty);
                     // `open`/`override` property accessors must stay non-final (kotlinc's member
-                    // modality — same rule as methods). Only BODY properties carry the flag;
-                    // an `open val` PRIMARY-CONSTRUCTOR property isn't modeled yet.
+                    // modality — same rule as methods). `field_props` interleaves PRIMARY-CONSTRUCTOR
+                    // and BODY properties, so both declaration forms must be consulted: the flag also
+                    // decides whether an in-class access may touch the raw backing field
+                    // (`jvm::ir_emit::direct_field_access`), and a ctor-declared `open val` overridden
+                    // by a subclass bypasses the override exactly like a body one.
                     let prop_open = c
-                        .body_props
+                        .props
                         .iter()
+                        .filter(|pp| pp.is_property)
                         .find(|pp| pp.name == *pname)
-                        .is_some_and(|pp| pp.is_open);
+                        .map(|pp| pp.is_open)
+                        .or_else(|| {
+                            c.body_props
+                                .iter()
+                                .find(|pp| pp.name == *pname)
+                                .map(|pp| pp.is_open)
+                        })
+                        .unwrap_or(false);
                     // A property that WRITES its own accessor over a backing field (`val x = init get() =
                     // field`) has source-written bodies, so its accessors must never be bypassed.
                     let prop_custom_accessor = c
@@ -2775,45 +2788,10 @@ fn lower_file_at_reporting_impl(
                         }
                     }
                     // A property redeclared in the subclass (`override val field`) overrides the base's
-                    // `getX()`, so external access dispatches virtually to the subclass field — correct.
-                    // But a *base-class member that reads the property internally* reads the field
-                    // directly (not via `getX`), bypassing the override. Bail only then.
-                    let own_fields: Vec<&String> = c
-                        .props
-                        .iter()
-                        .filter(|p| p.is_property)
-                        .map(|p| &p.name)
-                        .chain(c.body_props.iter().map(|p| &p.name))
-                        .collect();
-                    let base_name = c.base_class.clone();
-                    let base_decl = base_name.as_ref().and_then(|bn| {
-                        file.decls.iter().find_map(|&d| match file.decl(d) {
-                            Decl::Class(bc) if bc.name == *bn => Some(bc),
-                            _ => None,
-                        })
-                    });
-                    for fname in own_fields {
-                        if lo.resolve_field_name(super_int, fname).is_some() {
-                            // A base with its own base, or a base member reading `fname`, risks the
-                            // internal-read bypass — bail conservatively; else the override is safe.
-                            let unsafe_base = base_decl.map_or(true, |bd| {
-                                bd.base_class.is_some()
-                                    || bd.methods.iter().any(|m| match &m.body {
-                                        FunBody::Expr(e) | FunBody::Block(e) => {
-                                            file.expr_uses_name(*e, fname)
-                                        }
-                                        FunBody::None => false,
-                                    })
-                                    || bd.body_props.iter().any(|p| {
-                                        p.init.map_or(false, |e| file.expr_uses_name(e, fname))
-                                    })
-                            });
-                            if unsafe_base {
-                                lo.set_bail("gate:base-reads-override-internally");
-                                return None;
-                            }
-                        }
-                    }
+                    // `getX()`, and every access — including a base member reading or writing it
+                    // internally — goes through that accessor, so the override is never bypassed. See
+                    // `Lower::open_source_property` (bare `name`) and `jvm::ir_emit::direct_field_access`
+                    // (qualified `this.name`), which decline the raw backing field for an `open` property.
                 }
                 // An interface's abstract methods have no body; its DEFAULT methods (with a body) are
                 // lowered like instance methods (fall through to the normal method-body loop below).
@@ -5575,6 +5553,16 @@ pub(crate) struct Lower<'a> {
     /// function result), so the return-lowering routes it through the frame instead of emitting a
     /// real `Return` the suspend flattener can't model inside the splice's `try`/`finally`.
     inline_lambda_ret: Vec<(String, u32, String, Ty, bool)>,
+    /// The explicit label of the lambda whose body is being lowered as a real CLOSURE, when a
+    /// `return@<that label>` in it is this closure method's own return (see `lower_lambda_sam`).
+    /// `None` while lowering anything else, which is what makes an explicit label reaching no splice
+    /// frame a skip rather than a real return out of the enclosing function.
+    closure_label: Option<String>,
+    /// Active `forEach` lambda splices, innermost last: `(source label, IR loop label)`. `forEach` is
+    /// spliced into a for-each LOOP rather than through a result-slot frame, so a `return@<label>` in
+    /// its body is the loop's `continue`, not a break to a result slot. The source label is the
+    /// lambda's explicit one (`forEach inner@{ … }`) or the implicit `forEach`.
+    foreach_splice: Vec<(String, String)>,
     /// The enclosing function's TAIL expression (an expression body, a block's trailing value, or the
     /// value of a final `return`), if any — the expression whose value is the function's result.
     /// Consulted by tail-position splice gates (`fn_tail` above).
@@ -6541,12 +6529,33 @@ impl<'a> Lower<'a> {
         })
     }
 
+    /// Whether `name` resolves to an OPEN property on `owner` (or one of its supertypes). Such a
+    /// property is reached through its ACCESSOR even from inside the declaring class: a subclass
+    /// `override val`/`var` replaces the accessor, not this class's private backing field, so a direct
+    /// field access from a base member would read/write the base's own storage and bypass the
+    /// override. kotlinc emits `invokevirtual get<Name>()`/`set<Name>()` there for that reason.
+    ///
+    /// A WRITE to an open `val` is exempt: a `val` declares no setter at all, so its only write is the
+    /// deferred initialization Kotlin permits in a constructor/`init` block (`open val c: B` assigned
+    /// under `-ProhibitOpenValDeferredInitialization`), which kotlinc also emits as a direct
+    /// `putfield`. Routing it through `set<Name>` would be a `NoSuchMethodError`.
+    fn open_source_property(&self, owner: TypeName, name: &str, writable: bool) -> bool {
+        self.syms
+            .declared_member_prop(owner, name)
+            .is_some_and(|(_, property)| {
+                property.is_open && (!writable || property.setter_name.is_some())
+            })
+    }
+
     fn implicit_source_property_field(
         &self,
         owner: TypeName,
         name: &str,
         writable: bool,
     ) -> Option<(u32, u32)> {
+        if self.open_source_property(owner, name, writable) {
+            return None;
+        }
         if !self.can_access_source_private(owner)
             || (writable
                 && self
@@ -7900,7 +7909,30 @@ impl<'a> Lower<'a> {
         if !c.owner_package_matches(pkg.as_str()) {
             return None;
         }
-        // A vararg FQ call is a later slice (sound skip).
+        // A VARARG FQ call packs its trailing arguments into the callee's array parameter — exactly
+        // what the bare-name path does. The CHECKER selected the overload and recorded the packing
+        // slot; a callee whose last parameter merely IS an array is not evidence of a vararg, so
+        // that shape stays a sound skip.
+        let packed_vararg = (!c.default_call)
+            .then_some(c.vararg_index)
+            .flatten()
+            .filter(|&slot| slot + 1 == c.params.len() && args.len() >= slot)
+            .filter(|_| !self.info.resolved_call_arg_slots.contains_key(&e));
+        if let Some(slot) = packed_vararg {
+            let params = tys_to_ir(&c.params);
+            let a = self.lower_call_args_vararg(args, &params, true, slot)?;
+            let physical_ret = c.physical_ret;
+            let logical_ret = c.ret;
+            let call_inline = c.inline.can_inline();
+            let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
+            let suspend = c.suspend;
+            let call = self.emit_library_static_call(c, a, suspend);
+            return Some(if call_inline || erased_generic_ret {
+                self.coerce_erased_call_result(e, call, &physical_ret, true)
+            } else {
+                call
+            });
+        }
         let last_is_array = c.params.last().is_some_and(|p| p.array_elem().is_some());
         if last_is_array {
             return None;
@@ -8922,11 +8954,25 @@ impl<'a> Lower<'a> {
         // closure method, not a non-local return of the enclosing fn. Lower its body with `cur_ret_ty`
         // set to the closure's own return type so `return` coerces to and `areturn`s that type.
         let is_anon_fun = self.afile.anon_fun_lambdas.contains(&e.0);
-        let saved_ret_ty = if is_anon_fun {
+        // A LABELLED lambda lowered as a real closure owns its `return@<own label>` the same way: the
+        // label is local to this lambda, so it is this closure method's own return. That holds only
+        // while no BARE `return` shares the body — a bare return is non-local and needs the enclosing
+        // function's type, and the two cannot both drive `cur_ret_ty`. Registering the label here is
+        // what lets the closure route serve a labelled lambda; without it the return-lowering guard
+        // (which cannot otherwise tell this from an unmodelled splice) would skip the whole file.
+        let own_closure_label = self
+            .afile
+            .lambda_labels
+            .get(&e.0)
+            .filter(|_| !body_has_bare_return(self.afile, body))
+            .cloned();
+        let saved_ret_ty = if is_anon_fun || own_closure_label.is_some() {
             Some(std::mem::replace(&mut self.cur_ret_ty, sig.ret))
         } else {
             None
         };
+        let owns_labelled_return = own_closure_label.is_some();
+        let saved_closure_label = std::mem::replace(&mut self.closure_label, own_closure_label);
         // A `var` declared INSIDE this lambda's body and mutated by a further (non-inline) closure
         // (`{ var v = …; call { v = … }; v }`) needs a `Ref` holder so the nested write is observed.
         // UNION the body-local shared cells with the inherited set (captured enclosing cells stay boxed)
@@ -8939,8 +8985,11 @@ impl<'a> Lower<'a> {
         // function must not capture a `return`/`return@label` lowered inside it (a non-local return
         // across a non-inline boundary is illegal Kotlin anyway; don't let one silently bind).
         let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
+        let saved_foreach = std::mem::take(&mut self.foreach_splice);
         let ve = self.expr(body);
+        self.foreach_splice = saved_foreach;
         self.inline_lambda_ret = saved_lam_frames;
+        self.closure_label = saved_closure_label;
         self.shared_cell_vars = saved_cells;
         if let Some(rt) = saved_ret_ty {
             self.cur_ret_ty = rt;
@@ -9049,7 +9098,12 @@ impl<'a> Lower<'a> {
             arity: arity as u8,
             captures: capture_vals,
             sam: sam.map(|(i, m, descriptor, _)| (i, m, descriptor)),
-            inline_body: Some(inline_body),
+            // The mirror of the bare-return rule above. A `return@<own label>` was lowered as THIS
+            // closure method's own return, which is only correct while the method exists: spliced
+            // through `inline_body` the very same node becomes a non-local return of the enclosing
+            // function, carrying the wrong type. Withhold the splice form so the lambda can only be
+            // emitted as the closure it was lowered as.
+            inline_body: (!owns_labelled_return).then_some(inline_body),
         }))
     }
 
@@ -9549,9 +9603,11 @@ impl<'a> Lower<'a> {
             // The suspend-lambda machine is its own return scope — don't let an enclosing splice's
             // return frame capture a `return` lowered inside it (illegal across the boundary anyway).
             let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
+            let saved_foreach = std::mem::take(&mut self.foreach_splice);
             // Evaluate WITHOUT `?` so the `cur_fn_suspend` / `scope` state is always restored, even when the
             // body bails (an early `?` here would leak `cur_fn_suspend = true` into the enclosing method).
             let body_val = self.expr(body);
+            self.foreach_splice = saved_foreach;
             self.inline_lambda_ret = saved_lam_frames;
             self.cur_fn_suspend = saved_cur_suspend;
             self.in_suspend_lambda_body = saved_in_sl;
@@ -10586,53 +10642,6 @@ impl<'a> Lower<'a> {
             .get(&lambda.0)
             .cloned()
             .unwrap_or_else(|| callee.to_string())
-    }
-
-    /// Splice a zero-parameter lambda body in place, giving a `return@<label>` inside it a LOCAL-return
-    /// frame: the body is wrapped in a `while (true) { … break@brk }` and the labelled return lowers to
-    /// `break@brk`, leaving its value in a slot. Without the frame the labelled return falls through to
-    /// the ENCLOSING function's return and pushes a value of the lambda's type where the function's is
-    /// required — unverifiable bytecode (`run { … return@run 30 … }` inside a `String` function).
-    fn splice_labeled_lambda_body(
-        &mut self,
-        body: AstExprId,
-        label: &str,
-        result_ty: Ty,
-    ) -> Option<u32> {
-        let brk = format!("$lamret${}", self.fresh_value());
-        // `result_ty` is the CALL's type, not the body's: a body whose every path is a `return@label`
-        // falls through as `Nothing` while the call still produces a value, and binding the slot as
-        // `Nothing` leaves the splice with no result at all ("control flow falls through code end").
-        if result_ty != Ty::Unit && result_ty != Ty::Nothing {
-            let ret = result_ty;
-            let result_slot = self.fresh_value();
-            let dflt = self.emit_zero_value(ret);
-            let decl = self.emit_variable(result_slot, ty_to_ir(ret), Some(dflt));
-            self.inline_lambda_ret
-                .push((label.to_string(), result_slot, brk.clone(), ret, false));
-            let body_val = self.expr(body);
-            self.inline_lambda_ret.pop();
-            let body_val = body_val?;
-            // Normal fall-through: the body's own value is the result.
-            let assign = self.emit_set_value(result_slot, body_val);
-            let brk_stmt = self.emit_break(Some(brk.clone()));
-            let loop_body = self.emit_block(vec![assign, brk_stmt], None);
-            let cond = self.emit_const(IrConst::Boolean(true));
-            let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
-            let get = self.emit_get_value(result_slot);
-            return Some(self.emit_block(vec![decl, loopw], Some(get)));
-        }
-        self.inline_lambda_ret
-            .push((label.to_string(), 0, brk.clone(), Ty::Unit, false));
-        let body_val = self.expr(body);
-        self.inline_lambda_ret.pop();
-        let body_val = body_val?;
-        let brk_stmt = self.emit_break(Some(brk.clone()));
-        let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
-        let cond = self.emit_const(IrConst::Boolean(true));
-        let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
-        let unit = self.emit_unit();
-        Some(self.emit_block(vec![loopw], Some(unit)))
     }
 
     fn single_lambda_arg(&self, args: &[AstExprId]) -> Option<(AstExprId, Vec<String>, AstExprId)> {
@@ -16115,6 +16124,84 @@ impl<'a> Lower<'a> {
         Some(result)
     }
 
+    /// The IR loop label a `return@<label>` should `continue`, when `label` names an active `forEach`
+    /// lambda splice (innermost first). `None` when no such splice is active for that label.
+    fn foreach_splice_loop_label(&self, label: &str) -> Option<String> {
+        self.foreach_splice
+            .iter()
+            .rev()
+            .find(|(source, _)| source == label)
+            .map(|(_, loop_label)| loop_label.clone())
+    }
+
+    /// Whether `label` is an EXPLICIT lambda label written anywhere in this file (`run outer@{ … }`).
+    /// Such a label names a LAMBDA, never the enclosing function, so lowering a `return@<label>` that
+    /// matched no active splice frame as a real function return would be a miscompile — its callers
+    /// bail instead.
+    fn is_explicit_lambda_label(&self, label: &str) -> bool {
+        self.afile.lambda_labels.values().any(|l| l == label)
+    }
+
+    /// Splice a lambda body inline, modelling a `return@<label>` in it as a LOCAL return from that
+    /// lambda: the body is wrapped in a `while(true){ … break }` and a frame is registered, so the
+    /// labeled return assigns the result slot and breaks out. Same shape as the inline-fn lambda-invoke
+    /// splice, shared so the receiver-less `run { … }` route models the same returns. A body with no
+    /// labeled return needs neither wrapper nor frame and splices directly.
+    fn splice_labelled_body(&mut self, body: AstExprId, label: &str, result: Ty) -> Option<u32> {
+        if !body_has_labeled_return_deep(self.afile, body, label) {
+            return self.expr(body);
+        }
+        // A body whose EVERY path is a labelled return has a `Nothing` fall-through: there is no value
+        // to store after the wrapper loop, and emitting the store anyway leaves unreachable code the
+        // verifier rejects ("control flow falls through code end"). Skip that (rarer) shape.
+        if self.info.ty(body) == Ty::Nothing {
+            return None;
+        }
+        // The result slot is framed as `result` (the call's type, which the checker takes from the
+        // body's TAIL). A `return@label` whose value has an unrelated type stores through the same
+        // slot, and the two stackmap frames for it then disagree — the class fails to load. The
+        // checker does not fold labelled-return values into the call type, so verify the agreement
+        // here and skip when it does not hold.
+        let labelled_tys: std::cell::RefCell<Vec<Ty>> = std::cell::RefCell::new(Vec::new());
+        self.collect_labeled_return_tys(body, label, &labelled_tys);
+        if labelled_tys
+            .into_inner()
+            .iter()
+            .any(|&returned| returned != result && returned != Ty::Nothing)
+        {
+            return None;
+        }
+        let brk = format!("$lamret${}", self.fresh_value());
+        if result != Ty::Unit && result != Ty::Nothing {
+            let slot = self.fresh_value();
+            let dflt = self.emit_zero_value(result);
+            let decl = self.emit_variable(slot, ty_to_ir(result), Some(dflt));
+            self.inline_lambda_ret
+                .push((label.to_string(), slot, brk.clone(), result, false));
+            let body_val = self.expr(body);
+            self.inline_lambda_ret.pop();
+            let body_val = body_val?;
+            let assign = self.emit_set_value(slot, body_val);
+            let brk_stmt = self.emit_break(Some(brk.clone()));
+            let loop_body = self.emit_block(vec![assign, brk_stmt], None);
+            let cond = self.emit_const(IrConst::Boolean(true));
+            let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+            let get = self.emit_get_value(slot);
+            return Some(self.emit_block(vec![decl, loopw], Some(get)));
+        }
+        self.inline_lambda_ret
+            .push((label.to_string(), 0, brk.clone(), Ty::Unit, false));
+        let body_val = self.expr(body);
+        self.inline_lambda_ret.pop();
+        let body_val = body_val?;
+        let brk_stmt = self.emit_break(Some(brk.clone()));
+        let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
+        let cond = self.emit_const(IrConst::Boolean(true));
+        let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+        let unit = self.emit_unit();
+        Some(self.emit_block(vec![loopw], Some(unit)))
+    }
+
     /// Inline a scope function over an ALREADY-LOWERED receiver value (`recv_val`) — the shared core for
     /// a safe-call scope fn (`s?.let { … }`). Binds `recv_val` to a fresh slot named `pname` (`it` for
     /// `let`/`also`, `this` for `run`/`apply` — which also clears `cur_class`), lowers the body, and
@@ -17042,6 +17129,23 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
+                // A `return@label` naming a `forEach` lambda spliced into a for-each LOOP is a local
+                // return from that lambda — i.e. the next iteration: `continue` the loop it spliced to.
+                // Before this, it fell through to the real-function-return path and emitted a bare
+                // `return` inside a value-returning method (a verifier error at class-load time).
+                if let Some(loop_label) = ret_label
+                    .as_deref()
+                    .and_then(|lbl| self.foreach_splice_loop_label(lbl))
+                {
+                    if e.is_none() {
+                        return Some(self.emit_continue(Some(loop_label)));
+                    }
+                    // `forEach`'s lambda returns `Unit`, so the only value a `return@forEach` can
+                    // carry is `Unit` itself — there is no result slot to store it in. Falling through
+                    // would emit a real return inside a value-returning method (a verifier error at
+                    // class load), so skip.
+                    return self.bail("valued return through a forEach splice");
+                }
                 // A `return@label` matching an active spliced-lambda frame is a LOCAL return from that
                 // lambda: break to the lambda's end label (`Unit` result — run any value for effect). A
                 // labeled return with no matching frame is a `return@enclosingFn` — fall through to the
@@ -17064,6 +17168,18 @@ impl<'a> Lower<'a> {
                 } else {
                     None
                 };
+                // An EXPLICIT lambda label (`run outer@{ … return@outer v … }`) never names the
+                // enclosing function, so the fall-through above would emit a real return out of the
+                // caller — a miscompile (a `String`-returning `box()` doing `areturn` on an `Int`).
+                // No frame matched ⇒ this splice route does not model the label yet: skip.
+                if frame.is_none()
+                    && ret_label.as_deref().is_some_and(|lbl| {
+                        self.is_explicit_lambda_label(lbl)
+                            && self.closure_label.as_deref() != Some(lbl)
+                    })
+                {
+                    return self.bail("unmodeled labelled lambda return");
+                }
                 {
                     if let Some((_, slot, brk, rty, _)) = frame {
                         let mut stmts = Vec::new();
@@ -17534,12 +17650,29 @@ impl<'a> Lower<'a> {
                 // A backing field of the enclosing class (`this.<field>`) shadows a same-named top-level
                 // property — resolve it BEFORE `statics` (kotlinc: a member's unqualified name binds to the
                 // class member first). Requires `this` in scope (a class member, not a top-level function).
+                // An OPEN property of the enclosing class is written through `setX` instead — see
+                // [`Self::open_source_property`]. This is the bare-name analogue of the qualified
+                // `this.x = …` write, which the emitter already routes through the accessor; without it
+                // the two spellings compile to different things in the same class body.
+                let own_open_property = self
+                    .lookup("this")
+                    .and_then(|(this_v, _)| self.cur_class.map(|c| (this_v, c)))
+                    .filter(|(_, owner)| self.open_source_property(*owner, &name, true))
+                    .and_then(|(this_v, owner)| {
+                        let ty = self.class_info_name(owner).and_then(|ci| {
+                            ci.fields.iter().find(|(f, _)| *f == name).map(|&(_, t)| t)
+                        })?;
+                        Some((this_v, owner, ty))
+                    });
                 let own_field = self.lookup("this").and_then(|(this_v, _)| {
                     self.cur_class.as_ref().and_then(|c| {
                         // A `var` custom-accessor property writes through `setX`, never the raw field.
                         // A `val` custom-accessor (no setter) is assigned once in a constructor by
                         // writing its backing field directly, so it is NOT excluded here.
                         if self.field_accessor_var_props.contains(&(*c, name.clone())) {
+                            return None;
+                        }
+                        if self.open_source_property(*c, &name, true) {
                             return None;
                         }
                         self.class_info_name(*c).and_then(|ci| {
@@ -17560,6 +17693,10 @@ impl<'a> Lower<'a> {
                     let recv = self.emit_get_value(this_v);
                     let val = self.lower_arg(value, &field_ty)?;
                     Some(self.emit_set_field(recv, class, idx, val))
+                } else if let Some((this_v, owner, ty)) = own_open_property {
+                    let recv = self.emit_get_value(this_v);
+                    let val = self.lower_arg(value, &ty_to_ir(ty))?;
+                    Some(self.emit_source_property_set(recv, owner, &name, ty, val))
                 } else if let Some(sfid) = self.computed_setters.get(&name).copied() {
                     // A top-level backing-field `var` with a custom setter → call `setX(value)` (which
                     // runs the custom body), not a direct `putstatic`.
@@ -19312,8 +19449,8 @@ impl<'a> Lower<'a> {
                     let mut params = vec!["this".to_string(); context_count + receiver_count];
                     params.extend(value_params);
                     // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
-                    // bail. A `return@<thisInlineFn>` IS modeled (a local return from the spliced lambda,
-                    // handled by the `inline_lambda_ret` frame set up at the invoke site), so it's allowed.
+                    // bail. A `return@<thisLambdaLabel>` IS modeled (a local return from the spliced
+                    // lambda, handled by the `inline_lambda_ret` frame set up at the invoke site).
                     if body_has_disallowed_return(self.afile, lbody, &lam_label)
                         || params.len() != fnsig.params.len()
                     {
@@ -19952,7 +20089,21 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 if let Some(lbl) = &label {
-                    if self.inline_lambda_ret.iter().any(|(l, ..)| l == lbl) {
+                    // A `return@label` naming a `forEach` lambda spliced into a loop continues that
+                    // loop (see the statement form). `forEach`'s lambda is `Unit`, so it carries no
+                    // value.
+                    if let Some(loop_label) = self.foreach_splice_loop_label(lbl) {
+                        if value.is_none() {
+                            return Some(self.emit_continue(Some(loop_label)));
+                        }
+                    }
+                    // A label naming an active splice frame needs the statement-return handling; an
+                    // EXPLICIT lambda label with no frame names a lambda this route does not model, and
+                    // emitting a real function return for it would be a miscompile. Skip both.
+                    if self.inline_lambda_ret.iter().any(|(l, ..)| l == lbl)
+                        || (self.is_explicit_lambda_label(lbl)
+                            && self.closure_label.as_deref() != Some(lbl.as_str()))
+                    {
                         return None;
                     }
                 }
@@ -22423,6 +22574,16 @@ impl<'a> Lower<'a> {
                 }
                 return Some(contains_v);
             }
+            // A WIDENED value over a primitive range (`when (x: Any) { in 4..10 -> … }`). kotlinc
+            // emits `CollectionsKt.contains(4..10, x)`, whose result is true exactly when `x` is a
+            // BOXED element of the range — the range is not a `Collection`, so `contains` walks it
+            // comparing with `equals`, and a value of any other class never matches. That is the
+            // ordinary comparison chain on the unboxed value, guarded by an `instanceof` on the boxed
+            // element type. The guard must SHORT-CIRCUIT (a `when`, not the eager `iand`): unboxing a
+            // value of another class would throw.
+            if self.info.ty(value).is_reference() {
+                return self.lower_widened_in_range(value, start, end, kind, negated);
+            }
             // Evaluate the bounds then the value once each (source order: start, end, value —
             // matching kotlinc's `start..end` then `.contains(value)`), into temps, then a
             // comparison chain. `!in` uses the De Morgan dual so no logical-not node is needed.
@@ -22488,6 +22649,75 @@ impl<'a> Lower<'a> {
             self.emit_block(vec![var_s, var_e, var_v], Some(cond))
         };
         Some(t)
+    }
+
+    /// `x in a..b` where `x` is a REFERENCE (`Any`) and the bounds are primitive — see the call site in
+    /// [`Self::expr_inner_in_range`] for why this is the boxed-element test kotlinc's
+    /// `CollectionsKt.contains` performs. Evaluation order matches the primitive chain (bounds, then
+    /// value); only the unboxing and the comparisons sit behind the `instanceof` guard.
+    fn lower_widened_in_range(
+        &mut self,
+        value: AstExprId,
+        start: AstExprId,
+        end: AstExprId,
+        kind: ast::RangeKind,
+        negated: bool,
+    ) -> Option<u32> {
+        use crate::ast::RangeKind;
+        let elem = self.info.ty(start);
+        // Only the element types the checker admits for this shape — see
+        // `resolve::in_range_widened_value` for why a floating-point, `Byte`/`Short`, or unsigned
+        // range is not a boxed-element test.
+        if !matches!(elem, Ty::Int | Ty::Long | Ty::Char) {
+            return None;
+        }
+        let boxed = elem.boxed_ref()?;
+        let value_ty = self.info.ty(value);
+        let s = self.expr(start)?;
+        let sv = self.fresh_value();
+        let var_s = self.emit_variable(sv, ty_to_ir(elem), Some(s));
+        let en = self.expr(end)?;
+        let ev = self.fresh_value();
+        let var_e = self.emit_variable(ev, ty_to_ir(elem), Some(en));
+        let v = self.expr(value)?;
+        let vv = self.fresh_value();
+        let var_v = self.emit_variable(vv, ty_to_ir(value_ty), Some(v));
+
+        let boxed_read = self.emit_get_value(vv);
+        let guard = self.emit_type_op(IrTypeOp::InstanceOf, boxed_read, ty_to_ir(boxed));
+        // Inside the guarded branch the value is known to be a boxed element — unbox it once into a
+        // temp so both comparisons read the same primitive.
+        let boxed_read = self.emit_get_value(vv);
+        let unboxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, boxed_read, ty_to_ir(elem));
+        let uv = self.fresh_value();
+        let var_u = self.emit_variable(uv, ty_to_ir(elem), Some(unboxed));
+        // `downTo` runs high→low, so membership is `end <= value <= start` — swap the bounds.
+        let (lo, hi, hi_strict) = match kind {
+            RangeKind::Through => (sv, ev, false),
+            RangeKind::Until => (sv, ev, true),
+            RangeKind::DownTo => (ev, sv, false),
+        };
+        let lo_read = self.emit_get_value(lo);
+        let u_read = self.emit_get_value(uv);
+        let c1 = self.compare_ordered(elem, IrBinOp::Le, lo_read, u_read)?;
+        let u_read = self.emit_get_value(uv);
+        let hi_read = self.emit_get_value(hi);
+        let c2 = self.compare_ordered(
+            elem,
+            if hi_strict { IrBinOp::Lt } else { IrBinOp::Le },
+            u_read,
+            hi_read,
+        )?;
+        let mut in_chain = self.emit_primitive_bin_op(IrBinOp::And, c1, c2);
+        if negated {
+            let f = self.emit_const(IrConst::Boolean(false));
+            in_chain = self.emit_primitive_bin_op(IrBinOp::Eq, in_chain, f);
+        }
+        let hit = self.emit_block(vec![var_u], Some(in_chain));
+        // A value of any other class is not in the range — so `in` is false there and `!in` is true.
+        let miss = self.emit_const(IrConst::Boolean(negated));
+        let selected = self.emit_when(vec![(Some(guard), hit), (None, miss)]);
+        Some(self.emit_block(vec![var_s, var_e, var_v], Some(selected)))
     }
 
     fn expr_inner_inc_dec(
@@ -22943,6 +23173,33 @@ impl<'a> Lower<'a> {
         Some(t)
     }
 
+    /// The boxed type a `when` comparand must be lowered to, when the SUBJECT is a reference and the
+    /// comparand is a primitive (`when (x: Any) { 1 -> … }`): kotlinc compares the boxed value through
+    /// `Intrinsics.areEqual`. The nullable form is the boxed CARRIER here — a non-null `Int` still
+    /// lowers to the JVM `int`. `None` when the arm needs no boxing, or for a comparand whose boxed
+    /// `equals` is not Kotlin `==`:
+    ///
+    /// * an UNSIGNED comparand boxes to its own inline class rather than a plain wrapper;
+    /// * a FLOAT/DOUBLE comparand compares by IEEE `==` whenever the subject is a primitive, and
+    ///   `Double.equals` is not that relation (`-0.0 != 0.0`, `NaN == NaN`). Which of the two applies
+    ///   depends on whether an enclosing/earlier `is` test smart-casts the SUBJECT to the primitive
+    ///   for this arm — per-arm subject narrowing this lowering does not model — so the whole shape
+    ///   is skipped rather than risk the wrong equality. Corpus case:
+    ///   `ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt`.
+    fn when_boxed_comparand(&self, subject_ty: Ty, condition: AstExprId) -> Option<Ty> {
+        if !subject_ty.is_reference() || is_when_test(self.afile, condition) {
+            return None;
+        }
+        let ct = self.info.ty(condition);
+        if !self.has_scalar_value_repr(ct)
+            || ct.is_unsigned()
+            || matches!(ct, Ty::Double | Ty::Float)
+        {
+            return None;
+        }
+        ct.nullable_boxed()
+    }
+
     fn expr_inner_when(
         &mut self,
         e: AstExprId,
@@ -22994,8 +23251,8 @@ impl<'a> Lower<'a> {
             // behavior-preserving for an exhaustive `when`.
             let has_else = arms.iter().any(|a| a.conditions.is_empty());
             let make_last_else = !has_else && self.info.ty(e) != Ty::Unit && !arms.is_empty();
-            if let Some(subj) = subject {
-                let st = self.info.ty(subj);
+            let subj_ty = subject.map(|subj| self.info.ty(subj));
+            if let Some(st) = subj_ty {
                 for arm in &arms {
                     for &c in &arm.conditions {
                         // `is`/`in` conditions are complete boolean tests, not `==` comparands —
@@ -23003,8 +23260,14 @@ impl<'a> Lower<'a> {
                         if is_when_test(self.afile, c) {
                             continue;
                         }
+                        // A REFERENCE subject with a primitive comparand (`when (x: Any) { 1 -> … }`)
+                        // is not a bad-typed compare: it is the BOXED comparison kotlinc emits
+                        // (`Intrinsics.areEqual(x, Integer.valueOf(1))`), so the comparand is boxed
+                        // below instead. Only the converse (a primitive subject, a reference
+                        // comparand) has no such form and still bails.
                         if self.has_scalar_value_repr(st)
                             != self.has_scalar_value_repr(self.info.ty(c))
+                            && self.when_boxed_comparand(st, c).is_none()
                         {
                             return None;
                         }
@@ -23054,7 +23317,10 @@ impl<'a> Lower<'a> {
                                 Some((v, _)) => self.emit_get_value(v),
                                 None => self.expr(subject?)?,
                             };
-                            let cv = self.expr(c)?;
+                            let cv = match subj_ty.and_then(|st| self.when_boxed_comparand(st, c)) {
+                                Some(boxed) => self.lower_arg(c, &ty_to_ir(boxed))?,
+                                None => self.expr(c)?,
+                            };
                             self.emit_primitive_bin_op(IrBinOp::Eq, s, cv)
                         };
                         cond = Some(match cond {
@@ -23160,30 +23426,19 @@ impl<'a> Lower<'a> {
             // block()`): inline the lambda body directly as the value. The receiver scope
             // functions (`x.let`/`with(x)`) are intercepted similarly; without this, no-receiver
             // `run` falls to the bytecode splicer, which bails on a branchy body (`run { if … }`).
-            if let ("run", Some((lambda, params, body)), true, true) = (
+            if let ("run", Some((arg, params, body)), true, true) = (
                 fname.as_str(),
                 one_lambda_arg.as_ref(),
                 self.lookup(&fname).is_none(),
                 !self.module_declares(&fname),
             ) {
-                let label = self.lambda_label(*lambda, "run");
                 if params.is_empty() {
-                    let (body, label) = (*body, label);
-                    return if body_has_labeled_return(self.afile, body, &label) {
-                        // A body whose every path is a `return@label` falls through as `Nothing`, and
-                        // the checker types the CALL from that fall-through — so there is no result
-                        // type for the splice to bind, and the enclosing expression body drops the
-                        // value instead of returning it. Typing the lambda from the JOIN of its
-                        // labelled returns is the real fix and belongs in the checker; until then this
-                        // shape declines rather than miscompiling.
-                        let result_ty = self.info.ty(e);
-                        if result_ty == Ty::Nothing {
-                            return None;
-                        }
-                        self.splice_labeled_lambda_body(body, &label, result_ty)
-                    } else {
-                        self.expr(body)
-                    };
+                    // A `return@run` (or `return@<explicit label>`) inside is a LOCAL return from the
+                    // lambda, not from the enclosing function — splice through the labeled-return
+                    // frame so it lands on the `run` result instead of returning out of the caller.
+                    let label = self.lambda_label(*arg, "run");
+                    let result = self.info.ty(e);
+                    return self.splice_labelled_body(*body, &label, result);
                 }
             }
             // A call to a lifted local function — the checker mapped this call to its decl.
@@ -24463,7 +24718,8 @@ impl<'a> Lower<'a> {
             // capture in the lambda works, exactly as kotlinc's inlining does. Gated on the
             // receiver being iterable (so a user `forEach` on a non-iterable falls through).
             let one_lambda_arg = self.single_lambda_arg(&args);
-            if let ("forEach", Some((_, params, lbody))) = (name.as_str(), one_lambda_arg.as_ref())
+            if let ("forEach", Some((arg, params, lbody))) =
+                (name.as_str(), one_lambda_arg.as_ref())
             {
                 let rty = self.info.ty(receiver);
                 // An array, a `String`, or an `Obj` iterable (List/Set/Iterable) — all handled
@@ -24476,7 +24732,16 @@ impl<'a> Lower<'a> {
                     });
                 if iterable {
                     let param = ast::first_lambda_param_or_it(params);
-                    return self.lower_for_each(&param, receiver, *lbody, None, true);
+                    // A `return@forEach` (or `return@<explicit label>`) in the body is a local return
+                    // from the lambda — the spliced loop's `continue`. Label the loop and register the
+                    // splice so the return lowering can find it.
+                    let source_label = self.lambda_label(*arg, "forEach");
+                    let loop_label = format!("$foreach${}", self.fresh_value());
+                    self.foreach_splice.push((source_label, loop_label.clone()));
+                    let lowered =
+                        self.lower_for_each(&param, receiver, *lbody, Some(loop_label), true);
+                    self.foreach_splice.pop();
+                    return lowered;
                 }
             }
             // `iterable.map/flatMap { … }` WHERE THE LAMBDA BODY SUSPENDS: a stdlib collection HOF
@@ -25288,6 +25553,33 @@ fn body_has_labeled_return(file: &ast::File, e: AstExprId, label: &str) -> bool 
     fn expr_has(file: &ast::File, e: AstExprId, lbl: &str) -> bool {
         if matches!(file.expr(e), Expr::Lambda { .. }) {
             return false;
+        }
+        file.any_child_expr(e, &mut |x| expr_has(file, x, lbl), &mut |s| {
+            stmt_has(file, s, lbl)
+        })
+    }
+    expr_has(file, e, label)
+}
+
+/// Does `e` contain a `return@<label>` anywhere, INCLUDING inside nested lambda literals, and in both
+/// the statement and the expression form? A nested lambda that is itself SPLICED (`forEach { … }` becomes
+/// a loop) is not its own return scope, so a `return@<outer label>` written inside it still targets this
+/// body's frame. Over-approximating is safe: an unused frame only wraps the body in a loop that breaks
+/// once, whereas missing one would emit a real function return — a miscompile.
+fn body_has_labeled_return_deep(file: &ast::File, e: AstExprId, label: &str) -> bool {
+    fn stmt_has(file: &ast::File, s: ast::StmtId, lbl: &str) -> bool {
+        if let Stmt::Return(_, Some(l)) = file.stmt(s) {
+            if l == lbl {
+                return true;
+            }
+        }
+        file.any_child_stmt(s, &mut |x| expr_has(file, x, lbl))
+    }
+    fn expr_has(file: &ast::File, e: AstExprId, lbl: &str) -> bool {
+        if let Expr::Return { label: Some(l), .. } = file.expr(e) {
+            if l == lbl {
+                return true;
+            }
         }
         file.any_child_expr(e, &mut |x| expr_has(file, x, lbl), &mut |s| {
             stmt_has(file, s, lbl)

@@ -60,6 +60,12 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - `Type.class_name = f6`.
 - `Constructor`: `f2 = value_parameter` (repeated `{f2=name, f3=Type}`), `f100 = JvmMethodSignature`
   ext (`f2 = desc`; name omitted ⇒ `<init>`).
+- A constructor's value parameters carry the SAME `ValueParameter` shape a function's do, and that is
+  the only place a constructor parameter's source-level type survives: `Base(init: Cfg.() -> Unit)`
+  erases to `Function1` in the `<init>` descriptor AND in its `Signature` attribute, so only the
+  `@ExtensionFunctionType` annotation on `ValueParameter.type` (`f3`) says the parameter is a RECEIVER
+  function type. A consumer that decodes constructor records for names/defaults only will bind a lambda
+  argument with no implicit `this`. krusty therefore decodes `f3` here as well as in `Function`.
 - `Property`: `f2 = name`, `f3 = return_type` (`Type`), `f11 = flags` (emitted as **1798** only for a
   `var`; `val` ⇒ 0, omitted), `f100 = JvmPropertySignature` `{f1 = field (empty ⇒ derived backing
   field), f3 = getter JvmMethodSignature, f4 = setter (var only)}`.
