@@ -108,6 +108,8 @@ mod catch_annotation_comma_e2e;
 mod checker_operator_methods_e2e;
 #[path = "class_body_e2e.rs"]
 mod class_body_e2e;
+#[path = "class_header_newline_e2e.rs"]
+mod class_header_newline_e2e;
 #[path = "class_literal_e2e.rs"]
 mod class_literal_e2e;
 #[path = "class_metadata_roundtrip.rs"]
