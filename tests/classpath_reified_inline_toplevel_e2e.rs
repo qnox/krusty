@@ -22,6 +22,11 @@ const LIB: &str = r#"
     inline fun <reified T : Any> describe(prefix: String = "<", suffix: String = ">"): String =
         prefix + (T::class.simpleName ?: "?") + suffix
 
+    // Same SOURCE name and arity, but a distinct JVM spelling and unrelated generic return. A
+    // `$default` synthetic must recover metadata from its exact base, not this same-arity sibling.
+    @JvmName("alternateDescribe")
+    fun <U> describe(value: Int = 0, marker: Long = 0): U? = null
+
     inline fun <reified T : Any> isA(value: Any): Boolean = value is T
 "#;
 
@@ -56,7 +61,8 @@ fn top_level_reified_inline_call_splices_and_runs() {
         \x20 if (nameOf<String>() != \"String\") return \"nameOf: ${nameOf<String>()}\"\n\
         \x20 if (describe<String>(\"[\", \"]\") != \"[String]\") return \"supplied: ${describe<String>(\"[\", \"]\")}\"\n\
         \x20 if (describe<String>() != \"<String>\") return \"omitted: ${describe<String>()}\"\n\
-        \x20 if (describe<String>(suffix = \"}\") != \"<String}\") return \"named: ${describe<String>(suffix = \"}\")}\"\n\
+        \x20 val named: String = describe<String>(suffix = \"}\")\n\
+        \x20 if (named != \"<String}\") return \"named: $named\"\n\
         \x20 if (!isA<String>(\"x\")) return \"isA true\"\n\
         \x20 if (isA<String>(7)) return \"isA false\"\n\
         \x20 return \"OK\"\n\

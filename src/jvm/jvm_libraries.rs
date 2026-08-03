@@ -299,10 +299,10 @@ impl JvmLibraries {
     ) -> Option<(TypeName, crate::libraries::StaticFieldRef)> {
         let rendered = path.render();
         // A plain `object` is `TypeKind::Object` — it carries its own `INSTANCE`. A COMPANION object does
-        // not: its singleton is a static field on the OUTER class (named after the companion, so a named
-        // companion is not `Companion`), which is why the type shape calls it a class. Both are objects
-        // as far as this namespace rule is concerned; the difference is only WHERE the singleton lives,
-        // and that field is returned so emit never has to guess a name.
+        // not: its singleton is a static field on the OUTER class. Both facts already belong to the
+        // backend-neutral `LibraryType` contract (`kind` and `companion_object`), so consume that one
+        // semantic view rather than re-reading raw classfile fields here. Besides avoiding two object
+        // classifiers, this keeps named companions and non-JVM symbol providers on the same boundary.
         let singleton =
             |candidate: TypeName| -> Option<(TypeName, crate::libraries::StaticFieldRef)> {
                 let name = candidate.render();
@@ -314,25 +314,21 @@ impl JvmLibraries {
                     ty: Ty::obj_name(candidate),
                     constant: None,
                 };
-                if self
-                    .resolve_type_name(candidate)
-                    .is_some_and(|classifier| classifier.is_object())
-                {
+                let classifier = self.resolve_type_name(candidate)?;
+                if classifier.is_object() {
                     return Some((candidate, field(candidate, "INSTANCE")));
                 }
                 let (outer, simple) = name.rsplit_once('$')?;
                 let outer = type_name(outer);
-                let outer_class = self.cp.find_name(outer)?;
-                // The holder field is named after the companion itself (`Companion`, or its declared
-                // name), so require THAT name rather than accepting any static field of the nested
-                // type — an ordinary nested class held in a static field of its outer would otherwise
-                // read as an object with that field as its singleton.
-                let holder = outer_class.fields.iter().find(|f| {
-                    f.name == simple
-                        && f.descriptor == descriptor
-                        && f.access & crate::jvm::classreader::ACC_STATIC != 0
-                })?;
-                Some((candidate, field(outer, &holder.name)))
+                let outer_type = self.resolve_type_name(outer)?;
+                let (holder_name, companion_type) = outer_type.companion_object.as_ref()?;
+                // Requiring both the semantic companion type and its declared field name prevents an
+                // ordinary nested class held in some unrelated static field from masquerading as the
+                // import's singleton parent.
+                if *companion_type != candidate || holder_name != simple {
+                    return None;
+                }
+                Some((candidate, field(outer, holder_name)))
             };
         if let Some(hit) = singleton(path) {
             return Some(hit);

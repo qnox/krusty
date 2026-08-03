@@ -2769,24 +2769,26 @@ impl<'a> SymbolResolver<'a> {
             // → `Any`, losing the block's result type). Fall back to the BASE function's gsig — its leading
             // real parameters (and their type-parameter positions) align with the `$default`'s, so unifying
             // the provided args against it recovers `T` (`runBlocking<T>(block: () -> T): T` → `T = Ch`).
+            // Resolve the base ONCE for every metadata facet the synthetic may lack. Arity alone is
+            // not identity: two overloads can have the same number of parameters but different JVM
+            // spellings and unrelated type variables. Borrowing either one's generic signature can
+            // bind a return or reified marker to the wrong formal while still producing valid bytecode.
+            //
+            // krusty models `$default` with only the real parameters, so exact JVM spelling plus the
+            // logical parameter vector identifies its base without reconstructing a descriptor from
+            // lossy `Ty` values (`Byte`/`Short` both appear as `Int`).
+            let base_spelling = c.name.strip_suffix("$default");
+            let base = base_spelling.and_then(|spelling| {
+                function_set_from_symbols(self.symbols_in_scope(name))
+                    .into_top_level()
+                    .find(|candidate| {
+                        candidate.callable.name == spelling
+                            && candidate.callable.params.as_slice() == params.as_slice()
+                    })
+            });
             let base_gsig = o.generic_sig.clone().or_else(|| {
-                // The `$default` (krusty models it with the REAL params, no mask/marker) shares its base
-                // function's parameter shape, so a SAME-ARITY base overload's generic signature applies.
-                // Among same-arity candidates, prefer one whose return is a bare type PARAMETER (the
-                // generic `fun <T> …(): T` form we need to bind), so a same-name/same-arity non-generic
-                // sibling doesn't cross-bind.
-                let bases: Vec<FunctionInfo> =
-                    function_set_from_symbols(self.symbols_in_scope(name))
-                        .into_top_level()
-                        .filter(|b| {
-                            b.generic_sig.is_some() && b.callable.params.len() == params.len()
-                        })
-                        .collect();
-                bases
-                    .iter()
-                    .find(|b| b.generic_sig.as_ref().is_some_and(|g| g.ret.is_ty_param()))
-                    .or_else(|| bases.first())
-                    .and_then(|b| b.generic_sig.clone())
+                base.as_ref()
+                    .and_then(|candidate| candidate.generic_sig.clone())
             });
             let ret_ty = base_gsig
                 .as_ref()
@@ -2820,17 +2822,7 @@ impl<'a> SymbolResolver<'a> {
             // signature would specialize the body against the wrong names. `sourceName-<hash>$default`
             // belongs to `sourceName-<hash>`, and only that one.
             if callable.signature.is_none() {
-                let base_spelling = c.name.strip_suffix("$default").map(str::to_string);
-                callable.signature = base_spelling.and_then(|spelling| {
-                    function_set_from_symbols(self.symbols_in_scope(name))
-                        .into_top_level()
-                        .find(|b| {
-                            b.callable.name == spelling
-                                && b.callable.signature.is_some()
-                                && b.callable.params.len() == params.len()
-                        })
-                        .and_then(|b| b.callable.signature.clone())
-                });
+                callable.signature = base.and_then(|candidate| candidate.callable.signature);
             }
             record_default_vararg_slot(&mut callable, o.call_sig.vararg_index, params, args);
             Some(callable)
