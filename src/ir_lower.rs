@@ -9851,11 +9851,19 @@ impl<'a> Lower<'a> {
     /// Zero-extend an unsigned value out of its own representation into the `int` its operations run
     /// in: `UByte`/`UShort` live in a SIGN-extended `byte`/`short`, so every widening masks first
     /// (`iand 0xFF`), exactly as kotlinc lowers `UByte.toInt()`. A no-op for any other type.
+    ///
+    /// The result is coerced to `Int` explicitly. The emitter types a `PrimitiveBinOp` from its LEFT
+    /// operand, which here is still the narrow `byte`/`short` — so without this the masked value reads
+    /// back as a `Byte`/`Short` and any consumer that BOXES it (an erased generic argument, a vararg
+    /// element) picks `Byte.valueOf`/`Short.valueOf`. That throws above 127 for `UByte` and silently
+    /// wraps to a negative for `UShort`. The coercion emits no bytecode — `byte`/`short` and `int`
+    /// share the int stack category — it only carries the right type forward.
     fn widen_unsigned(&mut self, value: u32, ty: Ty) -> u32 {
         match ty.unsigned_widen_mask() {
             Some(mask) => {
                 let m = self.emit_const(IrConst::Int(mask));
-                self.emit_primitive_bin_op(IrBinOp::BitAnd, value, m)
+                let masked = self.emit_primitive_bin_op(IrBinOp::BitAnd, value, m);
+                self.emit_type_op(IrTypeOp::ImplicitCoercion, masked, ty_to_ir(Ty::Int))
             }
             None => value,
         }
@@ -11313,22 +11321,14 @@ impl<'a> Lower<'a> {
         {
             return None;
         }
-        // A `UByte`/`UShort` operator called by name (`a.plus(b)`) is the same `UInt` operation the
-        // binary form lowers to: zero-extend both operands out of their `byte`/`short` first.
-        if lt.unsigned_widen_mask().is_some() && rt == lt {
-            let op_ty = lt.unsigned_op_type()?;
-            let l = self.lower_arg(recv, &ty_to_ir(lt))?;
-            let l = self.widen_unsigned(l, lt);
-            let r = self.expr(arg)?;
-            let r = self.widen_unsigned(r, lt);
-            return match op {
-                BinOp::Div => self.runtime_call(RuntimeOp::UnsignedDivide, op_ty, vec![l, r]),
-                BinOp::Rem => self.runtime_call(RuntimeOp::UnsignedRemainder, op_ty, vec![l, r]),
-                BinOp::Add | BinOp::Sub | BinOp::Mul => {
-                    Some(self.emit_primitive_bin_op(bin_to_ir(op)?, l, r))
-                }
-                _ => None,
-            };
+        // A `UByte`/`UShort` operator called BY NAME (`a.plus(b)`) never reaches lowering today: the
+        // checker doesn't surface the narrow receiver's metadata overloads and rejects the call. Decline
+        // it rather than fall through to the generic path below, which would compute on the operands'
+        // SIGN-extended `byte`/`short` and silently produce a negative. (The `a + b` operator form is
+        // handled correctly in the binary-expression lowering, which zero-extends first.) If the checker
+        // gap closes, the file skips instead of miscompiling until this grows a real lowering + test.
+        if lt.unsigned_widen_mask().is_some() {
+            return None;
         }
         // Unsigned `div`/`rem` need platform unsigned helpers (signed `+`/`-`/`*` share opcodes).
         if lt.is_unsigned() && matches!(op, BinOp::Div | BinOp::Rem) {
@@ -24410,7 +24410,25 @@ impl<'a> Lower<'a> {
                         } else {
                             IrBinOp::Add
                         };
-                        return Some(self.emit_primitive_bin_op(op, r, o));
+                        // `UByte`/`UShort` add in the int category, so the sum must be truncated back
+                        // into the `byte`/`short` the value lives in (`UByte.MAX.inc()` is `0`, and
+                        // kotlinc emits `iadd; i2b`). Skipping it left the result outside the canonical
+                        // representation, where `==` — BIT equality on that representation — stopped
+                        // matching the same value written as a literal. Widening the RECEIVER to `Int`
+                        // first is what makes the truncation land: the emitter types a `PrimitiveBinOp`
+                        // from its left operand, so a narrow lhs would make the sum read back as an
+                        // already-`byte` value and the coercion emit nothing. Neither widening step
+                        // costs an instruction (`byte`/`short` and `int` share the int stack category).
+                        // `UInt`/`ULong` already compute in their own width, so both steps are no-ops.
+                        let repr = self.scalar_value_repr(rty)?;
+                        let int_ir = ty_to_ir(repr.int_arithmetic_repr());
+                        let r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, int_ir);
+                        let sum = self.emit_primitive_bin_op(op, r, o);
+                        return Some(self.emit_type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            sum,
+                            ty_to_ir(repr),
+                        ));
                     }
                     if is_conversion_call_name(&name) {
                         let target = self.info.ty(e);

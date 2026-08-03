@@ -872,10 +872,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into a reference context uses the
   inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and `unbox-impl` on read, `is UInt` →
   `instanceof kotlin/UInt`) — never `Integer`, so identity and large values are preserved.
-  `tests/unsigned_e2e.rs`, `tests/feature_coverage_i_e2e.rs`. (`UIntRange` value iteration is not yet
-  modeled — it cleanly skips. The native unsigned types do not carry kotlinc's value-class NAME MANGLING on a
-  function that takes one: krusty emits `f(byte)` where kotlinc emits `f-7apg3OU(byte)`, a pre-existing
-  divergence shared by `UInt`/`ULong`.)
+  `tests/unsigned_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
+
+  Still unmodeled, all of them REJECTED or skipped rather than miscompiled: `UIntRange` value iteration;
+  and, for the narrow pair specifically, a `when` on a `UByte`/`UShort` subject (the arms-must-be-literals
+  gate can't be satisfied — a bare `200u` arm types as `UInt`, and `200u.toUByte()` is not a literal),
+  `is UByte`/`is UShort`, `UByteArray`/`UShortArray`, ranges and `in`-tests, `hashCode()`, the bitwise
+  members (`and`/`or`/`inv`), a mixed-width operand pair (`UByte + UInt`), and an operator called by name
+  (`a.plus(b)` — the checker doesn't surface the narrow receiver's metadata overloads). One known
+  DIVERGENCE, not a skip: the native unsigned types do not carry kotlinc's value-class NAME MANGLING on a
+  function that takes one — krusty emits `f(byte)` where kotlinc emits `f-7apg3OU(byte)`, pre-existing and
+  shared by `UInt`/`ULong`.
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
@@ -2208,10 +2215,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operator is defined as `toInt()` followed by the `UInt` operator, so `UByte + UByte` is a `UInt`, and
   `/`/`%`/`<`/`>` route through the `UInt` platform helpers on the masked operands. `==`/`!=` stay on the
   narrow representation — equality is BIT equality, identical either way. `toByte()`/`toShort()` are the
-  raw reinterpret (`200u.toByte()` is `-56`), so they emit nothing. Tests:
+  raw reinterpret (`200u.toByte()` is `-56`), so they emit nothing.
+
+  Two consequences of computing in the int category, each of which cost a miscompile before it was
+  pinned by a test. (1) The widened value must be carried as an `Int`: the emitter types a
+  `PrimitiveBinOp` from its LEFT operand, so the mask node inherited the narrow `byte`/`short` and any
+  consumer that BOXED it reached `Byte.valueOf` — which throws above 127 — or `Short.valueOf`, which
+  silently wraps to a negative. (2) `inc`/`dec` must truncate BACK with `i2b`/`i2s` (kotlinc emits
+  `iadd; i2b`), or the result leaves the canonical representation and stops comparing equal under the
+  bit equality of (1) — `(127u as UByte).inc() == 128u.toUByte()` was false. Tests:
   `tests/feature_coverage_i_e2e.rs::{ubyte_and_ushort, ubyte_and_ushort_arithmetic_promotes_to_uint,
   ubyte_and_ushort_comparison_is_unsigned, ubyte_and_ushort_conversions,
-  ubyte_and_ushort_interpolate_unsigned}`.
+  ubyte_and_ushort_interpolate_unsigned, widened_ubyte_and_ushort_box_as_int,
+  ubyte_and_ushort_inc_dec_wrap_in_representation}`.
 - **A sub-`Int` library constant inlines as its OWN narrow constant.** `Byte.MIN_VALUE`,
   `Short.MAX_VALUE`, `Char.MAX_VALUE`, `UByte.MIN_VALUE` … all read back from the classpath as an integer
   `ConstantValue`, but the constant's TYPE is the narrow one. Emitting `IrConst::Int` boxed them to

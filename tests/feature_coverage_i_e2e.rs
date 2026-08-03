@@ -293,6 +293,49 @@ fn ubyte_and_ushort_interpolate_unsigned() {
     assert_eq!(out, "OK");
 }
 
+/// A zero-extended `UByte`/`UShort` is an `Int` — boxing it at an erased generic boundary must reach
+/// `Integer.valueOf`. Typing the mask node from its narrow left operand picked `Byte.valueOf` (which
+/// throws above 127) and `Short.valueOf` (which silently wraps to a negative).
+#[test]
+fn widened_ubyte_and_ushort_box_as_int() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val s: UShort = 40000u\n\
+    if (listOf(a.toInt()) != listOf(200)) return \"ub ${listOf(a.toInt())}\"\n\
+    if (listOf(s.toInt()) != listOf(40000)) return \"us ${listOf(s.toInt())}\"\n\
+    if (listOf((a + a).toInt()) != listOf(400)) return \"sum ${listOf((a + a).toInt())}\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteBox") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// `inc`/`dec` stay INSIDE the narrow representation: `UByte` wraps at 255, `UShort` at 65535. Without
+/// the `i2b`/`i2s` the sum leaves the byte/short and stops comparing equal to the same value written
+/// as a literal — `==` is bit equality on that representation.
+#[test]
+fn ubyte_and_ushort_inc_dec_wrap_in_representation() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 127u\n\
+    if (a.inc() != 128u.toUByte()) return \"inc ${a.inc().toInt()}\"\n\
+    val b: UByte = 255u\n\
+    if (b.inc() != 0u.toUByte()) return \"wrap ${b.inc().toInt()}\"\n\
+    val c: UByte = 0u\n\
+    if (c.dec() != 255u.toUByte()) return \"dec ${c.dec().toInt()}\"\n\
+    val s: UShort = 32767u\n\
+    if (s.inc() != 32768u.toUShort()) return \"sinc ${s.inc().toInt()}\"\n\
+    val t: UShort = 65535u\n\
+    if (t.inc() != 0u.toUShort()) return \"swrap ${t.inc().toInt()}\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteIncDec") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
 #[test]
 fn uint_comparison() {
     let src = "fun box(): String {\n\
