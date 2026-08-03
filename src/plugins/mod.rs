@@ -368,7 +368,9 @@ fn const_string_value_d(
     }
     match file.expr(e) {
         crate::ast::Expr::StringLit(s) => Some(s.clone()),
-        crate::ast::Expr::CharLit(c) => Some(c.to_string()),
+        // A lone surrogate has no `String` form in Rust (unlike Kotlin's `Char.toString()`); it
+        // degrades to U+FFFD rather than silently becoming NUL.
+        crate::ast::Expr::CharLit(c) => Some(String::from_utf16_lossy(&[*c])),
         crate::ast::Expr::Name(n) => top_level_const_string_d(file, n, depth + 1),
         crate::ast::Expr::Template(parts) => {
             let mut out = String::new();

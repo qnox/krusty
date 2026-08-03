@@ -108,7 +108,9 @@ pub enum Expr {
     FloatLit(f32),
     BoolLit(bool),
     StringLit(String),
-    CharLit(char),
+    /// A `Char` literal, held as its UTF-16 code UNIT (see `IrConst::Char`). Not a Rust `char`: a
+    /// lone surrogate (`'\uD800'`) is a legal Kotlin `Char` but not a legal Unicode scalar value.
+    CharLit(u16),
     NullLit,
     Name(String),
     /// `operand!!` — not-null assertion (throws NPE if null, else the value).
@@ -1836,7 +1838,11 @@ impl File {
             Expr::FloatLit(v) => out.push_str(&format!("{v}f")),
             Expr::BoolLit(b) => out.push_str(if *b { "true" } else { "false" }),
             Expr::StringLit(s) => out.push_str(&format!("{s:?}")),
-            Expr::CharLit(c) => out.push_str(&format!("'{c}'")),
+            // A code unit that is not a scalar value (a lone surrogate) has no `char` to print.
+            Expr::CharLit(c) => match char::from_u32(*c as u32) {
+                Some(c) => out.push_str(&format!("'{c}'")),
+                None => out.push_str(&format!("'\\u{c:04X}'")),
+            },
             Expr::NullLit => out.push_str("null"),
             Expr::Name(n) => out.push_str(n),
             Expr::NotNull { operand } => {

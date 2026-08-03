@@ -4607,13 +4607,6 @@ fn break_continue_stmt_tail_only(file: &ast::File, s: ast::StmtId) -> bool {
     }
 }
 
-/// The UTF-16 code unit of a source `Char` literal. The AST carries a Rust `char` (a code POINT),
-/// while a Kotlin `Char` is a single code unit; a well-formed literal is always in the BMP, so this
-/// is the JVM's own `i2c` truncation.
-fn char_code_unit(c: char) -> u16 {
-    c as u32 as u16
-}
-
 fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir::IrConst> {
     use crate::ir::IrConst;
     use ast::Expr;
@@ -4629,7 +4622,7 @@ fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir
         Expr::FloatLit(v) => IrConst::Float(*v),
         Expr::BoolLit(b) => IrConst::Boolean(*b),
         Expr::StringLit(s) => IrConst::String(s.clone()),
-        Expr::CharLit(c) => IrConst::Char(char_code_unit(*c)),
+        Expr::CharLit(c) => IrConst::Char(*c),
         Expr::UIntLit(v) => IrConst::Int(*v as i32),
         Expr::ULongLit(v) => IrConst::Long(*v),
         _ => return None,
@@ -19490,7 +19483,7 @@ impl<'a> Lower<'a> {
             Expr::ULongLit(v) => self.emit_const(IrConst::Long(v)),
             Expr::DoubleLit(v) => self.emit_const(IrConst::Double(v)),
             Expr::FloatLit(v) => self.emit_const(IrConst::Float(v)),
-            Expr::CharLit(c) => self.emit_const(IrConst::Char(char_code_unit(c))),
+            Expr::CharLit(c) => self.emit_const(IrConst::Char(c)),
             Expr::BoolLit(b) => self.emit_const(IrConst::Boolean(b)),
             Expr::StringLit(s) => self.ir_const_str(s),
             Expr::NullLit => self.emit_const(IrConst::Null),
@@ -24917,7 +24910,7 @@ fn ctor_default_to_ir(
         CtorDefaultValue::Double(v) => IrExpr::Const(IrConst::Double(*v)),
         CtorDefaultValue::Float(v) => IrExpr::Const(IrConst::Float(*v)),
         CtorDefaultValue::Bool(v) => IrExpr::Const(IrConst::Boolean(*v)),
-        CtorDefaultValue::Char(v) => IrExpr::Const(IrConst::Char(char_code_unit(*v))),
+        CtorDefaultValue::Char(v) => IrExpr::Const(IrConst::Char(*v)),
         CtorDefaultValue::Str(s) => IrExpr::Const(IrConst::String(s.clone())),
         CtorDefaultValue::Null => IrExpr::Const(IrConst::Null),
         CtorDefaultValue::Object(internal) => {
@@ -25013,7 +25006,7 @@ fn const_default_of(file: &ast::File, e: AstExprId) -> Option<crate::ir::IrConst
         Expr::BoolLit(v) => IrConst::Boolean(*v),
         Expr::DoubleLit(v) => IrConst::Double(*v),
         Expr::FloatLit(v) => IrConst::Float(*v),
-        Expr::CharLit(v) => IrConst::Char(char_code_unit(*v)),
+        Expr::CharLit(v) => IrConst::Char(*v),
         Expr::StringLit(s) => IrConst::String(s.clone()),
         _ => return None,
     })
@@ -25667,7 +25660,7 @@ fn eval_anno_value(
         Expr::DoubleLit(v) => AnnoValue::Const(IrConst::Double(*v)),
         Expr::FloatLit(v) => AnnoValue::Const(IrConst::Float(*v)),
         Expr::BoolLit(v) => AnnoValue::Const(IrConst::Boolean(*v)),
-        Expr::CharLit(v) => AnnoValue::Const(IrConst::Char(char_code_unit(*v))),
+        Expr::CharLit(v) => AnnoValue::Const(IrConst::Char(*v)),
         // `E.E0` — an ENUM constant (`receiver` names an enum class declared in this file).
         Expr::Member { receiver, name } => {
             let Expr::Name(enum_name) = file.expr(*receiver) else {

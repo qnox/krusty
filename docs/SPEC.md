@@ -423,10 +423,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   though those are not valid Unicode scalar values. `IrConst::Char` accordingly carries a raw `u16`, not a
   Rust `char`: routing the value through `char::from_u32` yields `None` on a lone surrogate, and inlining
   a classpath `Char` constant used to fold that `None` to NUL — `Char.MIN_HIGH_SURROGATE.code` printed
-  `0` where kotlinc prints `55296`, a silent wrong value. Test: `CharSurrogateConst` in
-  `tests/feature_box_e2e.rs`. **Known gap**: a surrogate written as a *source* literal (`'\uD800'`) is
-  still folded to NUL, because the AST's `Expr::CharLit` holds a Rust `char` (`unquote_char` in
-  `src/parser.rs`); closing that needs the same `u16` change one level up, in the AST.
+  `0` where kotlinc prints `55296`, a silent wrong value. The same rule holds one level up, in the AST:
+  `Expr::CharLit` is a `u16` and `unquote_char` takes a `\uXXXX` escape verbatim, so a *source* literal
+  `'\uD800'` keeps its code unit too (it used to fold to NUL by the same round-trip). A `char` that
+  reaches either from a code POINT truncates with the JVM's own `i2c`, since a well-formed `Char`
+  literal is always in the BMP. Tests: `CharSurrogateConst` and `CharSurrogateLiteral` in
+  `tests/feature_box_e2e.rs`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.

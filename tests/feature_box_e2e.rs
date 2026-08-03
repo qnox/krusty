@@ -3874,6 +3874,28 @@ fun box(): String {
 }
 "#,
     ),
+    // The same UTF-16 code-unit rule for a SOURCE literal: `'\uD800'` is a lone surrogate, which is a
+    // legal `Char` but not a legal code point, so it survives neither a Rust `char` nor a Rust `String`.
+    // Covers a local, a `const val` (which lands in a `ConstantValue` attribute), and equality against
+    // the inlined classpath constant.
+    (
+        "CharSurrogateLiteral",
+        r#"
+const val HIGH_SUR = '\uD800'
+
+fun box(): String {
+    val hi = '\uD800'
+    if (hi.code != 55296) return "f0: ${hi.code}"
+    if (hi != Char.MIN_HIGH_SURROGATE) return "f1"
+    val lo = '\uDFFF'
+    if (lo.code != 57343) return "f2: ${lo.code}"
+    if (lo != Char.MAX_LOW_SURROGATE) return "f3"
+    if (HIGH_SUR.code != 55296) return "f4: ${HIGH_SUR.code}"
+    if (HIGH_SUR != hi) return "f5"
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]

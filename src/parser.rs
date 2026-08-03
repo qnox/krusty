@@ -5021,7 +5021,7 @@ impl<'a> Parser<'a> {
             "Float" => Expr::FloatLit(0.0),
             "Double" => Expr::DoubleLit(0.0),
             "Boolean" => Expr::BoolLit(false),
-            "Char" => Expr::CharLit('\0'),
+            "Char" => Expr::CharLit(0),
             _ => Expr::NullLit,
         };
         self.file.add_expr(e, span)
@@ -8197,7 +8197,16 @@ fn infix_bp(op: BinOp) -> (u8, u8) {
 }
 
 /// Decode a `'x'` char literal (with simple escapes) to a `char`.
-fn unquote_char(raw: &str) -> char {
+/// The UTF-16 code UNIT a `Char` literal denotes. A Kotlin `Char` is one code unit, so `\uXXXX` keeps
+/// its raw value even in the surrogate range D800..DFFF — `'\uD800'` is a legal `Char` (it is what
+/// `Char.MIN_HIGH_SURROGATE` equals) but not a legal Unicode scalar value, so a `char::from_u32`
+/// round-trip would reject it and silently yield NUL.
+fn unquote_char(raw: &str) -> u16 {
+    /// A source `char` is a code POINT; a well-formed `Char` literal is always in the BMP, so this is
+    /// the JVM's own `i2c` truncation.
+    fn unit(c: char) -> u16 {
+        c as u32 as u16
+    }
     let inner = raw
         .strip_prefix('\'')
         .and_then(|s| s.strip_suffix('\''))
@@ -8205,28 +8214,28 @@ fn unquote_char(raw: &str) -> char {
     let mut chars = inner.chars();
     match chars.next() {
         Some('\\') => match chars.next() {
-            Some('n') => '\n',
-            Some('t') => '\t',
-            Some('r') => '\r',
-            Some('b') => '\u{0008}',
-            Some('\\') => '\\',
-            Some('\'') => '\'',
-            Some('"') => '"',
-            Some('0') => '\0',
-            Some('$') => '$',
-            // `\uXXXX` — a 4-hex-digit UTF-16 code unit.
+            Some('n') => unit('\n'),
+            Some('t') => unit('\t'),
+            Some('r') => unit('\r'),
+            Some('b') => unit('\u{0008}'),
+            Some('\\') => unit('\\'),
+            Some('\'') => unit('\''),
+            Some('"') => unit('"'),
+            Some('0') => 0,
+            Some('$') => unit('$'),
+            // `\uXXXX` — a 4-hex-digit UTF-16 code unit, taken verbatim.
             Some('u') => {
                 let hex: String = chars.by_ref().take(4).collect();
                 u32::from_str_radix(&hex, 16)
                     .ok()
-                    .and_then(char::from_u32)
-                    .unwrap_or('\0')
+                    .map(|v| v as u16)
+                    .unwrap_or(0)
             }
-            Some(other) => other,
-            None => '\0',
+            Some(other) => unit(other),
+            None => 0,
         },
-        Some(c) => c,
-        None => '\0',
+        Some(c) => unit(c),
+        None => 0,
     }
 }
 
