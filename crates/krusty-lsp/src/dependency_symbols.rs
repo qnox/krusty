@@ -19,18 +19,20 @@
 use std::collections::HashMap;
 
 use crate::analysis::{
-    camel_hump_initials, is_ordered_subsequence_lowercase, qwerty_from_cyrillic, WorkspaceQuery,
+    camel_hump_initials, is_ordered_subsequence_lowercase, matches_glob, workspace_queries,
+    WorkspaceQuery, WorkspaceSymbolRung, MAX_WORKSPACE_SYMBOL_GLOB_STEPS,
 };
 
-/// Ceiling on classes retained for one project's dependencies.
+/// Ceiling on raw class entries inspected and searchable classes retained for one project.
 ///
 /// Measured against real dependency sets rather than guessed: 100 jars declare 91,182 classes,
 /// 200 declare 219,272, and 400 declare 392,275. A 256k ceiling truncated the 400-jar set exactly,
 /// which is a large but ordinary enterprise dependency graph, so it sits above that.
 ///
-/// The cost of the ceiling is memory, and an entry is deliberately three `u32`s plus interned
-/// names — the slashed internal name is *derived* rather than stored, because one per class is the
-/// largest table there would be and it is recoverable from the package and the name.
+/// Applying it before filtering also bounds malformed or synthetic-heavy archives whose entries
+/// would never become searchable. The retained cost is deliberately two `u32`s per accepted class
+/// plus interned names — the slashed internal name is *derived* rather than stored, because one per
+/// class is the largest table there would be and it is recoverable from the package and the name.
 pub const MAX_DEPENDENCY_CLASSES: usize = 1024 * 1024;
 
 /// A class the classpath declares, ranked but not yet located.
@@ -85,8 +87,10 @@ impl DependencySymbolIndex {
         entries: &[std::path::PathBuf],
         cache_root: &std::path::Path,
     ) -> Self {
-        let mut names = Vec::new();
-        for entry in entries {
+        // Keep the per-entry vectors needed for cache IO, but feed them into the bounded builder
+        // lazily. Extending one classpath-wide `Vec` first made the index's retention ceiling take
+        // effect only after every raw name had already been retained.
+        let names = entries.iter().flat_map(|entry| {
             let classes = match crate::dependency_cache::load(cache_root, entry) {
                 Some(cached) => cached,
                 None => {
@@ -95,8 +99,8 @@ impl DependencySymbolIndex {
                     classes
                 }
             };
-            names.extend(classes);
-        }
+            classes.into_iter()
+        });
         Self::from_internal_names(names)
     }
 
@@ -110,6 +114,13 @@ impl DependencySymbolIndex {
     /// Repeats collapse. A classpath can carry two versions of one artifact, and a name both
     /// declare is a single class, resolved from whichever entry comes first.
     pub fn from_internal_names(internals: impl IntoIterator<Item = String>) -> Self {
+        Self::from_internal_names_with_limit(internals, MAX_DEPENDENCY_CLASSES)
+    }
+
+    fn from_internal_names_with_limit(
+        internals: impl IntoIterator<Item = String>,
+        limit: usize,
+    ) -> Self {
         let mut result = Self {
             complete: true,
             ..Self::default()
@@ -117,13 +128,16 @@ impl DependencySymbolIndex {
         let mut name_ids = HashMap::<String, u32>::new();
         let mut package_ids = HashMap::<String, u32>::new();
         let mut declared = std::collections::HashSet::new();
-        for internal in internals {
-            if !declared.insert(internal.clone()) {
-                continue;
-            }
-            if result.entries.len() >= MAX_DEPENDENCY_CLASSES {
+        for (inspected, internal) in internals.into_iter().enumerate() {
+            // The work/temporary-retention ceiling applies before filtering. A hostile archive can
+            // contain an arbitrary number of multi-release, descriptor, or synthetic entries that
+            // never become searchable; counting only accepted classes left that input unbounded.
+            if inspected >= limit {
                 result.complete = false;
                 break;
+            }
+            if !declared.insert(internal.clone()) {
+                continue;
             }
             let Some((package, simple)) = split_internal_name(&internal) else {
                 continue;
@@ -147,24 +161,16 @@ impl DependencySymbolIndex {
             .iter()
             .map(|name| camel_hump_initials(name))
             .collect::<Vec<_>>();
-        let key = |index: &u32, table: &[String]| {
-            self.entries
-                .get(*index as usize)
-                .and_then(|entry| table.get(entry[0] as usize))
-                .map(String::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
         let mut by_name = (0..self.entries.len() as u32).collect::<Vec<u32>>();
         by_name.sort_unstable_by(|left, right| {
-            key(left, &self.lowercase_names)
-                .cmp(&key(right, &self.lowercase_names))
+            self.name_of(*left, &self.lowercase_names)
+                .cmp(self.name_of(*right, &self.lowercase_names))
                 .then_with(|| left.cmp(right))
         });
         let mut by_initials = (0..self.entries.len() as u32).collect::<Vec<u32>>();
         by_initials.sort_unstable_by(|left, right| {
-            key(left, &self.initials)
-                .cmp(&key(right, &self.initials))
+            self.name_of(*left, &self.initials)
+                .cmp(self.name_of(*right, &self.initials))
                 .then_with(|| left.cmp(right))
         });
         self.by_name = by_name;
@@ -187,23 +193,36 @@ impl DependencySymbolIndex {
     /// name, and turning it into something a client can open is the caller's job, for only as many
     /// as it means to return.
     pub fn candidates(&self, query: &str, limit: usize) -> Vec<DependencyCandidate> {
-        let mut parsed = vec![WorkspaceQuery::parse(query)];
-        if let Some(latin) = qwerty_from_cyrillic(query) {
-            let translated = WorkspaceQuery::parse(&latin);
-            if translated != parsed[0] {
-                parsed.push(translated);
-            }
+        let mut remaining_glob_steps = MAX_WORKSPACE_SYMBOL_GLOB_STEPS;
+        self.candidates_with_glob_steps(query, limit, &mut remaining_glob_steps)
+    }
+
+    /// Rank with the wildcard transition budget left by earlier workspace-symbol layers.
+    pub(crate) fn candidates_with_glob_steps(
+        &self,
+        query: &str,
+        limit: usize,
+        remaining_glob_steps: &mut usize,
+    ) -> Vec<DependencyCandidate> {
+        if limit == 0 {
+            return Vec::new();
         }
         let mut ranked = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for query in &parsed {
-            for index in self.ranked_indices(query, limit) {
-                if ranked.len() >= limit {
-                    break;
-                }
-                if !seen.insert(index) {
-                    continue;
-                }
+        for query in workspace_queries(query) {
+            // The source layer may use an empty query to enumerate a bounded project. Dependencies
+            // are the widest layer and deliberately decline it rather than return an arbitrary
+            // slice of the classpath. Every other query semantic is shared.
+            if query.is_empty() || ranked.len() >= limit || *remaining_glob_steps == 0 {
+                continue;
+            }
+            let indices = self.ranked_indices(
+                &query,
+                limit - ranked.len(),
+                &mut seen,
+                remaining_glob_steps,
+            );
+            for index in indices {
                 if let Some(candidate) = self.candidate(index) {
                     ranked.push(candidate);
                 }
@@ -212,68 +231,172 @@ impl DependencySymbolIndex {
         ranked
     }
 
-    fn ranked_indices(&self, query: &WorkspaceQuery, limit: usize) -> Vec<u32> {
-        let pattern = &query.pattern;
-        if pattern.is_empty() {
-            return Vec::new();
-        }
+    /// Rank at most `limit` previously unseen entries for one parsed query.
+    ///
+    /// The limit is enforced while each rung is walked, not after a vector has been built. A one-
+    /// character prefix can match hundreds of thousands of classes; materialising all of them for
+    /// a 32-result response would make the response cap cosmetic rather than a work bound.
+    fn ranked_indices(
+        &self,
+        query: &WorkspaceQuery,
+        limit: usize,
+        seen: &mut std::collections::HashSet<u32>,
+        remaining_glob_steps: &mut usize,
+    ) -> Vec<u32> {
         let mut ranked = Vec::new();
-        let push = |ranked: &mut Vec<u32>, index: u32| {
-            if self.qualifier_matches(index, query.package.as_deref()) {
-                ranked.push(index);
-            }
-        };
-        for &index in self.prefix_range(&self.by_name, &self.lowercase_names, pattern) {
-            push(&mut ranked, index);
+        if limit == 0 {
+            return ranked;
         }
-        if query.package.is_some() && ranked.len() < limit {
-            // A qualified query spells the qualifier separately, so the pattern is the last segment
-            // and a nested class has to be reachable by it.
-            for index in 0..self.entries.len() as u32 {
-                if self.simple_segment(index).starts_with(pattern)
-                    && !self
-                        .name_of(index, &self.lowercase_names)
-                        .starts_with(pattern)
-                {
-                    push(&mut ranked, index);
+        for rung in query.rungs() {
+            if ranked.len() >= limit {
+                break;
+            }
+            match rung {
+                WorkspaceSymbolRung::Every => {}
+                WorkspaceSymbolRung::Glob => {
+                    let prefix = query.literal_prefix();
+                    let completed = if prefix.is_empty() {
+                        self.append_glob_candidates(
+                            0..self.entries.len() as u32,
+                            query,
+                            limit,
+                            seen,
+                            &mut ranked,
+                            remaining_glob_steps,
+                        )
+                    } else {
+                        self.append_glob_candidates(
+                            self.prefix_range(&self.by_name, &self.lowercase_names, prefix)
+                                .iter()
+                                .copied(),
+                            query,
+                            limit,
+                            seen,
+                            &mut ranked,
+                            remaining_glob_steps,
+                        )
+                    };
+                    if !completed {
+                        break;
+                    }
                 }
-            }
-        }
-        if ranked.len() < limit {
-            for &index in self.prefix_range(&self.by_initials, &self.initials, pattern) {
-                if !self
-                    .name_of(index, &self.lowercase_names)
-                    .starts_with(pattern)
-                {
-                    push(&mut ranked, index);
+                WorkspaceSymbolRung::NamePrefix => {
+                    for &index in
+                        self.prefix_range(&self.by_name, &self.lowercase_names, &query.pattern)
+                    {
+                        if !self.admit_ranked(index, query, limit, seen, &mut ranked) {
+                            break;
+                        }
+                    }
+                    if query.package.is_some() && ranked.len() < limit {
+                        // A qualified query spells the qualifier separately, so the pattern is the
+                        // last segment and a nested class has to be reachable by it.
+                        for index in 0..self.entries.len() as u32 {
+                            if self.simple_segment(index).starts_with(&query.pattern)
+                                && !self
+                                    .name_of(index, &self.lowercase_names)
+                                    .starts_with(&query.pattern)
+                                && !self.admit_ranked(index, query, limit, seen, &mut ranked)
+                            {
+                                break;
+                            }
+                        }
+                    }
                 }
-            }
-        }
-        if ranked.len() < limit {
-            let matching = self.matching_names(|name, initials| {
-                is_ordered_subsequence_lowercase(initials, pattern)
-                    && !initials.starts_with(pattern)
-                    && !name.starts_with(pattern)
-            });
-            for index in 0..self.entries.len() as u32 {
-                if self.name_matches(index, &matching) {
-                    push(&mut ranked, index);
+                WorkspaceSymbolRung::InitialsPrefix => {
+                    for &index in
+                        self.prefix_range(&self.by_initials, &self.initials, &query.pattern)
+                    {
+                        if self
+                            .name_of(index, &self.lowercase_names)
+                            .starts_with(&query.pattern)
+                        {
+                            continue;
+                        }
+                        if !self.admit_ranked(index, query, limit, seen, &mut ranked) {
+                            break;
+                        }
+                    }
                 }
-            }
-        }
-        if ranked.len() < limit {
-            let matching = self.matching_names(|name, initials| {
-                is_ordered_subsequence_lowercase(name, pattern)
-                    && !name.starts_with(pattern)
-                    && !is_ordered_subsequence_lowercase(initials, pattern)
-            });
-            for index in 0..self.entries.len() as u32 {
-                if self.name_matches(index, &matching) {
-                    push(&mut ranked, index);
+                WorkspaceSymbolRung::InitialsSubsequence => {
+                    let matching = self.matching_names(|name, initials| {
+                        is_ordered_subsequence_lowercase(initials, &query.pattern)
+                            && !initials.starts_with(&query.pattern)
+                            && !name.starts_with(&query.pattern)
+                    });
+                    for &index in &self.by_initials {
+                        if self.name_matches(index, &matching)
+                            && !self.admit_ranked(index, query, limit, seen, &mut ranked)
+                        {
+                            break;
+                        }
+                    }
+                }
+                WorkspaceSymbolRung::NameSubsequence => {
+                    let matching = self.matching_names(|name, initials| {
+                        is_ordered_subsequence_lowercase(name, &query.pattern)
+                            && !name.starts_with(&query.pattern)
+                            && !is_ordered_subsequence_lowercase(initials, &query.pattern)
+                    });
+                    for index in 0..self.entries.len() as u32 {
+                        if self.name_matches(index, &matching)
+                            && !self.admit_ranked(index, query, limit, seen, &mut ranked)
+                        {
+                            break;
+                        }
+                    }
                 }
             }
         }
         ranked
+    }
+
+    fn append_glob_candidates(
+        &self,
+        candidates: impl IntoIterator<Item = u32>,
+        query: &WorkspaceQuery,
+        limit: usize,
+        seen: &mut std::collections::HashSet<u32>,
+        ranked: &mut Vec<u32>,
+        remaining_steps: &mut usize,
+    ) -> bool {
+        for index in candidates {
+            match matches_glob(
+                self.name_of(index, &self.lowercase_names),
+                &query.pattern,
+                remaining_steps,
+            ) {
+                Some(true) => {}
+                Some(false) => continue,
+                None => {
+                    *remaining_steps = 0;
+                    return false;
+                }
+            }
+            if !self.admit_ranked(index, query, limit, seen, ranked) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Admit one entry under the common qualifier and de-duplication rules. `false` means the
+    /// caller has filled the bounded response and must stop walking its current rung immediately.
+    fn admit_ranked(
+        &self,
+        index: u32,
+        query: &WorkspaceQuery,
+        limit: usize,
+        seen: &mut std::collections::HashSet<u32>,
+        ranked: &mut Vec<u32>,
+    ) -> bool {
+        if ranked.len() >= limit {
+            return false;
+        }
+        if self.qualifier_matches(index, query.package.as_deref()) && seen.insert(index) {
+            ranked.push(index);
+        }
+        ranked.len() < limit
     }
 
     /// Entry indices whose key in `table` starts with `pattern`, by binary search over `order`.
@@ -454,15 +577,31 @@ pub fn locate(
     candidates: Vec<DependencyCandidate>,
     use_sources: bool,
 ) -> Vec<LocatedDependency> {
+    locate_with(cache_root, candidates, |candidate| {
+        let source =
+            crate::deps_render::materialize(classpath, &candidate.internal, "", "", use_sources)?;
+        // No member name: a class-name query points at the class declaration itself.
+        Some(source.into_text_and_span("", ""))
+    })
+}
+
+/// Finish dependency locations using a host-provided semantic materializer.
+///
+/// The standalone renderer and the real worker use different transports to obtain source text,
+/// but everything after that boundary must be identical: failed materialization is omitted, the
+/// content-addressed cache is authoritative for the returned path, and the candidate/text/span are
+/// kept together. Keeping that policy here prevents the production worker path from becoming an
+/// untested second implementation of dependency location.
+pub fn locate_with(
+    cache_root: &std::path::Path,
+    candidates: Vec<DependencyCandidate>,
+    mut materialize: impl FnMut(&DependencyCandidate) -> Option<(String, krusty::diag::Span)>,
+) -> Vec<LocatedDependency> {
     let mut located = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        let Some(source) =
-            crate::deps_render::materialize(classpath, &candidate.internal, "", "", use_sources)
-        else {
+        let Some((text, span)) = materialize(&candidate) else {
             continue;
         };
-        // No member name: a class-name query points at the class declaration itself.
-        let (text, span) = source.into_text_and_span("", "");
         let Ok(path) = crate::deps_cache::store(cache_root, &candidate.internal, &text) else {
             continue;
         };
@@ -610,12 +749,81 @@ mod tests {
     }
 
     #[test]
+    fn filtered_archive_entries_still_consume_the_bounded_scan_budget() {
+        let index = DependencySymbolIndex::from_internal_names_with_limit(
+            [
+                "META-INF/versions/9/demo/Versioned".to_string(),
+                "module-info".to_string(),
+                "demo/WouldOtherwiseBeUnbounded".to_string(),
+            ],
+            2,
+        );
+
+        assert_eq!(index.class_count(), 0);
+        assert!(!index.is_complete());
+    }
+
+    #[test]
     fn an_empty_query_returns_nothing() {
         let index = index(&["demo/Widget"]);
 
         // The dependency layer is the widest one there is; answering an empty query from it would
         // return an arbitrary slice of every jar on the classpath.
         assert!(index.candidates("", 8).is_empty());
+    }
+
+    #[test]
+    fn wildcard_queries_share_the_workspace_query_grammar() {
+        let index = index(&[
+            "demo/AbstractList",
+            "demo/AbstractMutableList",
+            "demo/ArrayList",
+        ]);
+
+        // A trailing `::` is the shared protocol escape that disables the client's own literal
+        // re-filter. The dependency layer used to parse the same request but silently treat `*` as
+        // ordinary subsequence text, unlike the project layer below it.
+        assert_eq!(
+            names(&index, "Abstract*List::", 8),
+            vec!["AbstractList", "AbstractMutableList"]
+        );
+    }
+
+    #[test]
+    fn dependency_queries_obey_the_shared_input_and_result_bounds() {
+        let index = index(&["demo/Widget"]);
+        let oversized = "W".repeat(crate::analysis::MAX_WORKSPACE_SYMBOL_QUERY_BYTES + 1);
+
+        assert!(index.candidates(&oversized, 8).is_empty());
+        assert!(index.candidates("Widget", 0).is_empty());
+    }
+
+    #[test]
+    fn wildcard_transition_budget_is_shared_with_the_project_layer() {
+        let project = crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
+            "file:///Project.kt",
+            "package demo\nclass RepeatedTarget\n",
+        )]);
+        let dependencies = index(&["vendor/RepeatedTarget"]);
+        let parsed = WorkspaceQuery::parse("*target");
+        let mut probe = usize::MAX;
+        assert_eq!(
+            matches_glob("repeatedtarget", &parsed.pattern, &mut probe),
+            Some(true)
+        );
+        let mut remaining = usize::MAX - probe;
+
+        let project_hits = project.encode_over_with_glob_steps(
+            "*target",
+            &[],
+            &std::collections::HashSet::new(),
+            &mut remaining,
+        );
+        let dependency_hits = dependencies.candidates_with_glob_steps("*target", 8, &mut remaining);
+
+        assert_eq!(project_hits.len(), 1);
+        assert!(dependency_hits.is_empty());
+        assert_eq!(remaining, 0);
     }
 
     #[test]

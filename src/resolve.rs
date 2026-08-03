@@ -147,9 +147,9 @@ pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 pub(crate) use crate::symbol_resolver::FunctionImportScope;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
-/// `is_override`/`is_final`/`is_suspend` into one byte. Read through the `Signature` accessors of the
-/// same names; `vararg` is also mutated through `set_vararg`; built with the `with_*` chain. Headroom
-/// for two more flags.
+/// `is_override`/`is_final`/`is_suspend`/`requires_splice` into one byte. Read through the
+/// `Signature` accessors of the same names; `vararg` is also mutated through `set_vararg`; built with
+/// the `with_*` chain. Headroom for one more flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SigFlags(u8);
 
@@ -160,6 +160,7 @@ impl SigFlags {
     const IS_OVERRIDE: u8 = 1 << 3;
     const IS_FINAL: u8 = 1 << 4;
     const IS_SUSPEND: u8 = 1 << 5;
+    const REQUIRES_SPLICE: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -199,6 +200,10 @@ impl SigFlags {
     pub const fn with_is_suspend(self, on: bool) -> Self {
         self.with(Self::IS_SUSPEND, on)
     }
+    #[inline]
+    pub const fn with_requires_splice(self, on: bool) -> Self {
+        self.with(Self::REQUIRES_SPLICE, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -208,9 +213,11 @@ pub struct Signature {
     /// Declared generic callable shape retained for call-site inference.
     pub generic_sig: Option<GenericSig>,
     pub projected_return_hazard: bool,
-    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend` (read via the
-    /// accessors below; `vararg` set via `set_vararg`). `vararg` marks a variadic signature.
-    /// `is_final` — a `final` member a subclass cannot override. `is_suspend` — a `suspend fun`.
+    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend`/
+    /// `requires_splice` (read via the accessors below; `vararg` set via `set_vararg`). `vararg` marks
+    /// a variadic signature. `is_final` — a `final` member a subclass cannot override. `is_suspend`
+    /// — a `suspend fun`. `requires_splice` — no direct-call fallback is semantically legal even when
+    /// the backend emits a method so another compilation can obtain and inline its body.
     pub flags: SigFlags,
     pub vararg_index: Option<usize>,
     /// Minimum number of arguments a caller must supply — params beyond this have default values
@@ -302,6 +309,10 @@ impl Signature {
     #[inline]
     pub fn is_suspend(&self) -> bool {
         self.flags.has(SigFlags::IS_SUSPEND)
+    }
+    #[inline]
+    pub fn requires_splice(&self) -> bool {
+        self.flags.has(SigFlags::REQUIRES_SPLICE)
     }
     #[inline]
     pub fn set_vararg(&mut self, on: bool) {
@@ -2746,11 +2757,14 @@ impl SymbolTable {
             if !seen_owners.insert(owner) {
                 continue;
             }
+            // A CLASSPATH owner in the chain: its methods aren't source declarations, so it
+            // contributes nothing and its own supertypes aren't walked. Keep whatever the SOURCE
+            // classes below it already contributed rather than discarding the walk — a source class
+            // extending a library class (`class C : ArrayList<Int>() { override fun removeAt(…) }`)
+            // still has its own declaration matched, which is what a `super.` call and the mapped-
+            // interface bridge both need. Bailing out here made such an override invisible.
             let Some(class) = self.class_by_type_name(owner) else {
-                if include_interfaces {
-                    continue;
-                }
-                return None;
+                continue;
             };
             for signature in class.methods_named(name) {
                 // An override has the same JVM parameter signature as its parent. Keep the
@@ -4604,7 +4618,14 @@ fn collect_signatures_with_cp_impl(
                             .with_is_operator(f.is_operator())
                             .with_is_override(f.is_override())
                             .with_is_final(f.is_final())
-                            .with_is_suspend(f.is_suspend()),
+                            .with_is_suspend(f.is_suspend())
+                            // Reified source bodies may be emitted to make their inline body
+                            // available across a compilation boundary, but their erased JVM method
+                            // is not a legal direct-call fallback. Encode that semantic capability on
+                            // the signature itself so every source callable origin maps it to the
+                            // shared `InlineKind::MustInline` state instead of consulting a parallel
+                            // declaration set or rediscovering `reified` in individual call paths.
+                            .with_requires_splice(!f.reified_type_params.is_empty()),
                         vararg_index,
                         required,
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
@@ -4972,22 +4993,46 @@ fn collect_signatures_with_cp_impl(
                                 crate::symbol_resolver::InheritedNestedClassifier::NotFound => {}
                             }
                         }
-                        let prefix = format!("{}.", c.name);
+                        // Own nested classifiers from every lexical owner are in scope inside a nested
+                        // class. For `Outer { inner class First; inner class Second(val first: First) }`,
+                        // `First` belongs to `Outer`, not `Outer.Second`, so probing only `c.name` loses
+                        // the sibling during signature collection. Index direct children of all lexical
+                        // owners in one declaration scan; a nearer owner wins when names shadow.
+                        let lexical_owner_ranks = lexical_inheritors
+                            .iter()
+                            .copied()
+                            .enumerate()
+                            .map(|(rank, owner)| (owner, rank))
+                            .collect::<HashMap<_, _>>();
+                        let mut lexical_nested = HashMap::<String, (usize, TypeName)>::new();
                         for &nd in &file.decls {
                             if let Decl::Class(nc) = file.decl(nd) {
-                                if let Some(seg) = nc.name.strip_prefix(&prefix) {
-                                    // Kotlin nested-type scoping: the enclosing class's own nested type
-                                    // SHADOWS a same-named top-level/imported type — insert unconditionally
-                                    // (overwriting any top-level entry). Consistent with the checker's
-                                    // `enclosing_nested_type` expression-path fallback.
-                                    if !seg.contains('.') {
-                                        let ni = class_names.get(&nc.name).unwrap_or_else(|| {
-                                            type_name(&class_internal(file, &nc.name))
-                                        });
-                                        ext.insert_name(seg.to_string(), ni);
+                                let Some((owner, simple)) = nc.name.rsplit_once('.') else {
+                                    continue;
+                                };
+                                let owner = type_name(&class_internal(file, owner));
+                                let Some(&rank) = lexical_owner_ranks.get(&owner) else {
+                                    continue;
+                                };
+                                let internal = class_names
+                                    .get(&nc.name)
+                                    .unwrap_or_else(|| type_name(&class_internal(file, &nc.name)));
+                                match lexical_nested.entry(simple.to_string()) {
+                                    std::collections::hash_map::Entry::Vacant(entry) => {
+                                        entry.insert((rank, internal));
                                     }
+                                    std::collections::hash_map::Entry::Occupied(mut entry)
+                                        if rank < entry.get().0 =>
+                                    {
+                                        entry.insert((rank, internal));
+                                    }
+                                    std::collections::hash_map::Entry::Occupied(_) => {}
                                 }
                             }
+                        }
+                        for (simple, (_, internal)) in lexical_nested {
+                            // A lexical nested classifier shadows top-level/imported classifiers.
+                            ext.insert_name(simple, internal);
                         }
                         ext
                     };
@@ -9335,6 +9380,11 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
+        /// The selected callable's generic [`InlineKind::MustInline`] capability: a direct fallback
+        /// is semantically illegal even if a facade method is physically emitted to publish inline
+        /// code. Same-file lowering may splice it first; every remaining path must bail. Carrying
+        /// the resolved capability keeps lowering independent of source syntax and symbol origin.
+        requires_splice: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -9507,12 +9557,87 @@ struct MatchedCtorDelegation {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedSuperCall {
-    pub owner: TypeName,
-    pub interface: bool,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub descriptor: Option<String>,
+pub enum ResolvedSuperCall {
+    /// A SOURCE base-class method or interface-default method. Its JVM name IS the source name and its
+    /// signature is the one this module will emit, so there is nothing to carry beyond the shape.
+    Source {
+        owner: TypeName,
+        interface: bool,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
+    /// A CLASSPATH base-class method — the selected library member, exactly as
+    /// [`ResolvedCall::Member`] carries one for an ordinary member call. It already states every JVM
+    /// fact the lowerer needs (its own `name`, which is the physical one when the Kotlin name renames
+    /// it; its `descriptor`; and its erased `physical_ret`, which the logical `ret` may narrow after
+    /// binding the base's type arguments), so none of those are re-stated here as parallel fields.
+    Classpath(Box<crate::libraries::LibraryMember>),
+}
+
+impl ResolvedSuperCall {
+    /// The parameter types a call site's arguments are lowered against.
+    pub fn params(&self) -> &[Ty] {
+        match self {
+            ResolvedSuperCall::Source { params, .. } => params,
+            ResolvedSuperCall::Classpath(member) => &member.params,
+        }
+    }
+
+    /// The declaring type the call dispatches to, when it is known. `None` only for a classpath member
+    /// whose owner the library reader could not name.
+    pub fn owner(&self) -> Option<TypeName> {
+        match self {
+            ResolvedSuperCall::Source { owner, .. } => Some(*owner),
+            ResolvedSuperCall::Classpath(member) => member.owner,
+        }
+    }
+
+    /// The LOGICAL result type of the call — what the checker gave the expression.
+    pub fn ret(&self) -> Ty {
+        match self {
+            ResolvedSuperCall::Source { ret, .. } => *ret,
+            ResolvedSuperCall::Classpath(member) => member.ret,
+        }
+    }
+
+    /// The name to emit the call under. A source target uses the name written at the call site; a
+    /// classpath member states its own, which differs whenever its Kotlin name renames the JVM one
+    /// (`MutableList.removeAt` IS `java.util.List.remove(int)`).
+    pub fn emitted_name<'a>(&'a self, source_name: &'a str) -> &'a str {
+        match self {
+            ResolvedSuperCall::Source { .. } => source_name,
+            ResolvedSuperCall::Classpath(member) => &member.name,
+        }
+    }
+
+    /// The target's own descriptor, when it has one. `None` for a source target, whose descriptor the
+    /// backend derives from the signature it is about to emit.
+    pub fn descriptor(&self) -> Option<&str> {
+        match self {
+            ResolvedSuperCall::Source { .. } => None,
+            ResolvedSuperCall::Classpath(member) => Some(&member.descriptor),
+        }
+    }
+
+    /// Whether the target is an interface method (an interface-default `super` call).
+    pub fn interface(&self) -> bool {
+        match self {
+            ResolvedSuperCall::Source { interface, .. } => *interface,
+            ResolvedSuperCall::Classpath(_) => false,
+        }
+    }
+
+    /// The target's ERASED result type, when it differs from the logical [`Self::ret`] — a generic
+    /// classpath member returns `Object` physically while `ret` is the type recovered from the base's
+    /// bound arguments. `None` when nothing was erased and the result needs no coercion.
+    pub fn erased_ret(&self) -> Option<Ty> {
+        match self {
+            ResolvedSuperCall::Source { .. } => None,
+            ResolvedSuperCall::Classpath(member) => {
+                (member.physical_ret != member.ret).then_some(member.physical_ret)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -10110,6 +10235,14 @@ pub enum ExprLowering {
         name: String,
         descriptor: Option<String>,
     },
+    /// Kotlin's synthetic `EnumType.entries` property. `accessor` is the exact physical realization
+    /// advertised by the selected enum shape. Keeping the target here makes source, module, and
+    /// dependency providers use one semantic handoff; `None` means the property is valid Kotlin but
+    /// this provider exposes no direct accessor that the current backend can emit.
+    EnumEntriesRead {
+        owner: TypeName,
+        accessor: Option<Box<crate::libraries::LibraryMember>>,
+    },
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
     /// `getstatic <internal>.INSTANCE` as the receiver and invokes the member — the same shape a qualified
@@ -10135,6 +10268,10 @@ pub enum ExprLowering {
         /// Whether that declaring owner is an interface. This is target-neutral type shape; a backend
         /// that has no compiled declaration to inspect still needs it to realize virtual dispatch.
         interface: bool,
+        /// Exact physical field selected by the same declaration walk that selected the property.
+        /// `None` leaves realization to the property declaration; `Some` prevents a backend from
+        /// replacing a Java field with a same-named synthetic accessor.
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
     },
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
@@ -10536,6 +10673,48 @@ fn make_checker<'a>(
         loop_depth: 0,
         return_allowed: true,
     }
+}
+
+fn class_declaration_label(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+fn class_receiver_labels(
+    class: &ClassDecl,
+    symbols: &SymbolTable,
+    current: Option<Ty>,
+) -> Vec<(String, Ty, bool)> {
+    let mut labels = Vec::new();
+    // Start from the collected signature's semantic nesting edge. Reconstructing the owner from
+    // `ClassDecl::name` / `inner_of` would make receiver labels depend on whether this declaration was
+    // spelled as a dotted nested source name, and previously required a separate fallback for an
+    // already-interned type name. Every caller has already selected `current` from the same collected
+    // signature, so its normalized internal name gives source files and later module consumers one
+    // origin-independent path to the lexical outer chain.
+    let current_internal = current.and_then(Ty::obj_internal);
+    let mut outer = current_internal
+        .and_then(|internal| symbols.class_by_type_name(internal))
+        .and_then(ClassSig::inner_of_name);
+    while let Some(internal) = outer {
+        let Some(signature) = symbols.class_by_type_name(internal) else {
+            break;
+        };
+        let declaration = symbols.class_simple_name(internal).unwrap_or("<anonymous>");
+        labels.push((
+            class_declaration_label(declaration).to_string(),
+            Ty::obj_name(signature.internal_name()),
+            true,
+        ));
+        outer = signature.inner_of_name();
+    }
+    labels.reverse();
+    if let Some(ty) = current {
+        // The current AST declaration is the authoritative source spelling for its explicit label;
+        // using a reverse symbol-table lookup here would be ambiguous in an already-diagnosed duplicate
+        // declaration, even though either entry may normalize to the same internal name.
+        labels.push((class_declaration_label(&class.name).to_string(), ty, true));
+    }
+    labels
 }
 
 fn anonymous_body_bound_names(
@@ -11170,8 +11349,10 @@ fn preinfer_returns_pass(
                     .map(|name| class_tparams.erase(name))
                     .collect::<Vec<_>>(),
             );
+            let labels_depth = pre.this_labels.len();
             pre.set_this_ty(Some(dispatch_ty));
-            pre.this_labels.push((cl.name.clone(), dispatch_ty, true));
+            pre.this_labels
+                .extend(class_receiver_labels(cl, pre.syms, Some(dispatch_ty)));
             let properties = pre.scoped_properties(internal_name);
             for (property_index, property) in cl.body_props.iter().enumerate() {
                 let Some((receiver, getter)) = member_extension_property_preinfer_body(property)
@@ -11228,7 +11409,7 @@ fn preinfer_returns_pass(
                     pre.reified_tparams.clear();
                 }
             }
-            pre.this_labels.pop();
+            pre.this_labels.truncate(labels_depth);
             pre.set_this_ty(None);
         }
     }
@@ -11557,36 +11738,9 @@ fn check_file_at_impl_mode(
                 // Push the enclosing-class labels for the duration of this class's member checks: the
                 // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
                 // class's own label (`this@C`) innermost. Walk `inner_of` outward.
-                let mut label_depth = 0usize;
-                {
-                    let mut chain: Vec<(String, Ty)> = Vec::new();
-                    let mut outer = cl.inner_of.as_deref().and_then(|o| {
-                        syms.classes
-                            .get(o)
-                            .map(ClassSig::internal_name)
-                            .or_else(|| existing_type_name(o))
-                    });
-                    while let Some(o) = outer {
-                        if let Some(s) = syms.class_by_type_name(o) {
-                            let key = syms
-                                .class_simple_name(o)
-                                .unwrap_or("<anonymous>")
-                                .to_string();
-                            chain.push((key, Ty::obj_name(s.internal_name())));
-                            outer = s.inner_of_name();
-                        } else {
-                            break;
-                        }
-                    }
-                    for (n, ty) in chain.into_iter().rev() {
-                        c.this_labels.push((n, ty, true));
-                        label_depth += 1;
-                    }
-                }
-                if let Some(ty) = c.this_ty {
-                    c.this_labels.push((cl.name.clone(), ty, true));
-                    label_depth += 1;
-                }
+                let labels = class_receiver_labels(cl, c.syms, c.this_ty);
+                let label_depth = labels.len();
+                c.this_labels.extend(labels);
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
                 c.check_no_erased_clash(&methods);
                 if let Some(internal) = syms.classes.get(&cl.name).map(ClassSig::internal_name) {
@@ -13381,7 +13535,8 @@ impl<'a> Checker<'a> {
             flags: SigFlags::default()
                 .with_vararg(selected.call_sig.vararg_index.is_some())
                 .with_is_inline(selected.flags.inline.can_inline())
-                .with_is_suspend(selected.flags.suspend),
+                .with_is_suspend(selected.flags.suspend)
+                .with_requires_splice(selected.flags.inline.must_inline()),
             vararg_index: selected.call_sig.vararg_index,
             required: selected.call_sig.required,
             param_defaults: selected.call_sig.param_defaults.clone(),
@@ -13398,6 +13553,15 @@ impl<'a> Checker<'a> {
             contract: None,
         };
         Some((selected, signature))
+    }
+
+    fn source_extension_requires_splice(&self, selected: &crate::libraries::FunctionInfo) -> bool {
+        // Inline fallback legality is part of the resolved callable's semantic state. In
+        // particular, a reified source extension may have a physically emitted facade so another
+        // compilation can read and splice its body, while calling that erased method directly is
+        // still illegal. Reading `InlineKind::MustInline` keeps that distinction independent of
+        // source-file keys and avoids a reified-only side index or per-origin lowering branches.
+        selected.flags.inline.must_inline()
     }
 
     fn check_source_extension_call_args(
@@ -14710,13 +14874,13 @@ impl<'a> Checker<'a> {
             .and_then(Symbol::instance)
     }
 
-    fn resolve_super_instance_name(
+    fn resolve_super_instance_ty(
         &self,
-        internal: TypeName,
+        recv: Ty,
         name: &str,
         args: &[CallArgKind],
     ) -> Option<crate::libraries::LibraryMember> {
-        self.resolver().resolve_super_instance(internal, name, args)
+        self.resolver().resolve_super_instance(recv, name, args)
     }
     fn resolve_companion_with_literal_args(
         &self,
@@ -15200,7 +15364,10 @@ impl<'a> Checker<'a> {
                                 params: sig.params.clone(),
                                 physical_ret: sig.ret,
                                 ret: sig.ret,
-                                inline: InlineKind::from_flags(sig.is_inline(), false),
+                                inline: InlineKind::from_flags(
+                                    sig.is_inline(),
+                                    sig.requires_splice(),
+                                ),
                                 interface: self
                                     .syms
                                     .class_by_type_name(owner)
@@ -15225,7 +15392,7 @@ impl<'a> Checker<'a> {
                             params: sig.params.clone(),
                             physical_ret: sig.ret,
                             ret: sig.ret,
-                            inline: InlineKind::from_flags(sig.is_inline(), false),
+                            inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
                             interface,
                             vararg_index: sig.vararg_index,
                             suspend: sig.is_suspend(),
@@ -15240,6 +15407,7 @@ impl<'a> Checker<'a> {
             .selected_source_extension(receiver, name, &arg_kinds)
             .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
         {
+            let requires_splice = self.source_extension_requires_splice(&selected);
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
             let owner = sig
                 .source_file
@@ -15260,6 +15428,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
+                    requires_splice,
                 },
             ));
         }
@@ -17912,6 +18081,23 @@ impl<'a> Checker<'a> {
             .iter()
             .any(|candidate| candidate == entry)
             .then_some(internal)
+    }
+
+    fn enum_entries_target(
+        &self,
+        receiver: ExprId,
+    ) -> Option<(TypeName, Option<Box<crate::libraries::LibraryMember>>)> {
+        let owner = self.classifier_receiver_internal(receiver)?;
+        let classifier = self.resolved_type_name(owner)?;
+        if !classifier.is_enum() {
+            return None;
+        }
+        // Consume the provider's dedicated semantic capability rather than rediscovering a callable
+        // by name. The opaque physical owner/name/descriptor is carried to lowering verbatim.
+        Some((
+            owner,
+            classifier.enum_entries_accessor.clone().map(Box::new),
+        ))
     }
 
     /// Source classes in lexical precedence order, including static enclosing classes.
@@ -21574,7 +21760,10 @@ impl<'a> Checker<'a> {
                                 params: sig.params.clone(),
                                 physical_ret: sig.ret,
                                 ret: sig.ret,
-                                inline: InlineKind::from_flags(sig.is_inline(), false),
+                                inline: InlineKind::from_flags(
+                                    sig.is_inline(),
+                                    sig.requires_splice(),
+                                ),
                                 interface,
                                 vararg_index: sig.vararg_index,
                                 suspend: sig.is_suspend(),
@@ -21590,6 +21779,7 @@ impl<'a> Checker<'a> {
                 .selected_source_extension(at, "get", &index_kinds)
                 .filter(|(_, signature)| signature.is_operator())
             {
+                let requires_splice = self.source_extension_requires_splice(&selected);
                 for (i, &pt) in sig.params.iter().enumerate() {
                     self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                 }
@@ -21613,6 +21803,7 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
+                        requires_splice,
                     },
                 );
                 return self.set(e, sig.ret);
@@ -22781,6 +22972,7 @@ impl<'a> Checker<'a> {
                     .selected_source_extension(lt, "compareTo", &rhs_kind)
                     .filter(|(_, signature)| signature.is_operator() && signature.ret == Ty::Int)
                 {
+                    let requires_splice = self.source_extension_requires_splice(&selected);
                     let Some(param) = signature.single_param() else {
                         return self.check_binary(op, lt, rt, self.span(e));
                     };
@@ -22803,6 +22995,7 @@ impl<'a> Checker<'a> {
                             owner,
                             source: selected.source_key,
                             vararg: selected.call_sig.vararg,
+                            requires_splice,
                         },
                     );
                     return self.set(e, Ty::Boolean);
@@ -22830,8 +23023,36 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // Kotlin exposes a synthetic `entries: EnumEntries<E>` property on every enum classifier.
+            // Recognize the classifier receiver directly, even when its provider has no direct accessor;
+            // this also handles `Outer.Mode.entries` without evaluating `Outer.Mode` as a value.
+            if name == "entries" {
+                if let Some((owner, accessor)) = self.enum_entries_target(receiver) {
+                    if let Some(access) = self.resolver().inaccessible_classifier_access(owner) {
+                        let reference = self.span(receiver);
+                        let display = self
+                            .dotted_full_path(receiver)
+                            .unwrap_or_else(|| owner.render().replace(['/', '$'], "."));
+                        self.diags.error_with_identity(
+                            reference,
+                            DiagnosticIdentity::ClassifierAccess {
+                                reference,
+                                classifier: owner,
+                            },
+                            inaccessible_classifier_message(&display, access),
+                        );
+                        return self.set(e, Ty::Error);
+                    }
+                    self.expr_lowers
+                        .insert(e, ExprLowering::EnumEntriesRead { owner, accessor });
+                    return self.set(
+                        e,
+                        Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(owner)]),
+                    );
+                }
+            }
             if let Some(field) = self
-                .classpath_type_receiver_internal(receiver)
+                .classifier_receiver_internal(receiver)
                 .and_then(|internal| self.resolver().static_field(internal, &name))
             {
                 let ty = self.record_external_static_field(Some(e), field);
@@ -23952,6 +24173,7 @@ impl<'a> Checker<'a> {
         arg_kinds: &[CallArgKind],
     ) -> Option<Ty> {
         let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
+        let requires_splice = self.source_extension_requires_splice(&selected);
         // Validate against the resolver's instantiated value parameters, not the declaration's
         // potentially generic signature. This is the contract the former qualified-call block used;
         // retaining it here prevents helper reuse from accepting a safe call that selected a generic
@@ -23987,6 +24209,7 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
+                requires_splice,
             },
         );
         // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
@@ -25345,6 +25568,7 @@ impl<'a> Checker<'a> {
             );
         }
         if matches!(fi.callable.origin, Origin::Module { .. }) {
+            let requires_splice = self.source_extension_requires_splice(&fi);
             let (file, declaration) = fi.source_key?;
             let (_, signature) = self
                 .syms
@@ -25372,6 +25596,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
+                    requires_splice,
                 },
             );
             self.resolved_call_arg_slots.insert(call, slots);
@@ -27273,6 +27498,7 @@ impl<'a> Checker<'a> {
                         ExprLowering::MemberPropertyRead {
                             owner,
                             interface: self.resolved_owner_is_interface(owner),
+                            field: None,
                         },
                     );
                 }
@@ -27289,6 +27515,24 @@ impl<'a> Checker<'a> {
                         .applied_declared_member_prop_ty(rt, owner, name, ty),
                 );
             }
+            // An actual field declaration outranks JavaBean accessor synthesis on the same receiver.
+            // Ask the shared declaration walk here, before the method-derived property path, and carry
+            // its exact target so later phases never repeat an origin-specific lookup.
+            if let Some((owner, ty, interface, Some(field))) =
+                self.resolver().member_property_type(rt, name)
+            {
+                if let Some(expression) = mexpr {
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::MemberPropertyRead {
+                            owner,
+                            interface,
+                            field: Some(Box::new(field)),
+                        },
+                    );
+                }
+                return Some(ty);
+            }
             if let Some(m) = self.resolve_external_inherited_property(internal_name, name) {
                 let ret = m.ret;
                 if let Some(me) = mexpr {
@@ -27299,6 +27543,7 @@ impl<'a> Checker<'a> {
                             owner,
                             interface: m.member.is_interface()
                                 || self.resolved_owner_is_interface(owner),
+                            field: None,
                         },
                     );
                     self.resolved_calls.insert(me, ResolvedCall::Member(m));
@@ -27325,6 +27570,7 @@ impl<'a> Checker<'a> {
                                 owner,
                                 interface: m.member.is_interface()
                                     || self.resolved_owner_is_interface(owner),
+                                field: None,
                             },
                         );
                     }
@@ -27337,10 +27583,18 @@ impl<'a> Checker<'a> {
             // it need not go through any method — the backend realizes the read from the owner's own
             // declaration. Resolution owes the site only the property's type. It stays a MEMBER, so it is
             // decided here, ahead of any extension property of the same name.
-            if let Some((owner, ty, interface)) = self.resolver().member_property_type(rt, name) {
+            if let Some((owner, ty, interface, field)) =
+                self.resolver().member_property_type(rt, name)
+            {
                 if let Some(me) = mexpr {
-                    self.expr_lowers
-                        .insert(me, ExprLowering::MemberPropertyRead { owner, interface });
+                    self.expr_lowers.insert(
+                        me,
+                        ExprLowering::MemberPropertyRead {
+                            owner,
+                            interface,
+                            field: field.map(Box::new),
+                        },
+                    );
                 }
                 return Some(ty);
             }
@@ -27419,6 +27673,9 @@ impl<'a> Checker<'a> {
                     access: self.effective_property_visibility(internal_name, name),
                 });
             }
+            if let Some((_, ty, _, Some(_))) = self.resolver().member_property_type(rt, name) {
+                return Some(PropertyReadProbe::Found { ty, access: None });
+            }
             if let Some(member) = self.resolve_external_inherited_property(internal_name, name) {
                 return Some(PropertyReadProbe::Found {
                     ty: member.ret,
@@ -27432,6 +27689,9 @@ impl<'a> Checker<'a> {
                     ty: member.ret,
                     access: None,
                 });
+            }
+            if let Some((_, ty, _, _)) = self.resolver().member_property_type(rt, name) {
+                return Some(PropertyReadProbe::Found { ty, access: None });
             }
         }
         match self.member_extension_property(rt, name) {
@@ -28015,10 +28275,11 @@ impl<'a> Checker<'a> {
                 })
     }
 
-    /// The classpath internal name a bare class name resolves to — an explicit import first, then the
-    /// federated class-name seed (default/same-package/wildcard imports). Used to reach a classpath type's
-    /// `@Metadata` (e.g. constructor parameter names) from a simple-name constructor call.
-    fn classpath_class_internal_name(&self, name: &str) -> Option<TypeName> {
+    /// The semantic internal name a bare classifier resolves to — an explicit import first, then the
+    /// federated class-name seed (default/same-package/wildcard imports). Every caller consumes the
+    /// resulting classifier identity without branching on whether its shape came from this file, a
+    /// module source, or a dependency provider.
+    fn classifier_internal_name(&self, name: &str) -> Option<TypeName> {
         // Resolve through the same NESTED-type rewrite the positional-construction path uses: an
         // unqualified nested-type import (`import lib.Op.Apply`) stores the flat `lib/Op/Apply`, but the
         // class is `lib/Op$Apply`. `imported_type_internal` applies the `/`→`$` recovery (and wildcard
@@ -28033,10 +28294,10 @@ impl<'a> Checker<'a> {
             .or_else(|| self.syms.class_names.get(name))
     }
 
-    fn classpath_type_receiver_internal(&self, receiver: ExprId) -> Option<TypeName> {
+    fn classifier_receiver_internal(&self, receiver: ExprId) -> Option<TypeName> {
         match self.file.expr(receiver) {
             Expr::Name(name) if !self.value_root_shadows_classifier(name) => {
-                self.classpath_class_internal_name(name)
+                self.classifier_internal_name(name)
             }
             Expr::Member { .. } => {
                 let path = qualified_path(self.file, receiver)?;
@@ -28760,7 +29021,7 @@ impl<'a> Checker<'a> {
                     } else {
                         let qualified_top_level = if let Some(root) = self.dotted_root(*receiver) {
                             if !self.value_root_shadows_classifier(&root)
-                                && self.classpath_type_receiver_internal(*receiver).is_none()
+                                && self.classifier_receiver_internal(*receiver).is_none()
                             {
                                 if let Some(package) = qualified_path(self.file, *receiver) {
                                     let scope = [type_name(&package)];
@@ -28833,7 +29094,7 @@ impl<'a> Checker<'a> {
                 // top-level overloads and confirm the owning facade sits in the receiver's package.
                 if let Some(root) = self.dotted_root(receiver) {
                     if !self.value_root_shadows_classifier(&root)
-                        && self.classpath_type_receiver_internal(receiver).is_none()
+                        && self.classifier_receiver_internal(receiver).is_none()
                     {
                         if let Some(pkg) = qualified_path(self.file, receiver) {
                             let arg_tys = self.arg_tys(args);
@@ -29369,10 +29630,21 @@ impl<'a> Checker<'a> {
                             .is_none_or(|t| internal.qualifier_matches(t))
                     };
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        let sup = self
-                            .syms
-                            .class_by_type_name(internal)
-                            .and_then(|c| c.super_internal);
+                        let declared = self.syms.class_by_type_name(internal);
+                        let sup = declared.and_then(|c| c.super_internal);
+                        // The base spelled WITH its declared type arguments (`ArrayList<Int>`) — a
+                        // classpath member query is receiver-coupled, so these are what recover a
+                        // generic return (`removeAt(i): E` → `Int`) instead of erasing it to `Any`.
+                        let applied_sup = sup.map(|s| {
+                            let args = declared
+                                .map(|c| c.super_type_args.clone())
+                                .unwrap_or_default();
+                            if args.is_empty() {
+                                Ty::obj_name(s)
+                            } else {
+                                Ty::obj_args_name(s, &args)
+                            }
+                        });
                         if let Some(sup) = sup.filter(|s| matches_qual(*s)) {
                             // A user base-class method.
                             if let Some((owner, sig)) = self
@@ -29383,31 +29655,23 @@ impl<'a> Checker<'a> {
                                 self.expect_call_args(&sig.params, false, args, &arg_tys);
                                 self.resolved_super_calls.insert(
                                     call,
-                                    ResolvedSuperCall {
+                                    ResolvedSuperCall::Source {
                                         owner,
                                         interface: false,
                                         params: sig.params.clone(),
                                         ret: sig.ret,
-                                        descriptor: None,
                                     },
                                 );
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            if let Some(m) =
-                                self.resolve_super_instance_name(sup, &name, &arg_kinds)
-                            {
-                                self.resolved_super_calls.insert(
-                                    call,
-                                    ResolvedSuperCall {
-                                        owner: sup,
-                                        interface: false,
-                                        params: m.params.clone(),
-                                        ret: m.ret,
-                                        descriptor: Some(m.descriptor.clone()),
-                                    },
-                                );
-                                return m.ret;
+                            if let Some(m) = applied_sup.and_then(|recv| {
+                                self.resolve_super_instance_ty(recv, &name, &arg_kinds)
+                            }) {
+                                let ret = m.ret;
+                                self.resolved_super_calls
+                                    .insert(call, ResolvedSuperCall::Classpath(Box::new(m)));
+                                return ret;
                             }
                         }
                         // An INTERFACE DEFAULT method: a class `C : I` with `super.foo()` dispatches to
@@ -29429,12 +29693,11 @@ impl<'a> Checker<'a> {
                             self.expect_call_args(&sig.params, false, args, &arg_tys);
                             self.resolved_super_calls.insert(
                                 call,
-                                ResolvedSuperCall {
+                                ResolvedSuperCall::Source {
                                     owner: *iface,
                                     interface: true,
                                     params: sig.params.clone(),
                                     ret: sig.ret,
-                                    descriptor: None,
                                 },
                             );
                             return sig.ret;
@@ -29445,7 +29708,7 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 if let Expr::Member { .. } = self.file.expr(receiver) {
-                    if let Some(internal) = self.classpath_type_receiver_internal(receiver) {
+                    if let Some(internal) = self.classifier_receiver_internal(receiver) {
                         let fq = internal.render();
                         let explicit_type_args = self.explicit_call_type_args(call);
                         let arg_kinds = self.provider_member_lambda_arg_kinds(
@@ -31979,7 +32242,7 @@ impl<'a> Checker<'a> {
                     // Named classpath constructors use metadata names/defaults; lowering selects
                     // either the plain constructor or the default-argument synthetic.
                     if arg_names.is_some() || self.file.call_has_trailing_lambda.contains(&call.0) {
-                        if let Some(internal) = self.classpath_class_internal_name(&fname) {
+                        if let Some(internal) = self.classifier_internal_name(&fname) {
                             match self.record_named_library_constructor_name(
                                 call,
                                 internal,
@@ -34568,6 +34831,7 @@ val result = object { fun value(): String = captured }
             kind: crate::libraries::TypeKind::Class,
             supertypes: crate::types::TypeNameList::new(),
             constructors: Vec::new(),
+            fields: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
             companion_consts: HashMap::new(),
@@ -34579,6 +34843,7 @@ val result = object { fun value(): String = captured }
             type_params: Vec::new(),
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: Vec::new(),
+            enum_entries_accessor: None,
             value_ctor_has_default: false,
             ctor_named_params: Vec::new(),
             value_class_properties: Vec::new(),
@@ -34693,6 +34958,78 @@ val result = object { fun value(): String = captured }
             .iter()
             .map(|diagnostic| diagnostic.msg.clone())
             .collect()
+    }
+
+    #[test]
+    fn nested_class_self_label_uses_the_simple_declaration_name() {
+        let (errors, _) = check(
+            "class Outer {\n\
+                 inner class NestedReceiver {\n\
+                     init {\n\
+                         \"receiver\".apply { this@NestedReceiver }\n\
+                     }\n\
+                 }\n\
+             }",
+        );
+
+        assert!(
+            errors.is_empty(),
+            "nested class self-label should resolve: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nested_class_outer_label_uses_the_simple_declaration_name() {
+        let (errors, _) = check(
+            "class Outer {\n\
+                 inner class Middle {\n\
+                     inner class Leaf {\n\
+                         init {\n\
+                             \"receiver\".apply { this@Middle }\n\
+                         }\n\
+                     }\n\
+                 }\n\
+             }",
+        );
+
+        assert!(
+            errors.is_empty(),
+            "nested class outer label should resolve: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nested_class_outer_label_participates_in_return_preinference() {
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(
+            "class Outer(val value: String) {\n\
+                 inner class Middle {\n\
+                     fun outerValue() = this@Outer.value\n\
+                 }\n\
+             }",
+            &mut diagnostics,
+        );
+        let file = parse(
+            "class Outer(val value: String) {\n\
+                 inner class Middle {\n\
+                     fun outerValue() = this@Outer.value\n\
+                 }\n\
+             }",
+            &tokens,
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+
+        preinfer_returns_pass(&files[0], 0, &mut symbols);
+
+        let method = symbols
+            .classes
+            .get("Outer.Middle")
+            .and_then(|class| class.methods.get("outerValue"))
+            .and_then(|overloads| overloads.first())
+            .expect("nested method signature");
+        assert_eq!(method.ret, Ty::String);
     }
 
     fn ok(src: &str) {
@@ -34986,7 +35323,7 @@ class Child : Base() {
         let mut targets = info
             .resolved_super_calls
             .values()
-            .map(|target| (target.owner.render(), target.params.clone()))
+            .filter_map(|target| Some((target.owner()?.render(), target.params().to_vec())))
             .collect::<Vec<_>>();
         targets.sort_by_key(|(_, params)| format!("{params:?}"));
         assert_eq!(
@@ -35312,8 +35649,8 @@ class Child : Middle() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Base");
-        assert_eq!(target.params, vec![Ty::Int]);
+        assert_eq!(target.owner().map(|o| o.render()).as_deref(), Some("Base"));
+        assert_eq!(target.params(), vec![Ty::Int]);
     }
 
     #[test]
@@ -35351,8 +35688,8 @@ class Child : Base() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Grand");
-        assert_eq!(target.params, vec![Ty::Int]);
+        assert_eq!(target.owner().map(|o| o.render()).as_deref(), Some("Grand"));
+        assert_eq!(target.params(), vec![Ty::Int]);
     }
 
     #[test]
@@ -35626,6 +35963,7 @@ fun box(): String {
                     | "BoxedIterator"
                     | "TestMutex"
                     | "test/Factory"
+                    | "test/JavaState"
             ) {
                 return crate::libraries::ResolvedSymbols {
                     classifier: self.resolve_type(fqn).map(std::rc::Rc::new),
@@ -35866,6 +36204,7 @@ fun box(): String {
                     | "BoxedIterator"
                     | "TestMutex"
                     | "test/Factory"
+                    | "test/JavaState"
             )
             .then(|| {
                 let companion = if internal == "test/Factory" {
@@ -35896,9 +36235,14 @@ fun box(): String {
                 };
                 crate::libraries::LibraryType {
                     is_public: true,
-                    kind: crate::libraries::TypeKind::Class,
+                    kind: if internal == "test/JavaState" {
+                        crate::libraries::TypeKind::Enum
+                    } else {
+                        crate::libraries::TypeKind::Class
+                    },
                     supertypes: crate::types::TypeNameList::new(),
                     constructors: vec![],
+                    fields: vec![],
                     members: vec![],
                     companion,
                     companion_consts: HashMap::new(),
@@ -35909,7 +36253,12 @@ fun box(): String {
                     alias_target: None,
                     type_params: vec![],
                     sealed_subclasses: crate::types::TypeNameList::new(),
-                    enum_entries: vec![],
+                    enum_entries: if internal == "test/JavaState" {
+                        vec!["READY".to_string()]
+                    } else {
+                        Vec::new()
+                    },
+                    enum_entries_accessor: None,
                     value_ctor_has_default: false,
                     ctor_named_params: vec![],
                     value_class_properties: vec![],
@@ -36443,6 +36792,40 @@ fun box(): String {
             ),
             "checker must record the selected classpath getter for safe-call lowering"
         );
+    }
+
+    #[test]
+    fn source_enum_entries_property_resolves_for_bare_and_nested_classifiers() {
+        ok("enum class Direct { VALUE }\n\
+            class Owner { enum class Nested { VALUE } }\n\
+            fun inspect() { Direct.entries; Owner.Nested.entries }");
+    }
+
+    #[test]
+    fn enum_without_a_direct_entries_accessor_records_the_unavailable_realization() {
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "import test.JavaState\nfun inspect() { JavaState.entries }",
+            &mut diagnostics,
+        );
+        let entries = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                matches!(expression, Expr::Member { name, .. } if name == "entries")
+                    .then_some(ExprId(index as u32))
+            })
+            .expect("source should contain the entries property");
+        let files = vec![file];
+        let mut symbols =
+            collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
+        let info = check_file(&files[0], &mut symbols, &mut diagnostics);
+        assert_no_diags(&diagnostics);
+        assert!(matches!(
+            info.expr_lowers.get(&entries),
+            Some(ExprLowering::EnumEntriesRead { accessor: None, .. })
+        ));
     }
 
     #[test]

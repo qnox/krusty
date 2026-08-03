@@ -642,6 +642,7 @@ mod tests {
                     },
                     supertypes,
                     constructors: Vec::new(),
+                    fields: Vec::new(),
                     members: Vec::new(),
                     companion: match internal {
                         "fixture/Stable" => vec![LibraryMember::new(
@@ -667,6 +668,7 @@ mod tests {
                     type_params: Vec::new(),
                     sealed_subclasses: TypeNameList::new(),
                     enum_entries: Vec::new(),
+                    enum_entries_accessor: None,
                     value_ctor_has_default: false,
                     ctor_named_params: Vec::new(),
                     value_class_properties: Vec::new(),

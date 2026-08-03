@@ -54,6 +54,11 @@ boundary.
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
   The request also carries the bounded set of enabled language-feature names derived from project
   compilation arguments and explicit LSP flags; per-source directives are applied inside the worker.
+  The worker is not a second server-CLI consumer: `exec` carries only its private mode marker and
+  supervisor PID. Before compiler initialization, the supervisor sends one bounded launch frame with
+  the already-composed project/JDK classpath; restarts use the same frame. This keeps arbitrarily many
+  individual classpath entries out of platform argument/environment size limits and gives initial
+  startup and project reconfiguration one classpath-composition rule.
 - Diagnostics use either pull responses with refresh requests or
   `textDocument/publishDiagnostics`, according to the client's capabilities. Compiler diagnostics
   are deduplicated by `(span, severity, kind, message)` before entering the LSP indexes.
@@ -70,6 +75,22 @@ boundary.
   cannot evict the interactive hot path. One work-done token spans the queued operation; every
   chunk updates an admitted-files `(handed out, total)` pair, and priority promotion changes queue
   ownership without double-counting the file.
+- `workspace/symbol` composes project declarations with a final dependency-class layer built from
+  the model's compile classpath after declared project outputs are removed. All layers share one
+  parsed query grammar, input ceiling, wildcard transition budget, keyboard-layout fallback, rank
+  ladder, response count, and response byte budget; a storage layer cannot reinterpret or expand
+  the request. The dependency index retains only interned class/package names. It ranks at most the
+  response slots left by project declarations, then asks the compiler worker to materialize only
+  those survivors. Materialized text is content-addressed on disk, reduced to path and precomputed
+  UTF-16 declaration endpoints when its engine event reaches the session, and then dropped; the
+  session does not retain a second source copy.
+  In-flight materializations share that same entry ceiling, bounding the engine queue while leaving
+  unadmitted candidates eligible for a later query.
+  Indexes, in-flight requests, and completed locations carry the project-model generation, so an
+  old classpath cannot repopulate the session after reset. A completed failed materialization
+  releases its in-flight marker and may be retried; failure never becomes a permanent negative
+  cache. Raw per-jar class listings are a best-effort startup cache keyed by path, size, and mtime;
+  malformed or unavailable cache state always falls back to reading the classpath entry.
 - Workspace diagnostics retain only bounded file URIs, text hashes, packed UTF-16 ranges/severity,
   and deduplicated display messages. Replaced entry slices are compacted and deleted file slots are
   reused; no source text, AST, semantic class identity, classpath entry, or compiler snapshot
@@ -169,6 +190,26 @@ boundary.
 
 - **No non-backend module depends on a backend.** `resolve.rs`/`types.rs` must not reference
   `jvm::`. (Helpers that traffic in JVM `ClassInfo`/descriptors belong in the backend.)
+- **Semantic behavior is independent of symbol origin and source spelling.** Once declarations have
+  entered the symbol model, resolution, checking, and lowering must not select a different algorithm
+  because a declaration came from the current file, another module, Java source, a classpath class,
+  Kotlin metadata, or a generated source. Loaders and decoders normalize missing facts at their
+  boundary; downstream code consumes the common facts. Likewise, a package, module, file, class, or
+  host path must not act as a routing key. A language or JVM rule that genuinely names a declaration
+  is represented once in the backend's documented semantic mapping, rather than by scattered
+  conditionals at use sites.
+- **Physical fields participate in the common declaration model.** A symbol provider records every
+  field declared by a classifier, including static and inaccessible declarations that can hide an
+  inherited field. Resolution walks those records together with properties and supertypes exactly
+  once; providers do not repeat inheritance lookup. When a readable field is selected, its complete
+  owner/name/type and opaque backend token travel with the semantic property read, so lowering never
+  reconstructs a target from a file/module/classpath branch or a receiver's spelling.
+- **Unsupported input has one explicit semantic boundary.** A not-yet-implemented language shape is
+  rejected with a stable reason before emission; it is not silently redirected to a weaker lookup,
+  dropped only for one declaration origin, or allowed to reach unverifiable bytecode. Returning an
+  `Option` or `Result` is not itself a violation: the caller must preserve the declared rejection
+  contract instead of inventing a fallback. Tests assert both successful behavior and intentional
+  rejection boundaries against general input shapes, never project-specific names or paths.
 - **No hardcoded type/alias tables.** Stdlib types resolve from the classpath; the Kotlin↔platform
   mapping is the ported `JavaToKotlinClassMap` (`jvm/jvm_class_map.rs`) — a *JVM-backend* table. WASM
   and JS backends carry their own mapping.

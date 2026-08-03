@@ -1017,6 +1017,39 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Return the first token after physical line breaks at `index`, stopping at an explicit `;`.
+    ///
+    /// The lexer deliberately represents both forms as `Newline`, so grammar lookahead must use this
+    /// helper instead of open-coding a token-kind loop whenever a construct permits `NL*` but not a
+    /// semicolon. Keeping that distinction here prevents declaration callers from gradually acquiring
+    /// different continuation rules.
+    fn after_plain_newlines(&self, mut index: usize) -> usize {
+        while self
+            .t
+            .get(index)
+            .is_some_and(|token| token.kind == TokenKind::Newline && token.text(self.src) != ";")
+        {
+            index += 1;
+        }
+        index
+    }
+
+    /// Advance over physical line breaks while preserving an explicit semicolon as a declaration
+    /// boundary. Mutating callers share the same lexer distinction as lookahead callers through
+    /// `after_plain_newlines`; there must not be a second newline-scanning implementation here.
+    fn skip_plain_newlines(&mut self) {
+        self.i = self.after_plain_newlines(self.i);
+    }
+
+    /// Consume physical line breaks only when `expected` follows them. A failed lookahead leaves the
+    /// parser at the original newline so the enclosing declaration can terminate normally.
+    fn skip_plain_newlines_before(&mut self, expected: TokenKind) {
+        let next = self.after_plain_newlines(self.i);
+        if self.t.get(next).is_some_and(|token| token.kind == expected) {
+            self.i = next;
+        }
+    }
+
     /// Kotlin treats a newline before `||`, `&&`, or `?:` as a line CONTINUATION, not a statement
     /// terminator (`cond\n  && other`, `x\n  ?: default`): the operator cannot begin a statement, so
     /// the expression keeps going. Peek past the newline(s); if such an operator follows, consume them
@@ -2065,11 +2098,7 @@ impl<'a> Parser<'a> {
     fn primary_constructor_header_follows(&self) -> bool {
         let mut i = self.i;
         loop {
-            while self.t.get(i).is_some_and(|token| {
-                token.kind == TokenKind::Newline && token.text(self.src) != ";"
-            }) {
-                i += 1;
-            }
+            i = self.after_plain_newlines(i);
             let Some(token) = self.t.get(i) else {
                 return false;
             };
@@ -2120,10 +2149,21 @@ impl<'a> Parser<'a> {
         Some(())
     }
 
-    /// Parse a setter's optional `(param)` (type annotation discarded). Returns the param name.
+    /// Parse a setter's optional `(param)` and return its parameter name.
+    ///
+    /// Kotlin gives setter parameters a deliberately narrower grammar than ordinary function
+    /// parameters: annotations are allowed, while the property supplies the value type. Keep this
+    /// parser narrow instead of routing through `parse_param_list`, which would require a type and
+    /// admit unrelated modifiers/defaults. Annotation values are parsed through the common annotation
+    /// grammar and then discarded because `PropAccessor` has no parameter-metadata contract.
     fn parse_setter_param(&mut self) -> Option<String> {
         if !self.eat(TokenKind::LParen) {
             return None;
+        }
+        self.skip_plain_newlines();
+        while self.at(TokenKind::At) {
+            let _ = self.skip_annotation();
+            self.skip_plain_newlines();
         }
         let name = if self.at(TokenKind::Ident) {
             let n = self.text().to_string();
@@ -2132,8 +2172,19 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        self.skip_plain_newlines();
+        // Keep accepting the historical optional type annotation for recovery/compatibility, but use
+        // the ordinary type parser so a complex type cannot desynchronize the enclosing class body.
         if self.eat(TokenKind::Colon) {
+            self.skip_plain_newlines();
             let _ = self.parse_type();
+            self.skip_plain_newlines();
+        }
+        // Kotlin permits a trailing comma in a multiline parameter list. There is exactly one setter
+        // parameter, so consume only the comma; a second parameter remains visible to `expect` as an
+        // error instead of being silently accepted.
+        if self.eat(TokenKind::Comma) {
+            self.skip_plain_newlines();
         }
         self.expect(TokenKind::RParen, "')'");
         name
@@ -2300,12 +2351,10 @@ impl<'a> Parser<'a> {
         // Optional supertype list (`enum class E : I1, I2`): an enum may implement interfaces; the
         // abstract members are satisfied by the enum's own methods or per-entry overrides. (An enum can't
         // extend a class, so only the interface supertypes are kept.)
-        let enum_supertypes = if self.at(TokenKind::Colon) {
-            let (supertypes, _base, _base_targs, _args, _del, _del_e) = self.parse_supertypes();
-            supertypes
-        } else {
-            Vec::new()
-        };
+        // Always enter the shared optional parser. Besides avoiding a declaration-specific colon
+        // branch, this lets enum headers honor the same `NL* ':'` grammar as class, interface, object,
+        // companion-object, and anonymous-object headers.
+        let (enum_supertypes, _base, _base_targs, _args, _del, _del_e) = self.parse_supertypes();
         let mut entries: Vec<AstEnumEntry> = Vec::new();
         let mut methods = Vec::new();
         // Enum body member properties (`enum class C { A; val x = … }`) and their initializer order.
@@ -2778,11 +2827,7 @@ impl<'a> Parser<'a> {
         let mut i = self.i;
         let mut saw_context = false;
         loop {
-            while self.t.get(i).is_some_and(|token| {
-                token.kind == TokenKind::Newline && token.text(self.src) != ";"
-            }) {
-                i += 1;
-            }
+            i = self.after_plain_newlines(i);
             let token = self.t.get(i)?;
             if token.kind == TokenKind::At {
                 i = self.annotation_end_at(i)?;
@@ -3441,6 +3486,10 @@ impl<'a> Parser<'a> {
         let mut base_args = Vec::new();
         let mut delegations = Vec::new();
         let mut delegation_exprs = Vec::new();
+        // Kotlin declaration headers permit physical line breaks before the supertype-list colon.
+        // The shared lookahead deliberately stops at `;`, which terminates the declaration even though
+        // the lexer represents it with the same token kind as a line break.
+        self.skip_plain_newlines_before(TokenKind::Colon);
         if self.eat(TokenKind::Colon) {
             loop {
                 self.skip_newlines();
@@ -8942,6 +8991,88 @@ mod tests {
             "constructor after semicolon was attached to First"
         );
         assert!(find_class("Second").annotations.is_empty());
+    }
+
+    #[test]
+    fn every_declared_type_header_shares_newline_before_supertype_colon() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+interface HeaderBase
+class HeaderClass
+    : HeaderBase
+interface HeaderInterface
+    : HeaderBase
+object HeaderObject
+    : HeaderBase
+enum class HeaderEnum
+    : HeaderBase { Entry }
+class HeaderHost {
+    companion object
+        : HeaderBase
+}
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("test.kt", source)
+        );
+        let find_class = |name: &str| {
+            file.decls
+                .iter()
+                .find_map(|&declaration| match file.decl(declaration) {
+                    Decl::Class(class) if class.name == name => Some(class),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} declaration"))
+        };
+
+        // All declared-type entry points delegate to `parse_supertypes`; this assertion set guards
+        // against a caller reintroducing its own same-line-only colon check (the enum parser did so
+        // previously) and bypassing the common continuation rule.
+        for name in [
+            "HeaderClass",
+            "HeaderInterface",
+            "HeaderObject",
+            "HeaderEnum",
+        ] {
+            assert_eq!(
+                find_class(name)
+                    .supertypes
+                    .iter()
+                    .map(|supertype| supertype.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["HeaderBase"],
+                "{name} did not retain the continued supertype header"
+            );
+        }
+        assert_eq!(
+            find_class("HeaderHost").companion_supertypes,
+            ["HeaderBase"]
+        );
+    }
+
+    #[test]
+    fn semicolon_does_not_continue_into_a_supertype_list() {
+        let mut diagnostics = DiagSink::new();
+        let source = "open class Base\nclass Derived; : Base()\n";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let derived = file
+            .decls
+            .iter()
+            .find_map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) if class.name == "Derived" => Some(class),
+                _ => None,
+            })
+            .expect("Derived class");
+
+        assert!(derived.supertypes.is_empty());
+        assert!(diagnostics.diags.iter().any(|diagnostic| {
+            diagnostic.msg == "expected a top-level declaration"
+                && &source[diagnostic.span.lo as usize..diagnostic.span.hi as usize] == ":"
+        }));
     }
 
     #[test]

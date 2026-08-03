@@ -473,7 +473,7 @@ pub trait AnalysisBackend {
 
     /// Ask for dependency classes to be written out. Answers nothing: the query that wanted them
     /// has already been answered without them, and the next one reads what this produced.
-    fn locate_dependencies(&mut self, _candidates: Vec<DependencyCandidate>) {}
+    fn locate_dependencies(&mut self, _generation: u64, _candidates: Vec<DependencyCandidate>) {}
     /// Render the dev-mode dump for `job.uri`.
     ///
     /// Mirrors [`AnalysisBackend::materialize`]: `Some` answers the request now, `None` means the
@@ -998,9 +998,20 @@ const DIAGNOSTIC_REFRESH_REQUEST_ID: &str = "krusty/diagnosticRefresh";
 /// these costs a render the first time it is returned.
 const MAX_DEPENDENCY_SYMBOLS_PER_RESPONSE: usize = 32;
 
-/// Ceiling on rendered dependency sources held for reuse. Each retains the text it was rendered
-/// from, so this is a memory bound rather than a hit-rate one.
+/// Ceiling on rendered dependency locations held for reuse. Rendered text is reduced to UTF-16
+/// endpoints as the engine event arrives and is not part of this long-lived count.
 const MAX_LOCATED_DEPENDENCIES: usize = 512;
+
+/// Session-owned form of a materialized dependency symbol.
+///
+/// The worker result carries source text because its byte span cannot be converted to protocol
+/// coordinates without it. Conversion happens exactly once at the session boundary; retaining the
+/// full text for hundreds of classes made an entry-count ceiling an ineffective memory bound.
+struct RetainedDependencyLocation {
+    path: PathBuf,
+    start: Position,
+    end: Position,
+}
 
 pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
@@ -1016,10 +1027,13 @@ pub struct LspService<B> {
     project_symbols_incomplete_reported: bool,
     /// Class names from the project's dependencies. Names only; a location costs a render.
     dependency_symbols: DependencySymbolIndex,
+    /// Project-model generation shared by the dependency index and every asynchronous render.
+    /// Without it, a queued result from the old classpath can repopulate the cache after reset.
+    dependency_symbols_generation: u64,
     /// Dependency classes already written out, by internal name. A query answers from this and
     /// asks for what is missing, so it never waits on a render -- the picker re-queries on every
     /// keystroke, and the next one has them.
-    located_dependencies: HashMap<String, LocatedDependency>,
+    located_dependencies: HashMap<String, RetainedDependencyLocation>,
     /// Candidates already asked for, so a keystroke does not queue the same render twice.
     requested_dependencies: HashSet<String>,
     workspace_diagnostics: WorkspaceDiagnosticStore,
@@ -1078,6 +1092,7 @@ where
             project_symbols_generation: 0,
             project_symbols_incomplete_reported: false,
             dependency_symbols: DependencySymbolIndex::default(),
+            dependency_symbols_generation: 0,
             located_dependencies: HashMap::new(),
             requested_dependencies: HashSet::new(),
             workspace_diagnostics: WorkspaceDiagnosticStore::default(),
@@ -1448,7 +1463,10 @@ where
         )]
     }
 
-    pub(crate) fn set_dependency_index(&mut self, index: DependencySymbolIndex) {
+    pub(crate) fn set_dependency_index(&mut self, generation: u64, index: DependencySymbolIndex) {
+        if generation != self.dependency_symbols_generation {
+            return;
+        }
         // A new index describes a new classpath. What was rendered from the old one may be a
         // different version of the same class, and serving it would open the wrong source; what
         // failed to render under the old one deserves another attempt.
@@ -1457,20 +1475,60 @@ where
         self.requested_dependencies.clear();
     }
 
-    pub(crate) fn record_located_dependencies(&mut self, located: Vec<LocatedDependency>) {
-        for found in located {
-            // Each entry retains the rendered source, so a session that browses widely would
-            // otherwise accumulate them without limit. Oldest-first is wrong for a cache but right
-            // here: what a reader is looking at now is what they just asked for.
-            if self.located_dependencies.len() >= MAX_LOCATED_DEPENDENCIES {
-                self.located_dependencies.clear();
-                self.requested_dependencies.clear();
-            }
-            self.requested_dependencies
-                .insert(found.candidate.internal.clone());
-            self.located_dependencies
-                .insert(found.candidate.internal.clone(), found);
+    #[cfg(test)]
+    fn set_dependency_index_for_test(&mut self, index: DependencySymbolIndex) {
+        self.set_dependency_index(self.dependency_symbols_generation, index);
+    }
+
+    pub(crate) fn record_located_dependencies(
+        &mut self,
+        generation: u64,
+        attempted: Vec<String>,
+        located: Vec<LocatedDependency>,
+    ) {
+        if generation != self.dependency_symbols_generation {
+            return;
         }
+        // `requested_dependencies` means in flight, not permanently attempted. Release every
+        // completed name, including failures, so a transient worker or cache error can be retried
+        // by the next query. The previous success-only event never released an all-failed batch.
+        for internal in attempted {
+            self.requested_dependencies.remove(&internal);
+        }
+        for found in located {
+            let start = byte_offset_to_position(&found.text, found.span.lo as usize);
+            let end = byte_offset_to_position(&found.text, found.span.hi as usize);
+            // Browsing widely still needs a count bound for paths and names. In-flight markers are
+            // a separate correctness state and must survive: clearing them with the location cache
+            // allowed duplicate engine work to be queued for requests already running.
+            if self.located_dependencies.len() >= MAX_LOCATED_DEPENDENCIES
+                && !self
+                    .located_dependencies
+                    .contains_key(&found.candidate.internal)
+            {
+                if let Some(evicted) = self.located_dependencies.keys().next().cloned() {
+                    self.located_dependencies.remove(&evicted);
+                }
+            }
+            let internal = found.candidate.internal.clone();
+            self.located_dependencies.insert(
+                internal,
+                RetainedDependencyLocation {
+                    path: found.path,
+                    start,
+                    end,
+                },
+            );
+        }
+    }
+
+    #[cfg(test)]
+    fn record_located_dependencies_for_test(&mut self, located: Vec<LocatedDependency>) {
+        let attempted = located
+            .iter()
+            .map(|found| found.candidate.internal.clone())
+            .collect();
+        self.record_located_dependencies(self.dependency_symbols_generation, attempted, located);
     }
 
     /// Symbols for dependency classes matching `query`, and the candidates still to be written out.
@@ -1482,20 +1540,22 @@ where
     fn dependency_symbols(
         &self,
         query: &str,
+        limit: usize,
         wire_bytes: &mut usize,
+        remaining_glob_steps: &mut usize,
     ) -> (Vec<Value>, Vec<DependencyCandidate>) {
         let mut symbols = Vec::new();
         let mut missing = Vec::new();
-        if query.is_empty() {
+        if query.is_empty() || limit == 0 {
             return (symbols, missing);
         }
         // The client re-filters results against the name it is given, so a qualified query has to
         // be answered with the qualified name -- exactly as the project layer does, or these hits
         // are computed and then discarded before anyone sees them.
         let parsed = crate::analysis::WorkspaceQuery::parse(query);
-        for candidate in self
-            .dependency_symbols
-            .candidates(query, MAX_DEPENDENCY_SYMBOLS_PER_RESPONSE)
+        for candidate in
+            self.dependency_symbols
+                .candidates_with_glob_steps(query, limit, remaining_glob_steps)
         {
             let Some(found) = self.located_dependencies.get(&candidate.internal) else {
                 if !self.requested_dependencies.contains(&candidate.internal) {
@@ -1506,15 +1566,13 @@ where
             let Some(uri) = path_to_file_uri(&found.path) else {
                 continue;
             };
-            let start = byte_offset_to_position(&found.text, found.span.lo as usize);
-            let end = byte_offset_to_position(&found.text, found.span.hi as usize);
             let symbol = json!({
                 "name": parsed.response_name(&candidate.package, &candidate.name),
                 "kind": 5,
                 "containerName": candidate.package,
                 "location": {
                     "uri": uri,
-                    "range": {"start": start, "end": end},
+                    "range": {"start": found.start, "end": found.end},
                 },
             });
             let symbol_bytes = serialized_json_wire_bytes(&symbol).unwrap_or(usize::MAX);
@@ -1532,6 +1590,11 @@ where
         self.project_symbols = ProjectSymbolIndex::default();
         self.project_symbols_generation = generation;
         self.project_symbols_incomplete_reported = false;
+        // Dependency names and materialized sources describe the same project model as the source
+        // index. Clear all three pieces together; retaining names while clearing only locations
+        // let stale candidates queue renders between reset and the replacement index arriving.
+        self.dependency_symbols = DependencySymbolIndex::default();
+        self.dependency_symbols_generation = generation;
         self.located_dependencies.clear();
         self.requested_dependencies.clear();
         self.workspace_diagnostics.reset_to(generation);
@@ -2199,23 +2262,43 @@ where
         let Ok(params) = serde_json::from_value::<WorkspaceSymbolParams>(params) else {
             return invalid_params(Some(id));
         };
-        let mut symbols = self.workspace_symbols.encode_over(
+        let mut remaining_glob_steps = crate::analysis::MAX_WORKSPACE_SYMBOL_GLOB_STEPS;
+        let mut symbols = self.workspace_symbols.encode_over_with_glob_steps(
             &params.query,
             &self.project_symbols.layers(),
             &self.documents.keys().map(String::as_str).collect(),
+            &mut remaining_glob_steps,
         );
         let mut wire_bytes = serialized_json_wire_bytes(&Value::Array(symbols.clone()))
             .unwrap_or(MAX_WORKSPACE_SYMBOL_WIRE_BYTES);
-        let (dependencies, missing) = self.dependency_symbols(&params.query, &mut wire_bytes);
+        // The response ceiling belongs to the composed response. Asking for 32 dependency renders
+        // after the project layer already filled 512 slots did work whose results were immediately
+        // truncated, contradicting the on-demand contract. Only the slots that can survive layer
+        // composition are ranked and materialized.
+        let dependency_limit = MAX_DEPENDENCY_SYMBOLS_PER_RESPONSE.min(
+            crate::analysis::MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS.saturating_sub(symbols.len()),
+        );
+        let (dependencies, mut missing) = self.dependency_symbols(
+            &params.query,
+            dependency_limit,
+            &mut wire_bytes,
+            &mut remaining_glob_steps,
+        );
         symbols.extend(dependencies);
         // The response ceiling covers the whole response, not each layer's share of it.
         symbols.truncate(crate::analysis::MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS);
+        // In-flight candidates retain three owned names in both session state and the engine queue.
+        // Bound them with the same ceiling as completed locations. Candidates not admitted here are
+        // deliberately left unmarked, so a later query can try them after capacity is released.
+        missing
+            .truncate(MAX_LOCATED_DEPENDENCIES.saturating_sub(self.requested_dependencies.len()));
         for candidate in &missing {
             self.requested_dependencies
                 .insert(candidate.internal.clone());
         }
         if !missing.is_empty() {
-            self.backend.locate_dependencies(missing);
+            self.backend
+                .locate_dependencies(self.dependency_symbols_generation, missing);
         }
         Dispatch::messages(vec![rpc_result(id, Value::Array(symbols))])
     }
@@ -4241,11 +4324,15 @@ where
                 write_framed(writer, &encoded)?;
             }
         }
-        EngineEvent::DependencyIndex(index) => {
-            service.set_dependency_index(index);
+        EngineEvent::DependencyIndex { generation, index } => {
+            service.set_dependency_index(generation, index);
         }
-        EngineEvent::DependenciesLocated(located) => {
-            service.record_located_dependencies(located);
+        EngineEvent::DependenciesLocated {
+            generation,
+            attempted,
+            located,
+        } => {
+            service.record_located_dependencies(generation, attempted, located);
         }
         EngineEvent::SymbolIndexProgress(batch) => {
             for message in service.apply_symbol_index_batch(batch) {
@@ -4641,6 +4728,54 @@ mod tests {
         }
         fn set_ready(&mut self, ready: bool) {
             self.ready = ready;
+        }
+    }
+
+    type DependencyRequests = std::rc::Rc<std::cell::RefCell<Vec<(u64, Vec<String>)>>>;
+
+    struct DependencyRecordingBackend {
+        requested: DependencyRequests,
+    }
+
+    impl AnalysisBackend for DependencyRecordingBackend {
+        fn analysis_ready(&self) -> bool {
+            true
+        }
+
+        fn submit(&mut self, _job: AnalysisJob) -> Option<AnalysisBatch> {
+            None
+        }
+
+        fn locate_dependencies(&mut self, generation: u64, candidates: Vec<DependencyCandidate>) {
+            self.requested.borrow_mut().push((
+                generation,
+                candidates
+                    .into_iter()
+                    .map(|candidate| candidate.internal)
+                    .collect(),
+            ));
+        }
+
+        fn set_workspace_root(&mut self, _root: Option<PathBuf>) -> Option<ProjectFeedback> {
+            None
+        }
+
+        fn watched_globs(&mut self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn note_project_change(&mut self) {}
+
+        fn note_watched_file_change(&mut self, _uri: &str) -> bool {
+            false
+        }
+
+        fn project_refresh_due_in(&self) -> Option<Duration> {
+            None
+        }
+
+        fn refresh_project(&mut self) -> Option<ProjectFeedback> {
+            None
         }
     }
 
@@ -5662,7 +5797,7 @@ mod tests {
             submitted,
         });
         service.force_initialized_for_test();
-        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+        service.set_dependency_index_for_test(crate::DependencySymbolIndex::from_internal_names([
             "kotlin/collections/AbstractList".to_string(),
         ]));
 
@@ -5676,7 +5811,7 @@ mod tests {
         }));
         assert_eq!(first.messages[0]["result"], json!([]));
 
-        service.record_located_dependencies(vec![crate::LocatedDependency {
+        service.record_located_dependencies_for_test(vec![crate::LocatedDependency {
             candidate: crate::DependencyCandidate {
                 internal: "kotlin/collections/AbstractList".to_string(),
                 package: "kotlin.collections".to_string(),
@@ -5704,6 +5839,82 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_dependency_location_is_released_for_retry() {
+        let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(DependencyRecordingBackend {
+            requested: requested.clone(),
+        });
+        service.force_initialized_for_test();
+        service.set_dependency_index_for_test(crate::DependencySymbolIndex::from_internal_names([
+            "vendor/Retryable".to_string(),
+        ]));
+
+        let query = || {
+            json!({
+                "jsonrpc": "2.0",
+                "id": "retryable",
+                "method": "workspace/symbol",
+                "params": {"query": "Retryable"}
+            })
+        };
+        assert_eq!(service.handle(query()).messages[0]["result"], json!([]));
+        assert_eq!(requested.borrow().len(), 1);
+
+        let attempted = requested.borrow()[0].1.clone();
+        service.record_located_dependencies(0, attempted, Vec::new());
+
+        assert_eq!(service.handle(query()).messages[0]["result"], json!([]));
+        assert_eq!(
+            requested.borrow().len(),
+            2,
+            "a completed failure is no longer in flight and must be eligible for the next attempt"
+        );
+    }
+
+    #[test]
+    fn stale_dependency_results_cannot_cross_a_project_generation() {
+        let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(DependencyRecordingBackend {
+            requested: requested.clone(),
+        });
+        service.force_initialized_for_test();
+        service.reset_workspace_index(1);
+        service.set_dependency_index(
+            1,
+            crate::DependencySymbolIndex::from_internal_names(["vendor/Current".to_string()]),
+        );
+
+        // This completed after the reset but belongs to generation zero. Accepting it would make a
+        // file rendered from the previous classpath visible under the replacement model.
+        service.record_located_dependencies(
+            0,
+            vec!["vendor/Current".to_string()],
+            vec![crate::LocatedDependency {
+                candidate: crate::DependencyCandidate {
+                    internal: "vendor/Current".to_string(),
+                    package: "vendor".to_string(),
+                    name: "Current".to_string(),
+                },
+                path: std::path::PathBuf::from("/cache/old/vendor/Current.kt"),
+                span: krusty::diag::Span::new(22, 29),
+                text: "package vendor\n\nclass Current\n".to_string(),
+            }],
+        );
+
+        let answered = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "current",
+            "method": "workspace/symbol",
+            "params": {"query": "Current"}
+        }));
+        assert_eq!(answered.messages[0]["result"], json!([]));
+        assert_eq!(
+            requested.borrow().as_slice(),
+            &[(1, vec!["vendor/Current".to_string()])]
+        );
+    }
+
+    #[test]
     fn a_new_classpath_forgets_what_the_old_one_rendered() {
         let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut service = LspService::with_backend(RecordingBackend {
@@ -5711,10 +5922,10 @@ mod tests {
             submitted,
         });
         service.force_initialized_for_test();
-        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+        service.set_dependency_index_for_test(crate::DependencySymbolIndex::from_internal_names([
             "vendor/Versioned".to_string(),
         ]));
-        service.record_located_dependencies(vec![crate::LocatedDependency {
+        service.record_located_dependencies_for_test(vec![crate::LocatedDependency {
             candidate: crate::DependencyCandidate {
                 internal: "vendor/Versioned".to_string(),
                 package: "vendor".to_string(),
@@ -5727,7 +5938,7 @@ mod tests {
 
         // A dependency version bump replaces the index. The rendered source from the old version is
         // still on disk -- the cache is content-addressed -- and would otherwise be served forever.
-        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+        service.set_dependency_index_for_test(crate::DependencySymbolIndex::from_internal_names([
             "vendor/Versioned".to_string(),
         ]));
 
@@ -5752,10 +5963,10 @@ mod tests {
             submitted,
         });
         service.force_initialized_for_test();
-        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+        service.set_dependency_index_for_test(crate::DependencySymbolIndex::from_internal_names([
             "kotlin/collections/AbstractList".to_string(),
         ]));
-        service.record_located_dependencies(vec![crate::LocatedDependency {
+        service.record_located_dependencies_for_test(vec![crate::LocatedDependency {
             candidate: crate::DependencyCandidate {
                 internal: "kotlin/collections/AbstractList".to_string(),
                 package: "kotlin.collections".to_string(),
@@ -5798,10 +6009,10 @@ mod tests {
                 "package demo\nclass Shared\n",
             )]),
         });
-        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+        service.set_dependency_index_for_test(crate::DependencySymbolIndex::from_internal_names([
             "vendor/Shared".to_string(),
         ]));
-        service.record_located_dependencies(vec![crate::LocatedDependency {
+        service.record_located_dependencies_for_test(vec![crate::LocatedDependency {
             candidate: crate::DependencyCandidate {
                 internal: "vendor/Shared".to_string(),
                 package: "vendor".to_string(),
@@ -5826,6 +6037,117 @@ mod tests {
             "a name the workspace declares is the one the reader meant"
         );
         assert_eq!(results[1]["containerName"], "vendor");
+    }
+
+    #[test]
+    fn a_full_project_response_does_not_queue_discarded_dependency_renders() {
+        let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(DependencyRecordingBackend {
+            requested: requested.clone(),
+        });
+        service.force_initialized_for_test();
+        let source = (0..crate::analysis::MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS)
+            .map(|index| format!("class Item{index}\n"))
+            .collect::<String>();
+        service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec!["file:///Items.kt".to_string()],
+            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
+                "file:///Items.kt",
+                source.as_str(),
+            )]),
+        });
+        service.set_dependency_index_for_test(crate::DependencySymbolIndex::from_internal_names([
+            "vendor/ItemDependency".to_string(),
+        ]));
+
+        let answered = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "items",
+            "method": "workspace/symbol",
+            "params": {"query": "Item"}
+        }));
+
+        assert_eq!(
+            answered.messages[0]["result"].as_array().unwrap().len(),
+            crate::analysis::MAX_WORKSPACE_SYMBOL_RESPONSE_SYMBOLS
+        );
+        assert!(
+            requested.borrow().is_empty(),
+            "a dependency with no surviving response slot must not be materialized"
+        );
+    }
+
+    #[test]
+    fn dependency_location_work_is_bounded_while_the_engine_is_backlogged() {
+        let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(DependencyRecordingBackend {
+            requested: requested.clone(),
+        });
+        service.force_initialized_for_test();
+        service.set_dependency_index_for_test(crate::DependencySymbolIndex::from_internal_names(
+            (0..MAX_LOCATED_DEPENDENCIES + 64).map(|index| format!("vendor/Type{index:04}")),
+        ));
+
+        // This backend deliberately never completes an attempt. Distinct exact queries would grow
+        // both the service set and engine queue forever without admission at the session boundary.
+        for index in 0..MAX_LOCATED_DEPENDENCIES + 64 {
+            let response = service.handle(json!({
+                "jsonrpc": "2.0",
+                "id": index,
+                "method": "workspace/symbol",
+                "params": {"query": format!("Type{index:04}")}
+            }));
+            assert_eq!(response.messages[0]["result"], json!([]));
+        }
+
+        let queued = requested
+            .borrow()
+            .iter()
+            .map(|(_, candidates)| candidates.len())
+            .sum::<usize>();
+        assert_eq!(queued, MAX_LOCATED_DEPENDENCIES);
+        assert_eq!(
+            service.requested_dependencies.len(),
+            MAX_LOCATED_DEPENDENCIES
+        );
+    }
+
+    #[test]
+    fn located_dependency_eviction_preserves_unrelated_in_flight_work() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        let located = |index: usize| crate::LocatedDependency {
+            candidate: crate::DependencyCandidate {
+                internal: format!("vendor/Type{index}"),
+                package: "vendor".to_string(),
+                name: format!("Type{index}"),
+            },
+            path: std::path::PathBuf::from(format!("/cache/vendor/Type{index}.kt")),
+            span: krusty::diag::Span::new(22, 26),
+            text: format!("package vendor\n\nclass Type{index}\n"),
+        };
+        let initial = (0..MAX_LOCATED_DEPENDENCIES)
+            .map(located)
+            .collect::<Vec<_>>();
+        service.record_located_dependencies(0, Vec::new(), initial);
+        service
+            .requested_dependencies
+            .insert("vendor/StillRunning".to_string());
+
+        service.record_located_dependencies(
+            0,
+            vec![format!("vendor/Type{MAX_LOCATED_DEPENDENCIES}")],
+            vec![located(MAX_LOCATED_DEPENDENCIES)],
+        );
+
+        assert_eq!(service.located_dependencies.len(), MAX_LOCATED_DEPENDENCIES);
+        assert!(service
+            .requested_dependencies
+            .contains("vendor/StillRunning"));
     }
 
     #[test]

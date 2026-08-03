@@ -108,6 +108,15 @@ exact `Int` parameter wins over adaptation to `Long`; non-literal `Int` values a
 Public static fields are valid class-qualified property reads, including in inferred property
 initializers.
 
+Public Java instance fields are valid value-qualified property reads. Selection uses the same
+classifier/property hierarchy for Java source stubs, compiled dependencies, and source/module
+subclasses: the nearest declaration wins, a private or static same-named field hides an inherited
+instance field, and an actual field wins over synthetic JavaBean getter discovery. Generic field
+types are substituted from the applied receiver; a raw receiver uses the descriptor-erased type.
+Resolution carries the exact declaring owner, field name, and opaque physical descriptor through the
+ordinary property-read node, including nullable safe-call lowering, rather than reclassifying the
+receiver by origin during lowering or emission.
+
 Static methods of **nested** Java classes resolve through all three kotlinc-accepted spellings —
 `Outer.Bus.notify(x)` with `Outer` imported, `Bus.notify(x)` with `import pkg.Outer.Bus`, and the
 fully-qualified `pkg.Outer.Bus.notify(x)`. A dotted qualifier chain maps to the JVM internal name
@@ -407,6 +416,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   an entry as `new Enum$ENTRY(name, ordinal, …)`. An abstract enum member requires every entry to
   override it (else the file is skipped, never miscompiled); property overrides in an entry body
   (`override val`) are not yet modeled — skipped.
+- **Every enum classifier has the synthetic `entries: EnumEntries<E>` property.** Resolution selects
+  the enum by semantic type identity, including nested and cross-file classifiers, then carries the
+  exact zero-argument static accessor advertised by that symbol provider into lowering. Source/module
+  and dependency shapes therefore share one target handoff; lowering never reconstructs a call from
+  the declaration origin. If a provider exposes the enum kind but no direct accessor realization, the
+  valid property is typed but rejected before emission with a stable boundary until an alternative
+  cached-mapping realization is implemented.
 - Explicit builtin operator-methods on numeric primitives: `a.plus(b)` ≡ `a + b` (same promotion);
   `a.compareTo(b)` uses IEEE total order (`{Integer,Long,Float,Double}.compare`, so
   `0f.compareTo(-0f) == 1`, `Double.NaN.compareTo(x) == 1`). Kotlin routes the *infix* form
@@ -429,14 +445,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   qualified-access lowering used by `.`, so source/module members and extensions, classpath members
   and extensions, primitive intrinsics, array operations, and `kotlin/Any` virtuals do not acquire
   separate safe-call dispatch tables. Resolution likewise normalizes the receiver to its non-null
-  semantic type before selecting those targets; whether a primitive arrived boxed from `Int?` or
-  unboxed from `Int` is a lowering representation, not a callable origin. A statically non-null scalar
-  receiver delegates directly to the complete qualified operation; a nullable receiver's merge boxes
-  primitive member results so both branches are references, and composes with Elvis (`a?.m() ?: d`).
+  semantic type before selecting those targets. An applicable member still wins over an extension,
+  including an inherited universal member such as `Any.toString()` when the same-named extension is
+  declared on the receiver's superclass or interface; an inapplicable same-named overload does not
+  veto the applicable member. Whether a primitive arrived boxed from `Int?` or unboxed from `Int` is
+  a lowering representation, not a callable origin. A statically non-null scalar receiver delegates
+  directly to the complete qualified operation; a nullable receiver's merge boxes primitive member
+  results so both branches are references, and composes with Elvis (`a?.m() ?: d`).
   Primitive conversions, unmodelled builtin methods (`inc`/`dec`/`mod`/`rangeTo`), erased type-parameter
   receivers, local functions, and function-object `toString`/`hashCode` remain rejected rather than
   being rebound to a different origin or emitted with the wrong representation.
-  (`tests/safe_call_e2e.rs`, `tests/safe_call_primitive_e2e.rs`.)
+  (`tests/safe_call_e2e.rs`, `tests/safe_call_primitive_e2e.rs`,
+  `tests/safe_call_any_member_e2e.rs`.)
 - **Safe call whose scope block diverges — `x?.let { return … }` / `x?.run { throw … }` / `x?.also { … }`
   / `x?.apply { … }`.** A scope function whose lambda body is a non-local `return` (or `throw`) has block
   value type `Nothing`, so the whole safe call is `Nothing?` — `null` when the receiver is null, else
@@ -1003,6 +1023,49 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a `Comparable` parameter is a VerifyError), so such a call is DECLINED (the file skips), never
   miscompiled. Tests: `tests/bounded_type_param_e2e.rs`.
 
+- **A mapped collection's member scope comes from `.kotlin_builtins`, not from the JVM class.** A mapped
+  Kotlin type (`kotlin/collections/MutableList`, …) has no `.class` of its own; krusty resolves it through
+  the JVM type it maps to (`java/util/List`). That class's method set is NOT its Kotlin API. `java.util.List`
+  declares `remove(int)` (remove BY INDEX) alongside `remove(Object)` (remove the ELEMENT), plus `stream`,
+  `toArray`, `getFirst`, `spliterator` — none of which Kotlin's `MutableList` has. Kotlin declares only
+  `MutableCollection.remove(element: E): Boolean`; the index-taking method is reachable solely under the
+  renamed name `removeAt` (kotlinc's `BuiltinMethodsWithDifferentJvmName`). Taking the Java set therefore
+  MISCOMPILED: `list.remove(10)` bound the primitive-`int` overload — removing whichever element sits at
+  index 10, or throwing `IndexOutOfBoundsException` — because an `Int` argument fits `I` exactly while
+  `remove(Object)` needs boxing.
+
+  So for a mapped COLLECTION the `.kotlin_builtins` declaration supplies BOTH the members and the
+  supertypes, replacing the JVM class's rather than joining them — the supertypes too, or `java/util/List`
+  re-enters one rung up the receiver walk and re-supplies everything. The class file still states the kind
+  and constructors. Nothing physical changes: the builtins decode to the same erased descriptors and the
+  same JVM owner, member names stay in SOURCE terms, and the Kotlin → JVM rename happens where it always
+  did, at emit (`names::mapped_builtin_virtual_name`, `removeAt` → `remove`). No filter subtracts from the
+  Java scope and no reverse table exists — the correct set is simply the declared one. The OVERRIDE
+  direction is unchanged: a class realizing `MutableList` writes `removeAt`, and `mapped_interface_members`
+  emits the `remove(int)` bridge. Tests: `tests/mapped_collection_scope_e2e.rs`, corpus
+  `specialBuiltins/irrelevantRemoveAtOverride.kt`.
+
+  A CONCRETE `java.util` class (`ArrayList`, `AbstractList`) is the other half, and needs the other
+  mechanism: it has a real class file, so it never consults the builtins and keeps its Java member scope —
+  including its own `remove(int)`. kotlinc handles exactly this in `LazyJavaClassMemberScope`
+  (`isVisibleAsFunction` / `doesOverrideRenamedBuiltins` / `createRenamedCopy`): a Java method whose
+  signature matches a renamed builtin is hidden under its JVM name and re-exposed under the Kotlin one.
+  krusty derives this read-side rename from the same `mapped_interface_members` semantic handoff used
+  for bridge emission. The selected mapping must match the JVM name AND full erased descriptor (only
+  `remove(int)` is renamed, not `remove(Object)`) and its declaring mapped interface must occur in the
+  concrete receiver's hierarchy. There is therefore no second reverse table to drift, and an unrelated
+  class declaring `remove(index: Int): Any` is untouched. Verified against kotlinc:
+  `arrayListOf(10, 20, 30).remove(10)` removes the ELEMENT on both `ArrayList` and `AbstractList`
+  receivers, while `removeAt(0)` emits `remove(I)`.
+
+  Limited to the COLLECTION mapped builtins. `kotlin/String` also leaks its JVM class's members, but two of
+  them are load-bearing: kotlinc reaches `String.substring` and `String.indexOf` through `kotlin.text`
+  EXTENSIONS (an `@InlineOnly` splice down to the Java member, and `StringsKt.indexOf$default`), a path
+  krusty does not yet cover — today they resolve only via the leak. Everything else on `String` (`replace`,
+  `split`, `trim`, `uppercase`, `startsWith`, `contains`, `get`, `length`, `plus`, `compareTo`) already
+  resolves as an extension or a builtin member. Widening this to the remaining mapped builtins is gated on
+  those two, not on anything in the member-scope model.
+
 - **Kotlin members on JVM-mapped built-ins (`CharSequence`/`Number`/`Comparable`).** kotlinc maps these
   Kotlin types to JVM classes (`java/lang/CharSequence`, …) but their Kotlin API differs from the JVM
   class's methods — `CharSequence.get(i)` dispatches to `charAt`, `Number.toInt()` to `intValue`, and the
@@ -1517,9 +1580,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return matches a source-spelled reference return instead of a divergent `Ty::Nullable`. Test:
   `tests/suspend_return_type_recovery_e2e.rs`.
 - **A generic-return builtin member's nullability is recovered from `.kotlin_builtins` metadata**
-  (`kotlin/collections/Map.get(K): V?`, `getOrDefault`, …). Such a member's return is a bare TYPE
-  PARAMETER, so `builtin_members` drops it, and the member that actually resolves the call is the erased
-  classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin nullability. The source `V?`
+  (`kotlin/collections/Map.get(K): V?`, `getOrDefault`, …). When the mapped JVM class IS on the classpath,
+  the member that resolves the call is the erased classpath method (`java/util/Map.get` → `Object`), which
+  carries no Kotlin nullability. The source `V?`
   survives only on the builtin's `Type.nullable` flag; `parse_builtins` records every function member's
   return-nullability (including the dropped ones) in `BuiltinClass.member_ret_nullable`, and the member
   walk (`Classpath::builtin_member_ret_nullable`) null-annotates the resolved return. Applied only to a
@@ -1528,6 +1591,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps its plain erased `Ty` (mirrors the suspend/`resolve_ty` policy above). This is why `m[k] ?: continue`
   correctly skips absent keys. NOT a hardcoded method list — the flag is read from `@Metadata`. Test:
   `tests/map_get_nullable_elvis_e2e.rs`.
+- **`.kotlin_builtins` types decode in full — type parameters AND type arguments.** A builtins `Type` is
+  either a `class_name` with `argument`s, or a reference to a declared `type_parameter` (by id, or by
+  `type_parameter_name`); the decoder resolves all three, and each `Class`/`Function`/`Property` carries
+  its own `type_parameter` table naming those ids. Members are therefore never dropped for having a
+  type-parameter type (`List<E>.get(index: Int): E`, `MutableList.removeAt(Int): E`), and a type argument
+  survives (`Map<K, V>.entries: Set<Map.Entry<K, V>>`). Since a builtin member has no JVM `Signature`
+  string, `builtin_members` also carries a DECODED `LibraryMember::generic_sig` (erased `params`/`ret`
+  matching the descriptor, declared ones in the signature), and `Classpath::builtin_class_gsig_name`
+  supplies the builtin's formals + argument-carrying supertypes where a class `Signature` normally would.
+  Together these let the member walk bind a type-parameter return against the receiver's type arguments
+  (`List<String>.get(1): String`) with NO JDK on the classpath — the `.kotlin_builtins` fallback
+  configuration, where the mapped JVM class (`java/util/List`) is absent. Scope: this makes the fallback
+  correct for RESOLUTION and type-checking (the LSP/analysis use). Its CODEGEN is separately broken and
+  predates this — with no `.class` to read accessors off, a builtin property read emits the JavaBean
+  getter (`getSize`/`getEntries`) instead of the `java.util` name, and a member descriptor keeps the
+  bound type argument. Do not treat a no-JDK compile's bytecode as loadable. Tests:
+  `tests/metadata_return_types.rs` (`builtins_decode_type_parameters_and_arguments`,
+  `builtin_generic_member_binds_receiver_argument_without_jdk`,
+  `builtin_generic_members_type_check_without_jdk`).
+- **`MutableList.removeAt(Int)` IS `java.util.List.remove(int)`** — the function half of kotlinc's
+  `BuiltinMethodsWithDifferentJvmName`/special-builtin renaming whose property half is
+  `size`/`keys`/`values`/`entries`. A call through a `MutableList` receiver emits the JVM name
+  (`names::mapped_builtin_virtual_name`), and a class implementing `MutableList` gets a `remove(int)`
+  bridge forwarding to its `removeAt` override (`mapped_interface_members` →
+  `bridges::mapped_interface_bridges`) — needed when the override is inherited from a NON-collection
+  supertype, which is the only place the two names can diverge. Unlike the `size` entry beside it, this
+  one is keyed on the KOTLIN name `kotlin/collections/MutableList`, not the erased `java/util/List`:
+  the renaming exists only on the mutable side, so a READ-ONLY `List` implementation that happens to
+  declare an unrelated `removeAt` must not acquire a `remove(int)` bridge. Tests: box corpus
+  `codegen/box/specialBuiltins/irrelevantRemoveAtOverride.kt`, and
+  `tests/metadata_return_types.rs::read_only_list_impl_gets_no_remove_bridge`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
   with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the call passes the Kotlin type

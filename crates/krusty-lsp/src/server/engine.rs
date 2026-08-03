@@ -163,7 +163,10 @@ pub(crate) enum EngineCommand {
     IndexSymbols(SymbolIndexJob),
     /// Write out the source for classes a query wants to return. Never speculative: the candidates
     /// are the ones a query already ranked.
-    LocateDependencies(Vec<DependencyCandidate>),
+    LocateDependencies {
+        generation: u64,
+        candidates: Vec<DependencyCandidate>,
+    },
     ProjectChange {
         refresh: bool,
         reanalyze: bool,
@@ -186,9 +189,17 @@ pub(crate) enum EngineEvent {
     /// re-queried on every keystroke, so partial coverage converges without client coordination.
     SymbolIndexProgress(SymbolIndexBatch),
     /// Class names from the project's dependencies, published once per project model.
-    DependencyIndex(DependencySymbolIndex),
-    /// Classes now written to disk, with the span of each declaration in the written text.
-    DependenciesLocated(Vec<LocatedDependency>),
+    DependencyIndex {
+        generation: u64,
+        index: DependencySymbolIndex,
+    },
+    /// One completed location attempt. Attempted names are carried even when none succeeded, so
+    /// the service can release its in-flight markers and retry a transient worker/cache failure.
+    DependenciesLocated {
+        generation: u64,
+        attempted: Vec<String>,
+        located: Vec<LocatedDependency>,
+    },
     Materialized(MaterializeResult),
     Dumped(DumpOutcome),
     Status(ServerStatus),
@@ -415,11 +426,16 @@ impl CommandState {
                     self.push_index_chunk(priority, chunk);
                 }
             }
-            EngineCommand::LocateDependencies(candidates) => {
+            EngineCommand::LocateDependencies {
+                generation,
+                candidates,
+            } => {
                 // Latency-sensitive but not interactive: a query already answered without these,
                 // and the next keystroke picks them up.
-                self.pending
-                    .push_back(EngineCommand::LocateDependencies(candidates));
+                self.pending.push_back(EngineCommand::LocateDependencies {
+                    generation,
+                    candidates,
+                });
             }
             EngineCommand::IndexSymbols(job) => {
                 let mut chunk =
@@ -596,6 +612,11 @@ impl CommandState {
     /// Work queued against the previous model must never run against its replacement.
     fn replace_index_generation(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
+        // Location candidates are classpath identities. Drop them with the model-owned index
+        // queues instead of making the new generation drain up to the session's pending-work cap
+        // one stale no-op command at a time.
+        self.pending
+            .retain(|command| !matches!(command, EngineCommand::LocateDependencies { .. }));
         self.indexed_done = 0;
         self.indexed_total = 0;
         self.neighborhood.clear();
@@ -860,9 +881,11 @@ impl AnalysisBackend for EngineBackend {
         None
     }
 
-    fn locate_dependencies(&mut self, candidates: Vec<DependencyCandidate>) {
-        self.engine
-            .submit(EngineCommand::LocateDependencies(candidates));
+    fn locate_dependencies(&mut self, generation: u64, candidates: Vec<DependencyCandidate>) {
+        self.engine.submit(EngineCommand::LocateDependencies {
+            generation,
+            candidates,
+        });
     }
 
     fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) -> Option<ProjectFeedback> {
@@ -962,7 +985,10 @@ fn run<A: Analysis>(
             Some(EngineCommand::IndexSymbols(job)) => {
                 Some(format!("Indexing symbols: {} files", job.uris.len()))
             }
-            Some(EngineCommand::LocateDependencies(candidates)) => {
+            Some(EngineCommand::LocateDependencies {
+                generation,
+                candidates,
+            }) if *generation == commands.index_generation() => {
                 Some(format!("Locating {} dependency classes", candidates.len()))
             }
             Some(EngineCommand::Index(_)) => {
@@ -1061,15 +1087,27 @@ fn run<A: Analysis>(
                     let generation = commands.index_generation();
                     if submitted_sweep_generation != Some(generation) {
                         let dependencies = analyze.dependency_index();
+                        let dependency_incomplete =
+                            dependencies.class_count() > 0 && !dependencies.is_complete();
                         if dependencies.class_count() > 0
                             && events
-                                .send(Incoming::Engine(EngineEvent::DependencyIndex(dependencies)))
+                                .send(Incoming::Engine(EngineEvent::DependencyIndex {
+                                    generation,
+                                    index: dependencies,
+                                }))
                                 .is_err()
                         {
                             break;
                         }
                         submit_workspace_sweep(&mut analyze, &commands);
                         let mut logs = Vec::new();
+                        if dependency_incomplete {
+                            logs.push(
+                                "krusty: dependency symbol index reached its class retention limit; \
+                                 dependency-wide symbol search is incomplete"
+                                    .to_string(),
+                            );
+                        }
                         if analyze.workspace_index_incomplete()
                             || commands.index_admission_truncated()
                         {
@@ -1167,14 +1205,29 @@ fn run<A: Analysis>(
                     break;
                 }
             }
-            Some(EngineCommand::LocateDependencies(candidates)) => {
-                let located = analyze.locate_dependencies(candidates);
-                if !located.is_empty()
-                    && events
-                        .send(Incoming::Engine(EngineEvent::DependenciesLocated(located)))
+            Some(EngineCommand::LocateDependencies {
+                generation,
+                candidates,
+            }) => {
+                // A project reset may leave old location work in the bounded queue. Do not render
+                // an old classpath's candidates through a new worker, and do not publish them into
+                // a service generation they never belonged to.
+                if generation == commands.index_generation() {
+                    let attempted = candidates
+                        .iter()
+                        .map(|candidate| candidate.internal.clone())
+                        .collect();
+                    let located = analyze.locate_dependencies(candidates);
+                    if events
+                        .send(Incoming::Engine(EngineEvent::DependenciesLocated {
+                            generation,
+                            attempted,
+                            located,
+                        }))
                         .is_err()
-                {
-                    break;
+                    {
+                        break;
+                    }
                 }
             }
             Some(EngineCommand::ProjectChange {
@@ -2564,6 +2617,14 @@ mod tests {
             priority: IndexPriority::Sweep,
             uris: vec!["file:///old/A.kt".into()],
         }));
+        receiver.enqueue(EngineCommand::LocateDependencies {
+            generation: 0,
+            candidates: vec![DependencyCandidate {
+                internal: "old/Dependency".to_string(),
+                package: "old".to_string(),
+                name: "Dependency".to_string(),
+            }],
+        });
 
         assert_eq!(receiver.replace_index_generation(), 1);
         assert!(

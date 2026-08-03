@@ -91,12 +91,12 @@ const MAX_SOURCE_SET_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 8 * 1024 * 1024;
 /// ~52, so 192 MiB of budget admits roughly 1.2M declarations. Neither corpus comes close; a
 /// pathological workspace stops growing the index instead of the process.
 const MAX_PROJECT_WORKSPACE_SYMBOL_INDEX_WIRE_BYTES: usize = 192 * 1024 * 1024;
-const MAX_WORKSPACE_SYMBOL_QUERY_BYTES: usize = 1024;
+pub(crate) const MAX_WORKSPACE_SYMBOL_QUERY_BYTES: usize = 1024;
 const MAX_WORKSPACE_SYMBOL_CONTAINER_DEPTH: usize = 128;
 /// A leading-wildcard query scans the retained index. Bound the greedy matcher's total transitions
 /// as well as input and response bytes, so an adversarial `*aaaa...b` pattern cannot multiply a
 /// maximum-sized name table into unbounded request latency.
-const MAX_WORKSPACE_SYMBOL_GLOB_STEPS: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_WORKSPACE_SYMBOL_GLOB_STEPS: usize = 32 * 1024 * 1024;
 const JSON_U32_MAX_BYTES: usize = 10;
 // Entry array and separator, plus one value in each search permutation.
 const WORKSPACE_SYMBOL_ENTRY_MAX_WIRE_BYTES: usize =
@@ -1056,7 +1056,7 @@ impl ProjectSymbolIndex {
 
 /// The match qualities the ladder walks, strongest first.
 #[derive(Clone, Copy)]
-enum WorkspaceSymbolRung {
+pub(crate) enum WorkspaceSymbolRung {
     /// An empty query asks for everything.
     Every,
     Glob,
@@ -1776,10 +1776,26 @@ impl WorkspaceSymbolIndex {
     /// the file's text from disk, and `open` alone misses the support sources analysis pulled in
     /// beside the open ones, which would report those declarations from two layers at once.
     pub fn encode_over(&self, query: &str, base: &[&Self], open: &HashSet<&str>) -> Vec<Value> {
+        let mut remaining_glob_steps = MAX_WORKSPACE_SYMBOL_GLOB_STEPS;
+        self.encode_over_with_glob_steps(query, base, open, &mut remaining_glob_steps)
+    }
+
+    /// Encode with a request-owned wildcard transition budget.
+    ///
+    /// The LSP service passes the remainder to the dependency layer after project encoding. This
+    /// is intentionally separate from the ordinary convenience entry point: the budget covers the
+    /// composed protocol request, not each retained index independently.
+    pub(crate) fn encode_over_with_glob_steps(
+        &self,
+        query: &str,
+        base: &[&Self],
+        open: &HashSet<&str>,
+        remaining_glob_steps: &mut usize,
+    ) -> Vec<Value> {
         let mut layers = Vec::with_capacity(base.len() + 1);
         layers.push(self);
         layers.extend(base.iter().copied());
-        Self::encode_layers(query, &layers, open)
+        Self::encode_layers_with_glob_steps(query, &layers, open, remaining_glob_steps)
     }
 
     /// Rank across every layer at once, rung by rung.
@@ -1788,7 +1804,8 @@ impl WorkspaceSymbolIndex {
     /// layer's would let a subsequence match in a newly indexed chunk outrank an exact prefix match
     /// in the segment beside it, and spend the response budget on it.
     fn encode_layers(query: &str, layers: &[&Self], open: &HashSet<&str>) -> Vec<Value> {
-        Self::encode_layers_with_glob_steps(query, layers, open, MAX_WORKSPACE_SYMBOL_GLOB_STEPS)
+        let mut remaining_glob_steps = MAX_WORKSPACE_SYMBOL_GLOB_STEPS;
+        Self::encode_layers_with_glob_steps(query, layers, open, &mut remaining_glob_steps)
     }
 
     /// Budgeted query implementation. The transition budget belongs to the request, not an index
@@ -1798,21 +1815,14 @@ impl WorkspaceSymbolIndex {
         query: &str,
         layers: &[&Self],
         open: &HashSet<&str>,
-        mut remaining_glob_steps: usize,
+        remaining_glob_steps: &mut usize,
     ) -> Vec<Value> {
         let mut result = Vec::new();
-        if query.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
-            return result;
-        }
-        // A query typed without switching keyboard layout is searched in both forms, so `зфкыу`
-        // finds what `parse` would.
-        let mut parsed = vec![WorkspaceQuery::parse(query)];
-        if let Some(latin) = qwerty_from_cyrillic(query) {
-            let translated = WorkspaceQuery::parse(&latin);
-            if translated != parsed[0] {
-                parsed.push(translated);
-            }
-        }
+        // Parsing, input bounds, keyboard-layout translation, and rung selection are shared with
+        // the dependency index. They are protocol semantics, not storage-layer policy: letting a
+        // second index reinterpret the same request previously made the dependency path bypass the
+        // workspace query's denial-of-service bounds and disagree about wildcard syntax.
+        let parsed = workspace_queries(query);
 
         let mut shadowed = open.clone();
         let mut suppressed = Vec::with_capacity(layers.len());
@@ -1831,19 +1841,7 @@ impl WorkspaceSymbolIndex {
         // Two query forms can reach the same entry, so ranks are deduplicated across them.
         let mut seen = vec![HashSet::new(); layers.len()];
         for query in &parsed {
-            let rungs: &[WorkspaceSymbolRung] = if query.is_empty() {
-                &[WorkspaceSymbolRung::Every]
-            } else if query.globbed {
-                &[WorkspaceSymbolRung::Glob]
-            } else {
-                &[
-                    WorkspaceSymbolRung::NamePrefix,
-                    WorkspaceSymbolRung::InitialsPrefix,
-                    WorkspaceSymbolRung::InitialsSubsequence,
-                    WorkspaceSymbolRung::NameSubsequence,
-                ]
-            };
-            for rung in rungs {
+            for rung in query.rungs() {
                 for (index, layer) in layers.iter().enumerate() {
                     let scope = EncodeScope {
                         query,
@@ -1855,7 +1853,7 @@ impl WorkspaceSymbolIndex {
                         &mut result,
                         &mut wire_bytes,
                         &mut seen[index],
-                        &mut remaining_glob_steps,
+                        remaining_glob_steps,
                     ) {
                         return result;
                     }
@@ -2310,13 +2308,33 @@ impl WorkspaceQuery {
     }
 
     /// The literal text before the first wildcard, usable as a sorted-array prefix.
-    fn literal_prefix(&self) -> &str {
+    pub(crate) fn literal_prefix(&self) -> &str {
         let end = self.pattern.find(['*', '?']).unwrap_or(self.pattern.len());
         &self.pattern[..end]
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.pattern.is_empty() && self.package.is_none()
+    }
+
+    /// The common ranking ladder for this query shape.
+    ///
+    /// Kept on the parsed query so every workspace-symbol storage layer makes the same choice for
+    /// empty, wildcard, and ordinary requests. The layers still decide whether an empty query is
+    /// appropriate for their scope; the dependency layer deliberately declines it.
+    pub(crate) fn rungs(&self) -> &'static [WorkspaceSymbolRung] {
+        if self.is_empty() {
+            &[WorkspaceSymbolRung::Every]
+        } else if self.globbed {
+            &[WorkspaceSymbolRung::Glob]
+        } else {
+            &[
+                WorkspaceSymbolRung::NamePrefix,
+                WorkspaceSymbolRung::InitialsPrefix,
+                WorkspaceSymbolRung::InitialsSubsequence,
+                WorkspaceSymbolRung::NameSubsequence,
+            ]
+        }
     }
 
     pub(crate) fn response_name(&self, declared_package: &str, source_name: &str) -> String {
@@ -2335,8 +2353,27 @@ impl WorkspaceQuery {
     }
 }
 
+/// Parse every spelling of one workspace-symbol query that the server searches.
+///
+/// The byte ceiling belongs here rather than in an individual index. A request is interpreted once
+/// for all layers, including the positional Cyrillic-to-Latin fallback, so adding another symbol
+/// source cannot accidentally create an unbounded or semantically different request path.
+pub(crate) fn workspace_queries(raw: &str) -> Vec<WorkspaceQuery> {
+    if raw.len() > MAX_WORKSPACE_SYMBOL_QUERY_BYTES {
+        return Vec::new();
+    }
+    let mut parsed = vec![WorkspaceQuery::parse(raw)];
+    if let Some(latin) = qwerty_from_cyrillic(raw) {
+        let translated = WorkspaceQuery::parse(&latin);
+        if translated != parsed[0] {
+            parsed.push(translated);
+        }
+    }
+    parsed
+}
+
 /// Glob match over folded text: `*` spans any run, `?` one character.
-fn matches_glob(text: &str, pattern: &str, remaining_steps: &mut usize) -> Option<bool> {
+pub(crate) fn matches_glob(text: &str, pattern: &str, remaining_steps: &mut usize) -> Option<bool> {
     // Keep byte offsets only for slicing, but advance them by decoded characters. Treating `?` as
     // one UTF-8 byte made it impossible to match the Unicode identifiers Kotlin permits.
     let (mut text_offset, mut pattern_offset) = (0usize, 0usize);
@@ -3994,11 +4031,12 @@ mod tests {
         );
         let one_match_steps = usize::MAX - probe_steps;
 
+        let mut remaining_steps = one_match_steps;
         let encoded = WorkspaceSymbolIndex::encode_layers_with_glob_steps(
             "*target",
             &[&first, &second],
             &HashSet::new(),
-            one_match_steps,
+            &mut remaining_steps,
         );
 
         assert_eq!(encoded.len(), 1);

@@ -122,7 +122,10 @@ impl ProjectSync {
     /// Used for worker startup and dependency-source materialization. Module analysis requests pass
     /// their narrower compile classpath. Project outputs precede published copies.
     pub fn project_classpath(&self) -> Vec<PathBuf> {
-        self.project_classpath_with(&|path| std::fs::canonicalize(path).ok())
+        let (mut outputs, dependencies) =
+            self.project_classpath_parts_with(&|path| std::fs::canonicalize(path).ok());
+        outputs.extend(dependencies);
+        outputs
     }
 
     /// The classpath minus the project's own compiled output.
@@ -131,64 +134,30 @@ impl ProjectSync {
     /// dependency would list every workspace class twice -- once from its source and once as a stub
     /// decompiled from the class file beside it.
     pub fn dependency_classpath(&self) -> Vec<PathBuf> {
-        let canonicalize = &|path: &Path| std::fs::canonicalize(path).ok();
-        let all = self.project_classpath_with(canonicalize);
-        let outputs = self.output_count_with(canonicalize);
-        all.into_iter().skip(outputs).collect()
+        self.project_classpath_parts_with(&|path| std::fs::canonicalize(path).ok())
+            .1
     }
 
-    /// How many leading entries of `project_classpath` are the project's own output.
-    fn output_count_with(&self, canonicalize: &dyn Fn(&Path) -> Option<PathBuf>) -> usize {
-        let Some(model) = self.model() else {
-            return 0;
-        };
-        let declared_output_set = model
-            .modules
-            .iter()
-            .flat_map(|module| {
-                module
-                    .outputs
-                    .iter()
-                    .map(|output| output.path().to_path_buf())
-                    .chain(module.friend_paths.iter().cloned())
-            })
-            .collect::<HashSet<_>>();
-        let mut canonical_paths = CanonicalPathCache::new(canonicalize);
-        let mut canonical_output_set = HashSet::new();
-        for output in &declared_output_set {
-            if let Some(canonical) = canonical_paths.get(output) {
-                canonical_output_set.insert(canonical.to_path_buf());
-            }
-        }
-        let mut seen = HashSet::new();
-        let mut count = 0;
-        for module in &model.modules {
-            for entry in model.compile_classpath(module) {
-                if !seen.insert(entry.clone()) {
-                    continue;
-                }
-                let is_output = entry
-                    .ancestors()
-                    .any(|ancestor| declared_output_set.contains(ancestor))
-                    || canonical_paths.get(&entry).is_some_and(|entry| {
-                        entry
-                            .ancestors()
-                            .any(|ancestor| canonical_output_set.contains(ancestor))
-                    });
-                if is_output {
-                    count += 1;
-                }
-            }
-        }
-        count
-    }
-
+    #[cfg(test)]
     fn project_classpath_with(
         &self,
         canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,
     ) -> Vec<PathBuf> {
+        let (mut outputs, dependencies) = self.project_classpath_parts_with(canonicalize);
+        outputs.extend(dependencies);
+        outputs
+    }
+
+    /// Partition the deduplicated compile classpath once, using the same declared/canonical output
+    /// identity for both consumers. Computing a leading-output count separately repeated the
+    /// classification algorithm and made `dependency_classpath` depend on that copy staying in
+    /// lockstep with the ordering copy.
+    fn project_classpath_parts_with(
+        &self,
+        canonicalize: &dyn Fn(&Path) -> Option<PathBuf>,
+    ) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let Some(model) = self.model() else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let mut union = Vec::new();
         let mut seen = HashSet::new();
@@ -227,10 +196,9 @@ impl ProjectSync {
                         .any(|ancestor| canonical_output_set.contains(ancestor))
                 })
         };
-        let (mut outputs, others): (Vec<_>, Vec<_>) =
+        let (outputs, dependencies): (Vec<_>, Vec<_>) =
             union.into_iter().partition(|entry| is_output(entry));
-        outputs.extend(others);
-        outputs
+        (outputs, dependencies)
     }
 
     /// The `jvmTarget` the project reports, used to pick a matching JDK.
@@ -340,6 +308,16 @@ mod tests {
         sync.project_classpath()
     }
 
+    fn synced_dependency_classpath(model: ProjectModel) -> Vec<PathBuf> {
+        let mut sync =
+            ProjectSync::new(Box::new(ScriptedProvider::new(Vec::new(), vec![Ok(model)])));
+        assert_eq!(
+            sync.refresh(&FakeRunner::default()),
+            RefreshOutcome::Updated
+        );
+        sync.dependency_classpath()
+    }
+
     #[test]
     fn an_unchanged_fingerprint_does_not_run_the_build_tool_again() {
         let tree = TempTree::new("sync-unchanged");
@@ -428,6 +406,34 @@ mod tests {
                 PathBuf::from("/workspace/lib/checked-in.jar"),
                 PathBuf::from("/workspace/app/build/generated/resources.jar"),
                 PathBuf::from("/cache/support.jar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn dependency_classpath_excludes_only_declared_project_outputs() {
+        let mut library = Module::new(ModuleId::new(":library", "main"), "/workspace/library");
+        library.outputs = vec![ModuleOutput::classes("/composite/library/classes")];
+        let mut application = Module::new(
+            ModuleId::new(":application", "main"),
+            "/workspace/application",
+        );
+        application.classpath = vec![
+            PathBuf::from("/cache/published.jar"),
+            PathBuf::from("/workspace/checked-in.jar"),
+            PathBuf::from("/composite/library/classes"),
+        ];
+        let model = ProjectModel::new("/workspace", ProviderKind::Gradle)
+            .with_modules(vec![application, library]);
+
+        // Being under the workspace root does not make an entry project output. Classification is
+        // driven by the model's declared outputs, through the same partition used to put those
+        // outputs first for worker startup.
+        assert_eq!(
+            synced_dependency_classpath(model),
+            vec![
+                PathBuf::from("/cache/published.jar"),
+                PathBuf::from("/workspace/checked-in.jar"),
             ]
         );
     }

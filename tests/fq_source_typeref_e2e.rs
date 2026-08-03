@@ -265,6 +265,17 @@ fn source_private_nested_classifier_uses_lexical_owner_visibility() {
 }
 
 #[test]
+fn source_private_nested_enum_entries_preserve_classifier_access_diagnostic() {
+    let diagnostics = common::front_end_diagnostics_files(
+        &["class Outer { private enum class Hidden { VALUE } }\n\
+           fun expose() = Outer.Hidden.entries\n"],
+        &[],
+        None,
+    );
+    assert_eq!(diagnostics, ["cannot access 'Outer.Hidden': it is private"]);
+}
+
+#[test]
 fn fq_source_import_nested_shadows_package_path() {
     // The nested-first order also governs EXPLICIT imports: `import pkg1.Cls` binds the root
     // class `pkg1`'s nested `Cls` over package `pkg1`'s `Cls`. Asserted via TYPE IDENTITY: the

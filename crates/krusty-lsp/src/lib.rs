@@ -15,8 +15,8 @@ pub use analysis::*;
 pub use compiler_analysis::LibraryRef;
 pub use dependency_sources::render as deps_render;
 pub use dependency_symbols::{
-    locate as locate_dependencies, DependencyCandidate, DependencySymbolIndex, LocatedDependency,
-    MAX_DEPENDENCY_CLASSES,
+    locate as locate_dependencies, locate_with as locate_dependencies_with, DependencyCandidate,
+    DependencySymbolIndex, LocatedDependency, MAX_DEPENDENCY_CLASSES,
 };
 pub use options::*;
 pub use project::{
