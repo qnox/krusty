@@ -905,6 +905,28 @@ pub fn is_reified_inline(body: &MethodCode) -> bool {
     })
 }
 
+/// Whether `insns` calls `kotlin/jvm/internal/Intrinsics.<name>` — the shared shape behind the
+/// compile-time markers, so a caller that has already disassembled a body tests for one without
+/// decoding it a second time (splicing is hot enough that a redundant decode is worth avoiding).
+///
+/// The two markers that matter here:
+/// * `reifiedOperationMarker` — the reified type-parameter directive, NOP'd and repointed at the
+///   concrete type by [`reify_markers`].
+/// * `needClassReification` — kotlinc's "this body materializes a class (an anonymous object, a
+///   default lambda) whose shape depends on the reified type parameter, so emit a fresh copy of that
+///   class per call site". krusty splices INSTRUCTIONS and does not regenerate a dependency's
+///   compiled inner classes, so reusing the erased-`T` copy would be a miscompile — and the marker
+///   itself throws `UnsupportedOperationException` if it survives into emitted code. A body carrying
+///   one is not spliceable, and the caller must BAIL rather than fall back to a (also throwing)
+///   direct call.
+fn calls_intrinsic(insns: &[Insn], source_cp: &[C], name: &str) -> bool {
+    insns.iter().any(|i| {
+        matches!(i, Insn::Plain { op: 0xb8, operands } if operands.len() == 2
+        && methodref_target(source_cp, (operands[0] as u16) << 8 | operands[1] as u16)
+            == Some(("kotlin/jvm/internal/Intrinsics", name)))
+    })
+}
+
 /// Per-parameter `(local slot, store-base opcode)` for a method descriptor, slots starting at `base`
 /// (`long`/`double` take two). Used to bind the on-stack call arguments into the inline body's frame.
 fn param_store_ops(descriptor: &str, base: u16) -> Option<Vec<(u16, u8)>> {
@@ -1866,6 +1888,14 @@ pub fn splice_unified(
     let ret = ret_vtype(descriptor, cw)?;
     let offsets_of_param = param_offsets(descriptor)?;
     let mut insns = disassemble(&body.code)?;
+    // The body materializes a class whose shape depends on the reified type parameter. Splicing the
+    // instructions would reuse the dependency's erased-`T` copy and leave a throwing marker behind.
+    // Scanned over the decode above rather than disassembling again: splicing is one of the hottest
+    // backend paths (every `require`/`let`/`also`/`@InlineOnly`), and this is a memory-lean compiler.
+    if calls_intrinsic(&insns, &body.source_cp, "needClassReification") {
+        crate::trace_compiler!("splice", "body requires class reification — not spliceable");
+        return None;
+    }
     // NOP the reified markers now (before relocation) and remember which instructions to repoint; the
     // concrete `Class` pool ref is minted + applied AFTER relocation (so `relocate_insns` doesn't remap
     // it back to the erased placeholder).
