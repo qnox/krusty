@@ -226,8 +226,6 @@ mod classpath_typealias_e2e;
 mod classpath_unbound_callable_ref_e2e;
 #[path = "classpath_value_class_builder_e2e.rs"]
 mod classpath_value_class_builder_e2e;
-#[path = "classpath_value_class_computed_property_e2e.rs"]
-mod classpath_value_class_computed_property_e2e;
 #[path = "classpath_value_class_default_e2e.rs"]
 mod classpath_value_class_default_e2e;
 #[path = "classpath_value_class_member_e2e.rs"]

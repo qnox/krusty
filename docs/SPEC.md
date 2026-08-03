@@ -2332,15 +2332,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`kotlin/math/MathKt.PI`) and the ordinary external-static-field path inlines its `ConstantValue`,
   which is what kotlinc emits at every use site. Test:
   `tests/resolve_parse_deep_coverage_e2e.rs::import_top_level_math`.
-- **A COMPUTED property of a value class (`Result.isSuccess`).** The same shape as the `const val`
-  above: a `@JvmInline value class`'s non-constructor `val` has NO instance accessor at all — kotlinc
-  compiles its getter to a static `<getterName>-impl(<carrier>)` — so the accessor-modelled property
-  namespace never surfaced it and every read was "unresolved reference". Such a property is published
-  as a zero-argument MEMBER under its source name, the same receiver-as-first-JVM-argument shape the
-  value class's own functions already use, so lowering and emit need no new case. The discriminator is
-  read off the class file (the accessor is `static` and takes exactly the carrier), never off the
-  method NAME; a constructor property keeps its ordinary `getRaw()` instance getter. Tests:
-  `tests/classpath_value_class_computed_property_e2e.rs`.
+- **A COMPUTED property of a value class (`Result.isSuccess`) — still open, and why.** The same shape
+  as the `const val` above: a `@JvmInline value class`'s non-constructor `val` has NO instance accessor
+  at all — kotlinc compiles its getter to a static `<getterName>-impl(<carrier>)` — so the
+  accessor-modelled property namespace never surfaces it and every read is "unresolved reference".
+  Publishing such properties as zero-argument members under their source name (the same
+  receiver-as-first-JVM-argument shape the value class's own FUNCTIONS already use) resolves and runs
+  them, but it also makes two box-corpus cases reach a SEPARATE, pre-existing defect and MISCOMPILE:
+  a value-class value passed through a `fun interface` method (`ResultHandler<T>.onResult(Result<T>)`)
+  is handed over as the raw carrier where the erased interface descriptor expects the BOX, so the
+  callee's `checkcast` throws. That defect is reachable without this feature (any `Result` argument to
+  such a method), it simply has no corpus case that reaches it today. The property support therefore
+  waits on the value-class boxing at an erased interface-parameter boundary; until then a read stays
+  unresolved rather than compiling into a `ClassCastException`.
 - **A constructor parameter of RECEIVER function type on a compiled class.** `Base(init: Cfg.() ->
   Unit)` erases to `Function1` in both the JVM descriptor and the `Signature` attribute, so only
   `@Metadata`'s `@ExtensionFunctionType` mark distinguishes it from `(Cfg) -> Unit`. Members and

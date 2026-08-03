@@ -996,63 +996,6 @@ impl JvmLibraries {
             .collect()
     }
 
-    /// A value class's own COMPUTED properties (`@JvmInline value class Wrap(val raw: String) { val
-    /// isTagged: Boolean get() = … }`), as zero-argument members under their SOURCE name.
-    ///
-    /// Such a property has no instance accessor at all: its getter compiles to a STATIC
-    /// `<getterName>-impl(<carrier>)` taking the erased underlying as its only JVM parameter. The
-    /// property namespace models properties BY their accessors, so it never surfaces one — which is why
-    /// `Result.isSuccess`/`isFailure` and every user value class's computed `val` read as unresolved.
-    /// Publishing them as members is the same shape (and the same receiver-as-first-JVM-argument
-    /// convention) [`Self::value_class_metadata_members_for_class`] already uses for the value class's
-    /// functions, so lowering and emit need no new case. A CONSTRUCTOR property keeps its ordinary
-    /// instance getter (`getRaw()`) and is left to the normal accessor path.
-    fn value_class_computed_property_members_for_class(
-        &self,
-        ci: &crate::jvm::classreader::ClassInfo,
-        inline: bool,
-    ) -> Vec<LibraryMember> {
-        if !inline {
-            return Vec::new();
-        }
-        metadata::class_properties(ci)
-            .iter()
-            .filter(|p| !p.is_extension && p.visibility == Visibility::Public)
-            .filter_map(|p| {
-                let getter = p.getter.as_ref()?;
-                // The static `-impl` form is the discriminator, read off the CLASS FILE rather than the
-                // name: only a method that is `static` and takes exactly the carrier can be one.
-                let method = ci
-                    .methods
-                    .iter()
-                    .find(|m| m.name == getter.name && m.descriptor == getter.desc)?;
-                if !method.is_static() {
-                    return None;
-                }
-                let (params, physical_ret) = parse_method_desc(&getter.desc)?;
-                if params.len() != 1 {
-                    return None;
-                }
-                let ret = metadata_return_info(p.ret_class, p.ret_nullable).apply(physical_ret);
-                let mut member =
-                    LibraryMember::new(p.name.clone(), vec![], ret, getter.desc.clone());
-                member.owner = Some(type_name(&ci.this_class()));
-                member.physical_name = Some(getter.name.clone());
-                member.physical_ret = physical_ret;
-                member.set_ret_nullable(p.ret_nullable);
-                crate::trace_compiler!(
-                    "value_classes",
-                    "value-class computed property {}.{} -> static {}{}",
-                    ci.this_class(),
-                    p.name,
-                    getter.name,
-                    getter.desc
-                );
-                Some(member)
-            })
-            .collect()
-    }
-
     /// Every value-class-TYPED property of `ci`, keyed by SOURCE property name. Such a property's getter is
     /// `@JvmName`-mangled (`getId-<hash>`) and its physical return erases to the value class's underlying,
     /// so ordinary getter resolution misses it. Each member carries the mangled getter name + physical
@@ -1552,11 +1495,8 @@ impl JvmLibraries {
                     crate::types::Ty::nullable(u)
                 }
             });
-            let value_class_metadata_members = self
-                .value_class_metadata_members_for_class(&ci, inline.is_some(), meta_fns)
-                .into_iter()
-                .chain(self.value_class_computed_property_members_for_class(&ci, inline.is_some()))
-                .collect::<Vec<_>>();
+            let value_class_metadata_members =
+                self.value_class_metadata_members_for_class(&ci, inline.is_some(), meta_fns);
             // The class's own formal type parameters (`Pair` → `[A, B]`), for constructor type-argument
             // inference; empty for a non-generic type.
             let type_params = ci
