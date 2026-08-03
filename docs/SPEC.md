@@ -2397,6 +2397,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   needs. Tests: `tests/inline_vc_suspend_coverage_e2e.rs::labelled_trailing_lambda_parses`,
   `::labelled_return_leaves_the_lambda_not_the_function`,
   `::inline_local_labeled_return`.
+- **A lambda argument to the invoke operator is CONTEXTUAL.** `b { it + 1 }` on a
+  `class Box { operator fun invoke(f: (Int) -> Int) }` types `it` from the operator's parameter. The
+  arguments were typed with no expectation, so `it` came out as the erased upper bound and the call
+  reported "operator cannot be applied to 'Any' and 'Int'" before the operator was ever consulted —
+  the expectation has to be supplied when the arguments are typed, not after selection. Test:
+  `tests/inline_vc_suspend_coverage_e2e.rs::inline_operator_fun`.
 
 ## 8. Success criteria for the PoC
 

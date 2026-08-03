@@ -20284,6 +20284,26 @@ impl<'a> Checker<'a> {
         args.iter().map(|&a| self.expr(a)).collect()
     }
 
+    /// Argument types for `receiver(args)` — the invoke-operator convention. A lambda argument is
+    /// CONTEXTUAL: `b { it + 1 }` on a `class Box { operator fun invoke(f: (Int) -> Int) }` types `it`
+    /// from the operator's parameter. Typing the arguments with no expectation left `it` as the erased
+    /// upper bound and reported "operator cannot be applied to 'Any' and 'Int'" before the operator was
+    /// ever consulted, so the expectation has to be supplied here, not after selection.
+    fn invoke_operator_arg_tys(&mut self, receiver_ty: Ty, args: &[ExprId]) -> Vec<Ty> {
+        let params = receiver_ty
+            .obj_internal()
+            .and_then(|internal| self.syms.method_of_name(internal, CALLABLE_INVOKE_OPERATOR))
+            .map(|signature| signature.params)
+            .filter(|params| params.len() == args.len());
+        let Some(params) = params else {
+            return self.arg_tys(args);
+        };
+        args.iter()
+            .zip(params)
+            .map(|(&a, param)| self.expr_result(a, Some(param), true))
+            .collect()
+    }
+
     /// Whether an argument call can be revisited with an expected type.
     fn postponable_generic_call(&self, expression: ExprId, actual: Ty) -> bool {
         let Expr::Call { callee, .. } = self.file.expr(expression) else {
@@ -30810,7 +30830,7 @@ impl<'a> Checker<'a> {
                 let local_value = self.lookup(&fname).map(|local| (local.ty, local.origin));
                 let local_value_ty = local_value.map(|(ty, _)| ty);
                 if let Some((receiver_ty, origin)) = local_value {
-                    let arg_tys = self.arg_tys(args);
+                    let arg_tys = self.invoke_operator_arg_tys(receiver_ty, args);
                     if origin == ReceiverFnValueOrigin::Local {
                         if let Some((signature, origin)) = self.receiver_function_value(&fname) {
                             if let Some((expected_receiver, params)) =
