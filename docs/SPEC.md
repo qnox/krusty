@@ -2320,16 +2320,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison node so the branch/stackmap shape stays the one every other comparison uses. Tests:
   `tests/feature_coverage_v_e2e.rs::lateinit_and_isinitialized`,
   `tests/implicit_this_callable_ref_e2e.rs::lateinit_is_initialized_runs` (the box-corpus case).
-- **`Array(n) { … }` with an ARRAY element stays rejected** — a BLANKET rejection of any array element,
-  not a shape-sensitive one. It masks a general StackMapTable defect that is not array-specific: a `for`
-  loop directly followed by a `while` emits a `while`-head frame that still names the `for`'s synthetic
-  index/bound slots, while the `while`'s own back-edge frame CHOPs them, so the back edge is narrower
-  than its target and the class fails verification. `fun box(): String { var t = 0; for (v in 0 until 2)
-  t += v; while (t > 100) t -= 1; return "OK" }` reproduces it with no array at all, on this branch and
-  on master alike; it stays hidden because `while`-then-`for`, `for`-then-`for`, and any statement
-  between the two loops are all fine. Fixing the frame emission retires this rejection. Tests:
-  `tests/backend_rejection_coverage_e2e.rs::nested_array_fill_inside_a_loop_rejected`,
-  `tests/feature_coverage_h_e2e.rs::two_dimensional_array_construction_is_declined`.
+- **One bytecode offset, one frame — merged across every label bound there.** Several labels can share
+  an offset: a loop's `end` and the following statement's head, or `next`/`end` in an all-diverging
+  `when`. Only one StackMapTable entry exists for that offset, and it must hold on EVERY edge reaching
+  it, so the frames are merged — locals become their common prefix, everything past the first
+  divergence reverting to `top`. Keeping the first (a plain dedup) claimed a local a later edge did not
+  have: `for (v in 0 until 2) t += v` immediately followed by `while (t > 100) t -= 1` bound the `for`'s
+  end and the `while`'s head at one offset, the emitted frame still named the `for`'s SYNTHETIC index,
+  the `while`'s own back edge chopped it, and the back edge became narrower than its own target —
+  "Inconsistent stackmap frames", on a program kotlinc accepts.
+
+  The synthetic slots never appear in the LocalVariableTable, so the SAME/CHOP chain in the
+  StackMapTable is the evidence, not the LVT. This retires the blanket rejection of `Array(n) { … }`
+  with an array element, which was only removing the ARRAY route into the same defect: a 2-D array is
+  built through a fill loop, and any statement between the two loops (even an `if`) hid it. Tests:
+  `tests/feature_coverage_h_e2e.rs::adjacent_loops_verify`,
+  `tests/feature_coverage_h_e2e.rs::two_dimensional_arrays`.
 - **A companion `var` is written only within the file that declares it.** `ir.statics` holds the
   statics of the file being lowered, and the IR has no external static STORE (`ExternalStaticField` is a
   read), so a cross-file write declines with a named bail. The cross-file READ works, and the checker

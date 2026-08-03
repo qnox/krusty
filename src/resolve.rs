@@ -24462,19 +24462,6 @@ impl<'a> Checker<'a> {
             self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
             let lam = self.check_lambda_with_types(args[1], &[Ty::Int]);
             let elem = lam.fun_ret().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            // A nested-array element (`Array(n) { DoubleArray(m) }`) is declined rather than emitted
-            // as a class file that fails verification. The defect is NOT array-specific: a `for` loop
-            // directly followed by a `while` emits a `while`-head frame naming the `for`'s synthetic
-            // index/bound slots, which the loop's own back edge then CHOPs, so the edge is narrower
-            // than its target. This blanket rejection only removes the ARRAY route into it; fixing the
-            // frame emission retires it. See docs/SPEC.md.
-            if elem.is_array() {
-                self.diags.error(
-                    span,
-                    "krusty: Array(n) {…} with an array element is not supported".to_string(),
-                );
-                return Some(Ty::Error);
-            }
             // `Array(n) { … }` is always the reference `Array<T>` (`Obj("kotlin/Array", [T])`), distinct
             // from a primitive array. The element stays LOGICAL `T` (a primitive `Int` reads as `Int`,
             // not a boxed wrapper); the backend owns the physical boxed/value-class array layout.
