@@ -630,3 +630,47 @@ fn a_ranked_dependency_class_becomes_a_file_with_a_range() {
 
     std::fs::remove_dir_all(&cache).ok();
 }
+
+#[test]
+fn a_cached_classpath_yields_the_same_index_and_is_reused() {
+    let Some(stdlib) = krusty::toolchain::stdlib_jar() else {
+        return;
+    };
+    let entries = vec![stdlib];
+    let cp = Rc::new(Classpath::new(entries.clone()));
+    if cp.scan_types().is_empty() {
+        return;
+    }
+    let cache = std::env::temp_dir().join(format!(
+        "krusty-dep-cache-e2e-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let direct = krusty_lsp::DependencySymbolIndex::from_classpath(&cp);
+    let cold = krusty_lsp::DependencySymbolIndex::from_cached_classpath(&entries, &cache);
+    let warm = krusty_lsp::DependencySymbolIndex::from_cached_classpath(&entries, &cache);
+
+    // Reading a jar and reading its cached listing have to produce the same index, or a second
+    // session would search a different set than the first.
+    assert_eq!(cold.class_count(), direct.class_count());
+    assert_eq!(warm.class_count(), direct.class_count());
+    assert_eq!(
+        warm.candidates("AbstractList", 8),
+        direct.candidates("AbstractList", 8)
+    );
+    assert!(
+        cache.is_dir(),
+        "the cold build must have left something to reuse"
+    );
+    assert!(
+        direct.class_count() > 100,
+        "the stdlib declares more than this; a test that quietly indexed nothing would pass every \
+         assertion above it"
+    );
+
+    std::fs::remove_dir_all(&cache).ok();
+}

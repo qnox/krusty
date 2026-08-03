@@ -73,6 +73,38 @@ impl DependencySymbolIndex {
         )
     }
 
+    /// Build from the project's classpath, reading each jar's class list from the cache when it is
+    /// there and filling it when it is not.
+    ///
+    /// Jar by jar rather than all at once, because that is the granularity the cache shares at: two
+    /// projects rarely resolve the same *set* of artifacts, and constantly resolve the same
+    /// individual ones. Composing per-jar listings has to deduplicate, which composing a single
+    /// classpath did for free -- a name declared by two jars is one class, and the earlier entry on
+    /// the classpath is the one that wins resolution.
+    pub fn from_cached_classpath(
+        entries: &[std::path::PathBuf],
+        cache_root: &std::path::Path,
+    ) -> Self {
+        let mut names = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for entry in entries {
+            let classes = match crate::dependency_cache::load(cache_root, entry) {
+                Some(cached) => cached,
+                None => {
+                    let classes = jar_class_names(entry);
+                    crate::dependency_cache::store(cache_root, entry, &classes);
+                    classes
+                }
+            };
+            for class in classes {
+                if seen.insert(class.clone()) {
+                    names.push(class);
+                }
+            }
+        }
+        Self::from_internal_names(names)
+    }
+
     /// Build from slashed internal names, as `Classpath::package_tree().classes()` yields them.
     ///
     /// A `$` in an internal name is a nested class, and a reader searching for `Entry` means
@@ -355,6 +387,15 @@ fn split_internal_name(internal: &str) -> Option<(String, String)> {
         return None;
     }
     Some((package, class.replace('$', ".")))
+}
+
+/// Every class one classpath entry declares.
+fn jar_class_names(entry: &std::path::Path) -> Vec<String> {
+    krusty::jvm::classpath::Classpath::new(vec![entry.to_path_buf()])
+        .package_tree()
+        .classes()
+        .map(|(internal, _)| internal)
+        .collect()
 }
 
 /// Rebuild the slashed internal name from the two parts it was split into.
