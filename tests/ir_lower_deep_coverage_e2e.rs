@@ -20,8 +20,8 @@ use super::common;
 
 /// (stdlib jar, jdk `lib/modules` jimage) for the `box()` harness, or `None` → skip.
 fn env() -> Option<(PathBuf, PathBuf)> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     Some((stdlib, jdk))
 }
 
@@ -32,7 +32,7 @@ fn run_box(src: &str, stem: &str) {
         return;
     };
     assert_eq!(
-        common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)).as_deref(),
+        common::compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path())).as_deref(),
         Some("OK"),
         "{stem}"
     );

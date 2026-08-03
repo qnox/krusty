@@ -9,10 +9,10 @@
 use super::common;
 
 fn run(src: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
-    let coro = common::coroutines_jar()?;
-    common::compile_and_run_box(src, "Main", &[sl, coro, jdk.clone()], Some(&jdk))
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    common::compile_and_run_box(src, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()))
 }
 
 // `withLock` is a `suspend inline` EXTENSION on `Mutex` with a defaulted leading `owner: Any? = null`. The

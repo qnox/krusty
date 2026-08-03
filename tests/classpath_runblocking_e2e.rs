@@ -17,14 +17,19 @@
 use super::common;
 
 fn run(lib: Option<(&str, &str)>, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
-    let corou = common::coroutines_jar()?;
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let corou = common::coroutines_jar();
     let mut cp = vec![sl, corou, jdk.clone()];
     if let Some((tag, src)) = lib {
         cp.insert(0, common::compile_lib(tag, src)?);
     }
-    Some(common::expect_box_run(main, "Main", &cp, Some(&jdk)))
+    Some(common::expect_box_run(
+        main,
+        "Main",
+        &cp,
+        Some(jdk.as_path()),
+    ))
 }
 
 #[test]

@@ -10,15 +10,9 @@ use super::common;
 
 #[test]
 fn suspend_spill_slot_reuse_runs() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(coro) = common::coroutines_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
     // agg: for each (name, count) in cfg, skip when catalog has no tag (`?: continue`), else run a
     // nested loop that reads `tag` (declared at the continue) and `scaled` (declared AFTER it, live
     // across the nested suspensions). Both are spilled restore-only locals reached on the fresh edge.
@@ -47,7 +41,8 @@ fn suspend_spill_slot_reuse_runs() {
                 mapOf(\"a\" to listOf(10, 20), \"b\" to listOf(1, 2, 3)))\n\
             if (r == 69) \"OK\" else \"F r=$r\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(&jdk));
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

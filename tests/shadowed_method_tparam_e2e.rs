@@ -52,10 +52,7 @@ fn shadowing_method_type_param_is_independent() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let sl = common::stdlib_jar();
     let jdk = PathBuf::from(format!("{jh}/lib/modules"));
     // `echo`'s own `<T>` shadows the class `<T>`; it returns its argument unchanged.
     let java = "package lib;\n\

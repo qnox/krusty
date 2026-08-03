@@ -15,8 +15,8 @@ use krusty::jvm::names::file_class_name;
 
 /// Compile two sources as one module (mirrors `cross_file_ctor_default_e2e`'s harness).
 fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let sl = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let sl = common::stdlib_jar();
+    let jdk = common::jdk_modules();
 
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(a);
@@ -65,7 +65,7 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
 }
 
 fn run_two(a: &str, b: &str) -> Option<String> {
-    let sl = common::stdlib_jar()?;
+    let sl = common::stdlib_jar();
     let classes = compile_two(a, b)?;
     let box_class = common::find_box_class(&classes)?;
     common::run_box(&classes, &box_class, &[sl])
@@ -73,7 +73,9 @@ fn run_two(a: &str, b: &str) -> Option<String> {
 
 #[test]
 fn cross_file_companion_function_call_runs() {
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    if false /* toolchain gate panics */ || false
+    /* toolchain gate panics */
+    {
         return;
     }
     // `Job` (file A) has a `companion object` with functions; file B calls them qualified across the

@@ -13,10 +13,7 @@ use std::rc::Rc;
 
 #[test]
 fn classpath_class_companion_object_is_detected() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar located");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let cp = Rc::new(Classpath::new(vec![stdlib]));
     let libs = JvmLibraries::new(cp);
 

@@ -8,21 +8,21 @@ use super::common;
 /// Raw compile — a `None` is AMBIGUOUS (unprovisioned toolchain or a declined source), so this form
 /// is for the REJECTION test below, which asserts the `None` on a provisioned toolchain.
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_in_process(src, "P", &[stdlib], Some(&jdk))
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    common::compile_in_process(src, "P", &[stdlib], Some(jdk.as_path()))
 }
 
 /// Positive form: `None` means ONLY that the toolchain isn't provisioned; a declined source panics
 /// with its front-end diagnostics instead of skipping as a silent pass.
 fn expect_classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     Some(common::expect_compile_in_process(
         src,
         "P",
         &[stdlib],
-        Some(&jdk),
+        Some(jdk.as_path()),
     ))
 }
 
@@ -50,7 +50,7 @@ fn integral_bounded_type_param_specializes_to_primitive_descriptor() {
     );
     // And it runs.
     if let Some(box_class) = common::find_box_class(&cs) {
-        let stdlib = common::stdlib_jar().unwrap();
+        let stdlib = common::stdlib_jar();
         assert_eq!(
             common::run_box(&cs, &box_class, &[stdlib]).as_deref(),
             Some("OK")
@@ -77,7 +77,9 @@ fn double_bounded_type_param_is_rejected() {
     // A floating-point bound is NOT specializable (boxed vs primitive `==` differ on -0.0/NaN) — krusty
     // must reject it (compile fails → None), so the test skips rather than miscompiles, like the unsigned
     // and value bounds. (kotlinc would specialize it; we conservatively decline until it's sound.)
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    if false /* toolchain gate panics */ || false
+    /* toolchain gate panics */
+    {
         return;
     }
     let src = "fun <T : Double> idd(d: T): T = d\nfun box(): String = if (idd(1.0) == 1.0) \"OK\" else \"no\"\n";

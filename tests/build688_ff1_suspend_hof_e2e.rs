@@ -12,12 +12,17 @@
 use super::common;
 
 fn run(tag: &str, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
-    let corou = common::coroutines_jar()?;
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let corou = common::coroutines_jar();
     let libout = common::compile_lib(tag, "package lib\nclass Z\n")?;
     let cp = [libout, sl, corou, jdk.clone()];
-    Some(common::expect_box_run(main, "Main", &cp, Some(&jdk)))
+    Some(common::expect_box_run(
+        main,
+        "Main",
+        &cp,
+        Some(jdk.as_path()),
+    ))
 }
 
 #[test]

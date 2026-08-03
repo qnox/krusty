@@ -11,9 +11,9 @@ fn run(name: &str, src: &str, class: &str) {
 }
 
 fn javap_krusty(name: &str, src: &str, class: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar()?;
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let classes = common::compile_in_process(src, name, &[stdlib], jdk.as_deref())
+    let classes = common::compile_in_process(src, name, &[stdlib], Some(jdk.as_path()))
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     let (_, bytes) = classes
         .iter()

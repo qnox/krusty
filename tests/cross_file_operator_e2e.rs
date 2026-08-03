@@ -9,7 +9,9 @@ fn run_two(operator_source: &str, use_source: &str) -> Option<String> {
 
 #[test]
 fn cross_file_source_extension_unary_and_increment_operators_run() {
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    if false /* toolchain gate panics */ || false
+    /* toolchain gate panics */
+    {
         return;
     }
     let operators = r#"
@@ -31,7 +33,9 @@ fun box(): String {
 
 #[test]
 fn cross_file_inline_extension_operators_keep_callable_bodies() {
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    if false /* toolchain gate panics */ || false
+    /* toolchain gate panics */
+    {
         return;
     }
     let operators = r#"

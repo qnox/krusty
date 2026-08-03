@@ -24,10 +24,14 @@ fn run(src: &str, stem: &str) -> Option<String> {
 /// Compile `lib_src` with krusty (emitting `@Metadata`), persist its classfiles to a fresh classpath
 /// dir, then compile+run `main` against that dir — a genuine krusty-emit → krusty-decode round-trip.
 fn roundtrip(tag: &str, lib_src: &str, main: &str) -> Option<String> {
-    let sl = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    let lib_classes =
-        common::expect_compile_in_process(lib_src, "Lib", std::slice::from_ref(&sl), Some(&jdk));
+    let sl = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let lib_classes = common::expect_compile_in_process(
+        lib_src,
+        "Lib",
+        std::slice::from_ref(&sl),
+        Some(jdk.as_path()),
+    );
     let dir = std::env::temp_dir().join(format!("krusty_cov10_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for (name, bytes) in &lib_classes {
@@ -35,7 +39,12 @@ fn roundtrip(tag: &str, lib_src: &str, main: &str) -> Option<String> {
         std::fs::create_dir_all(p.parent()?).ok()?;
         std::fs::write(&p, bytes).ok()?;
     }
-    Some(common::expect_box_run(main, "Main", &[dir, sl], Some(&jdk)))
+    Some(common::expect_box_run(
+        main,
+        "Main",
+        &[dir, sl],
+        Some(jdk.as_path()),
+    ))
 }
 
 // ---------------------------------------------------------------------------

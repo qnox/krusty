@@ -11,18 +11,14 @@ use std::process::Command;
 
 use super::common;
 
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
-
-fn java_home() -> Option<String> {
-    env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME"))
+fn java_home() -> String {
+    common::java_home()
 }
 
 /// Compile `src` with the krusty binary into a fresh dir; return (dir, java_home) or `None` if javap
 /// is unavailable (test then skips).
 fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)> {
-    let jh = java_home()?;
+    let jh = java_home();
     if !std::path::Path::new(&format!("{jh}/bin/javap")).exists() {
         return None;
     }
@@ -57,25 +53,27 @@ fn javap(jh: &str, class_file: &std::path::Path) -> String {
 /// Locate a real `kotlin-stdlib.jar` (the coroutine intrinsics — `Continuation`, `ContinuationImpl`,
 /// `IntrinsicsKt`, `ResultKt` — live there) for the compile + run classpath. Mirrors how the box
 /// harness finds it: a provisioned `target/cache/kotlinc/<v>/.../lib/kotlin-stdlib.jar`.
-fn stdlib_jar() -> Option<String> {
-    // Walk up from CWD looking for `target/cache/kotlinc/*/kotlinc/lib/kotlin-stdlib.jar`.
-    let mut dir = std::env::current_dir().ok()?;
+fn stdlib_jar() -> String {
+    // Walk up from CWD looking for `target/cache/kotlinc/*/kotlinc/lib/kotlin-stdlib.jar`; fall back
+    // to the shared accessor, which panics with the provisioning instructions when it is absent. An
+    // unprovisioned toolchain is a FAILURE here, never a skip.
+    let mut dir = std::env::current_dir().expect("a current directory");
     loop {
         if let Ok(versions) = fs::read_dir(dir.join("target/cache/kotlinc")) {
             for v in versions.flatten() {
                 let jar = v.path().join("kotlinc/lib/kotlin-stdlib.jar");
                 if jar.exists() {
-                    return Some(jar.to_string_lossy().into_owned());
+                    return jar.to_string_lossy().into_owned();
                 }
             }
         }
         if !dir.pop() {
-            return None;
+            return common::stdlib_jar().to_string_lossy().into_owned();
         }
     }
 }
 
-fn jdk_modules_path() -> Option<PathBuf> {
+fn jdk_modules_path() -> PathBuf {
     common::jdk_modules()
 }
 
@@ -93,12 +91,12 @@ fn compile_krusty_src(
 fn compile_krusty_with_stdlib(stem: &str, src: &str, stdlib: &str, out_dir: &Path) {
     let cp = [PathBuf::from(stdlib)];
     let jdk = jdk_modules_path();
-    compile_krusty_src(stem, src, &cp, jdk.as_deref(), out_dir);
+    compile_krusty_src(stem, src, &cp, Some(jdk.as_path()), out_dir);
 }
 
 fn compile_krusty_with_cp(stem: &str, src: &str, cp_jars: &[PathBuf], out_dir: &Path) {
     let jdk = jdk_modules_path();
-    compile_krusty_src(stem, src, cp_jars, jdk.as_deref(), out_dir);
+    compile_krusty_src(stem, src, cp_jars, Some(jdk.as_path()), out_dir);
 }
 
 #[test]
@@ -107,13 +105,15 @@ fn krusty_compiled_suspend_dep_is_consumable() {
     // with IS_SUSPEND + the logical signature), then krusty compiles a CALLER against that dir. Without
     // the metadata writer the callee's physical `Object helper(Continuation)` is unresolvable as
     // `helper()`. Drives UseKt.caller(k) → 43.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_susp_rt_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -184,13 +184,15 @@ public class M {\n\
 fn suspend_lambda_control_flow_with_capture_runs() {
     // A `suspend` lambda whose VALUE is a conditional suspension over a captured variable
     // (`{ if (c) foo() else 7 }`). Only the `c == true` branch suspends. make(true)→42, make(false)→7.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamcf_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -235,13 +237,15 @@ fn suspend_lambda_param_with_suspension_runs() {
     // A `suspend` lambda with its OWN parameter that ALSO suspends (`{ val a = foo(); it + a }`). The
     // parameter `it` is a field (set by `create`) reloaded into a local each invokeSuspend entry, like
     // a capture. make().invoke(10, k) → 10 + 42 = 52.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_lampsusp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -283,13 +287,15 @@ fn suspend_lambda_captures_with_suspension_runs() {
     // A `suspend` lambda that BOTH captures an enclosing variable AND suspends (`{ n + foo() }`). The
     // capture `n` is a field reloaded into a local at each invokeSuspend entry; the suspension threads
     // `this`. make(10).invoke(k) → 10 + 42 = 52.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamcapsusp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -331,11 +337,16 @@ fn suspend_lambda_two_suspensions_async_resume() {
     // The ASYNC path of the general lambda-mode machine: `{ val a = suspendOnce(); val b = plain();
     // a + b }`. The first callee PARKS (returns COROUTINE_SUSPENDED); `a` must be SPILLED across the
     // second suspension. invoke suspends, resumeSaved(42) re-enters → 42 + 100 = 142.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let stdlib = stdlib_jar();
+    let Some(_kotlinc) = kotlinc_bin() else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("krusty_susp_lam2as_{}", std::process::id()));
@@ -414,13 +425,15 @@ fn suspend_lambda_two_suspensions_runs() {
     // A `suspend` lambda with TWO suspension points (`{ val a = foo(); val b = bar(); a + b }`). Its
     // invokeSuspend needs a multi-state machine (the lambda instance as the continuation) — the general
     // lambda-mode flattener. Both callees complete synchronously → make().invoke(k) = 42 + 100 = 142.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_lam2_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -462,13 +475,15 @@ fn suspend_lambda_non_tail_body_runs() {
     // A `suspend` lambda whose body BINDS a suspension result and then computes a tail expression
     // (`{ val a = foo(); a + 1 }`). The `invokeSuspend` state machine resumes into the binding, then
     // runs the tail. foo completes synchronously → make().invoke(k) yields boxed 43.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamnontail_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -510,13 +525,15 @@ fn suspend_fun_suspension_in_and_condition() {
     // A suspension on the RHS of `&&` in an `if` CONDITION (`if (c && check())`). The condition is
     // evaluated (and suspends) before the branch; only the `c == true` path calls `check()`. Drives:
     // bar(true) → check() true → 1; bar(false) → short-circuits (no suspension) → 2.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_andcond_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -562,13 +579,15 @@ fn suspend_lambda_with_parameter_runs() {
     // parameter is a field set by `create(value, completion)`; `invoke(p, completion)` boxes p, calls
     // create, then invokeSuspend. The lambda implements Function2<Integer, Continuation, Object>.
     // Driven: make().invoke(10, k) -> 11.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamparam_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -610,11 +629,16 @@ fn suspend_lambda_internal_suspension_async_resume() {
     // The ASYNC path for an internal-suspension lambda: `{ suspendOnce() }` where suspendOnce (kotlinc)
     // parks the continuation. The lambda's invokeSuspend returns COROUTINE_SUSPENDED up; a later
     // resumeWith re-enters it (state 1) and delivers the value. make().invoke(k) suspends, then 42.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let stdlib = stdlib_jar();
+    let Some(_kotlinc) = kotlinc_bin() else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("krusty_susp_laminas_{}", std::process::id()));
@@ -693,13 +717,15 @@ fn suspend_lambda_with_internal_suspension_runs() {
     // A `suspend` lambda whose body SUSPENDS (`{ foo() }`, foo a suspend fn). Its `invokeSuspend` is a
     // state machine with the lambda instance itself as the continuation. foo completes synchronously →
     // make().invoke(k) yields boxed 42.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_laminsusp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -741,13 +767,15 @@ fn suspend_lambda_captures_enclosing_variable() {
     // A `suspend` lambda capturing an enclosing parameter (`{ n + 1 }`). The captured value becomes a
     // field on the `SuspendLambda` subclass, set at construction and copied into the fresh instance
     // `invoke` builds. Driven: make(10).invoke(k) -> 10 + 1 = 11.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_lamcap_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -790,13 +818,15 @@ fn leaf_suspend_lambda_creates_and_invokes() {
     // `SuspendLambda` subclass implementing `Function1<Continuation,Object>`, NOT krusty's
     // invokedynamic path. A Java driver gets the returned `Function1` and invokes it with a
     // continuation; the synchronously-completing body yields boxed 42.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_lam_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -856,13 +886,15 @@ fn suspend_fun_suspension_on_elvis_rhs() {
     // A suspension on the RHS of an elvis (`x ?: fallback()`) — a CONDITIONAL suspension (only the
     // null case suspends). Drives both: `bar(null)` takes the suspending branch → 7+1=8; `bar(5)`
     // takes the value branch (no suspension) → 5+1=6.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_elvis_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -911,13 +943,15 @@ fn suspend_receiver_of_elvis_safecall_chain() {
     // `return { s…; v }` / `val x = { s…; v }` to `s…; return v` / `s…; val x = v`) the suspension
     // hides there and the flattener bails. Values match kotlinc: pick("a") = 1 + 100 = 101; pick("z")
     // (absent) = -1.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_elvischain_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -969,13 +1003,15 @@ fn suspend_try_catch_with_branch_in_nonsuspending_catch_runs() {
     // (the shape a production service's drift-check method uses). It must compile AND run —
     // loading the class verifies the handler frames. (A branchy catch that itself SUSPENDS is still
     // skipped — its branch temps would span resume states.)
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_branchcatch_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1029,13 +1065,15 @@ fn suspend_in_try_catch_with_spilled_locals() {
     // (whose slot the register allocator coalesces with the reference-typed catch var) from being
     // spilled dead on the exceptional edge (else: "ref stored into int field" VerifyError).
     // Values match kotlinc: compute(false) = risky(7) + "cfg".length(3) = 10; compute(true) = -1.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_trycatch_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1086,10 +1124,10 @@ public class M {\n\
 /// `fun box(): String = runBlocking { … }` on the shared box runner — the same harness the other
 /// `suspend … runBlocking { }` behavioural tests use. `None` if the toolchain isn't provisioned.
 fn run_suspend_box(src: &str, tag: &str) -> Option<String> {
-    let sl = common::stdlib_jar()?;
-    let coro = common::coroutines_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_and_run_box(src, tag, &[sl, coro, jdk.clone()], Some(&jdk))
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    let jdk = common::jdk_modules();
+    common::compile_and_run_box(src, tag, &[sl, coro, jdk.clone()], Some(jdk.as_path()))
 }
 
 #[test]
@@ -1099,9 +1137,10 @@ fn suspend_unit_fn_bare_early_return() {
     // must `areturn Unit.INSTANCE` — emitting a void `return` (as the bare `Return(None)` did) yields
     // "Method expects a return value" at load. Production hit: an invitation-accepting service method
     // (`… ?: return`, `if (status != PENDING) return`). proc(b,true) leaves v=0; proc(b,false) sets v=1.
-    if common::stdlib_jar().is_none()
-        || common::coroutines_jar().is_none()
-        || common::jdk_modules().is_none()
+    if false /* toolchain gate panics */
+        || false /* toolchain gate panics */
+        || false
+    /* toolchain gate panics */
     {
         return;
     }
@@ -1133,9 +1172,10 @@ fn suspend_in_catch_body_spills_exception() {
     // field and restored per-state, exactly like any local live across a suspension. compute(sb,false) =
     // risky(7) + "cfg".length(3) = 10 with sb "R"; compute(sb,true) rethrows the original
     // IllegalStateException("boom") after running the catch's suspend, with sb "R[boomC]".
-    if common::stdlib_jar().is_none()
-        || common::coroutines_jar().is_none()
-        || common::jdk_modules().is_none()
+    if false /* toolchain gate panics */
+        || false /* toolchain gate panics */
+        || false
+    /* toolchain gate panics */
     {
         return; // toolchain not provisioned
     }
@@ -1179,9 +1219,10 @@ fn suspend_return_when_with_suspending_branches() {
     // including an `else -> throw` divergent arm. Desugars to `val tmp; when (k) { … tmp = v }; return
     // tmp`, each branch flattened as a suspending `when`-statement arm. handle(0) = "a5" with sb "A!";
     // handle(1) = null with sb "B"; handle(2) = "c" with sb "C".
-    if common::stdlib_jar().is_none()
-        || common::coroutines_jar().is_none()
-        || common::jdk_modules().is_none()
+    if false /* toolchain gate panics */
+        || false /* toolchain gate panics */
+        || false
+    /* toolchain gate panics */
     {
         return; // toolchain not provisioned
     }
@@ -1234,14 +1275,15 @@ fn leaf_suspend_fun_has_cps_signature() {
 /// The suspend callees complete synchronously (never COROUTINE_SUSPENDED), so the whole state machine
 /// runs to completion under `-Xverify:all`. Skips if javac / kotlin-stdlib is unavailable.
 fn run_suspend(name: &str, src: &str, call: &str, expect: i32) {
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib.jar found");
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1280,13 +1322,15 @@ public class M {{\n\
 /// `suspend_funs` — the coroutine pass must learn it from the resolver (`@Metadata`/module symbols).
 /// `call` is `Facade.method`, driven as `Facade.method(k)`.
 fn run_suspend_2(name: &str, lib: &str, user: &str, facade: &str, method: &str, expect: i32) {
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_susp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -1387,11 +1431,16 @@ fn suspend_fun_calls_classpath_suspend_fun() {
     // `Object helper(Continuation)`). krusty then compiles the caller against `-cp lib.jar`. The
     // classpath parser must resolve `helper()` by its LOGICAL signature (no continuation arg, `Int`
     // return) and mark it suspend; the coroutine pass threads the continuation. 42 + 1 = 43.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let stdlib = stdlib_jar();
+    let Some(_kotlinc) = kotlinc_bin() else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("krusty_susp_cp_{}", std::process::id()));
@@ -1513,13 +1562,15 @@ fn suspend_fun_suspension_inside_if_not_taken() {
 fn state_machine_member_suspend_fun_runs() {
     // A member suspend fn that SUSPENDS (calls `foo`): its continuation `C$m$1` must capture the
     // receiver and, on resume, call `receiver.m(continuation)`. Driven: new C(100).m(k) -> 100+42=142.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_smmem_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1560,13 +1611,15 @@ fn state_machine_member_suspend_fun_with_param_runs() {
     // A member suspend fn that SUSPENDS and has its OWN parameter `x`, live across the suspension:
     // the continuation `C$m$1` must capture the receiver AND spill `x` (restored on resume). Driven:
     // new C(100).m(5, k) -> 100 + 42 + 5 = 147.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_smmemp_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1607,11 +1660,16 @@ fn toplevel_suspend_fun_with_param_survives_async_resume() {
     // ASYNC case for a TOP-LEVEL suspend fn with a live parameter `x` (the `receiver=None` capture
     // path). `caller(5)` suspends on `suspendOnce`; on resume, `x` must be restored from the captured
     // continuation field. 42 + 5 = 47.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let stdlib = stdlib_jar();
+    let Some(_kotlinc) = kotlinc_bin() else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("krusty_susp_tlp_async_{}", std::process::id()));
@@ -1690,11 +1748,16 @@ fn member_suspend_fun_with_param_survives_async_resume() {
     // suspension/resume. `suspendOnce` (kotlinc) parks the continuation; `m` propagates
     // COROUTINE_SUSPENDED, and on `resumeSaved(42)` re-enters — `x` (and the receiver `base`) must be
     // restored from the continuation's captured fields. new C(100).m(5): 100 + 42 + 5 = 147.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let stdlib = stdlib_jar();
+    let Some(_kotlinc) = kotlinc_bin() else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("krusty_susp_memp_async_{}", std::process::id()));
@@ -1771,13 +1834,15 @@ public class M {\n\
 fn leaf_member_suspend_fun_runs() {
     // A leaf `suspend` member function: it gets the CPS signature on the instance method (`Object
     // m(Continuation)`), no state machine. A Java driver creates the instance and calls it: 100+5=105.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_susp_mem_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -1942,11 +2007,16 @@ fn suspend_fun_actually_suspends_and_resumes_async() {
     // state and run to completion. `suspendOnce` (kotlinc) parks the continuation; the driver gets
     // `COROUTINE_SUSPENDED` back from `caller`, then resumes with 42 → caller computes 43 and delivers
     // it to the completion. Proves invokeSuspend / label-MIN re-entry actually works.
-    let _jh = match java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let _jh = {
+        let j = java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home: {j}"
+        );
+        j
     };
-    let (Some(stdlib), Some(_kotlinc)) = (stdlib_jar(), kotlinc_bin()) else {
+    let stdlib = stdlib_jar();
+    let Some(_kotlinc) = kotlinc_bin() else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("krusty_susp_async_{}", std::process::id()));

@@ -6,7 +6,7 @@
 //! on a real JVM (the packing bug surfaced as a VerifyError, not a diagnostic).
 use super::common;
 fn run(src: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar()?;
+    let stdlib = common::stdlib_jar();
     let jdk = std::env::var("JAVA_HOME")
         .ok()
         .filter(|v| !v.is_empty())

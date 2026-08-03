@@ -89,12 +89,8 @@ fn suspend_interface_get_with_list_param_lowers() {
     // w1 exactly: a `suspend` interface member `get(ids: List<Int>): List<Info>`. The `List<Int>` PARAM was
     // the resolution failure (`unresolved method 'get' on 'lib/Port'`), not the return. Asserts the caller
     // LOWERS end-to-end (a coroutine RUN needs a driver, out of scope); the library is built by real kotlinc.
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib(
         "w1_susp",
         "package lib\n\
@@ -108,7 +104,7 @@ fn suspend_interface_get_with_list_param_lowers() {
         suspend fun use(p: Port): Int = p.get(listOf(1, 2)).sumOf { it.n }\n\
         fun box(): String = \"OK\"\n";
     assert_eq!(
-        common::compile_and_run_box(MAIN, "Main", &cp, Some(&jdk))
+        common::compile_and_run_box(MAIN, "Main", &cp, Some(jdk.as_path()))
             .expect("suspend List-param lowers"),
         "OK"
     );
@@ -124,11 +120,11 @@ fn suspend_interface_get_with_list_param_lowers() {
 // LOWERING is the bar, exactly as `suspend_interface_get_with_list_param_lowers`.
 
 fn suspend_lowers(tag: &str, lib: &str, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let libout = common::compile_lib(tag, lib)?;
     let cp: Vec<PathBuf> = vec![libout, sl];
-    common::compile_and_run_box(main, "Main", &cp, Some(&jdk))
+    common::compile_and_run_box(main, "Main", &cp, Some(jdk.as_path()))
 }
 
 #[test]

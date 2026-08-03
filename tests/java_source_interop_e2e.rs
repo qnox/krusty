@@ -134,10 +134,7 @@ open class A {
 fun box(): String = J().name()
 "#;
     let java = "public class J extends A { @Override public String name() { return \"OK\"; } }";
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: JDK unavailable");
-        return;
-    };
+    let jdk = common::jdk_modules();
     let jars = common::classpath_jars_for(kotlin);
 
     // 1. Stubs: resolve `A` as a known Kotlin class, everything else via a real Classpath.
@@ -205,10 +202,7 @@ fun box(): String = J().name()
 /// classpath — the same javac-first, dir-chaining flow `compile_module_test` performs per module.
 #[test]
 fn module_dependency_with_java_source() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: JDK unavailable");
-        return;
-    };
+    let jdk = common::jdk_modules();
     let jars = common::classpath_jars_for("");
     // Module `lib`: J.java + lib.kt (Kotlin wrapping the Java class).
     let Some((javadir, java_classes)) = common::javac_compile(
@@ -415,7 +409,7 @@ fn compile_java(java: &[(&str, &str)]) -> Option<common::JavacOutput> {
 
 fn mixed_diagnostics(java: &[(&str, &str)], kotlin: &str) -> Option<Vec<String>> {
     let (javadir, _) = compile_java(java)?;
-    let jdk = common::jdk_modules()?;
+    let jdk = common::jdk_modules();
     let mut classpath = common::classpath_jars_for(kotlin);
     classpath.push(javadir.clone());
     let diagnostics = common::front_end_diagnostics(kotlin, &classpath, Some(jdk.as_path()));
@@ -432,10 +426,7 @@ fn run_mixed(java: &[(&str, &str)], kotlin: &str) {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: JDK modules unavailable");
-        return;
-    };
+    let jdk = common::jdk_modules();
     // Gate-canonical jars (stdlib/test/annotations — Intrinsics must resolve at runtime); the javac
     // output dir joins only the COMPILE classpath. The run classpath stays jars-only so the pooled
     // BoxRunner JVM (keyed by classpath) is reused across tests — the Java classes ride along as
@@ -475,10 +466,7 @@ fn inferred_return_worklist_tracks_java_synthetic_property_name() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: JDK modules unavailable");
-        return;
-    };
+    let jdk = common::jdk_modules();
     let sources = [
         "package demo\nfun box(): String = entryName()",
         "package demo\nfun entryName() = SyntheticCatalogImpl().entries[0].name",
@@ -486,7 +474,8 @@ fn inferred_return_worklist_tracks_java_synthetic_property_name() {
     ];
     let mut classpath = common::classpath_jars_for(&sources.join("\n"));
     classpath.push(javadir.clone());
-    let diagnostics = common::front_end_diagnostics_files(&sources, &classpath, Some(&jdk));
+    let diagnostics =
+        common::front_end_diagnostics_files(&sources, &classpath, Some(jdk.as_path()));
     if let Some(root) = javadir.parent() {
         let _ = std::fs::remove_dir_all(root);
     }
@@ -508,10 +497,7 @@ fn inferred_return_worklist_tracks_unicode_java_synthetic_property_name() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: JDK modules unavailable");
-        return;
-    };
+    let jdk = common::jdk_modules();
     let sources = [
         "package demo\nfun unicodeBox(): String = unicodeEntryName()",
         "package demo\nfun unicodeEntryName() = UnicodeSyntheticCatalogImpl().äpfel[0].name",
@@ -519,7 +505,8 @@ fn inferred_return_worklist_tracks_unicode_java_synthetic_property_name() {
     ];
     let mut classpath = common::classpath_jars_for(&sources.join("\n"));
     classpath.push(javadir.clone());
-    let diagnostics = common::front_end_diagnostics_files(&sources, &classpath, Some(&jdk));
+    let diagnostics =
+        common::front_end_diagnostics_files(&sources, &classpath, Some(jdk.as_path()));
     if let Some(root) = javadir.parent() {
         let _ = std::fs::remove_dir_all(root);
     }
@@ -997,9 +984,7 @@ fn value_shadows_classpath_class_in_static_receiver_position() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let mut cp = common::classpath_jars_for("");
     cp.push(javadir.clone());
     let src = "val K = \"value\"\nfun box(): String = K.s()";

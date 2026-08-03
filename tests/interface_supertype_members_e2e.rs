@@ -13,7 +13,7 @@ use super::common;
 fn build_lib(work: &std::path::Path, src: &str) -> Option<PathBuf> {
     let out = work.join("libout");
     fs::create_dir_all(&out).ok()?;
-    let stdlib = common::stdlib_jar()?;
+    let stdlib = common::stdlib_jar();
     let lib_kt = work.join("Lib.kt");
     fs::write(&lib_kt, src).ok()?;
     let args = vec![
@@ -39,12 +39,12 @@ fn work_dir(tag: &str) -> PathBuf {
 fn run_box_against(lib: &str, main: &str, tag: &str) -> Option<String> {
     let work = work_dir(tag);
     let libout = build_lib(&work, lib)?;
-    let stdlib = common::stdlib_jar()?;
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     // The work dir must be reclaimed even when the compile step PANICS (`work_dir` only sweeps
     // same-pid leftovers), so the cleanup runs on unwind rather than after the call.
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        common::expect_box_run(main, "Main", &[libout, stdlib], jdk.as_deref())
+        common::expect_box_run(main, "Main", &[libout, stdlib], Some(jdk.as_path()))
     }));
     let _ = fs::remove_dir_all(&work);
     match out {
@@ -132,9 +132,7 @@ fn jvmstatic_object_member() {
 fn suspend_interface_member() {
     // A `suspend` member is driven from Java with a completion `Continuation` (a suspend fn can't be
     // `box()`), the same shape `suspend_e2e.rs` uses.
-    let Some(jh) = common::java_home() else {
-        return;
-    };
+    let jh = common::java_home();
     if !std::path::Path::new(&format!("{jh}/bin/javac")).exists() {
         return;
     }
@@ -160,9 +158,7 @@ fn suspend_interface_member() {
     let Some(libout) = build_lib(&work, lib) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
 
     let main_src = "package app\n\
          suspend fun grab(r: ConfigRepo): String {\n\
@@ -180,7 +176,7 @@ fn suspend_interface_member() {
             main_src,
             "Main",
             &[libout.clone(), stdlib.clone()],
-            jdk.as_deref(),
+            Some(jdk.as_path()),
             &work,
         )
         .is_some(),

@@ -28,8 +28,8 @@ use std::path::PathBuf;
 
 /// The `<stdlib jar>` + JDK `lib/modules` compile classpath, or `None` when the toolchain is absent.
 fn box_cp() -> Option<(Vec<PathBuf>, Option<PathBuf>)> {
-    let jh = common::java_home()?;
-    let stdlib = common::stdlib_jar()?;
+    let jh = common::java_home();
+    let stdlib = common::stdlib_jar();
     let jdk = PathBuf::from(format!("{jh}/lib/modules"));
     if !jdk.exists() {
         return None;
@@ -56,13 +56,10 @@ fn box_ok(src: &str) {
 /// the source and the backend reaches one of its unsupported-feature exits. Returns `true`
 /// (skip-clean) when the toolchain is absent.
 fn rejects(src: &str) -> bool {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return true;
-    };
-    let Some(jdk_modules) = common::jdk_modules() else {
-        return true;
-    };
-    common::backend_rejects_in_process(src, "S", &[stdlib], Some(&jdk_modules)).unwrap_or(false)
+    let stdlib = common::stdlib_jar();
+    let jdk_modules = common::jdk_modules();
+    common::backend_rejects_in_process(src, "S", &[stdlib], Some(jdk_modules.as_path()))
+        .unwrap_or(false)
 }
 
 // ===================================================================================================

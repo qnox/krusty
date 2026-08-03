@@ -70,12 +70,8 @@ fn named_argument_skipping_a_default_resolves_and_runs() {
     let Some(libout) = common::compile_lib("named_skips_default", LIB) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [libout, stdlib];
     // Each call names a parameter whose type differs from the omitted leading one, so a positional
     // check would compare the argument against the wrong declaration.
@@ -89,10 +85,11 @@ fn named_argument_skipping_a_default_resolves_and_runs() {
         \x20 if (spanning(name = \"n\", tail = true) != \"n/false/0/true\") return \"both: ${spanning(name = \"n\", tail = true)}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(&jdk)) else {
+    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path()))
+    else {
         panic!(
             "compile/run returned None: {:?}",
-            common::front_end_diagnostics(main, &classpath, Some(&jdk))
+            common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()))
         );
     };
     assert_eq!(out, "OK");
@@ -109,12 +106,8 @@ fn trailing_lambda_is_typed_from_the_slot_a_named_argument_leaves_it() {
     let Some(libout) = common::compile_lib("named_skips_default_lambda", LAMBDA_LIB) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [libout, stdlib];
     // The `suspend` receiver body is EMPTY on purpose: a `suspend Receiver.() -> Unit` whose body
     // actually uses its receiver is a separate, pre-existing lowering gap ("this construct is not yet
@@ -133,10 +126,11 @@ fn trailing_lambda_is_typed_from_the_slot_a_named_argument_leaves_it() {
         \x20 if (seen != 15) return \"bodies ran: $seen\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(&jdk)) else {
+    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path()))
+    else {
         panic!(
             "compile/run returned None: {:?}",
-            common::front_end_diagnostics(main, &classpath, Some(&jdk))
+            common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()))
         );
     };
     assert_eq!(out, "OK");
@@ -149,16 +143,12 @@ fn named_argument_type_is_still_checked_against_the_parameter_it_names() {
     let Some(libout) = common::compile_lib("named_skips_default_bad", LIB) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [libout, stdlib];
     let main = "import lib.labelled\n\
         fun box(): String = labelled(second = 5)\n";
-    let diagnostics = common::front_end_diagnostics(main, &classpath, Some(&jdk));
+    let diagnostics = common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()));
     assert!(
         diagnostics.iter().any(|message| {
             message.contains("actual type is 'Int'") && message.contains("'String' was expected")

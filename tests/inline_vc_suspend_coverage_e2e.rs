@@ -33,12 +33,9 @@ use super::common;
 
 /// Compile `src` (stem `stem`) against kotlin-stdlib + JDK modules and run `box()`, asserting "OK".
 fn run_ok(src: &str, stem: &str) {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping {stem}: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let out = common::expect_box_run(src, stem, &[stdlib], jdk.as_deref());
+    let out = common::expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()));
     assert_eq!(out, "OK", "{stem} produced wrong box() result");
 }
 
@@ -50,15 +47,16 @@ fn run_ok(src: &str, stem: &str) {
 /// evaluates `SKt.<call_expr>` (where `k` is an in-scope trivial `Continuation`) and asserts the
 /// synchronously-completing result's `String.valueOf` equals `expect`.
 fn run_suspend(name: &str, src: &str, call_expr: &str, expect: &str) {
-    let jh = match common::java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => return,
+    let jh = {
+        let j = common::java_home();
+        assert!(
+            std::path::Path::new(&format!("{j}/bin/javac")).exists(),
+            "JAVA_HOME is not a usable JDK home"
+        );
+        j
     };
     let _ = jh;
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping {name}: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let dir = std::env::temp_dir().join(format!("krusty_ivsc_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -67,7 +65,7 @@ fn run_suspend(name: &str, src: &str, call_expr: &str, expect: &str) {
         src,
         "S",
         std::slice::from_ref(&stdlib),
-        jdk.as_deref(),
+        Some(jdk.as_path()),
         &dir,
     );
     assert!(
@@ -105,16 +103,11 @@ public class M {{\n\
 /// it — exercising the `src/jvm/suspend.rs` bail branch for suspend-function shapes krusty does not
 /// yet lower. Skips clean when the toolchain is absent.
 fn rejects_suspend(name: &str, src: &str) {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping {name}: no kotlin-stdlib jar");
-        return;
-    };
-    let Some(jdk_modules) = common::jdk_modules() else {
-        eprintln!("skipping {name}: no JDK modules");
-        return;
-    };
-    let rejected = common::backend_rejects_in_process(src, "S", &[stdlib], Some(&jdk_modules))
-        .unwrap_or(false);
+    let stdlib = common::stdlib_jar();
+    let jdk_modules = common::jdk_modules();
+    let rejected =
+        common::backend_rejects_in_process(src, "S", &[stdlib], Some(jdk_modules.as_path()))
+            .unwrap_or(false);
     assert!(
         rejected,
         "{name}: expected the backend to REJECT this suspend shape, but it compiled"

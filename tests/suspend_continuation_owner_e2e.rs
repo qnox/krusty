@@ -6,11 +6,12 @@
 use super::common;
 
 fn class_names(src: &str) -> Vec<String> {
-    let jdk = common::jdk_modules().expect("jdk modules");
-    let sl = common::stdlib_jar().expect("stdlib jar");
-    let coro = common::coroutines_jar().expect("coroutines jar");
-    let classes = common::compile_in_process(src, "File", &[sl, coro, jdk.clone()], Some(&jdk))
-        .unwrap_or_else(|| panic!("krusty failed to compile:\n{src}"));
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    let classes =
+        common::compile_in_process(src, "File", &[sl, coro, jdk.clone()], Some(jdk.as_path()))
+            .unwrap_or_else(|| panic!("krusty failed to compile:\n{src}"));
     classes.into_iter().map(|(name, _)| name).collect()
 }
 

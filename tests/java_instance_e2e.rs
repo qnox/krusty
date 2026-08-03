@@ -25,9 +25,8 @@ fn constructs_and_calls_java_instance_methods() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let (Some(jdk), Some(stdlib)) = (common::jdk_modules(), common::stdlib_jar()) else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let root = std::env::temp_dir().join(format!("krusty_ji_{}", std::process::id()));
     let cp = root.join("cp");
     let _ = fs::remove_dir_all(&root);
@@ -75,16 +74,13 @@ fn constructs_and_calls_java_instance_methods() {
 /// picks the arity/type-appropriate overload, and emits `invokestatic`.
 #[test]
 fn calls_java_static_overloaded_methods() {
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let java_home = common::java_home();
     let javac = format!("{java_home}/bin/javac");
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let (Some(jdk), Some(stdlib)) = (common::jdk_modules(), common::stdlib_jar()) else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let root = std::env::temp_dir().join(format!("krusty_js_{}", std::process::id()));
     let cp = root.join("cp");
     let _ = fs::remove_dir_all(&root);

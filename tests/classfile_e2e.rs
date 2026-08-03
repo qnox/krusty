@@ -9,7 +9,9 @@ use super::common;
 
 #[test]
 fn emitted_add_class_verifies_and_runs() {
-    if common::java_home().is_none() {
+    if false
+    /* toolchain gate panics */
+    {
         eprintln!("skipping: javac/java not available");
         return;
     }

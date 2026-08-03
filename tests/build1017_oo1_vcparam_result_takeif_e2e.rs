@@ -15,10 +15,10 @@ const LIB: &str = "package lib\n\
     object R : Repo { override fun byHash(h: Hash): Tok? = if (h.v == \"x\") Tok(true) else null }\n";
 
 fn run(tag: &str, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let lo = common::compile_lib(tag, LIB)?;
-    common::compile_and_run_box(main, "Main", &[lo, sl, jdk.clone()], Some(&jdk))
+    common::compile_and_run_box(main, "Main", &[lo, sl, jdk.clone()], Some(jdk.as_path()))
 }
 
 #[test]

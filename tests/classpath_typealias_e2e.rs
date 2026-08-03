@@ -43,9 +43,7 @@ fn classpath_typealias_visibility_is_enforced() {
     let Some(libout) = common::compile_lib("typealias_visibility", VISIBILITY_LIB) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let cp = [libout.clone(), stdlib];
     let diagnostics = common::front_end_diagnostics(
@@ -56,7 +54,7 @@ fn classpath_typealias_visibility_is_enforced() {
          fun internalValue(): Any = InternalAlias()\n\
          fun privateValue(): Any = PrivateAlias()\n",
         &cp,
-        jdk.as_deref(),
+        Some(jdk.as_path()),
     );
 
     assert!(diagnostics

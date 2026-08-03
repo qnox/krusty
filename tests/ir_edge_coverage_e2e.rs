@@ -11,14 +11,8 @@ use std::path::PathBuf;
 /// JVM toolchain / stdlib isn't provisioned; a `None` from a provisioned toolchain is a real
 /// compile/run failure and panics so regressions surface.
 fn ok(src: &str, stem: &str) {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping {stem}: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping {stem}: no kotlin-stdlib jar found");
-        return;
-    };
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
     let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
     match common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) {
         Some(out) => assert_eq!(out, "OK", "{stem}"),

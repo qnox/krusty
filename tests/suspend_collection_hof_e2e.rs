@@ -21,12 +21,8 @@ const LIB: &str = "package lib\n\
 
 #[test]
 fn suspend_inline_hof_on_collection_result_compiles() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib("susp_hof", LIB) else {
         return;
     };
@@ -62,7 +58,7 @@ fn suspend_inline_hof_on_collection_result_compiles() {
         ),
     ] {
         assert!(
-            common::compile_in_process(main, "Main", &cp, Some(&jdk)).is_some(),
+            common::compile_in_process(main, "Main", &cp, Some(jdk.as_path())).is_some(),
             "{tag}: suspend inline-HOF on a collection result should lower"
         );
     }

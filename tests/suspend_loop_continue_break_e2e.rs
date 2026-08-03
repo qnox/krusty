@@ -10,15 +10,9 @@ use super::common;
 
 #[test]
 fn suspend_loop_continue_break_runs() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(coro) = common::coroutines_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
     // Each callee suspends (completes synchronously under runBlocking) so every loop body suspends and
     // is flattened; the jumps therefore exercise the state-machine goto rewrite, not structural emit.
     //   forSkip:  0..5 skip i==2                 → 0+1+3+4+5   = 13
@@ -44,7 +38,8 @@ fn suspend_loop_continue_break_runs() {
             if (a == 13 && b == 3 && c == 19 && e == 6 && f == 40 && g == 15 && h == 66) \"OK\"\n\
             else \"F a=$a b=$b c=$c e=$e f=$f g=$g h=$h\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(&jdk));
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

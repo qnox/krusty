@@ -33,11 +33,11 @@ fun <T> runBlocking(block: suspend () -> T): T {
 /// Returns the trimmed `box()` output, or `None` when the Kotlin/JDK toolchain is unavailable —
 /// that, and only that, is a skip: a source the front end rejects panics with its diagnostics.
 fn run_box(stem: &str, body: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar()?;
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let src = format!("{PREAMBLE}{body}");
     Some(
-        common::expect_box_run(&src, stem, &[stdlib], jdk.as_deref())
+        common::expect_box_run(&src, stem, &[stdlib], Some(jdk.as_path()))
             .trim()
             .to_string(),
     )

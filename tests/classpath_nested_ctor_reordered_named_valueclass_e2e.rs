@@ -25,12 +25,8 @@ const LIB: &str = "package lib\n\
 
 #[test]
 fn classpath_nested_ctor_reordered_named_valueclass_runs() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(lo) = common::compile_lib("nested_vc_ctor", LIB) else {
         return;
     };
@@ -43,7 +39,8 @@ fn classpath_nested_ctor_reordered_named_valueclass_runs() {
                 && c.id.v == \"Q\" && c.c.n == 9 && c.a.v == \"X\") \"OK\"\n\
             else \"F id=${m.id.v} a=${m.a.v} b=${m.b.v} n=${m.n} c=${c.c.n}\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[lo, sl, jdk.clone()], Some(&jdk));
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[lo, sl, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

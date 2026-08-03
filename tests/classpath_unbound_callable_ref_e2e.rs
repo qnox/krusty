@@ -2,9 +2,9 @@ use super::common;
 
 fn run_source_files_against(tag: &str, library: &str, sources: &[(&str, &str)]) -> Option<String> {
     let dependency = common::compile_lib(tag, library)?;
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_and_run_box_files(sources, &[dependency, stdlib], Some(&jdk))
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    common::compile_and_run_box_files(sources, &[dependency, stdlib], Some(jdk.as_path()))
 }
 
 fn source_file_diagnostics_against(
@@ -13,12 +13,12 @@ fn source_file_diagnostics_against(
     sources: &[&str],
 ) -> Option<Vec<String>> {
     let dependency = common::compile_lib(tag, library)?;
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     Some(common::front_end_diagnostics_files(
         sources,
         &[dependency, stdlib],
-        Some(&jdk),
+        Some(jdk.as_path()),
     ))
 }
 

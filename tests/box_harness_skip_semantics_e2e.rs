@@ -30,21 +30,23 @@ fn panic_message<F: FnOnce()>(f: F) -> String {
 /// A source the front end REJECTS must fail the test and name the diagnostic — never skip.
 #[test]
 fn a_rejected_source_panics_with_its_diagnostics() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let src = "fun box(): String = definitelyNotDeclaredAnywhere()\n";
-    let diagnostics = common::front_end_diagnostics(src, std::slice::from_ref(&stdlib), Some(&jdk));
+    let diagnostics =
+        common::front_end_diagnostics(src, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
     assert!(
         !diagnostics.is_empty(),
         "fixture must actually be rejected by the front end"
     );
 
     let msg = panic_message(|| {
-        common::expect_box_run(src, "RejectRun", std::slice::from_ref(&stdlib), Some(&jdk));
+        common::expect_box_run(
+            src,
+            "RejectRun",
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path()),
+        );
     });
     assert!(
         msg.contains("compile/run returned None"),
@@ -60,7 +62,7 @@ fn a_rejected_source_panics_with_its_diagnostics() {
             src,
             "RejectCompile",
             std::slice::from_ref(&stdlib),
-            Some(&jdk),
+            Some(jdk.as_path()),
         );
     });
     assert!(

@@ -40,13 +40,13 @@ fun box(): String {
 fn run_box(_tag: &str, src: &str) -> Option<String> {
     // The data class emits `Intrinsics` references, so kotlin-stdlib must be on the classpath. The
     // jimage (`<jdk>/lib/modules`) is the compile-time bootclasspath so collection supertypes resolve.
-    let stdlib = common::stdlib_jar()?;
-    let jdk_modules = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk_modules = common::jdk_modules();
     Some(common::expect_box_run(
         src,
         "Destr",
         &[stdlib],
-        Some(&jdk_modules),
+        Some(jdk_modules.as_path()),
     ))
 }
 

@@ -6,17 +6,18 @@
 use super::common;
 
 fn run_box(src: &str, tag: &str) -> Option<String> {
-    let sl = common::stdlib_jar()?;
-    let coro = common::coroutines_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_and_run_box(src, tag, &[sl, coro, jdk.clone()], Some(&jdk))
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    let jdk = common::jdk_modules();
+    common::compile_and_run_box(src, tag, &[sl, coro, jdk.clone()], Some(jdk.as_path()))
 }
 
 #[test]
 fn suspend_member_overriding_nongeneric_interface() {
-    if common::stdlib_jar().is_none()
-        || common::coroutines_jar().is_none()
-        || common::jdk_modules().is_none()
+    if false /* toolchain gate panics */
+        || false /* toolchain gate panics */
+        || false
+    /* toolchain gate panics */
     {
         return;
     }
@@ -42,9 +43,10 @@ fn suspend_override_needing_generic_bridge_is_skipped_not_miscompiled() {
     // A suspend member reached through a GENERIC ancestor (`A<T>`) via a raw-looking intermediate
     // (`B : A<String>`) DOES need an erasure bridge, which the coroutine lowering can't fix up. krusty
     // must SKIP the file (emit nothing runnable) rather than emit a broken bridge → `AbstractMethodError`.
-    if common::stdlib_jar().is_none()
-        || common::coroutines_jar().is_none()
-        || common::jdk_modules().is_none()
+    if false /* toolchain gate panics */
+        || false /* toolchain gate panics */
+        || false
+    /* toolchain gate panics */
     {
         return;
     }

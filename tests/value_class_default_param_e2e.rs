@@ -198,9 +198,7 @@ fun box(): String {
 /// stays a skip, never a class-load VerifyError.
 #[test]
 fn boxed_read_defaults_still_rejected() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let cases: &[(&str, &str)] = &[
         (
             "VcDefaultTopLevelValRead",
@@ -233,7 +231,7 @@ fun box(): String = test().toString()
     ];
     for (stem, src) in cases {
         let cp = krusty::toolchain::classpath_jars_for(src);
-        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(&jdk));
+        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(jdk.as_path()));
         assert_ne!(
             outcome,
             Some(common::BackendOutcome::Emitted),
@@ -248,9 +246,7 @@ fun box(): String = test().toString()
 /// sound skip.
 #[test]
 fn unsafe_value_class_defaults_still_rejected() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let cases: &[(&str, &str)] = &[
         (
             "VcDefaultGeneric",
@@ -316,7 +312,7 @@ fun box(): String = test().toString()
     ];
     for (stem, src) in cases {
         let cp = krusty::toolchain::classpath_jars_for(src);
-        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(&jdk));
+        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(jdk.as_path()));
         assert_ne!(
             outcome,
             Some(common::BackendOutcome::Emitted),

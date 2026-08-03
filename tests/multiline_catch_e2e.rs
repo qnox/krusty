@@ -5,14 +5,8 @@ use super::common;
 
 #[test]
 fn multiline_catch_parameter() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let src = "fun parse(s: String): Int {\n\
         \x20   return try {\n\
         \x20       s.toInt()\n\
@@ -28,7 +22,7 @@ fn multiline_catch_parameter() {
         \x20   return \"OK\"\n\
         }\n";
     let cp = vec![sl.clone()];
-    let classes = common::compile_in_process(src, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(src, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile a multi-line catch parameter");
     match common::run_box(&classes, "MainKt", &cp) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),

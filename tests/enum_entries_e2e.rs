@@ -11,13 +11,13 @@ use super::common;
 /// `None` means ONLY that the toolchain isn't provisioned — a source krusty REJECTS panics with its
 /// diagnostics rather than skipping the assertions below.
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     Some(common::expect_compile_in_process(
         src,
         "E",
         &[stdlib],
-        Some(&jdk),
+        Some(jdk.as_path()),
     ))
 }
 
@@ -58,7 +58,7 @@ fn enum_emits_entries_field_and_accessor() {
 
     // Runs on a real JVM (the `<clinit>` `EnumEntriesKt.enumEntries` call resolves against stdlib).
     if let Some(box_class) = common::find_box_class(&cs) {
-        let stdlib = common::stdlib_jar().unwrap();
+        let stdlib = common::stdlib_jar();
         assert_eq!(
             common::run_box(&cs, &box_class, &[stdlib]).as_deref(),
             Some("OK")
@@ -109,7 +109,7 @@ fn enum_with_ctor_and_method_still_emits_entries() {
     assert!(ci.methods.iter().any(|m| m.name == "getEntries"));
     assert!(ci.methods.iter().any(|m| m.name == "$values"));
     if let Some(box_class) = common::find_box_class(&cs) {
-        let stdlib = common::stdlib_jar().unwrap();
+        let stdlib = common::stdlib_jar();
         assert_eq!(
             common::run_box(&cs, &box_class, &[stdlib]).as_deref(),
             Some("OK")

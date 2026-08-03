@@ -8,9 +8,9 @@
 use super::common;
 
 fn run(src: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
+    let jdk = common::jdk_modules();
     let cp = common::classpath_jars_for("// WITH_STDLIB");
-    let cs = common::compile_in_process(src, "S", &cp, Some(&jdk))?;
+    let cs = common::compile_in_process(src, "S", &cp, Some(jdk.as_path()))?;
     let box_class = common::find_box_class(&cs)?;
     common::run_box(&cs, &box_class, &cp)
 }

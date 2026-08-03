@@ -54,14 +54,8 @@ fun box(): String {
 
 #[test]
 fn unsigned_metadata_return_blocks_unsupported_inline_splice() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping resolver_regression_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping resolver_regression_e2e: no kotlin-stdlib jar found");
-        return;
-    };
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     let src = r#"
 fun box(): String {
@@ -153,14 +147,8 @@ fun box(): String {
 
 #[test]
 fn primitive_builtin_infix_extension_source_form_matters() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping resolver_regression_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping resolver_regression_e2e: no kotlin-stdlib jar found");
-        return;
-    };
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     let src = r#"
 infix fun Int.rem(other: Int) = 10

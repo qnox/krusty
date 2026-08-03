@@ -914,7 +914,7 @@ fn kotlin_codegen_box_conformance() {
     let stdlib = {
         let mut paths: Vec<String> = Vec::new();
         for p in [
-            stdlib_jar.clone(),
+            Some(stdlib_jar.clone()),
             common::kotlin_test_jar(),
             common::dist_jar("kotlin-reflect.jar")
                 .or_else(|| common::find_jar("kotlin-reflect-", &["sources"])),

@@ -2,12 +2,8 @@ use super::common;
 
 #[test]
 fn byte_array_return_flows_into_constructor() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let java = [
         (
             "Bytes.java".into(),
@@ -44,11 +40,11 @@ fn byte_array_return_flows_into_constructor() {
         \x20 val packet = Packet(payload)\n\
         \x20 return if (payload.size == 2 && packet.size() == 2) \"OK\" else \"fail\"\n\
         }\n";
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(&jdk))
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
         .unwrap_or_else(|| {
             panic!(
                 "{:?}",
-                common::front_end_diagnostics(source, &classpath, Some(&jdk))
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
             )
         });
     let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");

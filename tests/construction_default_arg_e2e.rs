@@ -32,12 +32,8 @@ fn construction_valued_default_omitted() {
 fn suspend_service_with_construction_default_compiles() {
     // The AuditService shape: a suspend function with a construction-valued default parameter and two
     // suspend reads, called omitting the default — must LOWER (was skipped for the construction default).
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let lib = "package lib\n\
         class Filters\n\
         class Page(val total: Int)\n\
@@ -60,7 +56,7 @@ fn suspend_service_with_construction_default_compiles() {
         suspend fun caller(r: Repo): Page = list(r)\n\
         fun box(): String = \"OK\"\n";
     assert!(
-        common::compile_in_process(main, "Main", &cp, Some(&jdk)).is_some(),
+        common::compile_in_process(main, "Main", &cp, Some(jdk.as_path())).is_some(),
         "suspend service with a construction-valued default should lower"
     );
 }

@@ -53,17 +53,13 @@ fn non_local_return_in_cross_file_inline_lambda_still_rejects() {
                         \x20   untilDone(4) { hit = it; if (it == 4) return \"early\" }\n\
                         \x20   return if (hit == 4) \"OK\" else \"fail: $hit\"\n\
                         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file inline call with a non-local return must be rejected, never emitted"
@@ -80,17 +76,13 @@ fn value_class_signature_inline_fun_cross_file_still_rejects() {
                        value class Z(val value: Int)\n";
     const MAIN: &str = "fun box(): String =\n\
                         \x20   if (new(fun(z: Z) {}).value == 42) \"OK\" else \"Fail\"\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a value-class-signature inline fun must be rejected, never emitted"
@@ -132,17 +124,13 @@ fn mutable_capture_in_cross_file_inline_lambda_still_rejects() {
                         \x20   foo(x) { x++ }\n\
                         \x20   return if (x == 24) \"OK\" else \"fail: $x\"\n\
                         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file inline call with a mutating capture must be rejected, never emitted"
@@ -158,17 +146,13 @@ fn callable_ref_arg_in_cross_file_inline_call_still_rejects() {
                         \x20   val chars = listOf('a') + \"-\"\n\
                         \x20   return if (useRef('a', chars::contains)) \"OK\" else \"Fail\"\n\
                         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file inline call with a callable-ref argument must be rejected, never emitted"
@@ -183,17 +167,13 @@ fn try_body_inline_fun_cross_file_still_rejects() {
                        inline fun tryZap(string: String, fn: (String) -> String) =\n\
                        \x20   fn(try { zap(string) } finally { zap(string) })\n";
     const MAIN: &str = "fun box(): String = tryZap(\"OK\") { it }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a try-bodied inline fun must be rejected, never emitted"
@@ -373,17 +353,13 @@ fn stored_lambda_body_inline_fun_cross_file_still_rejects() {
                        \x20   return f()\n\
                        }\n";
     const MAIN: &str = "fun box(): String = makeAndCall()\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a stored-lambda-body inline fun must be rejected, never emitted"
@@ -403,17 +379,13 @@ fn return_in_lambda_arg_body_inline_fun_cross_file_still_rejects() {
                        \x20   return bar { return \"def\" }\n\
                        }\n";
     const MAIN: &str = "fun box(): String = bar2()\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a non-local-return-lambda inline fun must be rejected, never emitted"
@@ -430,17 +402,13 @@ fn value_class_receiver_inline_extension_cross_file_still_rejects() {
                        inline fun Z.transform(f: (Int) -> Int): Int = f(value)\n";
     const MAIN: &str =
         "fun box(): String = if (Z(21).transform { it * 2 } == 42) \"OK\" else \"fail\"\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a value-class-receiver inline extension must be rejected, never emitted"
@@ -454,17 +422,13 @@ fn value_class_receiver_inline_extension_cross_file_still_rejects() {
 fn reified_inline_extension_cross_file_still_rejects() {
     const LIB: &str = "inline fun <reified T> T.check(f: () -> Unit): Boolean = this is T\n";
     const MAIN: &str = "fun box(): String = if (1.check { }) \"OK\" else \"fail\"\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a reified inline extension must be rejected, never emitted"
@@ -486,17 +450,13 @@ fn suspend_inline_extension_cross_file_still_rejects() {
                         \x20   suspend { r = 1.plusOne() }.startCoroutine(EC())\n\
                         \x20   return if (r == 2) \"OK\" else \"fail\"\n\
                         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a suspend inline extension must be rejected, never emitted"
@@ -579,9 +539,7 @@ fn cross_file_ref_to_emitted_fns_stays_clean() {
 /// registration data the reference declines silently and types through the fallbacks, as before.
 #[test]
 fn checker_only_pipeline_cross_file_ref_to_plain_fn_stays_clean() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let diags = common::front_end_diagnostics_files(
         &[
@@ -592,7 +550,7 @@ fn checker_only_pipeline_cross_file_ref_to_plain_fn_stays_clean() {
              }\n",
         ],
         &[stdlib],
-        jdk.as_deref(),
+        Some(jdk.as_path()),
     );
     assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
 }

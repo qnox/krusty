@@ -7,13 +7,13 @@ use super::common;
 /// Compile `src` in-process and run `SCKt.box()` on the shared persistent JVM (stdlib + JDK jimage on
 /// the classpath). `None` ⇒ environment unavailable, and nothing else: a declined source panics.
 fn run_box(_tag: &str, src: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk_modules = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk_modules = common::jdk_modules();
     Some(common::expect_box_run(
         src,
         "SC",
         &[stdlib],
-        Some(&jdk_modules),
+        Some(jdk_modules.as_path()),
     ))
 }
 

@@ -7,14 +7,14 @@
 use super::common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     // Toolchain present ⇒ compilation MUST succeed (a `None` here is a real failure, not a skip).
     Some(common::expect_compile_in_process(
         src,
         "P",
         &[stdlib],
-        Some(&jdk),
+        Some(jdk.as_path()),
     ))
 }
 
@@ -32,7 +32,7 @@ fn method(
 
 fn run_ok(cs: &[(String, Vec<u8>)]) {
     if let Some(box_class) = common::find_box_class(cs) {
-        let stdlib = common::stdlib_jar().unwrap();
+        let stdlib = common::stdlib_jar();
         assert_eq!(
             common::run_box(cs, &box_class, &[stdlib]).as_deref(),
             Some("OK")

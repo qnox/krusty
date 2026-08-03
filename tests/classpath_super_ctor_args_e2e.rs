@@ -6,9 +6,9 @@
 use super::common;
 
 fn compile(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
-    common::compile_in_process(src, "File", &[sl, jdk.clone()], Some(&jdk))
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    common::compile_in_process(src, "File", &[sl, jdk.clone()], Some(jdk.as_path()))
 }
 
 #[test]

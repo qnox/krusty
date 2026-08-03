@@ -15,10 +15,7 @@ fn branchless_inline_fn_is_spliced_not_called() {
         eprintln!("skipping inline_splice_e2e: set JAVA_HOME");
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping inline_splice_e2e: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let stdlib_path = stdlib;
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
@@ -73,10 +70,7 @@ fn typed_bodies_are_spliced() {
         eprintln!("skipping inline_splice_e2e(typed): set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping inline_splice_e2e(typed): no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     let Some(libout) = common::compile_libs(

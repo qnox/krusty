@@ -9,15 +9,9 @@ use super::common;
 
 #[test]
 fn suspend_compound_assign_in_loops_runs() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(coro) = common::coroutines_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
     // d() suspends and returns 1; weight(i) suspends and returns i*2.
     //   whileSum:   0 -> 1 -> 2 -> 3          == 3
     //   doWhileSum: 1 -> 2 -> 3               == 3
@@ -37,7 +31,8 @@ fn suspend_compound_assign_in_loops_runs() {
             if (a == 3 && b == 3 && c == 3 && e == 6 && f == 3) \"OK\"\n\
             else \"F a=$a b=$b c=$c e=$e f=$f\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(&jdk));
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

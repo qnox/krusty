@@ -244,9 +244,7 @@ fun box(): String {
 /// run-based check pass, but only the former is acceptable.
 #[test]
 fn unsupported_interface_property_shapes_still_rejected() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let cases: &[(&str, &str)] = &[
         // A `var` with custom get+set.
         (
@@ -317,7 +315,7 @@ fun box(): String = with(C()) { "a".x }
     ];
     for (stem, src) in cases {
         let cp = krusty::toolchain::classpath_jars_for(src);
-        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(&jdk));
+        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(jdk.as_path()));
         assert_ne!(
             outcome,
             Some(common::BackendOutcome::Emitted),

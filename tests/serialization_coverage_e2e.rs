@@ -60,7 +60,7 @@ fn serialization_runtime_jars() -> Option<Vec<PathBuf>> {
     static JARS: OnceLock<Option<Vec<PathBuf>>> = OnceLock::new();
     JARS.get_or_init(|| {
         Some(vec![
-            common::stdlib_jar()?,
+            common::stdlib_jar(),
             find("kotlinx-serialization-core-jvm")?,
             find("kotlinx-serialization-json-jvm")?,
         ])

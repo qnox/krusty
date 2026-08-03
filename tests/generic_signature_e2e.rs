@@ -8,13 +8,13 @@ use super::common;
 /// `None` means ONLY that the toolchain isn't provisioned — a source krusty REJECTS panics with its
 /// diagnostics rather than skipping the assertions below.
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     Some(common::expect_compile_in_process(
         src,
         "G",
         &[stdlib],
-        Some(&jdk),
+        Some(jdk.as_path()),
     ))
 }
 
@@ -56,7 +56,7 @@ fn generic_member_method_compiles_runs_and_signs() {
         Some("<U:Ljava/lang/Object;>(TU;)TU;")
     );
     if let Some(box_class) = common::find_box_class(&cs) {
-        let stdlib = common::stdlib_jar().unwrap();
+        let stdlib = common::stdlib_jar();
         assert_eq!(
             common::run_box(&cs, &box_class, &[stdlib]).as_deref(),
             Some("OK")

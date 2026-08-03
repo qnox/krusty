@@ -7,14 +7,8 @@ use super::common;
 
 #[test]
 fn classpath_value_class_param_member_resolves_mangled() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     // A classpath library: a value class, an interface with a value-class-param method, and a factory so
     // the box() can obtain a `Port` without implementing the mangled method itself.
     let Some(libout) = common::compile_lib(
@@ -36,7 +30,7 @@ fn classpath_value_class_param_member_resolves_mangled() {
         \x20 val c = p.get(Vid(\"7\"))\n\
         \x20 return if (c.name == \"cat-7\") \"OK\" else \"fail: ${c.name}\"\n\
         }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile value-class-param member call");
     match common::run_box(&classes, "MainKt", &[libout, sl]) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),

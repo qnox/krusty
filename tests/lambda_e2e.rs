@@ -43,17 +43,13 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classes = common::compile_in_process(
         src,
         "LambdaSequence",
         std::slice::from_ref(&stdlib),
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("same-named declarations should compile");
 

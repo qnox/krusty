@@ -28,7 +28,7 @@ fn krusty_bytes(src: &str, class_internal: &str, cp: &[PathBuf]) -> Vec<u8> {
 
 /// kotlinc's reference bytes for `class_internal` (server-backed). `None` ⇒ toolchain unavailable.
 fn kotlinc_bytes(src: &str, stem: &str, class_internal: &str, cp: &[PathBuf]) -> Option<Vec<u8>> {
-    common::java_home()?;
+    common::java_home();
     let dir = common::scratch_dir()?;
     let out = dir.join("out");
     std::fs::create_dir_all(&out).ok()?;
@@ -363,7 +363,7 @@ fn data_class_mixed_nullable_primitive_is_byte_identical() {
 /// `Class java/util/List`. The pervasive `List`/`Map`/`Set`-field data-class shape.
 #[test]
 fn data_class_generic_collection_field_is_byte_identical() {
-    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    let cp: Vec<PathBuf> = vec![common::stdlib_jar()];
     assert_byte_identical(
         "package demo\ndata class D(val xs: List<String>)\n",
         "demo/D",
@@ -376,7 +376,7 @@ fn data_class_generic_collection_field_is_byte_identical() {
 /// class-id `Lkotlin/CharSequence;` descriptor (which leaves an orphan d2 string + a divergent d1).
 #[test]
 fn data_class_charsequence_field_is_byte_identical() {
-    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    let cp: Vec<PathBuf> = vec![common::stdlib_jar()];
     assert_byte_identical(
         "package demo\ndata class D(val cs: CharSequence)\n",
         "demo/D",
@@ -389,7 +389,7 @@ fn data_class_charsequence_field_is_byte_identical() {
 /// same deferred-interning path keeps `copy$default` orphan-free.
 #[test]
 fn data_class_generic_map_field_is_byte_identical() {
-    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    let cp: Vec<PathBuf> = vec![common::stdlib_jar()];
     assert_byte_identical(
         "package demo\ndata class D(val m: Map<String, Int>)\n",
         "demo/D",
@@ -402,7 +402,7 @@ fn data_class_generic_map_field_is_byte_identical() {
 /// with the deferred-interned frames.
 #[test]
 fn data_class_nullable_generic_collection_field_is_byte_identical() {
-    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    let cp: Vec<PathBuf> = vec![common::stdlib_jar()];
     assert_byte_identical(
         "package demo\ndata class D(val xs: List<String>?)\n",
         "demo/D",
@@ -418,7 +418,7 @@ fn data_class_nullable_generic_collection_field_is_byte_identical() {
 /// the kotlin stdlib on the classpath so `List<String>` resolves.
 #[test]
 fn plain_generic_collection_property_is_byte_identical() {
-    let cp: Vec<PathBuf> = common::stdlib_jar().into_iter().collect();
+    let cp: Vec<PathBuf> = vec![common::stdlib_jar()];
     assert_byte_identical(
         "package demo\nclass C(val xs: List<String>)\n",
         "demo/C",
@@ -792,10 +792,7 @@ fn data_class_emits_metadata_debug_tables_and_annotations() {
 /// classpath.
 #[test]
 fn generic_list_property_with_default_metadata_byte_identical() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skip (kotlin stdlib jar unavailable)");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let cp = [stdlib];
     let src = "package demo\n\
         data class C(val a: String, val b: String, val items: List<String> = emptyList())\n";

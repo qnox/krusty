@@ -14,8 +14,8 @@ use krusty::jvm::names::file_class_name;
 /// Compile two sources as one module (mirrors the conformance harness's `compile_multifile`): parse
 /// each, collect signatures across BOTH, then check + lower + emit each file.
 fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let sl = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let sl = common::stdlib_jar();
+    let jdk = common::jdk_modules();
 
     let mut diags = DiagSink::new();
     let features = krusty::features::LangFeatures::from_source(a);
@@ -66,7 +66,7 @@ fn compile_two(a: &str, b: &str) -> Option<Vec<(String, Vec<u8>)>> {
 }
 
 fn run_two(a: &str, b: &str) -> Option<String> {
-    let sl = common::stdlib_jar()?;
+    let sl = common::stdlib_jar();
     let classes = compile_two(a, b)?;
     let box_class = common::find_box_class(&classes)?;
     common::run_box(&classes, &box_class, &[sl])
@@ -80,7 +80,9 @@ fn cross_file_ctor_default_does_not_panic() {
     // without panicking. (Cross-file class *construction* is itself not yet modeled, so the file then
     // cleanly skips — `None` — rather than producing bytecode; the point of THIS test is the absence of
     // a crash, which `run_two` returning at all proves.)
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    if false /* toolchain gate panics */ || false
+    /* toolchain gate panics */
+    {
         return;
     }
     let a = "open class Base(val n: Int = 7)\n";
@@ -97,7 +99,9 @@ open class Base(val ctx: CoroutineContext = EmptyCoroutineContext)\n";
 
 #[test]
 fn cross_file_top_level_default_uses_selected_decl() {
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    if false /* toolchain gate panics */ || false
+    /* toolchain gate panics */
+    {
         return;
     }
     let a = "fun choose(x: Int = 1): String = \"int:$x\"\n\
@@ -108,7 +112,9 @@ fn cross_file_top_level_default_uses_selected_decl() {
 
 #[test]
 fn cross_file_top_level_default_before_trailing_lambda() {
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    if false /* toolchain gate panics */ || false
+    /* toolchain gate panics */
+    {
         return;
     }
     let a = "fun host(prefix: String = \"O\", block: () -> String): String = prefix + block()\n";
@@ -118,7 +124,9 @@ fn cross_file_top_level_default_before_trailing_lambda() {
 
 #[test]
 fn cross_file_base_class_resolves_as_module_symbol() {
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    if false /* toolchain gate panics */ || false
+    /* toolchain gate panics */
+    {
         return;
     }
     let a = "open class Base { fun ok(): String = \"O\" }\n";
@@ -129,7 +137,9 @@ fn cross_file_base_class_resolves_as_module_symbol() {
 
 #[test]
 fn cross_file_interface_resolves_as_module_symbol() {
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
+    if false /* toolchain gate panics */ || false
+    /* toolchain gate panics */
+    {
         return;
     }
     let a = "interface Marker\n";

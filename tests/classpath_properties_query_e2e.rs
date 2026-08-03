@@ -14,10 +14,7 @@ use super::common;
 
 #[test]
 fn member_property_getter_and_setter_from_metadata() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let Some(dir) = common::compile_lib(
         "propquery",
         "class Holder(val label: String) { var count: Int = 0 }\n\
@@ -144,14 +141,8 @@ fn classpath_jvmname_var_setter_assigns_via_metadata() {
 
 #[test]
 fn callable_reference_targets_must_have_a_real_virtual_method() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skip: no JDK modules");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let lib = JvmLibraries::new(Rc::new(Classpath::new(vec![stdlib, jdk])));
 
     let target = |receiver, name: &str| {

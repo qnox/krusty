@@ -15,13 +15,10 @@ use super::common;
 /// `true` (skip-clean) when the toolchain is absent, so the suite never fails spuriously on a machine
 /// without the vendored kotlinc/JDK.
 fn rejects(src: &str) -> bool {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return true;
-    };
-    let Some(jdk_modules) = common::jdk_modules() else {
-        return true;
-    };
-    common::backend_rejects_in_process(src, "S", &[stdlib], Some(&jdk_modules)).unwrap_or(false)
+    let stdlib = common::stdlib_jar();
+    let jdk_modules = common::jdk_modules();
+    common::backend_rejects_in_process(src, "S", &[stdlib], Some(jdk_modules.as_path()))
+        .unwrap_or(false)
 }
 
 // --- Unsigned byte/short block-list (src/jvm/ir_emit.rs `ty_ok`/`callee_ok`; emit_all → None; the
