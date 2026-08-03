@@ -2349,6 +2349,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`kotlin/math/MathKt.PI`) and the ordinary external-static-field path inlines its `ConstantValue`,
   which is what kotlinc emits at every use site. Test:
   `tests/resolve_parse_deep_coverage_e2e.rs::import_top_level_math`.
+- **`private` visibility is LEXICAL, and the JVM's is not.** A nested (non-`inner`) class, the
+  companion and an `inline` body spliced into a caller all sit inside the owner's braces, so Kotlin
+  lets them reach its private members; each is a SEPARATE class file, so `invokespecial` on a private
+  method and `getfield`/`putfield` on a private backing field are both illegal there. Accessibility is
+  therefore decided over the ENCLOSING chain (not the receiver chain, which a nested class has none
+  of), and the reach is realized through the synthetic bridges kotlinc emits on the owner —
+  `access$<name>` for a method, `access$get<X>$p` / `access$set<X>$p` for a property. Both are applied
+  at the single point the call/read/write node is CONSTRUCTED, so no lowering path can forget them; a
+  call with an omitted (defaulted) argument is left alone, since the bridge carries no `$default`
+  stub. This removed the divergence where a class with a companion kept public accessors for its
+  private properties. Tests: `tests/companion_e2e.rs::companion_reaches_the_outer_class_private_var`,
+  `::a_nested_class_reaches_the_outer_class_private_member`,
+  `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
+  `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **The accessor a `private` property does not get is the SYNTHESIZED one.** A source-written
+  accessor is user code with a body: skipping it replaces the program's `set(l) { /* ignore */ }` with
+  a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is
+  withheld. Test: `tests/companion_e2e.rs::a_private_property_keeps_its_source_written_setter`,
+  box `properties/kt3551.kt`.
 
 ## 8. Success criteria for the PoC
 

@@ -26711,10 +26711,14 @@ impl<'a> Checker<'a> {
             Visibility::Public | Visibility::Internal => true,
             Visibility::Private | Visibility::Protected => {
                 let nested_prefix = format!("{}$", owner.render());
-                self.this_labels
-                    .iter()
-                    .filter(|(_, _, is_class)| *is_class)
-                    .filter_map(|(_, receiver, _)| receiver.obj_internal())
+                // Access is LEXICAL, so the ENCLOSING chain is walked, not the receiver chain: a
+                // NESTED (non-`inner`) class has no outer receiver at all, yet it sits inside its
+                // outer class's body and Kotlin lets it reach that class's private members — including
+                // its companion's. Reading the receiver labels alone reported `C.create()` from
+                // `class C { companion object { private fun create() … }; class ZZZ { … } }` as
+                // inaccessible, which kotlinc compiles.
+                self.lexical_source_class_names()
+                    .into_iter()
                     .any(|enclosing| {
                         let enclosing_prefix = format!("{}$", enclosing.render());
                         enclosing == owner
