@@ -28225,20 +28225,35 @@ impl<'a> Checker<'a> {
             .map(|_| (owner, member.to_string()))
     }
 
+    /// A PROPERTY reached by name through an import of an object-like owner — either a companion
+    /// (`import p.C.Companion.PROP`, whose field lives on the outer class `C`) or a plain `object`
+    /// (`import p.Obj.PROP`, whose field lives on `Obj` itself).
+    ///
+    /// Both spell the same static read; only the owner differs, so they share one lookup. Without the
+    /// plain-object case an `import Config.NAME` bound nothing while `import Config.greeting` — the
+    /// same import form on a FUNCTION — already worked, and `Config.NAME` qualified worked too.
     fn imported_source_companion_property(
         &self,
         name: &str,
     ) -> Option<(TypeName, String, Ty, Visibility)> {
         let full = self.imports.get(name)?;
         let (owner_path, member) = full.rsplit_once('/')?;
-        let outer_path = owner_path.strip_suffix("/Companion")?;
-        let owner = self.nested_internal_name(outer_path)?;
-        let (ty, visibility) = *self
-            .syms
-            .class_by_type_name(owner)?
-            .static_props
-            .get(member)?;
-        Some((owner, member.to_string(), ty, visibility))
+        // A companion's statics are hoisted onto the OUTER class; a plain object owns its own.
+        let owner_path = owner_path.strip_suffix("/Companion").unwrap_or(owner_path);
+        let owner = self.nested_internal_name(owner_path)?;
+        let class = self.syms.class_by_type_name(owner)?;
+        if let Some(&(ty, visibility)) = class.static_props.get(member) {
+            return Some((owner, member.to_string(), ty, visibility));
+        }
+        // A `const val` declared directly in an `object` is a real `public static final` field on the
+        // object class (that is the JVM realization of `const`, not a convention), so an imported read
+        // is the same static read. A NON-const object property is an INSTANCE field on `INSTANCE` and
+        // is deliberately not matched here — it needs the singleton receiver, which this hook cannot
+        // express.
+        let declared = class.declared_props.get(member)?;
+        declared
+            .is_const
+            .then(|| (owner, member.to_string(), declared.ty, declared.visibility))
     }
 
     /// Primary-constructor parameter names/defaults of a same-file class, in declaration order — for

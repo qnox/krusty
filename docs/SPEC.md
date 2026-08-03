@@ -2248,6 +2248,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/feature_coverage_n_e2e.rs::bounded_type_param_comparable`,
   `tests/feature_coverage_x_e2e.rs::generic_fn_with_comparable_bound`,
   `tests/bounded_type_param_e2e.rs::comparable_operator_bounded_generic_called_with_primitive_runs`.
+- **`EnumName.entries`.** Kotlin 2.x's replacement for `values()`. The emitter already synthesized
+  the `$ENTRIES` field and its `getEntries()` accessor on every enum class (that is what kotlinc's
+  byte-parity requires); only the READ had no resolution. The checker types `E.entries` as `List<E>` —
+  kotlinc types it `EnumEntries<E>`, which IS-A `List<E>`, and the list type is what makes `size`,
+  `[0]` and `for (x in …)` resolve while the accessor's actual return stays assignable to it. Lowering
+  emits the same `invokestatic <E>.getEntries()Lkotlin/enums/EnumEntries;` kotlinc does. Tests:
+  `tests/feature_coverage_a_e2e.rs::enum_entries`,
+  `tests/feature_coverage_r_e2e.rs::enum_reflection_members`.
+- **`this@Inner` — a nested class's own qualified-this label.** The enclosing chain (`this@Outer`
+  from an `inner class`) already resolved; the class's OWN label did not, because a nested declaration
+  is flattened under its dotted name (`Outer.Inner`) and that dotted string was pushed as the label,
+  while a Kotlin label is always the SIMPLE name. Test:
+  `tests/feature_coverage_p_e2e.rs::qualified_this_in_nested_class`.
+- **`import Obj.CONST` — a `const val` imported from an `object`.** The import form already bound
+  FUNCTIONS of an object (`import Config.greeting`), and the qualified read `Config.NAME` already
+  worked; only the imported bare name did not, because the import-to-property lookup accepted a
+  COMPANION owner alone. A companion's statics are hoisted onto the outer class and a plain object
+  owns its own, so both spell the same static read and now share one lookup. A `const val` in an
+  object is a real `public static final` field on the object class (the JVM realization of `const`),
+  which is what makes this the ordinary static read; a NON-const object property is an instance field
+  on `INSTANCE` and is deliberately not matched, since it needs the singleton receiver. Test:
+  `tests/resolve_parse_deep_coverage_e2e.rs::import_object_member`.
 
 ## 8. Success criteria for the PoC
 
