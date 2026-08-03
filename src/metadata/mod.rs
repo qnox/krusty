@@ -8,6 +8,21 @@ pub mod encoding;
 pub mod module;
 pub mod protobuf;
 
+/// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags
+/// include the declaration's two-bit MEMBER_KIND after MODALITY, so property-specific bits must not be
+/// copied from the shorter Function/Class prefix. Keeping the raw schema facts here prevents the JVM
+/// decoder, class encoder, and package encoder from drifting into separate numeric interpretations.
+pub(crate) mod property_flags {
+    /// Public, final property with a default getter; protobuf omits field 11 at this value.
+    pub const DEFAULT: u64 = 518;
+    pub const VISIBILITY_MASK: u64 = 0b1110;
+    pub const IS_VAR: u64 = 1 << 8;
+    pub const HAS_SETTER: u64 = 1 << 10;
+    pub const IS_CONST: u64 = 1 << 11;
+    pub const HAS_CONSTANT: u64 = 1 << 13;
+    pub const MODALITY_ABSTRACT: u64 = 1 << 5;
+}
+
 pub(crate) fn serialize_string_table_types(records: &[Pb]) -> Pb {
     let mut out = Pb::new();
     let mut i = 0;

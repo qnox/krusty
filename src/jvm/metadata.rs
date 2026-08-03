@@ -126,6 +126,7 @@ fn parse_type_gsig_node(
     let mut tp_id = None;
     let mut tpn_id = None;
     let mut nullable = false;
+    let mut receiver_fun = false;
     let mut args: Vec<Ty> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
@@ -156,12 +157,37 @@ fn parse_type_gsig_node(
                 }
                 args.push(arg.unwrap_or_else(|| Ty::obj("kotlin/Any")));
             }
+            (100, 2) => {
+                // Type.annotation (extension field 100) — `Annotation.id` = 1. A RECEIVER function type
+                // (`Cfg.() -> Unit`) is a plain `kotlin/FunctionN` classifier carrying the
+                // `@kotlin.ExtensionFunctionType` annotation; without it the decoded `Ty::Fun` would read
+                // as an ordinary `(Cfg) -> Unit` and never match a receiver-lambda argument.
+                let n = pb.varint()? as usize;
+                let abody = pb.bytes(n)?;
+                let mut ap = Pb { b: abody, i: 0 };
+                let mut annotation_id = None;
+                while !ap.at_end() {
+                    let at = ap.varint()?;
+                    match (at >> 3, at & 7) {
+                        (1, 0) => annotation_id = ap.varint(),
+                        (_, w) => ap.skip(w)?,
+                    }
+                }
+                // `Type.annotation` is REPEATED. Receiver-ness is the presence of ONE semantic marker,
+                // not a property of whichever annotation happened to be serialized last. Accumulate the
+                // predicate while walking the field so adding an unrelated type-use annotation cannot
+                // erase an earlier `@ExtensionFunctionType` mark (protobuf preserves no useful ordering
+                // contract between independent annotations).
+                receiver_fun |= annotation_id
+                    .and_then(|id| resolve_class_name(records, d2, id as usize))
+                    .is_some_and(|name| name == "kotlin/ExtensionFunctionType");
+            }
             (_, w) => pb.skip(w)?,
         }
     }
     let ty = if let Some(id) = class_id {
         let internal = resolve_class_name(records, d2, id as usize)?;
-        gsig_from_kotlin_class(&internal, args)
+        gsig_from_kotlin_class(&internal, args, receiver_fun)
     } else if let Some(id) = tp_id {
         tparams.get(&id).map(|n| {
             let bound = bounds
@@ -190,11 +216,16 @@ fn parse_type_gsig_node(
 /// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
 /// [`Ty::Fun`] (args are `[P1..Pn, R]`), a Kotlin primitive collapses to its dedicated [`Ty`] variant (so
 /// it matches a JVM-descriptor primitive downstream), everything else stays a [`Ty::Obj`].
-fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>) -> Ty {
+///
+/// `receiver_fun` is the type's `@kotlin.ExtensionFunctionType` mark: a receiver function type carries
+/// its receiver as the FIRST type argument, which [`Ty::Fun`] models as the first parameter binding
+/// `this` (`has_receiver`).
+fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>, receiver_fun: bool) -> Ty {
     if let Some(arity) = internal.strip_prefix("kotlin/Function") {
         if arity.parse::<u8>().is_ok() {
             let ret = args.pop().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            return Ty::fun(args, ret);
+            let has_receiver = receiver_fun && !args.is_empty();
+            return Ty::fun_with_shape(args, ret, 0, has_receiver, false);
         }
     }
     // Arrays are `Obj` types. A boxed `Array<T>` carries its element as a type argument — built directly
@@ -603,13 +634,13 @@ fn parse_type_class_name(body: &[u8]) -> Option<u64> {
 }
 
 /// For a function-type `Type` (`kotlin/FunctionN`), recover whether it is a RECEIVER function type
-/// (`Recv.(…) -> R`) and the receiver's class id: returns `(annotation_id, first_argument_class_id)`,
-/// where `annotation_id` is the `Type.annotation` (field 100) `Annotation.id` (which a caller checks
-/// resolves to `kotlin/ExtensionFunctionType`) and the first `Type.argument` (field 1) carries the
-/// receiver type. Either is `None` when absent.
-fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
+/// (`Recv.(…) -> R`) and the receiver's class id: returns `(annotation_ids, first_argument_class_id)`,
+/// where `annotation_ids` contains EVERY repeated `Type.annotation` (field 100) `Annotation.id` (a caller
+/// checks whether any resolves to `kotlin/ExtensionFunctionType`) and the first `Type.argument` (field 1)
+/// carries the receiver type. The receiver id is `None` when absent.
+fn parse_type_recv_fun(body: &[u8]) -> (Vec<u64>, Option<u64>) {
     let mut pb = Pb { b: body, i: 0 };
-    let mut anno_id = None;
+    let mut annotation_ids = Vec::new();
     let mut arg0_class = None;
     let mut seen_arg = false;
     while !pb.at_end() {
@@ -653,7 +684,14 @@ fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
                 while !ap.at_end() {
                     let Some(at) = ap.varint() else { break };
                     match (at >> 3, at & 7) {
-                        (1, 0) => anno_id = ap.varint(),
+                        (1, 0) => {
+                            if let Some(id) = ap.varint() {
+                                // `Type.annotation` is repeated. Preserve the whole semantic set so a
+                                // later, unrelated type-use annotation cannot overwrite an earlier
+                                // receiver-function marker in this lightweight parameter decoder.
+                                annotation_ids.push(id);
+                            }
+                        }
                         (_, w) => {
                             if ap.skip(w).is_none() {
                                 break;
@@ -669,7 +707,7 @@ fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
             }
         }
     }
-    (anno_id, arg0_class)
+    (annotation_ids, arg0_class)
 }
 
 /// `Function.flags` bit for `suspend` (kotlin metadata `Flags.IS_SUSPEND`, function flag bit 13).
@@ -699,7 +737,7 @@ struct ParsedValueParam {
     name_id: u64,
     has_default: bool,
     materialized: bool,
-    recv_fun: (Option<u64>, Option<u64>),
+    recv_fun: (Vec<u64>, Option<u64>),
     /// The raw `ValueParameter.type` (field 3) `Type` message body — decoded to a signature [`Ty`] with the
     /// enclosing type-parameter table (needs `records`/`d2`, so it happens in `decode_functions`).
     type_body: Vec<u8>,
@@ -857,7 +895,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 let mut tid = None;
                 let mut nid = 0u64;
                 let mut vflags = 0u64;
-                let mut recv_ids = (None, None);
+                let mut recv_ids = (Vec::new(), None);
                 let mut type_body = Vec::new();
                 let mut vararg_elem_body = None;
                 while !vp.at_end() {
@@ -1937,13 +1975,10 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                         .value_params
                         .iter()
                         .map(|p| {
-                            let recv_fun_ty = p
-                                .recv_fun
-                                .0
-                                .and_then(|id| resolve_class_name(records, d2, id as usize))
-                                .map(|name| type_name(&name));
-                            let recv_fun = recv_fun_ty
-                                .is_some_and(|name| name.matches("kotlin/ExtensionFunctionType"));
+                            let recv_fun = p.recv_fun.0.iter().copied().any(|id| {
+                                resolve_class_name(records, d2, id as usize)
+                                    .is_some_and(|name| name == "kotlin/ExtensionFunctionType")
+                            });
                             MetaValueParam {
                                 ty: p
                                     .class_id
@@ -2370,17 +2405,22 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             .and_then(|table| type_table_entry(table, tid as usize))
             .is_some_and(|(body, table_nullable)| table_nullable || parse_type_nullable(body))
     };
-    // `Property.flags`: HAS_ANNOTATIONS(0) · VISIBILITY(1..3) · MODALITY(4..5) · IS_VAR(6) ·
-    // HAS_GETTER(7) · HAS_SETTER(8) · IS_CONST(9) · …
-    const IS_VAR_BIT: u64 = 1 << 6;
-    const IS_CONST_BIT: u64 = 1 << 9;
+    // Current `Property.flags` is field 11. Its shared declaration prefix is HAS_ANNOTATIONS(0) ·
+    // VISIBILITY(1..3) · MODALITY(4..5) · MEMBER_KIND(6..7), so property-specific IS_VAR and IS_CONST
+    // live at bits 8 and 11. Older metadata may instead carry `old_flags` in field 1, whose shorter
+    // layout puts those facts at bits 6 and 9. Decode the two words independently and prefer field 11
+    // regardless of wire order; collapsing them into one mutable word would let a reordered legacy
+    // field override the authoritative modern value. The shared modern constants also drive both writers.
+    const LEGACY_IS_VAR: u64 = 1 << 6;
+    const LEGACY_IS_CONST: u64 = 1 << 9;
     for prop in props {
         let mut p = Pb { b: prop, i: 0 };
         let mut name_id = None;
         let mut ret = None;
         let mut ret_nullable = false;
         let mut ret_body = None;
-        let mut flags = 6u64;
+        let mut legacy_flags = None;
+        let mut modern_flags = None;
         let mut sig = (None, None);
         let mut receiver_class = None;
         let mut receiver_body = None;
@@ -2389,7 +2429,8 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
         while !p.at_end() {
             let Some(tag) = p.varint() else { break };
             match (tag >> 3, tag & 7) {
-                (1, 0) => flags = p.varint().unwrap_or(6),
+                (1, 0) => legacy_flags = p.varint(),
+                (11, 0) => modern_flags = p.varint(),
                 (2, 0) => name_id = p.varint(),
                 (3, 2) => {
                     let Some(n) = p.varint() else { break };
@@ -2461,7 +2502,26 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
                 desc: resolve_string(records, d2, did as usize)?,
             })
         };
-        let is_var = setter.is_some() || flags & IS_VAR_BIT != 0;
+        let (flags, is_var_bit, is_const_bit) = modern_flags.map_or_else(
+            || {
+                legacy_flags.map_or(
+                    (
+                        crate::metadata::property_flags::DEFAULT,
+                        crate::metadata::property_flags::IS_VAR,
+                        crate::metadata::property_flags::IS_CONST,
+                    ),
+                    |flags| (flags, LEGACY_IS_VAR, LEGACY_IS_CONST),
+                )
+            },
+            |flags| {
+                (
+                    flags,
+                    crate::metadata::property_flags::IS_VAR,
+                    crate::metadata::property_flags::IS_CONST,
+                )
+            },
+        );
+        let is_var = setter.is_some() || flags & is_var_bit != 0;
         let generic_sig = build_property_generic_sig(
             &type_params,
             ret_body,
@@ -2479,7 +2539,7 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             getter: getter.and_then(resolve_sig),
             setter: setter.and_then(resolve_sig),
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
-            is_const: flags & IS_CONST_BIT != 0,
+            is_const: flags & is_const_bit != 0,
             is_var,
             receiver_class,
             is_extension: receiver_body.is_some(),
@@ -3185,7 +3245,8 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 mod module_reader_tests {
     use super::{
         decode_properties, parse_function, parse_receiver_type_gsig, parse_type_alias,
-        parse_type_gsig, parse_type_gsig_node, primary_erasure_bounds, read_kotlin_module, MetaCtx,
+        parse_type_gsig, parse_type_gsig_node, parse_type_recv_fun, primary_erasure_bounds,
+        read_kotlin_module, MetaCtx,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
@@ -3301,6 +3362,47 @@ mod module_reader_tests {
     }
 
     #[test]
+    fn receiver_function_mark_is_independent_of_type_annotation_order() {
+        // Type.class_name = d2[0] (`Function1`), followed by its receiver and return type arguments.
+        // Type.annotation is extension field 100 (tag varint `a2 06`); each nested Annotation stores its
+        // class-name id in field 1. Two copies exercise the repeated-field contract in both orders: an
+        // unrelated annotation after `ExtensionFunctionType` must not overwrite the receiver marker.
+        let prefix = [
+            0x30, 0x00, // Function1
+            0x12, 0x04, 0x12, 0x02, 0x30, 0x01, // argument[0] = String receiver
+            0x12, 0x04, 0x12, 0x02, 0x30, 0x02, // argument[1] = Unit return
+        ];
+        let extension_annotation = [0xa2, 0x06, 0x02, 0x08, 0x03];
+        let unrelated_annotation = [0xa2, 0x06, 0x02, 0x08, 0x04];
+        let d2 = [
+            "kotlin/Function1".to_string(),
+            "kotlin/String".to_string(),
+            "kotlin/Unit".to_string(),
+            "kotlin/ExtensionFunctionType".to_string(),
+            "sample/TypeUseMarker".to_string(),
+        ];
+        let expected = Ty::fun_with_shape(vec![Ty::String], Ty::Unit, 0, true, false);
+        for (annotations, expected_ids) in [
+            ([extension_annotation, unrelated_annotation], vec![3, 4]),
+            ([unrelated_annotation, extension_annotation], vec![4, 3]),
+        ] {
+            let body = prefix
+                .into_iter()
+                .chain(annotations.into_iter().flatten())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parse_type_recv_fun(&body),
+                (expected_ids, Some(1)),
+                "the lightweight value-parameter decoder must preserve every annotation too"
+            );
+            assert_eq!(
+                parse_type_gsig(&body, &[], &d2, &HashMap::new()),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn extension_receiver_signature_preserves_top_level_nullability() {
         let nullable_string = [0x30, 0x00, 0x18, 0x01];
         assert_eq!(
@@ -3405,5 +3507,65 @@ mod module_reader_tests {
         );
         assert!(properties[0].ret_nullable);
         assert_eq!(properties[0].visibility, crate::types::Visibility::Public);
+    }
+
+    #[test]
+    fn property_flags_honor_modern_and_legacy_schema_layouts() {
+        // A Package containing five minimal Property messages. `ordinary` omits flags, which Kotlin's
+        // schema defines as 518 (public/final/default getter). `moduleOnly` writes field 11 as 512:
+        // the same default word with VISIBILITY bits 1..3 cleared to INTERNAL. The last two declarations
+        // isolate property-specific IS_VAR (bit 8) and IS_CONST (bit 11); both sit past MEMBER_KIND and
+        // therefore catch the former function-style offsets too. Keeping these assertions at the protobuf
+        // boundary prevents a JVM accessor—or a later resolver policy—from masking a layout regression.
+        // `legacy` exercises old_flags field 1 with that layout's earlier IS_VAR/IS_CONST positions.
+        let msg = [
+            0x22, 0x06, // Package.property, six-byte public property body
+            0x10, 0x00, // Property.name = d2[0]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+            0x22, 0x09, // Package.property, nine-byte internal property body
+            0x10, 0x01, // Property.name = d2[1]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+            0x58, 0x80, 0x04, // Property.flags (field 11) = 512
+            0x22, 0x09, // Package.property, nine-byte mutable property body
+            0x10, 0x02, // Property.name = d2[2]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+            0x58, 0x86, 0x0e, // Property.flags = 1798 (default + isVar + hasSetter)
+            0x22, 0x09, // Package.property, nine-byte const property body
+            0x10, 0x03, // Property.name = d2[3]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+            0x58, 0x86, 0x14, // Property.flags = 2566 (default + isConst)
+            0x22, 0x09, // Package.property, nine-byte legacy property body
+            0x08, 0xc0,
+            0x04, // Property.old_flags (field 1) = 576 (internal + isVar + isConst)
+            0x10, 0x04, // Property.name = d2[4]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+        ];
+        let d2 = vec![
+            "ordinary".to_string(),
+            "moduleOnly".to_string(),
+            "mutable".to_string(),
+            "constant".to_string(),
+            "legacy".to_string(),
+            "kotlin/Int".to_string(),
+        ];
+        let ctx = MetaCtx {
+            msg: &msg,
+            records: &[],
+            d2: &d2,
+            methods: &[],
+        };
+
+        let properties = decode_properties(&ctx, 4);
+
+        assert_eq!(properties.len(), 5);
+        assert_eq!(properties[0].visibility, crate::types::Visibility::Public);
+        assert_eq!(properties[1].visibility, crate::types::Visibility::Internal);
+        assert!(properties[2].is_var);
+        assert!(!properties[2].is_const);
+        assert!(!properties[3].is_var);
+        assert!(properties[3].is_const);
+        assert_eq!(properties[4].visibility, crate::types::Visibility::Internal);
+        assert!(properties[4].is_var);
+        assert!(properties[4].is_const);
     }
 }
