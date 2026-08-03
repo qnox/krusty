@@ -514,6 +514,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   *promotion* between `Char` and `Int`, but both share the int stack slot, so the op runs on ints; a `Char`
   result is truncated back with `i2c` (Kotlin wraps mod 2^16, so `Char.MAX_VALUE + 1 == Char.MIN_VALUE`),
   matching kotlinc's `isub`/`iadd` + `i2c`. A `Char - Char` distance stays a plain `Int`.
+- **A `Char` is a UTF-16 code UNIT, not a code point.** The surrogate range `D800..DFFF` therefore holds
+  legal `Char` values (`Char.MIN_HIGH_SURROGATE == '\uD800'`, `Char.MAX_LOW_SURROGATE == '\uDFFF'`) even
+  though those are not valid Unicode scalar values. `IrConst::Char` accordingly carries a raw `u16`, not a
+  Rust `char`: routing the value through `char::from_u32` yields `None` on a lone surrogate, and inlining
+  a classpath `Char` constant used to fold that `None` to NUL — `Char.MIN_HIGH_SURROGATE.code` printed
+  `0` where kotlinc prints `55296`, a silent wrong value. The same rule holds one level up, in the AST:
+  `Expr::CharLit` is a `u16` and `unquote_char` takes a `\uXXXX` escape verbatim, so a *source* literal
+  `'\uD800'` keeps its code unit too (it used to fold to NUL by the same round-trip). A `char` that
+  reaches either from a code POINT truncates with the JVM's own `i2c`, since a well-formed `Char`
+  literal is always in the BMP. Tests: `CharSurrogateConst` and `CharSurrogateLiteral` in
+  `tests/feature_box_e2e.rs`.
+- **A `Char` constant folded into a string renders as the CHARACTER, not its code unit.** The constant
+  string evaluator behind the `trimIndent`/`trimMargin` fold accepts a `Char` (`${'$'}` is the idiomatic
+  way to write a literal `$` in a template), so it must spell the character out. A code unit that is not
+  a scalar value has no Rust `String` spelling at all, so the evaluator reports "not a constant" rather
+  than substituting a stand-in; the file then hits the existing "`trimIndent` on a non-constant receiver"
+  gap and is rejected with a diagnostic. kotlinc folds that case — krusty's is a **loud bail, not a wrong
+  value**, and closing it needs a UTF-16 representation for string constants (`IrConst::String` is a Rust
+  `String`, which cannot hold a lone surrogate either). Test: `ConstCharTemplateFold` in
+  `tests/feature_box_e2e.rs`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
@@ -2547,6 +2567,62 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments, 400/5000 nested `while` blocks, 300/5000 nested classes, and mixed local-class/init/
   loop recursion) and `tests/deep_expression_nesting_check_e2e.rs`
   (450-level `0+(…)` right-nesting through the checker and lowering, end-to-end).
+
+- **A member called on an OBJECT or COMPANION receiver types its lambda arguments from the selected
+  candidate, exactly as an instance receiver does.** `Wrap.apply2 { it * 2 }` on
+  `object Wrap { fun apply2(f: (Int) -> Int): Int }` must bind `it` to `Int`. The instance-receiver
+  arm of `check_call` postpones lambda arguments (`None` in the partial argument types), selects the
+  member against the non-lambda arguments, and only then checks each lambda against that member's
+  function-type parameter (`best_module_member_candidate` → `plan_generic_member` →
+  `module_member_lambda_shape` → `check_lambda_with_types`). The classifier-receiver arms reached
+  `check_module_member_call` with argument types computed up front by `arg_tys`, so a lambda was
+  checked with no expectation, `it` bound as `Any`, and the body was rejected
+  (`operator cannot be applied to 'Any' and 'Int'`) — a lambda argument to an object member was
+  effectively unusable. Those arms now share one seam, `classifier_member_arg_tys`, which runs the
+  instance path's postpone-select-check sequence against the classifier's own type: the object's
+  internal name for `object` members, and `C$Companion` for companion members (the receiver type
+  `check_source_companion_call` already dispatches on, so selection and checking agree). It applies
+  to the receiverless, receiver-lambda (`Int.() -> Int`), and defaulted/named/trailing call shapes,
+  because the shape comes from the same `CallSig` slot mapping; with no lambda argument it is
+  `arg_tys` unchanged. A companion is not a `this` receiver unless it declares a supertype, so an
+  unqualified call to a sibling companion function from inside the companion had no implicit
+  receiver carrying the member either; `implicit_member_receiver_types` adds the `C$Companion` type
+  to the implicit-receiver list the member-shape lookup walks. An unqualified companion call from an
+  ordinary INSTANCE member of the class stays unresolved — that is a separate scope gap (it fails
+  with no lambda involved), not a lambda-typing one. Type-parameter inference for a lambda
+  parameter bound by a FUNCTION-level type parameter (`fun <T> pick(v: T, f: (T) -> String)`) is
+  equally absent on instance receivers and is likewise out of scope here.
+  Test: `tests/object_receiver_lambda_e2e.rs`.
+
+- **`Type { … }` selects a SOURCE companion's `operator fun invoke` when no constructor is
+  applicable.** For `class Wrap(val v: Int) { companion object { operator fun invoke(f: (Int) -> Int): Int } }`,
+  kotlinc resolves `Wrap { it * 2 }` to the companion operator — a lambda is not applicable to the
+  constructor's `Int` parameter — while `Wrap(7)` stays a construction. krusty had this for CLASSPATH
+  types (`classpath_companion_ty` + `record_invoke`) and for source INTERFACES (which have no
+  constructor), but a source CLASS went to the constructor unconditionally and reported
+  `return type mismatch: expected 'Int', actual 'Wrap'`. The source class path now falls back to
+  `check_source_companion_call(CALLABLE_INVOKE_OPERATOR, require_operator = true)` when
+  `select_source_constructor` finds no applicable candidate, lowering as
+  `getstatic Wrap.Companion; invokevirtual Wrap$Companion.invoke` — kotlinc's
+  `Wrap.Companion.invoke(…)`. Constructor selection still wins whenever a constructor is applicable,
+  so the operator never shadows a construction. The arguments are re-typed against the operator's
+  parameters and the constructor pass's diagnostics for them are dropped: that pass had no
+  expectation for a lambda argument, and its complaints never applied to the call kotlinc selects.
+  Selection does NOT depend on whether the argument bodies type-check — backing out of the operator
+  because a lambda body has an unrelated error reported the construction's own failure
+  (`cannot create an instance of an interface`) on top of that error, so the operator is taken
+  whenever the call resolves to it and its own diagnostics are kept. `Ty::Error` with nothing
+  reported is not a resolution: `check_module_member_call` suppresses its inapplicable-overload
+  diagnostic when the call already carries an argument diagnostic, and that is precisely the
+  provisional pass this would then erase, which would leave the call silent.
+  Two gaps are shared with the pre-existing member-call paths and are NOT introduced here, but this
+  fallback makes the first reachable from `Type { … }`: a lambda's inferred RETURN type is not
+  checked against the expected function type (`O.apply2 { it + 1; "s" }` on an object receiver and
+  `P().apply2 { … }` on an instance receiver are accepted identically, and fail at runtime with a
+  `ClassCastException`), and an overload set whose members differ only in a POSTPONED lambda slot
+  scores every candidate equally, so declaration order decides
+  (`fun ap(f: (Int) -> Int)` + `fun ap(s: String)` fails on object and instance receivers alike).
+  Test: `tests/object_receiver_lambda_e2e.rs`.
 
 ## 8. Success criteria for the PoC
 
