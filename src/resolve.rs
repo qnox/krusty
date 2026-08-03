@@ -9367,6 +9367,11 @@ pub enum ResolvedCall {
         physical_params: Vec<Ty>,
         ret: Ty,
         physical_ret: Ty,
+        /// Selected callable capabilities. These stay on the semantic target so every later consumer
+        /// answers "does this exact call suspend/require splicing?" without looking the source name up
+        /// again or branching on whether the declaration came from this file or a dependency.
+        inline: InlineKind,
+        suspend: bool,
         interface: bool,
         /// The semantic vararg slot. Its presence is the vararg flag and its value drives packing.
         vararg_index: Option<usize>,
@@ -9380,11 +9385,11 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
-        /// The selected callable's generic [`InlineKind::MustInline`] capability: a direct fallback
-        /// is semantically illegal even if a facade method is physically emitted to publish inline
-        /// code. Same-file lowering may splice it first; every remaining path must bail. Carrying
-        /// the resolved capability keeps lowering independent of source syntax and symbol origin.
-        requires_splice: bool,
+        /// Selected callable capabilities. Carrying the complete semantic facts, rather than only a
+        /// derived `requires_splice` bit, lets safety gates distinguish `suspend inline` from ordinary
+        /// inline calls and keeps those gates independent of declaration name and symbol origin.
+        inline: InlineKind,
+        suspend: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -9421,6 +9426,51 @@ impl ResolvedCall {
             Self::ModuleExtension { owner, .. } => *owner,
             Self::ModuleTopLevel(_) | Self::LocalFunction(_) => None,
         }
+    }
+
+    /// Whether this exact checker-selected call suspends. This is the common classification consumed
+    /// by AST-level coroutine discovery before an IR suspension set exists.
+    pub(crate) fn is_suspend(&self) -> bool {
+        match self {
+            Self::Member(resolved) => resolved.suspend,
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => callable.suspend,
+            Self::Companion(member) => member.suspend(),
+            Self::ModuleMember { suspend, .. }
+            | Self::ModuleMemberExtension { suspend, .. }
+            | Self::ModuleExtension { suspend, .. } => *suspend,
+            Self::ModuleTopLevel(callable) => callable.suspend,
+            Self::LocalFunction(callable) => callable.sig.is_suspend(),
+        }
+    }
+
+    /// Inline capability of the exact selected target. `None` means an ordinary callable, while the
+    /// stronger states preserve whether splicing is optional or mandatory.
+    fn inline_kind(&self) -> InlineKind {
+        match self {
+            Self::Member(resolved) => resolved.member.inline,
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => callable.inline,
+            Self::Companion(member) => member.inline,
+            Self::ModuleMember { inline, .. }
+            | Self::ModuleMemberExtension { inline, .. }
+            | Self::ModuleExtension { inline, .. } => *inline,
+            Self::ModuleTopLevel(callable) => callable.inline,
+            Self::LocalFunction(callable) => {
+                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice())
+            }
+        }
+    }
+
+    /// Whether this EXACT checker-selected call is both suspending and inline. A suspend lambda's
+    /// state-machine body cannot currently splice such a callee, so lowering must decline it before
+    /// emitting a direct call. Keeping this classification on the resolved target is important: a
+    /// name-wide lookup would conflate overloads and unrelated members, while origin-specific probes
+    /// would make source, sibling-module, and classpath calls disagree.
+    pub(crate) fn is_suspend_inline(&self) -> bool {
+        self.is_suspend() && self.inline_kind().can_inline()
     }
 }
 
@@ -12858,6 +12908,8 @@ struct MemberExtensionFunctionCandidate {
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
     is_operator: bool,
+    inline: InlineKind,
+    suspend: bool,
     owner: TypeName,
 }
 
@@ -12872,6 +12924,8 @@ impl MemberExtensionFunctionCandidate {
             physical_params: self.physical_params.clone(),
             ret: self.ret,
             physical_ret: self.physical_ret,
+            inline: self.inline,
+            suspend: self.suspend,
             interface,
             vararg_index: self.call_sig.vararg_index,
         }
@@ -13553,15 +13607,6 @@ impl<'a> Checker<'a> {
             contract: None,
         };
         Some((selected, signature))
-    }
-
-    fn source_extension_requires_splice(&self, selected: &crate::libraries::FunctionInfo) -> bool {
-        // Inline fallback legality is part of the resolved callable's semantic state. In
-        // particular, a reified source extension may have a physically emitted facade so another
-        // compilation can read and splice its body, while calling that erased method directly is
-        // still illegal. Reading `InlineKind::MustInline` keeps that distinction independent of
-        // source-file keys and avoids a reified-only side index or per-origin lowering branches.
-        selected.flags.inline.must_inline()
     }
 
     fn check_source_extension_call_args(
@@ -14874,28 +14919,6 @@ impl<'a> Checker<'a> {
             .and_then(Symbol::instance)
     }
 
-    /// [`Self::resolve_instance_name`] carrying each argument's syntactic provenance. A LAMBDA
-    /// LITERAL only SAM-converts to a Java functional-interface parameter (`Box.mapped(Mapper)`)
-    /// when the resolver knows it was written as a literal: the checked argument type is a plain
-    /// `Ty::Fun`, which matches no SAM parameter on its own. Integer-literal provenance rides the
-    /// same channel, so a literal argument still adapts to a wider primitive parameter.
-    fn resolve_instance_name_with_lambda_args(
-        &self,
-        internal: TypeName,
-        name: &str,
-        args: &[CallArgKind],
-    ) -> Option<crate::libraries::LibraryMember> {
-        use crate::symbol_resolver::{SymRecv, Symbol};
-        self.resolver()
-            .resolve_symbol_with_literal_and_lambda_args(
-                SymRecv::TypeName(internal),
-                name,
-                args,
-                &[],
-            )
-            .and_then(Symbol::instance)
-    }
-
     fn resolve_super_instance_ty(
         &self,
         recv: Ty,
@@ -15429,7 +15452,8 @@ impl<'a> Checker<'a> {
             .selected_source_extension(receiver, name, &arg_kinds)
             .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
         {
-            let requires_splice = self.source_extension_requires_splice(&selected);
+            let inline = selected.flags.inline;
+            let suspend = selected.flags.suspend;
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
             let owner = sig
                 .source_file
@@ -15450,7 +15474,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
-                    requires_splice,
+                    inline,
+                    suspend,
                 },
             ));
         }
@@ -20795,52 +20820,25 @@ impl<'a> Checker<'a> {
         });
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
-        let materialized = shape.as_ref().and_then(|shape| shape.materialized.as_ref());
         // A SEMANTIC-PROVIDER member's lambda shape (`re?.replace(s) { m -> m.value }`). The
         // providers above answer source members and extensions only, so a `?.` call to a library
         // member whose parameter is a function type or a Java SAM interface left its lambda
         // unshaped and the parameters typed as `Any` — one `?` away from what the qualified path
-        // already does. Probed when ANY lambda argument is left unshaped and APPLIED only to those
-        // arguments, so a source member or extension shape always wins and the two never compete.
-        //
-        // A slot the extension provider MATERIALIZED counts as shaped even though its parameter
-        // list is empty: a zero-parameter functional interface (`Executor.execute(Runnable)`) is a
-        // real shape, and the `pt` derivation below cannot tell it from "no shape" by emptiness
-        // alone. Without this the provider probe would re-shape such a slot from a different
-        // callable rather than leaving it to the plain check it had before.
-        let unshaped_lambda_arguments: Vec<bool> = args
-            .iter()
-            .enumerate()
-            .map(|(index, &argument)| {
-                matches!(self.file.expr(argument), Expr::Lambda { .. })
-                    && module_shape
-                        .as_ref()
-                        .and_then(|shape| shape.param_types.get(index))
-                        .and_then(Option::as_deref)
-                        .is_none()
-                    && pts
-                        .and_then(|parameters| parameters.get(index))
-                        .is_none_or(Vec::is_empty)
-                    && !materialized
-                        .and_then(|slots| slots.get(index))
-                        .copied()
-                        .unwrap_or(false)
-            })
-            .collect();
-        let provider_member_expectations = unshaped_lambda_arguments
-            .iter()
-            .any(|unshaped| *unshaped)
-            .then(|| {
-                self.provider_member_lambda_expectations(
-                    call,
-                    crate::symbol_resolver::SymRecv::Value(receiver),
-                    name,
-                    args,
-                    &partial,
-                    explicit_type_args,
-                )
-            })
-            .flatten();
+        // already does. Callable precedence is a WHOLE-CALL decision: once a source member or an
+        // extension supplies a shape, never fill an empty slot from a different provider candidate.
+        // This is the qualified path's rule too and keeps two-lambda calls from combining
+        // expectations belonging to callables that cannot both be selected.
+        let provider_member_expectations = (module_shape.is_none() && shape.is_none()).then(|| {
+            self.provider_member_lambda_expectations(
+                call,
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                args,
+                &partial,
+                explicit_type_args,
+            )
+        });
+        let provider_member_expectations = provider_member_expectations.flatten();
         args.iter()
             .enumerate()
             .map(|(i, &x)| {
@@ -20896,11 +20894,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ => {
-                        // Applied to exactly the arguments the gate above found unshaped, so the
-                        // probe's whole-call trigger never reaches a slot another provider owns.
                         match provider_member_expectations
                             .as_ref()
-                            .filter(|_| unshaped_lambda_arguments[i])
                             .and_then(|all| all.get(i))
                             .and_then(Option::as_ref)
                         {
@@ -21862,7 +21857,8 @@ impl<'a> Checker<'a> {
                 .selected_source_extension(at, "get", &index_kinds)
                 .filter(|(_, signature)| signature.is_operator())
             {
-                let requires_splice = self.source_extension_requires_splice(&selected);
+                let inline = selected.flags.inline;
+                let suspend = selected.flags.suspend;
                 for (i, &pt) in sig.params.iter().enumerate() {
                     self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                 }
@@ -21886,7 +21882,8 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
-                        requires_splice,
+                        inline,
+                        suspend,
                     },
                 );
                 return self.set(e, sig.ret);
@@ -22479,7 +22476,7 @@ impl<'a> Checker<'a> {
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
-                        } else if let Ty::Obj(internal, _) = recv {
+                        } else if let Ty::Obj(_, _) = recv {
                             // Source members take precedence over extensions and classpath members.
                             let arg_names = self.file.call_arg_names.get(&e.0).cloned();
                             let full_arg_tys =
@@ -22535,32 +22532,23 @@ impl<'a> Checker<'a> {
                                     if labelled {
                                         return None;
                                     }
-                                    // Argument PROVENANCE, not just types: the qualified arm
-                                    // resolves the same member through a kind-aware lookup, and
-                                    // without it a lambda literal never SAM-converts to a Java
-                                    // functional-interface parameter after `?.`.
+                                    // Reuse the qualified path's VALUE-receiver resolver. Besides
+                                    // carrying lambda/integer-literal provenance for SAM conversion,
+                                    // it preserves the complete semantic receiver and returns the
+                                    // canonical `ResolvedMember`; resolving by bare class name here
+                                    // would create a second selection path and duplicate selected-
+                                    // member reconstruction below the common resolver.
                                     let arg_kinds: Vec<CallArgKind> = a
                                         .iter()
                                         .zip(&arg_tys)
                                         .map(|(&x, &ty)| call_arg_kind(self.file, x, ty))
                                         .collect();
-                                    self.resolve_instance_name_with_lambda_args(
-                                        internal, &name, &arg_kinds,
+                                    self.resolve_instance_member_with_literal_and_lambda_args(
+                                        recv, &name, &arg_kinds,
                                     )
-                                    .map(|m| {
-                                        let ret = m.ret;
-                                        let suspend = m.suspend();
-                                        self.resolved_calls.insert(
-                                            e,
-                                            ResolvedCall::Member(
-                                                crate::symbol_resolver::ResolvedMember {
-                                                    member: m,
-                                                    ret,
-                                                    projected_return_hazard: false,
-                                                    suspend,
-                                                },
-                                            ),
-                                        );
+                                    .map(|member| {
+                                        let ret = member.ret;
+                                        self.resolved_calls.insert(e, ResolvedCall::Member(member));
                                         ret
                                     })
                                 })
@@ -23066,7 +23054,8 @@ impl<'a> Checker<'a> {
                     .selected_source_extension(lt, "compareTo", &rhs_kind)
                     .filter(|(_, signature)| signature.is_operator() && signature.ret == Ty::Int)
                 {
-                    let requires_splice = self.source_extension_requires_splice(&selected);
+                    let inline = selected.flags.inline;
+                    let suspend = selected.flags.suspend;
                     let Some(param) = signature.single_param() else {
                         return self.check_binary(op, lt, rt, self.span(e));
                     };
@@ -23089,7 +23078,8 @@ impl<'a> Checker<'a> {
                             owner,
                             source: selected.source_key,
                             vararg: selected.call_sig.vararg,
-                            requires_splice,
+                            inline,
+                            suspend,
                         },
                     );
                     return self.set(e, Ty::Boolean);
@@ -24267,7 +24257,8 @@ impl<'a> Checker<'a> {
         arg_kinds: &[CallArgKind],
     ) -> Option<Ty> {
         let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
-        let requires_splice = self.source_extension_requires_splice(&selected);
+        let inline = selected.flags.inline;
+        let suspend = selected.flags.suspend;
         // Validate against the resolver's instantiated value parameters, not the declaration's
         // potentially generic signature. This is the contract the former qualified-call block used;
         // retaining it here prevents helper reuse from accepting a safe call that selected a generic
@@ -24303,7 +24294,8 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
-                requires_splice,
+                inline,
+                suspend,
             },
         );
         // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
@@ -25662,7 +25654,8 @@ impl<'a> Checker<'a> {
             );
         }
         if matches!(fi.callable.origin, Origin::Module { .. }) {
-            let requires_splice = self.source_extension_requires_splice(&fi);
+            let inline = fi.flags.inline;
+            let suspend = fi.flags.suspend;
             let (file, declaration) = fi.source_key?;
             let (_, signature) = self
                 .syms
@@ -25690,7 +25683,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
-                    requires_splice,
+                    inline,
+                    suspend,
                 },
             );
             self.resolved_call_arg_slots.insert(call, slots);
@@ -27434,6 +27428,11 @@ impl<'a> Checker<'a> {
                 argument_parameters: instantiated.argument_parameters,
                 visibility: shape.function.signature.visibility,
                 is_operator: shape.is_operator,
+                inline: InlineKind::from_flags(
+                    shape.function.signature.is_inline(),
+                    shape.function.signature.requires_splice(),
+                ),
+                suspend: shape.function.signature.is_suspend(),
                 owner: shape.owner,
             });
         }
