@@ -2368,6 +2368,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is
   withheld. Test: `tests/companion_e2e.rs::a_private_property_keeps_its_source_written_setter`,
   box `properties/kt3551.kt`.
+- **A property reference carries its type arguments.** `::foo` typed as a RAW `KProperty0`, so
+  `(::foo).get()` erased to the upper bound and `(::foo).get().value` did not resolve. The reference
+  type is built with the property's own type (`[V]` at arity 0, `[Recv, V]` at arity 1). Two things
+  are deliberately NOT asserted, because a wrong type is worse than none: a type still mentioning a
+  type parameter (the use site's substitution is not applied here), and an EXTENSION property's value
+  type (written in terms of the property's own parameters). A VALUE-CLASS-typed property reference
+  declines outright — kotlinc emits those accessors under the value-class name mangle, which the
+  reference does not yet carry. Tests: `tests/toplevel_property_ref_e2e.rs::toplevel_property_refs_run`,
+  box `callableReference/property/extensionPropertyWithExtensionType.kt`,
+  `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt`.
+- **A property on a BUILTIN receiver is one table, read by both phases.** `String.length`, `Char.code`
+  and an array's `size` have no class file to resolve against. The body checker knew them; the
+  SIGNATURE phase did not, so `const val code = a.code` reported "cannot infer the type of property"
+  for an expression the checker accepts. `String.length` alone records its resolved member — the other
+  two are backend intrinsics, and recording a member for them retargets the read into unverifiable
+  bytecode. Test: `tests/toplevel_property_inference_e2e.rs::toplevel_property_cross_reference`.
 
 ## 8. Success criteria for the PoC
 

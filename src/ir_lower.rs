@@ -11600,6 +11600,18 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        // Same rule for a VALUE-CLASS-typed property: kotlinc emits its accessors under the
+        // value-class name mangle (`getZ-<hash>()I`, over the UNDERLYING type), while the reference
+        // dispatches the plain `getZ()`. Until the reference carries the mangle, dispatching the
+        // unmangled name is a `NoSuchMethodError`, so decline (skip) instead
+        // (box `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt` and its three siblings).
+        if prop_ty
+            .obj_internal()
+            .and_then(|internal| self.syms.class_by_type_name(internal))
+            .is_some_and(|signature| signature.value_field.is_some())
+        {
+            return None;
+        }
         // A mutable (`var`) reference uses the `KMutableProperty*` runtime class and gets a `set`
         // method (emitted alongside `get`); an immutable one stays `KProperty*`.
         let bound = capture.is_some();
