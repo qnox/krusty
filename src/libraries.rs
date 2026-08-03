@@ -1373,6 +1373,11 @@ pub struct LibraryType {
     /// The enum entry names this type declares (`Kind` → `["PENDING", "DONE"]`); empty for a non-enum.
     /// Lets `EnumName.ENTRY` resolve for a classpath enum as it does for a source enum.
     pub enum_entries: Vec<String>,
+    /// Exact physical realization of Kotlin's synthetic `EnumType.entries` property, when this symbol
+    /// provider exposes a direct accessor. This is deliberately separate from [`Self::companion`]:
+    /// the accessor is not a source-callable `getEntries()` function, and keeping a dedicated fact
+    /// prevents consumers from rediscovering it by provider-specific names or descriptors.
+    pub enum_entries_accessor: Option<LibraryMember>,
     /// Whether a `@JvmInline value class`'s primary constructor is defaulted — kotlinc emits a
     /// `constructor-impl$default` synthetic exactly then, which realizes an all-defaulted `Id()`.
     pub value_ctor_has_default: bool,
@@ -1594,6 +1599,7 @@ mod tests {
             type_params: vec![],
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: vec![],
+            enum_entries_accessor: None,
             value_ctor_has_default: false,
             ctor_named_params: vec![],
             value_class_properties: vec![],

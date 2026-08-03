@@ -1087,7 +1087,13 @@ impl JvmLibraries {
             let mut constructors = Vec::new();
             let mut members = Vec::new();
             let mut companion = Vec::new();
+            let mut enum_entries_accessor = None;
             let is_java = !ci.meta.is_present();
+            // Identify the generated accessor while decoding JVM declarations, where metadata and
+            // class flags are authoritative. The backend-neutral checker then consumes an explicit
+            // capability instead of inferring declaration origin from a same-named static method.
+            let owns_enum_entries_accessor =
+                ci.meta.is_present() && ci.access & crate::jvm::classreader::ACC_ENUM != 0;
             // `Map.put` returns the PREVIOUS value (`V?`, null for a fresh key) — Kotlin enhances this Java
             // method's nullability. It applies to ANY `Map` subtype (`HashMap`, `TreeMap`, …), since a call
             // resolves the member on the concrete class, not on `Map` itself.
@@ -1222,6 +1228,14 @@ impl JvmLibraries {
                     // construction's type arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend
                     // signature strings. Re-parsing the raw attribute here would drop the receiver marks.
                     constructors.push(member);
+                } else if m.is_static()
+                    && owns_enum_entries_accessor
+                    && m.name == "getEntries"
+                    && member.params.is_empty()
+                    && member.ret.obj_internal()
+                        == Some(crate::types::type_name("kotlin/enums/EnumEntries"))
+                {
+                    enum_entries_accessor = Some(member);
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
                     companion.push(member);
@@ -1495,6 +1509,7 @@ impl JvmLibraries {
                 type_params,
                 sealed_subclasses: metadata::class_sealed_subclasses(&ci).into(),
                 enum_entries,
+                enum_entries_accessor,
                 value_ctor_has_default,
                 ctor_named_params: metadata::class_constructor_params(&ci),
                 value_class_properties: self.value_class_property_members_for_class(&ci),
@@ -2023,6 +2038,7 @@ fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
         type_params: Vec::new(),
         sealed_subclasses: TypeNameList::new(),
         enum_entries: Vec::new(),
+        enum_entries_accessor: None,
         value_ctor_has_default: false,
         ctor_named_params: Vec::new(),
         value_class_properties: Vec::new(),
@@ -2059,6 +2075,7 @@ fn builtin_library_type(
         type_params,
         sealed_subclasses: TypeNameList::new(),
         enum_entries: Vec::new(),
+        enum_entries_accessor: None,
         value_ctor_has_default: false,
         ctor_named_params: Vec::new(),
         value_class_properties: Vec::new(),
