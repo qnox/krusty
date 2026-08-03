@@ -9377,11 +9377,10 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
-        /// JVM module registration determined that the selected declaration has no callable
-        /// facade. Same-file lowering may still splice an inline body first; every remaining path
-        /// must bail instead of inventing an `invokestatic` target. This semantic flag deliberately
-        /// carries the registrar's complete decision rather than one source-language reason (for
-        /// example `reified`), so new splice-only or ABI-restricted shapes cannot bypass it.
+        /// The selected callable's generic [`InlineKind::MustInline`] capability: a direct fallback
+        /// is semantically illegal even if a facade method is physically emitted to publish inline
+        /// code. Same-file lowering may splice it first; every remaining path must bail. Carrying
+        /// the resolved capability keeps lowering independent of source syntax and symbol origin.
         requires_splice: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
