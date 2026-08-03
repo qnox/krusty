@@ -387,40 +387,43 @@ fn lower_file_at_reporting_impl(
     // The `sequence {}` / `iterator {}` coroutine BUILDERS drive a suspend LAMBDA through `yield`/
     // `yieldAll` suspension points — a state machine the pass doesn't model. Skip the whole file rather
     // than emit a `Sequence`/`Iterator` whose `iterator()`/`next()` has no body (an `AbstractMethodError`
-    // at the for-loop / terminal operation). It is the BUILDER that is unsupported, so the gate needs
-    // both halves of the shape: a `yield`/`yieldAll` call AND an unqualified `sequence`/`iterator`
-    // builder call to supply the `SequenceScope` receiver those calls suspend on. `yield` is an ordinary
-    // identifier in Kotlin (it is not a keyword), so the call alone says nothing — a user's own
-    // `fun yield(…)` member is a plain call the pass lowers like any other. A `SequenceScope` receiver
-    // reached any other way is a suspend extension/member, which the suspend gate below already skips.
-    let file_calls = |names: &[&str]| {
-        file.decls.iter().any(|&d| {
-            let body = match file.decl(d) {
-                Decl::Fun(f) => match &f.body {
+    // at the for-loop / terminal operation). Detected by the builder's `yield`/`yieldAll` calls anywhere.
+    //
+    // The BUILDER's `yield`/`yieldAll` are members of `kotlin.sequences.SequenceScope`. A call the
+    // checker resolved to any OTHER owner is an ordinary user method that happens to share the name
+    // (`class Buildee<T> { fun yield(arg: T) }`), and gating on the spelling alone skipped those files
+    // for no reason. An unresolved call is gated too — nothing rules out the builder.
+    let uses_yield_builder = file.decls.iter().any(|&d| {
+        let body = match file.decl(d) {
+            Decl::Fun(f) => match &f.body {
+                FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+                FunBody::None => None,
+            },
+            Decl::Property(p) => p.init,
+            _ => None,
+        };
+        let class_bodies: Vec<AstExprId> = match file.decl(d) {
+            Decl::Class(c) => c
+                .methods
+                .iter()
+                .filter_map(|m| match &m.body {
                     FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
                     FunBody::None => None,
-                },
-                Decl::Property(p) => p.init,
-                _ => None,
-            };
-            let class_bodies: Vec<AstExprId> = match file.decl(d) {
-                Decl::Class(c) => c
-                    .methods
-                    .iter()
-                    .filter_map(|m| match &m.body {
-                        FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
-                        FunBody::None => None,
-                    })
-                    .chain(c.body_props.iter().filter_map(|p| p.init))
-                    .collect(),
-                _ => Vec::new(),
-            };
-            body.into_iter()
-                .chain(class_bodies)
-                .any(|e| names.iter().any(|n| expr_tree_calls_name(file, e, n)))
+                })
+                .chain(c.body_props.iter().filter_map(|p| p.init))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let builder_scope = |call: AstExprId| {
+            info.resolved_call_owner(call)
+                .is_none_or(|owner| owner.matches("kotlin/sequences/SequenceScope"))
+        };
+        body.into_iter().chain(class_bodies).any(|e| {
+            expr_tree_calls_name_where(file, e, "yield", &builder_scope)
+                || expr_tree_calls_name_where(file, e, "yieldAll", &builder_scope)
         })
-    };
-    if file_calls(&["yield", "yieldAll"]) && file_calls(&["sequence", "iterator"]) {
+    });
+    if uses_yield_builder {
         return lo.bail("gate:yield-builder");
     }
 
@@ -26772,15 +26775,28 @@ fn ir_array_element(t: &Ty) -> Option<Ty> {
 /// shifts them) no guards are emitted.
 /// Whether the expression tree rooted at `e` contains a CALL to the unqualified `name` — recursing FULLY
 /// through nested lambdas AND statement bodies (so a `sequence { for (…) { yield(i) } }` is found).
-fn expr_tree_calls_name(file: &ast::File, e: AstExprId, name: &str) -> bool {
+/// Whether the expression tree contains a call to `name` that `accept` admits — so a caller can ask
+/// about the call's RESOLUTION, not only its spelling.
+fn expr_tree_calls_name_where(
+    file: &ast::File,
+    e: AstExprId,
+    name: &str,
+    accept: &dyn Fn(AstExprId) -> bool,
+) -> bool {
     if let Expr::Call { callee, .. } = file.expr(e) {
-        if matches!(file.expr(*callee), Expr::Name(n) if n == name) {
+        if matches!(file.expr(*callee), Expr::Name(n) if n == name) && accept(e) {
             return true;
         }
     }
-    file.any_child_expr(e, &mut |c| expr_tree_calls_name(file, c, name), &mut |s| {
-        file.any_child_stmt(s, &mut |c| expr_tree_calls_name(file, c, name))
-    })
+    file.any_child_expr(
+        e,
+        &mut |c| expr_tree_calls_name_where(file, c, name, accept),
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                expr_tree_calls_name_where(file, c, name, accept)
+            })
+        },
+    )
 }
 
 fn param_checks_for(
