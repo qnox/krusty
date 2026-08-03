@@ -142,6 +142,7 @@ pub(crate) struct RawDecl {
     pub(crate) fields: Vec<(String, SrcType, u16)>,
     pub(crate) enum_constants: Vec<String>,
     pub(crate) record_components: Vec<(String, SrcType)>,
+    pub(crate) record_is_varargs: bool,
 }
 
 impl RawDecl {
@@ -700,11 +701,11 @@ fn type_decl_with_access(
     } else {
         Vec::new()
     };
-    let record_components = if kind == DeclKind::Record {
+    let (record_components, record_is_varargs) = if kind == DeclKind::Record {
         p.eat_punct('(').then_some(())?;
         record_component_list(p)?
     } else {
-        Vec::new()
+        (Vec::new(), false)
     };
     let mut superclass = None;
     let mut interfaces = Vec::new();
@@ -754,6 +755,7 @@ fn type_decl_with_access(
         fields: Vec::new(),
         enum_constants: Vec::new(),
         record_components,
+        record_is_varargs,
     };
 
     if kind == DeclKind::Enum {
@@ -933,6 +935,7 @@ fn annotation_type_decl(
         fields: Vec::new(),
         enum_constants: Vec::new(),
         record_components: Vec::new(),
+        record_is_varargs: false,
     };
 
     loop {
@@ -972,24 +975,42 @@ fn annotation_type_decl(
     Some(())
 }
 
+/// Shared `modifiers Type [... ] name` prefix for method parameters and record components. A vararg
+/// spelling maps to its JVM array type here; list-level callers enforce that it is the final element.
+fn typed_parameter(p: &mut P) -> Option<(String, SrcType, bool)> {
+    // Method parameters and record components share this exact Java grammar prefix. Parse it once so
+    // accepting an annotation/modifier, recognizing `...`, and converting that spelling to its JVM
+    // array type cannot drift between the explicit-method and synthesized-record constructor paths.
+    let _ = modifiers(p)?;
+    let mut ty = src_type(p)?;
+    let is_varargs = if p.eat_punct('.') {
+        p.eat_punct('.').then_some(())?;
+        p.eat_punct('.').then_some(())?;
+        ty.array += 1;
+        true
+    } else {
+        false
+    };
+    let name = p.ident()?;
+    Some((name, ty, is_varargs))
+}
+
 /// `( Type name, Type... name )` — parameter list (opening paren consumed). Varargs `...` maps to
 /// an array, exactly as javac compiles it.
 fn param_list(p: &mut P) -> Option<(Vec<SrcType>, bool)> {
     let mut out = Vec::new();
-    let mut varargs = false;
     if p.eat_punct(')') {
-        return Some((out, varargs));
+        return Some((out, false));
     }
     loop {
-        let _ = modifiers(p)?; // `final`, annotations
-        let mut ty = src_type(p)?;
-        if p.eat_punct('.') {
-            p.eat_punct('.').then_some(())?;
-            p.eat_punct('.').then_some(())?;
-            ty.array += 1;
-            varargs = true;
+        let (_name, mut ty, parameter_is_varargs) = typed_parameter(p)?;
+        if parameter_is_varargs {
+            // Java permits variable arity only in the final parameter. Requiring the closing delimiter
+            // here rejects malformed declarations instead of retaining ACC_VARARGS on an earlier array.
+            out.push(ty);
+            p.eat_punct(')').then_some(())?;
+            return Some((out, true));
         }
-        let _name = p.ident()?;
         // C-style array suffix on the NAME (`int a[]`).
         while p.eat_punct('[') {
             p.eat_punct(']').then_some(())?;
@@ -1000,30 +1021,29 @@ fn param_list(p: &mut P) -> Option<(Vec<SrcType>, bool)> {
             continue;
         }
         p.eat_punct(')').then_some(())?;
-        return Some((out, varargs));
+        return Some((out, false));
     }
 }
 
-fn record_component_list(p: &mut P) -> Option<Vec<(String, SrcType)>> {
+fn record_component_list(p: &mut P) -> Option<(Vec<(String, SrcType)>, bool)> {
     let mut out = Vec::new();
     if p.eat_punct(')') {
-        return Some(out);
+        return Some((out, false));
     }
     loop {
-        let _ = modifiers(p)?;
-        let mut ty = src_type(p)?;
-        if p.eat_punct('.') {
-            p.eat_punct('.').then_some(())?;
-            p.eat_punct('.').then_some(())?;
-            ty.array += 1;
-        }
-        let name = p.ident()?;
+        let (name, ty, component_is_varargs) = typed_parameter(p)?;
         out.push((name, ty));
+        if component_is_varargs {
+            // The variable-arity record component defines the canonical constructor ABI and, like an
+            // ordinary method vararg, must be last. `)` is therefore part of recognizing this form.
+            p.eat_punct(')').then_some(())?;
+            return Some((out, true));
+        }
         if p.eat_punct(',') {
             continue;
         }
         p.eat_punct(')').then_some(())?;
-        return Some(out);
+        return Some((out, false));
     }
 }
 
