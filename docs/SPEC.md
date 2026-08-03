@@ -1923,7 +1923,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **Source nesting is depth-bounded — degrade, never crash.** The checker and IR-lowering bound
   their expression recursion at 500 semantic nesting levels; the parser bounds its recursion at
-  1000 entries per funnel — expressions (`parse_bp`), types (`parse_type`: nested type parens
+  1000 entries per funnel — expressions (`parse_bp`, plus annotation arrays/nested values which
+  recurse while a declaration prefix is parsed), types (`parse_type`: nested type parens
   `((((Int))))`, nested generic arguments), and statements/declarations (`parse_stmt` plus the
   class-like declaration parsers: nested blocks `while { while { … } }`, nested
   classes/interfaces/objects/enums), each of which recurses outside `parse_bp` and carries its
@@ -1949,8 +1950,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nesting shape per pass (5–6 parser frames per paren level; `check_call`-sized checker/lowering
   frames per call level), and 5000-deep statement/class nesting SIGBUSed past one grown segment.
   Tests: `tests/deep_expression_nesting_check.rs` (400/700-operand chains, 400 and 1500 nested
-  parens, 450-deep call chain, 400/5000 nested type parens and generic arguments, 400/5000 nested
-  `while` blocks, 300/5000 nested classes) and `tests/deep_expression_nesting_check_e2e.rs`
+  parens, 450-deep call chain, 5000-deep annotation arrays, 400/5000 nested type parens and generic
+  arguments, 400/5000 nested `while` blocks, 300/5000 nested classes, and mixed local-class/init/
+  loop recursion) and `tests/deep_expression_nesting_check_e2e.rs`
   (450-level `0+(…)` right-nesting through the checker and lowering, end-to-end).
 
 ## 8. Success criteria for the PoC

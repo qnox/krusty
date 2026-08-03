@@ -265,8 +265,8 @@ fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
 }
 
 /// The degraded result of a tripped declaration-nesting guard: an empty final class named
-/// `<error>`. The angle-bracket-free name cannot collide with source classes, and the empty body
-/// gives the later passes nothing to recurse over.
+/// `<error>`. That source-impossible synthetic name cannot collide with a declared class, and the
+/// empty body gives the later passes nothing to recurse over.
 fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
     ClassDecl {
         name: "<error>".to_string(),
@@ -822,6 +822,46 @@ struct Parser<'a> {
     /// type declarations (`class A { class B { … } }`) recurse outside `parse_bp` too; one shared
     /// counter bounds any interleaving of the two shapes.
     stmt_depth: u32,
+}
+
+/// Semantic parser-recursion funnels governed by one depth/recovery mechanism.
+///
+/// Statement and declaration entries intentionally select the same counter: a local class inside
+/// a loop, or a loop inside an initializer of a local class, must not evade the bound by alternating
+/// declaration origins. Type recovery alone treats angle brackets as delimiters because only type
+/// grammar gives `<`/`>` that unconditional structural meaning.
+#[derive(Clone, Copy)]
+enum ParserNesting {
+    Expression,
+    Type,
+    Statement,
+    Declaration,
+}
+
+impl ParserNesting {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Expression => "expression",
+            Self::Type => "type",
+            Self::Statement => "statement",
+            Self::Declaration => "declaration",
+        }
+    }
+
+    fn counter_mut<'parser, 'source>(
+        self,
+        parser: &'parser mut Parser<'source>,
+    ) -> &'parser mut u32 {
+        match self {
+            Self::Expression => &mut parser.expr_depth,
+            Self::Type => &mut parser.type_depth,
+            Self::Statement | Self::Declaration => &mut parser.stmt_depth,
+        }
+    }
+
+    fn angle_brackets(self) -> bool {
+        matches!(self, Self::Type)
+    }
 }
 
 /// Maximum expression-parse recursion depth, counted in `parse_bp` ENTRIES — not semantic nesting
@@ -1681,6 +1721,18 @@ impl<'a> Parser<'a> {
     /// or an ordinary expression (incl. `Foo::class`). Returns the expr for the ordinary case (kept for
     /// const-folding by extensions); array/nested values return `None`.
     fn parse_annotation_value(&mut self) -> Option<ExprId> {
+        // Annotation arrays, nested annotations, and spreads recurse while a declaration prefix is
+        // still being consumed, before `parse_bp` or a class-like parser is necessarily entered.
+        // They are expression syntax, so join the shared expression lane instead of owning another
+        // origin-specific counter/recovery policy.
+        self.with_nesting_guard(
+            ParserNesting::Expression,
+            |_parser, _span| None,
+            Self::parse_annotation_value_inner,
+        )
+    }
+
+    fn parse_annotation_value_inner(&mut self) -> Option<ExprId> {
         if self.at(TokenKind::LBracket) {
             self.bump(); // '['
             self.skip_newlines();
@@ -2943,23 +2995,18 @@ impl<'a> Parser<'a> {
     }
 
     fn guarded_class_like(&mut self, inner: fn(&mut Self) -> ClassDecl) -> ClassDecl {
-        if self.stmt_depth >= EXPR_DEPTH_LIMIT {
-            let span = self.tok().span;
-            self.diags.error(span, "declaration nesting too deep");
-            self.skip_over_deep_rest(false);
-            // The rejected declaration's pending prefix (annotations, context params) dies with
-            // it — otherwise it would attach to the next declaration parsed after recovery.
-            self.pending_annotations.clear();
-            self.pending_annotation_args.clear();
-            self.pending_context_params.clear();
-            return error_class_decl(span);
-        }
-        self.stmt_depth += 1;
-        // Grow the stack per level, like `parse_bp`: one nesting level is one large unoptimized
-        // class-parser frame, so the depth bound can need more than one grown segment.
-        let d = crate::wide_stack::on_wide_stack(|| inner(self));
-        self.stmt_depth -= 1;
-        d
+        self.with_nesting_guard(
+            ParserNesting::Declaration,
+            |parser, span| {
+                // The rejected declaration's pending prefix (annotations, context params) dies
+                // with it — otherwise it would attach to the next declaration after recovery.
+                parser.pending_annotations.clear();
+                parser.pending_annotation_args.clear();
+                parser.pending_context_params.clear();
+                error_class_decl(span)
+            },
+            inner,
+        )
     }
 
     fn parse_class_inner(&mut self) -> ClassDecl {
@@ -4061,18 +4108,11 @@ impl<'a> Parser<'a> {
     /// the expression guard never sees it. Past [`EXPR_DEPTH_LIMIT`] the type degrades to an error
     /// type with a diagnostic and an angle-aware balanced skip — degrade, never crash.
     fn parse_type(&mut self) -> TypeRef {
-        if self.type_depth >= EXPR_DEPTH_LIMIT {
-            let span = self.tok().span;
-            self.diags.error(span, "type nesting too deep");
-            self.skip_over_deep_rest(true);
-            return simple_type_ref("<error>", span);
-        }
-        self.type_depth += 1;
-        // Grow the stack per level, like `parse_bp`: one nesting level stacks several unoptimized
-        // parser frames, so the depth bound can need more than one grown segment.
-        let ty = crate::wide_stack::on_wide_stack(|| self.parse_type_inner());
-        self.type_depth -= 1;
-        ty
+        self.with_nesting_guard(
+            ParserNesting::Type,
+            |_parser, span| simple_type_ref("<error>", span),
+            Self::parse_type_inner,
+        )
     }
 
     /// Parse a type, folding a trailing definitely-non-null intersection `T & Any` (the only legal
@@ -5112,19 +5152,16 @@ impl<'a> Parser<'a> {
     /// an error statement with a diagnostic and a balanced skip — degrade, never crash — leaving
     /// one closer for each enclosing block frame.
     fn parse_stmt(&mut self) -> StmtId {
-        if self.stmt_depth >= EXPR_DEPTH_LIMIT {
-            let span = self.tok().span;
-            self.diags.error(span, "statement nesting too deep");
-            self.skip_over_deep_rest(false);
-            let e = self.file.add_expr(Expr::Name("<error>".to_string()), span);
-            return self.finish_stmt(Stmt::Expr(e), span);
-        }
-        self.stmt_depth += 1;
-        // Grow the stack per level, like `parse_bp`: one block level stacks several unoptimized
-        // parser frames (`parse_stmt` → loop arm → `parse_block_expr` → back here).
-        let s = crate::wide_stack::on_wide_stack(|| self.parse_stmt_inner());
-        self.stmt_depth -= 1;
-        s
+        self.with_nesting_guard(
+            ParserNesting::Statement,
+            |parser, span| {
+                let expression = parser
+                    .file
+                    .add_expr(Expr::Name("<error>".to_string()), span);
+                parser.finish_stmt(Stmt::Expr(expression), span)
+            },
+            Self::parse_stmt_inner,
+        )
     }
 
     fn parse_stmt_inner(&mut self) -> StmtId {
@@ -6247,31 +6284,55 @@ impl<'a> Parser<'a> {
         lhs
     }
 
-    /// Depth-guarded entry for the binary-expression parser. Every expression recursion funnels
+    /// Depth-guarded entry for the binary-expression parser. Ordinary expression recursion funnels
     /// through here — `parse_expr` → `parse_elvis` → `parse_bp`, and nested operands
     /// (parenthesized/bracketed expressions, call arguments, prefix operands, branch bodies)
-    /// re-enter via `parse_expr` — so this single guard bounds all of it. A left-leaning binary
-    /// chain (`a && b && c`) iterates in `parse_bp_inner`'s loop and does not grow the depth;
-    /// only genuinely nested expressions (`((((x))))`, `f(f(f(x)))`) do. Past
-    /// [`EXPR_DEPTH_LIMIT`] the expression degrades to an error expression with a diagnostic —
-    /// degrade, never crash — mirroring the checker's and lowering's `expr_depth` guards.
+    /// re-enter via `parse_expr`. Annotation-value structures recurse outside `parse_bp`, so their
+    /// entry explicitly selects the same [`ParserNesting::Expression`] lane. A left-leaning binary
+    /// chain (`a && b && c`) iterates in `parse_bp_inner`'s loop and does not grow the depth; only
+    /// genuinely nested expressions (`((((x))))`, `f(f(f(x)))`) do. Past [`EXPR_DEPTH_LIMIT`] the
+    /// expression degrades to an error expression with a diagnostic — degrade, never crash —
+    /// mirroring the checker's and lowering's `expr_depth` guards.
     fn parse_bp(&mut self, min_bp: u8) -> ExprId {
-        if self.expr_depth >= EXPR_DEPTH_LIMIT {
+        self.with_nesting_guard(
+            ParserNesting::Expression,
+            |parser, span| {
+                parser
+                    .file
+                    .add_expr(Expr::Name("<error>".to_string()), span)
+            },
+            |parser| parser.parse_bp_inner(min_bp),
+        )
+    }
+
+    /// Apply the parser's depth, recovery, and stack-growth contract to every recursive funnel.
+    ///
+    /// Keeping the counter lane, diagnostic label, delimiter policy, and per-level stack growth in
+    /// one operation prevents a new syntax origin from silently receiving a different safety
+    /// policy. Callers provide only their typed degraded node; that is the one aspect which cannot
+    /// be shared between an expression, type, statement, and declaration AST.
+    fn with_nesting_guard<T>(
+        &mut self,
+        nesting: ParserNesting,
+        degraded: impl FnOnce(&mut Self, crate::diag::Span) -> T,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if *nesting.counter_mut(self) >= EXPR_DEPTH_LIMIT {
             let span = self.tok().span;
-            self.diags.error(span, "expression nesting too deep");
-            self.skip_over_deep_rest(false);
-            return self.file.add_expr(Expr::Name("<error>".to_string()), span);
+            self.diags
+                .error(span, format!("{} nesting too deep", nesting.label()));
+            self.skip_over_deep_rest(nesting.angle_brackets());
+            return degraded(self, span);
         }
-        self.expr_depth += 1;
-        // Grow the stack HERE, per level, not once at the parse entry: one nesting level stacks
-        // 5–6 unoptimized parser frames (`parse_bp_inner` → `parse_prefix` → `parse_primary` →
-        // `parse_expr` → `parse_elvis` → back here), so the depth bound needs more than one grown
-        // segment — a single entry-point reserve was measured to SIGBUS between 400 and 500 paren
-        // levels. The per-call check is a stack-pointer read; `stacker` chains further segments
-        // only when the current one runs low (see [`crate::wide_stack`]).
-        let e = crate::wide_stack::on_wide_stack(|| self.parse_bp_inner(min_bp));
-        self.expr_depth -= 1;
-        e
+
+        *nesting.counter_mut(self) += 1;
+        // Check/grow at EVERY recursive level. A single grown segment was measured to fail before
+        // the bound because each semantic level stacks several large unoptimized parser frames.
+        // `maybe_grow` is cheap while enough stack remains and chains a segment only near its
+        // low-water mark.
+        let result = crate::wide_stack::on_wide_stack(|| parse(self));
+        *nesting.counter_mut(self) -= 1;
+        result
     }
 
     /// Recovery for a tripped nesting guard: skip the REST of the over-deep construct,

@@ -242,6 +242,32 @@ fn beyond_depth_guard_paren_type_nesting_degrades_on_two_mib_stack() {
 }
 
 #[test]
+fn beyond_depth_guard_annotation_value_nesting_degrades_on_two_mib_stack() {
+    // Annotation arrays and nested annotations recurse through `parse_annotation_value` while a
+    // declaration prefix is still being consumed. They do not pass through `parse_bp`, so they
+    // must explicitly join the expression-depth lane; otherwise this shape overflows before the
+    // guarded class parser is even entered.
+    let src = format!(
+        "@Synthetic({}0{})\nclass SyntheticTarget\n",
+        "[".repeat(5000),
+        "]".repeat(5000)
+    );
+    let es = parse_only_on_regression_stack(src);
+    let depth_diagnostics = es
+        .iter()
+        .filter(|message| message.contains("expression nesting too deep"))
+        .count();
+    assert_eq!(
+        depth_diagnostics, 1,
+        "annotation-value recursion must share the expression guard and diagnose once; got: {es:?}"
+    );
+    assert!(
+        !es.iter().any(|message| message.contains("expected ']'")),
+        "balanced recovery must leave one ']' for every enclosing annotation array; got: {es:?}"
+    );
+}
+
+#[test]
 fn deep_generic_type_nesting_parses_on_two_mib_stack() {
     // 400 nested generic arguments (`List<List<…<Int>…>>`) — `parse_type` → `parse_type_args` →
     // `parse_type` recursion in declaration position. Parse-only: the later passes recurse over the
@@ -368,5 +394,34 @@ fn beyond_depth_guard_class_nesting_degrades_on_two_mib_stack() {
     assert!(
         !es.iter().any(|m| m.contains("expected '}'")),
         "balanced recovery must leave one '}}' for each enclosing class-body frame; got: {es:?}"
+    );
+}
+
+#[test]
+fn mixed_statement_and_declaration_nesting_shares_one_guard_on_two_mib_stack() {
+    // Alternate all the structural origins that share `stmt_depth`: a local class declaration, its
+    // initializer block, and a nested while statement. Separate per-origin budgets would allow the
+    // combined recursion to run several times deeper than the documented limit. The unified guard
+    // must trip exactly once and recover through every enclosing class/block closer.
+    let src = format!(
+        "fun deep() {{ {}val x = 0 {} }}\n",
+        "class SyntheticNode { init { while (true) { ".repeat(2000),
+        "} } } ".repeat(2000)
+    );
+    let es = parse_only_on_regression_stack(src);
+    let depth_diagnostics = es
+        .iter()
+        .filter(|message| {
+            message.contains("statement nesting too deep")
+                || message.contains("declaration nesting too deep")
+        })
+        .count();
+    assert_eq!(
+        depth_diagnostics, 1,
+        "mixed structural recursion must consume one shared budget and diagnose once; got: {es:?}"
+    );
+    assert!(
+        !es.iter().any(|message| message.contains("expected '}'")),
+        "shared recovery must preserve every enclosing class/block closer; got: {es:?}"
     );
 }
