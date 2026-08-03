@@ -1158,9 +1158,11 @@ pub enum InlineKind {
     /// A Kotlin `inline` function (per its `@Metadata`): the JVM backend MAY splice its compiled body
     /// at the call site, but a real call is a legal fallback (the callee is a public method).
     CanInline,
-    /// A NON-PUBLIC `@InlineOnly` function (`require`/`check`/`error`/`let`/…): there is no callable
-    /// method to invoke, so the backend MUST splice the body — a failed splice skips the whole file
-    /// (never an `invokestatic` on the private method → never an `IllegalAccessError`).
+    /// No legal direct-call fallback. This includes a NON-PUBLIC `@InlineOnly` function
+    /// (`require`/`check`/`error`/`let`/…) whose method is inaccessible and a reified source body
+    /// whose erased method may exist only to publish inline code. The backend MUST splice the body;
+    /// a failed splice skips the whole file rather than emitting an inaccessible or unspecialized
+    /// `invokestatic`.
     MustInline,
 }
 
