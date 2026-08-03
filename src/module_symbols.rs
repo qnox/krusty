@@ -312,7 +312,10 @@ impl<'a> ModuleSymbols<'a> {
                     FnKind::TopLevel,
                     sig,
                     None,
-                    owner,
+                    CallableOwner {
+                        internal: owner,
+                        is_interface: false,
+                    },
                     name,
                     0,
                     origin.clone(),
@@ -385,7 +388,10 @@ impl<'a> ModuleSymbols<'a> {
                 FnKind::Member,
                 sig,
                 None,
-                c.internal_name(),
+                CallableOwner {
+                    internal: c.internal_name(),
+                    is_interface: c.is_interface(),
+                },
                 name,
                 here,
                 Origin::Module {
@@ -418,7 +424,12 @@ impl<'a> ModuleSymbols<'a> {
         let here = *rung;
         *rung += 1;
         if let Some(property) = class.declared_props.get(name) {
-            out.push(source_property(class.internal_name(), property, here));
+            out.push(source_property(
+                class.internal_name(),
+                property,
+                class.is_interface(),
+                here,
+            ));
         }
         for interface in class.interfaces.iter_ids() {
             self.collect_properties(interface, name, out, seen, rung);
@@ -447,7 +458,10 @@ impl<'a> ModuleSymbols<'a> {
         for property in class.declared_props.values() {
             let accessor = if property.getter_name == name {
                 Some(source_accessor(
-                    class.internal_name(),
+                    CallableOwner {
+                        internal: class.internal_name(),
+                        is_interface: class.is_interface(),
+                    },
                     name,
                     property.context_params.clone(),
                     property.ty,
@@ -459,7 +473,10 @@ impl<'a> ModuleSymbols<'a> {
                 let mut params = property.context_params.clone();
                 params.push(property.ty);
                 Some(source_accessor(
-                    class.internal_name(),
+                    CallableOwner {
+                        internal: class.internal_name(),
+                        is_interface: class.is_interface(),
+                    },
                     name,
                     params,
                     Ty::Unit,
@@ -493,22 +510,32 @@ fn lib_member(name: &str, sig: &Signature, owner: TypeName, is_interface: bool) 
     m.set_is_interface(is_interface);
     m.set_suspend(sig.is_suspend());
     m.visibility = sig.visibility;
-    m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), false);
+    m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), sig.requires_splice());
     m.call_sig = sig.call_sig();
     m
 }
 
 /// Build a top-level / extension `FunctionInfo` from a user [`Signature`]. `receiver` is `Some` for an
 /// extension (prepended to `params`, matching the library convention that `params[0]` is the receiver).
+#[derive(Clone, Copy)]
+struct CallableOwner {
+    internal: TypeName,
+    is_interface: bool,
+}
+
 fn fn_info(
     kind: FnKind,
     sig: &Signature,
     receiver: Option<Ty>,
-    owner: TypeName,
+    owner: CallableOwner,
     name: &str,
     rank: u32,
     origin: Origin,
 ) -> FunctionInfo {
+    let CallableOwner {
+        internal: owner,
+        is_interface: owner_is_interface,
+    } = owner;
     let source_receiver = sig.source_receiver.or(receiver);
     let mut params: Vec<Ty> = Vec::new();
     if let Some(r) = receiver {
@@ -523,7 +550,12 @@ fn fn_info(
         ret: sig.ret,
         physical_ret: sig.ret,
         suspend: sig.is_suspend(),
-        inline: InlineKind::from_flags(sig.is_inline(), false),
+        // Declaration capabilities travel on the selected callable for every symbol source. A module
+        // owner may be re-readable today, but making later consumers re-query only that origin would
+        // let the source and classpath resolution paths drift and would lose this fact on a generic
+        // `FunctionInfo` → `LibraryMember` round trip.
+        owner_is_interface,
+        inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
         default_call: false,
         vararg_elem: None,
         vararg_index: None,
@@ -547,7 +579,7 @@ fn fn_info(
             .zip(sig.source_decl)
             .map(|(file, decl)| (file, decl.0)),
         flags: FnFlags {
-            inline: InlineKind::from_flags(sig.is_inline(), false),
+            inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
             suspend: sig.is_suspend(),
@@ -558,7 +590,13 @@ fn fn_info(
     }
 }
 
-fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> LibraryCallable {
+fn source_callable(
+    owner: TypeName,
+    name: String,
+    params: Vec<Ty>,
+    ret: Ty,
+    owner_is_interface: bool,
+) -> LibraryCallable {
     LibraryCallable {
         owner,
         name,
@@ -567,6 +605,7 @@ fn source_callable(owner: TypeName, name: String, params: Vec<Ty>, ret: Ty) -> L
         ret,
         physical_ret: ret,
         suspend: false,
+        owner_is_interface,
         inline: InlineKind::None,
         default_call: false,
         vararg_elem: None,
@@ -586,14 +625,15 @@ fn source_property_getter(
     name: String,
     params: Vec<Ty>,
     ty: Ty,
+    owner_is_interface: bool,
 ) -> LibraryCallable {
-    let mut callable = source_callable(owner, name, params, ty);
+    let mut callable = source_callable(owner, name, params, ty, owner_is_interface);
     callable.physical_ret = stored_value_ty(ty);
     callable
 }
 
 fn source_accessor(
-    owner: TypeName,
+    owner: CallableOwner,
     name: &str,
     params: Vec<Ty>,
     ret: Ty,
@@ -601,6 +641,10 @@ fn source_accessor(
     receiver_rank: u32,
     context_count: usize,
 ) -> FunctionInfo {
+    let CallableOwner {
+        internal: owner,
+        is_interface: owner_is_interface,
+    } = owner;
     FunctionInfo {
         visibility,
         receiver_rank,
@@ -608,7 +652,7 @@ fn source_accessor(
         ..FunctionInfo::plain(
             FnKind::Member,
             Some(Ty::obj_name(owner)),
-            source_callable(owner, name.to_string(), params, ret),
+            source_callable(owner, name.to_string(), params, ret, owner_is_interface),
         )
     }
 }
@@ -616,6 +660,7 @@ fn source_accessor(
 fn source_property(
     owner: TypeName,
     property: &FrontendDeclaredPropertySig,
+    owner_is_interface: bool,
     receiver_rank: u32,
 ) -> PropertyInfo {
     PropertyInfo {
@@ -629,11 +674,12 @@ fn source_property(
             property.getter_name.clone(),
             property.context_params.clone(),
             property.ty,
+            owner_is_interface,
         ),
         setter: property.setter_name.as_ref().map(|setter| {
             let mut params = property.context_params.clone();
             params.push(stored_value_ty(property.ty));
-            source_callable(owner, setter.clone(), params, Ty::Unit)
+            source_callable(owner, setter.clone(), params, Ty::Unit, owner_is_interface)
         }),
         is_const: false,
         visibility: property.visibility,
@@ -702,7 +748,10 @@ impl SymbolSource for ModuleSymbols<'_> {
                         FnKind::Extension,
                         sig,
                         Some(*recv),
-                        crate::types::type_name(""),
+                        CallableOwner {
+                            internal: crate::types::type_name(""),
+                            is_interface: false,
+                        },
                         &name,
                         rank,
                         Origin::Module {
@@ -735,6 +784,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     property.getter_name.clone(),
                     vec![property.receiver],
                     property.ty,
+                    false,
                 );
                 let setter = property.setter_name.as_ref().map(|setter_name| {
                     source_callable(
@@ -742,6 +792,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                         setter_name.clone(),
                         vec![property.receiver, stored_value_ty(property.ty)],
                         Ty::Unit,
+                        false,
                     )
                 });
                 properties.push(PropertyInfo {
@@ -1169,6 +1220,34 @@ mod tests {
     }
 
     #[test]
+    fn required_splice_flows_as_the_generic_inline_capability() {
+        let mut symbols = FrontendSymbols::default();
+        let receiver = Ty::obj("demo/Receiver");
+        let mut signature = sig(vec![Ty::Int], Ty::Boolean);
+        // An emitted method and a legal direct fallback are independent capabilities. Reified
+        // source declarations use this signature bit even when their facade exists, and all module
+        // callable projections must preserve it as the shared `MustInline` semantic state.
+        signature.flags = signature
+            .flags
+            .with_is_inline(true)
+            .with_requires_splice(true);
+        symbols
+            .ext_funs
+            .entry("check".into())
+            .or_default()
+            .insert(receiver.extension_recv_key(), vec![signature]);
+        let module = ModuleSymbols::new(&symbols);
+
+        let functions = match module.resolve_symbols("check").callables {
+            crate::libraries::Callables::Functions(functions) => functions.overloads,
+            _ => Vec::new(),
+        };
+        assert_eq!(functions.len(), 1);
+        assert!(functions[0].flags.inline.must_inline());
+        assert!(functions[0].callable.inline.must_inline());
+    }
+
+    #[test]
     fn extension_prepends_receiver_and_keeps_source_receiver_identity() {
         let mut st = FrontendSymbols::default();
         let recv = Ty::nullable(Ty::obj("demo/Point"));
@@ -1353,6 +1432,30 @@ mod tests {
                 .expect("shape")
                 .is_public
         );
+    }
+
+    #[test]
+    fn selected_module_callable_preserves_interface_dispatch_capability() {
+        // `FunctionInfo::member_with_return` is the common overload-selection round trip used by
+        // module and dependency providers. Preserve the capability on the selected callable itself;
+        // re-reading only module owners later would create an origin-specific path and would let a
+        // provider-neutral resolver silently turn an interface member into virtual dispatch.
+        let mut symbols = FrontendSymbols::default();
+        let mut contract = class("demo/Contract");
+        contract.flags = contract.flags.with_interface(true);
+        contract
+            .methods
+            .insert("run".into(), vec![sig(vec![], Ty::Int)]);
+        symbols.insert_class("Contract".into(), contract);
+
+        let selected = ModuleSymbols::new(&symbols)
+            .member_overloads(Ty::obj("demo/Contract"), "run")
+            .overloads
+            .into_iter()
+            .next()
+            .expect("interface member overload");
+        assert!(selected.callable.owner_is_interface);
+        assert!(selected.member_with_return(Ty::Int).is_interface());
     }
 
     #[test]

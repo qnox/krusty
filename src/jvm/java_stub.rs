@@ -27,7 +27,7 @@ use crate::java_source::{
     lex_java, parse_raw_file, primitive_desc, resolve_internal_name, DeclKind, FileCtx, Member,
     RawDecl, SrcType, STUB_DEFAULT,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 use crate::java_source::parse_source_file;
@@ -70,6 +70,18 @@ pub fn stub_classes(
         })
         .map(|declaration| declaration.internal.as_str())
         .collect::<HashSet<_>>();
+    // This parser-owned graph is the only authority for lexical nesting. Walking encoded names by
+    // splitting `$` would make a legal `$` inside an identifier look like an enclosing declaration.
+    let declaration_outers = parsed
+        .iter()
+        .flat_map(|(_, declarations)| declarations)
+        .map(|declaration| {
+            (
+                declaration.internal.as_str(),
+                declaration.outer_internal.as_deref(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let resolve_all = |cand: &str| emittable_declarations.contains(cand) || resolve(cand);
 
     let mut out = Vec::new();
@@ -86,6 +98,7 @@ pub fn stub_classes(
                 resolve: &resolve_all,
                 mode,
                 owner: Some(raw.internal.as_str()),
+                declaration_outers: &declaration_outers,
             };
             match r.emit(raw) {
                 Some(bytes) => out.push((raw.internal.clone(), bytes)),
@@ -104,22 +117,77 @@ struct Resolver<'a> {
     /// Internal name of the declaration being emitted — member types of the enclosing chain
     /// shadow the package (`Proc` inside `Builder` is `Builder$Proc`, JLS scoping).
     owner: Option<&'a str>,
+    /// Parsed internal name → syntactic enclosing declaration. This is intentionally distinct from
+    /// the encoded `$` spelling, which is ambiguous for legal Java identifiers containing `$`.
+    declaration_outers: &'a HashMap<&'a str, Option<&'a str>>,
+}
+
+/// The declaration flags Java assigns after applying kind-specific implicit modifiers. This is the
+/// single semantic source for both the class header and the declaration's `InnerClasses` self entry.
+/// Those two classfile locations allow different flag subsets, but must never disagree about whether
+/// an enum is final/abstract or whether a member interface, annotation, enum, or record is static.
+fn semantic_declaration_access(d: &RawDecl) -> u16 {
+    let mut access = d.access
+        & (ACC_PUBLIC | ACC_PRIVATE | ACC_PROTECTED | ACC_STATIC | ACC_FINAL | ACC_ABSTRACT);
+    let member_static = if d.outer_internal.is_some() {
+        ACC_STATIC
+    } else {
+        0
+    };
+    match d.kind {
+        DeclKind::Enum => {
+            access &= !(ACC_FINAL | ACC_ABSTRACT);
+            access |= member_static | ACC_ENUM;
+            if d.is_abstract {
+                access |= ACC_ABSTRACT;
+            } else if !d.enum_has_constant_body {
+                access |= ACC_FINAL;
+            }
+        }
+        DeclKind::Interface => {
+            access &= !ACC_FINAL;
+            access |= member_static | ACC_INTERFACE | ACC_ABSTRACT;
+        }
+        DeclKind::Annotation => {
+            access &= !ACC_FINAL;
+            access |= member_static | ACC_INTERFACE | ACC_ABSTRACT | ACC_ANNOTATION;
+        }
+        DeclKind::Record => {
+            access &= !ACC_ABSTRACT;
+            access |= member_static | ACC_FINAL;
+        }
+        DeclKind::Class => {
+            if d.is_abstract {
+                access &= !ACC_FINAL;
+                access |= ACC_ABSTRACT;
+            }
+        }
+    }
+    access
+}
+
+/// Project semantic declaration flags onto JVMS `ClassFile.access_flags`. Member-only visibility and
+/// `static` live in `InnerClasses`, while every non-interface class header carries `ACC_SUPER`.
+fn classfile_header_access(d: &RawDecl, declaration_access: u16) -> u16 {
+    let mut access = declaration_access
+        & (ACC_PUBLIC | ACC_FINAL | ACC_INTERFACE | ACC_ABSTRACT | ACC_ANNOTATION | ACC_ENUM);
+    if !d.is_interface() {
+        access |= ACC_SUPER;
+    }
+    access
 }
 
 impl Resolver<'_> {
     fn internal_of(&self, name: &str) -> Option<String> {
         if let Some(owner) = self.owner {
             let nested = name.replace('.', "$");
-            let mut scope = owner;
-            loop {
-                let candidate = format!("{scope}${nested}");
+            let mut scope = Some(owner);
+            while let Some(current) = scope {
+                let candidate = format!("{current}${nested}");
                 if (self.resolve)(&candidate) {
                     return Some(candidate);
                 }
-                let Some((enclosing, _)) = scope.rsplit_once('$') else {
-                    break;
-                };
-                scope = enclosing;
+                scope = self.declaration_outers.get(current).copied().flatten();
             }
         }
         resolve_internal_name(&self.ctx.package, &self.ctx.imports, name, self.resolve)
@@ -237,61 +305,17 @@ impl Resolver<'_> {
         };
         let is_annotation = d.kind == DeclKind::Annotation;
         let mut w = ClassWriter::new(&d.internal, &super_internal);
-        let visibility = d.access & ACC_PUBLIC;
-        w.set_access(if is_enum {
-            visibility
-                | ACC_ENUM
-                | ACC_SUPER
-                | if d.is_abstract {
-                    ACC_ABSTRACT
-                } else if d.enum_has_constant_body {
-                    0
-                } else {
-                    ACC_FINAL
-                }
-        } else if is_record {
-            visibility | ACC_FINAL | ACC_SUPER
-        } else if is_annotation {
-            visibility | ACC_INTERFACE | ACC_ABSTRACT | ACC_ANNOTATION
-        } else if d.is_interface() {
-            visibility | ACC_INTERFACE | ACC_ABSTRACT
-        } else if d.is_abstract {
-            visibility | ACC_SUPER | ACC_ABSTRACT
-        } else {
-            visibility | (d.access & ACC_FINAL) | ACC_SUPER
-        });
+        let declaration_access = semantic_declaration_access(d);
+        w.set_access(classfile_header_access(d, declaration_access));
         if let Some(outer) = &d.outer_internal {
-            let mut access = d.access
-                & (ACC_PUBLIC
-                    | ACC_PRIVATE
-                    | ACC_PROTECTED
-                    | ACC_STATIC
-                    | ACC_FINAL
-                    | ACC_ABSTRACT);
-            match d.kind {
-                DeclKind::Enum => {
-                    access &= !(ACC_FINAL | ACC_ABSTRACT);
-                    access |= ACC_STATIC | ACC_ENUM;
-                    if d.is_abstract {
-                        access |= ACC_ABSTRACT;
-                    } else if !d.enum_has_constant_body {
-                        access |= ACC_FINAL;
-                    }
-                }
-                DeclKind::Interface => access |= ACC_STATIC | ACC_INTERFACE | ACC_ABSTRACT,
-                DeclKind::Annotation => {
-                    access |= ACC_STATIC | ACC_INTERFACE | ACC_ABSTRACT | ACC_ANNOTATION
-                }
-                DeclKind::Record => access |= ACC_STATIC | ACC_FINAL,
-                DeclKind::Class => {}
-            }
             // A nested class carries its own InnerClasses entry. Classpath visibility and inherited
-            // classifier lookup read this entry rather than the top-level Class access flags.
+            // classifier lookup read this entry rather than the class header. Reuse the declaration
+            // access computed above so the two projections cannot independently encode kind flags.
             w.add_inner_class(InnerClassSpec {
                 inner: d.internal.clone(),
                 outer: Some(outer.clone()),
                 name: Some(d.simple_name.clone()),
-                access,
+                access: declaration_access,
             });
         }
         for i in &d.interfaces {
@@ -750,6 +774,80 @@ mod tests {
     }
 
     #[test]
+    fn dollar_in_top_level_name_does_not_create_a_lexical_parent() {
+        // `Dollar$Top` is one top-level identifier, not `Top` nested in `Dollar`. The old encoded-name
+        // walk incorrectly found `Dollar$Target` as an enclosing-scope member and accepted this stub.
+        // A strict parse must reject the unresolved `Target` instead of inventing that relationship.
+        assert!(stubs(
+            "class Dollar { static class Target {} } class Dollar$Top { Target value; }",
+            &["java/lang/Object"],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn member_kind_flags_share_one_semantic_projection() {
+        // These are the implicit JLS member modifiers that must be projected consistently into the
+        // class header and its `InnerClasses` self entry. `static` and non-public visibility exist only
+        // in the latter, while kind/finality/abstractness must agree between both locations.
+        let out = stubs(
+            "class Host { \
+             interface Contract {} \
+             @interface Mark {} \
+             record Data(int value) {} \
+             static final class Leaf {} \
+             }",
+            &[
+                "java/lang/Object",
+                "java/lang/Record",
+                "java/lang/annotation/Annotation",
+            ],
+        )
+        .expect("member-kind stubs");
+        let cases = [
+            (
+                "Host$Contract",
+                ACC_STATIC | ACC_INTERFACE | ACC_ABSTRACT,
+                ACC_FINAL | ACC_ANNOTATION,
+            ),
+            (
+                "Host$Mark",
+                ACC_STATIC | ACC_INTERFACE | ACC_ABSTRACT | ACC_ANNOTATION,
+                ACC_FINAL,
+            ),
+            (
+                "Host$Data",
+                ACC_STATIC | ACC_FINAL,
+                ACC_INTERFACE | ACC_ABSTRACT,
+            ),
+            (
+                "Host$Leaf",
+                ACC_STATIC | ACC_FINAL,
+                ACC_INTERFACE | ACC_ABSTRACT,
+            ),
+        ];
+        for (internal, expected, forbidden) in cases {
+            let class = out
+                .iter()
+                .find(|(name, _)| name == internal)
+                .and_then(|(_, bytes)| parse_class(bytes).ok())
+                .unwrap_or_else(|| panic!("missing {internal}"));
+            let entry = class
+                .inner_classes
+                .iter()
+                .find(|entry| entry.inner == internal)
+                .unwrap_or_else(|| panic!("missing self entry for {internal}"));
+            assert_eq!(entry.access & expected, expected, "{internal} self entry");
+            assert_eq!(entry.access & forbidden, 0, "{internal} self entry");
+            // `ACC_STATIC` is member metadata and therefore absent from ClassFile.access_flags.
+            let shared = expected & !ACC_STATIC;
+            assert_eq!(class.access & shared, shared, "{internal} class header");
+            assert_eq!(class.access & forbidden, 0, "{internal} class header");
+            assert_eq!(class.access & ACC_STATIC, 0, "{internal} class header");
+        }
+    }
+
+    #[test]
     fn enum_emits_constants_values_and_valueof() {
         let out = stubs(
             "package p;\npublic enum Color { RED, GREEN, BLUE; public int rank() { return 0; } }",
@@ -807,6 +905,7 @@ mod tests {
             .expect("self entry");
         assert_eq!(entry.access & ACC_FINAL, 0);
         assert_ne!(entry.access & ACC_ENUM, 0);
+        assert_ne!(entry.access & ACC_STATIC, 0);
 
         let abstract_enum = out
             .iter()
@@ -1182,6 +1281,24 @@ mod tests {
             .map(|reference| &source[reference.span.lo as usize..reference.span.hi as usize])
             .collect::<Vec<_>>();
         assert_eq!(referenced, ["java.util.List", "String"]);
+    }
+
+    #[test]
+    fn source_model_does_not_infer_reference_scope_from_dollar_spelling() {
+        // Navigation consumes the public Java source model rather than the stub resolver. Pin the same
+        // structural rule at that boundary: `Dollar$Top` must not climb into top-level `Dollar` and
+        // resolve its member merely because their encoded names share a textual prefix.
+        let source = "class Dollar { static class Target {} } class Dollar$Top { Target value; }";
+        let file = parse_source_file(source).expect("Java source");
+        let target = file
+            .references
+            .iter()
+            .find(|reference| reference.path == "Target")
+            .expect("Target reference");
+        assert_eq!(
+            file.resolve_reference(target, &|candidate| candidate == "Dollar$Target"),
+            None
+        );
     }
 
     #[test]
