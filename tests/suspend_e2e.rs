@@ -2095,3 +2095,39 @@ public class M {\n\
         "async suspend/resume: wrong result; got {out}",
     );
 }
+
+/// An extension `suspend fun` whose body suspends on a MEMBER of its receiver is still skipped.
+///
+/// A member suspension point resumes against the state machine's `this`; an extension has no `this`
+/// (its receiver is an ordinary parameter slot), so the resumed call would target the wrong instance.
+/// The file must be REFUSED, never emitted (`gate:extension-suspend-fn-member-suspension`). The plain
+/// extension shape — suspending on a top-level `suspend fun` — is modeled and covered by
+/// `feature_coverage_s_e2e::suspend_extension_function_on_user_type`.
+#[test]
+fn suspend_extension_suspending_on_a_receiver_member_still_skips() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+class Ctl(val n: Int) {\n\
+    suspend fun step(): Int = n + 1\n\
+}\n\
+suspend fun Ctl.run2(): Int {\n\
+    val a = step()\n\
+    return a + 1\n\
+}\n\
+fun box(): String {\n\
+    val r = runBlocking { Ctl(40).run2() }\n\
+    return if (r == 42) \"OK\" else \"FAIL:$r\"\n\
+}\n";
+    assert!(
+        common::compile_and_run_box(src, "SuspendExtMember", &[stdlib], Some(jdk.as_path()))
+            .is_none(),
+        "an extension suspend fn suspending on a receiver member must be skipped, never emitted"
+    );
+}

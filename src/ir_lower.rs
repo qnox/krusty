@@ -448,12 +448,31 @@ fn lower_file_at_reporting_impl(
         })
         .collect();
     if !top_suspend.is_empty() || !member_suspend.is_empty() {
-        // Extension suspend fns aren't modeled. (A leaf member suspend fn IS — its CPS signature on the
-        // instance method; a member suspension point is skipped by the pass.)
+        // A top-level `suspend` EXTENSION is modeled: its receiver is an ordinary leading static
+        // parameter, so the coroutine pass appends the CPS `Continuation` after it and threads call
+        // sites like any other static suspend call (registered in `suspend_funs` in pass 1b).
+        // EXCEPT one shape: an extension body that suspends on a MEMBER of its receiver
+        // (`suspend fun Controller.test() { … foo() … }` reaching `Controller.foo()` through the implicit
+        // receiver). A member suspension resumes against the machine's `this`, which an extension has
+        // not got — its receiver is a parameter slot — so the resumed call would target the wrong
+        // instance. Skip the file (never miscompile) until member suspension points are threaded.
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
-                if f.is_suspend() && f.receiver.is_some() {
+                if !f.is_suspend() || f.receiver.is_none() {
+                    continue;
+                }
+                // An INLINE suspend extension is spliced at its call sites, where the splice and the CPS
+                // rewrite do not compose: the caller's machine inlines the pre-CPS body and drops the
+                // assignment it performs (`suspend { r = 1.plusOne() }` leaves `r` at 0). Keep skipping.
+                if f.is_inline() {
                     return lo.bail("gate:extension-suspend-fn");
+                }
+                let body = match &f.body {
+                    FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+                    FunBody::None => None,
+                };
+                if body.is_some_and(|e| member_suspend.iter().any(|n| file.expr_uses_name(e, n))) {
+                    return lo.bail("gate:extension-suspend-fn-member-suspension");
                 }
             }
         }
@@ -2282,6 +2301,12 @@ fn lower_file_at_reporting_impl(
                 // class-body caller goes through the `access$<name>` bridge (see `emit_pass`).
                 if f.visibility.is_private() {
                     lo.ir.private_methods.insert(id);
+                }
+                // Tag a `suspend` extension exactly like a plain top-level `suspend fun`: the receiver
+                // is already an ordinary leading static parameter, so the coroutine pass appends the
+                // CPS `Continuation` after it and threads call sites unchanged.
+                if f.is_suspend() {
+                    lo.ir.suspend_funs.push(id);
                 }
             } else {
                 let sig = syms.funs.get(&f.name)?.iter().find(|sig| {

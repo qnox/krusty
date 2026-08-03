@@ -262,6 +262,58 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`invokestatic check(Continuation)` with no continuation argument → an operand-stack VerifyError).
   Proven: `if (c && check()) return 1` drives `bar(true)`→1, `bar(false)`→2
   (`tests/suspend_e2e.rs::suspend_fun_suspension_in_and_condition`).
+- **`suspend fun` — an unnamed TEMP that is live across a suspension gets a spill slot.** Hoisting a
+  multi-suspension expression (`a() + b() + c()`) materializes one unnamed `Variable` per operand, so
+  the first operand's value must survive the *later* suspensions. The per-suspension scope snapshot
+  (`ScopeWalk`, kotlinc's positional-spill model — see `docs/POSITIONAL_SPILLS.md`) previously admitted
+  only `named: true` variables, so those temps were in the spilled union (hence stored) but in no
+  resume arm's restore list (hence read back as `null`/a wrongly-typed slot). A NAMED variable still
+  spills by lexical SCOPE (kotlinc's rule — every splice-materialization local is emitted `named` at its
+  lowering site, so scope and liveness agree for them); an unnamed TEMP now spills by LIVENESS: it is
+  included exactly when some expression that may still execute — a later statement of an enclosing list,
+  or a whole enclosing loop, which re-runs on the back-edge — reads it. Liveness rather than scope is
+  what keeps the per-kind field maxima at kotlinc's count: a dead temp would inflate them. kotlinc
+  spills a live operand the same way (`a() + b()` stores its partial `StringBuilder` in `L$0` and
+  restores it in every later arm). Proven: `runBlocking { pick(0) + pick(1) + pick(2) }` → `"abc"`
+  (`tests/feature_coverage_j_e2e.rs::suspend_when_branch_around_suspend_calls`). Two shapes the temps
+  model does NOT cover keep skipping (box-corpus-proven, never miscompiled): a RECEIVER lambda
+  (`suspend Controller.() -> Unit`), whose restore reloads leading `this`/capture fields that displace a
+  temp's positional slot (`consecutive_temp_suspensions`, corpus `suspendCallsInArguments`); and a
+  spilled local of the BOTTOM type (`var x = null` is `Nothing?` — `Ty::Null`/`Ty::Nothing`), which has
+  no JVM reference frame type, so the slot merges to `top` at a join and its `aload` fails verification
+  ("Bad local variable type" — `spills_bottom_typed_local`, corpus `varSpilling/nullSpilling`).
+- **`suspend fun` — a top-level `suspend` EXTENSION function.** `suspend fun Counter.next(): Int` needs
+  no CPS machinery of its own: an extension receiver is already lowered to an ordinary LEADING static
+  parameter, so the coroutine pass appends the `Continuation` after it (`next(Counter, Continuation)
+  Object`) and threads call sites like any other static suspend call. The only thing missing was the
+  registration — pass 1b's extension branch never pushed the `FunId` into `ir.suspend_funs`, so the
+  pass saw neither the declaration nor its call sites (the call site then kept its pre-CPS arity: "call
+  arity mismatch"). Registering it there retires the blanket `gate:extension-suspend-fn` file skip.
+  Proven: `suspend fun Counter.next()` suspending on `bump(base)` → 42
+  (`tests/feature_coverage_s_e2e.rs::suspend_extension_function_on_user_type`). Two extension shapes
+  still skip. (1) An extension body that suspends on a MEMBER of its receiver: a member suspension
+  resumes against the machine's `this`, which an extension has not got — its receiver is a parameter
+  slot — so the resumed call would target the wrong instance
+  (`gate:extension-suspend-fn-member-suspension`; corpus `controlFlow/doubleBreak`,
+  `suspendFunctionAsCoroutine/handleException`;
+  `tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member_still_skips`). (2) An
+  `inline suspend` extension, spliced at its call sites where the splice and the CPS rewrite do not
+  compose — the caller's machine inlines the pre-CPS body and drops the assignment it performs
+  (`suspend { r = 1.plusOne() }` leaves `r` at 0):
+  `tests/cross_file_inline_call_e2e.rs::suspend_inline_extension_cross_file_still_rejects`.
+- **`suspend fun` returning a `@JvmInline value class` — the result crosses the CPS boundary BOXED.**
+  A CPS return is `Object`, so a non-null value-class result cannot ride in its erased underlying form:
+  kotlinc emits `X.box-impl` before the `areturn` and `checkcast X` + `X.unbox-impl()` on the resume
+  side. The value-class pass runs BEFORE the coroutine pass and erases `X` to its underlying everywhere,
+  so it now boxes such a suspend function's tail (the same `box_ref_tail` a lambda's erased `Object`
+  result uses) and records the class in `ir.suspend_boxed_value_class_returns`; the coroutine pass's
+  `bind_from_r` consults that record and unwraps the box instead of applying the ordinary
+  `Object`→declared-type coercion. Value-class knowledge stays in the value-class pass — the record
+  carries only the erasure it deliberately did NOT apply. Byte-identical to kotlinc for
+  `suspend fun distance(): Meters` (`constructor-impl` → `box-impl` → `areturn`). A CROSS-UNIT suspend
+  call whose logical return is a value class (`ir.suspend_calls`, a callee in another file with no such
+  record) still skips the file. Proven: `runBlocking { compute() }` where `compute` binds `distance()`
+  and reads `m.v` → 42 (`tests/feature_coverage_s_e2e.rs::suspend_returns_value_class`).
 - **`@Metadata` writer — the suspend round-trip.** krusty now emits a `@kotlin.Metadata` annotation on
   a file facade that has top-level `suspend fun`s, so its OWN compiled output is consumable as a
   classpath dependency (a suspend fn's physical method is `Object foo(…, Continuation)` — only
