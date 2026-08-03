@@ -946,19 +946,19 @@ struct BuiltinClass {
     nullable_member_returns: Vec<(String, usize)>,
 }
 
+/// One decoded `.kotlin_builtins` member, in the ONE form that is not derivable: its declared
+/// (unerased) signature — its own formals, parameter types and return, including type parameters
+/// (`List<E>.get(Int): E`) and type arguments (`Set<Map.Entry<K, V>>`). A builtin member has no JVM
+/// `Signature` string, so this is the only carrier that lets a type-parameter return bind against the
+/// receiver's type arguments.
+///
+/// Deliberately NOT a [`crate::libraries::LibraryMember`]: the erased `params`/`ret`/`descriptor` a
+/// `LibraryMember` carries are [`builtin_erased`] of this signature, and the rest of its fields need
+/// the classpath (the `owner` mapping, the interface flag) which this decode does not have.
+/// [`Classpath::builtin_members_name`] is where the two are joined, and it memoizes its result.
 struct BuiltinMember {
     name: String,
-    /// ERASED parameter types (a type parameter erases to `Any`) — the shape a JVM descriptor has, so
-    /// they line up with a classpath member's. The declared types live in [`Self::generic_sig`].
-    params: Vec<Ty>,
-    /// The ERASED return, matching [`Self::descriptor`].
-    ret: Ty,
-    /// The member's declared (unerased) signature: its own formals, parameter types and return —
-    /// including type parameters (`List<E>.get(Int): E`) and type arguments (`Set<Map.Entry<K, V>>`).
-    /// A `.kotlin_builtins` member has no JVM `Signature` string, so this is the only carrier that lets
-    /// a type-parameter return bind against the receiver's type arguments.
     generic_sig: GenericSig,
-    descriptor: String,
     is_property: bool,
     ret_nullable: bool,
 }
@@ -972,6 +972,16 @@ fn builtin_erased(ty: Ty) -> Ty {
         Ty::Obj(name, args) if !args.is_empty() => Ty::obj_name(name),
         other => other,
     }
+}
+
+/// The JVM descriptor a builtin member's declared signature erases to.
+fn builtin_descriptor(sig: &GenericSig) -> String {
+    let params: String = sig
+        .params
+        .iter()
+        .map(|p| type_descriptor(builtin_erased(*p)))
+        .collect();
+    format!("({params}){}", type_descriptor(builtin_erased(sig.ret)))
 }
 
 /// A decoded `.kotlin_builtins` type as a [`Ty`]. `bounds` supplies each in-scope type parameter's
@@ -1046,19 +1056,8 @@ impl BuiltinsFile {
                 .into_iter()
                 .map(|m| {
                     let bounds = builtin_bounds(&m.formals, &class_bounds);
-                    let params: Vec<Ty> = m
-                        .params
-                        .iter()
-                        .map(|p| builtin_ty(p, &bounds, false))
-                        .collect();
-                    let ret = builtin_ty(&m.ret, &bounds, false);
-                    let pdesc: String = params
-                        .iter()
-                        .map(|p| type_descriptor(builtin_erased(*p)))
-                        .collect();
                     BuiltinMember {
                         name: m.name,
-                        descriptor: format!("({pdesc}){}", type_descriptor(builtin_erased(ret))),
                         generic_sig: GenericSig {
                             formals: m.formals.iter().map(|p| p.name.clone()).collect(),
                             formal_bounds: m
@@ -1072,11 +1071,13 @@ impl BuiltinsFile {
                                 })
                                 .collect(),
                             receiver: None,
-                            params: params.clone(),
-                            ret,
+                            params: m
+                                .params
+                                .iter()
+                                .map(|p| builtin_ty(p, &bounds, false))
+                                .collect(),
+                            ret: builtin_ty(&m.ret, &bounds, false),
                         },
-                        params: params.into_iter().map(builtin_erased).collect(),
-                        ret: builtin_erased(ret),
                         is_property: m.is_property,
                         ret_nullable: m.ret_nullable,
                     }
@@ -2083,8 +2084,18 @@ impl Classpath {
             .get_name(internal_id)
             .map(|class| {
                 class.members.iter().map(|m| {
-                    let descriptor = m.descriptor.clone();
-                    let ret = m.ret;
+                    // A `LibraryMember` states the member in its ERASED, JVM-descriptor shape (the form
+                    // a classpath member arrives in, and the form overload alignment compares against);
+                    // the declared shape rides along in `generic_sig`. Both are the one decoded builtin
+                    // signature, erased here.
+                    let descriptor = builtin_descriptor(&m.generic_sig);
+                    let params: Vec<Ty> = m
+                        .generic_sig
+                        .params
+                        .iter()
+                        .map(|p| builtin_erased(*p))
+                        .collect();
+                    let ret = builtin_erased(m.generic_sig.ret);
                     let physical_ret = ret;
                     // The owner's JVM class: the kotlin↔JVM map (`kotlin/String` → `java/lang/String`), and for the
                     // non-collection mapped builtins (`kotlin/CharSequence` → `java/lang/CharSequence`, …) the
@@ -2122,7 +2133,7 @@ impl Classpath {
                         name: member_name,
                         owner: Some(owner),
                         physical_name: None,
-                        params: m.params.clone(),
+                        params,
                         ret,
                         physical_ret,
                         descriptor,
@@ -2139,7 +2150,9 @@ impl Classpath {
                         inline: crate::libraries::InlineKind::None,
                         // Builtin (`.kotlin_builtins`) members are all public API.
                         visibility: crate::libraries::Visibility::Public,
-                        call_sig: crate::libraries::CallSig::metadata_plain(m.params.len()),
+                        call_sig: crate::libraries::CallSig::metadata_plain(
+                            m.generic_sig.params.len(),
+                        ),
                     }
                 })
             })
