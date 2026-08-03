@@ -3496,7 +3496,7 @@ fn emit_object_as(cw: &mut ClassWriter, code: &mut CodeBuilder, ty: Ty) {
     }
 }
 
-fn parse_physical_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
+pub(crate) fn parse_physical_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
         params.into_iter().map(ty_from_field_descriptor).collect(),

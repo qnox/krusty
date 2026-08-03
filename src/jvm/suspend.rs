@@ -1842,10 +1842,7 @@ fn build_state_machine(
     }
     // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
     // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
-    if spills_bottom_typed_local(&spilled)
-        || suspension_operand_writes_local(ir, b, &suspend_set, &spilled)
-        || suspending_over_progression(ir, b, &suspend_set)
-    {
+    if spills_bottom_typed_local(&spilled) || suspending_over_progression(ir, b, &suspend_set) {
         return false;
     }
     // The spilled value parameters — captured at continuation construction (in spilled order).
@@ -2396,7 +2393,6 @@ fn build_lambda_state_machine(
     // (the corpus `suspendCallsInArguments` shape). The PLAIN lambda's temps are e2e-verified.
     if (receiver_lambda && spill_shape_unmodeled(&spilled))
         || spills_bottom_typed_local(&spilled)
-        || suspension_operand_writes_local(ir, b, &suspend_set, &spilled)
         || suspending_over_progression(ir, b, &suspend_set)
         || tail_suspending_loop(ir, &stmts, &suspend_set)
     {
@@ -2833,6 +2829,85 @@ impl Flat<'_> {
         );
         self.set_label(out, target);
     }
+    /// Materialize the suspension point's receiver/arguments into fresh temps emitted into `out` AHEAD
+    /// of the spill, left to right so source evaluation order is preserved, and rewrite the call to read
+    /// the temps. Without this the spill `putfield`s run first and a side effect an operand has on a
+    /// spilled local (`foo(i++)`) lands in the local but never in the field, so the resume arm restores
+    /// the PRE-evaluation value (`bars(foo(i++), foo(i++))` yielded `"1;1;"` instead of `"1;2;"`).
+    /// kotlinc has its arguments on the operand stack before its `putfield`s, so its spill always
+    /// observes the post-evaluation state; the temps reproduce that ordering in IR. They never cross the
+    /// suspension — the call IS the suspension and consumes them before it — so they need no spill slots.
+    ///
+    /// Only fires when an operand actually writes a local this point spills: binding every suspension's
+    /// operands would add store/load pairs kotlinc does not emit. Returns `false` when the shape can't be
+    /// re-bound (an intrinsic/inline-splice callee, a lambda or vararg operand, a conditional suspension
+    /// buried in an operand) — the caller then fails the machine (skip, never miscompile).
+    fn bind_operand_temps(
+        &mut self,
+        out: &mut Vec<ExprId>,
+        point: ExprId,
+        list: &[(u32, Ty)],
+    ) -> bool {
+        let operands = suspension_operand_ids(self.ir, point);
+        if operands.is_empty() {
+            // An INTRINSIC suspension point (`suspendCoroutineUninterceptedOrReturn { c -> … }`) is an
+            // inlined block, not a call: it has no operands to move ahead of the spill, and the block
+            // body runs after the spill by construction. That is not a hazard, because a mutable local
+            // the block writes is captured BY REFERENCE (the front end `RefNew`-boxes it the moment a
+            // lambda writes it), so the write lands in the heap cell whose reference the spill stored —
+            // the restore cannot undo it. Refuse should that ever stop holding, rather than lose a write.
+            return !writes_local_in(self.ir, point, list);
+        }
+        if !operands.iter().any(|&o| writes_local_in(self.ir, o, list)) {
+            return true;
+        }
+        let Some(operands) = typed_suspension_operands(self.ir, point) else {
+            return false;
+        };
+        // A conditional suspension nested in an operand (`foo(if (c) susp() else 1)`) is left in place by
+        // the hoister for the flattener; hoisting it into a pre-spill temp would put a suspension ahead of
+        // this one's own spill. Refuse instead.
+        if operands
+            .iter()
+            .any(|&(o, _)| expr_calls_suspend(self.ir, o, self.suspend))
+        {
+            return false;
+        }
+        let reads: Vec<ExprId> = operands
+            .iter()
+            .map(|&(o, ty)| {
+                let idx = self.fresh();
+                let v = self.add(IrExpr::Variable {
+                    index: idx,
+                    ty,
+                    init: Some(o),
+                    named: false,
+                });
+                out.push(v);
+                self.gv(idx)
+            })
+            .collect();
+        match &mut self.ir.exprs[point as usize] {
+            IrExpr::Call {
+                dispatch_receiver,
+                args,
+                ..
+            } => {
+                let mut it = reads.iter().copied();
+                if let Some(r) = dispatch_receiver.as_mut() {
+                    *r = it.next().expect("receiver operand was typed first");
+                }
+                *args = it.collect();
+            }
+            IrExpr::MethodCall { receiver, args, .. } => {
+                let mut it = reads.iter().copied();
+                *receiver = it.next().expect("receiver operand was typed first");
+                *args = it.map(Some).collect();
+            }
+            _ => return false,
+        }
+        true
+    }
     /// Emit the suspend-call sequence into `out`, transferring to state `resume` (the loop re-dispatches
     /// `resume` on synchronous completion; on `COROUTINE_SUSPENDED` the function returns and a later
     /// resume re-enters at `resume`).
@@ -2850,6 +2925,14 @@ impl Flat<'_> {
             self.failed = true;
             return;
         };
+        if !self.bind_operand_temps(out, point, &list) {
+            crate::trace_compiler!(
+                "suspend",
+                "emit_suspension BAIL: unre-bindable operands at suspension point {point}"
+            );
+            self.failed = true;
+            return;
+        }
         self.spill_scope(out, &list);
         self.resume_points.push(point);
         if let Some(sc) = self.state_scope.get_mut(resume) {
@@ -5400,61 +5483,152 @@ fn tail_suspending_loop(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32
     hit
 }
 
-/// A suspension whose own RECEIVER/ARGUMENTS write a local (`foo(i++)`). The spill stores are emitted
-/// ahead of the call, so such a write lands in the local but never in the field, and the resume then
-/// restores the PRE-evaluation value — a silent wrong answer (`bars(foo(i++), foo(i++))` yields
-/// `"1;1;"`). kotlinc has its arguments on the operand stack before its `putfield`s, so its spill
-/// always sees the post-evaluation state. Modelling that needs the operands materialized into typed
-/// temps ahead of the spill; until then, bail (skip, never miscompile).
-fn suspension_operand_writes_local(
-    ir: &IrFile,
-    b: ExprId,
-    suspend_set: &HashSet<u32>,
-    spilled: &[(u32, Ty)],
-) -> bool {
-    // Only a SPILLED slot can lose the write — a slot the machine never stores keeps whatever the
-    // local holds — and only if something OUTSIDE the operand reads it: a scratch variable whose every
-    // read is inside the operand itself (`foo(run { t = 2; t })`) is re-assigned before each read, so
-    // the stale field is never observed. Reads are counted rather than located, since the operand
-    // subtree cannot be subtracted from the body's own walk.
-    fn count_reads(ir: &IrFile, e: ExprId, idx: u32) -> usize {
-        let mut n = usize::from(matches!(ir.exprs[e as usize], IrExpr::GetValue(i) if i == idx));
-        for_each_child(&ir.exprs, e, &mut |c| n += count_reads(ir, c, idx));
-        n
+/// The receiver/arguments of a suspension point, in EVALUATION order. Both call shapes suspend: `Call`
+/// is a static/top-level callee (its `dispatch_receiver` is the operand-stack receiver of a virtual /
+/// `super` callee), `MethodCall` a same-file member (`c.foo(i++)`), whose receiver is just as much an
+/// operand as its arguments. Empty for an intrinsic suspension point (an inlined block, not a call).
+fn suspension_operand_ids(ir: &IrFile, point: ExprId) -> Vec<ExprId> {
+    match &ir.exprs[point as usize] {
+        IrExpr::Call {
+            dispatch_receiver,
+            args,
+            ..
+        } => dispatch_receiver.iter().chain(args).copied().collect(),
+        IrExpr::MethodCall { receiver, args, .. } => std::iter::once(*receiver)
+            .chain(args.iter().flatten().copied())
+            .collect(),
+        _ => Vec::new(),
     }
-    fn written_slots(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
-        if let IrExpr::SetValue { var, .. } = ir.exprs[e as usize] {
-            out.push(var);
+}
+
+/// Whether `e`'s subtree assigns any local in `list` — the writes whose effect the spill stores must
+/// observe. Both an assignment and a re-declaration at the same value index count.
+fn writes_local_in(ir: &IrFile, e: ExprId, list: &[(u32, Ty)]) -> bool {
+    let idx = match ir.exprs[e as usize] {
+        IrExpr::SetValue { var, .. } => Some(var),
+        IrExpr::Variable { index, .. } => Some(index),
+        _ => None,
+    };
+    if idx.is_some_and(|i| list.iter().any(|&(l, _)| l == i)) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, e, &mut |c| {
+        found = found || writes_local_in(ir, c, list);
+    });
+    found
+}
+
+/// [`suspension_operand_ids`] with each operand paired to the DECLARED type of the parameter (or
+/// receiver) it feeds — the type a pre-spill temp must carry, so the temp's store/load is the same JVM
+/// kind the call consumes. `None` for a shape whose operands can't be typed or safely re-bound: an
+/// intrinsic callee, a `Callee::Static` that is `inline` (SPLICED from its operand nodes rather than
+/// called with them) or carries a `dispatch_receiver` (which the non-splice emit path does not even
+/// push), ANY `$default` synthetic (see the indexing rule below), a `MethodCall` with omitted arguments
+/// (routed through that same stub), or a `Lambda`/`Vararg` operand (not a plain value at emit either).
+///
+/// A `Callee::Virtual` may also be inline-spliced at emit (its descriptor form has an inline branch) and
+/// is deliberately NOT refused for it: splicing reads its operand nodes as values, and a `GetValue` of a
+/// temp is one.
+fn typed_suspension_operands(ir: &IrFile, point: ExprId) -> Option<Vec<(ExprId, Ty)>> {
+    // Parameters are indexed, never length-matched — sound ONLY while the surplus parameter is the
+    // TRAILING one. That holds for the accepted callees: the CPS `Continuation` is appended to the
+    // signature ahead of this pass but to the ARGUMENTS only after the spill (`append_continuation`), so
+    // `args` is legitimately one short here. It does NOT hold for a `$default` synthetic, whose
+    // continuation sits before the mask/marker — refused above rather than mis-zipped.
+    fn zip(args: &[ExprId], params: &[Ty], out: &mut Vec<(ExprId, Ty)>) -> Option<()> {
+        for (i, &a) in args.iter().enumerate() {
+            out.push((a, *params.get(i)?));
         }
-        for_each_child(&ir.exprs, e, &mut |c| written_slots(ir, c, out));
+        Some(())
     }
-    let mut points: HashSet<ExprId> = HashSet::new();
-    collect_suspension_points(ir, b, suspend_set, &mut points);
-    points.iter().any(|&p| {
-        // Both call shapes suspend: `Call` is a static/top-level callee, `MethodCall` a same-file
-        // member (`c.foo(i++)`), whose receiver is just as much an operand as its arguments.
-        let (receiver, args): (Option<ExprId>, Vec<ExprId>) = match &ir.exprs[p as usize] {
-            IrExpr::Call {
-                dispatch_receiver,
-                args,
-                ..
-            } => (*dispatch_receiver, args.clone()),
-            IrExpr::MethodCall { receiver, args, .. } => {
-                (Some(*receiver), args.iter().flatten().copied().collect())
-            }
-            _ => return false,
-        };
-        receiver.iter().chain(args.iter()).any(|&o| {
-            let mut written = Vec::new();
-            written_slots(ir, o, &mut written);
-            written.sort_unstable();
-            written.dedup();
-            written.iter().any(|&slot| {
-                spilled.iter().any(|&(s, _)| s == slot)
-                    && count_reads(ir, b, slot) > count_reads(ir, o, slot)
-            })
+    let mut out: Vec<(ExprId, Ty)> = Vec::new();
+    match &ir.exprs[point as usize] {
+        IrExpr::Call {
+            callee,
+            dispatch_receiver,
+            args,
+        } => {
+            let params: Vec<Ty> = match callee {
+                Callee::Local(fid) => {
+                    dispatch_receiver.is_none().then_some(())?;
+                    ir.functions[*fid as usize].params.clone()
+                }
+                Callee::CrossFile { params, .. } => {
+                    dispatch_receiver.is_none().then_some(())?;
+                    params.clone()
+                }
+                Callee::Static {
+                    descriptor,
+                    name,
+                    inline,
+                    ..
+                } => {
+                    (!inline.can_inline() && dispatch_receiver.is_none()).then_some(())?;
+                    // NOT a `$default` synthetic. Indexing arguments against parameters is only sound
+                    // while the surplus parameter is the TRAILING one; a suspend `$default` descriptor
+                    // spells its `Continuation` BEFORE the `int mask` + `Object marker` (see
+                    // `append_continuation`, which inserts the continuation VALUE two before the end for
+                    // exactly this reason), so zipping would pair the mask with the `Continuation` and the
+                    // marker with the mask — an `astore` of an int, i.e. a class that fails verification.
+                    (!name.ends_with("$default")).then_some(())?;
+                    crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0
+                }
+                Callee::Virtual {
+                    owner,
+                    descriptor,
+                    params,
+                    ..
+                } => {
+                    out.push((
+                        dispatch_receiver.as_ref().copied()?,
+                        Ty::obj(&owner.render()),
+                    ));
+                    match params {
+                        Some((p, _)) => p.clone(),
+                        None => crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0,
+                    }
+                }
+                Callee::Special {
+                    owner,
+                    name,
+                    descriptor,
+                    ..
+                } => {
+                    // Same `$default` indexing rule as `Callee::Static` above.
+                    (!name.ends_with("$default")).then_some(())?;
+                    out.push((
+                        dispatch_receiver.as_ref().copied()?,
+                        Ty::obj(&owner.render()),
+                    ));
+                    crate::jvm::ir_emit::parse_physical_method_desc(descriptor)?.0
+                }
+                Callee::External(_) | Callee::LocalDefault(_) => return None,
+            };
+            zip(args, &params, &mut out)?;
+        }
+        IrExpr::MethodCall {
+            class,
+            index,
+            receiver,
+            args,
+        } => {
+            let c = &ir.classes[*class as usize];
+            let f = &ir.functions[*c.methods.get(*index as usize)? as usize];
+            out.push((*receiver, Ty::obj(&c.fq_name())));
+            let args: Vec<ExprId> = args.iter().copied().collect::<Option<Vec<_>>>()?;
+            zip(&args, &f.params, &mut out)?;
+        }
+        _ => return None,
+    }
+    out.iter()
+        .all(|&(o, _)| {
+            !matches!(
+                ir.exprs[o as usize],
+                IrExpr::Lambda { .. } | IrExpr::Vararg { .. }
+            )
         })
-    })
+        .then_some(out)
 }
 
 /// True if `e`'s subtree binds the result of a suspension to a value(inline)-class-typed local. An

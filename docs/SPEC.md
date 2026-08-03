@@ -331,22 +331,53 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::suspend_cross_loop_labeled_continue_and_three_levels_run`,
   `::suspend_cross_loop_labeled_jump_between_pretest_loops_runs`; corpus
   `coroutines/controlFlow/doubleBreak`).
-- **`suspend fun` — a suspension whose own ARGUMENT writes a local is refused, not miscompiled.** The
-  spill stores are emitted ahead of the call, so an argument's update to a spilled local (`foo(i++)`)
-  lands in the local but never in the field, and the resume restores the PRE-evaluation value —
-  `bars(foo(i++), foo(i++))` silently answered `"1;1;"` instead of `"1;2;"`. kotlinc has its arguments
-  on the operand stack before its `putfield`s, so its spill always sees the post-evaluation state;
-  modelling that needs the receiver/arguments materialized into typed temps ahead of the spill. Until
-  then `suspension_operand_writes_local` skips the file. It covers both suspending call shapes — a
-  static `Call` and a same-file member `MethodCall`, whose RECEIVER (`cs[i++].foo()`) is as much an
-  operand as its arguments — and fires only when the written slot is SPILLED and read somewhere outside
-  the operand: a scratch whose every read is inside the operand itself (`foo(run { t = 2; t })`) is
-  re-assigned before each read, so its stale field is never observed. This was the actual cause of the
-  corpus `suspendCallsInArguments` divergence — a silent wrong answer in an otherwise-accepted shape,
+- **`suspend fun` — a suspension's RECEIVER/ARGUMENTS are evaluated into temps BEFORE the spill.** The
+  spill stores used to be emitted ahead of the call, so an argument's update to a spilled local
+  (`foo(i++)`) landed in the local but never in the field, and the resume restored the PRE-evaluation
+  value — `bars(foo(i++), foo(i++))` silently answered `"1;1;"` instead of `"1;2;"`. kotlinc has its
+  arguments on the operand stack before its `putfield`s, so its spill always observes the
+  post-evaluation state. `bind_operand_temps` reproduces that ordering in IR: it binds the suspension
+  point's receiver and each argument to a fresh temp emitted ahead of `spill_scope`, left to right so
+  source evaluation order is preserved, and rewrites the call to read the temps. The temps never cross
+  the suspension — the call IS the suspension and consumes them before it — so they get no spill slots.
+  The emitted sequence matches kotlinc's modulo krusty's use of a local slot where kotlinc keeps the
+  value on the operand stack (`iinc` then `putfield`, not `putfield` then `iinc`), verified by
+  disassembling `bars(foo(i++), foo(i++))` against the reference compiler.
+  Each temp is typed from the CALLEE's corresponding parameter — the `Local`/`MethodCall` target's
+  `IrFunction::params`, `Callee::CrossFile`'s `params`, `Callee::Virtual`'s `params` when it carries them
+  and its `descriptor` otherwise, or a `Callee::Static`/`Special` descriptor — and the receiver from the
+  callee's `owner`, so the temp's store/load is the JVM kind the call consumes. Parameters are INDEXED,
+  never length-matched, which is sound only while the surplus parameter is the TRAILING one: the callee
+  signature may already carry the CPS `Continuation` that `append_continuation` appends to the arguments
+  only after the spill. It is NOT trailing for a `$default` synthetic, whose descriptor spells the
+  `Continuation` BEFORE the `int mask` + `Object marker` (`append_continuation` inserts the continuation
+  VALUE two before the end for that reason), so zipping it would pair the mask with the `Continuation`
+  slot and `astore` an int — every `$default` callee is refused instead.
+  Binding fires only when an operand actually writes a local this point spills — every suspension would
+  otherwise gain store/load pairs kotlinc does not emit — and a scratch written only inside the operand
+  (`foo(run { t = 2; t })`) is unaffected either way. Shapes that cannot be re-bound are still REFUSED
+  rather than reordered blindly: an intrinsic callee, an `inline` `Callee::Static` (spliced from its
+  operand nodes, not called with them), a `Callee::Static` carrying a `dispatch_receiver` (which the
+  non-splice emit path never pushes), any `$default` synthetic (`Callee::LocalDefault`, a `$default`
+  `Callee::Static`, a `MethodCall` with omitted arguments), a `Lambda`/`Vararg` operand, and a
+  conditional suspension buried in an operand (hoisting it would put a suspension ahead of this one's own
+  spill). An inline-spliceable `Callee::Virtual` is deliberately NOT refused: the splice reads its
+  operand nodes as values, and a `GetValue` of a temp is one. This ordering bug was the actual cause of
+  the corpus `suspendCallsInArguments` divergence — a silent wrong answer in an otherwise-accepted shape,
   not a spill-slot displacement
-  (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_still_skips`,
-  `::suspend_member_call_whose_operand_writes_a_local_still_skips`,
+  (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_runs`,
+  `::suspend_member_call_whose_operand_writes_a_local_runs`,
   `::suspend_operand_write_to_a_locally_dead_scratch_runs`).
+- **`suspend fun` — an INTRINSIC suspension point needs no operand temps.** A
+  `suspendCoroutineUninterceptedOrReturn { c -> … }` recorded in `ir.intrinsic_suspension_points` is an
+  inlined BLOCK, not a call: it has no operands to move ahead of the spill, and its body runs after the
+  spill by construction (as in kotlinc, which has nothing on the operand stack there either). That is
+  not the ordering hazard above, because a mutable local the block writes is captured BY REFERENCE — the
+  front end `RefNew`-boxes it as soon as a lambda writes it — so the write lands in the heap cell whose
+  reference the spill stored, and the restore cannot undo it. `bind_operand_temps` still refuses an
+  operand-less point whose subtree writes a spilled local, so the property is enforced rather than
+  assumed. (That `RefNew` shape is independently refused today by `box_returns`; kotlinc answers
+  `"a;2;"` for it.)
 - **`suspend fun` — a `Nothing?` local live across a suspension is REMATERIALIZED, not spilled.**
   `var x = null` has exactly one possible value, so kotlinc gives it no continuation field and re-emits
   `aconst_null; astore` in each resume arm. Spilling it instead is wrong twice over: the local's
