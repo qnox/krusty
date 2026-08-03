@@ -25567,6 +25567,14 @@ fn collect_calls(
     out: &std::cell::RefCell<Vec<AstExprId>>,
     descend_nested_bodies: bool,
 ) {
+    // Enforce the execution boundary at the recursive entry, not only in the expression-child
+    // callback. A lambda can be reached directly from a statement (`val task = { pause() }`) or can
+    // itself be a function's expression body; both routes bypass the child callback that first tried
+    // to implement this rule. Treating every entry uniformly prevents a deferred lambda body from
+    // being charged to the ordinary function which merely allocates it.
+    if !descend_nested_bodies && matches!(file.expr(e), ast::Expr::Lambda { .. }) {
+        return;
+    }
     if matches!(file.expr(e), ast::Expr::Call { .. }) {
         out.borrow_mut().push(e);
     }
@@ -25575,9 +25583,7 @@ fn collect_calls(
         &mut |c| {
             // A lambda executes in its own function/coroutine context. The full suspend-lambda scan
             // opts in to descending; the file-level caller-context gate stops here.
-            if descend_nested_bodies || !matches!(file.expr(c), ast::Expr::Lambda { .. }) {
-                collect_calls(file, c, out, descend_nested_bodies);
-            }
+            collect_calls(file, c, out, descend_nested_bodies);
             false
         },
         &mut |s| {
