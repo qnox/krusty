@@ -1,14 +1,14 @@
-//! Searchable class names from the classpath.
+//! Searchable class names from the project's dependencies.
 //!
-//! The project index answers for the workspace's own sources. This answers for everything they
-//! depend on — the stdlib, every jar Gradle resolved, the JDK image — which is where most of the
-//! names a reader looks up actually live.
+//! The project index answers for the workspace's own sources. This answers for what they depend
+//! on — the union of every module's compile classpath, which is where most of the names a reader
+//! looks up actually live. Only that: not every jar on the machine, and not the build cache it was
+//! resolved from. What the project does not compile against, nobody in the project can name.
 //!
 //! It holds names only. A dependency symbol has no location until its class is rendered back to
-//! source, and rendering every class up front would be work nobody asked for: measured, a class
-//! renders in 20.7 µs, so the few a query returns cost well under a millisecond, while the whole
-//! local Gradle cache (3,456 jars) would be minutes. Ranking therefore happens here, over names,
-//! and only the survivors are ever rendered.
+//! source, and rendering is on demand — for the symbols a query actually returns, never ahead of
+//! time. Ranking therefore happens here, over names, and produces candidates; turning a candidate
+//! into something a client can open is a separate step, taken for as few as possible.
 
 use std::collections::HashMap;
 
@@ -16,10 +16,13 @@ use crate::analysis::{
     camel_hump_initials, is_ordered_subsequence_lowercase, qwerty_from_cyrillic, WorkspaceQuery,
 };
 
-/// Ceiling on classes retained per classpath. The local Gradle cache holds 3,456 jars and the doc's
-/// measurement of every class in it is 436,289 names — an index this size is a name table, not a
-/// problem, but a workspace that somehow exceeds it stops growing rather than the process.
-pub const MAX_DEPENDENCY_CLASSES: usize = 1024 * 1024;
+/// Ceiling on classes retained for one project's dependencies.
+///
+/// Sized from what jars actually hold: over a 40-jar sample, the median declares 71 non-synthetic
+/// classes and the mean 1,105, the mean being dragged by one jar with 33,213. A project resolving a
+/// few hundred jars therefore lands in the tens of thousands, and this leaves an order of magnitude
+/// of room. A dependency set that somehow exceeds it stops growing rather than the process.
+pub const MAX_DEPENDENCY_CLASSES: usize = 256 * 1024;
 
 /// A class the classpath declares, ranked but not yet located.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +51,20 @@ pub struct DependencySymbolIndex {
 }
 
 impl DependencySymbolIndex {
+    /// Build from the project's resolved classpath: the union of every module's compile classpath.
+    ///
+    /// Scope is deliberate. A build cache holds every version of every artifact ever fetched, and
+    /// none of what the project does not compile against can be named from it, so indexing the
+    /// cache would answer with classes no source file could refer to.
+    pub fn from_classpath(classpath: &krusty::jvm::classpath::Classpath) -> Self {
+        Self::from_internal_names(
+            classpath
+                .package_tree()
+                .classes()
+                .map(|(internal, _)| internal),
+        )
+    }
+
     /// Build from slashed internal names, as `Classpath::package_tree().classes()` yields them.
     ///
     /// A `$` in an internal name is a nested class, and a reader searching for `Entry` means
@@ -340,6 +357,49 @@ fn intern(value: &str, table: &mut Vec<String>, ids: &mut HashMap<String, u32>) 
     table.push(value.to_string());
     ids.insert(value.to_string(), id);
     id
+}
+
+/// Where a dependency class was written out so a client can open it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedDependency {
+    pub candidate: DependencyCandidate,
+    pub path: std::path::PathBuf,
+    /// Byte span of the declaration's name within the written text.
+    pub span: krusty::diag::Span,
+    pub text: String,
+}
+
+/// Write out the source for `candidates`, skipping any the classpath cannot resolve.
+///
+/// On demand and nowhere else: a class is rendered because a query is about to return it, never
+/// because it exists. Rendering is cheap per class -- 20.7 µs measured -- but a project's
+/// dependencies hold tens of thousands of them, and a reader asked about a handful.
+pub fn locate(
+    classpath: &std::rc::Rc<krusty::jvm::classpath::Classpath>,
+    cache_root: &std::path::Path,
+    candidates: Vec<DependencyCandidate>,
+    use_sources: bool,
+) -> Vec<LocatedDependency> {
+    let mut located = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let Some(source) =
+            crate::deps_render::materialize(classpath, &candidate.internal, "", "", use_sources)
+        else {
+            continue;
+        };
+        // No member name: a class-name query points at the class declaration itself.
+        let (text, span) = source.into_text_and_span("", "");
+        let Ok(path) = crate::deps_cache::store(cache_root, &candidate.internal, &text) else {
+            continue;
+        };
+        located.push(LocatedDependency {
+            candidate,
+            path,
+            span,
+            text,
+        });
+    }
+    located
 }
 
 #[cfg(test)]

@@ -13,7 +13,10 @@ mod worker;
 pub use analysis::*;
 pub use compiler_analysis::LibraryRef;
 pub use dependency_sources::render as deps_render;
-pub use dependency_symbols::{DependencyCandidate, DependencySymbolIndex, MAX_DEPENDENCY_CLASSES};
+pub use dependency_symbols::{
+    locate as locate_dependencies, DependencyCandidate, DependencySymbolIndex, LocatedDependency,
+    MAX_DEPENDENCY_CLASSES,
+};
 pub use options::*;
 pub use project::{
     detect, resolve_jdk, JdkRequest, LoadedProjectSources, ProcessRunner, ProjectModel,

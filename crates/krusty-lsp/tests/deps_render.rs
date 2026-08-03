@@ -583,3 +583,44 @@ fn the_real_stdlib_classpath_is_searchable_by_class_name() {
         );
     }
 }
+
+#[test]
+fn a_ranked_dependency_class_becomes_a_file_with_a_range() {
+    let cp = Rc::new(stdlib_classpath());
+    if cp.scan_types().is_empty() {
+        return;
+    }
+    let index = krusty_lsp::DependencySymbolIndex::from_classpath(&cp);
+    let cache = std::env::temp_dir().join(format!(
+        "krusty-dep-locate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let candidates = index.candidates("AbstractList", 4);
+    assert!(!candidates.is_empty());
+    let located = krusty_lsp::locate_dependencies(&cp, &cache, candidates, false);
+
+    let listed = located
+        .iter()
+        .find(|found| found.candidate.internal == "kotlin/collections/AbstractList")
+        .expect("the ranked class must be locatable");
+    // A client that will not open a URI without a range needs both, and the file has to be on disk
+    // by the time the response leaves.
+    assert!(
+        listed.path.is_file(),
+        "{} was not written",
+        listed.path.display()
+    );
+    let text = std::fs::read_to_string(&listed.path).unwrap();
+    assert_eq!(text, listed.text);
+    assert_eq!(
+        &text[listed.span.lo as usize..listed.span.hi as usize],
+        "AbstractList"
+    );
+
+    std::fs::remove_dir_all(&cache).ok();
+}
