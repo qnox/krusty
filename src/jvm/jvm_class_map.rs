@@ -176,6 +176,15 @@ pub fn jvm_to_kotlin_builtin_with_members_name(internal: TypeName) -> Option<Typ
     builtin_ids().with_members.get(&internal).copied()
 }
 
+/// The Kotlin builtin declaration that owns source-level metadata for a mapped JVM type. Collection
+/// interfaces and the smaller set of non-collection builtins use separate bidirectional maps because
+/// their source identities have different rules, but consumers asking for `.kotlin_builtins` facts
+/// must not repeat that storage distinction as parallel fallback branches.
+pub fn jvm_to_kotlin_builtin_metadata_name(internal: TypeName) -> Option<TypeName> {
+    jvm_collection_to_kotlin_type_name(internal)
+        .or_else(|| jvm_to_kotlin_builtin_with_members_name(internal))
+}
+
 /// Whether a JVM-mapped Kotlin built-in is a JVM **interface** (so a member dispatches via
 /// `invokeinterface`, not `invokevirtual`). A reliable answer for the curated mapped types — matching
 /// kotlinc's `JavaToKotlinClassMap` — for when the classpath `.class` reader can't be consulted (e.g. a
@@ -512,8 +521,9 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        jvm_collection_to_kotlin_type_name, kotlin_prim_to_wrapper, to_jvm_internal,
-        to_jvm_type_name, wrapper_internal, wrapper_to_kotlin_prim_name,
+        jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_name,
+        kotlin_prim_to_wrapper, to_jvm_internal, to_jvm_type_name, wrapper_internal,
+        wrapper_to_kotlin_prim_name,
     };
     use crate::types::{type_name, Ty};
 
@@ -582,6 +592,22 @@ mod tests {
         );
         assert_eq!(
             jvm_collection_to_kotlin_type_name(type_name("demo/Foo")),
+            None
+        );
+    }
+
+    #[test]
+    fn builtin_metadata_owner_unifies_collection_and_mapped_class_lookups() {
+        assert_eq!(
+            jvm_to_kotlin_builtin_metadata_name(type_name("java/util/List")),
+            Some(type_name("kotlin/collections/List"))
+        );
+        assert_eq!(
+            jvm_to_kotlin_builtin_metadata_name(type_name("java/lang/CharSequence")),
+            Some(type_name("kotlin/CharSequence"))
+        );
+        assert_eq!(
+            jvm_to_kotlin_builtin_metadata_name(type_name("demo/Foo")),
             None
         );
     }
