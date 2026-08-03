@@ -136,6 +136,12 @@ fun box(): String {
 /// makes the class carry an `InnerClasses` attribute. That nesting fact used to be read only off the
 /// owner's class file, so it silently vanished on a JDK-less classpath; it comes from the builtin's own
 /// `.kotlin_builtins` entry (`kotlin/collections/Map.Entry`) instead.
+///
+/// The source matrix deliberately crosses more than the collection aliases that first exposed the
+/// defect. Read-only and mutable collections, ordinary mapped interfaces/classes, numeric owners,
+/// iterators, generic arrays, and primitive arrays must all consume the same canonical metadata-owner
+/// mapping. Keeping them in one byte-for-byte comparison catches a future provider- or type-specific
+/// branch even when each isolated call would still load and return the expected value.
 #[test]
 fn no_jdk_emit_matches_jdk_emit_for_builtin_members() {
     let (Some(stdlib), Some(jdk)) = (common::stdlib_jar(), common::jdk_modules()) else {
@@ -151,6 +157,17 @@ fun e(l: List<String>): Boolean = l.isEmpty()
 fun i(l: List<String>): Iterator<String> = l.iterator()
 fun n(m: Map<String, Int>): String = m.entries.first().key
 fun q(s: CharSequence): Int = s.length
+fun ms(l: MutableList<String>): Int = l.size
+fun ma(l: MutableList<String>): Boolean = l.add("x")
+fun mm(m: MutableMap<String, Int>): Int = m.size
+fun mk(m: MutableMap<String, Int>): MutableSet<String> = m.keys
+fun st(s: String): Int = s.length
+fun sc(s: String): Char = s.get(0)
+fun cp(a: Comparable<String>, b: String): Int = a.compareTo(b)
+fun nt(n: Number): Int = n.toInt()
+fun it(i: Iterator<String>): Boolean = i.hasNext()
+fun ar(a: Array<String>): Int = a.size
+fun ia(a: IntArray): Int = a.size
 "#;
     let jars = [stdlib];
     let with_jdk = common::compile_in_process(src, "cmp", &jars, Some(&jdk))
