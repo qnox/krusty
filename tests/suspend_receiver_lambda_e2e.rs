@@ -102,6 +102,70 @@ fun box(): String {
 "#);
 }
 
+/// A suspend-lambda safety gate must inspect the SELECTED callable, not every declaration sharing its
+/// source name. The body selects the ordinary top-level `record`; the unrelated class member is
+/// `suspend inline` only to make a name-wide scan maximally misleading. The old scan rejected the whole
+/// file before lowering, even though neither overload selection nor emitted bytecode could reach the
+/// member. Exercise the ordinary call both directly and inside the suspend lambda: the file-level
+/// caller-context gate and the lambda state-machine classifier must share exact target semantics. This
+/// regression deliberately uses neutral names so diagnostics and compiler traces never need to expose
+/// an application class name to classify the call.
+#[test]
+fn suspend_lambda_ignores_unselected_same_named_suspend_inline_member() {
+    run(r#"
+import kotlin.coroutines.*
+
+var observed = ""
+
+class Unrelated {
+    suspend inline fun record() { observed = "wrong" }
+}
+
+fun record() { observed = "OK" }
+
+fun start(body: suspend () -> Unit) {
+    body.startCoroutine(Continuation(EmptyCoroutineContext) {})
+}
+
+fun box(): String {
+    record()
+    start { record() }
+    return observed
+}
+"#);
+}
+
+/// The complementary safety boundary: when the selected target itself is `suspend inline`, lowering
+/// must still decline before it emits a direct call from generated state-machine code. Assert the
+/// stable capability-based reason exactly; putting the source function's name in this diagnostic would
+/// leak application identifiers and couple tests to a real declaration spelling.
+#[test]
+fn suspend_lambda_rejects_selected_suspend_inline_without_name_leakage() {
+    let stdlib = common::stdlib_jar().expect("the e2e toolchain must provide kotlin-stdlib");
+    let jdk = common::jdk_modules().expect("the e2e toolchain must provide JDK modules");
+    let source = r#"
+import kotlin.coroutines.*
+
+suspend inline fun selectedOperation() {}
+
+fun start(body: suspend () -> Unit) {
+    body.startCoroutine(Continuation(EmptyCoroutineContext) {})
+}
+
+fun box(): String {
+    start { selectedOperation() }
+    return "unreachable"
+}
+"#;
+    let outcome =
+        common::backend_outcome_in_process(source, "SelectedSuspendInline", &[stdlib], Some(&jdk))
+            .expect("the front end must accept the regression source");
+    assert_eq!(
+        outcome,
+        common::BackendOutcome::LowerBail("gate:suspend-inline-call-in-suspend-lambda".to_string())
+    );
+}
+
 /// A `Unit` tail that leaves NOTHING on the operand stack must materialize the `Unit` singleton — a
 /// call to a `Unit` function VALUE, after a suspension. Storing the tail into the machine's result temp
 /// instead read from an empty stack (`VerifyError: Operand stack underflow`).

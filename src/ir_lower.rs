@@ -425,29 +425,14 @@ fn lower_file_at_reporting_impl(
     // to a suspend fn from a NON-suspend function (call-site continuation threading isn't modeled — and
     // calling a suspend fn from a non-suspend context is a Kotlin error anyway). The pass itself skips
     // any suspend *body* shape it can't yet restructure.
-    let top_suspend: Vec<String> = file
+    let has_top_suspend = file
         .decls
         .iter()
-        .filter_map(|&d| match file.decl(d) {
-            Decl::Fun(f) if f.is_suspend() => Some(f.name.clone()),
-            _ => None,
-        })
-        .collect();
-    let member_suspend: Vec<String> = file
-        .decls
-        .iter()
-        .filter_map(|&d| match file.decl(d) {
-            Decl::Class(c) => Some(c),
-            _ => None,
-        })
-        .flat_map(|c| {
-            c.methods
-                .iter()
-                .filter(|m| m.is_suspend())
-                .map(|m| m.name.clone())
-        })
-        .collect();
-    if !top_suspend.is_empty() || !member_suspend.is_empty() {
+        .any(|&d| matches!(file.decl(d), Decl::Fun(f) if f.is_suspend()));
+    let has_member_suspend = file.decls.iter().any(
+        |&d| matches!(file.decl(d), Decl::Class(c) if c.methods.iter().any(FunDecl::is_suspend)),
+    );
+    if has_top_suspend || has_member_suspend {
         // Extension suspend fns aren't modeled. (A leaf member suspend fn IS — its CPS signature on the
         // instance method; a member suspension point is skipped by the pass.)
         for &d in &file.decls {
@@ -547,17 +532,14 @@ fn lower_file_at_reporting_impl(
         if suspend_member_needs_bridge {
             return lo.bail("gate:suspend-erasure-bridge");
         }
-        // A NON-suspend body may not call any suspend fn (top-level or member): call-site continuation
-        // threading is only modeled inside a suspend body (and calling a suspend fn from a non-suspend
-        // context is a Kotlin error). A suspend body may call both — the coroutine pass threads the
-        // continuation into a static (`Call`) or member (`MethodCall`) suspend call.
+        // A NON-suspend body may not directly call any suspend fn: call-site continuation threading is
+        // only modeled inside a suspend body (and Kotlin rejects such a call anyway). Read the exact
+        // checker-selected target and stop at nested lambda/local-function execution boundaries. A
+        // declaration-name scan used to reject an ordinary overload merely because some unrelated
+        // member in the file shared its name; descending into a suspend lambda would also incorrectly
+        // attribute that lambda's legal call to its non-suspend enclosing function.
         for (e, owner_suspend) in bodies {
-            if !owner_suspend
-                && top_suspend
-                    .iter()
-                    .chain(member_suspend.iter())
-                    .any(|n| file.expr_uses_name(e, n))
-            {
+            if !owner_suspend && lo.ast_execution_scope_suspends(e) {
                 return lo.bail("gate:suspend-call-from-non-suspend");
             }
         }
@@ -6836,12 +6818,20 @@ impl<'a> Lower<'a> {
             physical_params,
             ret,
             physical_ret,
+            inline,
+            suspend,
             interface,
             ..
         } = target
         else {
             return None;
         };
+        // A selected `MustInline` target has no legal virtual-call fallback. Member extensions obey
+        // the same capability contract as every other `ResolvedCall`; the fact that their dispatch
+        // receiver is implicit does not make an erased/reified body callable.
+        if inline.must_inline() {
+            return None;
+        }
         let dispatch = self.member_extension_dispatch_value(*owner)?;
         let extension_value = self.emit_type_op(
             IrTypeOp::ImplicitCoercion,
@@ -6863,11 +6853,13 @@ impl<'a> Lower<'a> {
         let mut method_params = Vec::with_capacity(physical_params.len() + 1);
         method_params.push(*physical_receiver);
         method_params.extend(physical_params.iter().copied());
-        let call = if let Some((class, index, _, linked_ret)) =
+        let (call, emitted_ret) = if let Some((class, index, _, linked_ret)) =
             self.link_local_method(&owner.render(), name, &method_params)
         {
-            let call = self.emit_method_call(class, index, dispatch, lowered);
-            self.coerce_to_static(call, *ret, linked_ret)
+            (
+                self.emit_method_call(class, index, dispatch, lowered),
+                linked_ret,
+            )
         } else {
             let lowered = lowered.into_iter().collect::<Option<Vec<_>>>()?;
             let call = self.emit_call(
@@ -6881,9 +6873,13 @@ impl<'a> Lower<'a> {
                 Some(dispatch),
                 lowered,
             );
-            self.coerce_to_static(call, *ret, *physical_ret)
+            (call, *physical_ret)
         };
-        Some(call)
+        // Record the direct operation before any logical-return coercion wraps it, so the coroutine
+        // pass appends the continuation to the actual call node for local and sibling-module targets
+        // alike.
+        let call = self.record_suspend_call(call, *suspend, *ret);
+        Some(self.coerce_to_static(call, *ret, emitted_ret))
     }
 
     /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
@@ -8846,42 +8842,27 @@ impl<'a> Lower<'a> {
     /// suspend gate. Used both to classify a suspend lambda literal and to guard the non-inlined
     /// suspend-inline-HOF path (a plain `Function0` argument cannot legally call a suspend function).
     fn ast_body_suspends(&self, body: AstExprId) -> bool {
-        // Top-level suspend functions PLUS same-file class suspend METHODS: a method called with an
-        // IMPLICIT receiver (`suspendWithResult(x)` inside a receiver lambda) is a bare `Name` call,
-        // invisible to the explicit-`Member` checks below. Matching by name over-approximates (a
-        // same-named non-suspend call would classify the body as suspending), which is SAFE: the
-        // general machine over a body with no real suspension is a single state.
-        let susp_names: std::collections::HashSet<String> = self
-            .afile
-            .decls
-            .iter()
-            .flat_map(|&d| -> Vec<String> {
-                match self.afile.decl(d) {
-                    ast::Decl::Fun(f) if f.is_suspend() => vec![f.name.clone()],
-                    ast::Decl::Class(c) => c
-                        .methods
-                        .iter()
-                        .filter(|m| m.is_suspend())
-                        .map(|m| m.name.clone())
-                        .collect(),
-                    _ => Vec::new(),
-                }
-            })
-            .collect();
-        let call_names_cell = std::cell::RefCell::new(Vec::new());
-        collect_call_names(self.afile, body, &call_names_cell);
-        if call_names_cell
-            .into_inner()
-            .iter()
-            .any(|n| susp_names.contains(n))
-        {
-            return true;
-        }
-        // A MEMBER / invoke-operator suspend call (`getResult()` = `GetResult.suspend operator fun
-        // invoke()`, `x.m()` where `m` is `suspend`) is invisible to the top-level-name check above —
-        // resolve each callee's type + method `is_suspend` so the body isn't misclassified as leaf.
+        self.ast_body_suspends_with_nested_bodies(body, true)
+    }
+
+    /// Whether the expressions executed directly by `body` suspend. Nested lambda and local-function
+    /// bodies own a different suspend context, so the file-level non-suspend-function gate must not
+    /// charge their calls to the enclosing declaration.
+    fn ast_execution_scope_suspends(&self, body: AstExprId) -> bool {
+        self.ast_body_suspends_with_nested_bodies(body, false)
+    }
+
+    fn ast_body_suspends_with_nested_bodies(
+        &self,
+        body: AstExprId,
+        descend_nested_bodies: bool,
+    ) -> bool {
+        // Inspect every call through the checker-selected target. This covers top-level, local, member,
+        // extension, implicit-receiver, sibling-module, and classpath calls through one semantic table;
+        // a declaration-wide name scan would both conflate overloads and miss receiver syntax.
+        // Function-value/operator invokes additionally use their dedicated checked lowering below.
         let callees = std::cell::RefCell::new(Vec::new());
-        collect_calls(self.afile, body, &callees);
+        collect_calls(self.afile, body, &callees, descend_nested_bodies);
         let module_symbols = crate::module_symbols::ModuleSymbols::new(self.syms);
         callees.into_inner().into_iter().any(|call| {
             // Resolved call metadata below is provider-neutral and is the primary source of truth.
@@ -8896,6 +8877,14 @@ impl<'a> Lower<'a> {
                     .iter()
                     .any(|member| member.suspend())
             };
+            if self
+                .info
+                .resolved_calls
+                .get(&call)
+                .is_some_and(ResolvedCall::is_suspend)
+            {
+                return true;
+            }
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
             // operator on a class receiver.
@@ -8922,33 +8911,6 @@ impl<'a> Lower<'a> {
             // checker-selected `ReceiverFnInvoke`): a suspension point like a suspend fn value.
             if let Some(ExprLowering::ReceiverFnInvoke { suspend: true, .. }) =
                 self.info.expr_lowers.get(&call)
-            {
-                return true;
-            }
-            // A resolved top-level `suspend fun` called by name: the checker records the same semantic
-            // suspend flag regardless of which symbol provider supplied the callable.
-            if self
-                .info
-                .resolved_top_level(call)
-                .is_some_and(|c| c.suspend)
-                || self
-                    .info
-                    .resolved_module_top_level(call)
-                    .is_some_and(|c| c.suspend)
-            {
-                return true;
-            }
-            // A member / extension call to a suspend method, resolved by the CHECKER — with an
-            // EXPLICIT receiver (`recv.m(args)`) or an IMPLICIT one (`suspendWithResult(x)` inside a
-            // receiver lambda, whose callee is a bare `Name`, not a `Member`). The lowerer only reads.
-            if self
-                .info
-                .resolved_member(call)
-                .is_some_and(|m| m.member.suspend())
-                || self
-                    .info
-                    .resolved_extension(call)
-                    .is_some_and(|c| c.suspend)
             {
                 return true;
             }
@@ -9024,25 +8986,22 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Whether `body` calls a MODULE-declared `suspend inline` callable by bare name. Matching by name
-    /// over-approximates (a same-named ordinary call counts), which is the SAFE direction — it can only
-    /// skip a file, never accept one.
-    fn body_calls_module_suspend_inline(&self, body: AstExprId) -> bool {
-        let names = std::cell::RefCell::new(Vec::new());
-        collect_call_names(self.afile, body, &names);
-        let names = names.into_inner();
-        if names.is_empty() {
-            return false;
-        }
-        let suspend_inline =
-            |sigs: &Vec<Signature>| sigs.iter().any(|s| s.is_suspend() && s.is_inline());
-        names.iter().any(|name| {
-            self.syms.funs.get(name).is_some_and(suspend_inline)
-                || self
-                    .syms
-                    .classes
-                    .values()
-                    .any(|class| class.methods.get(name).is_some_and(suspend_inline))
+    /// Whether `body` contains a checker-selected `suspend inline` call. Such a call must be spliced,
+    /// but the current splicer does not enter a suspend lambda's generated state-machine states.
+    ///
+    /// This deliberately reads the same provider-neutral [`ResolvedCall`] that ordinary lowering will
+    /// emit. Looking up a bare name here is not conservative enough semantically: it can reject an
+    /// ordinary selected overload because an unrelated class happens to declare a suspend-inline method
+    /// with the same name, and it misses receiver syntax. Exact selection makes the safety gate agree
+    /// for local, module, member, extension, and classpath targets without exposing any target name.
+    fn body_calls_suspend_inline(&self, body: AstExprId) -> bool {
+        let calls = std::cell::RefCell::new(Vec::new());
+        collect_calls(self.afile, body, &calls, true);
+        calls.into_inner().into_iter().any(|call| {
+            self.info
+                .resolved_calls
+                .get(&call)
+                .is_some_and(ResolvedCall::is_suspend_inline)
         })
     }
 
@@ -9105,7 +9064,7 @@ impl<'a> Lower<'a> {
         // one the source signature names. The splicer does not reach into a state machine's states, so
         // the machine would emit an ordinary call and fail at runtime (`NoSuchMethodError`). Skip the
         // file rather than miscompile.
-        if self.body_calls_module_suspend_inline(body) {
+        if self.body_calls_suspend_inline(body) {
             return self.bail("gate:suspend-inline-call-in-suspend-lambda");
         }
         let jvm_arity = arity + 1; // + the trailing continuation
@@ -12939,13 +12898,14 @@ impl<'a> Lower<'a> {
                 owner,
                 source,
                 vararg,
-                requires_splice,
+                inline,
+                suspend,
             } => {
                 // The checker forwards the resolved callable's generic `MustInline` capability.
                 // Do not infer call legality here from whether a facade happens to be emitted: a
                 // reified method can exist to publish inline code while its erased body remains an
                 // illegal direct target. After the splicer has had its opportunity, this path bails.
-                if requires_splice {
+                if inline.must_inline() {
                     return None;
                 }
                 // The recorded receiver matches the call site directly, or in its NON-NULL form
@@ -13013,6 +12973,7 @@ impl<'a> Lower<'a> {
                     let mut lowered = vec![receiver_value];
                     lowered.extend(arguments);
                     let call = self.emit_local_call(fid, lowered);
+                    let call = self.record_suspend_call(call, suspend, selected_ret);
                     return Some((self.wrap_arg_prelude(call, prelude), ret));
                 }
                 let owner = owner?;
@@ -13065,6 +13026,7 @@ impl<'a> Lower<'a> {
                     .method_descriptor(&physical_params, selected_ret)?;
                 let call =
                     self.emit_static_call(owner, target, descriptor, InlineKind::None, lowered);
+                let call = self.record_suspend_call(call, suspend, selected_ret);
                 Some((self.wrap_arg_prelude(call, prelude), selected_ret))
             }
             ResolvedCall::Extension(callable) => {
@@ -25596,48 +25558,36 @@ fn outer_local_access_stmt(
     }
 }
 
-/// Collect the simple (`Name`-callee) function-call names anywhere in `e`'s subtree — used to decide
-/// whether a lambda body calls a `suspend` function (same-file or classpath).
 /// Collect every `Call` expr in `e` (incl. nested) — to resolve a call's suspend-ness via its `Invoke`
-/// lowering (a suspend function VALUE / invoke operator) or its callee (a member suspend method), none of
-/// which `collect_call_names` (top-level `Call{Name}` only) can see.
-fn collect_calls(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<AstExprId>>) {
+/// lowering (a suspend function value / invoke operator) or the checker-selected [`ResolvedCall`].
+/// Retaining expression identity, rather than only callee text, is what keeps overload selection exact.
+fn collect_calls(
+    file: &ast::File,
+    e: AstExprId,
+    out: &std::cell::RefCell<Vec<AstExprId>>,
+    descend_nested_bodies: bool,
+) {
     if matches!(file.expr(e), ast::Expr::Call { .. }) {
         out.borrow_mut().push(e);
     }
     file.any_child_expr(
         e,
         &mut |c| {
-            collect_calls(file, c, out);
+            // A lambda executes in its own function/coroutine context. The full suspend-lambda scan
+            // opts in to descending; the file-level caller-context gate stops here.
+            if descend_nested_bodies || !matches!(file.expr(c), ast::Expr::Lambda { .. }) {
+                collect_calls(file, c, out, descend_nested_bodies);
+            }
             false
         },
         &mut |s| {
-            file.any_child_stmt(s, &mut |c| {
-                collect_calls(file, c, out);
-                false
-            });
-            false
-        },
-    );
-}
-
-fn collect_call_names(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<String>>) {
-    if let ast::Expr::Call { callee, .. } = file.expr(e) {
-        if let ast::Expr::Name(n) = file.expr(*callee) {
-            out.borrow_mut().push(n.clone());
-        }
-    }
-    file.any_child_expr(
-        e,
-        &mut |c| {
-            collect_call_names(file, c, out);
-            false
-        },
-        &mut |s| {
-            file.any_child_stmt(s, &mut |c| {
-                collect_call_names(file, c, out);
-                false
-            });
+            // A local function likewise owns its call context and is checked/lowered separately.
+            if descend_nested_bodies || !matches!(file.stmt(s), Stmt::LocalFun(_)) {
+                file.any_child_stmt(s, &mut |c| {
+                    collect_calls(file, c, out, descend_nested_bodies);
+                    false
+                });
+            }
             false
         },
     );

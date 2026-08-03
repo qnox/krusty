@@ -300,16 +300,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   copied into the fresh instance `invoke` builds (`new This(this.cap.., (Continuation)arg)`); the
   creation site passes the captured values (`new This(captureValues.., null)`). `invokeSuspend` loads
   each capture field into a local before running the body. Proven: `make(n: Int): suspend () -> Int =
-  { n + 1 }`, `make(10).invoke(k)` → 11 (`::suspend_lambda_captures_enclosing_variable`). Still skipped
-  (later slices): own parameters. **Internal suspension**: a lambda whose body is a single TAIL suspend
-  call (`{ foo() }`, `{ suspendOnce() }`) compiles its `invokeSuspend` to a state machine with the
+  { n + 1 }`, `make(10).invoke(k)` → 11 (`::suspend_lambda_captures_enclosing_variable`). Own
+  parameters use fields after the captures, populated by `create`/`invoke` and reloaded by
+  `invokeSuspend`; parameters and captures may coexist. **Internal suspension**: a lambda whose body
+  is a single TAIL suspend call (`{ foo() }`, `{ suspendOnce() }`) compiles its `invokeSuspend` to a state machine with the
   lambda instance itself as the continuation — a `label` field on the class, dispatch on `this.label`:
   state 0 threads `this` (cast `Continuation`) into the callee and sets `label=1` (a classpath/sibling
   callee, resolved by its logical signature, gets its descriptor rewritten to the CPS form here), then
   returns `COROUTINE_SUSPENDED` up if the callee suspends else the value; state 1 (the async resume,
   re-entered by the callee's `resumeWith`) returns the resumed `result`. A suspending body that isn't a
-  clean tail call, or that also captures, still bails. The lambda-suspension detection walks the AST for
-  call names resolving to a suspend fn (same-file or, via the resolver, classpath). Proven both
+  supported state-machine shape still bails rather than emitting partial CPS. Lambda-suspension
+  detection walks AST call identities and reads each checker's exact provider-neutral `ResolvedCall`
+  (same-file, sibling-module, and classpath alike); it never classifies by a same-named declaration.
+  Proven both
   completion modes: `make(): suspend () -> Int = { foo() }` → 42 synchronously
   (`tests/suspend_e2e.rs::suspend_lambda_with_internal_suspension_runs`); `{ suspendOnce() }` against a
   real kotlinc parking primitive suspends then resumes to 42
@@ -382,9 +385,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A `suspend inline` callee inside a suspend lambda SKIPS (never miscompiles).** Its body must be
   spliced at the call site — the compiled method is not the one the source signature names — and the
   splicer does not reach into a state machine's states, so the machine would emit an ordinary call and
-  fail at runtime with `NoSuchMethodError`. `Lower::body_calls_module_suspend_inline` detects a
-  module-declared `suspend inline` callee by name (an over-approximation, which can only skip a file)
-  and bails. Corpus `coroutines/kt15017.kt`.
+  fail at runtime with `NoSuchMethodError`. `Lower::body_calls_suspend_inline` walks calls in the body
+  and reads each checker's exact provider-neutral `ResolvedCall`; it does not reselect by name or branch
+  on local/module/classpath origin. Consequently an unrelated same-named declaration cannot suppress a
+  valid ordinary call. The same exact target drives `Lower::ast_body_suspends`, so that ordinary call is
+  not falsely promoted to a state machine either. The selected suspend-inline target bails. Corpus
+  `coroutines/kt15017.kt` and the collision regression in `tests/suspend_receiver_lambda_e2e.rs`.
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
