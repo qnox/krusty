@@ -429,6 +429,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reaches either from a code POINT truncates with the JVM's own `i2c`, since a well-formed `Char`
   literal is always in the BMP. Tests: `CharSurrogateConst` and `CharSurrogateLiteral` in
   `tests/feature_box_e2e.rs`.
+- **A `Char` constant folded into a string renders as the CHARACTER, not its code unit.** The constant
+  string evaluator behind the `trimIndent`/`trimMargin` fold accepts a `Char` (`${'$'}` is the idiomatic
+  way to write a literal `$` in a template), so it must spell the character out. A code unit that is not
+  a scalar value has no Rust `String` spelling at all, so the evaluator reports "not a constant" rather
+  than substituting a stand-in; the file then hits the existing "`trimIndent` on a non-constant receiver"
+  gap and is rejected with a diagnostic. kotlinc folds that case — krusty's is a **loud bail, not a wrong
+  value**, and closing it needs a UTF-16 representation for string constants (`IrConst::String` is a Rust
+  `String`, which cannot hold a lone surrogate either). Test: `ConstCharTemplateFold` in
+  `tests/feature_box_e2e.rs`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.

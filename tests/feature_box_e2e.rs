@@ -3896,6 +3896,30 @@ fun box(): String {
 }
 "#,
     ),
+    // A `Char` constant folded into a `trimIndent`/`trimMargin` template must render as the CHARACTER.
+    // `${'$'}` is the idiomatic way to write a literal `$` in a Kotlin template, and it goes through the
+    // constant-string fold, so a `Char` mis-rendered there (e.g. as its decimal code unit) silently
+    // corrupts the folded string. A code unit with no `char` form (a lone surrogate) has no Rust
+    // `String` spelling at all, so the fold must BAIL to the runtime concat rather than substitute
+    // U+FFFD.
+    (
+        "ConstCharTemplateFold",
+        r#"
+const val DOLLAR = '$'
+
+fun box(): String {
+    val a = """
+        |price: ${'$'}100
+    """.trimMargin()
+    if (a != "price: \$100") return "f0: $a"
+    val b = """
+        |k=${DOLLAR}v
+    """.trimMargin()
+    if (b != "k=\$v") return "f1: $b"
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]
