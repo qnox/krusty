@@ -62,6 +62,27 @@ fun box(): String {
     );
 }
 
+/// The generic JVM→builtin metadata mapping covers mapped classes outside the collection-specific
+/// table too. `CharSequence.length` must therefore recover both its plain physical name (`length`, not
+/// `getLength`) and its interface dispatch bit from `kotlin/CharSequence` with no JDK class available.
+#[test]
+fn builtin_noncollection_property_read_runs_without_jdk() {
+    let src = r#"
+fun box(): String {
+    val text: CharSequence = "shape"
+    return if (text.length == 5) "OK" else "FAIL length=" + text.length
+}
+"#;
+    let Some(out) = run_no_jdk_box(src, "nojdk_noncollection_property") else {
+        eprintln!("skip: no kotlin-stdlib jar / JDK to run on");
+        return;
+    };
+    assert_eq!(
+        out, "OK",
+        "no-JDK noncollection property read returned {out:?}"
+    );
+}
+
 /// A builtin member CALL on a mapped interface owner must use `invokeinterface`. With no JDK the
 /// interface flag has to survive the resolution round trip from the `.kotlin_builtins` entry; when it
 /// is dropped the class fails to load with `IncompatibleClassChangeError`.
@@ -111,12 +132,16 @@ fun box(): String {
 /// simply supplies, from `java/util/List.class`, the same facts the builtin entry already carries. A
 /// divergence here is the general form of all three defects above, and catches ones no `box()` covers.
 ///
-/// Deliberately uses no NESTED builtin type: a reference to `java/util/Map$Entry` also emits an
-/// `InnerClasses` attribute, which is read off the owner's class file and so is still absent on a
-/// JDK-less classpath. That is a metadata-only divergence (the code array and constant-pool member
-/// refs match, and the class loads and runs — see the generic-property test above), listed with the
-/// other JDK-less codegen gaps in `docs/IMPLEMENTATION_PLAN.md` and outside the member-realization
-/// facts this asserts.
+/// Includes a NESTED builtin reference (`m.entries.first().key` → `java/util/Map$Entry`), which also
+/// makes the class carry an `InnerClasses` attribute. That nesting fact used to be read only off the
+/// owner's class file, so it silently vanished on a JDK-less classpath; it comes from the builtin's own
+/// `.kotlin_builtins` entry (`kotlin/collections/Map.Entry`) instead.
+///
+/// The source matrix deliberately crosses more than the collection aliases that first exposed the
+/// defect. Read-only and mutable collections, ordinary mapped interfaces/classes, numeric owners,
+/// iterators, generic arrays, and primitive arrays must all consume the same canonical metadata-owner
+/// mapping. Keeping them in one byte-for-byte comparison catches a future provider- or type-specific
+/// branch even when each isolated call would still load and return the expected value.
 #[test]
 fn no_jdk_emit_matches_jdk_emit_for_builtin_members() {
     let (Some(stdlib), Some(jdk)) = (common::stdlib_jar(), common::jdk_modules()) else {
@@ -130,13 +155,14 @@ fun v(m: Map<String, Int>): Collection<Int> = m.values
 fun g(l: List<String>): String = l.get(0)
 fun e(l: List<String>): Boolean = l.isEmpty()
 fun i(l: List<String>): Iterator<String> = l.iterator()
+fun n(m: Map<String, Int>): String = m.entries.first().key
+fun q(s: CharSequence): Int = s.length
 fun ms(l: MutableList<String>): Int = l.size
 fun ma(l: MutableList<String>): Boolean = l.add("x")
 fun mm(m: MutableMap<String, Int>): Int = m.size
 fun mk(m: MutableMap<String, Int>): MutableSet<String> = m.keys
 fun st(s: String): Int = s.length
 fun sc(s: String): Char = s.get(0)
-fun cs(c: CharSequence): Int = c.length
 fun cp(a: Comparable<String>, b: String): Int = a.compareTo(b)
 fun nt(n: Number): Int = n.toInt()
 fun it(i: Iterator<String>): Boolean = i.hasNext()
@@ -180,6 +206,70 @@ fun ia(a: IntArray): Int = a.size
             );
         }
     }
+}
+
+/// What the recovered `InnerClasses` entry must SAY, asserted directly rather than only against the
+/// JDK-present emit. The comparison above is anchored to the JDK today because its other side reads
+/// `java/util/Map.class` — but both sides run the same resolver, so a restructure that routed the
+/// JDK-present path through the builtins fallback too would leave it passing on whatever flags the
+/// decode happened to produce. `0x0609` (`public static interface abstract`) is what javac put in
+/// `java/util/Map`, and it is not negotiable.
+#[test]
+fn recovered_inner_class_entry_carries_the_jdk_flags() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
+        return;
+    };
+    let src = "fun n(m: Map<String, Int>): String = m.entries.first().key\n";
+    let classes = common::compile_in_process(src, "innercls", &[stdlib], None)
+        .expect("must compile with no JDK on the classpath");
+    let (name, bytes) = classes.first().expect("must emit a class file");
+    let info = krusty::jvm::classreader::parse_class(bytes)
+        .unwrap_or_else(|e| panic!("{name} must be a readable class file: {e:?}"));
+    let entry = info
+        .inner_classes
+        .iter()
+        .find(|e| e.inner == "java/util/Map$Entry")
+        .unwrap_or_else(|| {
+            panic!(
+                "{name} must carry an InnerClasses entry for the nested builtin it references; got {:?}",
+                info.inner_classes
+            )
+        });
+    assert_eq!(entry.outer.as_deref(), Some("java/util/Map"));
+    assert_eq!(entry.name.as_deref(), Some("Entry"));
+    assert_eq!(
+        entry.access, 0x0609,
+        "the entry must carry the flags java/util/Map records for Map$Entry \
+         (public static interface abstract), not whatever the builtins decode defaults to"
+    );
+}
+
+/// The guardrails that keep the `$`-decomposition from INVENTING a nesting relation. Requiring the
+/// `.kotlin_builtins` fragment to actually declare the nested class is the whole reason a `$` that is
+/// merely part of a mangled name, a lambda class, or a non-builtin owner cannot be reported as nesting.
+#[test]
+fn builtin_nested_class_only_answers_for_declared_nestings() {
+    let Some(stdlib) = common::stdlib_jar() else {
+        eprintln!("skip: no kotlin-stdlib jar");
+        return;
+    };
+    let cp = krusty::jvm::classpath::Classpath::new(vec![stdlib]);
+    assert_eq!(
+        cp.builtin_nested_class("java/util/Map$Entry"),
+        Some(("java/util/Map".to_string(), "Entry".to_string(), 0x0609)),
+        "the one nesting a JDK-less compile actually has to recover"
+    );
+    // Not nested at all — no `$` to decompose.
+    assert_eq!(cp.builtin_nested_class("java/util/Map"), None);
+    // A `$` that is part of a mangled name, not a nesting: the enclosing half maps to no builtin.
+    assert_eq!(cp.builtin_nested_class("com/example/Foo$bar$1"), None);
+    assert_eq!(cp.builtin_nested_class("MainKt$main$1"), None);
+    // The enclosing half maps to a builtin, but the fragment declares no such nested class — the
+    // decomposition alone must not be enough.
+    assert_eq!(cp.builtin_nested_class("java/util/Map$Absent"), None);
+    // Multi-level: the enclosing half is itself the mapped nested name, which declares nothing under it.
+    assert_eq!(cp.builtin_nested_class("java/util/Map$Entry$Deeper"), None);
 }
 
 /// Printable ASCII runs of 3+ characters in a class file — its constant-pool names and descriptors.

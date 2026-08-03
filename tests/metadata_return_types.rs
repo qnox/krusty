@@ -118,10 +118,14 @@ fn builtins_string_members_from_metadata() {
         .expect("kotlin.kotlin_builtins in stdlib jar");
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
-    let members = krusty::jvm::metadata::parse_builtins(&bytes)
+    let string = krusty::jvm::metadata::parse_builtins(&bytes)
         .remove("kotlin/String")
-        .map(|c| c.members)
-        .unwrap_or_default();
+        .expect("String builtin class");
+    // `kotlin/String` omits `Class.flags` in the shipped fragment. The protobuf default is the
+    // semantic PUBLIC FINAL word (`6`), so the parser must produce the same JVM access as an explicit
+    // public-final class rather than leaking the wire omission downstream as INTERNAL (`0`).
+    assert_eq!(string.access, 0x0019, "public static final");
+    let members = string.members;
     let find = |name: &str| members.iter().find(|m| m.name == name);
     // Functions: `get(Int): Char` (the `s[i]` operator), `plus(Any?): String`, `compareTo(String): Int`.
     let get = find("get").expect("String.get");

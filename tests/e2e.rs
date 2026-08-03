@@ -212,6 +212,8 @@ mod classpath_subtype_ctor_arg_e2e;
 mod classpath_super_call_e2e;
 #[path = "classpath_super_ctor_args_e2e.rs"]
 mod classpath_super_ctor_args_e2e;
+#[path = "classpath_suspend_receiver_lambda_e2e.rs"]
+mod classpath_suspend_receiver_lambda_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
 #[path = "classpath_top_level_property_e2e.rs"]

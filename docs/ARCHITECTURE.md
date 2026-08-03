@@ -75,6 +75,25 @@ boundary.
   cannot evict the interactive hot path. One work-done token spans the queued operation; every
   chunk updates an admitted-files `(handed out, total)` pair, and priority promotion changes queue
   ownership without double-counting the file.
+- `workspace/symbol` composes project declarations with a final dependency-class layer built from
+  the model's compile classpath after declared project outputs are removed. All layers share one
+  parsed query grammar, input ceiling, wildcard transition budget, keyboard-layout fallback, rank
+  ladder, response count, and response byte budget; a storage layer cannot reinterpret or expand
+  the request. The dependency index retains only interned class/package names. It ranks at most the
+  response slots left by project declarations, then asks the compiler worker to materialize only
+  those survivors. Materialized text is content-addressed on disk, reduced to path and precomputed
+  UTF-16 declaration endpoints when its engine event reaches the session, and then dropped; the
+  session does not retain a second source copy.
+  In-flight materializations share that same entry ceiling, bounding the engine queue while leaving
+  unadmitted candidates eligible for a later query.
+  Indexes, in-flight requests, and completed locations carry the project-model generation, so an
+  old classpath cannot repopulate the session after reset. A completed failed materialization
+  releases its in-flight marker and may be retried; failure never becomes a permanent negative
+  cache. Raw per-jar class listings are a best-effort startup cache keyed by path, size, and mtime;
+  malformed or unavailable cache state always falls back to reading the classpath entry. They are
+  auxiliary entries under the same version root and global lock as rendered sources, so the same
+  age/size collector and both cache-clean modes cover them rather than leaving an unbounded side
+  directory.
 - Workspace diagnostics retain only bounded file URIs, text hashes, packed UTF-16 ranges/severity,
   and deduplicated display messages. Replaced entry slices are compacted and deleted file slots are
   reused; no source text, AST, semantic class identity, classpath entry, or compiler snapshot
@@ -178,10 +197,17 @@ boundary.
   entered the symbol model, resolution, checking, and lowering must not select a different algorithm
   because a declaration came from the current file, another module, Java source, a classpath class,
   Kotlin metadata, or a generated source. Loaders and decoders normalize missing facts at their
-  boundary; downstream code consumes the common facts. Likewise, a package, module, file, class, or
-  host path must not act as a routing key. A language or JVM rule that genuinely names a declaration
-  is represented once in the backend's documented semantic mapping, rather than by scattered
-  conditionals at use sites.
+  boundary; downstream code consumes the common facts. Selected callables carry declaration
+  capabilities such as interface dispatch regardless of provider, even when one provider could be
+  queried again later. Likewise, a package, module, file, class, or host path must not act as a routing
+  key. A language or JVM rule that genuinely names a declaration is represented once in the backend's
+  documented semantic mapping, rather than by scattered conditionals at use sites.
+- **A call safety decision consumes the checker-selected target.** `TypeInfo::resolved_calls` carries
+  suspend and inline capability on every callable target, including same-module extensions and class-
+  body extensions. Lowering gates query that exact `ResolvedCall`; they must not scan declarations by
+  the callee's text, reconstruct overload selection, or maintain separate file/module/classpath tests.
+  This is both a consistency rule (the checked overload is the emitted overload) and a privacy rule
+  (a rejection reason need not expose the selected declaration's real name).
 - **Physical fields participate in the common declaration model.** A symbol provider records every
   field declared by a classifier, including static and inaccessible declarations that can hide an
   inherited field. Resolution walks those records together with properties and supertypes exactly
