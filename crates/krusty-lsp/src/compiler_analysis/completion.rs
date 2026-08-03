@@ -181,7 +181,14 @@ impl CompletionSymbols {
                     },
                 });
             }
-            for (alias, parameters, result_type) in &file.file.type_alias_fun {
+            // `type_alias_targets` carries every alias's structural target — a FUNCTION type or a class
+            // type with its type arguments. A class target is already listed above from
+            // `type_aliases` (as a `Class`, with its target name); only a function target needs the
+            // arrow rendering and the `Interface` kind here.
+            for (alias, parameters, result_type) in &file.file.type_alias_targets {
+                if result_type.fun_params.is_empty() && result_type.name != "<fun>" {
+                    continue;
+                }
                 let params = parameters.join(", ");
                 let package_detail = package_label_detail(&package);
                 let description = format!("({params}) -> {}", render_type(result_type));

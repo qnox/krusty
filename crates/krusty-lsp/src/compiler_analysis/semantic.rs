@@ -746,7 +746,7 @@ impl<'a> SemanticClassifier<'a> {
                             })
                             .or_else(|| {
                                 self.file
-                                    .type_alias_fun
+                                    .type_alias_targets
                                     .iter()
                                     .any(|(name, _, _)| name == alias_name)
                                     .then_some((

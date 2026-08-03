@@ -532,11 +532,22 @@ pub fn facade_package_metadata(
         // arguments included) — the family key is erased (`Refinement`), and a reader unifying a
         // generic call's receiver against it binds the type parameters (`R = String`).
         let receiver = receiver.map(|recv| sig.source_receiver.unwrap_or(recv));
+        // The metadata records the DECLARED signature, so a parameter or return written as a type
+        // PARAMETER must stay one — the builder maps a `Ty::TyParam` to a `Type.type_parameter`
+        // reference, which is how a reader binds `T` from the arguments at a call site. `sig.params`
+        // /`sig.ret` are erased: an UNBOUNDED `T` erases to `Any` and survives as a type parameter by
+        // accident, but a BOUNDED `<T : Comparable<T>>` erases to the bound, and recording that
+        // concrete class made `clampMax(10, 7)` read back as returning `Comparable`, not `Int`.
+        // `generic_sig` is the same declaration resolved against the SYMBOLIC type parameters; prefer
+        // it, and fall back to the erased form for a non-generic function (which has none).
+        let generic = sig.generic_sig.as_ref();
+        let declared_params = generic.map_or(&sig.params, |g| &g.params);
+        let declared_ret = generic.map_or(sig.ret, |g| g.ret);
         let params: Vec<_> = sig
             .param_names
             .iter()
             .cloned()
-            .zip(sig.params.iter().copied())
+            .zip(declared_params.iter().copied())
             .collect();
         // Per-parameter receiver function types (`Recv.(…) -> R`): the reader recovers lambda `this`
         // binding from the `@kotlin.ExtensionFunctionType` mark this drives.
@@ -583,7 +594,7 @@ pub fn facade_package_metadata(
         metas.push(crate::metadata::builder::FnMeta {
             name: f.name.clone(),
             params,
-            ret: sig.ret,
+            ret: declared_ret,
             receiver,
             param_fun_recvs,
             param_defaults: sig.param_defaults.clone(),

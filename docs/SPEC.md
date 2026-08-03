@@ -2287,8 +2287,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   Still open: MULTIPLE bounds on one parameter (`where T : Comparable<T>, T : Named`). Kotlin gives
   such a parameter the INTERSECTION of its bounds and resolves members from all of them, while the JVM
-  erasure takes the first; `Ty::TyParam` carries a single bound, so only the first one's members
-  resolve.
+  erasure takes ONE; `Ty::TyParam` carries a single bound, so only that one's members resolve. An
+  attempt to carry the later bounds beside the erasure and keep the parameter's identity
+  (`Ty::TyParam(name, first_bound)` in place of the bare erasure) was REVERTED: the checker and lowerer
+  match structurally on `Ty::Obj` in many places, so a parameter that stops being an `Obj` stops
+  resolving source-declared members (`resolve.rs`'s `matches!(rt, Ty::Obj(..))` module-member gate) and
+  stops being assignable to its own bound — both shapes that worked before. A real fix needs an
+  intersection the type model can express, not a re-tagged erasure. Note also that the erasure is NOT
+  simply the first declared bound: kotlinc hoists a CLASS bound ahead of interface bounds regardless of
+  order (`where T : Named, T : Base` erases to `Base`), and writes `<T extends Base & Named>` in the
+  generic signature where krusty writes only the first.
 - **`ClassName.Companion` named explicitly.** The bare `ClassName` already denotes the companion
   singleton in a value position (`val f: Factory = Widget`); both spellings mean the same object, so
   they resolve to the same type and lower to the same `getstatic C.Companion:LC$Companion;`. As in
@@ -3075,10 +3083,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`assignment_to_nullable_value_class_var_boxes`.)
 
 - **A FUNCTION-type `typealias` expands structurally at the parse seam.** `typealias L = (A) -> R`
-  (incl. `suspend`/`context(...)` forms) records the full target `TypeRef` in `File.type_alias_fun`;
-  a post-parse pass rewrites every `TypeRef` naming the alias into the arrow form, so all downstream
-  raw-`TypeRef` function-type tests (checker invoke detection, lowerer, metadata) see the ordinary
-  shape. Per-file only — a sibling file's alias stays unresolved (skip, never mis-grade); generic
+  (incl. `suspend`/`context(...)` forms) records the full target `TypeRef` in
+  `File.type_alias_targets`; a post-parse pass rewrites every `TypeRef` naming the alias into the
+  arrow form, so all downstream raw-`TypeRef` function-type tests (checker invoke detection, lowerer,
+  metadata) see the ordinary shape. Per-file only — a sibling file's alias stays unresolved (skip, never mis-grade); generic
   function-type aliases are not expanded (use-site substitution unmodeled). The use site's `?`
   survives expansion (`L?` = nullable function type) and the span stays the use site.
   (`tests/typealias_function_type_e2e.rs`; corpus `suspendConversion/suspendConversionOfAliasedType.kt`
@@ -3165,6 +3173,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generic fn alias reference (`typealias Chain<T> = Mapper<T, String>` — no `->` on the line) is not
   expanded (unresolved → skip). (`generic_fun_type_alias_substitutes_use_site_args`,
   `generic_suspend_fun_type_alias`, `class_target_alias_with_fn_type_argument_is_preserved`.)
+
+- **A CLASS-type `typealias` keeps its target's TYPE ARGUMENTS.** `typealias IntList = List<Int>`
+  used to record only the target's NAME (`File.type_aliases`, alias → `"List"`), so a member read
+  through the alias saw a RAW `List` and its element typed as `Any` — `xs[0] + 1` was rejected with
+  "operator cannot be applied to 'Any' and 'Int'" while the identical body on `List<Int>` compiled.
+  Class targets now record their full `TypeRef` in `File.type_alias_targets` alongside the function
+  ones, and the same parse-seam pass rewrites every use site to the complete target — arguments
+  included, with the use site's `?` and span preserved as before. The structural expansion subsumes
+  the fn/class split: ONE recorded target per alias, one pass, one substitution rule. A generic alias
+  substitutes into a class target exactly as into a function target (`typealias Table<V> = Map<String,
+  V>`; `Table<Int>` → `Map<String, Int>`), and a chain through another generic alias re-expands
+  (`typealias Ints = Seq<Int>` over `typealias Seq<T> = List<T>`).
+
+  The name → NAME map stays: a constructor call through an alias (`typealias Bar = Foo`; `Bar(…)`)
+  is an EXPRESSION, not a `TypeRef`, so it is not reached by the expansion and still resolves through
+  `File.type_aliases`. Tests: `tests/typealias_generic_target_e2e.rs`.
 
 - **An UNRESOLVED local type annotation is an error, not a silent `Error` bind.** `resolve_ty` is
   deliberately lenient (returns `Ty::Error` with no diagnostic) for expression positions, but a
@@ -3292,3 +3316,73 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `definitely_non_null_type_e2e::generic_function_constructor_still_requires_a_function_argument`
   and
   `definitely_non_null_type_e2e::concrete_secondary_beats_an_incompatible_generic_function_primary`.
+
+- **A lambda argument passed through the implicit-`invoke` convention gets its parameter types from
+  the selected `invoke`.** `b { it + 1 }` — where `b` carries `operator fun invoke(f: (Int) -> Int)` —
+  used to type its arguments with no expectation at all, so `it` bound as `Any` and the body was
+  rejected ("operator cannot be applied to 'Any' and 'Int'") BEFORE the callable was ever selected.
+  The same lambda on a normally-named method (`b.run2 { it + 1 }`) always bound correctly, so this was
+  specific to the operator-invoke call shape. Argument typing on the invoke paths now looks the
+  convention's parameters up first — a function value's own, or the receiver's member `operator fun
+  invoke` — and seeds each lambda argument with the matching parameter's function type. Only the
+  arity-free lookup is used, since this necessarily runs BEFORE any argument type exists to select an
+  overload with; a receiver with no invoke convention, or an arity mismatch, falls back to plain
+  argument typing unchanged. Tests: `tests/invoke_operator_lambda_arg_e2e.rs`.
+
+- **An anonymous function's `return` targets the anonymous function, everywhere.** `fun (…): T { …
+  return e … }` is a LOCAL return — unlike a lambda's bare `return`, which is a non-local return from
+  the enclosing function. Three seams each had to agree, and each was wrong in its own way:
+  - *Checking.* The body was checked with the ENCLOSING function's return type still installed, so
+    `fun(x: Int): Int { return x + 1 }` inside a `String`-returning function reported "return type
+    mismatch: expected 'String', actual 'Int'". The body now runs with the anonymous function's own
+    return type installed — its declared one, or `Unit`, which is what a block-bodied anonymous
+    function without a declared type returns.
+  - *Typing.* The declared return type (`fun (…): T`) is the function type's return; a block body
+    ending in `return` types as `Nothing` and would otherwise erase the result. The plain-lambda arm
+    already did this, but the two `check_lambda_with_*` arms (reached whenever an EXPECTED function
+    type exists — `val f: (Int) -> Int = fun(x): Int { … }`, or a call argument) did not, so the value
+    carried `… -> Nothing` and the lowered closure emitted a void `return` where its caller expected a
+    value (`VerifyError: Method expects a return value`). All three now share one rule.
+  - *Splicing.* A lambda's `inline_body` is its body copied into the caller — correct for a lambda,
+    whose bare `return` SHOULD return from the enclosing method, and wrong for an anonymous function,
+    whose `return` would then return out of the caller mid-body (`filter(fun(n: Int): Boolean { return
+    n % 2 == 0 })` returned out of the enclosing function on the first element). Declining the splice
+    is not an option: a classpath `inline` callee is `MustInline`, so a failed splice bails the file.
+    Instead an anonymous function's `inline_body` is an `invokestatic` CALL to its own impl method —
+    the splice binds value indices `0..` (captures, then the lambda's own parameters) to the slots it
+    prepared, so passing those indices reproduces the closure call exactly and the impl's `*return`
+    stays inside the impl. Such an impl is live despite no `invokedynamic` referencing it, so it is
+    exempt from both the must-inline dead-marking and the facade dead-lambda sweep.
+  - *Scanning.* "Does this body carry a bare `return`?" — the test that marks a lambda impl
+    splice-only — must STOP at a nested anonymous function. Its `return` is the anonymous function's
+    own, and counting it marked the ENCLOSING lambda splice-only: the impl method was dropped while
+    the `invokedynamic` referencing it remained (`NoSuchMethodError`). A nested plain LAMBDA is still
+    descended into, since its bare return really is non-local to the enclosing function. This one was
+    latent — the corpus case that hits it (`inference/pcla/issues/kt65300f.kt`) was REJECTED by the
+    front end before, so it never reached lowering; fixing the checker surfaced it. A corpus SKIP
+    counts as a pass, so removing a front-end rejection can expose a backend bug with no new test
+    naming it.
+  Tests: `tests/anonymous_function_e2e.rs::anon_fun_local_return_targets_its_own_declared_type`,
+  `::anon_fun_return_type_inferred_from_the_expected_function_type`,
+  `::block_bodied_anon_fun_without_a_declared_type_returns_unit`.
+
+- **A facade `@Metadata` record keeps a BOUNDED type parameter as a type parameter.** The metadata
+  builder maps a `Ty::TyParam` to a `Type.type_parameter` reference, which is how a reader binds `T`
+  from the arguments at a call site — but the facade record was built from the collected signature's
+  ERASED `params`/`ret`. An unbounded `<T>` erases to `Any` and survived by accident; a bounded
+  `<T : Comparable<T>>` erases to the BOUND, so a separate compilation reading krusty's own output saw
+  `clampMax(v: Comparable, hi: Comparable): Comparable` and `clampMax(10, 7) != 7` was rejected with
+  "operator '!=' cannot be applied to 'Comparable' and 'Int'". The record now takes the declaration's
+  `generic_sig` — the same signature resolved against the SYMBOLIC type parameters, already collected
+  for exactly this purpose and already used for the record's receiver — falling back to the erased form
+  only for a non-generic function, which has no `generic_sig`. This is the metadata-WRITE half of the
+  same rule the call site applies when inferring a bounded type parameter's return from source. Test:
+  `tests/bounded_type_param_e2e.rs::bounded_type_param_roundtrips_through_krusty_metadata`.
+
+  Still open (a separate gap, not generics): krusty emits `@Metadata` on the file FACADE only, never
+  on a CLASS — every in-tree caller passes no class-metadata builder to `emit_all_with_class_meta`,
+  though `metadata::class_builder::build_class` exists for external consumers. A krusty-compiled
+  `data class` therefore round-trips without the records a reader needs for `copy`'s PARAMETER NAMES
+  (named arguments) or for `componentN`'s operator marks (destructuring), even though both methods are
+  emitted into the class file. Blocks the rest of
+  `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn`.

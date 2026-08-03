@@ -1572,7 +1572,31 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
     }
 }
 
+/// Lambda impl methods that a lambda's own `inline_body` CALLS. An ANONYMOUS FUNCTION cannot be
+/// spliced verbatim — its `return` is LOCAL, so a copied body would return from the enclosing method —
+/// and the lowerer therefore gives it an `inline_body` that is an `invokestatic` to its impl. Such an
+/// impl is LIVE even though no `invokedynamic` ever references it, and must survive both the
+/// must-inline dead-marking and the facade dead-lambda sweep.
+fn splice_called_impls(ir: &IrFile) -> std::collections::HashSet<u32> {
+    ir.exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Lambda {
+                impl_fn,
+                inline_body: Some(body),
+                ..
+            } => matches!(
+                &ir.exprs[*body as usize],
+                IrExpr::Call { callee: Callee::Local(f), .. } if f == impl_fn
+            )
+            .then_some(*impl_fn),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
+    let spliced_as_a_call = splice_called_impls(ir);
     let mut dead: Vec<u32> = Vec::new();
     for i in 0..ir.exprs.len() {
         let args = match &ir.exprs[i] {
@@ -1589,7 +1613,9 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
         };
         for a in args {
             if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[a as usize] {
-                dead.push(*impl_fn);
+                if !spliced_as_a_call.contains(impl_fn) {
+                    dead.push(*impl_fn);
+                }
             }
         }
     }
@@ -1722,11 +1748,15 @@ fn emit_all_with_class_meta_impl(
     // suspend-state-machine lambda may be reached through paths discovery doesn't model) that no emitted
     // `invokedynamic` references. NB single iteration: an indy inside a dead lambda still marks its inner
     // lambda used, so a nested-dead chain keeps the inner method — rare, and strictly better than today.
+    // An anonymous function's impl is reached by an `invokestatic` the SPLICE emits, never by an
+    // `invokedynamic` — discovery would otherwise read it as dead and drop the method the splice calls.
+    let spliced_as_a_call = splice_called_impls(ir);
     let dead: std::collections::HashSet<u32> = ir
         .lambda_own_params_from
         .keys()
         .filter(|&&fid| {
             !used.contains(&fid)
+                && !spliced_as_a_call.contains(&fid)
                 && !ir.inline_only_fns.contains(&fid)
                 && !class_member_fids.contains(&fid)
                 && ir

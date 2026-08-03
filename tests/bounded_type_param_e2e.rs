@@ -120,3 +120,40 @@ fn comparable_bound_erases_descriptor_to_bound() {
         "(Ljava/lang/Comparable;Ljava/lang/Comparable;)Ljava/lang/Comparable;"
     );
 }
+
+/// A BOUNDED type parameter must survive krusty's own `@Metadata`: a separate compilation reading the
+/// facade record has to see `T`, not the bound the JVM descriptor erases to. Recording the erased
+/// bound made `clampMax(10, 7)` read back as returning `Comparable`, so `!= 7` was rejected. The
+/// UNBOUNDED case erases to `Any` and survived by accident, so it is checked alongside as the control.
+#[test]
+fn bounded_type_param_roundtrips_through_krusty_metadata() {
+    const LIB: &str = "fun <T> id(v: T): T = v\n\
+fun <T : Comparable<T>> clampMax(v: T, hi: T): T = if (v >= hi) hi else v\n\
+fun <T : Number> asIs(v: T): T = v\n";
+    const MAIN: &str = "fun box(): String {\n\
+    if (id(5) != 5) return \"f1\"\n\
+    if (clampMax(10, 7) != 7) return \"f2\"\n\
+    if (clampMax(\"a\", \"z\") != \"a\") return \"f3\"\n\
+    if (asIs(3) != 3) return \"f4\"\n\
+    return \"OK\"\n\
+}\n";
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let lib_classes = common::expect_compile_in_process(
+        LIB,
+        "Lib",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    );
+    let dir = std::env::temp_dir().join(format!("krusty_bounded_meta_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (name, bytes) in &lib_classes {
+        let path = dir.join(format!("{name}.class"));
+        std::fs::create_dir_all(path.parent().expect("class path has a parent")).expect("mkdir");
+        std::fs::write(&path, bytes).expect("write class");
+    }
+    assert_eq!(
+        common::expect_box_run(MAIN, "Main", &[dir, stdlib], Some(jdk.as_path())),
+        "OK"
+    );
+}

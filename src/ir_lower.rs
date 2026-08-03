@@ -7683,7 +7683,21 @@ impl<'a> Lower<'a> {
         let call_inline = c.inline.can_inline();
         let physical_ret = c.physical_ret;
         let logical_ret = c.ret;
-        let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
+        // A BOUNDED type parameter's return erases to its BOUND, not to `Object`, so the erased-top
+        // test alone misses it (`fun <T : Comparable<T>> clampMax(…): T` erases to `Comparable`, and
+        // `clampMax(10, 7) != 7` left the boxed value on the stack where an `int` was expected — a
+        // VerifyError). A SCALAR logical result behind a REFERENCE physical one takes the same
+        // substituted-result coercion: the value on the stack is boxed and the use site wants the
+        // primitive. (This is the call-site half of the rule `coerce_erased_call_result` already
+        // applies once reached; the gate here was the narrower test.) UNSIGNED is excluded — its box
+        // is `kotlin/UInt`, not `Integer`, so the plain unbox `coerce_erased_call_result` emits would
+        // `checkcast` to the wrong wrapper (a live bug on the erased-top path already; not widened
+        // here). `coerce_erased_call_result` still decides what to emit.
+        let erased_generic_ret = logical_ret != physical_ret
+            && (physical_ret.is_erased_top()
+                || (self.has_scalar_value_repr(logical_ret)
+                    && !logical_ret.is_unsigned()
+                    && physical_ret.is_reference()));
         let suspend = c.suspend;
         let call = self.emit_library_static_call(c, a, suspend);
         let call = if arg_prelude.is_empty() {
@@ -8719,6 +8733,7 @@ impl<'a> Lower<'a> {
         let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
         let own_params_from = params_ir.len() as u32;
         params_ir.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
+        let params_len = params_ir.len() as u32;
         let fid = self.ir.add_fun(IrFunction {
             name: impl_name,
             params: params_ir,
@@ -8743,6 +8758,19 @@ impl<'a> Lower<'a> {
         if !is_anon_fun && body_has_bare_return(self.afile, body) {
             self.ir.inline_only_fns.insert(fid);
         }
+        // …but that same exemption makes the ANONYMOUS FUNCTION's `inline_body` wrong: spliced into a
+        // caller, its LOCAL `return` would emit a `*return` from the ENCLOSING method (`filter(fun(n:
+        // Int): Boolean { return … })` returned out of the caller mid-loop). A stdlib `inline` callee
+        // is `MustInline`, so declining the splice is not an option — splice a CALL to the impl method
+        // instead. The splice binds value indices `0..` (captures, then the lambda's own parameters) to
+        // the slots it prepared, so passing those very indices reproduces the closure call exactly, and
+        // the impl's own `*return` stays inside the impl.
+        let inline_body = if is_anon_fun && body_has_bare_return(self.afile, body) {
+            let args = (0..params_len).map(|i| self.emit_get_value(i)).collect();
+            self.emit_local_call(fid, args)
+        } else {
+            inline_body
+        };
         // A lambda impl method lives ON THE CLASS declaring the enclosing member (kotlinc's placement:
         // same class as the `invokedynamic` call site, so a PRIVATE impl — and any enclosing-`this`
         // member access — resolves without bridges); a top-level declaration's lambda keeps its impl on
@@ -23347,12 +23375,23 @@ impl<'a> Lower<'a> {
                 // null must stay a legal value until a primitive/non-null use site demands it.
                 if call_inline {
                     self.coerce_erased_call_result(e, call, &call_phys, true)
-                } else if call_phys.is_erased_top() && call_log != call_phys {
+                } else if call_log != call_phys
+                    && (call_phys.is_erased_top()
+                        || (self.has_scalar_value_repr(call_log)
+                            && !call_log.is_unsigned()
+                            && call_phys.is_reference()))
+                {
                     // A NON-inline classpath top-level fn with an ERASED generic return
                     // (`runBlocking<T> { … }`, whose `$default` returns `Object`): the checker
                     // substituted the concrete result type (`T = Ch`/`Int`), so `checkcast`/unbox
                     // the `Object` result to it — else it lands boxed in a stricter slot
-                    // (`VerifyError`). A concrete (non-erased) return keeps the raw call, unchanged.
+                    // (`VerifyError`). A BOUNDED type parameter erases to its BOUND rather than to
+                    // `Object` (`fun <T : Comparable<T>> clampMax(…): T` → `Comparable`), so the
+                    // erased-top test alone misses it; a SCALAR logical result behind a REFERENCE
+                    // physical one is the same situation — the value on the stack is boxed and the
+                    // use site wants the primitive. UNSIGNED is excluded: its box is `kotlin/UInt`,
+                    // not `Integer`, so the unbox would `checkcast` the wrong wrapper. A concrete
+                    // return whose logical and physical types agree keeps the raw call, unchanged.
                     self.coerce_erased_call_result(e, call, &call_phys, true)
                 } else {
                     call
@@ -24759,6 +24798,8 @@ fn name_used_as_value(file: &ast::File, e: AstExprId, name: &str) -> bool {
 /// (transitively) encloses it must be inlined — a nested lambda's bare return surfaces in the outer
 /// lambda's body once spliced, making the outer impl method invalid too. A labeled `return@x` (a local
 /// return) is excluded. (Kotlin forbids a bare return inside a non-inline lambda, so descending is sound.)
+/// A nested ANONYMOUS FUNCTION is also excluded — its bare return is LOCAL to it, so it says nothing
+/// about this body; see the stop below.
 fn body_has_bare_return(file: &ast::File, e: AstExprId) -> bool {
     fn stmt_bare(file: &ast::File, s: ast::StmtId) -> bool {
         match file.stmt(s) {
@@ -24766,6 +24807,16 @@ fn body_has_bare_return(file: &ast::File, e: AstExprId) -> bool {
             Stmt::Return(_, Some(_)) => false,
             _ => file.any_child_stmt(s, &mut |x| body_has_bare_return(file, x)),
         }
+    }
+    // A nested ANONYMOUS FUNCTION owns its bare `return` — it is a LOCAL return from that function,
+    // so it says nothing about whether THIS body carries a non-local one. Counting it marked the
+    // enclosing lambda splice-only, and its impl method was then dropped while the `invokedynamic`
+    // referencing it remained (`NoSuchMethodError`; corpus `inference/pcla/issues/kt65300f.kt`, which
+    // only reaches lowering now that the front end accepts an anonymous function's local return). A
+    // nested plain LAMBDA is still descended into: ITS bare return is non-local to the enclosing
+    // function, which is exactly what this asks.
+    if file.anon_fun_lambdas.contains(&e.0) {
+        return false;
     }
     file.any_child_expr(e, &mut |x| body_has_bare_return(file, x), &mut |s| {
         stmt_bare(file, s)

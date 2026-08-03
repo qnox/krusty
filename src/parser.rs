@@ -96,7 +96,7 @@ fn parse_with_features_and_script(
     hoist_local_classes(&mut p.file);
     fixup_parenless_base_classes(&mut p.file);
     fill_class_decl_lines(&mut p.file, src);
-    expand_fun_type_aliases(&mut p.file);
+    expand_type_alias_targets(&mut p.file);
     p.file
 }
 
@@ -584,19 +584,21 @@ fn fixup_parenless_base_classes(file: &mut File) {
     file.detached_type_refs.extend(detached);
 }
 
-/// Expand the file's FUNCTION-type aliases (`typealias L = (A) -> R`) structurally: every `TypeRef`
-/// naming such an alias is rewritten to the target function type, so all downstream consumers (the
-/// checker's raw-`TypeRef` function-type tests, the lowerer, metadata) see the ordinary arrow form.
+/// Expand the file's type aliases structurally: every `TypeRef` naming an alias is rewritten to the
+/// full target type, so all downstream consumers (the checker's raw-`TypeRef` function-type tests,
+/// the lowerer, metadata) see the ordinary form. A FUNCTION target (`typealias L = (A) -> R`) becomes
+/// the arrow form; a CLASS target keeps its TYPE ARGUMENTS (`typealias IntList = List<Int>` → `xs[0]`
+/// types as `Int`, not `Any` — the name→name map alone erases them).
 /// Runs per file at the parse seam — an alias declared in a SIBLING file is not expanded (unresolved
 /// → the test skips, as before). Nested alias references inside a substituted target expand through
 /// the recursion; the depth cap only guards a (kotlinc-rejected) recursive alias from looping.
-fn expand_fun_type_aliases(file: &mut File) {
+fn expand_type_alias_targets(file: &mut File) {
     use std::collections::HashMap;
-    if file.type_alias_fun.is_empty() {
+    if file.type_alias_targets.is_empty() {
         return;
     }
     let aliases: HashMap<String, (Vec<String>, TypeRef)> = file
-        .type_alias_fun
+        .type_alias_targets
         .iter()
         .map(|(n, ps, t)| (n.clone(), (ps.clone(), t.clone())))
         .collect();
@@ -1314,72 +1316,52 @@ impl<'a> Parser<'a> {
                     };
                     let alias_targs = self.parse_type_args(); // `<T, R>` if present
                     self.eat(TokenKind::Eq);
-                    // A function-type target (`(A) -> R`, `suspend (A) -> R`, `context(C) (A) -> R`,
-                    // a receiver form `R.() -> T`): parse the full type and record it in
-                    // `type_alias_fun`. Every function-type spelling — and no class-name target —
-                    // carries an `->` before the end of the line, so detect by scanning ahead. A
-                    // GENERIC alias records its declared type-parameter NAMES (each `<T, R>` entry
-                    // parses as a simple type) so the expansion pass substitutes use-site arguments.
-                    let fn_target = self.t[self.i..]
+                    // Every declared type parameter must be a SIMPLE name (no bounds/variance are
+                    // parsed into `parse_type_args` results beyond the name; a non-simple entry —
+                    // e.g. a `*` projection — declines structural recording).
+                    let tparam_names: Option<Vec<String>> = alias_targs
                         .iter()
-                        .take_while(|t| t.kind != TokenKind::Newline && t.kind != TokenKind::Eof)
-                        .any(|t| t.kind == TokenKind::Arrow);
-                    // Parse the target type name, including dotted FQNs (e.g. java.lang.Exception).
-                    let target = if fn_target {
+                        .map(|a| {
+                            (a.fun_params.is_empty()
+                                && a.targs.is_empty()
+                                && !a.name.is_empty()
+                                && a.name != "<fun>"
+                                && a.name != "*")
+                                .then(|| a.name.clone())
+                        })
+                        .collect();
+                    // Parse the whole target type — a function type (`(A) -> R`, `suspend (A) -> R`,
+                    // `context(C) (A) -> R`, a receiver form `R.() -> T`) or a class type, including
+                    // dotted FQNs (`java.lang.Exception`) and TYPE ARGUMENTS (`List<Int>`). It is
+                    // recorded in `type_alias_targets` so the expansion pass rewrites every use site
+                    // to the full structural target, substituting the use site's arguments for the
+                    // alias's declared type parameters. `suspend`/`context` are soft keywords, so a
+                    // target starts at an identifier or at the `(` of a bare function type. An
+                    // ANNOTATED target (`= @Ann Foo`) starts at `@` and falls into the discard branch
+                    // below — unrecorded, exactly as before this change.
+                    let target = if self.at(TokenKind::Ident) || self.at(TokenKind::LParen) {
                         let t = self.parse_type();
-                        // Every declared type parameter must be a SIMPLE name (no bounds/variance are
-                        // parsed into `parse_type_args` results beyond the name; a non-simple entry —
-                        // e.g. a `*` projection — declines recording).
-                        let tparam_names: Option<Vec<String>> = alias_targs
-                            .iter()
-                            .map(|a| {
-                                (a.fun_params.is_empty()
-                                    && a.targs.is_empty()
-                                    && !a.name.is_empty()
-                                    && a.name != "<fun>"
-                                    && a.name != "*")
-                                    .then(|| a.name.clone())
-                            })
-                            .collect();
-                        let is_fun = !t.fun_params.is_empty() || t.name == "<fun>";
                         if let Some(tparam_names) = tparam_names {
-                            if !alias.is_empty() && is_fun {
-                                self.file.type_alias_fun.push((
+                            if !alias.is_empty() {
+                                self.file.type_alias_targets.push((
                                     alias.clone(),
                                     tparam_names,
                                     t.clone(),
                                 ));
                             }
                         }
+                        // Skip any remaining tokens on this line.
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
                         }
-                        if is_fun {
+                        // A function-type target has no class NAME to register; a class target keeps
+                        // the plain name→name entry so a constructor call through the alias
+                        // (`typealias Bar = Foo` → `Bar(…)`) still resolves.
+                        if !t.fun_params.is_empty() || t.name == "<fun>" {
                             String::new()
                         } else {
-                            // The Arrow that triggered the scan sat inside a CLASS target's type
-                            // argument (`Map<String, (Int) -> Int>`) — keep the class-name alias
-                            // exactly as the plain-name path records it.
                             t.name.clone()
                         }
-                    } else if self.at(TokenKind::Ident) {
-                        let mut name = self.text().to_string();
-                        self.bump();
-                        while self.at(TokenKind::Dot) {
-                            self.bump();
-                            if self.at(TokenKind::Ident) {
-                                name.push('.');
-                                name.push_str(self.text());
-                                self.bump();
-                            } else {
-                                break;
-                            }
-                        }
-                        // Skip any remaining tokens on this line (e.g. generic args).
-                        while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
-                            self.bump();
-                        }
-                        name
                     } else {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();

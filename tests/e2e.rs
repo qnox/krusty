@@ -574,6 +574,8 @@ mod interface_supertype_members_e2e;
 mod internal_classpath_access_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]
 mod invoke_operator_extension_e2e;
+#[path = "invoke_operator_lambda_arg_e2e.rs"]
+mod invoke_operator_lambda_arg_e2e;
 #[path = "ir_edge_coverage_e2e.rs"]
 mod ir_edge_coverage_e2e;
 #[path = "ir_lower_bail_coverage_e2e.rs"]
@@ -1036,6 +1038,8 @@ mod type_annotation_newline_e2e;
 mod type_param_vararg_check_e2e;
 #[path = "typealias_function_type_e2e.rs"]
 mod typealias_function_type_e2e;
+#[path = "typealias_generic_target_e2e.rs"]
+mod typealias_generic_target_e2e;
 #[path = "typeparam_cast_e2e.rs"]
 mod typeparam_cast_e2e;
 #[path = "unit_as_any_e2e.rs"]

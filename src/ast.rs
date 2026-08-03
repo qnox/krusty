@@ -1215,14 +1215,16 @@ pub struct File {
     /// lambda's `ExprId.0`. A block body that ends in `return` has body type `Nothing`, so the checker
     /// must take the function's type from this annotation, not from the (diverging) body value.
     pub anon_fun_ret: std::collections::HashMap<u32, TypeRef>,
-    /// `typealias Name = Target` — maps alias simple name → target simple name.
-    /// Generic type aliases are stored with the raw target name (type args erased).
+    /// `typealias Name = Target` — maps alias simple name → target simple NAME, with type arguments
+    /// erased. This is the name→name map a constructor call through the alias (`Bar(…)`) resolves
+    /// against; type positions go through the structural [`File::type_alias_targets`] instead.
     pub type_aliases: Vec<(String, String)>,
-    /// `typealias Name<T…> = (A) -> R` — aliases whose target is a FUNCTION type: the alias name,
-    /// its declared type-parameter names (empty for a non-generic alias), and the full target
-    /// `TypeRef` (parameters, return, `suspend`, receiver). A generic alias expands by substituting
-    /// the use site's type arguments for the parameter names in a clone of the target.
-    pub type_alias_fun: Vec<(String, Vec<String>, TypeRef)>,
+    /// `typealias Name<T…> = Target` — the alias name, its declared type-parameter names (empty for
+    /// a non-generic alias), and the full target `TypeRef`. The target may be a FUNCTION type
+    /// (parameters, return, `suspend`, receiver) or a CLASS type WITH its type arguments
+    /// (`List<Int>`). A generic alias expands by substituting the use site's type arguments for the
+    /// parameter names in a clone of the target.
+    pub type_alias_targets: Vec<(String, Vec<String>, TypeRef)>,
     /// File-level annotations (`@file:Foo(args…)`) as `(simple_name, arg ExprIds)`. Lets a plugin read
     /// e.g. `@file:UseContextualSerialization(MyDate::class)` to mark matching property types contextual.
     pub file_annotations: Vec<(String, Vec<ExprId>)>,

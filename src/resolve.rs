@@ -14503,6 +14503,7 @@ impl<'a> Checker<'a> {
             .resolve_symbol_with_literal_and_lambda_args(SymRecv::Value(recv), name, args, &[])
             .and_then(Symbol::call)
     }
+
     fn resolve_property_member(
         &self,
         recv: Ty,
@@ -20253,6 +20254,48 @@ impl<'a> Checker<'a> {
         args.iter().map(|&a| self.expr(a)).collect()
     }
 
+    /// The implicit-`invoke` convention's parameter types for `receiver(…)` — a function value's own
+    /// parameters, or those of the receiver's member `operator fun invoke`. Only the arity-free
+    /// lookup is used: this runs BEFORE the arguments are typed, so no argument types exist yet to
+    /// select an overload with. `None` when the receiver carries no such convention.
+    fn invoke_convention_params(&self, receiver_ty: Ty) -> Option<Vec<Ty>> {
+        if let Ty::Fun(signature) = receiver_ty {
+            return Some(signature.params.clone());
+        }
+        let internal = receiver_ty.obj_internal()?;
+        Some(
+            self.syms
+                .method_of_name(internal, CALLABLE_INVOKE_OPERATOR)?
+                .params,
+        )
+    }
+
+    /// [`Self::arg_tys`] for a call that will go through the implicit-`invoke` convention. A LAMBDA
+    /// argument (`b { it + 1 }` where `b` carries `operator fun invoke(f: (Int) -> Int)`) gets no
+    /// expectation from the plain path, so `it` binds as `Any` and the body reports against the wrong
+    /// parameter type BEFORE [`Self::record_invoke`] ever selects the callable. Seeding the lambda
+    /// here gives the operator-invoke call shape the same binding a normally-named method gets.
+    fn invoke_arg_tys(&mut self, receiver_ty: Ty, args: &[ExprId]) -> Vec<Ty> {
+        let Some(params) = self
+            .invoke_convention_params(receiver_ty)
+            .filter(|params| params.len() == args.len())
+        else {
+            return self.arg_tys(args);
+        };
+        let mut tys = Vec::with_capacity(args.len());
+        for (&arg, param) in args.iter().zip(&params) {
+            let lambda_params = match (self.file.expr(arg), param) {
+                (Expr::Lambda { .. }, Ty::Fun(signature)) => Some(signature.params.clone()),
+                _ => None,
+            };
+            tys.push(match lambda_params {
+                Some(lambda_params) => self.check_lambda_with_types(arg, &lambda_params),
+                None => self.expr(arg),
+            });
+        }
+        tys
+    }
+
     /// Whether an argument call can be revisited with an expected type.
     fn postponable_generic_call(&self, expression: ExprId, actual: Ty) -> bool {
         let Expr::Call { callee, .. } = self.file.expr(expression) else {
@@ -21543,7 +21586,7 @@ impl<'a> Checker<'a> {
             // lambda body is unresolved (→ the property skips) rather than miscompiled.
             let saved_field = self.field_ty.take();
             let lc_before = self.local_function_use_count();
-            let bret = self.expr(body);
+            let bret = self.with_anon_fun_return(e, |c| c.expr(body));
             // A non-inlined lambda that calls a local function would dispatch it on the lambda
             // class (the local fun lives on the enclosing facade/class) — reject rather than
             // miscompile (the recursive nested-closure case).
@@ -21567,15 +21610,7 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                 })
                 .collect();
-            // An anonymous function's declared return type (`fun (…): T`) IS the function type's
-            // return — a block body ending in `return` yields body type `Nothing`, which would
-            // otherwise erase the result. Fall back to the body type when unannotated.
-            let ret = self
-                .file
-                .anon_fun_ret
-                .get(&e.0)
-                .map(|r| self.resolve_ty(r))
-                .unwrap_or(bret);
+            let ret = self.lambda_ret_ty(e, bret);
             // A `suspend { … }` literal (the parser marked it) is a suspend function type —
             // `suspend () -> Unit` erases to `Function1` at runtime (trailing `Continuation`),
             // exactly like a declared `suspend (…) -> …` type.
@@ -25999,6 +26034,40 @@ impl<'a> Checker<'a> {
         self.expr_expected(expression, expected)
     }
 
+    /// Run `check` with the anonymous function `e`'s own return target installed. Unlike a lambda, a
+    /// bare `return` inside `fun (…) { … }` is a LOCAL return from the anonymous function itself, so
+    /// it is validated against that function's declared return type (`fun (…): Int`) — or `Unit` when
+    /// undeclared, the type a block-bodied anonymous function returns — never against the enclosing
+    /// function's. A plain lambda is left untouched: its bare `return` IS a non-local return from the
+    /// enclosing function, which is exactly what `ret_ty` already holds.
+    fn with_anon_fun_return<R>(&mut self, e: ExprId, check: impl FnOnce(&mut Self) -> R) -> R {
+        if !self.file.anon_fun_lambdas.contains(&e.0) {
+            return check(self);
+        }
+        let declared = self.file.anon_fun_ret.get(&e.0).cloned();
+        let ret = match declared {
+            Some(r) => self.resolve_ty(&r),
+            None => Ty::Unit,
+        };
+        let saved = (self.ret_ty, self.return_allowed);
+        self.ret_ty = ret;
+        self.return_allowed = true;
+        let out = check(self);
+        (self.ret_ty, self.return_allowed) = saved;
+        out
+    }
+
+    /// The RETURN of the function type a lambda expression carries. An anonymous function's declared
+    /// return type (`fun (…): T`) wins over the body type: a block body ending in `return` types as
+    /// `Nothing`, which would otherwise erase the result (and make the lowered closure emit a void
+    /// `return` where its caller expects a value). Falls back to the body type when undeclared.
+    fn lambda_ret_ty(&mut self, e: ExprId, bret: Ty) -> Ty {
+        match self.file.anon_fun_ret.get(&e.0).cloned() {
+            Some(declared) => self.resolve_ty(&declared),
+            None => bret,
+        }
+    }
+
     fn check_lambda_body(&mut self, body: ExprId, coerce_return_to_unit: bool) -> Ty {
         if !coerce_return_to_unit {
             return self.expr(body);
@@ -26092,7 +26161,8 @@ impl<'a> Checker<'a> {
                 self.declare(name, pty, false);
             }
             let saved_field = self.field_ty.take();
-            let bret = self.check_lambda_body(body, mode.coerce_return_to_unit);
+            let coerce = mode.coerce_return_to_unit;
+            let bret = self.with_anon_fun_return(e, |c| c.check_lambda_body(body, coerce));
             self.field_ty = saved_field;
             self.pop_scope();
             self.this_labels.truncate(labels_depth);
@@ -26102,9 +26172,10 @@ impl<'a> Checker<'a> {
             let mut pts = context_types.to_vec();
             pts.extend(extension_receiver);
             pts.extend_from_slice(value_types);
+            let ret = self.lambda_ret_ty(e, bret);
             let ty = Ty::fun_with_shape(
                 pts,
-                bret,
+                ret,
                 context_types.len(),
                 extension_receiver.is_some(),
                 mode.suspend,
@@ -26142,11 +26213,13 @@ impl<'a> Checker<'a> {
             }
             // `field` cannot be read from inside a lambda closure (see the `Expr::Lambda` arm).
             let saved_field = self.field_ty.take();
-            let bret = self.check_lambda_body(body, coerce_return_to_unit);
+            let bret =
+                self.with_anon_fun_return(e, |c| c.check_lambda_body(body, coerce_return_to_unit));
             self.field_ty = saved_field;
             self.pop_scope();
             // Carry the declared parameter types and the inferred body return type.
-            let ty = Ty::fun(param_types.to_vec(), bret);
+            let ret = self.lambda_ret_ty(e, bret);
+            let ty = Ty::fun(param_types.to_vec(), ret);
             return self.set(e, ty);
         }
         self.expr(e)
@@ -30760,7 +30833,9 @@ impl<'a> Checker<'a> {
                 let local_value = self.lookup(&fname).map(|local| (local.ty, local.origin));
                 let local_value_ty = local_value.map(|(ty, _)| ty);
                 if let Some((receiver_ty, origin)) = local_value {
-                    let arg_tys = self.arg_tys(args);
+                    // `b { … }` where `b` is a value carrying `operator fun invoke`: the lambda takes
+                    // its parameter types from that operator, not from an absent expectation.
+                    let arg_tys = self.invoke_arg_tys(receiver_ty, args);
                     if origin == ReceiverFnValueOrigin::Local {
                         if let Some((signature, origin)) = self.receiver_function_value(&fname) {
                             if let Some((expected_receiver, params)) =
@@ -33227,7 +33302,7 @@ impl<'a> Checker<'a> {
                 // An arbitrary callee expression (e.g. `make()(x)`): invoke it if it is a function
                 // value or carries a member `operator fun invoke`.
                 let callee_ty = self.expr(callee);
-                let arg_tys = self.arg_tys(args);
+                let arg_tys = self.invoke_arg_tys(callee_ty, args);
                 if let Some(ret) = self.record_invoke(call, callee, callee_ty, args, &arg_tys, span)
                 {
                     return ret;
