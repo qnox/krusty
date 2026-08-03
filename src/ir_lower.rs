@@ -9311,6 +9311,26 @@ impl<'a> Lower<'a> {
                 return true;
             }
         }
+        // An OPERATOR CONVENTION (`b[i]`, `b[i] = v`, `b + 1`, `b += 1`, `a < b`) whose selected target
+        // is a `suspend` function. Every scan around this one keys on a call SHAPE — a bare `Name`
+        // callee, a `Member` callee, an `Expr::Call` node — and a convention has none of those: the
+        // checker records its target against the `Expr::Index`/binary node, or against the assignment
+        // STATEMENT. Without this the driving lambda is classified as leaf, gets no state machine, and
+        // its call is emitted with the pre-CPS descriptor and no `Continuation`.
+        // An indexed READ additionally records its target in `resolved_calls` (against the `Expr::Index`
+        // node) rather than in the operator map, so both lookups are shape-free over the same walk.
+        let operator_exprs = self.info.suspending_operator_exprs();
+        let operator_stmts = self.info.suspending_operator_stmts();
+        let nodes = std::cell::RefCell::new((Vec::new(), Vec::new()));
+        collect_nodes(self.afile, body, &nodes);
+        let (body_exprs, body_stmts) = nodes.into_inner();
+        if body_exprs
+            .iter()
+            .any(|e| operator_exprs.contains(e) || self.info.resolved_call_suspends(*e))
+            || body_stmts.iter().any(|s| operator_stmts.contains(s))
+        {
+            return true;
+        }
         // A MEMBER / invoke-operator suspend call (`getResult()` = `GetResult.suspend operator fun
         // invoke()`, `x.m()` where `m` is `suspend`) is invisible to the top-level-name check above —
         // resolve each callee's type + method `is_suspend` so the body isn't misclassified as leaf.
@@ -17050,6 +17070,7 @@ impl<'a> Lower<'a> {
                 parameter,
                 owner,
                 source,
+                suspend,
             } => {
                 let recv_key = receiver.erased_recv();
                 let selected_params = vec![parameter];
@@ -17078,18 +17099,25 @@ impl<'a> Lower<'a> {
                 let descriptor = self
                     .runtime
                     .method_descriptor(&[receiver, parameter], Ty::Unit)?;
-                Some(self.emit_static_call(
+                let call = self.emit_static_call(
                     owner,
                     aname.to_string(),
                     descriptor,
                     InlineKind::None,
                     vec![r, a],
-                ))
+                );
+                // A sibling-file `suspend operator fun` is reached through its CPS entry point, exactly
+                // like an ordinary cross-file suspend extension call — the descriptor above is the
+                // LOGICAL one and the coroutine pass rewrites it once the node is a suspension point.
+                // The same-file branch above returns early: its callee is a local `FunId` the pass
+                // already knows from `suspend_funs`.
+                Some(self.record_suspend_call(call, suspend, Ty::Unit))
             }
             CompoundAssignmentTarget::Member {
                 owner,
                 parameter,
                 interface,
+                suspend,
             } => {
                 let r = self.expr(lhs)?;
                 let a = self.lower_arg(rhs, &parameter)?;
@@ -17099,7 +17127,7 @@ impl<'a> Lower<'a> {
                 {
                     return Some(self.emit_method_call(class, index, r, vec![Some(a)]));
                 }
-                Some(self.emit_call(
+                let call = self.emit_call(
                     Callee::Virtual {
                         owner,
                         name: aname.to_string(),
@@ -17109,13 +17137,16 @@ impl<'a> Lower<'a> {
                     },
                     Some(r),
                     vec![a],
-                ))
+                );
+                Some(self.record_suspend_call(call, suspend, Ty::Unit))
             }
             CompoundAssignmentTarget::LibraryExtension(c) => {
                 if c.params.len() == 2 {
+                    let suspend = c.suspend;
                     let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                     let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
-                    return Some(self.emit_library_static_call(*c, vec![r, a], false));
+                    let call = self.emit_library_static_call(*c, vec![r, a], false);
+                    return Some(self.record_suspend_call(call, suspend, Ty::Unit));
                 }
                 None
             }
@@ -26586,6 +26617,32 @@ fn collect_calls(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<As
         &mut |s| {
             file.any_child_stmt(s, &mut |c| {
                 collect_calls(file, c, out);
+                false
+            });
+            false
+        },
+    );
+}
+
+/// Every expression AND statement id under `e`, shape-agnostically. An OPERATOR CONVENTION has no call
+/// node of its own — the checker keys its selected target to the `Expr::Index` / binary-operator node,
+/// or to the assignment STATEMENT — so [`Lowering::ast_body_suspends`] cannot find it by walking calls.
+fn collect_nodes(
+    file: &ast::File,
+    e: AstExprId,
+    out: &std::cell::RefCell<(Vec<AstExprId>, Vec<ast::StmtId>)>,
+) {
+    out.borrow_mut().0.push(e);
+    file.any_child_expr(
+        e,
+        &mut |c| {
+            collect_nodes(file, c, out);
+            false
+        },
+        &mut |s| {
+            out.borrow_mut().1.push(s);
+            file.any_child_stmt(s, &mut |c| {
+                collect_nodes(file, c, out);
                 false
             });
             false

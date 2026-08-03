@@ -9488,6 +9488,21 @@ pub enum ResolvedCall {
 }
 
 impl ResolvedCall {
+    /// Whether the selected callee is `suspend`, for every target kind that records the flag. The
+    /// variants without one (`ModuleMemberExtension`, `LocalFunction`) answer `false`: a suspend
+    /// callee never reaches them, and under-reporting here only costs a state machine that the
+    /// per-shape bails would refuse anyway — it cannot invent a suspension that isn't there.
+    pub(crate) fn suspends(&self) -> bool {
+        match self {
+            Self::ModuleExtension { suspend, .. } | Self::ModuleMember { suspend, .. } => *suspend,
+            Self::Extension(c) | Self::TopLevel(c) | Self::LambdaReturnMember(c) => c.suspend,
+            Self::Member(m) => m.suspend || m.member.suspend(),
+            Self::Companion(m) => m.suspend(),
+            Self::ModuleTopLevel(c) => c.suspend,
+            Self::ModuleMemberExtension { .. } | Self::LocalFunction(_) => false,
+        }
+    }
+
     pub(crate) fn is_extension(&self) -> bool {
         matches!(
             self,
@@ -9982,6 +9997,36 @@ impl TypeInfo {
             Some(ResolvedCall::ModuleExtension { suspend: true, .. })
         )
     }
+    /// Whether the target selected at `e` is `suspend`, whatever its kind. Unlike the accessors above
+    /// this does not presuppose a call SHAPE: an operator convention (`b[i]`, `b + 1`) is recorded here
+    /// against a node that is not an `Expr::Call`.
+    pub fn resolved_call_suspends(&self, e: ExprId) -> bool {
+        self.resolved_calls
+            .get(&e)
+            .is_some_and(ResolvedCall::suspends)
+    }
+    /// Expression ids whose SYNTHETIC operator target is a `suspend` callee — `a < b` desugared to
+    /// `compareTo`, a `for`-loop `iterator`/`next`, and friends. These have no call node of their own,
+    /// so a scan over call shapes cannot reach them.
+    pub fn suspending_operator_exprs(&self) -> std::collections::HashSet<ExprId> {
+        self.resolved_operator_calls
+            .iter()
+            .filter(|(_, call)| call.suspends())
+            .map(|((e, _), _)| *e)
+            .collect()
+    }
+    /// Statement ids whose synthetic operator target is a `suspend` callee — `b[i] = v` (`set`) in the
+    /// operator map, `b += v` (`plusAssign`) in the statement-lowering map.
+    pub fn suspending_operator_stmts(&self) -> std::collections::HashSet<StmtId> {
+        self.resolved_stmt_operator_calls
+            .iter()
+            .filter(|(_, call)| call.suspends())
+            .map(|((s, _), _)| *s)
+            .chain(self.stmt_lowers.iter().filter_map(|(s, lowering)| {
+                matches!(lowering, StmtLowering::PlusAssign(t) if t.suspends()).then_some(*s)
+            }))
+            .collect()
+    }
     /// The resolved local function declaration selected at call `e`, if any.
     pub fn resolved_local_function(&self, e: ExprId) -> Option<&ResolvedLocalFunctionCall> {
         match self.resolved_calls.get(&e) {
@@ -10440,14 +10485,27 @@ pub enum CompoundAssignmentTarget {
         owner: TypeName,
         parameter: Ty,
         interface: bool,
+        suspend: bool,
     },
     SourceExtension {
         receiver: Ty,
         parameter: Ty,
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
+        suspend: bool,
     },
     LibraryExtension(Box<crate::libraries::LibraryCallable>),
+}
+
+impl CompoundAssignmentTarget {
+    /// Whether the selected `plusAssign`/`minusAssign`/… callee is `suspend`. `a += b` has no call
+    /// node, so this is the only way the suspension reaches lowering's classification.
+    pub fn suspends(&self) -> bool {
+        match self {
+            Self::Member { suspend, .. } | Self::SourceExtension { suspend, .. } => *suspend,
+            Self::LibraryExtension(c) => c.suspend,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -33918,6 +33976,7 @@ impl<'a> Checker<'a> {
                 owner,
                 params,
                 interface,
+                suspend,
                 ..
             } => {
                 let [parameter] = params.as_slice() else {
@@ -33927,6 +33986,7 @@ impl<'a> Checker<'a> {
                     owner,
                     parameter: *parameter,
                     interface,
+                    suspend,
                 }
             }
             ResolvedCall::ModuleExtension {
@@ -33934,6 +33994,7 @@ impl<'a> Checker<'a> {
                 params,
                 owner,
                 source,
+                suspend,
                 ..
             } => {
                 let [parameter] = params.as_slice() else {
@@ -33944,6 +34005,7 @@ impl<'a> Checker<'a> {
                     parameter: *parameter,
                     owner,
                     source,
+                    suspend,
                 }
             }
             ResolvedCall::Extension(callable) => {

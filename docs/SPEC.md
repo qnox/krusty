@@ -395,6 +395,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::suspend_extension_cross_file_executes` (the non-`inline` sibling — the latent miscompile the gate
   never covered), and `::suspend_extension_cross_file_with_suspension_point_executes` (the callee body
   itself suspends, so the resumed value must still reach the caller's assignment).
+- **`suspend fun` — an OPERATOR CONVENTION is a suspension point even though it has no call node.**
+  The sibling-file fix above was not enough for `suspend operator fun Box.get`/`set`/`plus`/
+  `plusAssign`/`unaryMinus` reached through their conventions (`b[i]`, `b[i] = v`, `b + 1`, `b += 1`,
+  `-b`): every suspension scan in `ast_body_suspends` keys on a call SHAPE — a bare `Name` callee, a
+  `Member` callee, an `Expr::Call` node — and a convention has none of them. The checker records the
+  selected target against the `Expr::Index`/binary node (`resolved_calls`), against the desugared
+  operator (`resolved_operator_calls`), or against the assignment STATEMENT
+  (`resolved_stmt_operator_calls`, and `StmtLowering::PlusAssign` for `+=`). The driving lambda was
+  therefore classified as leaf and the same silent wrong answer followed. The scan is now SHAPE-FREE:
+  `collect_nodes` walks every expression and statement under the body, and `ResolvedCall::suspends`
+  answers for any target kind, surfaced through `resolved_call_suspends` /
+  `suspending_operator_exprs` / `suspending_operator_stmts`. Lowering needed one addition beyond the
+  shared `ModuleExtension` arm (`lower_op_call`/`lower_stmt_op_call` already route through it):
+  `CompoundAssignmentTarget` dropped the flag entirely, so `Member`/`SourceExtension` now carry
+  `suspend` and all three `lower_plus_assign` arms register the node. Not every convention is reached
+  yet — a cross-file `operator fun Box.compareTo`/`invoke`/`contains` is refused by the front end
+  (`operator cannot be applied to 'Box' and 'Box'`) with or WITHOUT `suspend`, so that gap is a
+  resolution one and stays loud. Proven:
+  `tests/suspend_operator_convention_cross_file_e2e.rs` (one test per convention).
 - **`suspend fun` returning a `@JvmInline value class` — the result crosses the CPS boundary BOXED.**
   A CPS return is `Object`, so a non-null value-class result cannot ride in its erased underlying form:
   kotlinc emits `X.box-impl` before the `areturn` and `checkcast X` + `X.unbox-impl()` on the resume

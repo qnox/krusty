@@ -978,6 +978,8 @@ mod suspend_loop_compound_assign_e2e;
 mod suspend_loop_continue_break_e2e;
 #[path = "suspend_member_after_call_e2e.rs"]
 mod suspend_member_after_call_e2e;
+#[path = "suspend_operator_convention_cross_file_e2e.rs"]
+mod suspend_operator_convention_cross_file_e2e;
 #[path = "suspend_receiver_lambda_e2e.rs"]
 mod suspend_receiver_lambda_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
