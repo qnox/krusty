@@ -11081,7 +11081,10 @@ impl<'a> Emitter<'a> {
         let mut fin_ranges: Vec<(Label, Label)> = vec![(start, end)];
         for c in catches {
             let handler = code.new_label();
-            code.bind(handler);
+            // A handler is entered over the exception edge, not by a branch — and a diverging `try`
+            // body leaves the stream dead exactly here, so binding must revive on the range it guards
+            // rather than on an incoming branch.
+            code.bind_handler(handler, &[(start, end)]);
             let exc_internal = c.exc_internal.render();
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
@@ -11139,7 +11142,9 @@ impl<'a> Emitter<'a> {
         // inlined finally code — which lies past those ranges, so it doesn't re-catch itself.
         if let Some(f) = finally {
             let fin_handler = code.new_label();
-            code.bind(fin_handler);
+            // Exception edge — see the `catch` handler above; this one guards the body and every
+            // catch body (`fin_ranges`), which are complete by now.
+            code.bind_handler(fin_handler, &fin_ranges);
             let thr_ci = self.cw.class_ref("java/lang/Throwable");
             self.frame(fin_handler, vec![VerifType::Object(thr_ci)], code);
             let thr_ty = Ty::obj("java/lang/Throwable");

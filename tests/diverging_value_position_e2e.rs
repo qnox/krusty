@@ -98,6 +98,54 @@ fn diverging_statement_inside_value_block() {
     common::expect_box_ok_with_stdlib(SRC, "diverging_value_block");
 }
 
+/// A BRANCHY sibling still inside the dead region: the diverging argument is evaluated first, so the
+/// second argument's whole control-flow construct lands in dropped bytecode. Binding its labels must
+/// not resurrect the construct's tail around the hole where its condition used to be — a bind revives
+/// only when some ALREADY-EMITTED branch targets the label, and a branch emitted while dead was itself
+/// dropped. Covers the `if`/`when`/`&&`/`try` spellings plus inline-spliced bodies, whose relocated
+/// frames sit inside the spliced bytes and so cannot serve as an entry frame.
+#[test]
+fn diverging_sibling_of_a_branchy_argument() {
+    const SRC: &str = "fun boom(): Nothing = throw RuntimeException(\"boom\")\n\
+        fun g(a: Any?, b: Int): Int = b\n\
+        fun f1(b: Boolean): Int = g(boom(), if (b) 1 else 2)\n\
+        fun f2(b: Boolean): Int = g(boom(), when { b -> 1; else -> 2 })\n\
+        fun f3(b: Boolean, s: String?): Int = g(boom(), if (b && s != null) 1 else 2)\n\
+        fun f4(): Int = g(boom(), try { 1 } catch (e: Exception) { 2 })\n\
+        fun f5(): Int = g(boom(), 5.let { it + 1 })\n\
+        fun f6(): Int = g(boom(), listOf(1, 2).fold(0) { a, x -> a + x })\n\
+        fun f7(): Int = g(boom(), listOf(1, 2).map { it + 1 }.size)\n\
+        fun box(): String {\n\
+            var n = 0\n\
+            val fs = listOf<() -> Int>({ f1(true) }, { f2(true) }, { f3(true, \"x\") }, { f4() }, { f5() }, { f6() }, { f7() })\n\
+            for (f in fs) {\n\
+                try { f(); return \"F:no-throw\" } catch (e: RuntimeException) { if (e.message == \"boom\") n++ }\n\
+            }\n\
+            return if (n == 7) \"OK\" else \"F:\" + n\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "diverging_branchy_sibling");
+}
+
+/// The inverse of the case above: a LIVE `try` whose body diverges leaves the stream dead exactly at
+/// the handler, which is reached over the exception edge and has no incoming branch to revive on. The
+/// handler must still be emitted — it is the whole point of the `try`.
+#[test]
+fn diverging_try_body_handler_is_still_emitted() {
+    const SRC: &str = "fun boom(): Nothing = throw RuntimeException(\"boom\")\n\
+        fun run1(): String = try { boom() } catch (e: RuntimeException) { \"caught:\" + e.message }\n\
+        fun run2(): String {\n\
+            val sb = StringBuilder()\n\
+            try { sb.append(\"a\"); boom() } finally { sb.append(\"b\") }\n\
+            return sb.toString()\n\
+        }\n\
+        fun box(): String {\n\
+            if (run1() != \"caught:boom\") return \"F:\" + run1()\n\
+            val fin = try { run2(); \"no-throw\" } catch (e: RuntimeException) { e.message ?: \"?\" }\n\
+            return if (fin == \"boom\") \"OK\" else \"F:\" + fin\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "diverging_try_handler_emitted");
+}
+
 /// Regression lock for the surrounding machinery: a `when` whose branches diverge on one side only
 /// still merges — the non-diverging branch's `goto` and the `end` label must survive suppression.
 #[test]

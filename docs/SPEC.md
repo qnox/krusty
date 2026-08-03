@@ -832,24 +832,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   consuming construct always emits opcodes after the value: a local's `istore`, an outer call's
   `invokevirtual`, a method's implicit `return`. When the value diverges, those trailing opcodes are dead
   straight-line bytecode the verifier rejects. `CodeBuilder` therefore tracks reachability directly: after
-  an unconditional terminator (`goto`, `athrow`, any `*return`) instructions are DROPPED until the next
-  bound label — a label is a branch/handler target, hence a stack-map merge point — or a spliced inline
-  body, whose bytes carry their own relocated frames. Operand-height tracking, `max_stack`, and
-  `max_locals` keep running while dead, so a resumption point sees the state it would have seen anyway;
-  `LineNumberTable`/`LocalVariableTable` entries that would land in (or one past) a dropped region are
-  dropped with it, since their `start_pc` must index the code array. Because this is a property of the
-  instruction stream, no consuming construct needs its own divergence check for a STRAIGHT-LINE dead
-  region — `boom()?.hashCode()`, `val y: Int = boom() ?: 1`, `println(boom())`, `boom().toString()`, and
-  `if (true) { boom(); 1 }` are all the same case.
-  **Known limit — a BRANCHY sibling still in the dead region.** `g(boom(), if (b) 1 else 2)` (and the
-  `when`/`&&`/`try` spellings, or an inline-spliced `5.let { … }`) binds a label inside the dropped
-  region: the bind revives emission for the construct's tail and its frame is registered at the region's
-  end offset, where `build_stackmap`'s same-offset dedup keeps the stale one — `VerifyError: Bad local
-  variable type` / `Expecting a stack map frame`. `splice_inline` is exempt from suppression for the same
-  structural reason (its callers pre-compute absolute offsets and `bind_at` relocated frames INSIDE the
-  body, never at its first byte). Both shapes fail on the pre-suppression compiler too; kotlinc accepts
-  them. Fixing them means making a bind inside a dead region not revive (and giving a spliced body an
-  entry frame), not another per-construct check.
+  an unconditional terminator (`goto`, `athrow`, any `*return`) instructions are DROPPED until control can
+  demonstrably arrive again. Operand-height tracking, `max_stack`, and `max_locals` keep running while
+  dead, so a resumption point sees the state it would have seen anyway; `LineNumberTable`/
+  `LocalVariableTable` entries that would land in (or one past) a dropped region are dropped with it,
+  since their `start_pc` must index the code array. Because this is a property of the instruction stream,
+  no consuming construct needs its own divergence check — `boom()?.hashCode()`,
+  `val y: Int = boom() ?: 1`, `println(boom())`, `boom().toString()`, `if (true) { boom(); 1 }`, and a
+  BRANCHY sibling (`g(boom(), if (b) 1 else 2)`, the `when`/`&&`/`try` spellings, an inline-spliced
+  `5.let { … }`) are all the same case.
+  **What counts as arrival is the whole design.** Binding a label revives ONLY when some
+  already-emitted branch targets it (a recorded fixup). A branch emitted while dead was itself dropped
+  and left no fixup, so its target stays dead and the rest of that construct is dropped with it — without
+  that rule, `g(boom(), if (b) 1 else 2)` resurrects the `else` arm and the `istore`/`invoke` tail around
+  the hole where its condition used to be (`VerifyError: Bad local variable type`). A backward target
+  (a loop head) is bound before its back-edge and so never revives: reaching the head while dead means
+  the whole loop is unreachable. An EXCEPTION HANDLER has no incoming branch at all, so it binds through
+  `bind_handler`, which revives on whether its protected range holds live emitted bytes — that is exactly
+  the `try` whose body diverges (dead at the handler, yet the handler runs), while a `try` that is itself
+  inside a dropped region guards nothing and goes with it. A label bound inside a dropped region sits at
+  the same offset as the next live instruction, so its frame is dropped too: registered first, it would
+  otherwise out-rank the live label's frame in `build_stackmap`'s same-offset dedup. An inline splice in a
+  dead region is dropped as well — its relocated frames are bound INSIDE the body, never at its first
+  byte, so emitting it would leave an unreachable region with no entry frame; `bind_at` is a no-op while
+  dead and every consumer (`resolved_frames`, `build_stackmap`, `resolved_exceptions`) drops entries for
+  an unbound label.
   Relatedly, a `Nothing`-returning REAL call is emitted with zero result words
   (`slot_words(Nothing) == 0`) yet physically leaves a `Void`; the terminating
   `throw KotlinNothingValueException()` re-declares that word before discarding it, or `max_stack` is

@@ -2281,12 +2281,21 @@ pub struct CodeBuilder {
     /// those opcodes are exactly this dead straight-line region. No per-construct divergence check is
     /// needed at any consuming site.
     ///
-    /// Reachability resumes at the next bound label ([`Self::bind`]/[`Self::bind_at`]) — a label is a
-    /// branch/handler target, hence a stack-map merge point — and at a spliced inline body
-    /// ([`Self::splice_inline`]), whose bytes carry their own relocated frames. All other bookkeeping
+    /// Reachability resumes only where control can actually ARRIVE: a label some ALREADY-EMITTED
+    /// branch targets ([`Self::bind`] checks `fixups`), or an exception handler
+    /// ([`Self::bind_handler`], reachable via the exception edge rather than a branch). Binding a
+    /// label whose only branches were themselves dropped does NOT revive — that is what keeps a
+    /// branchy sub-expression inside a dead region (`g(boom(), if (b) 1 else 2)`) from having its
+    /// tail resurrected around the hole where its condition used to be. All other bookkeeping
     /// (operand-height tracking, `max_stack`, `max_locals`) runs unchanged while dead, so a revival
     /// point sees exactly the state it saw before this suppression existed.
     dead: bool,
+    /// Labels bound while `dead` and NOT revived, by label id. They sit at the end of a dropped
+    /// region, which is also where the next live instruction lands — so their frames would collide
+    /// with (and, being registered first, out-rank) the live label's frame in `build_stackmap`'s
+    /// same-offset dedup. Their frames are dropped instead. Indexed like `labels`; `false` for a
+    /// label bound normally, and for one never bound at all.
+    dead_bound: Vec<bool>,
 }
 
 impl CodeBuilder {
@@ -2304,7 +2313,16 @@ impl CodeBuilder {
             line_marks: Vec::new(),
             local_entries: Vec::new(),
             dead: false,
+            dead_bound: Vec::new(),
         }
+    }
+
+    /// Whether `label` was bound inside a dropped dead region (see `dead_bound`).
+    fn is_dead_bound(&self, label: u32) -> bool {
+        self.dead_bound
+            .get(label as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Record a local; a missing length extends to method end.
@@ -2360,10 +2378,11 @@ impl CodeBuilder {
 
     /// The recorded frames resolved to byte offsets: `(offset, locals, stack)` for each bound label.
     /// Used to relocate a spliced lambda body's own frames into the host method. Unbound labels (offset
-    /// `usize::MAX`) are dropped.
+    /// `usize::MAX`) and labels bound inside a dropped dead region are dropped.
     pub fn resolved_frames(&self) -> Vec<(usize, Vec<VerifType>, Vec<VerifType>)> {
         self.frames
             .iter()
+            .filter(|(lid, _, _)| !self.is_dead_bound(*lid))
             .filter_map(|(lid, locals, stack)| {
                 let off = self.labels.get(*lid as usize).copied()?;
                 (off != usize::MAX).then(|| (off, locals.clone(), stack.clone()))
@@ -2405,6 +2424,10 @@ impl CodeBuilder {
         let mut entries: Vec<(u32, &Vec<VerifType>, &Vec<VerifType>)> = self
             .frames
             .iter()
+            // A label bound inside a DROPPED dead region sits at the same offset as the next live
+            // instruction. Its frame describes state that no longer exists there, and being registered
+            // first it would win the same-offset dedup below over the live label's frame.
+            .filter(|(lid, _, _)| !self.is_dead_bound(*lid))
             .map(|(lid, locals, stack)| (self.labels[*lid as usize] as u32, locals, stack))
             // Drop frames whose offset is outside the bytecode (e.g. an `end` label bound one past
             // the last `ireturn`/`athrow` when every branch of a `when` diverges). The JVM verifier
@@ -2513,6 +2536,14 @@ impl CodeBuilder {
     pub fn resolved_exceptions(&self) -> Vec<(u16, u16, u16, u16)> {
         self.exceptions
             .iter()
+            // An UNBOUND label means the region it delimits was dropped as dead code (`bind_at` is a
+            // no-op while dead), so the entry describes bytes that do not exist. Without this the
+            // `usize::MAX as u16` truncation below would fabricate offset 65535.
+            .filter(|&&(s, e, h, _)| {
+                [s, e, h]
+                    .iter()
+                    .all(|l| self.labels[l.0 as usize] != usize::MAX)
+            })
             .map(|&(s, e, h, t)| {
                 (
                     self.labels[s.0 as usize] as u16,
@@ -2542,12 +2573,16 @@ impl CodeBuilder {
         arg_words: i32,
         ret_words: i32,
     ) {
-        // A spliced body is never dropped as dead code: its callers pre-compute absolute offsets from
-        // the CURRENT `bytes` length and bind relocated frames/handlers there (`bind_at`), so skipping
-        // the bytes would leave those pointing past the code array. The relocated frames also make the
-        // spliced region a legitimate resumption point.
-        self.dead = false;
         let baseline = self.cur_stack - arg_words; // stack height once the prologue consumes the args
+                                                   // A splice inside a dropped region goes with it. Its relocated frames are bound INSIDE the
+                                                   // body, never at its first byte, so emitting it while dead would leave an unreachable region
+                                                   // whose entry has no frame ("Expecting a stack map frame"); and its prologue consumes
+                                                   // arguments that the dropped code never pushed. `bind_at` already left its labels unbound, so
+                                                   // the frames and handlers registered for it are dropped too. Height bookkeeping still runs.
+        if self.dead {
+            self.cur_stack = baseline + ret_words;
+            return;
+        }
         if top_local > self.max_locals {
             self.max_locals = top_local;
         }
@@ -2576,19 +2611,53 @@ impl CodeBuilder {
     pub fn new_label(&mut self) -> Label {
         let id = self.labels.len() as u32;
         self.labels.push(usize::MAX);
+        self.dead_bound.push(false);
         Label(id)
     }
-    /// Bind `l` here. A label is a branch/handler target, so the instruction stream becomes
-    /// reachable again (see `dead`).
+    /// Bind `l` here. Inside a dropped dead region this revives emission only if control can actually
+    /// arrive: some branch to `l` was ALREADY EMITTED (it recorded a fixup). A branch emitted while
+    /// dead was itself dropped and left no fixup, so its target stays dead and the rest of that
+    /// construct is dropped with it. A backward target (a loop head) is bound before its back-edge and
+    /// so never revives — correct, because reaching the head while dead means the whole loop is
+    /// unreachable. For an entry point control reaches WITHOUT a branch, see [`Self::bind_handler`].
     pub fn bind(&mut self, l: Label) {
         self.labels[l.0 as usize] = self.bytes.len();
-        self.dead = false;
+        if self.dead {
+            if self.fixups.iter().any(|&(_, lid)| lid == l.0) {
+                self.dead = false;
+            } else {
+                self.dead_bound[l.0 as usize] = true;
+            }
+        }
+    }
+    /// Bind `l` as an EXCEPTION HANDLER entry guarding `protects` (`[start, end)` label pairs, already
+    /// bound). A handler is reached over the exception edge rather than by a branch, so `bind` can't
+    /// see that control arrives; it revives whenever some guarded range actually holds live emitted
+    /// bytes. That is the `try` whose body diverges — the stream is dead exactly at the handler, yet
+    /// the handler runs. A range that is empty, or whose start was itself bound inside a dropped
+    /// region, guards nothing: the whole `try` was dead code and the handler goes with it.
+    pub fn bind_handler(&mut self, l: Label, protects: &[(Label, Label)]) {
+        self.labels[l.0 as usize] = self.bytes.len();
+        let guards_live_code = protects.iter().any(|&(s, e)| {
+            let (s_off, e_off) = (self.labels[s.0 as usize], self.labels[e.0 as usize]);
+            s_off != usize::MAX && s_off < e_off && !self.is_dead_bound(s.0)
+        });
+        if guards_live_code {
+            self.dead = false;
+        } else if self.dead {
+            self.dead_bound[l.0 as usize] = true;
+        }
     }
     /// Bind a label at an explicit byte offset (used to attach a relocated StackMapTable frame to a
-    /// position inside a spliced inline body, which is appended as raw bytes).
+    /// position inside a spliced inline body, which is appended as raw bytes). While dead the splice
+    /// itself is dropped ([`Self::splice_inline`]), so the label is left UNBOUND: every consumer
+    /// (`resolved_frames`, `build_stackmap`, `resolved_exceptions`) drops entries for an unbound
+    /// label, which is exactly the right outcome for a frame or handler inside dropped bytes.
     pub fn bind_at(&mut self, l: Label, offset: usize) {
+        if self.dead {
+            return;
+        }
         self.labels[l.0 as usize] = offset;
-        self.dead = false;
     }
     fn branch(&mut self, opcode: u8, l: Label, delta: i32) {
         if self.dead {
