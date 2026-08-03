@@ -642,6 +642,7 @@ mod tests {
                     },
                     supertypes,
                     constructors: Vec::new(),
+                    fields: Vec::new(),
                     members: Vec::new(),
                     companion: match internal {
                         "fixture/Stable" => vec![LibraryMember::new(

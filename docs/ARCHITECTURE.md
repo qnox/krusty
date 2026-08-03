@@ -177,6 +177,12 @@ boundary.
   host path must not act as a routing key. A language or JVM rule that genuinely names a declaration
   is represented once in the backend's documented semantic mapping, rather than by scattered
   conditionals at use sites.
+- **Physical fields participate in the common declaration model.** A symbol provider records every
+  field declared by a classifier, including static and inaccessible declarations that can hide an
+  inherited field. Resolution walks those records together with properties and supertypes exactly
+  once; providers do not repeat inheritance lookup. When a readable field is selected, its complete
+  owner/name/type and opaque backend token travel with the semantic property read, so lowering never
+  reconstructs a target from a file/module/classpath branch or a receiver's spelling.
 - **Unsupported input has one explicit semantic boundary.** A not-yet-implemented language shape is
   rejected with a stable reason before emission; it is not silently redirected to a weaker lookup,
   dropped only for one declaration origin, or allowed to reach unverifiable bytecode. Returning an

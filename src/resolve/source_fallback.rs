@@ -836,6 +836,7 @@ mod tests {
             kind: TypeKind::Class,
             supertypes: Default::default(),
             constructors: Vec::new(),
+            fields: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
             companion_consts: HashMap::new(),

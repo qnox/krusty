@@ -115,6 +115,32 @@ pub struct StaticFieldRef {
     pub constant: Option<LibraryConst>,
 }
 
+/// One field declaration retained on a classifier shape. Keeping inaccessible and static declarations
+/// is intentional: either declaration hides an equally named inherited instance field even though it
+/// cannot itself realize a Kotlin instance-property read.
+#[derive(Clone, Debug)]
+pub struct LibraryField {
+    pub name: String,
+    /// Logical source type before receiver type arguments are substituted.
+    pub ty: Ty,
+    /// Erased type recovered from the physical descriptor. This is the safe result for a raw receiver
+    /// whose declaration type still contains an unbound type parameter.
+    pub erased_ty: Ty,
+    /// Opaque backend token consumed only by the platform emitter.
+    pub descriptor: String,
+    pub visibility: Visibility,
+    pub is_static: bool,
+}
+
+/// An exact readable instance-field declaration selected by the shared hierarchy walk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstanceFieldRef {
+    pub owner: TypeName,
+    pub name: String,
+    pub ty: Ty,
+    pub descriptor: String,
+}
+
 /// Source-level services exposed by compiled libraries.
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Semantic interface/class used by the platform libraries to model a function value of `arity`.
@@ -1333,6 +1359,10 @@ pub struct LibraryType {
     /// Internal names of the superclass + implemented interfaces (for the inherited-member walk).
     pub supertypes: TypeNameList,
     pub constructors: Vec<LibraryMember>,
+    /// Field declarations owned by this classifier. Selection is deliberately not performed by the
+    /// provider: the resolver walks these together with properties and supertypes, so source, module,
+    /// and compiled classifiers obey one hiding and precedence rule.
+    pub fields: Vec<LibraryField>,
     /// Instance members (member functions and property accessors).
     pub members: Vec<LibraryMember>,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
@@ -1588,6 +1618,7 @@ mod tests {
             kind: super::TypeKind::Class,
             supertypes: crate::types::TypeNameList::new(),
             constructors: vec![],
+            fields: vec![],
             members: vec![],
             companion: vec![],
             companion_consts: std::collections::HashMap::new(),

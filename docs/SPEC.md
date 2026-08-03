@@ -108,6 +108,15 @@ exact `Int` parameter wins over adaptation to `Long`; non-literal `Int` values a
 Public static fields are valid class-qualified property reads, including in inferred property
 initializers.
 
+Public Java instance fields are valid value-qualified property reads. Selection uses the same
+classifier/property hierarchy for Java source stubs, compiled dependencies, and source/module
+subclasses: the nearest declaration wins, a private or static same-named field hides an inherited
+instance field, and an actual field wins over synthetic JavaBean getter discovery. Generic field
+types are substituted from the applied receiver; a raw receiver uses the descriptor-erased type.
+Resolution carries the exact declaring owner, field name, and opaque physical descriptor through the
+ordinary property-read node, including nullable safe-call lowering, rather than reclassifying the
+receiver by origin during lowering or emission.
+
 Static methods of **nested** Java classes resolve through all three kotlinc-accepted spellings —
 `Outer.Bus.notify(x)` with `Outer` imported, `Bus.notify(x)` with `import pkg.Outer.Bus`, and the
 fully-qualified `pkg.Outer.Bus.notify(x)`. A dotted qualifier chain maps to the JVM internal name
