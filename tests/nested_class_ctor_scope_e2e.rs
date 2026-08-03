@@ -46,6 +46,95 @@ fn a_sibling_nested_class_resolves_by_simple_name_from_a_companion() {
     );
 }
 
+#[test]
+fn a_later_private_inner_class_constructor_resolves_in_an_anonymous_super_call() {
+    const SRC: &str = "open class ActionButton(val action: Any)\n\
+    class Builder { fun <T> cell(value: T): T = value }\n\
+    fun <T> panel(block: Builder.() -> T): T = Builder().block()\n\
+    class Outer {\n\
+    \x20   fun build(): String = panel {\n\
+    \x20       val button = cell(object : ActionButton(FilterAction()) {})\n\
+    \x20       button.action.toString()\n\
+    \x20   }\n\
+    \x20   private inner class FilterAction { override fun toString(): String = \"OK\" }\n\
+    }\n\
+    fun box(): String = Outer().build()\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn an_anonymous_sibling_method_preinfers_a_lexically_nested_return() {
+    const SRC: &str = "open class Base\n\
+    class Outer {\n\
+    \x20   fun build() = object : Base() {\n\
+    \x20       fun use(): String = make().value\n\
+    \x20       fun make() = Inner(\"OK\")\n\
+    \x20   }\n\
+    \x20   private inner class Inner(val value: String)\n\
+    }\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn deeply_nested_anonymous_objects_keep_the_source_class_classifier_scope() {
+    let mut source = String::from(
+        "open class Base(value: Any? = null)\n\
+         class Outer {\n\
+         \x20   fun build() = object : Base() {\n",
+    );
+    for level in 0..34 {
+        source.push_str(&format!("val level{level} = object : Base() {{\n"));
+    }
+    source.push_str("val leaf = object : Base(Inner()) {}\n");
+    for _ in 0..34 {
+        source.push_str("}\n");
+    }
+    source.push_str("}\nprivate class Inner\n}\n");
+
+    let diagnostics = common::front_end_diagnostics(&source, &[], None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn an_anonymous_synthetic_name_does_not_create_a_lexical_owner() {
+    const SRC: &str = "open class Base\n\
+    class Anon { class FilterAction }\n\
+    class Outer {\n\
+    \x20   open class Expected\n\
+    \x20   class FilterAction : Expected()\n\
+    \x20   fun build() = object : Base() {\n\
+    \x20       fun pick(): Outer.Expected = FilterAction()\n\
+    \x20   }\n\
+    }\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn anonymous_member_signatures_see_the_source_class_classifier_scope() {
+    const SRC: &str = "class Outer {\n\
+    \x20   private class Inner\n\
+    \x20   fun build() = object {\n\
+    \x20       fun take(value: Inner): Inner = value\n\
+    \x20   }\n\
+    }\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn anonymous_supertype_arguments_see_the_source_class_classifier_scope() {
+    const SRC: &str = "open class Base<T>\n\
+    class Outer {\n\
+    \x20   private class Inner\n\
+    \x20   fun build() = object : Base<Inner>() {}\n\
+    }\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
 /// The same, with NAMED arguments, one of which omits a default — the reported shape. Needs all three
 /// layers: the scope walk to resolve it, the predicate to accept the labels, and the ctor metadata to
 /// place them and fill `dist`.
