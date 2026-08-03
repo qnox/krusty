@@ -1360,9 +1360,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return matches a source-spelled reference return instead of a divergent `Ty::Nullable`. Test:
   `tests/suspend_return_type_recovery_e2e.rs`.
 - **A generic-return builtin member's nullability is recovered from `.kotlin_builtins` metadata**
-  (`kotlin/collections/Map.get(K): V?`, `getOrDefault`, …). Such a member's return is a bare TYPE
-  PARAMETER, so `builtin_members` drops it, and the member that actually resolves the call is the erased
-  classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin nullability. The source `V?`
+  (`kotlin/collections/Map.get(K): V?`, `getOrDefault`, …). When the mapped JVM class IS on the classpath,
+  the member that resolves the call is the erased classpath method (`java/util/Map.get` → `Object`), which
+  carries no Kotlin nullability. The source `V?`
   survives only on the builtin's `Type.nullable` flag; `parse_builtins` records every function member's
   return-nullability (including the dropped ones) in `BuiltinClass.member_ret_nullable`, and the member
   walk (`Classpath::builtin_member_ret_nullable`) null-annotates the resolved return. Applied only to a
@@ -1371,6 +1371,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps its plain erased `Ty` (mirrors the suspend/`resolve_ty` policy above). This is why `m[k] ?: continue`
   correctly skips absent keys. NOT a hardcoded method list — the flag is read from `@Metadata`. Test:
   `tests/map_get_nullable_elvis_e2e.rs`.
+- **`.kotlin_builtins` types decode in full — type parameters AND type arguments.** A builtins `Type` is
+  either a `class_name` with `argument`s, or a reference to a declared `type_parameter` (by id, or by
+  `type_parameter_name`); the decoder resolves all three, and each `Class`/`Function`/`Property` carries
+  its own `type_parameter` table naming those ids. Members are therefore never dropped for having a
+  type-parameter type (`List<E>.get(index: Int): E`, `MutableList.removeAt(Int): E`), and a type argument
+  survives (`Map<K, V>.entries: Set<Map.Entry<K, V>>`). Since a builtin member has no JVM `Signature`
+  string, `builtin_members` also carries a DECODED `LibraryMember::generic_sig` (erased `params`/`ret`
+  matching the descriptor, declared ones in the signature), and `Classpath::builtin_class_gsig_name`
+  supplies the builtin's formals + argument-carrying supertypes where a class `Signature` normally would.
+  Together these let the member walk bind a type-parameter return against the receiver's type arguments
+  (`List<String>.get(1): String`) with NO JDK on the classpath — the `.kotlin_builtins` fallback
+  configuration, where the mapped JVM class (`java/util/List`) is absent. Scope: this makes the fallback
+  correct for RESOLUTION and type-checking (the LSP/analysis use). Its CODEGEN is separately broken and
+  predates this — with no `.class` to read accessors off, a builtin property read emits the JavaBean
+  getter (`getSize`/`getEntries`) instead of the `java.util` name, and a member descriptor keeps the
+  bound type argument. Do not treat a no-JDK compile's bytecode as loadable. Tests:
+  `tests/metadata_return_types.rs` (`builtins_decode_type_parameters_and_arguments`,
+  `builtin_generic_member_binds_receiver_argument_without_jdk`,
+  `builtin_generic_members_type_check_without_jdk`).
+- **`MutableList.removeAt(Int)` IS `java.util.List.remove(int)`** — the function half of kotlinc's
+  `BuiltinMethodsWithDifferentJvmName`/special-builtin renaming whose property half is
+  `size`/`keys`/`values`/`entries`. A call through a `MutableList` receiver emits the JVM name
+  (`names::mapped_builtin_virtual_name`), and a class implementing `MutableList` gets a `remove(int)`
+  bridge forwarding to its `removeAt` override (`mapped_interface_members` →
+  `bridges::mapped_interface_bridges`) — needed when the override is inherited from a NON-collection
+  supertype, which is the only place the two names can diverge. Unlike the `size` entry beside it, this
+  one is keyed on the KOTLIN name `kotlin/collections/MutableList`, not the erased `java/util/List`:
+  the renaming exists only on the mutable side, so a READ-ONLY `List` implementation that happens to
+  declare an unrelated `removeAt` must not acquire a `remove(int)` bridge. Tests: box corpus
+  `codegen/box/specialBuiltins/irrelevantRemoveAtOverride.kt`, and
+  `tests/metadata_return_types.rs::read_only_list_impl_gets_no_remove_bridge`.
 - **A classpath method/interface member with a Kotlin-COLLECTION parameter (`fun size(items: List<String>):
   Int`) resolves.** The JVM method descriptor erases a collection parameter to its single JVM interface
   with the type argument dropped (`List<String>` → `Ljava/util/List;`), but the call passes the Kotlin type

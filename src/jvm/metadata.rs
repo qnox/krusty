@@ -255,6 +255,9 @@ struct ParsedTypeParam {
     id: u64,
     name_id: u64,
     upper_bound_bodies: Vec<Vec<u8>>,
+    /// `TypeParameter.upper_bound_id` (field 6) — the type-table form a `.kotlin_builtins` fragment
+    /// uses instead of the inline `upper_bound`. Empty for the `@Metadata` carrier, which inlines.
+    upper_bound_ids: Vec<u64>,
 }
 
 fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
@@ -262,6 +265,7 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
     let mut id = None;
     let mut name = None;
     let mut upper_bound_bodies = Vec::new();
+    let mut upper_bound_ids = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -271,6 +275,11 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
                 let n = pb.varint()? as usize;
                 upper_bound_bodies.push(pb.bytes(n)?.to_vec());
             }
+            (6, 0) => upper_bound_ids.push(pb.varint()?),
+            (6, 2) => {
+                let n = pb.varint()? as usize;
+                upper_bound_ids.extend(packed_varints(pb.bytes(n)?));
+            }
             (_, w) => pb.skip(w)?,
         }
     }
@@ -278,6 +287,7 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
         id: id?,
         name_id: name?,
         upper_bound_bodies,
+        upper_bound_ids,
     })
 }
 
@@ -2768,16 +2778,92 @@ fn strip_builtins_header(data: &[u8]) -> Option<&[u8]> {
     data.get(4 + 4 * count..)
 }
 
-/// One member of a builtins `Class`: its Kotlin name, value-parameter type names, and return type name
-/// — all Kotlin internal names (`kotlin/Int`, `kotlin/String`, …) resolved from the fragment's tables.
+/// A type decoded from a `.kotlin_builtins` fragment. A bare internal name cannot express the two
+/// facets the fragment actually records — a class's type ARGUMENTS (`Set<Map.Entry<K, V>>`) and a
+/// reference to a declared type PARAMETER (`E` of `List<E>`) — so both are modelled here. Class names
+/// are Kotlin internal names (`kotlin/Int`, `kotlin/collections/Map.Entry`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuiltinTy {
+    Class {
+        internal: String,
+        args: Vec<BuiltinTy>,
+        nullable: bool,
+    },
+    Param {
+        name: String,
+        nullable: bool,
+    },
+}
+
+impl BuiltinTy {
+    pub fn class(internal: impl Into<String>) -> BuiltinTy {
+        BuiltinTy::Class {
+            internal: internal.into(),
+            args: Vec::new(),
+            nullable: false,
+        }
+    }
+
+    /// The declared internal name when this is a class type, `None` for a type parameter.
+    pub fn internal(&self) -> Option<&str> {
+        match self {
+            BuiltinTy::Class { internal, .. } => Some(internal),
+            BuiltinTy::Param { .. } => None,
+        }
+    }
+
+    pub fn nullable(&self) -> bool {
+        match self {
+            BuiltinTy::Class { nullable, .. } | BuiltinTy::Param { nullable, .. } => *nullable,
+        }
+    }
+
+    /// A readable source-shaped rendering (`kotlin/collections/Set<kotlin/collections/Map.Entry<K,V>>`).
+    pub fn render(&self) -> String {
+        let (base, args, nullable) = match self {
+            BuiltinTy::Class {
+                internal,
+                args,
+                nullable,
+            } => (internal.clone(), args.as_slice(), *nullable),
+            BuiltinTy::Param { name, nullable } => (name.clone(), &[][..], *nullable),
+        };
+        let mut out = base;
+        if !args.is_empty() {
+            let inner: Vec<String> = args.iter().map(BuiltinTy::render).collect();
+            out.push('<');
+            out.push_str(&inner.join(","));
+            out.push('>');
+        }
+        if nullable {
+            out.push('?');
+        }
+        out
+    }
+}
+
+/// One member of a builtins `Class`: its Kotlin name, value-parameter types, and return type, each
+/// decoded through the fragment's type table.
 pub struct BuiltinMember {
     pub name: String,
-    pub params: Vec<String>,
-    pub ret: String,
+    pub params: Vec<BuiltinTy>,
+    pub ret: BuiltinTy,
     pub is_property: bool,
+    /// The member's OWN type parameters (`<R>` of `fold`), with their declared upper bounds — kept
+    /// apart from the class's so a consumer can build a generic signature whose formals shadow
+    /// correctly.
+    pub formals: Vec<BuiltinTypeParam>,
     /// Whether the declared return type is nullable (`V?`) — the JVM descriptor erases it, only the
     /// `.kotlin_builtins` `Type.nullable` flag carries it (`Map.get(K): V?`, `firstOrNull(): T?`).
     pub ret_nullable: bool,
+}
+
+/// One declared type parameter of a builtin class or member: its source name and decoded upper bounds
+/// (`E` unbounded, `T : Comparable<T>`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltinTypeParam {
+    pub name: String,
+    pub bounds: Vec<BuiltinTy>,
 }
 
 /// A builtin `Class` decoded from a `.kotlin_builtins` fragment: its direct supertypes and declared
@@ -2785,17 +2871,168 @@ pub struct BuiltinMember {
 #[derive(Default)]
 pub struct BuiltinClass {
     pub supertypes: Vec<String>,
+    /// The supertypes WITH their type arguments (`MutableList<E> : List<E>`), which the name-only
+    /// `supertypes` list cannot carry — the chain a receiver's type argument travels up.
+    pub supertype_tys: Vec<BuiltinTy>,
     pub members: Vec<BuiltinMember>,
+    /// The class's own type parameters, in declaration order (`Map` → `[K, V]`).
+    pub type_params: Vec<BuiltinTypeParam>,
     /// Whether the builtin is an interface (`List`, `CharSequence`, `Comparable`) vs a class (`Number`,
     /// `Enum`) — from the `@Metadata` `CLASS_KIND` flag. Needed when reporting a classless builtin whose
     /// JVM class is absent (a no-JDK compile), so member calls emit the right invoke opcode.
     pub is_interface: bool,
-    /// Nullable returns for declared function members keyed by `(name, value-arity)`, INCLUDING
-    /// members `members` drops because their return is a bare type parameter (`Map.get(K): V?`,
-    /// `firstOrNull(): T?`). The resolved member for such a call is the erased classpath method (`java/util
-    /// /Map.get` returns `Object`) which carries no Kotlin nullability — this is the only surviving record
+    /// Nullable returns for declared function members keyed by `(name, value-arity)` (`Map.get(K): V?`,
+    /// `firstOrNull(): T?`). A call may still resolve to the ERASED classpath method (`java/util/Map.get`
+    /// returns `Object`), which carries no Kotlin nullability — this is then the only surviving record
     /// that the source return is `T?`. Consulted by the member walk to null-annotate that resolved return.
     pub nullable_member_returns: Vec<(String, usize)>,
+}
+
+/// The tables a `.kotlin_builtins` `Class` resolves its types against: the fragment's string and
+/// qualified-name tables plus the class's own `type_table` (`Class.type_table` = field 30).
+struct BuiltinTables<'a> {
+    strings: &'a [String],
+    qnames: &'a [QName],
+    types: &'a [&'a [u8]],
+}
+
+/// A `TypeParameter.id` → source name map. A builtins `Type` names a type parameter by that id
+/// (`Type.type_parameter` = field 7); without the map the type is undecodable and the whole member
+/// used to be dropped.
+type TypeParamNames = std::collections::HashMap<u64, String>;
+
+/// How deep a `.kotlin_builtins` type may nest before the decode gives up — a type-table entry
+/// references other entries by id, so a malformed (or cyclic) fragment must not recurse forever.
+const BUILTIN_TYPE_DEPTH_LIMIT: u32 = 16;
+
+impl BuiltinTables<'_> {
+    /// Decode one `Type` message (a type-table entry or an inline `Type`) into a [`BuiltinTy`]. Mirrors
+    /// the `@Metadata` decoder [`parse_type_gsig_node`]: `class_name` (field 6) with its `argument`s
+    /// (field 2), else `type_parameter` (field 7, by id) or `type_parameter_name` (field 9, by string).
+    /// An `Argument` carries its type either inline (`Argument.type` = 2) or by table id
+    /// (`Argument.type_id` = 3) — a builtins fragment uses the latter — so both are followed.
+    fn ty(&self, body: &[u8], tparams: &TypeParamNames, depth: u32) -> Option<BuiltinTy> {
+        if depth > BUILTIN_TYPE_DEPTH_LIMIT {
+            return None;
+        }
+        let mut pb = Pb { b: body, i: 0 };
+        let mut class_id = None;
+        let mut tp_id = None;
+        let mut tpn_id = None;
+        let mut nullable = false;
+        let mut args: Vec<BuiltinTy> = Vec::new();
+        while !pb.at_end() {
+            let tag = pb.varint()?;
+            match (tag >> 3, tag & 7) {
+                (3, 0) => nullable = pb.varint()? != 0,
+                (6, 0) => class_id = Some(pb.varint()?),
+                (7, 0) => tp_id = Some(pb.varint()?),
+                (9, 0) => tpn_id = Some(pb.varint()?),
+                (2, 2) => {
+                    let n = pb.varint()? as usize;
+                    let abody = pb.bytes(n)?;
+                    let mut ap = Pb { b: abody, i: 0 };
+                    let mut arg = None;
+                    while !ap.at_end() {
+                        let at = ap.varint()?;
+                        match (at >> 3, at & 7) {
+                            (2, 2) => {
+                                let tn = ap.varint()? as usize;
+                                let tb = ap.bytes(tn)?;
+                                arg = self.ty(tb, tparams, depth + 1);
+                            }
+                            (3, 0) => {
+                                let id = ap.varint()? as usize;
+                                arg = self.ty_by_id(id, tparams, depth + 1);
+                            }
+                            (_, w) => ap.skip(w)?,
+                        }
+                    }
+                    // A star projection (`Map<*, *>`) records no type; `Any` is its erased stand-in,
+                    // matching what the `@Metadata` decoder substitutes.
+                    args.push(arg.unwrap_or_else(|| BuiltinTy::class("kotlin/Any")));
+                }
+                (_, w) => pb.skip(w)?,
+            }
+        }
+        if let Some(id) = class_id {
+            return Some(BuiltinTy::Class {
+                internal: resolve_qname(self.qnames, self.strings, id as i64),
+                args,
+                nullable,
+            });
+        }
+        let name = match (tp_id, tpn_id) {
+            (Some(id), _) => tparams.get(&id).cloned()?,
+            (None, Some(sid)) => self.strings.get(sid as usize).cloned()?,
+            (None, None) => return None,
+        };
+        Some(BuiltinTy::Param { name, nullable })
+    }
+
+    fn ty_by_id(&self, id: usize, tparams: &TypeParamNames, depth: u32) -> Option<BuiltinTy> {
+        self.ty(self.types.get(id)?, tparams, depth)
+    }
+
+    /// Decode a run of `TypeParameter` messages: their names (added to `tparams` so a bound may refer
+    /// to a sibling) and their upper bounds. Bounds are decoded against the names alone — a recursive
+    /// bound (`T : Comparable<T>`) therefore terminates instead of chasing itself.
+    fn type_params(&self, bodies: &[&[u8]], tparams: &mut TypeParamNames) -> Vec<BuiltinTypeParam> {
+        let parsed: Vec<ParsedTypeParam> = bodies
+            .iter()
+            .filter_map(|b| parse_type_param(b))
+            .filter(|tp| self.strings.get(tp.name_id as usize).is_some())
+            .collect();
+        for tp in &parsed {
+            tparams.insert(tp.id, self.strings[tp.name_id as usize].clone());
+        }
+        parsed
+            .iter()
+            .map(|tp| BuiltinTypeParam {
+                name: self.strings[tp.name_id as usize].clone(),
+                bounds: tp
+                    .upper_bound_ids
+                    .iter()
+                    .filter_map(|&id| self.ty_by_id(id as usize, tparams, 0))
+                    .chain(
+                        tp.upper_bound_bodies
+                            .iter()
+                            .filter_map(|b| self.ty(b, tparams, 0)),
+                    )
+                    .collect(),
+            })
+            .collect()
+    }
+}
+
+/// `Class.type_parameter`. Field 5 on a `Class` — where a `Function`/`Property` instead carries its
+/// `receiver_type`, hence the two distinct constants.
+const CLASS_TYPE_PARAMETER_FIELD: u64 = 5;
+/// `Function.type_parameter` / `Property.type_parameter`. Both are field 4 (matching the decoders in
+/// [`class_functions`] and [`class_properties`]); field 5 on those messages is `receiver_type`.
+const MEMBER_TYPE_PARAMETER_FIELD: u64 = 4;
+
+/// Collect a message's repeated `type_parameter` sub-message bodies. The field number differs by
+/// carrier — see [`CLASS_TYPE_PARAMETER_FIELD`] / [`MEMBER_TYPE_PARAMETER_FIELD`].
+fn type_param_bodies(body: &[u8], field: u64) -> Vec<&[u8]> {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut out = Vec::new();
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (f, 2) if f == field => {
+                let Some(n) = pb.varint() else { break };
+                let Some(b) = pb.bytes(n as usize) else { break };
+                out.push(b);
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Parse a `.kotlin_builtins` resource → every declared `Class` (qualified name → its supertypes +
@@ -2877,6 +3114,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
         let mut types: Vec<&[u8]> = Vec::new();
         let mut funcs: Vec<&[u8]> = Vec::new();
         let mut props: Vec<&[u8]> = Vec::new();
+        let mut class_tparam_bodies: Vec<&[u8]> = Vec::new();
         while !cp.at_end() {
             let Some(tag) = cp.varint() else { break };
             match (tag >> 3, tag & 7) {
@@ -2889,6 +3127,14 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                     if let Some(n) = cp.varint() {
                         if let Some(b) = cp.bytes(n as usize) {
                             supids.extend(packed_varints(b));
+                        }
+                    }
+                }
+                (f, 2) if f == CLASS_TYPE_PARAMETER_FIELD => {
+                    // The names behind every `Type.type_parameter` id a member of this class references.
+                    if let Some(n) = cp.varint() {
+                        if let Some(b) = cp.bytes(n as usize) {
+                            class_tparam_bodies.push(b);
                         }
                     }
                 }
@@ -2938,16 +3184,38 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
         }
         let Some(fq) = fq else { continue };
         let fqname = resolve_qname(&qnames, &strings, fq as i64);
-        // A `*_type_id` indexes the class `type_table`; resolve to the type's class_name → internal name.
-        let type_of_id = |tid: u64| -> Option<String> {
-            let tb = types.get(tid as usize)?;
-            let cn = parse_type_class_name(tb)?;
-            Some(resolve_qname(&qnames, &strings, cn as i64))
+        let tables = BuiltinTables {
+            strings: &strings,
+            qnames: &qnames,
+            types: &types,
         };
-        let supertypes: Vec<String> = supids.iter().filter_map(|&sid| type_of_id(sid)).collect();
+        // The class's own type parameters name every `Type.type_parameter` id its members reference.
+        let mut class_tparams = TypeParamNames::new();
+        let type_params = tables.type_params(&class_tparam_bodies, &mut class_tparams);
+        // A `*_type_id` indexes the class `type_table`; decode the entry in full (class + arguments,
+        // or a type-parameter reference) — a bare class name cannot express either.
+        let type_of_id = |tid: u64, tps: &TypeParamNames| -> Option<BuiltinTy> {
+            tables.ty_by_id(tid as usize, tps, 0)
+        };
+        let supertype_tys: Vec<BuiltinTy> = supids
+            .iter()
+            .filter_map(|&sid| type_of_id(sid, &class_tparams))
+            .collect();
+        let supertypes: Vec<String> = supertype_tys
+            .iter()
+            .filter_map(|t| t.internal().map(str::to_string))
+            .collect();
         let mut members = Vec::new();
         let mut nullable_member_returns = Vec::new();
         for fb in &funcs {
+            // A function may declare its OWN type parameters (`<R>` of `fold`); they shadow/extend the
+            // class's, so decode this function's types against the union.
+            let mut fn_tparams = class_tparams.clone();
+            let formals = tables.type_params(
+                &type_param_bodies(fb, MEMBER_TYPE_PARAMETER_FIELD),
+                &mut fn_tparams,
+            );
+            let type_of_id = |tid: u64| type_of_id(tid, &fn_tparams);
             let mut p = Pb { b: fb, i: 0 };
             let mut name_id = None;
             let mut ret_id = None;
@@ -2970,12 +3238,10 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                                         // builtins schema, 4 in some) → the parameter's type.
                                         (5, 0) | (4, 0) => pty = vp.varint().and_then(type_of_id),
                                         (3, 2) => {
-                                            // inline `type` Type → its class_name
+                                            // inline `type` Type
                                             if let Some(n) = vp.varint() {
                                                 if let Some(tb) = vp.bytes(n as usize) {
-                                                    pty = parse_type_class_name(tb).map(|cn| {
-                                                        resolve_qname(&qnames, &strings, cn as i64)
-                                                    });
+                                                    pty = tables.ty(tb, &fn_tparams, 0);
                                                 }
                                             }
                                         }
@@ -2986,7 +3252,9 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                                         }
                                     }
                                 }
-                                params.push(pty.unwrap_or_default());
+                                // An undecodable parameter type still keeps the member: `Any` is the
+                                // erased stand-in its descriptor would carry anyway.
+                                params.push(pty.unwrap_or_else(|| BuiltinTy::class("kotlin/Any")));
                             }
                         }
                     }
@@ -3003,8 +3271,9 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                 let ret_nullable = types
                     .get(ri as usize)
                     .is_some_and(|tb| parse_type_nullable(tb));
-                // Record nullable returns even for type-parameter-return functions the member list drops
-                // just below, so the erased classpath member can be null-annotated later.
+                // Record nullable returns separately too: a call may still resolve to the ERASED
+                // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
+                // nullability, and this is then the only surviving record that the source return is `T?`.
                 if let Some(name) = strings.get(ni as usize).filter(|_| ret_nullable) {
                     nullable_member_returns.push((name.clone(), params.len()));
                 }
@@ -3014,12 +3283,19 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                         params,
                         ret,
                         is_property: false,
+                        formals,
                         ret_nullable,
                     });
                 }
             }
         }
         for pb_ in &props {
+            let mut prop_tparams = class_tparams.clone();
+            let formals = tables.type_params(
+                &type_param_bodies(pb_, MEMBER_TYPE_PARAMETER_FIELD),
+                &mut prop_tparams,
+            );
+            let type_of_id = |tid: u64| type_of_id(tid, &prop_tparams);
             let mut p = Pb { b: pb_, i: 0 };
             let mut name_id = None;
             let mut ret_id = None;
@@ -3048,6 +3324,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                         params: vec![],
                         ret,
                         is_property: true,
+                        formals,
                         ret_nullable,
                     });
                 }
@@ -3057,7 +3334,9 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
             fqname,
             BuiltinClass {
                 supertypes,
+                supertype_tys,
                 members,
+                type_params,
                 nullable_member_returns,
                 is_interface: (flags >> 6) & 0x7 == 1,
             },
