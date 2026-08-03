@@ -1066,6 +1066,8 @@ mod unit_vararg_e2e;
 mod unqualified_enum_entry_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
+#[path = "unsigned_classpath_call_e2e.rs"]
+mod unsigned_classpath_call_e2e;
 #[path = "unsigned_ext_e2e.rs"]
 mod unsigned_ext_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]

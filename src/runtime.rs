@@ -122,6 +122,18 @@ pub trait TargetRuntime {
         None
     }
 
+    /// Per parameter position of an already-spelled platform method `descriptor`, whether that slot
+    /// holds a REFERENCE (so a boxed value may occupy it) rather than a primitive carrier.
+    ///
+    /// Common lowering needs this to check its own work: a callee's descriptor is emitted VERBATIM
+    /// while arguments are coerced to the callable's declared parameter types, and the two can
+    /// disagree about whether a value is boxed. Asking the platform keeps descriptor SYNTAX where it
+    /// belongs — lowering never parses a target's spelling itself. `None` when the descriptor cannot
+    /// be read, which leaves the decision to the platform's own gates.
+    fn descriptor_reference_params(&self, _descriptor: &str) -> Option<Vec<bool>> {
+        None
+    }
+
     /// Runtime superclass used for synthesized function references on this platform.
     fn function_reference_impl_type(&self) -> Option<Ty> {
         None

@@ -998,6 +998,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `unbox-impl` on read, `is UInt` → `instanceof kotlin/UInt`) — never `Integer`, so identity and large
   values are preserved. `tests/unsigned_e2e.rs`. (`UByte`/`UShort`, `UIntRange` value iteration, and unsigned
   `when` subjects are not yet modeled — they cleanly skip.)
+- **Unsigned values at a CLASSPATH call boundary** — because an unsigned value has TWO representations
+  (the carrier in a primitive slot, and the boxed inline class), every classpath call is a place where the
+  representation the lowerer produced must agree with the descriptor the backend spells verbatim. Both
+  directions are now pinned:
+  - a value class krusty models as a scalar of its own is recovered from `@Metadata` as **that carrier**,
+    not as the boxed class, so an argument to a value-class-MANGLED static keeps the erased form its
+    descriptor declares: `maxOf(a, b)` on a `UInt` emits `iload; iload; invokestatic
+    UComparisonsKt."maxOf-J1ME1BU":(II)I`, byte-for-byte kotlinc's shape, and compares in UNSIGNED order
+    (the stdlib callee owns the comparator, so values past the sign bit order correctly);
+  - an `invokevirtual` on the value class itself takes the **boxed** receiver, so `a.equals(b)` emits
+    `box-impl(a); box-impl(b); invokevirtual kotlin/UInt.equals(Ljava/lang/Object;)Z` — the value class's
+    own equality, which is `false` across carriers (`UInt.equals(ULong)`). kotlinc instead intrinsifies a
+    same-type `equals` to a direct carrier compare; krusty's call is semantically equal, not shape-equal.
+
+  Getting either wrong produced a class file that FAILED JVM VERIFICATION while krusty reported success —
+  output strictly worse than declining the file, and invisible to a differential harness that checks
+  compilation success. `jvm_can_emit` cannot see this class of defect: it inspects the TYPES a file
+  mentions (and `kotlin/UInt` is fully supported there), not the representation of a value at a call
+  boundary. The backstop therefore lives in the lowerer, where the descriptor and the lowered arguments
+  are both in hand: `check_unsigned_boxes_fit_descriptor` declines the file
+  (`gate:unsigned-box-in-erased-slot`) if a boxed unsigned would land in a primitive descriptor slot. It
+  is a net, not the mechanism the supported shapes rely on — verified live by reverting the parameter
+  recovery, which turns the miscompile back into a clean skip.
+  `tests/unsigned_classpath_call_e2e.rs` asserts the backend contract directly (a decline passes; an
+  EMITTED class that does not verify and run fails), so it keeps holding whichever way a shape is handled.
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`

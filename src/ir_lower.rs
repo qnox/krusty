@@ -5505,8 +5505,20 @@ impl<'a> Lower<'a> {
         logical_ret: Ty,
         suspend: bool,
         args: Vec<u32>,
-    ) -> u32 {
+    ) -> Option<u32> {
         let owner = member.owner_type_or(owner_fallback);
+        // An `invokevirtual` on an unsigned value class needs the BOXED receiver (`kotlin/UInt`) on
+        // the stack, but krusty carries an unsigned value in the primitive slot of its carrier —
+        // push it raw and the verifier rejects the call. Box it here, with the same `box-impl` an
+        // unsigned ARGUMENT flowing into a reference parameter already gets. A receiver that is
+        // ALREADY boxed (it came from a reference context) is left alone.
+        let recv = match unsigned_carrier_of_box_type(owner) {
+            Some(carrier) if self.lowered_unsigned_box(recv).is_none() => {
+                self.box_unsigned(recv, carrier)?
+            }
+            _ => recv,
+        };
+        self.check_unsigned_boxes_fit_descriptor(&member.descriptor, &args)?;
         let interface = member.is_interface() || self.library_type_is_interface(owner);
         // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
         // the pushed receiver into a continuation spill slot (an unnamed temp local in its
@@ -5526,14 +5538,14 @@ impl<'a> Lower<'a> {
             if suspend {
                 self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
             }
-            return self.emit_block(vec![decl], Some(call));
+            return Some(self.emit_block(vec![decl], Some(call)));
         }
         let call =
             self.emit_virtual_call(owner, member.name, member.descriptor, interface, recv, args);
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
-        call
+        Some(call)
     }
 
     /// Pack expanded member arguments into the physical trailing array.
@@ -5620,8 +5632,9 @@ impl<'a> Lower<'a> {
         callable: crate::libraries::LibraryCallable,
         args: Vec<u32>,
         record_suspend: bool,
-    ) -> u32 {
+    ) -> Option<u32> {
         let logical_ret = callable.ret;
+        self.check_unsigned_boxes_fit_descriptor(&callable.descriptor, &args)?;
         // A member of an `object` / `companion object` brought into scope by `import Owner.name`: its
         // realization is an INSTANCE invoke on the singleton, not a facade static. Resolution recorded
         // exactly which field holds it (a plain object's `INSTANCE`, or the outer class's field for a
@@ -5679,7 +5692,57 @@ impl<'a> Lower<'a> {
         if record_suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
-        call
+        Some(call)
+    }
+
+    /// The unsigned value class a LOWERED expression already holds in its BOXED form, as the carrier
+    /// `Ty` that box wraps (`kotlin/UInt.box-impl(…)` → `Ty::UInt`).
+    ///
+    /// A question about REPRESENTATION, not about the declared type. krusty carries an unsigned value
+    /// in the JVM primitive slot of its carrier, and the inline-class factory `X."box-impl"` is the
+    /// only thing that puts the boxed class on the stack — so reading it back off the lowered node is
+    /// exact, where the checker's `Ty` (still `UInt` on both sides of a box) cannot tell them apart.
+    fn lowered_unsigned_box(&self, expr: u32) -> Option<Ty> {
+        let IrExpr::Call {
+            callee: Callee::Static { owner, name, .. },
+            ..
+        } = &self.ir.exprs[expr as usize]
+        else {
+            return None;
+        };
+        (name == "box-impl")
+            .then(|| unsigned_carrier_of_box_type(*owner))
+            .flatten()
+    }
+
+    /// Decline the file unless every BOXED unsigned argument lands in a descriptor slot that actually
+    /// takes a reference.
+    ///
+    /// krusty emits a classpath callee's descriptor VERBATIM while the lowerer coerces arguments to
+    /// the callable's `params`, so the two sides can disagree about whether an unsigned value is
+    /// boxed. A `kotlin/UInt` pushed into an `I` slot compiles and links, and fails only when the JVM
+    /// verifies the class — output strictly worse than declining the file, and invisible to a
+    /// differential harness that checks compilation success. This is the invariant that keeps the
+    /// disagreement from reaching a class file; it is a net, not the mechanism any supported shape
+    /// relies on.
+    ///
+    /// Positions are compared only when the counts line up: a `$default` mask, an appended
+    /// `Continuation`, and a packed vararg all shift them, and none of those shapes can put a box
+    /// where a carrier belongs. A descriptor the platform cannot read is left to its own gates —
+    /// lowering asks which slots are references rather than parsing a target spelling itself.
+    fn check_unsigned_boxes_fit_descriptor(&self, descriptor: &str, args: &[u32]) -> Option<()> {
+        let Some(reference_slot) = self.runtime.descriptor_reference_params(descriptor) else {
+            return Some(());
+        };
+        if reference_slot.len() != args.len() {
+            return Some(());
+        }
+        let fits = std::iter::zip(args, reference_slot)
+            .all(|(&a, is_ref)| is_ref || self.lowered_unsigned_box(a).is_none());
+        if !fits {
+            return self.bail("gate:unsigned-box-in-erased-slot");
+        }
+        Some(())
     }
 
     fn emit_static_call(
@@ -6405,7 +6468,7 @@ impl<'a> Lower<'a> {
                 getter.ret,
                 getter.suspend,
                 vec![],
-            )
+            )?
         };
         let updated = self.lower_incdec_updated_value(
             IncDecSite::Statement(stmt),
@@ -6618,7 +6681,7 @@ impl<'a> Lower<'a> {
 
     fn runtime_call(&mut self, op: RuntimeOp, ty: Ty, args: Vec<u32>) -> Option<u32> {
         let c = self.runtime.runtime_callable(op, ty)?;
-        Some(self.emit_library_static_call(c, args, false))
+        self.emit_library_static_call(c, args, false)
     }
 
     fn platform_static_field(&mut self, field: PlatformField) -> u32 {
@@ -7051,7 +7114,7 @@ impl<'a> Lower<'a> {
         let ret = resolved.ret;
         let suspend = resolved.suspend;
         let physical_ret = m.physical_ret;
-        let call = self.emit_library_member_call(recv, internal, m, ret, suspend, a);
+        let call = self.emit_library_member_call(recv, internal, m, ret, suspend, a)?;
         let call = self.coerce_to_static(call, ret, physical_ret);
         Some(self.coerce_generic_read(call, call_expr, ret))
     }
@@ -7663,7 +7726,7 @@ impl<'a> Lower<'a> {
         let logical_ret = c.ret;
         let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
         let suspend = c.suspend;
-        let call = self.emit_library_static_call(c, a, suspend);
+        let call = self.emit_library_static_call(c, a, suspend)?;
         let call = if arg_prelude.is_empty() {
             call
         } else {
@@ -8003,10 +8066,10 @@ impl<'a> Lower<'a> {
         e: AstExprId,
         getter: crate::libraries::LibraryCallable,
         receiver: u32,
-    ) -> u32 {
+    ) -> Option<u32> {
         let physical_ret = getter.physical_ret;
-        let call = self.emit_library_static_call(getter, vec![receiver], false);
-        self.coerce_erased_call_result(e, call, &physical_ret, true)
+        let call = self.emit_library_static_call(getter, vec![receiver], false)?;
+        Some(self.coerce_erased_call_result(e, call, &physical_ret, true))
     }
 
     /// Lower a lambda literal `{ a, b -> body }` to an `IrExpr::Lambda` (emitted as `invokedynamic` +
@@ -8308,14 +8371,20 @@ impl<'a> Lower<'a> {
             DestructureComponentTarget::LibraryMember(m) => {
                 let physical_ret = m.member.physical_ret;
                 let ret = m.ret;
-                let c =
-                    self.emit_library_member_call(recv, internal, m.member, ret, m.suspend, vec![]);
+                let c = self.emit_library_member_call(
+                    recv,
+                    internal,
+                    m.member,
+                    ret,
+                    m.suspend,
+                    vec![],
+                )?;
                 Some((self.coerce_to_static(c, ret, physical_ret), ret))
             }
             DestructureComponentTarget::LibraryExtension(c) => {
                 let ret = c.ret;
                 let physical_ret = c.physical_ret;
-                let call = self.emit_library_static_call(c, vec![recv], false);
+                let call = self.emit_library_static_call(c, vec![recv], false)?;
                 Some((self.coerce_to_static(call, ret, physical_ret), ret))
             }
             DestructureComponentTarget::ModuleExtension {
@@ -8384,7 +8453,7 @@ impl<'a> Lower<'a> {
                     ret,
                     m.suspend,
                     vec![i],
-                );
+                )?;
                 Some((self.coerce_to_static(c, ret, physical_ret), ret))
             }
         }
@@ -10334,7 +10403,7 @@ impl<'a> Lower<'a> {
         let recv = self.expr(receiver)?;
         let (logical, physical) = (c.ret, c.physical_ret);
         let source_receiver = c.source_receiver;
-        let call = self.emit_library_static_call(c, vec![recv, lam], false);
+        let call = self.emit_library_static_call(c, vec![recv, lam], false)?;
         // Record the declared source receiver so the value-class pass keeps a REFERENCE-underlying
         // value-class receiver (`Result.getOrElse`) unboxed: the spliced `-impl` body reads it as the raw
         // underlying, so boxing it to the `Object` receiver parameter (which the descriptor otherwise
@@ -12847,7 +12916,8 @@ impl<'a> Lower<'a> {
                 };
                 let ret = resolved.ret;
                 let suspend = resolved.suspend;
-                let call = self.emit_library_member_call(recv_v, internal, member, ret, suspend, a);
+                let call =
+                    self.emit_library_member_call(recv_v, internal, member, ret, suspend, a)?;
                 Some((self.coerce_to_static(call, ret, physical_ret), ret))
             }
             ResolvedCall::ModuleMember {
@@ -13064,7 +13134,7 @@ impl<'a> Lower<'a> {
                 let receiver = self.spill_receiver_before_args(receiver, recv_ty, &mut prelude);
                 let mut lowered = vec![receiver];
                 lowered.extend(arguments);
-                let call = self.emit_library_static_call(callable, lowered, false);
+                let call = self.emit_library_static_call(callable, lowered, false)?;
                 Some((self.wrap_arg_prelude(call, prelude), selected_ret))
             }
             _ => None,
@@ -13448,7 +13518,7 @@ impl<'a> Lower<'a> {
         } else {
             (recv, None)
         };
-        let iter_call = self.lower_iterator_call(recv, iter_dispatch);
+        let iter_call = self.lower_iterator_call(recv, iter_dispatch)?;
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
@@ -13463,7 +13533,7 @@ impl<'a> Lower<'a> {
             hasnext_ret,
             hasnext_suspend,
             vec![],
-        );
+        )?;
 
         // x = (elem) it.next()  — unbox a primitive element, checkcast a specific reference.
         let it_g2 = self.emit_get_value(it_v);
@@ -13476,7 +13546,7 @@ impl<'a> Lower<'a> {
             next_ret,
             next_suspend,
             vec![],
-        );
+        )?;
         let x_init = if elem.is_unsigned() {
             // The element is a boxed `kotlin/UInt`/`ULong` — checkcast + `unbox-impl`, not the
             // `Integer` unbox a plain JVM-scalar coercion would emit.
@@ -13543,7 +13613,11 @@ impl<'a> Lower<'a> {
         Some(self.emit_block(stmts, None))
     }
 
-    fn lower_iterator_call(&mut self, receiver: u32, target: IteratorDispatchTarget) -> u32 {
+    fn lower_iterator_call(
+        &mut self,
+        receiver: u32,
+        target: IteratorDispatchTarget,
+    ) -> Option<u32> {
         match target {
             IteratorDispatchTarget::Member {
                 owner_fallback,
@@ -14729,7 +14803,7 @@ impl<'a> Lower<'a> {
         });
         if let Some((m, physical_ret)) = resolved {
             let read =
-                self.emit_library_member_call(recv, internal, m, physical_ret, false, vec![]);
+                self.emit_library_member_call(recv, internal, m, physical_ret, false, vec![])?;
             return Some(self.coerce_generic_read(read, e, physical_ret));
         }
         None
@@ -15194,13 +15268,13 @@ impl<'a> Lower<'a> {
         args: Vec<u32>,
         record_suspend: bool,
         recv_ty: Option<Ty>,
-    ) -> u32 {
+    ) -> Option<u32> {
         let reified_subst = self.reified_call_subst_for(ast_call, &callable, recv_ty);
-        let call = self.emit_library_static_call(callable, args, record_suspend);
+        let call = self.emit_library_static_call(callable, args, record_suspend)?;
         if !reified_subst.is_empty() {
             self.ir.reified_call_subst.insert(call, reified_subst);
         }
-        call
+        Some(call)
     }
 
     fn lower_ext_call_on(
@@ -15273,7 +15347,7 @@ impl<'a> Lower<'a> {
         // specializes the body.
         let physical_ret = c.physical_ret;
         let suspend_default = c.default_call && c.suspend;
-        let call = self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt));
+        let call = self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt))?;
         self.record_ext_source_receiver(call, source_receiver);
         let call = self.coerce_erased_call_result(e, call, &physical_ret, true);
         Some(self.wrap_arg_prelude(call, arg_prelude))
@@ -15674,7 +15748,7 @@ impl<'a> Lower<'a> {
                 .or_else(|| this_ty.obj_internal())
                 .unwrap_or_else(crate::types::wk::any);
             let physical_ret = member.physical_ret;
-            let call = self.emit_library_member_call(recv, owner, member, ret, false, a);
+            let call = self.emit_library_member_call(recv, owner, member, ret, false, a)?;
             return Some(self.coerce_generic_read(call, e, physical_ret));
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
@@ -16564,7 +16638,7 @@ impl<'a> Lower<'a> {
                 if c.params.len() == 2 {
                     let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                     let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
-                    return Some(self.emit_library_static_call(*c, vec![r, a], false));
+                    return self.emit_library_static_call(*c, vec![r, a], false);
                 }
                 None
             }
@@ -17838,7 +17912,7 @@ impl<'a> Lower<'a> {
         let recv_to_v = self.fresh_value();
         let var_recv_to = self.emit_named_variable(recv_to_v, ty_to_ir(it_ty), Some(recv_g0));
         let recv_g = self.emit_get_value(recv_to_v);
-        let iter_call = self.lower_iterator_call(recv_g, iter_dispatch);
+        let iter_call = self.lower_iterator_call(recv_g, iter_dispatch)?;
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
@@ -17853,7 +17927,7 @@ impl<'a> Lower<'a> {
             hasnext_ret,
             hasnext_suspend,
             vec![],
-        );
+        )?;
 
         // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
         let it_g2 = self.emit_get_value(it_v);
@@ -17866,7 +17940,7 @@ impl<'a> Lower<'a> {
             next_ret,
             next_suspend,
             vec![],
-        );
+        )?;
         // Coerce the `Object` iterator result to the element type — the SAME four-way split
         // `lower_foreach_iterator` uses: unbox an unsigned/scalar-value-class element (a `checkcast` +
         // `istore` would store a reference into a primitive slot → VerifyError), else `checkcast` a
@@ -19681,7 +19755,7 @@ impl<'a> Lower<'a> {
                 match kind {
                     RangeKind::Through => {
                         if let Some(c) = range.through_static {
-                            self.emit_library_static_call(c, vec![lo_v, hi_v], false)
+                            self.emit_library_static_call(c, vec![lo_v, hi_v], false)?
                         } else {
                             let mut args = vec![lo_v, hi_v];
                             for _ in 0..range.through.trailing_nulls {
@@ -19696,7 +19770,7 @@ impl<'a> Lower<'a> {
                     }
                     RangeKind::Until => {
                         let c = range.until?;
-                        self.emit_library_static_call(c, vec![lo_v, hi_v], false)
+                        self.emit_library_static_call(c, vec![lo_v, hi_v], false)?
                     }
                     // `downTo` never reaches here (it parses as an infix function call, not `RangeTo`).
                     RangeKind::DownTo => return None,
@@ -20740,7 +20814,7 @@ impl<'a> Lower<'a> {
                 let receiver = self.emit_get_value(this_v);
                 let target = getter.params.first().copied().unwrap_or(this_ty);
                 let receiver = self.coerce_argument_value(receiver, this_ty, target)?;
-                return Some(self.emit_extension_property_get(e, *getter, receiver));
+                return self.emit_extension_property_get(e, *getter, receiver);
             }
             // A resolved TOP-LEVEL property read: the selected facade's static getter, no receiver. The
             // callable carries its origin/owner, so this semantic handoff is identical for every provider.
@@ -20748,7 +20822,7 @@ impl<'a> Lower<'a> {
                 self.info.expr_lowers.get(&e).cloned()
             {
                 let physical_ret = getter.physical_ret;
-                let call = self.emit_library_static_call(*getter, Vec::new(), false);
+                let call = self.emit_library_static_call(*getter, Vec::new(), false)?;
                 return Some(self.coerce_erased_call_result(e, call, &physical_ret, true));
             }
             if let Some(ExprLowering::IntrinsicProperty(member)) =
@@ -20758,14 +20832,7 @@ impl<'a> Lower<'a> {
                 let recv = self.emit_get_value(this_v);
                 let fallback = this_ty.obj_internal().unwrap_or_else(crate::types::wk::any);
                 let ret = member.ret;
-                return Some(self.emit_library_member_call(
-                    recv,
-                    fallback,
-                    *member,
-                    ret,
-                    false,
-                    vec![],
-                ));
+                return self.emit_library_member_call(recv, fallback, *member, ret, false, vec![]);
             }
             if matches!(
                 self.info.expr_lowers.get(&e),
@@ -21046,7 +21113,7 @@ impl<'a> Lower<'a> {
                             ret,
                             resolved.suspend,
                             vec![],
-                        );
+                        )?;
                         return Some(self.coerce_to_static(call, ret, physical_ret));
                     }
                     let (fclass, idx, _) = self.resolve_field_name(bi, &n)?;
@@ -21179,14 +21246,7 @@ impl<'a> Lower<'a> {
                     .obj_internal()
                     .unwrap_or_else(crate::types::wk::any);
                 let ret = member.ret;
-                return Some(self.emit_library_member_call(
-                    recv,
-                    fallback,
-                    *member,
-                    ret,
-                    false,
-                    vec![],
-                ));
+                return self.emit_library_member_call(recv, fallback, *member, ret, false, vec![]);
             }
             if matches!(
                 self.info.expr_lowers.get(&e),
@@ -21210,7 +21270,7 @@ impl<'a> Lower<'a> {
                     .copied()
                     .unwrap_or_else(|| self.info.ty(receiver));
                 let receiver = self.lower_arg(receiver, &target)?;
-                return Some(self.emit_extension_property_get(e, *getter, receiver));
+                return self.emit_extension_property_get(e, *getter, receiver);
             }
             // A MEMBER EXTENSION PROPERTY read (`1.foo` where `class C { val Int.foo }`): the
             // checker selected the declaring owner — call its `getX(Recv)` accessor with dispatch
@@ -21559,7 +21619,7 @@ impl<'a> Lower<'a> {
                                 resolved.ret,
                                 resolved.suspend,
                                 vec![r],
-                            );
+                            )?;
                             let zero = self.emit_const(IrConst::Int(0));
                             return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                         }
@@ -21577,7 +21637,7 @@ impl<'a> Lower<'a> {
                         if c.params.len() == 2 {
                             let l = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                             let r = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
-                            return Some(self.emit_library_static_call(c, vec![l, r], false));
+                            return self.emit_library_static_call(c, vec![l, r], false);
                         }
                     }
                 }
@@ -23227,7 +23287,7 @@ impl<'a> Lower<'a> {
                 // the callee's `reifiedOperationMarker` body and falls back to a direct call, which
                 // for a reified callee only ever throws. There is no receiver to infer `T` from, so
                 // the call's own type arguments are the whole binding.
-                let call = self.emit_reified_library_static_call(e, c, a, call_suspend, None);
+                let call = self.emit_reified_library_static_call(e, c, a, call_suspend, None)?;
                 let call = if arg_prelude.is_empty() {
                     call
                 } else {
@@ -24405,7 +24465,7 @@ impl<'a> Lower<'a> {
                             ret,
                             resolved.suspend,
                             a,
-                        );
+                        )?;
                         let call = self.coerce_to_static(call, ret, physical_ret);
                         return Some(self.wrap_arg_prelude(call, prelude));
                     }
@@ -24417,7 +24477,7 @@ impl<'a> Lower<'a> {
                         ret,
                         resolved.suspend,
                         a,
-                    );
+                    )?;
                     return Some(self.coerce_to_static(call, ret, physical_ret));
                 }
                 // Fewer arguments than the resolved member has parameters means a DEFAULTED
@@ -24485,7 +24545,7 @@ impl<'a> Lower<'a> {
                     };
                 let recv = self.spill_receiver_before_args(recv, rt, &mut prelude);
                 let call =
-                    self.emit_library_member_call(recv, owner, member, ret, resolved.suspend, a);
+                    self.emit_library_member_call(recv, owner, member, ret, resolved.suspend, a)?;
                 // A generic member whose erased return is `Object` but whose substituted type is
                 // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                 let call = self.coerce_to_static(call, ret, physical_ret);
@@ -24607,7 +24667,7 @@ impl<'a> Lower<'a> {
                 // inferred from the receiver (`Collection<T>.toTypedArray()`) when none is explicit.
                 let source_receiver = c.source_receiver;
                 let call =
-                    self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt));
+                    self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt))?;
                 self.record_ext_source_receiver(call, source_receiver);
                 self.coerce_generic_read(call, e, physical_ret)
             } else if let Some(ResolvedCall::LambdaReturnMember(c)) =
@@ -26155,6 +26215,19 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn SemanticPlatform) -> Ty 
     }
 }
 
+/// The unsigned carrier `Ty` whose BOXED form is the value class `internal` (`kotlin/UInt` →
+/// `Ty::UInt`), or `None` for anything else.
+///
+/// Derived from `Ty::boxed_ref` rather than spelled as a second table, so the two directions cannot
+/// drift. Deliberately NOT `Ty::unboxed_primitive`, which omits the unsigned rows on purpose: a boxed
+/// `kotlin/UInt` IS a reference everywhere the IR asks, and this answers a different question — which
+/// carrier a given box wraps.
+fn unsigned_carrier_of_box_type(internal: TypeName) -> Option<Ty> {
+    [Ty::UInt, Ty::ULong]
+        .into_iter()
+        .find(|t| t.boxed_ref().and_then(|b| b.obj_internal()) == Some(internal))
+}
+
 /// Whether an `IrType` is a reference type (anything except a primitive class FqName / Unit).
 fn ir_type_is_reference(t: &Ty) -> bool {
     // A NULLABLE value is always a reference: a nullable reference keeps its descriptor, and a nullable
@@ -26434,4 +26507,34 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
         BinOp::And => IrBinOp::And,
         BinOp::Or => IrBinOp::Or,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The gate that keeps a boxed unsigned out of an erased descriptor slot reads a value's
+    /// representation off its lowered node by recognising `<box>.box-impl`, so it is only as good as
+    /// this box→carrier mapping. Pinned here because the mapping is derived from `Ty::boxed_ref`
+    /// rather than spelled out: a new unsigned carrier must show up on both sides at once.
+    #[test]
+    fn unsigned_box_types_map_back_to_their_carrier() {
+        for carrier in [Ty::UInt, Ty::ULong] {
+            let boxed = carrier
+                .boxed_ref()
+                .and_then(|b| b.obj_internal())
+                .expect("an unsigned carrier boxes to its own inline class");
+            assert_eq!(unsigned_carrier_of_box_type(boxed), Some(carrier));
+        }
+        // A SIGNED primitive boxes to `kotlin/Int`, whose values never ride in an unsigned carrier —
+        // recognising it here would box arguments that the descriptor wants as `Integer`.
+        let signed = Ty::Int.boxed_ref().and_then(|b| b.obj_internal()).unwrap();
+        assert_eq!(unsigned_carrier_of_box_type(signed), None);
+        // A value class krusty has no carrier `Ty` for stays unmapped: it is a reference on both
+        // sides of the call and needs no box/carrier reconciliation.
+        assert_eq!(
+            unsigned_carrier_of_box_type(crate::types::type_name("kotlin/time/Duration")),
+            None
+        );
+    }
 }
