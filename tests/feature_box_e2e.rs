@@ -3850,6 +3850,30 @@ fun box(): String {
 }
 "#,
     ),
+    // A Kotlin `Char` is a UTF-16 code UNIT, so the surrogate range D800..DFFF holds legal `Char`
+    // values. The `Char` companion's surrogate constants are inlined from the classpath, and each
+    // must keep its code unit — a Rust-`char` round-trip rejects lone surrogates and used to fold
+    // them to NUL.
+    (
+        "CharSurrogateConst",
+        r#"
+fun box(): String {
+    val minHigh = Char.MIN_HIGH_SURROGATE.code
+    if (minHigh != 55296) return "f0: $minHigh"
+    val maxHigh = Char.MAX_HIGH_SURROGATE.code
+    if (maxHigh != 56319) return "f1: $maxHigh"
+    val minLow = Char.MIN_LOW_SURROGATE.code
+    if (minLow != 56320) return "f2: $minLow"
+    val maxLow = Char.MAX_LOW_SURROGATE.code
+    if (maxLow != 57343) return "f3: $maxLow"
+    val minSur = Char.MIN_SURROGATE.code
+    if (minSur != 55296) return "f4: $minSur"
+    val maxSur = Char.MAX_SURROGATE.code
+    if (maxSur != 57343) return "f5: $maxSur"
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]
