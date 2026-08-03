@@ -2764,10 +2764,11 @@ fn emit_class(
         } else {
             0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
         };
-        if let Some(cv) = const_value_idx(ir, s.init, &mut cw) {
-            cw.add_field_const(acc, &s.name, &desc, cv);
-        } else {
-            cw.add_field(acc, &s.name, &desc);
+        // `ConstantValue` is only meaningful on a FINAL field (JVMS 4.7.2 ignores it otherwise), and a
+        // `var` is initialized by the `<clinit>` store anyway.
+        match const_value_idx(ir, s.init, &mut cw).filter(|_| !s.is_var) {
+            Some(cv) => cw.add_field_const(acc, &s.name, &desc, cv),
+            None => cw.add_field(acc, &s.name, &desc),
         }
     }
     // Constructor: super(); store each ctor *parameter* into its field; then run `init_body`
@@ -5244,10 +5245,12 @@ fn emit_enum_class(
     let owner_statics: Vec<&crate::ir::IrStatic> =
         ir.statics.iter().filter(|s| s.owner_matches(&fq)).collect();
     for s in &owner_statics {
+        // A `var` is reassignable, so it must not carry ACC_FINAL (see the class path).
+        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
         let acc = if s.visibility.is_private() {
-            0x001A // PRIVATE | STATIC | FINAL
+            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
         } else {
-            0x0019 // PUBLIC | STATIC | FINAL
+            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
         };
         cw.add_field(acc, &s.name, &ir_type_desc(&s.ty));
     }
