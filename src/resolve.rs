@@ -6623,6 +6623,36 @@ fn call_requires_argument_slots(
                 && signature.required < signature.param_names.len()))
 }
 
+/// Map an already-selected, unlabelled call's source expressions to semantic parameter slots. Selection
+/// has already established which omissions are legal; this helper records only the syntax-independent
+/// positional rule plus Kotlin's trailing-lambda rule. It deliberately knows nothing about callable
+/// origin (module/classpath/file) or emission — every lowerer receives the same slot handoff.
+fn unlabelled_argument_slots(
+    args: &[ExprId],
+    parameter_count: usize,
+    trailing_lambda: bool,
+) -> Option<Vec<Option<ExprId>>> {
+    if args.len() > parameter_count || (trailing_lambda && args.is_empty()) {
+        return None;
+    }
+    let trailing = usize::from(trailing_lambda && args.len() < parameter_count);
+    let positional = args.len().checked_sub(trailing)?;
+    let last = parameter_count.checked_sub(trailing)?;
+    Some(
+        (0..parameter_count)
+            .map(|parameter| {
+                if trailing != 0 && parameter == last {
+                    args.last().copied()
+                } else if parameter < positional {
+                    Some(args[parameter])
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    )
+}
+
 /// The one mapping failure worth reporting, when every candidate failed for the SAME reason.
 ///
 /// Equality is over the whole failure, deliberately. Agreeing only on the first error is not enough:
@@ -10119,6 +10149,12 @@ pub enum ExprLowering {
         owner: TypeName,
         receiver: Ty,
         ty: Ty,
+    },
+    /// A bare-name read of a TOP-LEVEL property (`import pkg.plugin; plugin.tag`), resolved to its
+    /// declaring facade's receiver-less static getter. The checker is the sole resolver; lowering emits
+    /// this callable instead of rediscovering the property.
+    TopLevelPropertyGet {
+        getter: Box<crate::libraries::LibraryCallable>,
     },
     /// A Kotlin invoke-operator call (`a(args)`, equivalently `a.invoke(args)`) selected by the
     /// checker. The one convention covers both a function VALUE receiver (`Ty::Fun`, lowered to a
@@ -14152,35 +14188,40 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .map(|(argument, &parameter)| {
+                // The receiver comes from the parameter's own function TYPE (already substituted into
+                // `param_types`), which carries the receiver's type ARGUMENTS (`Config<T>.() -> Unit` with
+                // `T` bound by this call). `call_sig.lambda_receivers` is the weaker fallback: a callable
+                // with no generic signature records only the receiver's CLASS, so preferring it would
+                // shape the lambda against a raw `Config` and lose the binding.
                 overload
                     .call_sig
-                    .lambda_receivers
+                    .lambda_receiver_params
                     .get(parameter)
                     .copied()
+                    .unwrap_or(false)
+                    .then(|| {
+                        let context_count = overload
+                            .call_sig
+                            .lambda_context_counts
+                            .get(parameter)
+                            .copied()
+                            .unwrap_or_default();
+                        shape
+                            .param_types
+                            .as_ref()
+                            .and_then(|types| types.get(argument))
+                            .and_then(|types| types.get(context_count))
+                            .copied()
+                    })
                     .flatten()
-                    .map(|receiver| crate::symbol_resolver::ty_subst(receiver, &binds))
                     .or_else(|| {
                         overload
                             .call_sig
-                            .lambda_receiver_params
+                            .lambda_receivers
                             .get(parameter)
                             .copied()
-                            .unwrap_or(false)
-                            .then(|| {
-                                let context_count = overload
-                                    .call_sig
-                                    .lambda_context_counts
-                                    .get(parameter)
-                                    .copied()
-                                    .unwrap_or_default();
-                                shape
-                                    .param_types
-                                    .as_ref()
-                                    .and_then(|types| types.get(argument))
-                                    .and_then(|types| types.get(context_count))
-                                    .copied()
-                            })
                             .flatten()
+                            .map(|receiver| crate::symbol_resolver::ty_subst(receiver, &binds))
                     })
             })
             .collect::<Vec<_>>();
@@ -15316,7 +15357,9 @@ impl<'a> Checker<'a> {
     fn resolve_context_module_top_level(
         &self,
         name: &str,
-        arg_tys: &[Ty],
+        args: &[ExprId],
+        argument_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<(crate::libraries::FunctionInfo, Vec<String>)> {
         let mut best: Option<(usize, usize, crate::libraries::FunctionInfo, Vec<String>)> = None;
         for (idx, fi) in self
@@ -15330,26 +15373,37 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let value_params = &fi.callable.params[ctx_count..];
-            if arg_tys.len() > value_params.len() {
+            // Context parameters are PHYSICAL leading parameters but never source arguments. Use the
+            // same semantic argument mapper as every other call path against the context-stripped
+            // signature: it handles labels, reordered arguments, omissions, and a trailing lambda in
+            // one place. The former positional zip made `f(b = value)` test `value` against `a`, and
+            // separately reimplemented only the trailing-default subset of the mapper's rules.
+            let value_signature = call_sig_without_context(&fi.call_sig, ctx_count);
+            let Ok(slots) = map_call_sig_args_with_trailing(
+                args,
+                argument_names,
+                &value_signature,
+                trailing_lambda,
+            ) else {
                 continue;
-            }
-            let omitted_ok = (arg_tys.len()..value_params.len())
-                .all(|i| fi.call_sig.param_has_default(ctx_count + i));
-            if !omitted_ok {
-                continue;
-            }
+            };
             let Some(sources) = self.resolve_context_args(&fi.callable.params[..ctx_count]) else {
                 continue;
             };
             let mut score = 0;
-            for (&p, &a) in value_params.iter().zip(arg_tys) {
+            let mut applicable = true;
+            for (&p, argument) in value_params.iter().zip(&slots) {
+                let Some(argument) = argument else {
+                    continue;
+                };
+                let a = self.expr_types[argument.0 as usize];
                 if !arg_assignable_simple(p, a) {
-                    score = 0;
+                    applicable = false;
                     break;
                 }
                 score += if p == a { 2 } else { 1 };
             }
-            if score == 0 && !arg_tys.is_empty() {
+            if !applicable {
                 continue;
             }
             if best.as_ref().is_none_or(|(best_score, best_idx, ..)| {
@@ -16858,6 +16912,16 @@ impl<'a> Checker<'a> {
         } else {
             None
         }
+    }
+
+    /// The TOP-LEVEL property an unqualified name denotes, over this file's import scope — asked of the
+    /// federated symbol source, so where it was declared is not this rung's question. Only a property with
+    /// an accessible getter and a value-shaped type is a read; anything a nearer scope declares (a local, a
+    /// member, this module's own top-level properties) is resolved by an earlier rung and shadows it.
+    fn top_level_property(&self, name: &str) -> Option<crate::libraries::PropertyInfo> {
+        self.resolver()
+            .resolve_top_level_property(name)
+            .filter(|property| property.getter.ret.is_read_value_result())
     }
 
     fn source_class_decl_by_internal(&self, internal: TypeName) -> Option<ClassDecl> {
@@ -22139,6 +22203,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                         } else if let Ty::Obj(internal, _) = recv {
                             // Source members take precedence over extensions and classpath members.
@@ -22229,6 +22294,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                         } else {
                             // Every non-`String`, non-`Obj` receiver reaches one semantic plan after
@@ -22256,6 +22322,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                             }
                         }
@@ -22540,6 +22607,18 @@ impl<'a> Checker<'a> {
                     self.expr_lowers
                         .insert(e, ExprLowering::IntrinsicProperty(Box::new(member)));
                     ret
+                } else if let Some(property) = self.top_level_property(&n) {
+                    // A TOP-LEVEL property read (`import pkg.plugin; plugin`): its value is its declaring
+                    // facade's static getter call. Last among the value rungs — every enclosing scope
+                    // (locals, members, objects) shadows an imported top-level property.
+                    let ty = property.ty;
+                    self.expr_lowers.insert(
+                        e,
+                        ExprLowering::TopLevelPropertyGet {
+                            getter: Box::new(property.getter),
+                        },
+                    );
+                    ty
                 } else {
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -24438,8 +24517,7 @@ impl<'a> Checker<'a> {
         if let Some(ret) = self.record_extension_call_with_slots(call, name, rt, args, &[]) {
             return Some(ret);
         }
-        if let Some(ret) =
-            self.record_library_extension_call_with_arg_kinds(Some(call), name, rt, &arg_kinds, &[])
+        if let Some(ret) = self.record_extension_call_from_args(call, name, rt, args, arg_tys, &[])
         {
             return Some(ret);
         }
@@ -24924,6 +25002,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Emit the single argument diagnostic for a LABELLED call only after every callable origin has
+    /// declined it. Individual member/extension/top-level probes must remain read-only on a miss so a
+    /// later origin still gets its turn; these terminal receiver branches call this helper once their
+    /// generic resolution ladder is exhausted.
+    fn report_unmapped_labelled_call(&mut self, call: ExprId, args: &[ExprId]) -> Option<Ty> {
+        if !self.file.call_arg_names.contains_key(&call.0) {
+            return None;
+        }
+        if !self.report_pending_unknown_named_arg(call)
+            && !self.call_already_has_argument_diagnostic(call, args)
+        {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+            );
+        }
+        Some(Ty::Error)
+    }
+
     fn record_extension_call_from_args(
         &mut self,
         call: ExprId,
@@ -24934,28 +25031,45 @@ impl<'a> Checker<'a> {
         type_args: &[Ty],
     ) -> Option<Ty> {
         if self.file.call_arg_names.contains_key(&call.0) {
-            return self
-                .record_extension_call_with_slots(call, name, receiver, args, type_args)
-                .or_else(|| {
-                    if !self.report_pending_unknown_named_arg(call)
-                        && !self.call_already_has_argument_diagnostic(call, args)
-                    {
-                        self.diags.error(
-                            self.call_callee_name_span(call),
-                            INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                        );
-                    }
-                    Some(Ty::Error)
-                });
+            // A labelled extension probe may legitimately find no extension: this same helper is used
+            // while walking implicit receivers, before a receiver-less top-level callable gets its turn.
+            // `record_extension_call_with_slots` already reports mapping/applicability errors when an
+            // extension family exists; preserve `None` when the family is absent so this generic probe
+            // cannot poison a later resolution rung with a fabricated overload diagnostic.
+            return self.record_extension_call_with_slots(call, name, receiver, args, type_args);
         }
         let arg_kinds = self.checked_call_arg_kinds(args);
-        self.record_library_extension_call_with_arg_kinds(
+        let resolved = self.record_library_extension_call_with_arg_kinds(
             Some(call),
             name,
             receiver,
             &arg_kinds,
             type_args,
-        )
+        );
+        if resolved.is_some() {
+            // The selected callable is the semantic authority for whether this is a `$default` call.
+            // Record its unlabelled omission/trailing-lambda mapping HERE, beside resolution, rather than
+            // asking only the classpath-extension emitter to reconstruct it from AST shape. The extension
+            // receiver occupies `params[0]`; `resolved_call_arg_slots` describes source VALUE parameters.
+            let parameter_count = match self.resolved_calls.get(&call) {
+                Some(ResolvedCall::Extension(callable))
+                    if callable.default_call && callable.vararg_elem.is_none() =>
+                {
+                    callable.params.len().checked_sub(1)
+                }
+                _ => None,
+            }
+            .filter(|&parameter_count| args.len() < parameter_count);
+            if let Some(parameter_count) = parameter_count {
+                let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                if let Some(slots) =
+                    unlabelled_argument_slots(args, parameter_count, trailing_lambda)
+                {
+                    self.resolved_call_arg_slots.insert(call, slots);
+                }
+            }
+        }
+        resolved
     }
 
     /// Select a labelled extension call without recording a call or diagnostic.
@@ -26206,8 +26320,15 @@ impl<'a> Checker<'a> {
             &ctor_params,
             self.file.call_has_trailing_lambda.contains(&call.0),
         )?;
+        // Type only arguments this call has not typed yet. This constructor is one CANDIDATE for a
+        // `Name(args)` whose name may also be a top-level function; re-checking an argument that already
+        // has a type would overwrite it with the expected-type-free one — a trailing lambda already shaped
+        // against the function's receiver parameter (`Cfg.() -> Unit`) would fall back to `() -> Unit`,
+        // after which neither this constructor nor the function accepts the call.
         for &a in slots.iter().flatten() {
-            self.expr(a);
+            if self.expr_types[a.0 as usize] == Ty::Error {
+                self.expr(a);
+            }
         }
         if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
             let tys: Vec<Ty> = ordered
@@ -32060,9 +32181,12 @@ impl<'a> Checker<'a> {
                         || self.resolve_instance_member(t, &fname, &arg_tys).is_some()
                 });
                 if module_top.is_none() && !shadowed_by_member {
-                    if let Some((fi, sources)) =
-                        self.resolve_context_module_top_level(&fname, &arg_tys)
-                    {
+                    if let Some((fi, sources)) = self.resolve_context_module_top_level(
+                        &fname,
+                        args,
+                        arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
+                    ) {
                         let params = &fi.callable.params;
                         let ctx_count = fi.context_count;
                         let ret_ty = self.module_top_level_return(call, &fi, &arg_tys, expected);
