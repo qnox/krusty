@@ -415,19 +415,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`resolver_regression_e2e::primitive_builtin_infix_extension_source_form_matters`,
   box `infixFunctionOverBuiltinMember.kt`). `mod`/`rangeTo`/`inc`/`dec` unsupported.
   The bitwise/shift members on `Int`/`Long` (`a.and(b)`/`a or b`, `a.shl(n)`/`a shr n`/`a ushr n`,
-  `a.xor(b)`) lower to the `iand`/`ior`/`ixor`/`ishl`/… intrinsic; shifts take an `Int` count, the
-  others the receiver's own type. `compareTo` and the arithmetic/bitwise/shift members all share
-  `lower_prim_op_method`, so an (unnecessary) safe call on a non-null primitive — `a?.and(b)`,
-  `a?.compareTo(b)` — compiles identically to the plain `.` form (`tests/safe_call_prim_intrinsic_e2e.rs`).
-  `inv()` (zero-arg) stays a dedicated arm.
+  `a.xor(b)`) and Boolean bitwise members (`b.and(c)`/`or`/`xor`) lower to the corresponding
+  `iand`/`ior`/`ixor`/`ishl`/… intrinsic; shifts take an `Int` count, the others the receiver's own
+  type. `compareTo` and the arithmetic/bitwise/shift members all share `lower_prim_op_method`.
+  A safe call uses that same operation on the non-null receiver value. Krusty collapses an unnecessary
+  safe call on a statically non-null primitive to the qualified operation (and its non-null result),
+  while a genuinely nullable primitive receiver is unboxed through the ordinary argument-coercion
+  path and its result is boxed for the nullable merge. `inv()` (zero-arg) stays a dedicated arm.
+  (`tests/safe_call_primitive_e2e.rs`.)
 - Safe call `a?.b` / `a?.m(args)`: evaluates the receiver once into a temp, then yields the member
-  access (property `GetField` / method `MethodCall`) when the temp is non-`null`, else `null` — i.e.
-  `{ val t = a; if (t != null) t.b else null }`. Lowered in the front-end so every backend shares it;
-  composes with Elvis (`a?.m() ?: d`). The merge of the member arm (a reference) with the `null` arm
-  types the verification stack as the member's reference type (`null` is assignable to any reference),
-  not `top` — emitting a `top` there is a `VerifyError: Bad type on operand stack`. Only user-defined
-  member targets are resolved; safe calls on stdlib receivers (`s?.substring(1)`) need the external-call
-  path and are skipped (`tests/safe_call_e2e.rs`).
+  access when the temp is non-`null`, else `null` — i.e. `{ val t = a; if (t != null) t.b else null }`.
+  Inside the non-null arm the receiver expression is substituted with the temp and re-enters the same
+  qualified-access lowering used by `.`, so source/module members and extensions, classpath members
+  and extensions, primitive intrinsics, array operations, and `kotlin/Any` virtuals do not acquire
+  separate safe-call dispatch tables. Resolution likewise normalizes the receiver to its non-null
+  semantic type before selecting those targets; whether a primitive arrived boxed from `Int?` or
+  unboxed from `Int` is a lowering representation, not a callable origin. A statically non-null scalar
+  receiver delegates directly to the complete qualified operation; a nullable receiver's merge boxes
+  primitive member results so both branches are references, and composes with Elvis (`a?.m() ?: d`).
+  Primitive conversions, unmodelled builtin methods (`inc`/`dec`/`mod`/`rangeTo`), erased type-parameter
+  receivers, local functions, and function-object `toString`/`hashCode` remain rejected rather than
+  being rebound to a different origin or emitted with the wrong representation.
+  (`tests/safe_call_e2e.rs`, `tests/safe_call_primitive_e2e.rs`.)
 - **Safe call whose scope block diverges — `x?.let { return … }` / `x?.run { throw … }` / `x?.also { … }`
   / `x?.apply { … }`.** A scope function whose lambda body is a non-local `return` (or `throw`) has block
   value type `Nothing`, so the whole safe call is `Nothing?` — `null` when the receiver is null, else
@@ -2021,25 +2030,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   document shape; `crates/krusty-lsp/src/dump_cache.rs` covers identity, privacy, atomicity, and
   retention.
 
-- **Expression nesting is depth-bounded in every recursive pass — degrade, never crash.** The
-  checker and IR-lowering bound their expression recursion at 500 semantic nesting levels; the
-  parser bounds its recursion at 1000 `parse_bp` entries — one semantic level costs up to two
-  entries (a binary right operand plus a parenthesized re-entry), so the parser admits every shape
-  the later passes admit at up to two entries per level; redundant nesting (doubled parens) spends
-  entries faster and trips the parser first. Past its bound the parser emits `expression nesting too deep`, skips the
-  rest of the over-deep expression bracket-balanced (so error recovery does not rebuild it as
-  postfix-call nesting for the later passes to recurse over), and yields an error expression; the
-  checker types the expression as `Error`; lowering bails. kotlinc has no fixed documented bound
-  (it stack-overflows on pathological nesting); krusty deliberately trades acceptance of
-  pathologically deep nesting for a guaranteed diagnostic on any thread's stack. A left-leaning binary chain (`a && b && c`) parses
-  and checks iteratively and does not count toward the depth. The bounds are survivable on a
-  default 2 MiB thread stack in unoptimized builds via same-thread stack growth
-  (`src/wide_stack.rs`), applied PER RECURSION LEVEL in all three passes — a single entry-point
-  reserve was measured to overrun on one deep genuine nesting shape per pass (5–6 parser frames
-  per paren level; `check_call`-sized checker/lowering frames per call level). Tests:
-  `tests/deep_expression_nesting_check.rs` (400/700-operand chains, 400 and 1500 nested parens,
-  450-deep call chain) and `tests/deep_expression_nesting_check_e2e.rs` (450-level `0+(…)`
-  right-nesting through the checker and lowering, end-to-end).
+- **Source nesting is depth-bounded — degrade, never crash.** The checker and IR-lowering bound
+  their expression recursion at 500 semantic nesting levels; the parser bounds its recursion at
+  1000 entries per funnel — expressions (`parse_bp`, plus annotation arrays/nested values which
+  recurse while a declaration prefix is parsed), types (`parse_type`: nested type parens
+  `((((Int))))`, nested generic arguments), and statements/declarations (`parse_stmt` plus the
+  class-like declaration parsers: nested blocks `while { while { … } }`, nested
+  classes/interfaces/objects/enums), each of which recurses outside `parse_bp` and carries its
+  own guard. Nested blocks reach the later passes as `Expr::Block` nesting (covered by their
+  expression guards) and nested classes hoist flat, but a genuinely deep generic `TypeRef` tree
+  that the parser admits has no demonstrated checker/lowering bound yet — the parser guard is
+  the demonstrated contract for types; bounding the later passes' `TypeRef` recursion is a
+  follow-up. For expressions, one semantic level costs up to
+  two entries (a binary right operand plus a parenthesized re-entry), so the parser admits every
+  shape the later passes admit at up to two entries per level; redundant nesting (doubled parens)
+  spends entries faster and trips the parser first. Past its bound the parser emits
+  `expression`/`type`/`statement`/`declaration` `nesting too deep`, skips the rest of the
+  over-deep construct bracket-balanced (angle-aware in type position, so each enclosing
+  type-argument frame finds its `>`; error recovery neither rebuilds the nesting for the later
+  passes to recurse over nor unwinds with an `expected ')'`/`'}'` cascade), and yields an error
+  node; the checker types an over-deep expression as `Error`; lowering bails. kotlinc has no fixed
+  documented bound (it stack-overflows on pathological nesting); krusty deliberately trades
+  acceptance of pathologically deep nesting for a guaranteed diagnostic on any thread's stack. A
+  left-leaning binary chain (`a && b && c`) parses and checks iteratively and does not count
+  toward the depth. The bounds are survivable on a default 2 MiB thread stack in unoptimized
+  builds via same-thread stack growth (`src/wide_stack.rs`), applied PER RECURSION LEVEL in every
+  guarded funnel — a single entry-point reserve was measured to overrun on one deep genuine
+  nesting shape per pass (5–6 parser frames per paren level; `check_call`-sized checker/lowering
+  frames per call level), and 5000-deep statement/class nesting SIGBUSed past one grown segment.
+  Tests: `tests/deep_expression_nesting_check.rs` (400/700-operand chains, 400 and 1500 nested
+  parens, 450-deep call chain, 5000-deep annotation arrays, 400/5000 nested type parens and generic
+  arguments, 400/5000 nested `while` blocks, 300/5000 nested classes, and mixed local-class/init/
+  loop recursion) and `tests/deep_expression_nesting_check_e2e.rs`
+  (450-level `0+(…)` right-nesting through the checker and lowering, end-to-end).
 
 ## 8. Success criteria for the PoC
 
