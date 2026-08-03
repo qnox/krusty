@@ -46,7 +46,22 @@ fn sealed_interface_nested_subclasses_emit() {
 fn data_object_has_no_copy() {
     let bytes = owned_bytes(SRC);
     let has = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
-    // A data object is a singleton — no copy, unlike a data class.
+    // A data object is a singleton — no copy, unlike a data class. Covers the class `@Metadata` too
+    // (its string table names every synthesized member), which is where a spurious `copy` first
+    // appeared: kotlinc's `Origin$Owned` declares only equals/hashCode/toString.
     assert!(!has("copy"), "a data object must not synthesize copy");
     assert!(has("INSTANCE"), "a data object has an INSTANCE field");
+    let meta = krusty::jvm::classreader::parse_class(&bytes)
+        .expect("Origin$Owned parses")
+        .meta;
+    let functions: Vec<&str> = meta
+        .class_functions
+        .iter()
+        .map(|f| f.kotlin_name.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        ["equals", "hashCode", "toString"],
+        "a data object's @Metadata names only kotlinc's synthesized set",
+    );
 }

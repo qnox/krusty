@@ -262,14 +262,9 @@ fn compile_source(
     // `@Metadata` shapes, `SourceFile` = `<stem>.kt`) so the byte-diff mode measures what ships —
     // and the box run exercises the shipping bytes too.
     let metadata = krusty::jvm::backend::facade_package_metadata(file, 0, &syms);
-    let opts = ir_emit::EmitOptions {
-        emit_class_metadata: true,
-        source_file: Some(format!("{stem}.kt")),
-        inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
-            cp.clone(),
-        )),
-        ..Default::default()
-    };
+    // Consume the same complete option set as the CLI. Keeping a local partial literal here once
+    // allowed the conformance artifact to diverge whenever the shipping defaults gained a field.
+    let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
     let run = ir_emit::EmitRun::default();
     let outputs: Vec<(String, Vec<u8>)> = match ir_emit::emit_all_with_opts(
         &ir,
@@ -558,22 +553,12 @@ fn compile_blocks(
         // MODULE's compile reads this module's output from the classpath and needs it to resolve
         // cross-module extensions.
         let metadata = krusty::jvm::backend::facade_package_metadata(file, i as u32, &syms);
-        let opts = ir_emit::EmitOptions {
-            // NO per-class `@Metadata` here: this path also compiles `// MODULE:` dependency
-            // chains, where a DOWNSTREAM module reads the emitted class metadata at compile time —
-            // the unverified value-class shapes mis-resolve there (VerifyError/CCE in the
-            // compileKotlinAgainstKotlin inline-class tests). Multi-file tests aren't byte-diffed
-            // yet, so only the `SourceFile` stamp is mirrored.
-            emit_class_metadata: false,
-            source_file: Some(format!(
-                "{}.kt",
-                blocks[i].0.rsplit('/').next().unwrap_or(&blocks[i].0)
-            )),
-            inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
-                cp.clone(),
-            )),
-            ..Default::default()
-        };
+        // This is the only gate path where a downstream `// MODULE:` reads an upstream module's
+        // classes. Use the complete shipping configuration rather than duplicating its metadata and
+        // filename fields; the shared constructor also reduces a logical nested source path to the
+        // simple `SourceFile` name required by the class-file attribute.
+        let opts =
+            krusty::jvm::backend::shipping_emit_options(&blocks[i].0, "main", None, cp.clone());
         let run = ir_emit::EmitRun::default();
         let out = ir_emit::emit_all_with_opts(&ir, &facade, &*cp, metadata.as_ref(), &opts, &run)?;
         all.extend(out);
