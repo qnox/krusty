@@ -471,6 +471,10 @@ fn reified_inline_extension_cross_file_still_rejects() {
     );
 }
 
+/// A reified parameter that appears only in a VALUE parameter cannot be inferred by the receiver
+/// splice path. The compiler still emits this extension's facade to publish its inline body, so this
+/// specifically guards the distinction between physical emission and a legal direct-call fallback:
+/// failed specialization must skip the file instead of invoking the erased reified body.
 #[test]
 fn reified_value_parameter_inline_extension_cross_file_still_rejects() {
     const LIB: &str = "interface I\n\

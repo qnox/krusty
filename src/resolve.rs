@@ -147,9 +147,9 @@ pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 pub(crate) use crate::symbol_resolver::FunctionImportScope;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
-/// `is_override`/`is_final`/`is_suspend` into one byte. Read through the `Signature` accessors of the
-/// same names; `vararg` is also mutated through `set_vararg`; built with the `with_*` chain. Headroom
-/// for two more flags.
+/// `is_override`/`is_final`/`is_suspend`/`requires_splice` into one byte. Read through the
+/// `Signature` accessors of the same names; `vararg` is also mutated through `set_vararg`; built with
+/// the `with_*` chain. Headroom for one more flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SigFlags(u8);
 
@@ -160,6 +160,7 @@ impl SigFlags {
     const IS_OVERRIDE: u8 = 1 << 3;
     const IS_FINAL: u8 = 1 << 4;
     const IS_SUSPEND: u8 = 1 << 5;
+    const REQUIRES_SPLICE: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -199,6 +200,10 @@ impl SigFlags {
     pub const fn with_is_suspend(self, on: bool) -> Self {
         self.with(Self::IS_SUSPEND, on)
     }
+    #[inline]
+    pub const fn with_requires_splice(self, on: bool) -> Self {
+        self.with(Self::REQUIRES_SPLICE, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -208,9 +213,11 @@ pub struct Signature {
     /// Declared generic callable shape retained for call-site inference.
     pub generic_sig: Option<GenericSig>,
     pub projected_return_hazard: bool,
-    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend` (read via the
-    /// accessors below; `vararg` set via `set_vararg`). `vararg` marks a variadic signature.
-    /// `is_final` — a `final` member a subclass cannot override. `is_suspend` — a `suspend fun`.
+    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend`/
+    /// `requires_splice` (read via the accessors below; `vararg` set via `set_vararg`). `vararg` marks
+    /// a variadic signature. `is_final` — a `final` member a subclass cannot override. `is_suspend`
+    /// — a `suspend fun`. `requires_splice` — no direct-call fallback is semantically legal even when
+    /// the backend emits a method so another compilation can obtain and inline its body.
     pub flags: SigFlags,
     pub vararg_index: Option<usize>,
     /// Minimum number of arguments a caller must supply — params beyond this have default values
@@ -302,6 +309,10 @@ impl Signature {
     #[inline]
     pub fn is_suspend(&self) -> bool {
         self.flags.has(SigFlags::IS_SUSPEND)
+    }
+    #[inline]
+    pub fn requires_splice(&self) -> bool {
+        self.flags.has(SigFlags::REQUIRES_SPLICE)
     }
     #[inline]
     pub fn set_vararg(&mut self, on: bool) {
@@ -1640,8 +1651,6 @@ pub struct SymbolTable {
     unemitted_fn_facades_by_decl: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands keyed by source declaration.
     pub source_generic_value_operand_slots: HashMap<(u32, u32), Vec<u32>>,
-    /// Source functions whose reified parameters require call-site splicing.
-    source_reified_functions: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands for source members.
     pub(crate) source_generic_member_value_operand_slots: GenericMemberValueOperandSlots,
     pub source_projected_return_hazards: std::collections::HashSet<(u32, u32)>,
@@ -1680,7 +1689,6 @@ impl Default for SymbolTable {
             fn_facades_by_decl: HashMap::new(),
             unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
             source_generic_value_operand_slots: HashMap::new(),
-            source_reified_functions: std::collections::HashSet::new(),
             source_generic_member_value_operand_slots: HashMap::new(),
             source_projected_return_hazards: std::collections::HashSet::new(),
             ext_prop_facades_by_decl: HashMap::new(),
@@ -1782,10 +1790,6 @@ impl SymbolTable {
                 .into_iter()
                 .map(|((file, declaration), slots)| ((file + offset, declaration), slots))
                 .collect();
-        self.source_reified_functions = std::mem::take(&mut self.source_reified_functions)
-            .into_iter()
-            .map(|(file, declaration)| (file + offset, declaration))
-            .collect();
         self.source_projected_return_hazards =
             std::mem::take(&mut self.source_projected_return_hazards)
                 .into_iter()
@@ -2753,11 +2757,14 @@ impl SymbolTable {
             if !seen_owners.insert(owner) {
                 continue;
             }
+            // A CLASSPATH owner in the chain: its methods aren't source declarations, so it
+            // contributes nothing and its own supertypes aren't walked. Keep whatever the SOURCE
+            // classes below it already contributed rather than discarding the walk — a source class
+            // extending a library class (`class C : ArrayList<Int>() { override fun removeAt(…) }`)
+            // still has its own declaration matched, which is what a `super.` call and the mapped-
+            // interface bridge both need. Bailing out here made such an override invisible.
             let Some(class) = self.class_by_type_name(owner) else {
-                if include_interfaces {
-                    continue;
-                }
-                return None;
+                continue;
             };
             for signature in class.methods_named(name) {
                 // An override has the same JVM parameter signature as its parent. Keep the
@@ -4470,9 +4477,6 @@ fn collect_signatures_with_cp_impl(
             match file.decl(d) {
                 Decl::Fun(f) => {
                     let source_key = (i as u32, d.0);
-                    if !f.reified_type_params.is_empty() {
-                        table.source_reified_functions.insert(source_key);
-                    }
                     let value_operand_slots = generic_value_operand_slots(f, &[]);
                     if !value_operand_slots.is_empty() {
                         table
@@ -4619,7 +4623,14 @@ fn collect_signatures_with_cp_impl(
                             .with_is_operator(f.is_operator())
                             .with_is_override(f.is_override())
                             .with_is_final(f.is_final())
-                            .with_is_suspend(f.is_suspend()),
+                            .with_is_suspend(f.is_suspend())
+                            // Reified source bodies may be emitted to make their inline body
+                            // available across a compilation boundary, but their erased JVM method
+                            // is not a legal direct-call fallback. Encode that semantic capability on
+                            // the signature itself so every source callable origin maps it to the
+                            // shared `InlineKind::MustInline` state instead of consulting a parallel
+                            // declaration set or rediscovering `reified` in individual call paths.
+                            .with_requires_splice(!f.reified_type_params.is_empty()),
                         vararg_index,
                         required,
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
@@ -9358,6 +9369,11 @@ pub enum ResolvedCall {
         physical_params: Vec<Ty>,
         ret: Ty,
         physical_ret: Ty,
+        /// Selected callable capabilities. These stay on the semantic target so every later consumer
+        /// answers "does this exact call suspend/require splicing?" without looking the source name up
+        /// again or branching on whether the declaration came from this file or a dependency.
+        inline: InlineKind,
+        suspend: bool,
         interface: bool,
         /// The semantic vararg slot. Its presence is the vararg flag and its value drives packing.
         vararg_index: Option<usize>,
@@ -9371,9 +9387,11 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
-        /// The selected declaration has reified type parameters, so a direct facade call is unsound.
-        /// Same-file lowering may splice it first; every remaining path must bail.
-        requires_splice: bool,
+        /// Selected callable capabilities. Carrying the complete semantic facts, rather than only a
+        /// derived `requires_splice` bit, lets safety gates distinguish `suspend inline` from ordinary
+        /// inline calls and keeps those gates independent of declaration name and symbol origin.
+        inline: InlineKind,
+        suspend: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -9410,6 +9428,51 @@ impl ResolvedCall {
             Self::ModuleExtension { owner, .. } => *owner,
             Self::ModuleTopLevel(_) | Self::LocalFunction(_) => None,
         }
+    }
+
+    /// Whether this exact checker-selected call suspends. This is the common classification consumed
+    /// by AST-level coroutine discovery before an IR suspension set exists.
+    pub(crate) fn is_suspend(&self) -> bool {
+        match self {
+            Self::Member(resolved) => resolved.suspend,
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => callable.suspend,
+            Self::Companion(member) => member.suspend(),
+            Self::ModuleMember { suspend, .. }
+            | Self::ModuleMemberExtension { suspend, .. }
+            | Self::ModuleExtension { suspend, .. } => *suspend,
+            Self::ModuleTopLevel(callable) => callable.suspend,
+            Self::LocalFunction(callable) => callable.sig.is_suspend(),
+        }
+    }
+
+    /// Inline capability of the exact selected target. `None` means an ordinary callable, while the
+    /// stronger states preserve whether splicing is optional or mandatory.
+    fn inline_kind(&self) -> InlineKind {
+        match self {
+            Self::Member(resolved) => resolved.member.inline,
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => callable.inline,
+            Self::Companion(member) => member.inline,
+            Self::ModuleMember { inline, .. }
+            | Self::ModuleMemberExtension { inline, .. }
+            | Self::ModuleExtension { inline, .. } => *inline,
+            Self::ModuleTopLevel(callable) => callable.inline,
+            Self::LocalFunction(callable) => {
+                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice())
+            }
+        }
+    }
+
+    /// Whether this EXACT checker-selected call is both suspending and inline. A suspend lambda's
+    /// state-machine body cannot currently splice such a callee, so lowering must decline it before
+    /// emitting a direct call. Keeping this classification on the resolved target is important: a
+    /// name-wide lookup would conflate overloads and unrelated members, while origin-specific probes
+    /// would make source, sibling-module, and classpath calls disagree.
+    pub(crate) fn is_suspend_inline(&self) -> bool {
+        self.is_suspend() && self.inline_kind().can_inline()
     }
 }
 
@@ -9546,12 +9609,87 @@ struct MatchedCtorDelegation {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedSuperCall {
-    pub owner: TypeName,
-    pub interface: bool,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub descriptor: Option<String>,
+pub enum ResolvedSuperCall {
+    /// A SOURCE base-class method or interface-default method. Its JVM name IS the source name and its
+    /// signature is the one this module will emit, so there is nothing to carry beyond the shape.
+    Source {
+        owner: TypeName,
+        interface: bool,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
+    /// A CLASSPATH base-class method — the selected library member, exactly as
+    /// [`ResolvedCall::Member`] carries one for an ordinary member call. It already states every JVM
+    /// fact the lowerer needs (its own `name`, which is the physical one when the Kotlin name renames
+    /// it; its `descriptor`; and its erased `physical_ret`, which the logical `ret` may narrow after
+    /// binding the base's type arguments), so none of those are re-stated here as parallel fields.
+    Classpath(Box<crate::libraries::LibraryMember>),
+}
+
+impl ResolvedSuperCall {
+    /// The parameter types a call site's arguments are lowered against.
+    pub fn params(&self) -> &[Ty] {
+        match self {
+            ResolvedSuperCall::Source { params, .. } => params,
+            ResolvedSuperCall::Classpath(member) => &member.params,
+        }
+    }
+
+    /// The declaring type the call dispatches to, when it is known. `None` only for a classpath member
+    /// whose owner the library reader could not name.
+    pub fn owner(&self) -> Option<TypeName> {
+        match self {
+            ResolvedSuperCall::Source { owner, .. } => Some(*owner),
+            ResolvedSuperCall::Classpath(member) => member.owner,
+        }
+    }
+
+    /// The LOGICAL result type of the call — what the checker gave the expression.
+    pub fn ret(&self) -> Ty {
+        match self {
+            ResolvedSuperCall::Source { ret, .. } => *ret,
+            ResolvedSuperCall::Classpath(member) => member.ret,
+        }
+    }
+
+    /// The name to emit the call under. A source target uses the name written at the call site; a
+    /// classpath member states its own, which differs whenever its Kotlin name renames the JVM one
+    /// (`MutableList.removeAt` IS `java.util.List.remove(int)`).
+    pub fn emitted_name<'a>(&'a self, source_name: &'a str) -> &'a str {
+        match self {
+            ResolvedSuperCall::Source { .. } => source_name,
+            ResolvedSuperCall::Classpath(member) => &member.name,
+        }
+    }
+
+    /// The target's own descriptor, when it has one. `None` for a source target, whose descriptor the
+    /// backend derives from the signature it is about to emit.
+    pub fn descriptor(&self) -> Option<&str> {
+        match self {
+            ResolvedSuperCall::Source { .. } => None,
+            ResolvedSuperCall::Classpath(member) => Some(&member.descriptor),
+        }
+    }
+
+    /// Whether the target is an interface method (an interface-default `super` call).
+    pub fn interface(&self) -> bool {
+        match self {
+            ResolvedSuperCall::Source { interface, .. } => *interface,
+            ResolvedSuperCall::Classpath(_) => false,
+        }
+    }
+
+    /// The target's ERASED result type, when it differs from the logical [`Self::ret`] — a generic
+    /// classpath member returns `Object` physically while `ret` is the type recovered from the base's
+    /// bound arguments. `None` when nothing was erased and the result needs no coercion.
+    pub fn erased_ret(&self) -> Option<Ty> {
+        match self {
+            ResolvedSuperCall::Source { .. } => None,
+            ResolvedSuperCall::Classpath(member) => {
+                (member.physical_ret != member.ret).then_some(member.physical_ret)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -10854,10 +10992,10 @@ fn install_anonymous_object_captures(
 }
 
 /// Walk expression/statement arenas iteratively from already-identified declaration roots and
-/// record every anonymous-object construction encountered. Keeping the arena walk separate from
-/// `File::any_decl_expr` lets the AST layer describe generic containment while this pass supplies
-/// capture-specific targets and completeness accounting.
-fn record_capture_targets(
+/// record every requested expression encountered. Keeping this traversal generic is important:
+/// capture discovery and lexical-owner discovery ask the same structural containment question, and
+/// neither should grow an origin-specific AST walk that can drift as expression shapes are added.
+fn record_expression_targets(
     file: &File,
     targets: &std::collections::HashSet<ExprId>,
     roots: impl IntoIterator<Item = ExprId>,
@@ -10905,7 +11043,7 @@ fn record_function_capture_targets(
         roots.push(expression);
         false
     });
-    record_capture_targets(file, targets, roots, discovered)
+    record_expression_targets(file, targets, roots, discovered)
 }
 
 /// Kotlin gives these unqualified instance methods a fixed return even when source omits the
@@ -11035,7 +11173,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
             });
             let mut declaration_targets = std::collections::HashSet::new();
             let owns_target =
-                record_capture_targets(file, &targets, roots, &mut declaration_targets);
+                record_expression_targets(file, &targets, roots, &mut declaration_targets);
             if owns_target {
                 if let Decl::Class(class) = file.decl(*declaration) {
                     class_plans.insert(
@@ -11050,7 +11188,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
         .collect::<std::collections::HashSet<_>>();
     let script_body = file
         .script_body
-        .is_some_and(|body| record_capture_targets(file, &targets, [body], &mut discovered));
+        .is_some_and(|body| record_expression_targets(file, &targets, [body], &mut discovered));
     // Keep capture analysis conservative as the AST evolves. If a parser change retains an
     // anonymous construction outside the generic declaration-root inventory, retain the old
     // full-file semantic pass rather than silently treating that construction as capture-free.
@@ -11076,6 +11214,25 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
 struct AnonymousLexicalClassScope {
     owners: HashMap<DeclId, DeclId>,
     declarations: std::collections::HashSet<DeclId>,
+}
+
+impl AnonymousLexicalClassScope {
+    /// The declaration followed by its structurally recorded anonymous-object owners, nearest first.
+    /// This is the single graph walk used by signature collection, pre-inference, and the main checker;
+    /// central cycle protection prevents those phases from disagreeing on malformed/recovered input.
+    fn declaration_chain(&self, declaration: DeclId) -> Vec<DeclId> {
+        let mut chain = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut current = Some(declaration);
+        while let Some(candidate) = current {
+            if !visited.insert(candidate) {
+                break;
+            }
+            chain.push(candidate);
+            current = self.owners.get(&candidate).copied();
+        }
+        chain
+    }
 }
 
 /// The source class whose expression tree contains each hoisted anonymous-object construction.
@@ -11108,7 +11265,7 @@ fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
             false
         });
         let mut constructions = std::collections::HashSet::new();
-        record_capture_targets(file, &targets, roots, &mut constructions);
+        record_expression_targets(file, &targets, roots, &mut constructions);
         for construction in constructions {
             if let Some(&anonymous) = file.anonymous_object_classes.get(&construction) {
                 owners.entry(anonymous).or_insert(owner);
@@ -11131,12 +11288,7 @@ fn declaration_lexical_class_names(
     mut exists: impl FnMut(TypeName) -> bool,
 ) -> Vec<TypeName> {
     let mut classes = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    let mut current = Some(declaration);
-    while let Some(candidate) = current {
-        if !visited.insert(candidate) {
-            break;
-        }
+    for candidate in scope.declaration_chain(declaration) {
         if let Decl::Class(class) = file.decl(candidate) {
             let internal = type_name(&class_internal(file, &class.name));
             if scope.declarations.contains(&candidate) {
@@ -11154,7 +11306,6 @@ fn declaration_lexical_class_names(
                 }
             }
         }
-        current = scope.owners.get(&candidate).copied();
     }
     classes
 }
@@ -12889,6 +13040,8 @@ struct MemberExtensionFunctionCandidate {
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
     is_operator: bool,
+    inline: InlineKind,
+    suspend: bool,
     owner: TypeName,
 }
 
@@ -12903,6 +13056,8 @@ impl MemberExtensionFunctionCandidate {
             physical_params: self.physical_params.clone(),
             ret: self.ret,
             physical_ret: self.physical_ret,
+            inline: self.inline,
+            suspend: self.suspend,
             interface,
             vararg_index: self.call_sig.vararg_index,
         }
@@ -13572,7 +13727,8 @@ impl<'a> Checker<'a> {
             flags: SigFlags::default()
                 .with_vararg(selected.call_sig.vararg_index.is_some())
                 .with_is_inline(selected.flags.inline.can_inline())
-                .with_is_suspend(selected.flags.suspend),
+                .with_is_suspend(selected.flags.suspend)
+                .with_requires_splice(selected.flags.inline.must_inline()),
             vararg_index: selected.call_sig.vararg_index,
             required: selected.call_sig.required,
             param_defaults: selected.call_sig.param_defaults.clone(),
@@ -13589,12 +13745,6 @@ impl<'a> Checker<'a> {
             contract: None,
         };
         Some((selected, signature))
-    }
-
-    fn source_extension_requires_splice(&self, selected: &crate::libraries::FunctionInfo) -> bool {
-        selected
-            .source_key
-            .is_some_and(|source| self.syms.source_reified_functions.contains(&source))
     }
 
     fn check_source_extension_call_args(
@@ -14907,13 +15057,13 @@ impl<'a> Checker<'a> {
             .and_then(Symbol::instance)
     }
 
-    fn resolve_super_instance_name(
+    fn resolve_super_instance_ty(
         &self,
-        internal: TypeName,
+        recv: Ty,
         name: &str,
         args: &[CallArgKind],
     ) -> Option<crate::libraries::LibraryMember> {
-        self.resolver().resolve_super_instance(internal, name, args)
+        self.resolver().resolve_super_instance(recv, name, args)
     }
     fn resolve_companion_with_literal_args(
         &self,
@@ -15397,7 +15547,10 @@ impl<'a> Checker<'a> {
                                 params: sig.params.clone(),
                                 physical_ret: sig.ret,
                                 ret: sig.ret,
-                                inline: InlineKind::from_flags(sig.is_inline(), false),
+                                inline: InlineKind::from_flags(
+                                    sig.is_inline(),
+                                    sig.requires_splice(),
+                                ),
                                 interface: self
                                     .syms
                                     .class_by_type_name(owner)
@@ -15422,7 +15575,7 @@ impl<'a> Checker<'a> {
                             params: sig.params.clone(),
                             physical_ret: sig.ret,
                             ret: sig.ret,
-                            inline: InlineKind::from_flags(sig.is_inline(), false),
+                            inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
                             interface,
                             vararg_index: sig.vararg_index,
                             suspend: sig.is_suspend(),
@@ -15437,7 +15590,8 @@ impl<'a> Checker<'a> {
             .selected_source_extension(receiver, name, &arg_kinds)
             .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
         {
-            let requires_splice = self.source_extension_requires_splice(&selected);
+            let inline = selected.flags.inline;
+            let suspend = selected.flags.suspend;
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
             let owner = sig
                 .source_file
@@ -15458,7 +15612,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
-                    requires_splice,
+                    inline,
+                    suspend,
                 },
             ));
         }
@@ -18178,38 +18333,25 @@ impl<'a> Checker<'a> {
     ) {
         self.lexical_class_context.clear();
         self.exact_anonymous_class_roots.clear();
-        if scope.declarations.contains(&declaration) {
-            if let Decl::Class(class) = self.file.decl(declaration) {
+        for (index, candidate) in scope.declaration_chain(declaration).into_iter().enumerate() {
+            if let Decl::Class(class) = self.file.decl(candidate) {
                 if let Some(internal) = self
                     .syms
                     .classes
                     .get(&class.name)
                     .map(ClassSig::internal_name)
                 {
-                    self.exact_anonymous_class_roots.insert(internal);
-                }
-            }
-        }
-        let mut lexical_owner = scope.owners.get(&declaration).copied();
-        let mut visited = std::collections::HashSet::new();
-        while let Some(owner) = lexical_owner {
-            if !visited.insert(owner) {
-                break;
-            }
-            if let Decl::Class(class) = self.file.decl(owner) {
-                if let Some(internal) = self
-                    .syms
-                    .classes
-                    .get(&class.name)
-                    .map(ClassSig::internal_name)
-                {
-                    self.lexical_class_context.push(internal);
-                    if scope.declarations.contains(&owner) {
+                    // The current declaration already enters through `this_labels`; only structural
+                    // owners belong in the supplemental context. Anonymous roots at either position
+                    // stay exact so a `$` in their generated name never invents another source owner.
+                    if index > 0 {
+                        self.lexical_class_context.push(internal);
+                    }
+                    if scope.declarations.contains(&candidate) {
                         self.exact_anonymous_class_roots.insert(internal);
                     }
                 }
             }
-            lexical_owner = scope.owners.get(&owner).copied();
         }
     }
 
@@ -20857,6 +20999,25 @@ impl<'a> Checker<'a> {
         });
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
+        // A SEMANTIC-PROVIDER member's lambda shape (`re?.replace(s) { m -> m.value }`). The
+        // providers above answer source members and extensions only, so a `?.` call to a library
+        // member whose parameter is a function type or a Java SAM interface left its lambda
+        // unshaped and the parameters typed as `Any` — one `?` away from what the qualified path
+        // already does. Callable precedence is a WHOLE-CALL decision: once a source member or an
+        // extension supplies a shape, never fill an empty slot from a different provider candidate.
+        // This is the qualified path's rule too and keeps two-lambda calls from combining
+        // expectations belonging to callables that cannot both be selected.
+        let provider_member_expectations = (module_shape.is_none() && shape.is_none()).then(|| {
+            self.provider_member_lambda_expectations(
+                call,
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                args,
+                &partial,
+                explicit_type_args,
+            )
+        });
+        let provider_member_expectations = provider_member_expectations.flatten();
         args.iter()
             .enumerate()
             .map(|(i, &x)| {
@@ -20911,7 +21072,19 @@ impl<'a> Checker<'a> {
                             self.check_lambda_with_types(x, pt)
                         }
                     }
-                    _ => partial[i].unwrap_or_else(|| self.expr(x)),
+                    _ => {
+                        match provider_member_expectations
+                            .as_ref()
+                            .and_then(|all| all.get(i))
+                            .and_then(Option::as_ref)
+                        {
+                            Some(expectation) => {
+                                let expectation = expectation.clone();
+                                self.check_lambda_with_expectation(x, &expectation, Some(name))
+                            }
+                            None => partial[i].unwrap_or_else(|| self.expr(x)),
+                        }
+                    }
                 }
             })
             .collect()
@@ -21844,7 +22017,10 @@ impl<'a> Checker<'a> {
                                 params: sig.params.clone(),
                                 physical_ret: sig.ret,
                                 ret: sig.ret,
-                                inline: InlineKind::from_flags(sig.is_inline(), false),
+                                inline: InlineKind::from_flags(
+                                    sig.is_inline(),
+                                    sig.requires_splice(),
+                                ),
                                 interface,
                                 vararg_index: sig.vararg_index,
                                 suspend: sig.is_suspend(),
@@ -21860,7 +22036,8 @@ impl<'a> Checker<'a> {
                 .selected_source_extension(at, "get", &index_kinds)
                 .filter(|(_, signature)| signature.is_operator())
             {
-                let requires_splice = self.source_extension_requires_splice(&selected);
+                let inline = selected.flags.inline;
+                let suspend = selected.flags.suspend;
                 for (i, &pt) in sig.params.iter().enumerate() {
                     self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                 }
@@ -21884,7 +22061,8 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
-                        requires_splice,
+                        inline,
+                        suspend,
                     },
                 );
                 return self.set(e, sig.ret);
@@ -22477,7 +22655,7 @@ impl<'a> Checker<'a> {
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
-                        } else if let Ty::Obj(internal, _) = recv {
+                        } else if let Ty::Obj(_, _) = recv {
                             // Source members take precedence over extensions and classpath members.
                             let arg_names = self.file.call_arg_names.get(&e.0).cloned();
                             let full_arg_tys =
@@ -22533,23 +22711,25 @@ impl<'a> Checker<'a> {
                                     if labelled {
                                         return None;
                                     }
-                                    self.resolve_instance_name(internal, &name, &arg_tys)
-                                        .map(|m| {
-                                            let ret = m.ret;
-                                            let suspend = m.suspend();
-                                            self.resolved_calls.insert(
-                                                e,
-                                                ResolvedCall::Member(
-                                                    crate::symbol_resolver::ResolvedMember {
-                                                        member: m,
-                                                        ret,
-                                                        projected_return_hazard: false,
-                                                        suspend,
-                                                    },
-                                                ),
-                                            );
-                                            ret
-                                        })
+                                    // Reuse the qualified path's VALUE-receiver resolver. Besides
+                                    // carrying lambda/integer-literal provenance for SAM conversion,
+                                    // it preserves the complete semantic receiver and returns the
+                                    // canonical `ResolvedMember`; resolving by bare class name here
+                                    // would create a second selection path and duplicate selected-
+                                    // member reconstruction below the common resolver.
+                                    let arg_kinds: Vec<CallArgKind> = a
+                                        .iter()
+                                        .zip(&arg_tys)
+                                        .map(|(&x, &ty)| call_arg_kind(self.file, x, ty))
+                                        .collect();
+                                    self.resolve_instance_member_with_literal_and_lambda_args(
+                                        recv, &name, &arg_kinds,
+                                    )
+                                    .map(|member| {
+                                        let ret = member.ret;
+                                        self.resolved_calls.insert(e, ResolvedCall::Member(member));
+                                        ret
+                                    })
                                 })
                                 .or_else(|| {
                                     self.check_member_extension_function_call(
@@ -23053,7 +23233,8 @@ impl<'a> Checker<'a> {
                     .selected_source_extension(lt, "compareTo", &rhs_kind)
                     .filter(|(_, signature)| signature.is_operator() && signature.ret == Ty::Int)
                 {
-                    let requires_splice = self.source_extension_requires_splice(&selected);
+                    let inline = selected.flags.inline;
+                    let suspend = selected.flags.suspend;
                     let Some(param) = signature.single_param() else {
                         return self.check_binary(op, lt, rt, self.span(e));
                     };
@@ -23076,7 +23257,8 @@ impl<'a> Checker<'a> {
                             owner,
                             source: selected.source_key,
                             vararg: selected.call_sig.vararg,
-                            requires_splice,
+                            inline,
+                            suspend,
                         },
                     );
                     return self.set(e, Ty::Boolean);
@@ -24254,7 +24436,8 @@ impl<'a> Checker<'a> {
         arg_kinds: &[CallArgKind],
     ) -> Option<Ty> {
         let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
-        let requires_splice = self.source_extension_requires_splice(&selected);
+        let inline = selected.flags.inline;
+        let suspend = selected.flags.suspend;
         // Validate against the resolver's instantiated value parameters, not the declaration's
         // potentially generic signature. This is the contract the former qualified-call block used;
         // retaining it here prevents helper reuse from accepting a safe call that selected a generic
@@ -24290,7 +24473,8 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
-                requires_splice,
+                inline,
+                suspend,
             },
         );
         // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
@@ -25649,7 +25833,8 @@ impl<'a> Checker<'a> {
             );
         }
         if matches!(fi.callable.origin, Origin::Module { .. }) {
-            let requires_splice = self.source_extension_requires_splice(&fi);
+            let inline = fi.flags.inline;
+            let suspend = fi.flags.suspend;
             let (file, declaration) = fi.source_key?;
             let (_, signature) = self
                 .syms
@@ -25677,7 +25862,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
-                    requires_splice,
+                    inline,
+                    suspend,
                 },
             );
             self.resolved_call_arg_slots.insert(call, slots);
@@ -27421,6 +27607,11 @@ impl<'a> Checker<'a> {
                 argument_parameters: instantiated.argument_parameters,
                 visibility: shape.function.signature.visibility,
                 is_operator: shape.is_operator,
+                inline: InlineKind::from_flags(
+                    shape.function.signature.is_inline(),
+                    shape.function.signature.requires_splice(),
+                ),
+                suspend: shape.function.signature.is_suspend(),
                 owner: shape.owner,
             });
         }
@@ -29711,10 +29902,21 @@ impl<'a> Checker<'a> {
                             .is_none_or(|t| internal.qualifier_matches(t))
                     };
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        let sup = self
-                            .syms
-                            .class_by_type_name(internal)
-                            .and_then(|c| c.super_internal);
+                        let declared = self.syms.class_by_type_name(internal);
+                        let sup = declared.and_then(|c| c.super_internal);
+                        // The base spelled WITH its declared type arguments (`ArrayList<Int>`) — a
+                        // classpath member query is receiver-coupled, so these are what recover a
+                        // generic return (`removeAt(i): E` → `Int`) instead of erasing it to `Any`.
+                        let applied_sup = sup.map(|s| {
+                            let args = declared
+                                .map(|c| c.super_type_args.clone())
+                                .unwrap_or_default();
+                            if args.is_empty() {
+                                Ty::obj_name(s)
+                            } else {
+                                Ty::obj_args_name(s, &args)
+                            }
+                        });
                         if let Some(sup) = sup.filter(|s| matches_qual(*s)) {
                             // A user base-class method.
                             if let Some((owner, sig)) = self
@@ -29725,31 +29927,23 @@ impl<'a> Checker<'a> {
                                 self.expect_call_args(&sig.params, false, args, &arg_tys);
                                 self.resolved_super_calls.insert(
                                     call,
-                                    ResolvedSuperCall {
+                                    ResolvedSuperCall::Source {
                                         owner,
                                         interface: false,
                                         params: sig.params.clone(),
                                         ret: sig.ret,
-                                        descriptor: None,
                                     },
                                 );
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            if let Some(m) =
-                                self.resolve_super_instance_name(sup, &name, &arg_kinds)
-                            {
-                                self.resolved_super_calls.insert(
-                                    call,
-                                    ResolvedSuperCall {
-                                        owner: sup,
-                                        interface: false,
-                                        params: m.params.clone(),
-                                        ret: m.ret,
-                                        descriptor: Some(m.descriptor.clone()),
-                                    },
-                                );
-                                return m.ret;
+                            if let Some(m) = applied_sup.and_then(|recv| {
+                                self.resolve_super_instance_ty(recv, &name, &arg_kinds)
+                            }) {
+                                let ret = m.ret;
+                                self.resolved_super_calls
+                                    .insert(call, ResolvedSuperCall::Classpath(Box::new(m)));
+                                return ret;
                             }
                         }
                         // An INTERFACE DEFAULT method: a class `C : I` with `super.foo()` dispatches to
@@ -29771,12 +29965,11 @@ impl<'a> Checker<'a> {
                             self.expect_call_args(&sig.params, false, args, &arg_tys);
                             self.resolved_super_calls.insert(
                                 call,
-                                ResolvedSuperCall {
+                                ResolvedSuperCall::Source {
                                     owner: *iface,
                                     interface: true,
                                     params: sig.params.clone(),
                                     ret: sig.ret,
-                                    descriptor: None,
                                 },
                             );
                             return sig.ret;
@@ -35421,7 +35614,7 @@ class Child : Base() {
         let mut targets = info
             .resolved_super_calls
             .values()
-            .map(|target| (target.owner.render(), target.params.clone()))
+            .filter_map(|target| Some((target.owner()?.render(), target.params().to_vec())))
             .collect::<Vec<_>>();
         targets.sort_by_key(|(_, params)| format!("{params:?}"));
         assert_eq!(
@@ -35747,8 +35940,8 @@ class Child : Middle() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Base");
-        assert_eq!(target.params, vec![Ty::Int]);
+        assert_eq!(target.owner().map(|o| o.render()).as_deref(), Some("Base"));
+        assert_eq!(target.params(), vec![Ty::Int]);
     }
 
     #[test]
@@ -35786,8 +35979,8 @@ class Child : Base() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Grand");
-        assert_eq!(target.params, vec![Ty::Int]);
+        assert_eq!(target.owner().map(|o| o.render()).as_deref(), Some("Grand"));
+        assert_eq!(target.params(), vec![Ty::Int]);
     }
 
     #[test]

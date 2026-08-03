@@ -208,8 +208,12 @@ mod classpath_runblocking_e2e;
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]
 mod classpath_subtype_ctor_arg_e2e;
+#[path = "classpath_super_call_e2e.rs"]
+mod classpath_super_call_e2e;
 #[path = "classpath_super_ctor_args_e2e.rs"]
 mod classpath_super_ctor_args_e2e;
+#[path = "classpath_suspend_receiver_lambda_e2e.rs"]
+mod classpath_suspend_receiver_lambda_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
 #[path = "classpath_top_level_property_e2e.rs"]
@@ -620,6 +624,8 @@ mod lambda_vs_block_fun_type_e2e;
 mod lateinit_local_e2e;
 #[path = "lib_fixture_parallel_e2e.rs"]
 mod lib_fixture_parallel_e2e;
+#[path = "library_fun_type_lambda_param_e2e.rs"]
+mod library_fun_type_lambda_param_e2e;
 #[path = "list_fold_e2e.rs"]
 mod list_fold_e2e;
 #[path = "literal_escapes_coverage_e2e.rs"]
@@ -652,6 +658,8 @@ mod mangled_member_null_arg_e2e;
 mod map_entry_destructure_e2e;
 #[path = "map_get_nullable_elvis_e2e.rs"]
 mod map_get_nullable_elvis_e2e;
+#[path = "mapped_collection_scope_e2e.rs"]
+mod mapped_collection_scope_e2e;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
@@ -732,6 +740,8 @@ mod nested_type_scope_e2e;
 mod nested_type_shadowing_e2e;
 #[path = "newline_method_chain_e2e.rs"]
 mod newline_method_chain_e2e;
+#[path = "no_jdk_builtin_emit_e2e.rs"]
+mod no_jdk_builtin_emit_e2e;
 #[path = "non_field_ctor_metadata_e2e.rs"]
 mod non_field_ctor_metadata_e2e;
 #[path = "not_null_assert_e2e.rs"]
