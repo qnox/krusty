@@ -1007,10 +1007,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     descriptor declares: `maxOf(a, b)` on a `UInt` emits `iload; iload; invokestatic
     UComparisonsKt."maxOf-J1ME1BU":(II)I`, byte-for-byte kotlinc's shape, and compares in UNSIGNED order
     (the stdlib callee owns the comparator, so values past the sign bit order correctly);
-  - an `invokevirtual` on the value class itself takes the **boxed** receiver, so `a.equals(b)` emits
-    `box-impl(a); box-impl(b); invokevirtual kotlin/UInt.equals(Ljava/lang/Object;)Z` — the value class's
-    own equality, which is `false` across carriers (`UInt.equals(ULong)`). kotlinc instead intrinsifies a
-    same-type `equals` to a direct carrier compare; krusty's call is semantically equal, not shape-equal.
+  - `a.equals(b)` between two values of the SAME unsigned type is kotlinc's `equals` **intrinsic**: an
+    unsigned value class wraps exactly one field, so its equality can only compare the carriers, and the
+    call folds away to precisely the instructions `a == b` emits (byte-identical to krusty's own `==`,
+    no box anywhere). Deliberately narrow to an argument of exactly the receiver's type — every other
+    argument keeps the value class's own equality, which is what makes a cross-carrier comparison
+    `false` (`UInt.equals(ULong)`, however the bits line up) and a nullable one null-safe;
+  - an `invokevirtual` on the value class itself takes the **boxed** receiver, which is what those
+    remaining shapes (`Any`/nullable/cross-carrier arguments) use. kotlinc instead reaches the static
+    `kotlin/UInt."equals-impl"(ILjava/lang/Object;)Z` and leaves the receiver unboxed; krusty's call is
+    semantically equal, not shape-equal, on those paths only.
 
   Getting either wrong produced a class file that FAILED JVM VERIFICATION while krusty reported success —
   output strictly worse than declining the file, and invisible to a differential harness that checks

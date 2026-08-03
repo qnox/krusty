@@ -17,6 +17,11 @@
 //! is a fully supported type there. What was wrong was the representation of a value at a call
 //! boundary, which no signature-level check can see.
 //!
+//! Both now emit kotlinc's shapes, and a SAME-TYPE `a.equals(b)` no longer reaches the member call
+//! at all — it folds to a carrier compare (kotlinc's intrinsic; the shape is pinned in
+//! `bytecode_parity_e2e`). The boxed receiver still carries every other argument type, which is what
+//! `unsigned_equals_keeps_value_class_semantics_across_argument_types` exercises.
+//!
 //! The contract pinned here is the backend's, not the feature's. Declining the file is always a
 //! legal outcome; claiming success and writing a class that fails verification is not. So
 //! [`expect_emitted_box_verifies`] accepts a backend decline and fails only when krusty says it
@@ -96,9 +101,9 @@ fn unsigned_min_of_emits_verifiable_bytecode() {
     );
 }
 
-/// `a.equals(b)` — an `invokevirtual kotlin/UInt.equals(Ljava/lang/Object;)Z`, whose receiver must
-/// be the BOXED value class. (`a == b` is a different lowering entirely: it compares the carriers
-/// with the direct opcode and is already correct.)
+/// `a.equals(b)`. A same-type pair folds to a carrier compare (kotlinc's intrinsic — shape pinned in
+/// `bytecode_parity_e2e`); any other argument stays an `invokevirtual kotlin/UInt.equals(Object)Z`,
+/// whose receiver must be the BOXED value class. Both paths are exercised here.
 #[test]
 fn unsigned_equals_call_emits_verifiable_bytecode() {
     expect_emitted_box_verifies(
@@ -143,5 +148,39 @@ fn narrow_unsigned_types_stay_declined_or_correct() {
     return if (a.equals(b)) \"bad\" else \"OK\"\n\
 }\n",
         "UShortEquals",
+    );
+}
+
+/// The `equals` intrinsic must not change what `equals` MEANS. kotlinc folds only the same-type case
+/// to a carrier compare; every other argument still goes through the value class's own equality,
+/// which is what makes a cross-carrier comparison answer `false` (a `UInt` is never a `ULong`, even
+/// when the carriers hold the same bits).
+#[test]
+fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val a: UInt = 4294967295u\n\
+    val b: UInt = 1u\n\
+    if (a.equals(b)) return \"f same-ne\"\n\
+    if (!a.equals(a)) return \"f same-eq\"\n\
+    if (a.equals(4294967295uL)) return \"f cross-carrier\"\n\
+    val anyA: Any = a\n\
+    if (!a.equals(anyA)) return \"f any-eq\"\n\
+    if (a.equals(\"4294967295\")) return \"f any-ne\"\n\
+    return \"OK\"\n\
+}\n",
+        "UEqualsSemantics",
+    );
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val a: ULong = 18446744073709551615uL\n\
+    val b: ULong = 1uL\n\
+    if (a.equals(b)) return \"f same-ne\"\n\
+    if (!a.equals(a)) return \"f same-eq\"\n\
+    val anyA: Any = a\n\
+    if (!a.equals(anyA)) return \"f any-eq\"\n\
+    return \"OK\"\n\
+}\n",
+        "ULongEqualsSemantics",
     );
 }

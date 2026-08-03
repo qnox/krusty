@@ -24269,6 +24269,25 @@ impl<'a> Lower<'a> {
                     .lower_selected_op_call(receiver, receiver_ty, &name, &args, target, Some(e))
                     .map(|(value, _)| value);
             }
+            // `a.equals(b)` between two values of the SAME unsigned type is kotlinc's `equals`
+            // INTRINSIC: an unsigned value class wraps exactly one field, so its equality can only
+            // compare the two carriers — kotlinc folds the call away to the instructions `a == b`
+            // emits, with no box anywhere. Deliberately narrow to an argument of exactly the receiver's
+            // type: for any OTHER argument the answer is the value class's own, which is what makes a
+            // cross-carrier comparison `false` (a `UInt` is never a `ULong`, however the bits line up)
+            // and a nullable one null-safe. Those keep the ordinary member-call path.
+            {
+                let rty = self.info.ty(receiver);
+                if let [arg] = args[..] {
+                    // `Ty` equality here is exact, nullability included: `UInt?` is a different type
+                    // and must NOT fold (its equality is null-safe, a carrier compare is not).
+                    if rty.is_unsigned() && name == "equals" && self.info.ty(arg) == rty {
+                        let l = self.expr(receiver)?;
+                        let r = self.expr(arg)?;
+                        return Some(self.emit_primitive_bin_op(IrBinOp::Eq, l, r));
+                    }
+                }
+            }
             // Unsigned conversions. `UInt`/`Int` and `ULong`/`Long` share a JVM representation,
             // so a conversion that doesn't change the representation is a no-op reinterpret;
             // `UInt.toLong()`/`toULong()` zero-extend via the platform helper; `ULong.toInt()`
