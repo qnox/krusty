@@ -2289,6 +2289,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   such a parameter the INTERSECTION of its bounds and resolves members from all of them, while the JVM
   erasure takes the first; `Ty::TyParam` carries a single bound, so only the first one's members
   resolve.
+- **`ClassName.Companion` named explicitly.** The bare `ClassName` already denotes the companion
+  singleton in a value position (`val f: Factory = Widget`); both spellings mean the same object, so
+  they resolve to the same type and lower to the same `getstatic C.Companion:LC$Companion;`. As in
+  the bare-name form, only a companion that DECLARES a supertype gets a registered `C$Companion`
+  ClassSig — a plain companion is not a first-class value. Test:
+  `tests/feature_coverage_r_e2e.rs::companion_implementing_interface`.
 
 ## 8. Success criteria for the PoC
 

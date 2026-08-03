@@ -21142,6 +21142,26 @@ impl<'a> Lower<'a> {
         name: String,
     ) -> Option<u32> {
         let t = {
+            // `ClassName.Companion` — the companion singleton named explicitly. Same read as the
+            // bare `ClassName` value form: `getstatic C.Companion:LC$Companion;`.
+            if name == "Companion" {
+                if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
+                    if self.lookup(&rn).is_none() {
+                        if let Some(cls) = self.syms.classes.get(&rn) {
+                            let cls_internal = cls.internal();
+                            let comp_internal = format!("{cls_internal}$Companion");
+                            if self.syms.class_by_internal(&comp_internal).is_some() {
+                                let field = self.runtime.companion_instance_field(
+                                    &cls_internal,
+                                    &comp_internal,
+                                    "Companion",
+                                )?;
+                                return Some(self.platform_static_field(field));
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(ExprLowering::EnumEntriesRead { owner, accessor }) =
                 self.info.expr_lowers.get(&e).cloned()
             {

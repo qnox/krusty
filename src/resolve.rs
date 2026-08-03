@@ -23052,6 +23052,19 @@ impl<'a> Checker<'a> {
                             return self.set(e, Ty::obj(&nested));
                         }
                     }
+                    // `ClassName.Companion` — the companion singleton named EXPLICITLY. The bare
+                    // `ClassName` already denotes it in a value position; both spellings mean the same
+                    // object, so they resolve to the same type. (Only a companion that declares a
+                    // supertype gets a registered `C$Companion` ClassSig — a plain companion is not a
+                    // first-class value, exactly as in the bare-name branch.)
+                    if name == "Companion" {
+                        if let Some(cs) = self.syms.classes.get(&en) {
+                            let comp_internal = format!("{}$Companion", cs.internal());
+                            if self.syms.class_by_internal(&comp_internal).is_some() {
+                                return self.set(e, Ty::obj(&comp_internal));
+                            }
+                        }
+                    }
                     // `ClassName.NestedObject` on a same-file class.
                     if let Some(cs) = self.syms.classes.get(&en) {
                         let nested = format!("{}${name}", cs.internal);
