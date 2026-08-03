@@ -1568,6 +1568,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   top-level type (`class Foo; class Outer { class Foo }`), ALL resolvers consistently pick the top-level
   (the signature-collection scope insert is skipped when the simple name already resolves), so the checker
   and codegen never disagree. Test: `tests/nested_type_scope_e2e.rs`.
+- **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
+  stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
+  supertype arguments, superclass constructor arguments, and inferred member returns may still name a
+  class nested in the source owner (`object : Base(Inner()) {}` inside `Outer`). A structural map from
+  anonymous declaration to containing class is computed by the same generic expression-target walk used
+  for capture containment, and one cycle-safe declaration-chain primitive feeds signature collection,
+  return pre-inference, and the main checker. The chain contributes classifier scope only: it never adds a
+  runtime receiver, changes capture fields, or alters the anonymous class ABI. Generated anonymous JVM
+  names are exact roots; `$` characters in them are not parsed as evidence of source nesting. Tests:
+  `tests/nested_class_ctor_scope_e2e.rs` and
+  `resolve::tests::anonymous_object_records_its_lexical_source_class_owner`.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
   `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a
