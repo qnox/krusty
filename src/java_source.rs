@@ -127,6 +127,9 @@ pub(crate) enum DeclKind {
 pub(crate) struct RawDecl {
     /// Internal name (`pkg/Outer$Inner`).
     pub(crate) internal: String,
+    /// Syntactic enclosing declaration, independent of `$` characters in Java identifiers.
+    pub(crate) outer_internal: Option<String>,
+    pub(crate) simple_name: String,
     pub(crate) name_span: Span,
     pub(crate) access: u16,
     pub(crate) kind: DeclKind,
@@ -141,6 +144,7 @@ pub(crate) struct RawDecl {
     pub(crate) methods: Vec<Member>,
     pub(crate) fields: Vec<(String, SrcType, u16)>,
     pub(crate) enum_constants: Vec<String>,
+    pub(crate) enum_has_constant_body: bool,
     pub(crate) record_components: Vec<(String, SrcType)>,
     pub(crate) record_is_varargs: bool,
 }
@@ -742,6 +746,8 @@ fn type_decl_with_access(
 
     let mut decl = RawDecl {
         internal: internal.clone(),
+        outer_internal: outer.map(str::to_string),
+        simple_name: simple.clone(),
         name_span,
         access: acc,
         kind,
@@ -754,6 +760,7 @@ fn type_decl_with_access(
         methods: Vec::new(),
         fields: Vec::new(),
         enum_constants: Vec::new(),
+        enum_has_constant_body: false,
         record_components,
         record_is_varargs,
     };
@@ -779,6 +786,7 @@ fn type_decl_with_access(
                 }
             }
             if p.eat_punct('{') {
+                decl.enum_has_constant_body = true;
                 p.skip_braces();
             }
             decl.enum_constants.push(cname);
@@ -808,10 +816,10 @@ fn type_decl_with_access(
             || (p.peek() == Some(&Tok::Punct('@'))
                 && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
         {
-            // A type nested in an interface/annotation is implicitly public (JLS §9.5), like
-            // interface methods and fields.
+            // A type nested in an interface/annotation is implicitly public and static (JLS
+            // §9.5), like interface methods and fields.
             let nested_access = if matches!(kind, DeclKind::Interface | DeclKind::Annotation) {
-                macc | ACC_PUBLIC
+                macc | ACC_PUBLIC | ACC_STATIC
             } else {
                 macc
             };
@@ -900,6 +908,14 @@ fn type_decl_with_access(
             }
         }
     }
+    if kind == DeclKind::Enum
+        && decl
+            .methods
+            .iter()
+            .any(|method| method.access & ACC_ABSTRACT != 0)
+    {
+        decl.is_abstract = true;
+    }
     out.push(decl);
     Some(())
 }
@@ -922,6 +938,8 @@ fn annotation_type_decl(
 
     let mut decl = RawDecl {
         internal: internal.clone(),
+        outer_internal: outer.map(str::to_string),
+        simple_name: simple,
         name_span,
         access: acc,
         kind: DeclKind::Annotation,
@@ -934,6 +952,7 @@ fn annotation_type_decl(
         methods: Vec::new(),
         fields: Vec::new(),
         enum_constants: Vec::new(),
+        enum_has_constant_body: false,
         record_components: Vec::new(),
         record_is_varargs: false,
     };
@@ -950,8 +969,14 @@ fn annotation_type_decl(
             || (p.peek() == Some(&Tok::Punct('@'))
                 && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
         {
-            // Nested types of an annotation type are implicitly public (JLS §9.5).
-            type_decl_with_access(p, package, Some(&internal), out, macc | ACC_PUBLIC)?;
+            // Nested types of an annotation type are implicitly public and static (JLS §9.5).
+            type_decl_with_access(
+                p,
+                package,
+                Some(&internal),
+                out,
+                macc | ACC_PUBLIC | ACC_STATIC,
+            )?;
             continue;
         }
         let ty = src_type(p)?;

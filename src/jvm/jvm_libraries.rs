@@ -37,11 +37,10 @@ fn inherited_class_access(
     internal_name: TypeName,
 ) -> Option<u16> {
     let nested = super::jvm_class_map::to_jvm_type_name(internal_name).render();
-    let (outer, _) = nested.rsplit_once('$')?;
     class
         .inner_classes
         .iter()
-        .find(|entry| entry.inner == nested && entry.outer.as_deref() == Some(outer))
+        .find(|entry| entry.inner == nested)
         .map(|entry| entry.access)
 }
 
@@ -3989,6 +3988,30 @@ mod tests {
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
     use crate::types::Ty;
+
+    #[test]
+    fn inherited_access_finds_self_entry_when_member_name_contains_dollar() {
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &[(
+                String::new(),
+                "class Outer { public static class Inner$Part {} }".into(),
+            )],
+            crate::jvm::java_stub::StubMode::Strict,
+            &|candidate| candidate == "java/lang/Object",
+        )
+        .expect("stubs");
+        let class = stubs
+            .iter()
+            .find(|(name, _)| name == "Outer$Inner$Part")
+            .and_then(|(_, bytes)| crate::jvm::classreader::parse_class(bytes).ok())
+            .expect("member class");
+
+        assert_eq!(
+            super::inherited_class_access(&class, type_name("Outer$Inner$Part"))
+                .map(|access| access & crate::jvm::classfile::ACC_PUBLIC),
+            Some(crate::jvm::classfile::ACC_PUBLIC)
+        );
+    }
 
     #[test]
     fn descriptor_void_reference_normalizes_before_core() {

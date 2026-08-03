@@ -20,8 +20,8 @@
 //! signatures, fields, constructors, and methods.
 
 use super::classfile::{
-    ClassWriter, CodeBuilder, ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE,
-    ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_SUPER,
+    ClassWriter, CodeBuilder, InnerClassSpec, ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL,
+    ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_SUPER,
 };
 use crate::java_source::{
     lex_java, parse_raw_file, primitive_desc, resolve_internal_name, DeclKind, FileCtx, Member,
@@ -66,7 +66,7 @@ pub fn stub_classes(
         .iter()
         .flat_map(|(_, declarations)| declarations)
         .filter(|declaration| {
-            !declaration.internal.contains('$') || declaration.access & ACC_PRIVATE == 0
+            declaration.outer_internal.is_none() || declaration.access & ACC_PRIVATE == 0
         })
         .map(|declaration| declaration.internal.as_str())
         .collect::<HashSet<_>>();
@@ -76,7 +76,7 @@ pub fn stub_classes(
     let mut emitted: HashSet<&str> = HashSet::new();
     for (ctx, decls) in &parsed {
         for raw in decls {
-            if (raw.internal.contains('$') && raw.access & ACC_PRIVATE != 0)
+            if (raw.outer_internal.is_some() && raw.access & ACC_PRIVATE != 0)
                 || !emitted.insert(raw.internal.as_str())
             {
                 continue;
@@ -239,7 +239,16 @@ impl Resolver<'_> {
         let mut w = ClassWriter::new(&d.internal, &super_internal);
         let visibility = d.access & ACC_PUBLIC;
         w.set_access(if is_enum {
-            visibility | ACC_FINAL | ACC_ENUM | ACC_SUPER
+            visibility
+                | ACC_ENUM
+                | ACC_SUPER
+                | if d.is_abstract {
+                    ACC_ABSTRACT
+                } else if d.enum_has_constant_body {
+                    0
+                } else {
+                    ACC_FINAL
+                }
         } else if is_record {
             visibility | ACC_FINAL | ACC_SUPER
         } else if is_annotation {
@@ -251,6 +260,40 @@ impl Resolver<'_> {
         } else {
             visibility | (d.access & ACC_FINAL) | ACC_SUPER
         });
+        if let Some(outer) = &d.outer_internal {
+            let mut access = d.access
+                & (ACC_PUBLIC
+                    | ACC_PRIVATE
+                    | ACC_PROTECTED
+                    | ACC_STATIC
+                    | ACC_FINAL
+                    | ACC_ABSTRACT);
+            match d.kind {
+                DeclKind::Enum => {
+                    access &= !(ACC_FINAL | ACC_ABSTRACT);
+                    access |= ACC_STATIC | ACC_ENUM;
+                    if d.is_abstract {
+                        access |= ACC_ABSTRACT;
+                    } else if !d.enum_has_constant_body {
+                        access |= ACC_FINAL;
+                    }
+                }
+                DeclKind::Interface => access |= ACC_STATIC | ACC_INTERFACE | ACC_ABSTRACT,
+                DeclKind::Annotation => {
+                    access |= ACC_STATIC | ACC_INTERFACE | ACC_ABSTRACT | ACC_ANNOTATION
+                }
+                DeclKind::Record => access |= ACC_STATIC | ACC_FINAL,
+                DeclKind::Class => {}
+            }
+            // A nested class carries its own InnerClasses entry. Classpath visibility and inherited
+            // classifier lookup read this entry rather than the top-level Class access flags.
+            w.add_inner_class(InnerClassSpec {
+                inner: d.internal.clone(),
+                outer: Some(outer.clone()),
+                name: Some(d.simple_name.clone()),
+                access,
+            });
+        }
         for i in &d.interfaces {
             match self.internal_of(&i.name) {
                 Some(internal) => w.add_interface(&internal),
@@ -647,6 +690,63 @@ mod tests {
             names.contains(&"Outer") && names.contains(&"Outer$Inner"),
             "{names:?}"
         );
+        let inner = out
+            .iter()
+            .find(|(name, _)| name == "Outer$Inner")
+            .and_then(|(_, bytes)| parse_class(bytes).ok())
+            .expect("nested class");
+        assert!(inner.inner_classes.iter().any(|entry| {
+            entry.inner == "Outer$Inner"
+                && entry.outer.as_deref() == Some("Outer")
+                && entry.name.as_deref() == Some("Inner")
+                && entry.access & (ACC_PUBLIC | ACC_STATIC) == (ACC_PUBLIC | ACC_STATIC)
+        }));
+    }
+
+    #[test]
+    fn interface_and_annotation_member_classes_are_public_static() {
+        let out = stubs(
+            "public interface Host { class Nested {} } @interface Mark { class Nested {} }",
+            &["java/lang/Object", "java/lang/annotation/Annotation"],
+        )
+        .expect("stubs");
+        for internal in ["Host$Nested", "Mark$Nested"] {
+            let nested = out
+                .iter()
+                .find(|(name, _)| name == internal)
+                .and_then(|(_, bytes)| parse_class(bytes).ok())
+                .expect("member class");
+            assert!(nested.inner_classes.iter().any(|entry| {
+                entry.inner == internal
+                    && entry.access & (ACC_PUBLIC | ACC_STATIC) == (ACC_PUBLIC | ACC_STATIC)
+            }));
+        }
+    }
+
+    #[test]
+    fn dollar_in_declared_names_does_not_change_inner_class_ownership() {
+        let out = stubs(
+            "class Dollar$Top {} class Outer { class Inner$Part {} }",
+            &["java/lang/Object"],
+        )
+        .expect("stubs");
+        let top = out
+            .iter()
+            .find(|(name, _)| name == "Dollar$Top")
+            .and_then(|(_, bytes)| parse_class(bytes).ok())
+            .expect("top-level class");
+        assert!(top.inner_classes.is_empty());
+
+        let member = out
+            .iter()
+            .find(|(name, _)| name == "Outer$Inner$Part")
+            .and_then(|(_, bytes)| parse_class(bytes).ok())
+            .expect("member class");
+        assert!(member.inner_classes.iter().any(|entry| {
+            entry.inner == "Outer$Inner$Part"
+                && entry.outer.as_deref() == Some("Outer")
+                && entry.name.as_deref() == Some("Inner$Part")
+        }));
     }
 
     #[test]
@@ -682,6 +782,46 @@ mod tests {
             ctor.access & ACC_PUBLIC == 0,
             "implicit enum ctor must be private, not public"
         );
+    }
+
+    #[test]
+    fn nested_enum_flags_follow_constant_bodies_and_abstract_members() {
+        let out = stubs(
+            "class Outer { \
+             enum Style { PLAIN, CUSTOM {} } \
+             enum AbstractStyle { ONE { int value() { return 1; } }; abstract int value(); } \
+             }",
+            &["java/lang/Enum", "java/lang/String", "java/lang/Object"],
+        )
+        .expect("stubs");
+        let nested = out
+            .iter()
+            .find(|(name, _)| name == "Outer$Style")
+            .and_then(|(_, bytes)| parse_class(bytes).ok())
+            .expect("nested enum");
+        assert_eq!(nested.access & ACC_FINAL, 0);
+        let entry = nested
+            .inner_classes
+            .iter()
+            .find(|entry| entry.inner == "Outer$Style")
+            .expect("self entry");
+        assert_eq!(entry.access & ACC_FINAL, 0);
+        assert_ne!(entry.access & ACC_ENUM, 0);
+
+        let abstract_enum = out
+            .iter()
+            .find(|(name, _)| name == "Outer$AbstractStyle")
+            .and_then(|(_, bytes)| parse_class(bytes).ok())
+            .expect("abstract nested enum");
+        assert_eq!(abstract_enum.access & ACC_FINAL, 0);
+        assert_ne!(abstract_enum.access & ACC_ABSTRACT, 0);
+        let abstract_entry = abstract_enum
+            .inner_classes
+            .iter()
+            .find(|entry| entry.inner == "Outer$AbstractStyle")
+            .expect("abstract self entry");
+        assert_eq!(abstract_entry.access & ACC_FINAL, 0);
+        assert_ne!(abstract_entry.access & ACC_ABSTRACT, 0);
     }
 
     #[test]
