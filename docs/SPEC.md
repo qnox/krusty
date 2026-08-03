@@ -279,9 +279,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   model does NOT cover keep skipping (box-corpus-proven, never miscompiled): a RECEIVER lambda
   (`suspend Controller.() -> Unit`), whose restore reloads leading `this`/capture fields that displace a
   temp's positional slot (`consecutive_temp_suspensions`, corpus `suspendCallsInArguments`); and a
-  spilled local of the BOTTOM type (`var x = null` is `Nothing?` — `Ty::Null`/`Ty::Nothing`), which has
-  no JVM reference frame type, so the slot merges to `top` at a join and its `aload` fails verification
-  ("Bad local variable type" — `spills_bottom_typed_local`, corpus `varSpilling/nullSpilling`).
+  spilled local of type `Nothing`, whose expression never yields a value, so the slot has no JVM type
+  and merges to `top` at a join ("Bad local variable type" — `spills_bottom_typed_local`).
+- **`suspend fun` — a `Nothing?` local live across a suspension is REMATERIALIZED, not spilled.**
+  `var x = null` has exactly one possible value, so kotlinc gives it no continuation field and re-emits
+  `aconst_null; astore` in each resume arm. Spilling it instead is wrong twice over: the local's
+  verification type widens from `null` to the field's `Object`, so the next typed use of it
+  (`bar(x: String?, …)`) fails with "Bad type on operand stack", and the extra field diverges from
+  kotlinc's count. `is_rematerialized_null` keeps such a local out of the spill layout and out of
+  `kind_positions`, and each arm restores it with `Const(Null)`. Continuation fields are then identical
+  to kotlinc's for the corpus `varSpilling/nullSpilling` shape (`L$0` for the crossing `String` temp,
+  `result`, `label`)
+  (`tests/suspend_e2e.rs::suspend_bottom_typed_local_across_a_suspension_is_rematerialized`).
 - **`suspend fun` — a top-level `suspend` EXTENSION function.** `suspend fun Counter.next(): Int` needs
   no CPS machinery of its own: an extension receiver is already lowered to an ordinary LEADING static
   parameter, so the coroutine pass appends the `Continuation` after it (`next(Counter, Continuation)

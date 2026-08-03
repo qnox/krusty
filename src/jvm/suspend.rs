@@ -2184,6 +2184,16 @@ fn build_state_machine(
                 };
                 ss.push(k(ir, restore));
             }
+            for local in rematerialized_nulls(list) {
+                let n = k(ir, IrExpr::Const(IrConst::Null));
+                ss.push(k(
+                    ir,
+                    IrExpr::SetValue {
+                        var: local,
+                        value: n,
+                    },
+                ));
+            }
         }
         ss.extend(st.iter().copied());
         let recv = k(ir, IrExpr::GetValue(cont_v));
@@ -2574,6 +2584,16 @@ fn build_lambda_state_machine(
                     IrExpr::SetValue {
                         var: local,
                         value: init,
+                    },
+                ));
+            }
+            for local in rematerialized_nulls(list) {
+                let n = k(ir, IrExpr::Const(IrConst::Null));
+                ss.push(k(
+                    ir,
+                    IrExpr::SetValue {
+                        var: local,
+                        value: n,
                     },
                 ));
             }
@@ -5158,9 +5178,27 @@ const SPILL_KIND_ORDER: [char; 9] = ['L', 'I', 'J', 'F', 'D', 'Z', 'C', 'B', 'S'
 
 /// Annotate each scope-list entry with its kind and position WITHIN that kind (kotlinc's
 /// per-suspension positional slot).
+/// A local of the BOTTOM type (`var x = null` — `Ty::Null`) has exactly ONE possible value, so kotlinc
+/// gives it no continuation field and REMATERIALIZES it (`aconst_null; astore`) in every resume arm.
+/// Keeping it out of the spill layout is also what keeps its verification type `null` — assignable to
+/// any reference — where restoring it from an `Object`-typed field would widen the slot and break the
+/// next typed use of it (`bar(x: String?, …)` → "Bad type on operand stack").
+fn is_rematerialized_null(ty: &Ty) -> bool {
+    matches!(ty.non_null(), Ty::Null)
+}
+
+/// The entries of a suspension's scope list that a resume arm rematerializes rather than reloads.
+fn rematerialized_nulls(list: &[(u32, Ty)]) -> Vec<u32> {
+    list.iter()
+        .filter(|(_, t)| is_rematerialized_null(t))
+        .map(|&(l, _)| l)
+        .collect()
+}
+
 fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
     let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
     list.iter()
+        .filter(|(_, ty)| !is_rematerialized_null(ty))
         .map(|&(l, ty)| {
             let k = spill_kind(&ty);
             let c = counts.entry(k).or_insert(0);
@@ -5181,6 +5219,9 @@ impl SpillLayout {
     fn add_list(&mut self, list: &[(u32, Ty)]) {
         let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
         for (_, ty) in list {
+            if is_rematerialized_null(ty) {
+                continue;
+            }
             *counts.entry(spill_kind(ty)).or_insert(0) += 1;
         }
         for (k, c) in counts {
@@ -5246,14 +5287,14 @@ fn spill_shape_unmodeled(spilled: &[(u32, Ty)]) -> bool {
     })
 }
 
-/// A spilled local of the BOTTOM type (`var x = null` is `Nothing?`; `Ty::Null`/`Ty::Nothing`): it has
-/// no JVM reference frame type of its own, so the slot merges to `top` at a control-flow join and the
-/// spill's `aload` then fails verification ("Bad local variable type"). Applies to both machines —
-/// bail (skip, never miscompile).
+/// A spilled local of type `Nothing`: an expression of the bottom type never yields a value, so the
+/// slot has no JVM type at all and merges to `top` at a control-flow join, where the spill's `aload`
+/// fails verification ("Bad local variable type"). (`Ty::Null` — the always-`null` `var x = null` — is
+/// handled instead of gated; see [`is_rematerialized_null`].) Bail (skip, never miscompile).
 fn spills_bottom_typed_local(spilled: &[(u32, Ty)]) -> bool {
     spilled
         .iter()
-        .any(|(_, t)| matches!(t.non_null(), Ty::Null | Ty::Nothing))
+        .any(|(_, t)| matches!(t.non_null(), Ty::Nothing))
 }
 
 /// A suspending body iterating a `kotlin.ranges` PROGRESSION object (`for (x in 20L..30L step 5L)` —

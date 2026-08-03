@@ -2131,3 +2131,51 @@ fun box(): String {\n\
         "an extension suspend fn suspending on a receiver member must be skipped, never emitted"
     );
 }
+
+/// A local of the BOTTOM type (`var x = null`, i.e. `Nothing?`) that is live across a suspension is
+/// REMATERIALIZED, not spilled.
+///
+/// Such a local has exactly one possible value, so kotlinc gives it no continuation field and re-emits
+/// `aconst_null; astore` in each resume arm. krusty spilled it into an `Object` field instead, which
+/// both widened the slot's verification type past `null` (breaking the later `bar(x: String?, …)` use)
+/// and mis-framed the loop back-edge. Continuation fields here are byte-identical to kotlinc's
+/// (`L$0`, `result`, `label` — one field, for the crossing `String` temp only).
+#[test]
+fn suspend_bottom_typed_local_across_a_suspension_is_rematerialized() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun foo(value: String): String = suspendCoroutineUninterceptedOrReturn { x ->\n\
+    x.resume(value)\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+fun bar(x: String?, y: String, z: String): String {\n\
+    if (x != null) throw RuntimeException(\"fail 0\")\n\
+    return y + z\n\
+}\n\
+suspend fun baz(): String {\n\
+    var x = null\n\
+    for (i in 1..3) {\n\
+        x = null\n\
+    }\n\
+    return bar(x, foo(\"O\"), foo(\"K\"))\n\
+}\n\
+fun box(): String = runBlocking { baz() }\n";
+    let Some(out) =
+        common::compile_and_run_box(src, "SuspendNullLocal", &[stdlib], Some(jdk.as_path()))
+    else {
+        panic!("SuspendNullLocal: the front end accepted the source, so lowering/emit bailed");
+    };
+    assert_eq!(
+        out.trim(),
+        "OK",
+        "a bottom-typed local live across a suspension must rematerialize as null"
+    );
+}
