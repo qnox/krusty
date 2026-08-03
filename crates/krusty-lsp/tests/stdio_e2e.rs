@@ -876,6 +876,79 @@ fn stdio_server_indexes_unopened_project_sources() {
 }
 
 #[test]
+fn stdio_server_finds_workspace_symbols_in_files_nothing_opened() {
+    let project = TempProject::new("workspace-symbol-coverage");
+    project.write(
+        "src/Never.kt",
+        "package sample\nclass NeverOpenedMarker {\n  fun neverOpenedMember(): Int = 1\n}\n",
+    );
+    let open_uri = project.uri("src/Open.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+
+    let mut server = ServerProcess::start(&[]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    server.receive_until(|message| message["method"] == "client/registerCapability");
+    // The background sweep is raised only once an interactive analysis has been served, so the
+    // session has to look like a real one before project-wide coverage starts.
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": open_uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": "package sample\nfun opened(): Int = 1\n"
+            }
+        }),
+    );
+    let diagnostics = server.await_diagnostics(&open_uri);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    // Indexing is asynchronous, and the picker re-queries on every keystroke, so polling is what a
+    // client does too.
+    let mut found = Value::Null;
+    for attempt in 0..200 {
+        let response = server.request(
+            100 + attempt,
+            "workspace/symbol",
+            json!({"query": "NeverOpenedMarker"}),
+        );
+        if response["result"][0].is_object() {
+            found = response["result"][0].clone();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(
+        found["location"]["uri"],
+        project.uri("src/Never.kt"),
+        "a declaration in a file nobody opened must be findable"
+    );
+    assert_eq!(found["name"], "NeverOpenedMarker");
+    assert_eq!(found["location"]["range"]["start"]["line"], 1);
+
+    let member = server.request(
+        200,
+        "workspace/symbol",
+        json!({"query": "neverOpenedMember"}),
+    );
+    assert_eq!(
+        member["result"][0]["location"]["uri"],
+        project.uri("src/Never.kt")
+    );
+    assert_eq!(
+        member["result"][0]["containerName"],
+        "sample.NeverOpenedMarker"
+    );
+
+    server.shutdown_and_exit();
+}
+
+#[test]
 fn stdio_server_reports_official_cross_file_conflicting_overloads() {
     let project = TempProject::new("conflicting-overloads");
     project.write(

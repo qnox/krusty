@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
 use krusty::features::LangFeatures;
-use krusty::jvm::classpath::{platform_jdk_modules, Classpath};
+use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
 use krusty::source::{SourceInput, SourceKind};
 use serde::{Deserialize, Serialize};
@@ -272,6 +272,9 @@ struct WorkerProcess {
     stdout: Option<BufReader<ChildStdout>>,
 }
 
+/// Borrowed send shape: a many-thousand-entry classpath must stream into the bounded writer without
+/// first cloning every `PathBuf`. The owning receive shape below is deliberately separate because the
+/// worker must retain the decoded paths after the launch frame is dropped.
 #[derive(Serialize)]
 struct WorkerLaunchConfiguration<'a> {
     classpath: &'a [PathBuf],
@@ -470,7 +473,7 @@ where
 }
 
 impl WorkerProcess {
-    fn spawn(executable: &Path, arguments: &[String], classpath: &[PathBuf]) -> io::Result<Self> {
+    fn spawn(executable: &Path, classpath: &[PathBuf]) -> io::Result<Self> {
         let configuration = encode_launch_configuration(classpath)?;
         let mut child = Command::new(executable)
             .arg("--analysis-worker")
@@ -478,7 +481,6 @@ impl WorkerProcess {
             // server is killed in that interval, getppid() already names the reaper and a worker
             // that sampled only its current parent could mistake that process for its server.
             .arg(std::process::id().to_string())
-            .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -631,7 +633,6 @@ impl Drop for WorkerProcess {
 
 pub struct AnalysisWorker {
     executable: PathBuf,
-    arguments: Vec<String>,
     classpath: Vec<PathBuf>,
     process: WorkerProcess,
     restart_required: bool,
@@ -641,16 +642,10 @@ pub struct AnalysisWorker {
 }
 
 impl AnalysisWorker {
-    pub fn spawn(
-        executable: PathBuf,
-        arguments: Vec<String>,
-        classpath: Vec<PathBuf>,
-    ) -> io::Result<Self> {
-        let arguments = worker_process_arguments(&arguments);
-        let process = WorkerProcess::spawn(&executable, &arguments, &classpath)?;
+    pub fn spawn(executable: PathBuf, classpath: Vec<PathBuf>) -> io::Result<Self> {
+        let process = WorkerProcess::spawn(&executable, &classpath)?;
         Ok(Self {
             executable,
-            arguments,
             classpath,
             process,
             restart_required: false,
@@ -664,7 +659,7 @@ impl AnalysisWorker {
         let _ = self.process.child.kill();
         let _ = self.process.child.wait();
         self.restart_required = true;
-        let replacement = WorkerProcess::spawn(&self.executable, &self.arguments, &self.classpath)?;
+        let replacement = WorkerProcess::spawn(&self.executable, &self.classpath)?;
         self.process = replacement;
         self.restart_required = false;
         self.analyses = 0;
@@ -684,7 +679,7 @@ impl AnalysisWorker {
         jdk_home: Option<&Path>,
         no_jdk: bool,
     ) -> io::Result<()> {
-        let classpath = configured_worker_classpath(classpath, jdk_home, no_jdk);
+        let classpath = crate::options::effective_classpath_for(classpath, jdk_home, no_jdk);
         if classpath == self.classpath {
             return if self.restart_required {
                 self.restart()
@@ -695,7 +690,7 @@ impl AnalysisWorker {
         let _ = self.process.child.kill();
         let _ = self.process.child.wait();
         self.restart_required = true;
-        let replacement = WorkerProcess::spawn(&self.executable, &self.arguments, &classpath)?;
+        let replacement = WorkerProcess::spawn(&self.executable, &classpath)?;
         self.classpath = classpath;
         self.process = replacement;
         self.restart_required = false;
@@ -1244,37 +1239,6 @@ fn json_io(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
-/// Keep resolved classpath and JDK configuration out of the worker's `exec` argument vector.
-fn worker_process_arguments(arguments: &[String]) -> Vec<String> {
-    let mut rebuilt = Vec::with_capacity(arguments.len());
-    let mut index = 0;
-    while index < arguments.len() {
-        match arguments[index].as_str() {
-            "-cp" | "-classpath" | "-class-path" | "-jdk-home" => index += 2,
-            "-no-jdk" => index += 1,
-            other => {
-                rebuilt.push(other.to_string());
-                index += 1;
-            }
-        }
-    }
-    rebuilt
-}
-
-fn configured_worker_classpath(
-    classpath: &[PathBuf],
-    jdk_home: Option<&Path>,
-    no_jdk: bool,
-) -> Vec<PathBuf> {
-    let mut configured = classpath.to_vec();
-    if !no_jdk {
-        if let Some(modules) = platform_jdk_modules(jdk_home) {
-            configured.push(modules);
-        }
-    }
-    configured
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, Cursor, Read};
@@ -1566,38 +1530,6 @@ mod tests {
         assert_eq!(
             encode_response(&wire_saturated).unwrap().len(),
             baseline + first_relation_wire
-        );
-    }
-
-    #[test]
-    fn worker_process_arguments_keep_classpath_and_jdk_out_of_exec() {
-        let arguments = vec![
-            "--stdio".to_string(),
-            "-cp".to_string(),
-            "old.jar".to_string(),
-            "-jdk-home".to_string(),
-            "/old-jdk".to_string(),
-        ];
-        let rebuilt = worker_process_arguments(&arguments);
-        assert_eq!(
-            rebuilt,
-            vec!["--stdio".to_string()],
-            "the classpath must cross the worker pipe instead of the exec argument vector"
-        );
-    }
-
-    #[test]
-    fn worker_process_arguments_drop_no_jdk_with_an_empty_classpath() {
-        let arguments = vec![
-            "-jdk-home".to_string(),
-            "/old-jdk".to_string(),
-            "-classpath".to_string(),
-            "old.jar".to_string(),
-        ];
-        assert_eq!(
-            worker_process_arguments(&arguments),
-            Vec::<String>::new(),
-            "the parent resolves the complete worker classpath before spawning it"
         );
     }
 

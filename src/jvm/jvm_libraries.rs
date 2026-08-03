@@ -12,14 +12,14 @@ use super::metadata;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
     CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibConst,
-    LibraryCallable, LibraryConst, LibraryMember, LibraryType, PropKind, PropertyInfo, PropertySet,
-    ReturnInfo, SemanticPlatform, Visibility,
+    LibraryCallable, LibraryConst, LibraryField, LibraryMember, LibraryType, PropKind,
+    PropertyInfo, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
 use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
     RangeConstruction, RuntimeCtor, RuntimeOp,
 };
-use crate::symbol_resolver::ty_subst;
+use crate::symbol_resolver::{ty_subst, ty_subst_all};
 use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
@@ -222,6 +222,17 @@ impl JvmLibraries {
             } else {
                 physical_ret
             };
+            // A value-class parameter erases to its underlying in the descriptor. Resolution compares
+            // the ARGUMENT's Kotlin type against these, so a `Duration`/`Tag` argument matches nothing
+            // while they stay erased. Restore the declared type — LAST, after every metadata/bytecode
+            // alignment above has matched against the erased form the class file actually spells. The
+            // emit `descriptor` keeps the physical form and the value-classes pass unboxes at the call,
+            // exactly how a mangled MEMBER with a value-class parameter is already exposed.
+            for (parameter, declared) in params.iter_mut().zip(&meta.value_class_params) {
+                if let Some(declared) = declared {
+                    *parameter = *declared;
+                }
+            }
             let inline_kind = InlineKind::from_flags(inline, inline && !c.public);
             let generic_sig_for_callable = self.callable_generic_sig(
                 c.owner,
@@ -274,6 +285,260 @@ impl JvmLibraries {
             });
         }
         overloads
+    }
+
+    /// The OBJECT an import path's parent denotes, as a class internal name — or `None` when it denotes
+    /// a package (the common case) or a non-object type.
+    ///
+    /// An import path separates every segment alike (`kotlin/time/Duration/Companion`), but a NESTED
+    /// class is spelled with `$` (`kotlin/time/Duration$Companion`). Which trailing segments are nesting
+    /// is not knowable from the path, so each split point is tried outward-in until one names an object.
+    fn object_owner_internal(
+        &self,
+        path: TypeName,
+    ) -> Option<(TypeName, crate::libraries::StaticFieldRef)> {
+        let rendered = path.render();
+        // A plain `object` is `TypeKind::Object` — it carries its own `INSTANCE`. A COMPANION object does
+        // not: its singleton is a static field on the OUTER class. Both facts already belong to the
+        // backend-neutral `LibraryType` contract (`kind` and `companion_object`), so consume that one
+        // semantic view rather than re-reading raw classfile fields here. Besides avoiding two object
+        // classifiers, this keeps named companions and non-JVM symbol providers on the same boundary.
+        let singleton =
+            |candidate: TypeName| -> Option<(TypeName, crate::libraries::StaticFieldRef)> {
+                let name = candidate.render();
+                let descriptor = format!("L{name};");
+                let field = |owner: TypeName, field_name: &str| crate::libraries::StaticFieldRef {
+                    owner,
+                    name: field_name.to_string(),
+                    descriptor: descriptor.clone(),
+                    ty: Ty::obj_name(candidate),
+                    constant: None,
+                };
+                let classifier = self.resolve_type_name(candidate)?;
+                if classifier.is_object() {
+                    return Some((candidate, field(candidate, "INSTANCE")));
+                }
+                let (outer, simple) = name.rsplit_once('$')?;
+                let outer = type_name(outer);
+                let outer_type = self.resolve_type_name(outer)?;
+                let (holder_name, companion_type) = outer_type.companion_object.as_ref()?;
+                // Requiring both the semantic companion type and its declared field name prevents an
+                // ordinary nested class held in some unrelated static field from masquerading as the
+                // import's singleton parent.
+                if *companion_type != candidate || holder_name != simple {
+                    return None;
+                }
+                Some((candidate, field(outer, holder_name)))
+            };
+        if let Some(hit) = singleton(path) {
+            return Some(hit);
+        }
+        // Nesting is a SUFFIX property, so convert trailing separators one at a time, keeping the ones
+        // already converted: `a/b/Outer/Inner` → `a/b/Outer$Inner` → `a/b$Outer$Inner`.
+        let mut candidate = rendered.clone();
+        for (at, _) in rendered.match_indices('/').rev() {
+            candidate.replace_range(at..=at, "$");
+            if let Some(hit) = singleton(type_name(&candidate)) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    /// Member EXTENSIONS named `name` declared inside the `object` / `companion object` `owner`, as
+    /// extension callables dispatched on that object's singleton.
+    ///
+    /// `import Duration.Companion.minutes` puts `minutes` in scope as an extension on `Int`, with
+    /// `Duration.Companion` supplying the dispatch receiver. Everything about selection is then ordinary
+    /// extension resolution — only the EMIT differs, and that difference rides on the callable as
+    /// [`LibraryCallable::singleton_dispatch`]. Nothing is contributed when `owner` is not an object
+    /// (the overwhelmingly common case: the parent really is a package).
+    fn object_member_extensions(
+        &self,
+        owner: TypeName,
+        name: &str,
+        overloads: &mut Vec<FunctionInfo>,
+        props: &mut Vec<PropertyInfo>,
+    ) {
+        let Some((owner, singleton)) = self.object_owner_internal(owner) else {
+            return;
+        };
+        let Some(class) = self.cp.find_name(owner) else {
+            return;
+        };
+        // A member's emit handle is the class's OWN method — resolved from `@Metadata`'s recorded JVM
+        // name + descriptor, never a `getX` guess, so `@JvmName` and value-class mangling
+        // (`getMinutes-UwyO8pc`) are carried verbatim.
+        //
+        // A NON-public one is `@InlineOnly` (`Duration.Companion`'s `minutes` accessor is `private`):
+        // there is no legal call site for it, so it must be SPLICED, which is what `MustInline` tells
+        // the backend. Returning the inline kind rather than a yes/no keeps that distinction where the
+        // bytecode fact is read.
+        let declared = |jvm_name: &str, desc: &str| {
+            class
+                .methods
+                .iter()
+                .find(|method| method.name == jvm_name && method.descriptor == desc)
+                .map(|method| InlineKind::from_flags(!method.is_public(), !method.is_public()))
+        };
+        for function in super::metadata::class_functions(&class) {
+            if function.kotlin_name != name || !function.is_extension() || !function.is_public() {
+                continue;
+            }
+            // A `suspend` member extension appends a `Continuation` parameter and erases its return,
+            // and the singleton dispatch does not yet thread the CPS form. Surfacing it would let the
+            // front end accept a call the backend then drops — a clean compile that emits nothing,
+            // which is exactly the silent-green shape this work set out to remove. Leave it
+            // unresolved (a diagnostic) until the CPS shape is threaded here.
+            if function.is_suspend() {
+                continue;
+            }
+            let Some(desc) = function.jvm_desc else {
+                continue;
+            };
+            let Some(function_inline) = declared(&function.jvm_name, desc) else {
+                continue;
+            };
+            let Some((params, physical_ret)) = parse_method_desc(desc) else {
+                continue;
+            };
+            if params.is_empty() {
+                continue; // an extension's first parameter IS its receiver
+            }
+            let generic_sig = function.generic_sig.clone();
+            let receiver = generic_sig
+                .as_ref()
+                .and_then(|gsig| gsig.receiver)
+                .or_else(|| function.receiver_class.map(kotlin_type_name_to_ty))
+                .unwrap_or(params[0]);
+            let ret = metadata_return_info(function.ret_class, function.ret_nullable())
+                .apply(physical_ret);
+            let callable = LibraryCallable {
+                suspend: function.is_suspend(),
+                inline: function_inline,
+                context_count: function.context_count,
+                generic_sig: generic_sig.clone().map(Box::new),
+                singleton_dispatch: Some(Box::new(singleton.clone())),
+                ..LibraryCallable::library(
+                    owner,
+                    function.jvm_name.clone(),
+                    params,
+                    ret,
+                    physical_ret,
+                    desc.to_string(),
+                )
+            };
+            overloads.push(FunctionInfo {
+                ret: metadata_return_info(function.ret_class, function.ret_nullable()),
+                visibility: function.visibility,
+                generic_sig,
+                context_count: function.context_count,
+                call_sig: function.member_call_sig(),
+                flags: FnFlags {
+                    inline: InlineKind::None,
+                    suspend: function.is_suspend(),
+                    operator: function.is_operator(),
+                },
+                ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
+            });
+        }
+        for property in super::metadata::class_properties(&class) {
+            if property.name != name || !property.is_extension {
+                continue;
+            }
+            let Some(getter_sig) = property.getter.as_ref() else {
+                continue;
+            };
+            let Some(getter_inline) = declared(&getter_sig.name, &getter_sig.desc) else {
+                continue;
+            };
+            let Some((getter_params, getter_ret)) = parse_method_desc(&getter_sig.desc) else {
+                continue;
+            };
+            if getter_params.len() != 1 {
+                continue; // exactly the extension receiver
+            }
+            let property_gsig = property.generic_sig.clone();
+            let fallback = property
+                .ret_class
+                .map_or(getter_ret, kotlin_type_name_to_ty);
+            let property_ty = property_gsig.as_ref().map_or_else(
+                || {
+                    if property.ret_nullable {
+                        Ty::nullable(fallback)
+                    } else {
+                        fallback
+                    }
+                },
+                |gsig| gsig.ret,
+            );
+            let accessor = |jvm_name: &str,
+                            desc: &str,
+                            params: Vec<Ty>,
+                            ret: Ty,
+                            physical: Ty,
+                            inline: InlineKind| {
+                LibraryCallable {
+                    inline,
+                    singleton_dispatch: Some(Box::new(singleton.clone())),
+                    ..LibraryCallable::library(
+                        owner,
+                        jvm_name.to_string(),
+                        params,
+                        ret,
+                        physical,
+                        desc.to_string(),
+                    )
+                }
+            };
+            let setter = property.setter.as_ref().and_then(|setter_sig| {
+                let setter_inline = declared(&setter_sig.name, &setter_sig.desc)?;
+                let (params, ret) = parse_method_desc(&setter_sig.desc)?;
+                (params.len() == 2 && ret == Ty::Unit).then(|| {
+                    accessor(
+                        &setter_sig.name,
+                        &setter_sig.desc,
+                        params,
+                        Ty::Unit,
+                        ret,
+                        setter_inline,
+                    )
+                })
+            });
+            props.push(PropertyInfo {
+                kind: PropKind::Extension,
+                receiver: property_gsig
+                    .as_ref()
+                    .and_then(|gsig| gsig.receiver)
+                    .or_else(|| {
+                        Some(
+                            property
+                                .receiver_class
+                                .map_or(getter_params[0], Ty::obj_name),
+                        )
+                    }),
+                formals: property_gsig
+                    .as_ref()
+                    .map(|gsig| gsig.formals.clone())
+                    .unwrap_or_default(),
+                ty: property_ty,
+                context_count: 0,
+                getter: accessor(
+                    &getter_sig.name,
+                    &getter_sig.desc,
+                    getter_params,
+                    property_ty,
+                    getter_ret,
+                    getter_inline,
+                ),
+                setter,
+                is_const: property.is_const,
+                visibility: property.visibility,
+                owner,
+                receiver_rank: 0,
+                source_key: None,
+            });
+        }
     }
 
     pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
@@ -571,33 +836,41 @@ impl JvmLibraries {
             if !seen.insert(internal) {
                 continue;
             }
-            let Some(ci) = self.cp.find_name(internal) else {
-                continue;
+            let ci = self.cp.find_name(internal);
+            // A Kotlin builtin whose mapped JVM class is absent (a no-JDK compile) has no `.class` and
+            // so no class `Signature`; its `.kotlin_builtins` declaration carries the same two facts —
+            // the formals and the argument-carrying supertypes — so bind through that instead.
+            let (formals, supers) = match &ci {
+                Some(ci) => ci.signature.as_deref().and_then(parse_class_gsig).unzip(),
+                None => self.cp.builtin_class_gsig_name(internal).unzip(),
             };
-            let (formals, supers) = ci.signature.as_deref().and_then(parse_class_gsig).unzip();
+            if ci.is_none() && formals.is_none() {
+                continue;
+            }
             let formals = formals.unwrap_or_default();
             let binds: std::collections::HashMap<String, Ty> =
                 formals.iter().cloned().zip(targs.iter().copied()).collect();
             if internal == target {
                 return binds;
             }
-            if let Some(supers) = supers {
-                for sup in supers {
-                    if let Ty::Obj(sup_internal, sup_args) = sup {
-                        let sup_targs = sup_args
-                            .iter()
-                            .map(|ty| ty_subst_preserving_unbound(*ty, &binds))
-                            .collect();
-                        q.push_back((
-                            super::jvm_class_map::to_jvm_type_name(sup_internal),
-                            sup_targs,
-                        ));
+            match (supers, &ci) {
+                (Some(supers), _) => {
+                    for sup in supers {
+                        if let Ty::Obj(sup_internal, sup_args) = sup {
+                            let sup_targs = ty_subst_all(sup_args, &binds);
+                            q.push_back((
+                                super::jvm_class_map::to_jvm_type_name(sup_internal),
+                                sup_targs,
+                            ));
+                        }
                     }
                 }
-            } else {
-                for i in ci.interfaces.iter_ids().chain(ci.super_class) {
-                    q.push_back((i, vec![]));
+                (None, Some(ci)) => {
+                    for i in ci.interfaces.iter_ids().chain(ci.super_class) {
+                        q.push_back((i, vec![]));
+                    }
                 }
+                (None, None) => {}
             }
         }
         std::collections::HashMap::new()
@@ -799,6 +1072,10 @@ impl JvmLibraries {
                                     is_iface,
                                     self.cp.builtin_supertypes_name(internal_name),
                                     self.builtin_members_for_type_name(internal_name),
+                                    self.cp
+                                        .builtin_class_gsig_name(internal_name)
+                                        .map(|(formals, _)| formals)
+                                        .unwrap_or_default(),
                                 ));
                             }
                             // Otherwise the backend's curated minimal ABI for the well-known mapped builtins.
@@ -810,7 +1087,13 @@ impl JvmLibraries {
             let mut constructors = Vec::new();
             let mut members = Vec::new();
             let mut companion = Vec::new();
+            let mut enum_entries_accessor = None;
             let is_java = !ci.meta.is_present();
+            // Identify the generated accessor while decoding JVM declarations, where metadata and
+            // class flags are authoritative. The backend-neutral checker then consumes an explicit
+            // capability instead of inferring declaration origin from a same-named static method.
+            let owns_enum_entries_accessor =
+                ci.meta.is_present() && ci.access & crate::jvm::classreader::ACC_ENUM != 0;
             // `Map.put` returns the PREVIOUS value (`V?`, null for a fresh key) — Kotlin enhances this Java
             // method's nullability. It applies to ANY `Map` subtype (`HashMap`, `TreeMap`, …), since a call
             // resolves the member on the concrete class, not on `Map` itself.
@@ -876,6 +1159,22 @@ impl JvmLibraries {
                 // The member's parsed generic signature — carries type-variable binding facts so a caller can
                 // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
                 member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                // The JVM `Signature` attribute cannot spell a RECEIVER function type — `Cfg.() -> Unit`
+                // and `(Cfg) -> Unit` share the `Function1` erasure — so restore the distinction from
+                // `@Metadata`'s per-parameter `@ExtensionFunctionType` mark. Without it a member's
+                // receiver-lambda parameter reads as an ordinary function type and no lambda matches it.
+                if let (Some(gsig), Some(metadata)) = (member.generic_sig.as_mut(), member_metadata)
+                {
+                    mark_receiver_fun_params(
+                        gsig,
+                        &metadata
+                            .value_params
+                            .iter()
+                            .map(metadata::MetaValueParam::recv_fun)
+                            .collect::<Vec<_>>(),
+                        metadata.is_suspend(),
+                    );
+                }
                 member.set_suspend(member_metadata.is_some_and(metadata::MetaFn::is_suspend));
                 let value_arity = member
                     .params
@@ -925,10 +1224,18 @@ impl JvmLibraries {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
                 if m.name == "<init>" {
-                    // Parse the ctor's generic signature so the resolver can infer a construction's type
-                    // arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend signature strings.
-                    member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                    // The ctor's generic signature (decoded above, marks restored) lets the resolver infer a
+                    // construction's type arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend
+                    // signature strings. Re-parsing the raw attribute here would drop the receiver marks.
                     constructors.push(member);
+                } else if m.is_static()
+                    && owns_enum_entries_accessor
+                    && m.name == "getEntries"
+                    && member.params.is_empty()
+                    && member.ret.obj_internal()
+                        == Some(crate::types::type_name("kotlin/enums/EnumEntries"))
+                {
+                    enum_entries_accessor = Some(member);
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
                     companion.push(member);
@@ -1182,11 +1489,44 @@ impl JvmLibraries {
                 .methods
                 .iter()
                 .any(|m| m.name == "constructor-impl$default");
+            // Retain every declaration, not only readable instance fields. A private or static field
+            // still hides an inherited field of the same name, and that hiding decision belongs to the
+            // shared source-level hierarchy walk rather than to this classfile provider.
+            let fields = ci
+                .fields
+                .iter()
+                .map(|field| {
+                    let erased_ty = field_desc_to_ty(&field.descriptor);
+                    let ty = field
+                        .signature
+                        .as_deref()
+                        .and_then(|signature| {
+                            parse_field_gsig(signature, &field.descriptor, ci.signature.as_deref())
+                                .map(|(ty, _)| ty)
+                        })
+                        .unwrap_or(erased_ty);
+                    LibraryField {
+                        name: field.name.clone(),
+                        ty,
+                        erased_ty,
+                        descriptor: field.descriptor.clone(),
+                        visibility: if field.access & 0x0001 != 0 {
+                            Visibility::Public
+                        } else if field.access & 0x0004 != 0 {
+                            Visibility::Protected
+                        } else {
+                            Visibility::Private
+                        },
+                        is_static: field.access & ACC_STATIC != 0,
+                    }
+                })
+                .collect();
             Some(LibraryType {
                 is_public: ci.is_public(),
                 kind,
                 supertypes,
                 constructors,
+                fields,
                 members: members
                     .into_iter()
                     .chain(value_class_metadata_members)
@@ -1202,6 +1542,7 @@ impl JvmLibraries {
                 type_params,
                 sealed_subclasses: metadata::class_sealed_subclasses(&ci).into(),
                 enum_entries,
+                enum_entries_accessor,
                 value_ctor_has_default,
                 ctor_named_params: metadata::class_constructor_params(&ci),
                 value_class_properties: self.value_class_property_members_for_class(&ci),
@@ -1488,9 +1829,9 @@ fn parse_concrete_field_gsig(signature: &str, erased_descriptor: &str) -> Option
     (!has_free).then_some(ty)
 }
 
-/// Parse a field signature without losing projection information or accepting a signature whose
-/// erasure disagrees with the field descriptor. Type parameters may remain for a caller that can
-/// substitute them from an applied receiver; [`parse_concrete_field_gsig`] rejects them.
+/// Decode the source type of a field while verifying that it erases to the classfile descriptor.
+/// Unlike the constant-field helper, this retains type variables: the shared resolver substitutes
+/// them from the applied receiver and falls back to `erased_ty` only for a raw receiver.
 fn parse_field_gsig(
     signature: &str,
     erased_descriptor: &str,
@@ -1511,9 +1852,9 @@ fn parse_field_gsig(
     Some((canonicalize_jvm_collections(parsed.ty), parsed.has_free))
 }
 
-/// Descriptor erasure for a field whose outermost signature type is a declaring-class type variable,
-/// including arrays of that variable. The JVM erases such a variable to its leftmost declared bound,
-/// not unconditionally to `Object`.
+/// Compute the descriptor erasure of an outermost declaring-class type variable (or an array of it).
+/// The JVM uses the variable's leftmost bound, so `T : CharSequence` erases to `CharSequence`, not
+/// unconditionally to `Object`. Chained bounds are followed defensively and cycles are rejected.
 fn field_type_parameter_erasure(
     signature: &str,
     declaring_class_signature: Option<&str>,
@@ -1549,62 +1890,6 @@ fn field_type_parameter_erasure(
         "[".repeat(dimensions),
         type_descriptor(bound)
     ))
-}
-
-fn field_type_parameters_bound(ty: Ty, bindings: &std::collections::HashMap<String, Ty>) -> bool {
-    fn bound(
-        ty: Ty,
-        bindings: &std::collections::HashMap<String, Ty>,
-        seen: &mut std::collections::HashSet<&'static str>,
-    ) -> bool {
-        match ty {
-            Ty::TyParam(name, _) => {
-                seen.insert(name)
-                    && bindings
-                        .get(name)
-                        .is_some_and(|ty| bound(*ty, bindings, seen))
-            }
-            Ty::Fun(signature) => {
-                signature
-                    .params
-                    .iter()
-                    .all(|ty| bound(*ty, bindings, &mut seen.clone()))
-                    && bound(signature.ret, bindings, &mut seen.clone())
-            }
-            Ty::Obj(_, arguments) => arguments
-                .iter()
-                .all(|ty| bound(*ty, bindings, &mut seen.clone())),
-            Ty::Nullable(inner) => bound(*inner, bindings, seen),
-            _ => true,
-        }
-    }
-    bound(ty, bindings, &mut std::collections::HashSet::new())
-}
-
-fn ty_subst_preserving_unbound(ty: Ty, bindings: &std::collections::HashMap<String, Ty>) -> Ty {
-    match ty {
-        Ty::TyParam(name, _) => bindings.get(name).copied().unwrap_or(ty),
-        Ty::Fun(signature) => Ty::fun_with_shape(
-            signature
-                .params
-                .iter()
-                .map(|ty| ty_subst_preserving_unbound(*ty, bindings))
-                .collect(),
-            ty_subst_preserving_unbound(signature.ret, bindings),
-            signature.context_count,
-            signature.has_receiver,
-            signature.suspend,
-        ),
-        Ty::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
-            name,
-            &arguments
-                .iter()
-                .map(|ty| ty_subst_preserving_unbound(*ty, bindings))
-                .collect::<Vec<_>>(),
-        ),
-        Ty::Nullable(inner) => Ty::nullable(ty_subst_preserving_unbound(*inner, bindings)),
-        _ => ty,
-    }
 }
 
 fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
@@ -1711,6 +1996,31 @@ fn canonicalize_jvm_collections(ty: Ty) -> Ty {
     }
 }
 
+/// Restore the RECEIVER function-type marks a JVM `Signature` attribute cannot carry: for each value
+/// parameter `@Metadata` marks `@kotlin.ExtensionFunctionType`, turn the decoded `(R, …) -> T` into
+/// `R.(…) -> T`. A `suspend` callable's physical signature appends a `Continuation` the source parameter
+/// list does not have, so it is dropped before aligning. Applied positionally, and skipped unless the two
+/// lists then align 1:1 — a mismatch means they describe different parameters.
+fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool], suspend: bool) {
+    let source_params = gsig.params.len().saturating_sub(usize::from(suspend));
+    if source_params != recv_fun.len() {
+        return;
+    }
+    for (param, &receiver_fun) in gsig.params.iter_mut().take(source_params).zip(recv_fun) {
+        let Ty::Fun(sig) = *param else { continue };
+        if !receiver_fun || sig.has_receiver || sig.params.is_empty() {
+            continue;
+        }
+        *param = Ty::fun_with_shape(
+            sig.params.clone(),
+            sig.ret,
+            sig.context_count,
+            true,
+            sig.suspend,
+        );
+    }
+}
+
 /// Count the `Byte`/`Short` primitive parameters in a JVM method descriptor — the "narrowing" measure
 /// used to prefer the widest among overloads krusty's `Byte`/`Short`/`Int` → `Int` collapse made
 /// indistinguishable. Object (`L…;`) and array (`[`) params are skipped (a `B`/`S` inside a class name
@@ -1803,6 +2113,7 @@ fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
         kind: crate::libraries::TypeKind::Class,
         supertypes: TypeNameList::new(),
         constructors: Vec::new(),
+        fields: Vec::new(),
         members,
         companion: Vec::new(),
         companion_consts: Default::default(),
@@ -1814,6 +2125,7 @@ fn mapped_builtin_fallback(internal: &str) -> Option<LibraryType> {
         type_params: Vec::new(),
         sealed_subclasses: TypeNameList::new(),
         enum_entries: Vec::new(),
+        enum_entries_accessor: None,
         value_ctor_has_default: false,
         ctor_named_params: Vec::new(),
         value_class_properties: Vec::new(),
@@ -1828,6 +2140,7 @@ fn builtin_library_type(
     is_interface: bool,
     supertypes: TypeNameList,
     members: Vec<LibraryMember>,
+    type_params: Vec<String>,
 ) -> LibraryType {
     LibraryType {
         is_public: true,
@@ -1838,6 +2151,7 @@ fn builtin_library_type(
         },
         supertypes,
         constructors: Vec::new(),
+        fields: Vec::new(),
         members,
         companion: Vec::new(),
         companion_consts: Default::default(),
@@ -1846,9 +2160,10 @@ fn builtin_library_type(
         value_companion_fns: Vec::new(),
         value_underlying: None,
         alias_target: None,
-        type_params: Vec::new(),
+        type_params,
         sealed_subclasses: TypeNameList::new(),
         enum_entries: Vec::new(),
+        enum_entries_accessor: None,
         value_ctor_has_default: false,
         ctor_named_params: Vec::new(),
         value_class_properties: Vec::new(),
@@ -2314,6 +2629,13 @@ impl SymbolSource for JvmLibraries {
         // Extension PROPERTIES of the source name live in the CALLABLE namespace's property half. A name is
         // functions XOR a property, so these are surfaced separately and chosen when there are no functions.
         let mut props: Vec<PropertyInfo> = Vec::new();
+        // The fqn's parent need not be a PACKAGE. `import kotlin.time.Duration.Companion.minutes` names a
+        // member of an OBJECT, and Kotlin's rule is that importing one brings it into scope with that
+        // object as its implicit dispatch receiver — so an object-like classifier is a legal parent of a
+        // callable name, exactly like a package. Its member EXTENSIONS are surfaced here; the singleton is
+        // recorded on the callable (`singleton_dispatch`) because the emit is an instance invoke on
+        // `Owner.INSTANCE` / `Outer.Companion`, not a facade `invokestatic`.
+        self.object_member_extensions(pkg, &name, &mut overloads, &mut props);
         // Extension discovery is @Metadata-driven (the source of truth), NOT a scan of JVM statics: the
         // package's PUBLIC facades' metadata carry each extension's SOURCE receiver, parameters, return
         // (with nullability), visibility, and generic signature. The JVM method (`@JvmName`-mangled name +
@@ -2467,15 +2789,19 @@ impl SymbolSource for JvmLibraries {
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
             }
-            // Extension PROPERTIES declared by the facade — `arr.lastIndex`, `list.indices`. Metadata
-            // records the property with its REAL accessor names (`JvmPropertySignature`), so the getter
-            // name is authoritative, never a `getX` guess. Facade parts are merged in the shared cached
-            // decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
+            // PROPERTIES declared by the facade — receiver-less TOP-LEVEL ones (`val plugin: Plugin`)
+            // and EXTENSION ones (`arr.lastIndex`, `list.indices`). Both are the callable namespace's
+            // property half, and both differ only by whether the accessors take a receiver parameter.
+            // Metadata records the property with its REAL accessor names (`JvmPropertySignature`), so the
+            // getter name is authoritative, never a `getX` guess. Facade parts are merged in the shared
+            // cached decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
             let mprops = self.cp.meta_properties_name(facade);
             for mp in mprops.iter() {
-                if mp.name != name || !mp.is_extension {
-                    continue; // this property name, extension only
+                if mp.name != name {
+                    continue; // this property name
                 }
+                // The accessors' receiver parameter: present iff the property is an extension.
+                let receiver_params = usize::from(mp.is_extension);
                 let mp = mp.clone();
                 let property_gsig = mp.generic_sig.clone();
                 let Some(getter_sig) = mp.getter else {
@@ -2495,7 +2821,7 @@ impl SymbolSource for JvmLibraries {
                 let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
                     continue;
                 };
-                if gparams.len() != 1 {
+                if gparams.len() != receiver_params {
                     continue;
                 }
                 let generic_receiver = property_gsig.as_ref().and_then(|gsig| gsig.receiver);
@@ -2520,7 +2846,7 @@ impl SymbolSource for JvmLibraries {
                 );
                 let setter = mp.setter.and_then(|setter_sig| {
                     let (sparams, sret) = parse_method_desc(&setter_sig.desc)?;
-                    if sparams.len() != 2 || sret != Ty::Unit {
+                    if sparams.len() != receiver_params + 1 || sret != Ty::Unit {
                         return None;
                     }
                     if !facade_class.methods.iter().any(|method| {
@@ -2541,12 +2867,16 @@ impl SymbolSource for JvmLibraries {
                     ))
                 });
                 props.push(PropertyInfo {
-                    kind: PropKind::Extension,
-                    receiver: generic_receiver.or_else(|| {
-                        Some(
+                    kind: if mp.is_extension {
+                        PropKind::Extension
+                    } else {
+                        PropKind::TopLevel
+                    },
+                    receiver: mp.is_extension.then(|| {
+                        generic_receiver.unwrap_or_else(|| {
                             mp.receiver_class
-                                .map_or(Ty::obj("kotlin/Any"), Ty::obj_name),
-                        )
+                                .map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
+                        })
                     }),
                     formals: property_gsig
                         .as_ref()
@@ -2615,7 +2945,14 @@ impl SymbolSource for JvmLibraries {
                             m.descriptor,
                             m.signature
                         );
-                        let generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                        // The provider-normalized signature is the single source of truth for every
+                        // carrier. For a `.class` member it also restores receiver function-type marks
+                        // that the raw JVM `Signature` attribute cannot spell; for a
+                        // `.kotlin_builtins` member there is no raw attribute at all, so the provider's
+                        // decoded signature is what preserves and binds its type parameters. Re-parsing
+                        // `m.signature` here would therefore lose facts in the former case and fail to
+                        // produce any signature in the latter.
+                        let generic_sig = m.generic_sig.clone();
                         // A `suspend fun` member's physical method appends a `Continuation` parameter
                         // and erases its return to `Object`; present the LOGICAL signature (drop the
                         // continuation, recover the real return from the `Continuation<T>` type
@@ -2749,12 +3086,7 @@ impl SymbolSource for JvmLibraries {
                         // JVM form (`java/util/Map`, when the member is found on a classpath supertype);
                         // map both to the builtin whose `@Metadata` declares the nullability.
                         let builtin_cn =
-                            super::jvm_class_map::jvm_collection_to_kotlin_type_name(cn)
-                                .or_else(|| {
-                                    super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(
-                                        cn,
-                                    )
-                                })
+                            super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(cn)
                                 .unwrap_or(cn);
                         let builtin_ret_nullable = !ret.is_reference()
                             && self.cp.builtin_member_ret_nullable_name(
@@ -2909,63 +3241,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 stack.push(s);
             }
             stack.extend(ci.interfaces.iter_ids());
-        }
-        None
-    }
-
-    fn instance_field(
-        &self,
-        receiver: Ty,
-        name: &str,
-    ) -> Option<crate::libraries::InstanceFieldRef> {
-        let internal = receiver.obj_internal()?;
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(super::jvm_class_map::to_jvm_type_name(internal));
-        let mut seen = std::collections::HashSet::new();
-        while let Some(current) = queue.pop_front() {
-            if !seen.insert(current) {
-                continue;
-            }
-            let Some(class) = self.cp.find_name(current) else {
-                continue;
-            };
-            let metadata_property = metadata::class_properties(&class)
-                .iter()
-                .find(|property| property.name == name && !property.is_extension);
-            if metadata_property.is_some_and(|property| {
-                property.getter.is_some() || property.visibility != Visibility::Public
-            }) {
-                return None;
-            }
-            if let Some(field) = class.fields.iter().find(|field| field.name == name) {
-                if field.access & crate::jvm::classreader::ACC_STATIC != 0
-                    || field.access & crate::jvm::classreader::ACC_PUBLIC == 0
-                {
-                    return None;
-                }
-                let ty = field
-                    .signature
-                    .as_deref()
-                    .and_then(|signature| {
-                        parse_field_gsig(signature, &field.descriptor, class.signature.as_deref())
-                    })
-                    .and_then(|(ty, has_free)| {
-                        let bindings = self.receiver_type_bindings_name(receiver, current);
-                        (!has_free || field_type_parameters_bound(ty, &bindings))
-                            .then(|| canonicalize_jvm_collections(ty_subst(ty, &bindings)))
-                    })
-                    .unwrap_or_else(|| field_desc_to_ty(&field.descriptor));
-                return Some(crate::libraries::InstanceFieldRef {
-                    owner: current,
-                    ty,
-                    descriptor: field.descriptor.clone(),
-                });
-            }
-            if metadata_property.is_some() {
-                return None;
-            }
-            queue.extend(class.super_class);
-            queue.extend(class.interfaces.iter_ids());
         }
         None
     }
@@ -3183,6 +3458,21 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 params: Vec::new(),
                 ret,
                 is_property: true,
+            });
+        }
+        // `MutableList.removeAt(Int): E` IS `java.util.List.remove(int)` — the function half of the
+        // same special-builtin renaming the properties above cover, so a class implementing
+        // `MutableList` must expose its `removeAt` override under the JVM name too. Keyed on the
+        // KOTLIN name, not the erased `java/util/List`: unlike `size`, this member exists only on the
+        // MUTABLE side, so a read-only `List` implementation that happens to declare an unrelated
+        // `removeAt` must not acquire a `remove(int)` bridge kotlinc would never emit.
+        if internal.matches("kotlin/collections/MutableList") {
+            members.push(crate::libraries::MappedInterfaceMember {
+                source_name: "removeAt".to_string(),
+                physical_name: "remove".to_string(),
+                params: vec![Ty::Int],
+                ret: Ty::obj("kotlin/Any"),
+                is_property: false,
             });
         }
         if internal.matches("kotlin/CharSequence") || internal.matches("java/lang/CharSequence") {
@@ -3696,6 +3986,7 @@ mod tests {
         parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::SemanticPlatform;
+    use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
     use crate::types::Ty;
 
@@ -3717,6 +4008,101 @@ mod tests {
         assert_eq!(
             desc_to_ty("[[Ljava/lang/String;"),
             Ty::array(Ty::array(Ty::String))
+        );
+    }
+
+    #[test]
+    fn shared_field_walk_honors_hiding_declarations() {
+        let sources = [
+            (
+                String::new(),
+                "package sample; public class Base { public int value; }".into(),
+            ),
+            (
+                String::new(),
+                "package sample; public class PrivateChild extends Base { private int value; }"
+                    .into(),
+            ),
+            (
+                String::new(),
+                "package sample; public class StaticChild extends Base { public static int value; }"
+                    .into(),
+            ),
+        ];
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &sources,
+            crate::jvm::java_stub::StubMode::Strict,
+            &|candidate| candidate == "java/lang/Object",
+        )
+        .expect("field-hiding stubs");
+        let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
+        classpath.set_stub_overlay(stubs);
+        let libraries = super::JvmLibraries::new(classpath);
+        let resolver = crate::symbol_resolver::SymbolResolver::new(&libraries);
+
+        assert_eq!(
+            resolver
+                .member_property_type(Ty::obj("sample/Base"), "value")
+                .map(|(_, ty, _, _)| ty),
+            Some(Ty::Int)
+        );
+        for child in ["sample/PrivateChild", "sample/StaticChild"] {
+            assert!(
+                resolver
+                    .member_property_type(Ty::obj(child), "value")
+                    .is_none(),
+                "{child}.value must not expose the hidden Base.value"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_field_walk_specializes_applied_receivers_and_erases_raw_ones() {
+        let sources = [
+            (
+                String::new(),
+                "package sample; public class Holder<T extends CharSequence> { public T value; public java.util.List<T> values; }"
+                    .into(),
+            ),
+        ];
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &sources,
+            crate::jvm::java_stub::StubMode::Strict,
+            &|candidate| candidate.starts_with("java/"),
+        )
+        .expect("generic field stubs");
+        let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
+        classpath.set_stub_overlay(stubs);
+        let libraries = super::JvmLibraries::new(classpath);
+        let shape = libraries
+            .resolve_type_name(type_name("sample/Holder"))
+            .expect("generic holder shape");
+        assert_eq!(shape.type_params, ["T"]);
+        assert!(
+            matches!(shape.fields.get(1), Some(field) if matches!(field.ty, Ty::Obj(_, arguments) if matches!(arguments, [Ty::TyParam("T", _)]))),
+            "field signature must retain its declaration variable: {:?}",
+            shape
+                .fields
+                .iter()
+                .map(|field| field.ty)
+                .collect::<Vec<_>>()
+        );
+        let resolver = crate::symbol_resolver::SymbolResolver::new(&libraries);
+
+        assert_eq!(
+            resolver
+                .member_property_type(Ty::obj_args("sample/Holder", &[Ty::String]), "values")
+                .map(|(_, ty, _, _)| ty),
+            Some(Ty::obj_args("kotlin/collections/List", &[Ty::String])),
+            "the field type must be substituted through the receiver hierarchy"
+        );
+        let raw_values = resolver
+            .member_property_type(Ty::obj("sample/Holder"), "values")
+            .expect("raw public field")
+            .1;
+        assert!(
+            matches!(raw_values, Ty::Obj(_, arguments) if arguments.is_empty()),
+            "an unbound field parameter must use the erased declaration type, got {raw_values:?}"
         );
     }
 
@@ -3852,87 +4238,6 @@ mod tests {
     }
 
     #[test]
-    fn inaccessible_or_static_field_hides_an_inherited_instance_field() {
-        let sources = [
-            (
-                String::new(),
-                "package p; public class Base { public int value; }".into(),
-            ),
-            (
-                String::new(),
-                "package p; public class PrivateChild extends Base { private int value; }".into(),
-            ),
-            (
-                String::new(),
-                "package p; public class StaticChild extends Base { public static int value; }"
-                    .into(),
-            ),
-        ];
-        let stubs = crate::jvm::java_stub::stub_classes(
-            &sources,
-            crate::jvm::java_stub::StubMode::Strict,
-            &|candidate| candidate == "java/lang/Object",
-        )
-        .expect("Java field-hiding stubs");
-        let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
-        classpath.set_stub_overlay(stubs);
-        let libraries = super::JvmLibraries::new(classpath);
-
-        assert_eq!(
-            libraries
-                .instance_field(Ty::obj("p/Base"), "value")
-                .map(|field| field.ty),
-            Some(Ty::Int)
-        );
-        for child in ["p/PrivateChild", "p/StaticChild"] {
-            assert!(
-                libraries.instance_field(Ty::obj(child), "value").is_none(),
-                "{child}.value must not expose Base.value"
-            );
-        }
-    }
-
-    #[test]
-    fn instance_field_specializes_parameters_and_erases_unbound_ones() {
-        let sources = [
-            (
-                String::new(),
-                "package p; public class Generic<T> { public T value; public java.util.List<T> values; }"
-                    .into(),
-            ),
-            (
-                String::new(),
-                "package p; public class Strings extends Generic<String> {}".into(),
-            ),
-        ];
-        let stubs = crate::jvm::java_stub::stub_classes(
-            &sources,
-            crate::jvm::java_stub::StubMode::Strict,
-            &|candidate| candidate.starts_with("java/"),
-        )
-        .expect("generic Java field stubs");
-        let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
-        classpath.set_stub_overlay(stubs);
-        let libraries = super::JvmLibraries::new(classpath);
-
-        assert_eq!(
-            libraries
-                .instance_field(Ty::obj("p/Strings"), "value")
-                .map(|field| field.ty),
-            Some(Ty::String),
-            "an exact type variable must be specialized through the receiver hierarchy"
-        );
-        let raw_values = libraries
-            .instance_field(Ty::obj("p/Generic"), "values")
-            .expect("public raw field")
-            .ty;
-        assert!(
-            matches!(raw_values, Ty::Obj(_, arguments) if arguments.is_empty()),
-            "an unbound field parameter must fall back to its erased descriptor, got {raw_values:?}"
-        );
-    }
-
-    #[test]
     fn field_generic_signature_rejects_wildcards_and_projections() {
         assert_eq!(
             parse_field_gsig(
@@ -3952,11 +4257,6 @@ mod tests {
             "Lkotlin/jvm/functions/Function1<-Ljava/lang/String;+Ljava/lang/Long;>;",
         ] {
             let descriptor = format!("L{};", &signature[1..signature.find('<').unwrap()]);
-            assert_eq!(
-                parse_field_gsig(signature, &descriptor, None),
-                None,
-                "field parser accepted lossy signature {signature}"
-            );
             assert_eq!(
                 parse_concrete_field_gsig(signature, &descriptor),
                 None,
