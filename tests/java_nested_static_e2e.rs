@@ -42,8 +42,14 @@ fn run_box(use_src: &str, tag: &str) {
 
     let kr = root.join("kr");
     assert!(
-        common::compile_to_dir(use_src, "Use", std::slice::from_ref(&cp), Some(&jdk), &kr)
-            .is_some(),
+        common::compile_to_dir(
+            use_src,
+            "Use",
+            std::slice::from_ref(&cp),
+            Some(jdk.as_path()),
+            &kr
+        )
+        .is_some(),
         "krusty failed on nested Java static call ({tag})"
     );
 

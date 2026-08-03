@@ -147,10 +147,7 @@ fn builtins_fragment(jar: &std::path::Path, path: &str) -> Vec<u8> {
 /// Both are the only record of these signatures when the mapped JVM class is off the classpath.
 #[test]
 fn builtins_decode_type_parameters_and_arguments() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let bytes = builtins_fragment(&jar, "kotlin/collections/collections.kotlin_builtins");
     let classes = parse_builtins(&bytes);
 
@@ -194,10 +191,7 @@ fn builtins_decode_type_parameters_and_arguments() {
 /// supported configuration, so its members must carry a generic signature like any other.
 #[test]
 fn builtin_generic_member_binds_receiver_argument_without_jdk() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     // Only the stdlib jar: no JDK, so `java/util/List` is absent and the builtins fallback is taken.
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
     let scope = [type_name("kotlin/collections")];
@@ -238,10 +232,7 @@ fn builtin_generic_member_binds_receiver_argument_without_jdk() {
 /// depend on the builtins decode keeping type parameters AND type arguments.
 #[test]
 fn builtin_generic_members_type_check_without_jdk() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let src = r#"
 fun a(l: List<String>): String = l.get(1)
 fun b(l: List<String>): String = l[1]
@@ -263,10 +254,8 @@ fun d(m: Map<String, Int>): List<Int> = m.entries.map { (k, v) -> k.length + v }
 /// or an unrelated method silently becomes the `java.util.List.remove(int)` implementation.
 #[test]
 fn read_only_list_impl_gets_no_remove_bridge() {
-    let (Some(jar), Some(jdk)) = (common::stdlib_jar(), common::jdk_modules()) else {
-        eprintln!("skip: no kotlin-stdlib jar / JDK");
-        return;
-    };
+    let jar = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let cp = [jar];
     let bridge_of = |src: &str| -> bool {
         let classes = common::compile_in_process(src, "Ro", &cp, Some(&jdk)).expect("compiles");

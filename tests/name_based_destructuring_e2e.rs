@@ -68,7 +68,7 @@ fn name_based_destructuring_rejected_without_flag() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     assert!(
-        common::compile_in_process(&src, "Nb", &[stdlib], Some(&jdk),).is_none(),
+        common::compile_in_process(&src, "Nb", &[stdlib], Some(jdk.as_path()),).is_none(),
         "krusty accepted `[a, b]` destructuring without +NameBasedDestructuring"
     );
 }

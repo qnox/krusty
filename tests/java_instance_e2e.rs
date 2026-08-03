@@ -46,7 +46,14 @@ fn constructs_and_calls_java_instance_methods() {
     // krusty constructs it and calls instance methods — compiled in-process against the cp dir.
     let use_src = "import util.Calc\nfun box(): String {\n  val c = Calc(10)\n  if (c.add(5) != 15) return \"f1\"\n  if (c.tag() != \"calc\") return \"f2\"\n  return \"OK\"\n}\n";
     let kr = root.join("kr");
-    if common::compile_to_dir(use_src, "Use", std::slice::from_ref(&cp), Some(&jdk), &kr).is_none()
+    if common::compile_to_dir(
+        use_src,
+        "Use",
+        std::slice::from_ref(&cp),
+        Some(jdk.as_path()),
+        &kr,
+    )
+    .is_none()
     {
         eprintln!("skip (IR unsupported)");
         return;
@@ -111,8 +118,14 @@ fn calls_java_static_overloaded_methods() {
          return \"OK\"\n}\n";
     let kr = root.join("kr");
     assert!(
-        common::compile_to_dir(use_src, "Use", std::slice::from_ref(&cp), Some(&jdk), &kr)
-            .is_some(),
+        common::compile_to_dir(
+            use_src,
+            "Use",
+            std::slice::from_ref(&cp),
+            Some(jdk.as_path()),
+            &kr
+        )
+        .is_some(),
         "krusty failed on Java static call"
     );
 

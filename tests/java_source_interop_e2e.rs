@@ -93,23 +93,19 @@ fun box(): String {
     return if (ShadowBox().value == 7) direct + inherited + sourceInherited else "FAIL"
 }
 "#;
-    let Some(jdk) = common::jdk_modules() else {
-        cleanup(&java_dir);
-        eprintln!("skipping: JDK unavailable");
-        return;
-    };
+    let jdk = common::jdk_modules();
     let mut classpath = common::classpath_jars_for(source);
     classpath.push(java_dir.clone());
-    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(&jdk));
+    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
     assert!(
         diagnostics.is_empty(),
         "public Java fields should resolve as Kotlin properties: {diagnostics:?}"
     );
-    let result = common::compile_and_run_box(source, "Main", &classpath, Some(&jdk));
+    let result = common::compile_and_run_box(source, "Main", &classpath, Some(jdk.as_path()));
     let nullable_diagnostics = common::front_end_diagnostics(
         "fun invalid(box: p.Box<String>?): Int = box.callback()",
         &classpath,
-        Some(&jdk),
+        Some(jdk.as_path()),
     );
     cleanup(&java_dir);
 
