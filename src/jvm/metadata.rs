@@ -2407,8 +2407,16 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
     };
     // `Property.flags`: HAS_ANNOTATIONS(0) · VISIBILITY(1..3) · MODALITY(4..5) · IS_VAR(6) ·
     // HAS_GETTER(7) · HAS_SETTER(8) · IS_CONST(9) · …
+    // `Property` carries its flags in ONE of two fields, with DIFFERENT bit layouts. Field 1 is the
+    // legacy word; current kotlinc writes field 11 instead and omits field 1 entirely, so a reader that
+    // knows only the legacy field sees the default for every property — every classpath property looked
+    // `public`, non-`var`, non-`const`. Visibility sits at bits 1..3 in both (`flags_visibility`); the
+    // rest does not, so the layout is chosen by the field the value came from. `Function` already reads
+    // its own modern field (9).
     const IS_VAR_BIT: u64 = 1 << 6;
     const IS_CONST_BIT: u64 = 1 << 9;
+    const MODERN_IS_VAR_BIT: u64 = 1 << 8;
+    const MODERN_IS_CONST_BIT: u64 = 1 << 11;
     for prop in props {
         let mut p = Pb { b: prop, i: 0 };
         let mut name_id = None;
@@ -2416,6 +2424,8 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
         let mut ret_nullable = false;
         let mut ret_body = None;
         let mut flags = 6u64;
+        // Whether `flags` came from the modern field, which decides the bit layout read below.
+        let mut modern_flags = false;
         let mut sig = (None, None);
         let mut receiver_class = None;
         let mut receiver_body = None;
@@ -2425,6 +2435,12 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             let Some(tag) = p.varint() else { break };
             match (tag >> 3, tag & 7) {
                 (1, 0) => flags = p.varint().unwrap_or(6),
+                (11, 0) => {
+                    if let Some(value) = p.varint() {
+                        flags = value;
+                        modern_flags = true;
+                    }
+                }
                 (2, 0) => name_id = p.varint(),
                 (3, 2) => {
                     let Some(n) = p.varint() else { break };
@@ -2496,7 +2512,17 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
                 desc: resolve_string(records, d2, did as usize)?,
             })
         };
-        let is_var = setter.is_some() || flags & IS_VAR_BIT != 0;
+        let var_bit = if modern_flags {
+            MODERN_IS_VAR_BIT
+        } else {
+            IS_VAR_BIT
+        };
+        let const_bit = if modern_flags {
+            MODERN_IS_CONST_BIT
+        } else {
+            IS_CONST_BIT
+        };
+        let is_var = setter.is_some() || flags & var_bit != 0;
         let generic_sig = build_property_generic_sig(
             &type_params,
             ret_body,
@@ -2514,7 +2540,7 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             getter: getter.and_then(resolve_sig),
             setter: setter.and_then(resolve_sig),
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
-            is_const: flags & IS_CONST_BIT != 0,
+            is_const: flags & const_bit != 0,
             is_var,
             receiver_class,
             is_extension: receiver_body.is_some(),

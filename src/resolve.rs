@@ -22190,6 +22190,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                         } else if let Ty::Obj(internal, _) = recv {
                             // Source members take precedence over extensions and classpath members.
@@ -22280,6 +22281,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                         } else {
                             // Every non-`String`, non-`Obj` receiver reaches one semantic plan after
@@ -22307,6 +22309,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                             }
                         }
@@ -24986,6 +24989,24 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Report a LABELLED call no candidate origin could map onto parameters. Every origin declines
+    /// rather than reports, so that a later one still gets its chance; the site that has run out of
+    /// origins calls this, which is what keeps exactly one diagnostic on the call.
+    fn report_unmapped_labelled_call(&mut self, call: ExprId, args: &[ExprId]) -> Option<Ty> {
+        if !self.file.call_arg_names.contains_key(&call.0) {
+            return None;
+        }
+        if !self.report_pending_unknown_named_arg(call)
+            && !self.call_already_has_argument_diagnostic(call, args)
+        {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+            );
+        }
+        Some(Ty::Error)
+    }
+
     fn record_extension_call_from_args(
         &mut self,
         call: ExprId,
@@ -24996,19 +25017,12 @@ impl<'a> Checker<'a> {
         type_args: &[Ty],
     ) -> Option<Ty> {
         if self.file.call_arg_names.contains_key(&call.0) {
-            return self
-                .record_extension_call_with_slots(call, name, receiver, args, type_args)
-                .or_else(|| {
-                    if !self.report_pending_unknown_named_arg(call)
-                        && !self.call_already_has_argument_diagnostic(call, args)
-                    {
-                        self.diags.error(
-                            self.call_callee_name_span(call),
-                            INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                        );
-                    }
-                    Some(Ty::Error)
-                });
+            // DECLINE rather than report: this recorder is one candidate origin among several, and the
+            // labelled spelling of a call it cannot map may still be resolved by a later origin — a
+            // CONTEXT top-level function reached through an implicit receiver is exactly that. Reporting
+            // here consumed the call, so `with(C()) { combine(b = …, a = …) }` was rejected outright. The
+            // caller that has exhausted every origin reports (see `report_unmapped_extension_call`).
+            return self.record_extension_call_with_slots(call, name, receiver, args, type_args);
         }
         let arg_kinds = self.checked_call_arg_kinds(args);
         let resolved = self.record_library_extension_call_with_arg_kinds(
