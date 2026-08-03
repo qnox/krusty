@@ -738,6 +738,8 @@ mod nested_type_scope_e2e;
 mod nested_type_shadowing_e2e;
 #[path = "newline_method_chain_e2e.rs"]
 mod newline_method_chain_e2e;
+#[path = "no_jdk_builtin_emit_e2e.rs"]
+mod no_jdk_builtin_emit_e2e;
 #[path = "non_field_ctor_metadata_e2e.rs"]
 mod non_field_ctor_metadata_e2e;
 #[path = "not_null_assert_e2e.rs"]

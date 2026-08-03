@@ -176,32 +176,12 @@ pub fn jvm_to_kotlin_builtin_with_members_name(internal: TypeName) -> Option<Typ
     builtin_ids().with_members.get(&internal).copied()
 }
 
-/// The Kotlin builtin declaration that owns source-level metadata for a mapped JVM type. Collection
-/// interfaces and the smaller set of non-collection builtins use separate bidirectional maps because
-/// their source identities have different rules, but consumers asking for `.kotlin_builtins` facts
-/// must not repeat that storage distinction as parallel fallback branches.
+/// The canonical Kotlin builtin declaration whose source metadata describes a mapped JVM type. Every
+/// erasure group contributes one owner here; for read-only/mutable collection siblings the read-only
+/// declaration is canonical. Consumers asking for `.kotlin_builtins` facts therefore never rebuild
+/// partial collection-vs-class mapping branches or maintain a separate per-name capability table.
 pub fn jvm_to_kotlin_builtin_metadata_name(internal: TypeName) -> Option<TypeName> {
-    jvm_collection_to_kotlin_type_name(internal)
-        .or_else(|| jvm_to_kotlin_builtin_with_members_name(internal))
-}
-
-/// Whether a JVM-mapped Kotlin built-in is a JVM **interface** (so a member dispatches via
-/// `invokeinterface`, not `invokevirtual`). A reliable answer for the curated mapped types — matching
-/// kotlinc's `JavaToKotlinClassMap` — for when the classpath `.class` reader can't be consulted (e.g. a
-/// JDK whose jimage format krusty doesn't decode). `None` for any other type (consult the classpath).
-pub fn jvm_mapped_builtin_is_interface(jvm_internal: &str) -> Option<bool> {
-    Some(match jvm_internal {
-        "java/lang/CharSequence" | "java/lang/Comparable" | "java/lang/Iterable" => true,
-        "java/lang/Number" | "java/lang/Object" | "java/lang/String" | "java/lang/Enum" => false,
-        _ => return None,
-    })
-}
-
-pub fn jvm_mapped_builtin_is_interface_name(jvm_internal: TypeName) -> Option<bool> {
-    builtin_ids()
-        .mapped_is_interface
-        .get(&jvm_internal)
-        .copied()
+    builtin_ids().metadata_owner.get(&internal).copied()
 }
 
 /// Whether a resolved JVM internal name denotes a `Throwable` subtype, recognised structurally by
@@ -379,7 +359,10 @@ struct BuiltinIds {
     coll_to_kotlin_mutable: FxHashMap<TypeName, TypeName>,
     wrapper_prim: FxHashMap<TypeName, &'static str>,
     with_members: FxHashMap<TypeName, TypeName>,
-    mapped_is_interface: FxHashMap<TypeName, bool>,
+    /// Canonical Kotlin declaration whose `.kotlin_builtins` record describes a JVM-mapped owner.
+    /// Read-only collection faces win for erasure groups with mutable siblings, matching the frontend
+    /// identity already used for a raw JVM collection return.
+    metadata_owner: FxHashMap<TypeName, TypeName>,
 }
 
 fn builtin_ids() -> &'static BuiltinIds {
@@ -392,10 +375,16 @@ fn builtin_ids() -> &'static BuiltinIds {
         let mut coll_to_kotlin = FxHashMap::default();
         let mut coll_to_kotlin_mutable = FxHashMap::default();
         let mut with_members = FxHashMap::default();
-        let mut mapped_is_interface = FxHashMap::default();
+        let mut metadata_owner = FxHashMap::default();
         for (group, (kotlin_names, jvm_name)) in ERASURE_GROUPS.iter().enumerate() {
             let g = u8::try_from(group).expect("erasure group count fits u8");
             let jvm_id = tn(jvm_name);
+            // Every erasure group is declared by a Kotlin builtin. Keeping the inverse beside the
+            // forward identity table prevents consumers from reconstructing only the collection or
+            // Kotlin-only-member subsets and silently missing mapped types such as Cloneable/String.
+            if let Some(kotlin_name) = kotlin_names.first() {
+                metadata_owner.insert(jvm_id, tn(kotlin_name));
+            }
             for kotlin_name in *kotlin_names {
                 let id = tn(kotlin_name);
                 erasure_group.insert(id, g);
@@ -414,9 +403,6 @@ fn builtin_ids() -> &'static BuiltinIds {
             }
             if let Some(kotlin) = jvm_to_kotlin_builtin_with_members(jvm_name) {
                 with_members.insert(jvm_id, tn(kotlin));
-            }
-            if let Some(is_interface) = jvm_mapped_builtin_is_interface(jvm_name) {
-                mapped_is_interface.insert(jvm_id, is_interface);
             }
         }
         let mut wrapper_prim = FxHashMap::default();
@@ -444,7 +430,7 @@ fn builtin_ids() -> &'static BuiltinIds {
             coll_to_kotlin_mutable,
             wrapper_prim,
             with_members,
-            mapped_is_interface,
+            metadata_owner,
         }
     })
 }
@@ -605,6 +591,16 @@ mod tests {
         assert_eq!(
             jvm_to_kotlin_builtin_metadata_name(type_name("java/lang/CharSequence")),
             Some(type_name("kotlin/CharSequence"))
+        );
+        assert_eq!(
+            jvm_to_kotlin_builtin_metadata_name(type_name("java/lang/String")),
+            Some(type_name("kotlin/String")),
+            "the canonical inverse covers mapped classes without Kotlin-only member tables too"
+        );
+        assert_eq!(
+            jvm_to_kotlin_builtin_metadata_name(type_name("java/lang/Cloneable")),
+            Some(type_name("kotlin/Cloneable")),
+            "interface classification must come from metadata, not a curated name subset"
         );
         assert_eq!(
             jvm_to_kotlin_builtin_metadata_name(type_name("demo/Foo")),

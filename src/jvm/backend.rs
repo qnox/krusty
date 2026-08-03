@@ -265,16 +265,30 @@ pub fn classpath_inner_class_resolver(
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
 ) -> crate::jvm::classfile::InnerClassResolver {
     std::rc::Rc::new(move |internal: &str| {
-        let class = cp.find(internal)?;
-        let entry = class
-            .inner_classes
-            .iter()
-            .find(|entry| entry.inner == internal)?;
-        Some(crate::jvm::classfile::InnerClassDetails {
-            outer: entry.outer.clone(),
-            name: entry.name.clone(),
-            access: entry.access,
-        })
+        // The class file first — it is authoritative whenever the nested class has one. A mapped
+        // builtin whose JVM class is absent (no JDK on the classpath) still declares the same nesting
+        // in its `.kotlin_builtins` entry; without this fallback the reference emits no `InnerClasses`
+        // attribute at all, so the JDK-less class file diverges from the JDK-present one.
+        cp.find(internal)
+            .and_then(|class| {
+                let entry = class
+                    .inner_classes
+                    .iter()
+                    .find(|entry| entry.inner == internal)?;
+                Some(crate::jvm::classfile::InnerClassDetails {
+                    outer: entry.outer.clone(),
+                    name: entry.name.clone(),
+                    access: entry.access,
+                })
+            })
+            .or_else(|| {
+                let (outer, name, access) = cp.builtin_nested_class(internal)?;
+                Some(crate::jvm::classfile::InnerClassDetails {
+                    outer: Some(outer),
+                    name: Some(name),
+                    access,
+                })
+            })
     })
 }
 
