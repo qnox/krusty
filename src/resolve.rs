@@ -20820,6 +20820,25 @@ impl<'a> Checker<'a> {
         });
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
+        // A SEMANTIC-PROVIDER member's lambda shape (`re?.replace(s) { m -> m.value }`). The
+        // providers above answer source members and extensions only, so a `?.` call to a library
+        // member whose parameter is a function type or a Java SAM interface left its lambda
+        // unshaped and the parameters typed as `Any` — one `?` away from what the qualified path
+        // already does. Callable precedence is a WHOLE-CALL decision: once a source member or an
+        // extension supplies a shape, never fill an empty slot from a different provider candidate.
+        // This is the qualified path's rule too and keeps two-lambda calls from combining
+        // expectations belonging to callables that cannot both be selected.
+        let provider_member_expectations = (module_shape.is_none() && shape.is_none()).then(|| {
+            self.provider_member_lambda_expectations(
+                call,
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                args,
+                &partial,
+                explicit_type_args,
+            )
+        });
+        let provider_member_expectations = provider_member_expectations.flatten();
         args.iter()
             .enumerate()
             .map(|(i, &x)| {
@@ -20874,7 +20893,19 @@ impl<'a> Checker<'a> {
                             self.check_lambda_with_types(x, pt)
                         }
                     }
-                    _ => partial[i].unwrap_or_else(|| self.expr(x)),
+                    _ => {
+                        match provider_member_expectations
+                            .as_ref()
+                            .and_then(|all| all.get(i))
+                            .and_then(Option::as_ref)
+                        {
+                            Some(expectation) => {
+                                let expectation = expectation.clone();
+                                self.check_lambda_with_expectation(x, &expectation, Some(name))
+                            }
+                            None => partial[i].unwrap_or_else(|| self.expr(x)),
+                        }
+                    }
                 }
             })
             .collect()
@@ -22445,7 +22476,7 @@ impl<'a> Checker<'a> {
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
-                        } else if let Ty::Obj(internal, _) = recv {
+                        } else if let Ty::Obj(_, _) = recv {
                             // Source members take precedence over extensions and classpath members.
                             let arg_names = self.file.call_arg_names.get(&e.0).cloned();
                             let full_arg_tys =
@@ -22501,23 +22532,25 @@ impl<'a> Checker<'a> {
                                     if labelled {
                                         return None;
                                     }
-                                    self.resolve_instance_name(internal, &name, &arg_tys)
-                                        .map(|m| {
-                                            let ret = m.ret;
-                                            let suspend = m.suspend();
-                                            self.resolved_calls.insert(
-                                                e,
-                                                ResolvedCall::Member(
-                                                    crate::symbol_resolver::ResolvedMember {
-                                                        member: m,
-                                                        ret,
-                                                        projected_return_hazard: false,
-                                                        suspend,
-                                                    },
-                                                ),
-                                            );
-                                            ret
-                                        })
+                                    // Reuse the qualified path's VALUE-receiver resolver. Besides
+                                    // carrying lambda/integer-literal provenance for SAM conversion,
+                                    // it preserves the complete semantic receiver and returns the
+                                    // canonical `ResolvedMember`; resolving by bare class name here
+                                    // would create a second selection path and duplicate selected-
+                                    // member reconstruction below the common resolver.
+                                    let arg_kinds: Vec<CallArgKind> = a
+                                        .iter()
+                                        .zip(&arg_tys)
+                                        .map(|(&x, &ty)| call_arg_kind(self.file, x, ty))
+                                        .collect();
+                                    self.resolve_instance_member_with_literal_and_lambda_args(
+                                        recv, &name, &arg_kinds,
+                                    )
+                                    .map(|member| {
+                                        let ret = member.ret;
+                                        self.resolved_calls.insert(e, ResolvedCall::Member(member));
+                                        ret
+                                    })
                                 })
                                 .or_else(|| {
                                     self.check_member_extension_function_call(
