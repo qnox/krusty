@@ -10376,6 +10376,18 @@ impl<'a> Lower<'a> {
         ty.obj_internal().and_then(|i| self.class_info_name(i))
     }
 
+    /// The label a lambda answers to. An EXPLICITLY labelled literal (`run rr@{ … }`) answers to its
+    /// own name; otherwise the lambda takes the name of the function it is passed to, which is what
+    /// `return@run` / `return@forEach` targets. Every site that decides whether a labelled return is
+    /// local to the lambda must ask this, not assume the callee's name.
+    fn lambda_label(&self, lambda: AstExprId, callee: &str) -> String {
+        self.afile
+            .lambda_labels
+            .get(&lambda.0)
+            .cloned()
+            .unwrap_or_else(|| callee.to_string())
+    }
+
     fn single_lambda_arg(&self, args: &[AstExprId]) -> Option<(AstExprId, Vec<String>, AstExprId)> {
         let [arg] = args else {
             return None;
@@ -11658,6 +11670,18 @@ impl<'a> Lower<'a> {
                     return None;
                 }
             }
+        }
+        // Same rule for a VALUE-CLASS-typed property: kotlinc emits its accessors under the
+        // value-class name mangle (`getZ-<hash>()I`, over the UNDERLYING type), while the reference
+        // dispatches the plain `getZ()`. Until the reference carries the mangle, dispatching the
+        // unmangled name is a `NoSuchMethodError`, so decline (skip) instead
+        // (box `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt` and its three siblings).
+        if prop_ty
+            .obj_internal()
+            .and_then(|internal| self.syms.class_by_type_name(internal))
+            .is_some_and(|signature| signature.value_field.is_some())
+        {
+            return None;
         }
         // A mutable (`var`) reference uses the `KMutableProperty*` runtime class and gets a `set`
         // method (emitted alongside `get`); an immutable one stays `KProperty*`.
@@ -15832,16 +15856,6 @@ impl<'a> Lower<'a> {
         Some(result)
     }
 
-    /// The label a `return@…` inside `lambda`'s body targets: the EXPLICIT label written on the literal
-    /// (`run outer@{ … }`), else the implicit one — the name of the callee it is an argument to.
-    fn lambda_label(&self, lambda: AstExprId, implicit: &str) -> String {
-        self.afile
-            .lambda_labels
-            .get(&lambda.0)
-            .cloned()
-            .unwrap_or_else(|| implicit.to_string())
-    }
-
     /// The IR loop label a `return@<label>` should `continue`, when `label` names an active `forEach`
     /// lambda splice (innermost first). `None` when no such splice is active for that label.
     fn foreach_splice_loop_label(&self, label: &str) -> Option<String> {
@@ -19120,6 +19134,11 @@ impl<'a> Lower<'a> {
                     },
                 ) = (splice, arg_expr)
                 {
+                    // An explicitly labelled lambda answers to its OWN label (`run rr@{ … return@rr
+                    // … }`); an unlabelled one takes the callee's name, which is what `return@run`
+                    // targets. Both the disallowed-return check and the splice frame use this name, so
+                    // it is resolved once here.
+                    let lam_label = self.lambda_label(args[ai], fname);
                     let context_count = fnsig.context_count.min(fnsig.params.len());
                     let receiver_count = usize::from(f.params[i].ty.fun_has_receiver())
                         .min(fnsig.params.len().saturating_sub(context_count));
@@ -19130,15 +19149,6 @@ impl<'a> Lower<'a> {
                     let value_params = ast::lambda_params_or_implicit(&params, value_arity)?;
                     let mut params = vec!["this".to_string(); context_count + receiver_count];
                     params.extend(value_params);
-                    // The label a `return@…` in this lambda's body may target: an EXPLICIT label on the
-                    // lambda literal (`run outer@{ … }`) REPLACES the implicit one, which is the inline
-                    // callee's own name.
-                    let lam_label = self
-                        .afile
-                        .lambda_labels
-                        .get(&args[ai].0)
-                        .cloned()
-                        .unwrap_or_else(|| fname.to_string());
                     // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
                     // bail. A `return@<thisLambdaLabel>` IS modeled (a local return from the spliced
                     // lambda, handled by the `inline_lambda_ret` frame set up at the invoke site).

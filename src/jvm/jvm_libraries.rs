@@ -3424,7 +3424,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         })
     }
 
-    fn property_reference_type(&self, arity: usize, mutable: bool) -> Option<Ty> {
+    fn property_reference_type(&self, arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty> {
         let internal = match (arity, mutable) {
             (0, false) => "kotlin/reflect/KProperty0",
             (0, true) => "kotlin/reflect/KMutableProperty0",
@@ -3432,7 +3432,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             (1, true) => "kotlin/reflect/KMutableProperty1",
             _ => return None,
         };
-        Some(Ty::obj(internal))
+        Some(Ty::obj_args(internal, args))
     }
 
     fn class_literal_type(&self) -> Option<Ty> {
