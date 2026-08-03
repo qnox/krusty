@@ -22013,24 +22013,6 @@ impl<'a> Checker<'a> {
                     Some(Ty::Error) => Ty::Error,
                     _ => t,
                 }
-            } else if !rt.is_reference() && !matches!(name.as_str(), "toString" | "hashCode") {
-                // A safe call on a NON-NULLABLE primitive receiver (`42?.foo()`): `?.` is vacuous
-                // (kotlinc warns "unnecessary safe call"), so the member resolves EXACTLY like
-                // the qualified call — member-first: a builtin operator member types (or
-                // rejects) before any extension is consulted, so a same-named user extension
-                // (invisible per Kotlin's members-win rule) can never be selected.
-                // `toString`/`hashCode` go through the general path instead: its special case
-                // types the BUILTIN member for every receiver type.
-                let arg_exprs = args.as_deref().unwrap_or_default();
-                let arg_tys = self.arg_tys(arg_exprs);
-                if let Some(ret) =
-                    self.check_builtin_operator_method(e, rt, &name, arg_exprs, &arg_tys, false)
-                {
-                    return self.set(e, ret);
-                }
-                let arg_kinds = self.checked_call_arg_kinds(arg_exprs);
-                self.record_source_extension_call(e, rt, &name, arg_exprs, &arg_tys, &arg_kinds)
-                    .unwrap_or(Ty::Error)
             } else {
                 match &args {
                     // After `?.` the receiver is non-null, so resolve the member against the NON-NULL
@@ -22069,10 +22051,25 @@ impl<'a> Checker<'a> {
                             self.resolved_call_type_args
                                 .insert(e, type_args.iter().copied().map(Some).collect());
                         }
-                        if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
-                            Ty::String
-                        } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
-                            Ty::Int // Int (not a reference), so safe-call rejection fires below
+                        if let ("toString" | "hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
+                            // Safe-call receiver normalization must preserve the qualified path's
+                            // function-value restriction. Lambda objects are not materialized with the
+                            // stable identity/structured string behavior these Any methods require;
+                            // admitting only the `?.` spelling would turn the generic safe-call handoff
+                            // into a representation-specific miscompile.
+                            if matches!(recv, Ty::Fun(_)) {
+                                self.diags.error(
+                                    self.span(e),
+                                    format!(
+                                        "krusty: {name}() on a function value is not supported"
+                                    ),
+                                );
+                                Ty::Error
+                            } else if name == "toString" {
+                                Ty::String
+                            } else {
+                                Ty::Int // wrapped to `Int?` with every other safe-call scalar result
+                            }
                         } else if recv == Ty::String {
                             let member = match self
                                 .record_classpath_member_call_with_slots(e, recv, &name, a, false)
@@ -22205,10 +22202,13 @@ impl<'a> Checker<'a> {
                                 })
                                 .unwrap_or(Ty::Error)
                         } else {
-                            // A non-`String`, non-`Obj` receiver — e.g. the non-null primitive
-                            // behind a NULLABLE primitive (`i?.plus(3)` on `Int?`). Member-first,
-                            // exactly like the qualified call: a builtin operator member types
-                            // (or rejects) before any extension is consulted.
+                            // Every non-`String`, non-`Obj` receiver reaches one semantic plan after
+                            // `?.` removes receiver nullability. That includes both a vacuous safe call
+                            // on `Int` and the unboxed branch of a call on `Int?`; keeping them together
+                            // is essential because boxing is a lowering representation, not a callable
+                            // origin. Resolve the builtin member first, then use the ordinary member and
+                            // library/source extension indexes. In particular, generic library
+                            // extensions such as `takeIf` must not disappear only for the non-null form.
                             if let Some(ret) = self
                                 .check_builtin_operator_method(e, recv, &name, a, &arg_tys, false)
                             {
@@ -22286,6 +22286,17 @@ impl<'a> Checker<'a> {
             {
                 self.diags.error(self.span(e), "krusty: named arguments are only supported for top-level functions and methods with named parameters".to_string());
                 return Ty::Error;
+            }
+            // This compiler deliberately collapses an unnecessary safe call on a statically non-null
+            // scalar receiver to the qualified operation (`5?.compareTo(3)` has the same `Int` result as
+            // `5.compareTo(3)`). Make that one decision only after the complete non-null receiver plan
+            // has resolved, so builtin members, source/module extensions, and classpath extensions all
+            // retain identical ordering. The old early branch made the same collapse but recognized
+            // only builtin operators and source extensions, causing generic library calls such as
+            // `7?.takeIf { ... }` to disappear. A genuinely nullable primitive is a reference here and
+            // continues into the nullable-result wrapping below.
+            if !rt.is_reference() {
+                return self.set(e, result);
             }
             // The safe-call result is nullable: `T` becomes `T?`; scalar member values are boxed
             // (or `null`) in lowering. A non-boxable primitive (unsigned/value) stays unsupported.
@@ -23819,9 +23830,10 @@ impl<'a> Checker<'a> {
 
     /// Record `e` as a call to the selected SOURCE extension (`ResolvedCall::ModuleExtension`)
     /// so lowering emits the direct static call, and return its return type. `None` when no
-    /// source extension applies or its arguments don't check. The single place this recording
-    /// happens; shared by the qualified path, the safe-call fallbacks, and the
-    /// non-null-primitive safe-call branch.
+    /// source extension applies; an applicable selection whose arguments fail returns `Ty::Error` so
+    /// callers cannot fall through and silently rebind it to a different origin. This is the single
+    /// place recording and generic return substitution happens: both qualified and safe calls consume
+    /// the same semantic target instead of maintaining origin-specific module-extension handoffs.
     fn record_source_extension_call(
         &mut self,
         e: ExprId,
@@ -23832,8 +23844,20 @@ impl<'a> Checker<'a> {
         arg_kinds: &[CallArgKind],
     ) -> Option<Ty> {
         let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
-        if !self.check_source_extension_call_args(e, name, args, arg_tys, &selected, &sig.params) {
-            return None;
+        // Validate against the resolver's instantiated value parameters, not the declaration's
+        // potentially generic signature. This is the contract the former qualified-call block used;
+        // retaining it here prevents helper reuse from accepting a safe call that selected a generic
+        // overload but whose concrete argument types do not fit that selection.
+        let logical_params = selected.extension_value_params().to_vec();
+        if !self.check_source_extension_call_args(
+            e,
+            name,
+            args,
+            arg_tys,
+            &selected,
+            &logical_params,
+        ) {
+            return Some(Ty::Error);
         }
         self.mark_source_call(e, selected.source_key);
         let owner = sig
@@ -23857,6 +23881,35 @@ impl<'a> Checker<'a> {
                 vararg: selected.call_sig.vararg,
             },
         );
+        // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
+        // returns the call-site receiver type, not the declaration's erased signature return. Keep
+        // this substitution beside target recording so `recv.id()` and `recv?.id()` cannot drift: the
+        // safe-call wrapper applies nullability only after this non-null member result is known.
+        if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
+            if let Some(decl) = self.source_function_decl(&selected).filter(|function| {
+                function.is_inline()
+                    && function.receiver.as_ref().is_some_and(|receiver| {
+                        function
+                            .type_params
+                            .iter()
+                            .any(|parameter| parameter == &receiver.name)
+                    })
+            }) {
+                let recv_tp = decl.receiver.as_ref().map(|receiver| receiver.name.clone());
+                return Some(match &decl.ret {
+                    Some(ret) if Some(&ret.name) == recv_tp.as_ref() => rt,
+                    Some(ret) => decl
+                        .params
+                        .iter()
+                        .zip(arg_tys)
+                        .find_map(|(parameter, actual)| {
+                            (parameter.ty.name == ret.name).then_some(*actual)
+                        })
+                        .unwrap_or(sig.ret),
+                    None => Ty::Unit,
+                });
+            }
+        }
         Some(sig.ret)
     }
 
@@ -30036,59 +30089,10 @@ impl<'a> Checker<'a> {
                 // (`@InlineOnly` extensions — scope fns `takeIf`/`let`/… — are resolved and recorded by
                 // `record_library_extension_call_with_arg_kinds` above: one extension resolution admits
                 // inline, and the lowerer splices via the callable's `inline` flag. No separate inline path here.)
-                if let Some((fi, sig)) = self.selected_source_extension(rt, &name, &arg_kinds) {
-                    let logical = fi.extension_value_params().to_vec();
-                    if !self.check_source_extension_call_args(
-                        call, &name, args, &arg_tys, &fi, &logical,
-                    ) {
-                        return Ty::Error;
-                    }
-                    self.mark_source_call(call, fi.source_key);
-                    let owner =
-                        sig.source_file
-                            .zip(sig.source_decl)
-                            .and_then(|(file, declaration)| {
-                                self.syms
-                                    .fn_facades_by_decl
-                                    .get(&(file, declaration.0))
-                                    .copied()
-                            });
-                    self.resolved_calls.insert(
-                        call,
-                        ResolvedCall::ModuleExtension {
-                            receiver: rt,
-                            name: name.clone(),
-                            params: sig.params.clone(),
-                            ret: sig.ret,
-                            owner,
-                            source: fi.source_key,
-                            vararg: fi.call_sig.vararg,
-                        },
-                    );
-                    if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
-                        if let Some(decl) = self.source_function_decl(&fi).filter(|function| {
-                            function.is_inline()
-                                && function.receiver.as_ref().is_some_and(|receiver| {
-                                    function
-                                        .type_params
-                                        .iter()
-                                        .any(|parameter| parameter == &receiver.name)
-                                })
-                        }) {
-                            let recv_tp = decl.receiver.as_ref().map(|r| r.name.clone());
-                            return match &decl.ret {
-                                Some(r) if Some(&r.name) == recv_tp.as_ref() => rt,
-                                Some(r) => decl
-                                    .params
-                                    .iter()
-                                    .zip(&arg_tys)
-                                    .find_map(|(p, a)| (p.ty.name == r.name).then_some(*a))
-                                    .unwrap_or(sig.ret),
-                                None => Ty::Unit,
-                            };
-                        }
-                    }
-                    return sig.ret;
+                if let Some(ret) =
+                    self.record_source_extension_call(call, rt, &name, args, &arg_tys, &arg_kinds)
+                {
+                    return ret;
                 }
                 if let Some(sig) = self.unique_visible_source_extension(rt, &name) {
                     if sig.params.len() != arg_tys.len() {

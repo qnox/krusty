@@ -103,6 +103,31 @@ fun box(): String {
     );
 }
 
+/// A vacuous safe call and a genuinely nullable safe call must select the same library extension
+/// after normalizing the receiver to its non-null semantic type. This pair specifically prevents the
+/// checker from restoring a primitive-only shortcut that recognizes builtin/source calls but bypasses
+/// the ordinary classpath extension index: `takeIf` is generic over its receiver, so whether `Int` is
+/// boxed at the null-check boundary is a lowering detail, not a different resolution origin.
+#[test]
+fn safecall_library_extension_resolution_is_representation_neutral() {
+    run_box(
+        r#"
+fun box(): String {
+    val direct = 7?.takeIf { it > 3 }
+    if (direct != 7) return "f1"
+
+    val present: Int? = 7
+    if (present?.takeIf { it > 3 } != 7) return "f2"
+
+    val absent: Int? = null
+    if (absent?.takeIf { it > 3 } != null) return "f3"
+    return "OK"
+}
+"#,
+        "SafeCallLibraryExtensionParity",
+    );
+}
+
 /// A user extension shadowed by the builtin `toString`: the builtin wins (kotlinc: "extension
 /// is shadowed by a member") — the result is the REAL `Int.toString()`, not the extension's.
 #[test]
@@ -134,6 +159,29 @@ fun box(): String {
 }
 "#,
         "SafeCallNullablePrimExt",
+    );
+}
+
+/// Generic inline source extensions use the selected call site's receiver for their semantic return
+/// type. Recording and substituting that target is shared with qualified calls, so `?.` adds only the
+/// nullable outer result and cannot leave the declaration's erased type parameter in `TypeInfo`.
+#[test]
+fn safecall_generic_source_extension_preserves_call_site_type() {
+    run_box(
+        r#"
+inline fun <T> T.echo(): T = this
+
+fun box(): String {
+    val direct: Int = 11.echo()
+    if (direct != 11) return "f1"
+
+    val present: Int? = 11
+    val safe: Int? = present?.echo()
+    if (safe != 11) return "f2"
+    return "OK"
+}
+"#,
+        "SafeCallGenericSourceExtension",
     );
 }
 
@@ -256,7 +304,9 @@ fun box(): String {
     );
 }
 
-/// `Boolean` bitwise through `?.` on a non-null receiver.
+/// `Boolean` bitwise through `?.` on both primitive representations. The nullable cases pin the
+/// generic safe-call handoff: the substituted receiver value is a boxed `Boolean?` slot and the
+/// primitive bitwise operation must request its semantic `Boolean` operand, which inserts unboxing.
 #[test]
 fn safecall_boolean_bitwise() {
     run_box(
@@ -266,6 +316,10 @@ fun box(): String {
     if (b?.and(false) != false) return "f1"
     if (b?.or(false) != true) return "f2"
     if (b?.xor(true) != false) return "f3"
+    val present: Boolean? = true
+    if (present?.and(true) != true) return "f4"
+    val absent: Boolean? = null
+    if (absent?.or(true) != null) return "f5"
     return "OK"
 }
 "#,
@@ -381,6 +435,27 @@ fun box(): String {
     fun local(x: Int) = x + 1
     val t: Int? = 2
     return if (t?.local(2) == 3) "OK" else "fail"
+}
+"#,
+        ),
+        // Function-object Any methods are deliberately unsupported by the qualified path because
+        // krusty does not yet preserve the singleton identity/structured string semantics. The generic
+        // safe-call lowering must not make the same receiver emittable merely by adding `?.`.
+        (
+            "SafeCallFunctionAnyMethod",
+            r#"
+fun box(): String {
+    val callback: (() -> Int)? = { 1 }
+    return callback?.toString() ?: "OK"
+}
+"#,
+        ),
+        (
+            "SafeCallFunctionHashCode",
+            r#"
+fun box(): String {
+    val callback: (() -> Int)? = { 1 }
+    return if (callback?.hashCode() == null) "OK" else "fail"
 }
 "#,
         ),

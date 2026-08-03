@@ -11158,7 +11158,11 @@ impl<'a> Lower<'a> {
                 _ => None,
             };
             if let Some(op) = bop {
-                let l = self.expr(recv)?;
+                // Request the semantic primitive operand instead of reading the receiver expression
+                // verbatim. A direct qualified call is already an unboxed `Boolean`, while a safe call
+                // substitutes its boxed `Boolean?` temp; `lower_arg` makes those representations feed
+                // the same operation by inserting the required unbox only in the latter case.
+                let l = self.lower_arg(recv, &ty_to_ir(Ty::Boolean))?;
                 let r = self.lower_arg(arg, &ty_to_ir(Ty::Boolean))?;
                 return Some(self.emit_primitive_bin_op(op, l, r));
             }
@@ -14444,6 +14448,48 @@ impl<'a> Lower<'a> {
                 ))
             }
         }
+    }
+
+    /// Emit the checker-selected call to a receiver-function value on an already evaluated receiver.
+    /// Both nullable safe calls and the statically-non-null collapse use this one semantic handoff;
+    /// callers supply only the receiver representation they own, and this helper coerces it to the
+    /// selected function's folded first parameter before invoking the recorded value origin.
+    fn lower_receiver_fn_invoke_on(
+        &mut self,
+        call: AstExprId,
+        receiver: u32,
+        receiver_ty: Ty,
+        args: &[AstExprId],
+    ) -> Option<u32> {
+        let ExprLowering::ReceiverFnInvoke {
+            name,
+            params,
+            ret,
+            origin,
+            implicit_receiver: _,
+            suspend,
+        } = self.info.expr_lowers.get(&call).cloned()?
+        else {
+            return None;
+        };
+        if args.len() + 1 != params.len() {
+            return None;
+        }
+        let receiver = self.coerce_argument_value(receiver, receiver_ty, params[0])?;
+        let function = self.receiver_fn_value(&name, origin)?;
+        let mut lowered = vec![receiver];
+        for (&argument, parameter) in args.iter().zip(&params[1..]) {
+            lowered.push(self.lower_arg(argument, &ty_to_ir(*parameter))?);
+        }
+        let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
+            func: function,
+            args: lowered,
+            ret: ty_to_ir(ret),
+        });
+        if suspend {
+            self.ir.suspend_calls.insert(invoke, ret);
+        }
+        Some(invoke)
     }
 
     fn implicit_receivers(&self) -> Vec<(u32, Ty)> {
@@ -19810,28 +19856,39 @@ impl<'a> Lower<'a> {
                 let nullc = self.emit_const(IrConst::Null);
                 return Some(self.emit_block(vec![recv], Some(nullc)));
             }
-            // A primitive receiver can never be null, so `a?.foo(b)` is a vacuous safe call (kotlinc
-            // warns "unnecessary safe call") ≡ `a.foo(b)`. Fold an arithmetic operator-method call to
-            // the plain primitive op — `var a = 10; a?.plus(10)` works like `a.plus(10)`.
-            if !rty.is_reference() && result_ty != Ty::Error {
-                if let Some([arg]) = args.as_deref() {
-                    if let Some(r) =
-                        self.lower_prim_op_method(receiver, &name, *arg, self.info.ty(e))
-                    {
-                        return Some(r);
-                    }
-                } else if args.as_deref().is_some_and(<[_]>::is_empty) {
-                    if let Some(r) =
-                        self.lower_prim_unary_op_method(receiver, &name, self.info.ty(e))
-                    {
-                        return Some(r);
-                    }
+            // Match the checker's semantic collapse for an unnecessary safe call on a statically
+            // non-null scalar receiver, but delegate the WHOLE operation to qualified lowering. This
+            // is intentionally not the former primitive-operator shortcut: the generic handoff also
+            // covers source/module extensions, classpath extensions, Any methods, and properties, so
+            // adding a new callable origin cannot require another `?.` dispatch arm. Nullable primitive
+            // receivers are references and continue into the boxed null-check structure below.
+            if !rty.is_reference() && self.has_scalar_value_repr(rty) && result_ty != Ty::Error {
+                // Receiver-function syntax has its own checker-selected target rather than an ordinary
+                // member/extension target. It still obeys the same non-null collapse; consume that
+                // semantic record through the shared helper before delegating ordinary operations.
+                if matches!(
+                    self.info.expr_lowers.get(&e),
+                    Some(ExprLowering::ReceiverFnInvoke { .. })
+                ) {
+                    let receiver_value = self.expr(receiver)?;
+                    return self.lower_receiver_fn_invoke_on(
+                        e,
+                        receiver_value,
+                        rty,
+                        args.as_deref().unwrap_or_default(),
+                    );
                 }
+                return match &args {
+                    Some(arguments) => {
+                        self.expr_inner_call_member(e, arguments.clone(), receiver, name)
+                    }
+                    None => self.expr_inner_member(e, receiver, name),
+                };
             }
             // The receiver must be a reference (the `?.` null-check is on an object) OR a scalar
-            // primitive — a NON-NULL primitive makes `?.` vacuous (kotlinc warns "unnecessary safe
-            // call") and a NULLABLE primitive (`Int?`) is boxed. Both ride the general structure:
-            // the temp slot carries the boxed form and the member runs on the unboxed value. The
+            // primitive. A NON-NULL primitive was collapsed generically above; a NULLABLE primitive
+            // (`Int?`) is boxed here. The temp slot carries that boxed form and the member runs on the
+            // unboxed value. The
             // result may be a reference OR a nullable-primitive (`s?.length` : `Int?`) — the
             // assembly below boxes the primitive member value into the wrapper (`null` in the other
             // branch). The one scalar exception is a property read whose receiver and result were
@@ -19919,35 +19976,11 @@ impl<'a> Lower<'a> {
             // A receiver-function-typed value in scope reached by `?.` (`b?.f()`, checker-selected
             // [`ExprLowering::ReceiverFnInvoke`]): invoke the local function value with the
             // non-null receiver as the folded-first argument.
-            let member = if let Some(ExprLowering::ReceiverFnInvoke {
-                name,
-                params,
-                ret,
-                origin,
-                implicit_receiver: _,
-                suspend,
-            }) = self.info.expr_lowers.get(&e).cloned()
-            {
-                let arg_list = args.clone().unwrap_or_default();
-                if arg_list.len() + 1 != params.len() {
-                    return None;
-                }
-                let func = self.receiver_fn_value(&name, origin)?;
-                let mut a = vec![recv2];
-                for (&arg, p) in arg_list.iter().zip(&params[1..]) {
-                    a.push(self.lower_arg(arg, &ty_to_ir(*p))?);
-                }
-                let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
-                    func,
-                    args: a,
-                    ret: ty_to_ir(ret),
-                });
-                // Suspension point (`b?.f()` on a `suspend Bar.() -> R` value): record for the
-                // coroutine pass, same as the plain member-syntax site.
-                if suspend {
-                    self.ir.suspend_calls.insert(invoke, ret);
-                }
-                invoke
+            let member = if matches!(
+                self.info.expr_lowers.get(&e),
+                Some(ExprLowering::ReceiverFnInvoke { .. })
+            ) {
+                self.lower_receiver_fn_invoke_on(e, recv2, nn, args.as_deref().unwrap_or_default())?
             } else if let Some(m) = self.lower_safe_scope_member(recv2, rty, &name, &args) {
                 from_scope_fn = true;
                 m
