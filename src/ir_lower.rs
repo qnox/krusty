@@ -1667,20 +1667,13 @@ fn lower_file_at_reporting_impl(
                 let field_tp: std::collections::HashMap<String, String> =
                     class_field_tparams(c).into_iter().collect();
                 // kotlinc emits NO accessor for a `private` property (in-class reads go straight to the
-                // field); synthesizing one is an extra public member → an ABI divergence. Kept when the
-                // class HAS a companion — a companion reads the outer's privates through the getter
-                // (kotlinc uses an `access$…` bridge krusty doesn't emit yet; box `classes/kt504.kt`).
-                // A value class also keeps its getter (its unboxed-support synthesis expects it).
-                // Only a companion with CODE (methods, non-const props, a base) can read the
-                // outer class's privates through the getter (kt504); a CONST-ONLY companion never
-                // does — its outer keeps kotlinc's shape (no getter for a private property).
-                let has_companion = !c.companion_methods.is_empty()
-                    || c.companion_props.iter().any(|p| !p.is_const)
-                    || c.companion_base.is_some();
+                // field); synthesizing one is an extra public member → an ABI divergence. A reader in
+                // another class — the companion, a nested class, an inlined body — goes through the
+                // synthetic `access$…$p` bridge instead (`mark_private_access_bridge_if_outside`).
+                // A value class keeps its getter: its unboxed-support synthesis expects one.
                 for (pi, (pname, is_var, is_private, property_ty)) in field_props.iter().enumerate()
                 {
                     let fidx = pi + field_offset;
-                    let private_no_accessor = *is_private && !c.is_value && !has_companion;
                     let fty = fields[fidx].1;
                     // Use the class field's IrType (carries declared `?` via `mark_nullable`), not the
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the
@@ -1726,15 +1719,16 @@ fn lower_file_at_reporting_impl(
                             needs_access_bridge: false,
                         });
                     let prop_record = lo.ir.classes[id as usize].properties.len() - 1;
-                    // kotlinc emits NO accessor for a private property — in-class reads go straight to
-                    // the backing field. The DECLARATION is recorded above regardless, so a use from
-                    // outside the class can see there is nothing to call.
-                    if private_no_accessor {
-                        continue;
-                    }
-                    // A property with NO source-written accessor needs none from the language lowering:
-                    // its `getX`/`setX` are a target realization of the declaration recorded above, and
-                    // the backend synthesizes them.
+                    // kotlinc SYNTHESIZES no accessor for a private property — in-class reads go straight
+                    // to the backing field. The DECLARATION is recorded above regardless, so a use from
+                    // outside the class can see there is nothing to call. A SOURCE-WRITTEN accessor is
+                    // different: it is user code with a body, and dropping it silently replaces the
+                    // program's `set(l) { /* ignore */ }` with a plain field store (box
+                    // `properties/kt3551.kt`). So the private skip covers only the synthesized pair.
+                    //
+                    // A property with NO source-written accessor needs none from the language lowering
+                    // either: its `getX`/`setX` are a target realization of the declaration recorded
+                    // above, and the backend synthesizes them.
                     if !prop_custom_accessor {
                         continue;
                     }
@@ -4864,6 +4858,11 @@ fn is_simple_interface(c: &ast::ClassDecl) -> bool {
         && c.companion_base.is_none()
         && c.companion_supertypes.is_empty()
         && companion_props_lowerable(c)
+        // A JVM interface field is implicitly `public static final` — there is no non-final form — so
+        // an interface companion `var` has no representation on this path at all. A CLASS companion
+        // `var` does (a plain static field, written with `putstatic`), which is why
+        // `companion_props_lowerable` admits one.
+        && c.companion_props.iter().all(|p| !p.is_var)
         && c.props.is_empty()
         // Abstract properties (`val x: T`, no initializer/getter) become abstract `getX()`/`setX()`
         // — non-extension only: an extension's accessor takes the receiver as its first parameter,
@@ -4954,9 +4953,14 @@ fn ast_init_is_jvm_default(file: &ast::File, e: AstExprId) -> bool {
 /// initialized in the constructor body rather than at the declaration.
 ///
 /// A deferred `var` is the same shape — the only difference is the synthesized setter, which the plain
-/// backing-field path already emits. (A `var` reachable with no assignment at all is only well-formed
-/// when an earlier initializer DIVERGES, e.g. `val x: String = TODO()`; kotlinc emits the field and
-/// throws before any store, so there is nothing extra to lower.)
+/// backing-field path already emits.
+///
+/// NOTE this gate is purely STRUCTURAL: it does not verify that the property is definitely assigned.
+/// kotlinc rejects `class C { var x: Int }` ("Property must be initialized"), while krusty emits the
+/// field with its zero value; the shape is only well-formed when an earlier initializer DIVERGES
+/// (`val t: String = TODO()` makes the rest unreachable). Admitting `var` widens a definite-assignment
+/// hole that already existed for `val` rather than introducing one — closing it needs real flow
+/// analysis in the checker, which is where the diagnostic belongs.
 fn is_deferred_prop(p: &ast::PropDecl) -> bool {
     p.receiver.is_none()
         && !p.is_lateinit
@@ -5456,8 +5460,13 @@ impl<'a> Lower<'a> {
     ///
     /// A nested declaration is flattened into `file.decls` under its dotted name, so this is the key
     /// `object_const_lits` / `companion_consts` record it under. Without the chain, only a top-level
-    /// `Obj.CONST` matched and a nested `Outer.Obj.CONST` fell through to a bail. A path rooted in a
-    /// value (`a.b.c`) simply misses both maps, so no extra guard is needed.
+    /// `Obj.CONST` matched and a nested `Outer.Obj.CONST` fell through to a bail.
+    ///
+    /// A path rooted in a VALUE (`a.b.c`) normally misses both maps — but not when the root name
+    /// collides with a classifier (`val Registry = …` beside `class Registry { object Const { … } }`),
+    /// where the local should shadow the type. The single-`Name` form has the same hole, so this is a
+    /// pre-existing shadowing gap the chain inherits rather than one it introduces; the fix is to
+    /// consult the lexical scope before these maps, for both forms at once.
     fn dotted_class_path(&self, e: AstExprId) -> Option<String> {
         match self.afile.expr(e) {
             Expr::Name(n) => Some(n.clone()),
@@ -5787,12 +5796,57 @@ impl<'a> Lower<'a> {
         receiver: u32,
         args: Vec<Option<u32>>,
     ) -> u32 {
+        let (class, index) = self
+            .private_member_call_target(class, index, &args)
+            .unwrap_or((class, index));
         self.ir.add_expr(IrExpr::MethodCall {
             class,
             index,
             receiver,
             args,
         })
+    }
+
+    /// A PRIVATE member is reached by `invokespecial`, which the JVM permits only from the member's OWN
+    /// class. Kotlin's private visibility is LEXICAL and wider than that: a nested class, the companion
+    /// and an `inline` body spliced into a caller all sit inside the owner's braces but land in separate
+    /// class files. kotlinc reaches the member from them through a synthetic `access$<name>` bridge on
+    /// the owner; without it the call is a `VerifyError` ("current class isn't assignable to reference
+    /// class"). Retargeting here — at the one place a member call is constructed — is why the rule holds
+    /// for every caller instead of the handful that each re-derived it.
+    ///
+    /// Returns `None` when the call is already legal, when the target is an accessor or a constructor,
+    /// or when no bridge can be built; a call with an OMITTED argument is left alone because the bridge
+    /// carries no `$default` stub to dispatch.
+    fn private_member_call_target(
+        &mut self,
+        class: u32,
+        index: u32,
+        args: &[Option<u32>],
+    ) -> Option<(u32, u32)> {
+        if args.iter().any(Option::is_none) {
+            return None;
+        }
+        let fid = *self
+            .ir
+            .classes
+            .get(class as usize)?
+            .methods
+            .get(index as usize)?;
+        if !self.ir.private_methods.contains(&fid) {
+            return None;
+        }
+        let name = self.ir.functions[fid as usize].name.clone();
+        if name.starts_with("access$") || name == "<init>" {
+            return None;
+        }
+        let owner = existing_type_name(&self.ir.classes[class as usize].fq_name())?;
+        if self.can_access_source_private(owner) {
+            return None;
+        }
+        let accessor = self.ensure_private_accessor_name(owner, &name)?;
+        let (class, index, _, _) = self.resolve_method_name(owner, &accessor)?;
+        Some((class, index))
     }
 
     fn emit_external_call(
@@ -12684,7 +12738,14 @@ impl<'a> Lower<'a> {
         let args: Vec<Option<u32>> = (0..params.len())
             .map(|i| Some(self.emit_get_value((i + 1) as u32)))
             .collect();
-        let call = self.emit_method_call(class_id, index, recv, args);
+        // Constructed directly rather than through `emit_method_call`: this body IS the in-class call
+        // the bridge exists to provide, so it must not be retargeted at a bridge again.
+        let call = self.ir.add_expr(IrExpr::MethodCall {
+            class: class_id,
+            index,
+            receiver: recv,
+            args,
+        });
         // Wrap in an explicit return so the method's control flow terminates: `return this.<m>(args)`
         // for a value-returning target, or the call then a bare `return` for a `Unit`/void one.
         let stmts = if ret == Ty::Unit {
@@ -14370,6 +14431,7 @@ impl<'a> Lower<'a> {
         interface: bool,
         field: Option<Box<crate::libraries::InstanceFieldRef>>,
     ) -> u32 {
+        self.mark_private_access_bridge_if_outside(owner, name);
         let read = self.ir.add_expr(IrExpr::PropertyRead {
             receiver,
             owner,
@@ -14383,6 +14445,23 @@ impl<'a> Lower<'a> {
         read
     }
 
+    /// A PRIVATE property NAMED from outside its declaring class has no accessor to call: kotlinc emits
+    /// none for a private property, and the backing field is unreachable from another class file — even
+    /// a lexically enclosed one, since the companion, a nested class and an inlined body are all separate
+    /// classes on the JVM. Such a use is reached through the synthetic `access$…$p` bridge instead.
+    ///
+    /// This sits at the one place every property read and write is CONSTRUCTED, so no naming path can
+    /// forget it. It previously lived on two of the callers, and the `StmtLowering::MemberPropertyWrite`
+    /// path — which preempts them — emitted a call to a `setX` that is never generated
+    /// (`NoSuchMethodError`; box `classes/kt504.kt`, a companion writing its outer class's private `var`).
+    fn mark_private_access_bridge_if_outside(&mut self, owner: TypeName, name: &str) {
+        if let Some((declaring, _, true)) = self.declared_property(owner, name) {
+            if !self.can_access_source_private(declaring) {
+                self.mark_property_access_bridge(declaring, name);
+            }
+        }
+    }
+
     /// Write analogue of [`Self::add_property_read`]. Reads and writes therefore preserve declaration
     /// types under the same rule instead of duplicating origin-sensitive metadata at their call sites.
     fn add_property_write(
@@ -14394,6 +14473,7 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
+        self.mark_private_access_bridge_if_outside(owner, name);
         let write = self.ir.add_expr(IrExpr::PropertyWrite {
             receiver,
             owner,
@@ -14419,21 +14499,14 @@ impl<'a> Lower<'a> {
         }
         // A class whose declarations are not tracked yet (an enum entry's body, an anonymous object)
         // still has the backing field; read that.
-        let (declaring, ty, is_private) = match self.declared_property(owner, name) {
-            Some((declaring, ty, is_private)) => (declaring, ty, is_private),
-            None => (
-                owner,
-                self.resolve_field_name(owner, name).map(|(_, _, t)| t)?,
-                false,
-            ),
-        };
         // Reaching a PRIVATE property from outside its class is legal in Kotlin — an `inline` body is
-        // spliced into its caller — so the read stands and the declaring class exposes a synthetic
-        // accessor for it. Declining here would silently turn the `inline` call into an ordinary one,
-        // which is a different program.
-        if is_private && !self.can_access_source_private(owner) {
-            self.mark_property_access_bridge(declaring, name);
-        }
+        // spliced into its caller — so the read stands, and `add_property_read` marks the declaring
+        // class to expose the synthetic accessor. Declining here would silently turn the `inline` call
+        // into an ordinary one, which is a different program.
+        let ty = match self.declared_property(owner, name) {
+            Some((_, ty, _)) => ty,
+            None => self.resolve_field_name(owner, name).map(|(_, _, t)| t)?,
+        };
         let read = self.add_property_read(
             receiver,
             owner,
@@ -16637,9 +16710,16 @@ impl<'a> Lower<'a> {
             self.info.stmt_lowers.get(&s).cloned()
         {
             if let Stmt::AssignMember { value, .. } = self.afile.stmt(s).clone() {
-                let index = self.ir.statics.iter().position(|static_field| {
+                // `ir.statics` holds only the statics of the file being LOWERED, so a companion
+                // declared in another file of the module has no index here. Writing one needs an
+                // external static store, which the IR has no node for (`ExternalStaticField` is a read
+                // only) — decline with a NAMED reason instead of skipping the file silently.
+                let Some(index) = self.ir.statics.iter().position(|static_field| {
                     static_field.owner == Some(owner) && static_field.name == name
-                })? as u32;
+                }) else {
+                    return self.bail("companion-static write to another file");
+                };
+                let index = index as u32;
                 let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
                 return Some(self.emit_set_static(index, lowered));
             }
@@ -18231,13 +18311,6 @@ impl<'a> Lower<'a> {
         // The property's type comes from its backing field, or — for a property that has none (a custom
         // setter, a delegated `x$delegate`) — from the setter it declares. Neither means this is not a
         // property of the class, and the caller's other paths apply.
-        // A private property written from outside its class needs the synthetic setter, same as a read.
-        if let Some((declaring, _, true)) = self.declared_property(type_name(&owner_internal), name)
-        {
-            if !self.can_access_source_private(declaring) {
-                self.mark_property_access_bridge(declaring, name);
-            }
-        }
         let prop_ty = self
             .class_of(rt)
             .and_then(|ci| {
@@ -21698,9 +21771,10 @@ impl<'a> Lower<'a> {
                 // the primitive comparison — a `VerifyError` on a reference operand.
                 let lt = self.recv_ty(lhs);
                 let rt = self.info.ty(rhs);
-                // Reference right operand only — matches the checker guard (a primitive arg to an
-                // erased generic `Comparable.compareTo(Object)` would need a box not applied here).
-                if rt.is_reference() {
+                // Non-null reference right operand only — matches the checker guard (a primitive arg
+                // to an erased generic `Comparable.compareTo(Object)` would need a box not applied
+                // here; a nullable one would NPE inside the callee).
+                if rt.is_reference() && !rt.is_nullable() {
                     if let Some(resolved) =
                         self.info.resolved_member(e).cloned().filter(|resolved| {
                             resolved.member.name == "compareTo" && resolved.ret == Ty::Int
