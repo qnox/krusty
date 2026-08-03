@@ -33,6 +33,13 @@ use crate::analysis::{
 /// would never become searchable. The retained cost is deliberately two `u32`s per accepted class
 /// plus interned names — the slashed internal name is *derived* rather than stored, because one per
 /// class is the largest table there would be and it is recoverable from the package and the name.
+/// One in this many prefix-response slots is held for nested classes matched by their leaf name.
+///
+/// A floor rather than a split: nested matches outnumber whole-name ones several times over, so
+/// without a reservation they never appear, and with an even share they crowd out the whole-name
+/// matches a reader is more likely to have meant.
+const NESTED_PREFIX_SHARE: usize = 4;
+
 pub const MAX_DEPENDENCY_CLASSES: usize = 1024 * 1024;
 
 /// A class the classpath declares, ranked but not yet located.
@@ -109,8 +116,10 @@ impl DependencySymbolIndex {
 
     /// Build from slashed internal names, as `Classpath::package_tree().classes()` yields them.
     ///
-    /// A `$` in an internal name is a nested class, and a reader searching for `Entry` means
-    /// `Map.Entry`, so the separator becomes `.` and the simple name keeps its outer classes.
+    /// A `$` in an internal name is a nested class, so the separator becomes `.` and the simple
+    /// name keeps its outer classes. Both spellings a reader might use reach it: `Map.Entry`
+    /// through the qualifier, and a bare `Entry` through the leaf-name ordering, which is
+    /// interleaved with whole-name matches rather than tried after them.
     /// Synthetic names — anonymous classes, lambda carriers — are dropped: nobody searches for
     /// `Foo$1`, and they outnumber the real declarations in some jars.
     ///
@@ -293,26 +302,34 @@ impl DependencySymbolIndex {
                     }
                 }
                 WorkspaceSymbolRung::NamePrefix => {
-                    for &index in
-                        self.prefix_range(&self.by_name, &self.lowercase_names, &query.pattern)
-                    {
+                    // Nested declarations are source-visible by their leaf name with or without an
+                    // outer qualifier: `Entry` and `Map.Entry` both mean what is stored internally
+                    // as `Map$Entry`. A dedicated sorted subset keeps that lookup logarithmic
+                    // rather than a scan.
+                    //
+                    // Neither range can simply precede the other. Whole names first starves the
+                    // leaves, and on a real classpath the leaves are the larger set by far: over
+                    // 1,898 jars holding 429,231 distinct classes, `Entry` prefixes 66 whole names
+                    // and 1,254 leaves, `Builder` 141 and 4,402 -- so a 32-slot response fills from
+                    // the smaller set and the leaves never appear at all. Leaves first, or a plain
+                    // alternation, starves the other way: `Base` would spend half the response on
+                    // classes that merely enclose a `Base` and drop `Base64` entirely.
+                    //
+                    // So whole names keep the response and the leaves get a floor: enough slots to
+                    // be reachable, few enough that a strong whole-name match is never displaced
+                    // by a weak nested one. Whatever one range does not use, the other takes.
+                    let whole =
+                        self.prefix_range(&self.by_name, &self.lowercase_names, &query.pattern);
+                    let leaf = self.simple_segment_prefix_range(&query.pattern);
+                    let reserved = (limit / NESTED_PREFIX_SHARE).min(leaf.len());
+                    let mut merged = Vec::with_capacity(limit.saturating_mul(2));
+                    merged.extend(whole.iter().take(limit - reserved).copied());
+                    merged.extend(leaf.iter().take(reserved).copied());
+                    merged.extend(whole.iter().skip(limit - reserved).take(limit).copied());
+                    merged.extend(leaf.iter().skip(reserved).take(limit).copied());
+                    for index in merged {
                         if !self.admit_ranked(index, query, limit, seen, &mut ranked) {
                             break;
-                        }
-                    }
-                    if ranked.len() < limit {
-                        // Nested declarations are source-visible by their leaf name with or without
-                        // an outer qualifier: `Entry` and `Map.Entry` both mean the entry represented
-                        // internally as `Map$Entry`. A dedicated sorted subset keeps that semantic
-                        // lookup logarithmic instead of scanning every class after most prefixes.
-                        for &index in self.simple_segment_prefix_range(&query.pattern) {
-                            if !self
-                                .name_of(index, &self.lowercase_names)
-                                .starts_with(&query.pattern)
-                                && !self.admit_ranked(index, query, limit, seen, &mut ranked)
-                            {
-                                break;
-                            }
                         }
                     }
                 }
@@ -647,6 +664,10 @@ mod tests {
         )
     }
 
+    fn names_of(found: &[DependencyCandidate]) -> Vec<String> {
+        found.iter().map(|c| c.name.clone()).collect()
+    }
+
     fn names(index: &DependencySymbolIndex, query: &str, limit: usize) -> Vec<String> {
         index
             .candidates(query, limit)
@@ -686,6 +707,43 @@ mod tests {
         assert_eq!(
             initials.first().map(String::as_str),
             Some("ArrayListDelegate")
+        );
+    }
+
+    #[test]
+    fn a_strong_whole_name_match_outranks_a_weak_nested_one() {
+        // The other half of the trade. Reaching nested classes must not cost every response half
+        // its slots: for `Base`, `Base64` is what a reader wants, not five classes that merely
+        // enclose something called `Base`.
+        let mut names = vec!["demo/Base64".to_string(), "demo/Base62".to_string()];
+        for index in 0..50 {
+            names.push(format!("vendor/Enclosing{index}$Base"));
+        }
+        let index = DependencySymbolIndex::from_internal_names(names);
+
+        let found = names_of(&index.candidates("Base", 8));
+        assert!(
+            found.contains(&"Base62".to_string()) && found.contains(&"Base64".to_string()),
+            "whole-name matches must survive the nested ones: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_nested_class_survives_a_crowd_of_whole_name_matches() {
+        // The shape a real classpath has: far more classes whose *leaf* starts with the query than
+        // whose whole name does. Over 1,898 jars, `Entry` prefixes 66 whole names and 1,254 leaves.
+        // Running the whole-name range to exhaustion first fills every slot from the smaller set.
+        let mut names = vec!["java/util/Map$Entry".to_string()];
+        for index in 0..500 {
+            names.push(format!("demo/Entry{index}Holder"));
+        }
+        let index = DependencySymbolIndex::from_internal_names(names);
+
+        let found = index.candidates("Entry", 32);
+        assert_eq!(found.len(), 32);
+        assert!(
+            found.iter().any(|c| c.internal == "java/util/Map$Entry"),
+            "the nested class must not be starved by whole-name matches"
         );
     }
 
