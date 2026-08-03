@@ -788,6 +788,8 @@ mod object_member_overload_e2e;
 mod object_member_ref_import_e2e;
 #[path = "object_method_ref_e2e.rs"]
 mod object_method_ref_e2e;
+#[path = "object_receiver_lambda_e2e.rs"]
+mod object_receiver_lambda_e2e;
 #[path = "object_value_inference_e2e.rs"]
 mod object_value_inference_e2e;
 #[path = "operator_inc_dec_e2e.rs"]

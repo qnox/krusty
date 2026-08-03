@@ -15189,6 +15189,28 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
+    /// [`Self::implicit_receiver_types`] plus the enclosing `companion object`'s own type.
+    ///
+    /// A companion is not a `this` receiver unless it declares a supertype, so an unqualified call
+    /// to a sibling companion function (`apply2 { … }` from inside the companion) has no implicit
+    /// receiver carrying that member. Member-shape lookups still need one: without it a lambda
+    /// argument gets no expectation and `it` binds as `Any`.
+    fn implicit_member_receiver_types(&self) -> Vec<Ty> {
+        let mut receivers = self.implicit_receiver_types();
+        if let Some(companion) = self
+            .companion_of
+            .as_deref()
+            .and_then(|class| self.syms.classes.get(class))
+            .map(|class| type_name(&format!("{}$Companion", class.internal())))
+        {
+            let ty = Ty::obj_name(companion);
+            if !receivers.contains(&ty) {
+                receivers.push(ty);
+            }
+        }
+        receivers
+    }
+
     fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
         if let Some(span) = receiver.extension_receiver {
             self.mark_extension_receiver_span_used(expression, span);
@@ -28998,13 +29020,156 @@ impl<'a> Checker<'a> {
         self.check_module_member_call_mode(call, rt, name, args, arg_tys, true)
     }
 
+    /// Argument types for a MODULE member call whose receiver is a *classifier* — an `object`
+    /// singleton (`Wrap.apply2 { … }`) or a companion (`Holder.apply2 { … }`).
+    ///
+    /// A classifier receiver reaches `check_module_member_call` with argument types computed up
+    /// front, so a lambda argument would otherwise be checked with no expectation and bind `it` as
+    /// `Any`. Type them the way the instance-receiver path in `check_call` does: select the
+    /// candidate from the receiver's members against the non-lambda arguments, then check each
+    /// lambda against that candidate's function-type parameter.
+    fn classifier_member_arg_tys(
+        &mut self,
+        call: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+    ) -> Vec<Ty> {
+        if !args
+            .iter()
+            .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+        {
+            return self.arg_tys(args);
+        }
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        // Lambda positions stay `None` until the candidate supplies their parameter types.
+        let partial: Vec<Option<Ty>> = args
+            .iter()
+            .map(|&a| {
+                if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                    None
+                } else {
+                    Some(self.expr(a))
+                }
+            })
+            .collect();
+        let members =
+            crate::module_symbols::ModuleSymbols::new(self.syms).instance_members(rt, name);
+        let shape = self
+            .best_module_member_candidate(
+                &members,
+                args,
+                &partial,
+                arg_names.as_deref(),
+                trailing_lambda,
+            )
+            .cloned()
+            .and_then(|member| {
+                let generic_member = self.plan_generic_member(
+                    rt,
+                    member.owner,
+                    name,
+                    Some(&member.params),
+                    Some(&partial),
+                    arg_names.as_deref(),
+                );
+                module_member_lambda_shape(
+                    &member,
+                    generic_member.as_ref(),
+                    args,
+                    arg_names.as_deref(),
+                    trailing_lambda,
+                    self.member_inline_body_available(&member),
+                )
+            });
+        // Non-lambda arguments keep the type from the pass above; re-typing them would duplicate
+        // whatever diagnostics that pass reported.
+        let Some(shape) = shape else {
+            return args
+                .iter()
+                .zip(&partial)
+                .map(|(&a, &typed)| typed.unwrap_or_else(|| self.expr(a)))
+                .collect::<Vec<_>>();
+        };
+        // A `Recv.() -> R` lambda argument binds `this@<name>` to the called member's name.
+        let call_fn_name = name.to_string();
+        self.with_lambda_mutation(shape.is_inline, |c| {
+            args.iter()
+                .enumerate()
+                .map(|(i, &a)| {
+                    if let Some(typed) = partial[i] {
+                        return typed;
+                    }
+                    if matches!(c.file.expr(a), Expr::Lambda { .. }) {
+                        if let Some(pt) = shape.param_types.get(i).and_then(Option::as_deref) {
+                            let receiver = shape.receivers.get(i).copied().flatten();
+                            if let Some(signature) = shape.signatures.get(i).copied().flatten() {
+                                return c.check_lambda_with_function_type_and_params_labeled(
+                                    a,
+                                    signature,
+                                    pt,
+                                    receiver.is_some(),
+                                    Some(&call_fn_name),
+                                );
+                            }
+                            if let Some(receiver) = receiver {
+                                return c.check_lambda_with_receiver_labeled(
+                                    a,
+                                    receiver,
+                                    pt.get(1..).unwrap_or_default(),
+                                    Some(&call_fn_name),
+                                );
+                            }
+                            return c.check_lambda_with_types(a, pt);
+                        }
+                    }
+                    c.expr(a)
+                })
+                .collect()
+        })
+    }
+
+    /// `Type(args)` resolved as the source companion's `operator fun invoke` — the factory kotlinc
+    /// selects when no constructor is applicable (an interface has none at all).
+    ///
+    /// The arguments were already typed for the construction, with no expectation for a lambda
+    /// argument; the operator re-types them against ITS parameters, so `first_arg_diag` (the
+    /// diagnostic count taken before that pass) marks complaints that never applied to the call
+    /// being made. Those are dropped once the operator is the selected candidate — but the
+    /// operator's OWN diagnostics are kept. Selection must not depend on whether the argument
+    /// bodies type-check: backing out because a lambda body has an unrelated error would report
+    /// the construction's failure (`cannot create an instance of an interface`) on top of it.
+    ///
+    /// The operator is the candidate when the call resolves to it. `Ty::Error` with nothing
+    /// reported is not a resolution — `check_module_member_call` suppresses its own inapplicable
+    /// -overload diagnostic when the call already carries an argument diagnostic, and here that
+    /// is precisely the provisional pass this would then erase, leaving the call silent.
+    fn take_source_companion_invoke(
+        &mut self,
+        call: ExprId,
+        class: &ClassSig,
+        args: &[ExprId],
+        first_arg_diag: usize,
+    ) -> Option<Ty> {
+        let before = self.diags.diags.len();
+        let ret =
+            self.check_source_companion_call(call, class, CALLABLE_INVOKE_OPERATOR, args, true);
+        let resolved = ret.filter(|ret| *ret != Ty::Error || self.diags.diags.len() != before);
+        let Some(ret) = resolved else {
+            self.diags.diags.truncate(before);
+            return None;
+        };
+        self.diags.diags.drain(first_arg_diag..before);
+        Some(ret)
+    }
+
     fn check_source_companion_call(
         &mut self,
         call: ExprId,
         class: &ClassSig,
         name: &str,
         args: &[ExprId],
-        arg_tys: &[Ty],
         require_operator: bool,
     ) -> Option<Ty> {
         let signature = class.static_methods.get(name)?;
@@ -29013,7 +29178,10 @@ impl<'a> Checker<'a> {
             return None;
         }
         let owner = type_name(&format!("{}$Companion", class.internal()));
-        let ret = self.check_module_member_call(call, Ty::obj_name(owner), name, args, arg_tys)?;
+        // Type the arguments against the COMPANION's signature, not the enclosing call's eager pass:
+        // a lambda argument to a companion function needs the companion member's parameter types.
+        let arg_tys = self.classifier_member_arg_tys(call, Ty::obj_name(owner), name, args);
+        let ret = self.check_module_member_call(call, Ty::obj_name(owner), name, args, &arg_tys)?;
         self.expr_lowers.insert(
             call,
             ExprLowering::ObjectMemberCall {
@@ -30142,12 +30310,13 @@ impl<'a> Checker<'a> {
                             source_class.as_ref().is_some_and(|class| class.is_object());
                         // Ordinary object members precede synthesized static fallbacks.
                         if is_object {
-                            let arg_tys = self.arg_tys(args);
                             let internal = source_class
                                 .as_ref()
                                 .map(ClassSig::internal_name)
                                 .expect("source object has a signature");
                             let receiver_ty = Ty::obj_name(internal);
+                            let arg_tys =
+                                self.classifier_member_arg_tys(call, receiver_ty, &name, args);
                             let arg_names = self.file.call_arg_names.get(&call.0).cloned();
                             let full_arg_tys =
                                 arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
@@ -30188,11 +30357,8 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .is_some_and(|class| class.companion_fun_names.contains(&name));
                         if source_companion {
-                            let arg_tys = self.arg_tys(args);
                             if let Some(ret) = source_class.as_ref().and_then(|class| {
-                                self.check_source_companion_call(
-                                    call, class, &name, args, &arg_tys, false,
-                                )
+                                self.check_source_companion_call(call, class, &name, args, false)
                             }) {
                                 return ret;
                             }
@@ -30208,11 +30374,16 @@ impl<'a> Checker<'a> {
                             return sig.ret;
                         }
                         if is_object {
-                            let arg_tys = self.arg_tys(args);
                             let internal = source_class
                                 .as_ref()
                                 .map(ClassSig::internal_name)
                                 .expect("source object has a signature");
+                            let arg_tys = self.classifier_member_arg_tys(
+                                call,
+                                Ty::obj_name(internal),
+                                &name,
+                                args,
+                            );
                             if let Some(ret) = self.check_module_member_call(
                                 call,
                                 Ty::obj_name(internal),
@@ -31841,7 +32012,7 @@ impl<'a> Checker<'a> {
                 let ordinary_this_member_lambda_shape: Option<ModuleMemberLambdaShape> =
                     if implicit_member_lambda_enabled {
                         let partial = this_member_partial.as_deref().unwrap_or_default();
-                        self.implicit_receiver_types()
+                        self.implicit_member_receiver_types()
                             .into_iter()
                             .find_map(|receiver| {
                                 let members = crate::module_symbols::ModuleSymbols::new(self.syms)
@@ -32027,6 +32198,10 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // Diagnostics from typing the arguments below are provisional while `fname` may name a
+                // class: if no constructor accepts them, a companion `operator fun invoke` re-types
+                // them against ITS signature and this pass's complaints never applied.
+                let pre_arg_diags = self.diags.diags.len();
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
@@ -32448,14 +32623,9 @@ impl<'a> Checker<'a> {
                     };
                     if let Some(cls) = ctor_cls {
                         if cls.is_interface() {
-                            if let Some(ret) = self.check_source_companion_call(
-                                call,
-                                &cls,
-                                CALLABLE_INVOKE_OPERATOR,
-                                args,
-                                &arg_tys,
-                                true,
-                            ) {
+                            if let Some(ret) =
+                                self.take_source_companion_invoke(call, &cls, args, pre_arg_diags)
+                            {
                                 return ret;
                             }
                         }
@@ -32474,6 +32644,14 @@ impl<'a> Checker<'a> {
                         let Some(selected) =
                             self.select_source_constructor(&arguments, &candidates)
                         else {
+                            // `Type { … }` / `Type(x)` where no constructor is applicable but the
+                            // COMPANION declares `operator fun invoke`: kotlinc picks the operator, so
+                            // the call is a factory, not a construction.
+                            if let Some(ret) =
+                                self.take_source_companion_invoke(call, &cls, args, pre_arg_diags)
+                            {
+                                return ret;
+                            }
                             if !self.report_source_constructor_mapping_error(
                                 call,
                                 args,
