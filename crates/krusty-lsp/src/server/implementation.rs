@@ -17,13 +17,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::super::{
-    CompletionIndex, DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex,
-    HoverIndex, IndexOutcome, IndexedFile, LibraryDefinitionIndex, MaterializedDefinition,
-    ProjectSymbolIndex, SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex,
-    WorkspaceSymbolIndex, MAX_RETAINED_ANALYSIS_BYTES, SEMANTIC_TOKEN_MODIFIERS,
+    CompletionIndex, DefinitionIndex, DependencyCandidate, DependencySymbolIndex, DocumentAnalysis,
+    DocumentSymbolIndex, FoldingRangeIndex, HoverIndex, IndexOutcome, IndexedFile,
+    LibraryDefinitionIndex, LocatedDependency, MaterializedDefinition, ProjectSymbolIndex,
+    SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex, WorkspaceSymbolIndex,
+    MAX_RETAINED_ANALYSIS_BYTES, MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS,
     SEMANTIC_TOKEN_TYPES,
 };
 use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
+use crate::analysis::serialized_json_wire_bytes;
 use crate::compiler_analysis::LibraryRef;
 use crate::server::engine::{
     AnalysisBatch, AnalysisEngine, AnalysisJob, DumpJob, DumpOutcome, DumpResult, EngineBackend,
@@ -233,6 +235,20 @@ pub trait Analysis {
     /// classpath, no module grouping, and no resolution, so every host gets real coverage.
     fn index_workspace_symbols(&mut self, uris: &[&str]) -> WorkspaceSymbolIndex {
         index_workspace_symbols_from_disk(uris)
+    }
+
+    /// Class names from the project's dependencies. Empty for a host with no classpath, which is
+    /// every host that is not the real project one.
+    fn dependency_index(&mut self) -> DependencySymbolIndex {
+        DependencySymbolIndex::default()
+    }
+
+    /// Write out the source for `candidates` so a client can open them.
+    fn locate_dependencies(
+        &mut self,
+        _candidates: Vec<DependencyCandidate>,
+    ) -> Vec<LocatedDependency> {
+        Vec::new()
     }
 
     /// Workspace sources sharing a module with one of the open documents. These are the files a
@@ -454,6 +470,10 @@ pub trait AnalysisBackend {
             definition: None,
         })
     }
+
+    /// Ask for dependency classes to be written out. Answers nothing: the query that wanted them
+    /// has already been answered without them, and the next one reads what this produced.
+    fn locate_dependencies(&mut self, _candidates: Vec<DependencyCandidate>) {}
     /// Render the dev-mode dump for `job.uri`.
     ///
     /// Mirrors [`AnalysisBackend::materialize`]: `Some` answers the request now, `None` means the
@@ -971,6 +991,13 @@ enum PendingAnalysisCancellation {
 
 const DIAGNOSTIC_REFRESH_REQUEST_ID: &str = "krusty/diagnosticRefresh";
 
+/// Ceiling on dependency classes one response may carry.
+///
+/// Ranked below every project hit, so this is what is left over for names the workspace does not
+/// declare. Small on purpose: a reader searching a project usually means the project, and each of
+/// these costs a render the first time it is returned.
+const MAX_DEPENDENCY_SYMBOLS_PER_RESPONSE: usize = 32;
+
 pub struct LspService<B> {
     documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
@@ -983,6 +1010,14 @@ pub struct LspService<B> {
     /// about a model that no longer exists.
     project_symbols_generation: u64,
     project_symbols_incomplete_reported: bool,
+    /// Class names from the project's dependencies. Names only; a location costs a render.
+    dependency_symbols: DependencySymbolIndex,
+    /// Dependency classes already written out, by internal name. A query answers from this and
+    /// asks for what is missing, so it never waits on a render -- the picker re-queries on every
+    /// keystroke, and the next one has them.
+    located_dependencies: HashMap<String, LocatedDependency>,
+    /// Candidates already asked for, so a keystroke does not queue the same render twice.
+    requested_dependencies: HashSet<String>,
     workspace_diagnostics: WorkspaceDiagnosticStore,
     backend: B,
     analysis_dirty: bool,
@@ -1038,6 +1073,9 @@ where
             project_symbols: ProjectSymbolIndex::default(),
             project_symbols_generation: 0,
             project_symbols_incomplete_reported: false,
+            dependency_symbols: DependencySymbolIndex::default(),
+            located_dependencies: HashMap::new(),
+            requested_dependencies: HashSet::new(),
             workspace_diagnostics: WorkspaceDiagnosticStore::default(),
             backend,
             analysis_dirty: false,
@@ -1404,6 +1442,68 @@ where
              oversized file; project-wide symbol search is incomplete"
                 .to_string(),
         )]
+    }
+
+    pub(crate) fn set_dependency_index(&mut self, index: DependencySymbolIndex) {
+        self.dependency_symbols = index;
+    }
+
+    pub(crate) fn record_located_dependencies(&mut self, located: Vec<LocatedDependency>) {
+        for found in located {
+            self.located_dependencies
+                .insert(found.candidate.internal.clone(), found);
+        }
+    }
+
+    /// Symbols for dependency classes matching `query`, and the candidates still to be written out.
+    ///
+    /// Answers from what has already been located and never blocks on the rest. A render is fast
+    /// but it is still a render, and the picker asks again on the next keystroke -- by which time
+    /// the missing ones have arrived. Ranked below every project hit, because a name the workspace
+    /// declares is the one the reader meant.
+    fn dependency_symbols(
+        &self,
+        query: &str,
+        wire_bytes: &mut usize,
+    ) -> (Vec<Value>, Vec<DependencyCandidate>) {
+        let mut symbols = Vec::new();
+        let mut missing = Vec::new();
+        if query.is_empty() {
+            return (symbols, missing);
+        }
+        for candidate in self
+            .dependency_symbols
+            .candidates(query, MAX_DEPENDENCY_SYMBOLS_PER_RESPONSE)
+        {
+            let Some(found) = self.located_dependencies.get(&candidate.internal) else {
+                if !self.requested_dependencies.contains(&candidate.internal) {
+                    missing.push(candidate);
+                }
+                continue;
+            };
+            let Some(uri) = path_to_file_uri(&found.path) else {
+                continue;
+            };
+            let start = byte_offset_to_position(&found.text, found.span.lo as usize);
+            let end = byte_offset_to_position(&found.text, found.span.hi as usize);
+            let symbol = json!({
+                "name": candidate.name,
+                "kind": 5,
+                "containerName": candidate.package,
+                "location": {
+                    "uri": uri,
+                    "range": {"start": start, "end": end},
+                },
+            });
+            let symbol_bytes = serialized_json_wire_bytes(&symbol).unwrap_or(usize::MAX);
+            let next_bytes = wire_bytes.saturating_add(symbol_bytes).saturating_add(1);
+            if next_bytes > MAX_WORKSPACE_SYMBOL_WIRE_BYTES {
+                break;
+            }
+            *wire_bytes = next_bytes;
+            symbols.push(symbol);
+        }
+        (symbols, missing)
     }
 
     pub(crate) fn reset_workspace_index(&mut self, generation: u64) -> Vec<Value> {
@@ -2068,21 +2168,30 @@ where
         )])
     }
 
-    fn workspace_symbols(&self, id: Option<Value>, params: Value) -> Dispatch {
+    fn workspace_symbols(&mut self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
         let Ok(params) = serde_json::from_value::<WorkspaceSymbolParams>(params) else {
             return invalid_params(Some(id));
         };
-        Dispatch::messages(vec![rpc_result(
-            id,
-            Value::Array(self.workspace_symbols.encode_over(
-                &params.query,
-                &self.project_symbols.layers(),
-                &self.documents.keys().map(String::as_str).collect(),
-            )),
-        )])
+        let mut symbols = self.workspace_symbols.encode_over(
+            &params.query,
+            &self.project_symbols.layers(),
+            &self.documents.keys().map(String::as_str).collect(),
+        );
+        let mut wire_bytes = serialized_json_wire_bytes(&Value::Array(symbols.clone()))
+            .unwrap_or(MAX_WORKSPACE_SYMBOL_WIRE_BYTES);
+        let (dependencies, missing) = self.dependency_symbols(&params.query, &mut wire_bytes);
+        symbols.extend(dependencies);
+        for candidate in &missing {
+            self.requested_dependencies
+                .insert(candidate.internal.clone());
+        }
+        if !missing.is_empty() {
+            self.backend.locate_dependencies(missing);
+        }
+        Dispatch::messages(vec![rpc_result(id, Value::Array(symbols))])
     }
 
     fn formatting(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -4106,6 +4215,12 @@ where
                 write_framed(writer, &encoded)?;
             }
         }
+        EngineEvent::DependencyIndex(index) => {
+            service.set_dependency_index(index);
+        }
+        EngineEvent::DependenciesLocated(located) => {
+            service.record_located_dependencies(located);
+        }
         EngineEvent::SymbolIndexProgress(batch) => {
             for message in service.apply_symbol_index_batch(batch) {
                 let encoded = serde_json::to_vec(&message).map_err(json_io)?;
@@ -5511,6 +5626,102 @@ mod tests {
                 },
             }])
         );
+    }
+
+    #[test]
+    fn dependency_symbols_never_block_a_query_and_arrive_on_the_next_one() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+            "kotlin/collections/AbstractList".to_string(),
+        ]));
+
+        // Nothing is located yet, so the first query answers without it rather than waiting on a
+        // render. The picker asks again on the next keystroke.
+        let first = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "dep-first",
+            "method": "workspace/symbol",
+            "params": {"query": "AbstractList"}
+        }));
+        assert_eq!(first.messages[0]["result"], json!([]));
+
+        service.record_located_dependencies(vec![crate::LocatedDependency {
+            candidate: crate::DependencyCandidate {
+                internal: "kotlin/collections/AbstractList".to_string(),
+                package: "kotlin.collections".to_string(),
+                name: "AbstractList".to_string(),
+            },
+            path: std::path::PathBuf::from("/cache/kotlin/collections/AbstractList.kt"),
+            // `AbstractList` begins 6 bytes into the third line.
+            span: krusty::diag::Span::new(34, 46),
+            text: "package kotlin.collections\n\nclass AbstractList\n".to_string(),
+        }]);
+
+        let second = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "dep-second",
+            "method": "workspace/symbol",
+            "params": {"query": "AbstractList"}
+        }));
+        let symbol = &second.messages[0]["result"][0];
+        assert_eq!(symbol["name"], "AbstractList");
+        assert_eq!(symbol["containerName"], "kotlin.collections");
+        // A range the client can open, resolved from the byte span in the written text.
+        assert_eq!(symbol["location"]["range"]["start"]["line"], 2);
+        assert_eq!(symbol["location"]["range"]["start"]["character"], 6);
+        assert_eq!(symbol["location"]["range"]["end"]["character"], 18);
+    }
+
+    #[test]
+    fn a_project_symbol_outranks_a_dependency_of_the_same_name() {
+        let submitted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut service = LspService::with_backend(RecordingBackend {
+            ready: true,
+            submitted,
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///Own.kt";
+        service.apply_symbol_index_batch(SymbolIndexBatch {
+            generation: 0,
+            attempted: vec![uri.to_string()],
+            symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(
+                uri,
+                "package demo\nclass Shared\n",
+            )]),
+        });
+        service.set_dependency_index(crate::DependencySymbolIndex::from_internal_names([
+            "vendor/Shared".to_string(),
+        ]));
+        service.record_located_dependencies(vec![crate::LocatedDependency {
+            candidate: crate::DependencyCandidate {
+                internal: "vendor/Shared".to_string(),
+                package: "vendor".to_string(),
+                name: "Shared".to_string(),
+            },
+            path: std::path::PathBuf::from("/cache/vendor/Shared.kt"),
+            span: krusty::diag::Span::new(22, 28),
+            text: "package vendor\n\nclass Shared\n".to_string(),
+        }]);
+
+        let answered = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": "shared",
+            "method": "workspace/symbol",
+            "params": {"query": "Shared"}
+        }));
+
+        let results = answered.messages[0]["result"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0]["location"]["uri"], uri,
+            "a name the workspace declares is the one the reader meant"
+        );
+        assert_eq!(results[1]["containerName"], "vendor");
     }
 
     #[test]

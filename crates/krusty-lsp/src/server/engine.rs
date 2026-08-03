@@ -7,8 +7,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::super::{
-    workspace_index_uri_bytes, DocumentAnalysis, IndexedFile, MaterializedDefinition,
-    WorkspaceSymbolIndex, MAX_WORKSPACE_INDEX_FILES,
+    workspace_index_uri_bytes, DependencyCandidate, DependencySymbolIndex, DocumentAnalysis,
+    IndexedFile, LocatedDependency, MaterializedDefinition, WorkspaceSymbolIndex,
+    MAX_WORKSPACE_INDEX_FILES,
 };
 use super::implementation::{
     Analysis, AnalysisBackend, DocumentAdmission, Incoming, ProjectFeedback,
@@ -160,6 +161,9 @@ pub(crate) enum EngineCommand {
     Dump(DumpJob),
     Index(IndexJob),
     IndexSymbols(SymbolIndexJob),
+    /// Write out the source for classes a query wants to return. Never speculative: the candidates
+    /// are the ones a query already ranked.
+    LocateDependencies(Vec<DependencyCandidate>),
     ProjectChange {
         refresh: bool,
         reanalyze: bool,
@@ -181,6 +185,10 @@ pub(crate) enum EngineEvent {
     /// One chunk of the project-wide symbol index. Published as it completes: the picker is
     /// re-queried on every keystroke, so partial coverage converges without client coordination.
     SymbolIndexProgress(SymbolIndexBatch),
+    /// Class names from the project's dependencies, published once per project model.
+    DependencyIndex(DependencySymbolIndex),
+    /// Classes now written to disk, with the span of each declaration in the written text.
+    DependenciesLocated(Vec<LocatedDependency>),
     Materialized(MaterializeResult),
     Dumped(DumpOutcome),
     Status(ServerStatus),
@@ -406,6 +414,12 @@ impl CommandState {
                 if !chunk.is_empty() {
                     self.push_index_chunk(priority, chunk);
                 }
+            }
+            EngineCommand::LocateDependencies(candidates) => {
+                // Latency-sensitive but not interactive: a query already answered without these,
+                // and the next keystroke picks them up.
+                self.pending
+                    .push_back(EngineCommand::LocateDependencies(candidates));
             }
             EngineCommand::IndexSymbols(job) => {
                 let mut chunk =
@@ -846,6 +860,11 @@ impl AnalysisBackend for EngineBackend {
         None
     }
 
+    fn locate_dependencies(&mut self, candidates: Vec<DependencyCandidate>) {
+        self.engine
+            .submit(EngineCommand::LocateDependencies(candidates));
+    }
+
     fn set_workspace_root(&mut self, root: Option<std::path::PathBuf>) -> Option<ProjectFeedback> {
         self.engine.submit(EngineCommand::SetWorkspaceRoot(root));
         None
@@ -943,6 +962,9 @@ fn run<A: Analysis>(
             Some(EngineCommand::IndexSymbols(job)) => {
                 Some(format!("Indexing symbols: {} files", job.uris.len()))
             }
+            Some(EngineCommand::LocateDependencies(candidates)) => {
+                Some(format!("Locating {} dependency classes", candidates.len()))
+            }
             Some(EngineCommand::Index(_)) => {
                 let (done, total) = commands.indexing_progress();
                 // Report the operation, not the chunk: "Indexing 32 files" never moved on a large
@@ -1038,6 +1060,14 @@ fn run<A: Analysis>(
                     }
                     let generation = commands.index_generation();
                     if submitted_sweep_generation != Some(generation) {
+                        let dependencies = analyze.dependency_index();
+                        if dependencies.class_count() > 0
+                            && events
+                                .send(Incoming::Engine(EngineEvent::DependencyIndex(dependencies)))
+                                .is_err()
+                        {
+                            break;
+                        }
                         submit_workspace_sweep(&mut analyze, &commands);
                         let mut logs = Vec::new();
                         if analyze.workspace_index_incomplete()
@@ -1133,6 +1163,16 @@ fn run<A: Analysis>(
                         },
                     )))
                     .is_err()
+                {
+                    break;
+                }
+            }
+            Some(EngineCommand::LocateDependencies(candidates)) => {
+                let located = analyze.locate_dependencies(candidates);
+                if !located.is_empty()
+                    && events
+                        .send(Incoming::Engine(EngineEvent::DependenciesLocated(located)))
+                        .is_err()
                 {
                     break;
                 }

@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use krusty::jvm::classpath::platform_jdk_modules;
+use krusty::jvm::classpath::{platform_jdk_modules, Classpath};
 use krusty::source::SourceKind;
 use krusty_lsp::{
     detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, JdkRequest,
@@ -153,6 +153,16 @@ fn exit_when_orphaned(server: u32) {
 
 #[cfg(not(unix))]
 fn exit_when_orphaned(_server: u32) {}
+
+/// Where rendered dependency sources are written, from the configured directory or the XDG default.
+fn deps_cache_root(options: &LspOptions) -> std::path::PathBuf {
+    options
+        .deps_cache_dir()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| {
+            krusty_lsp::deps_cache::default_cache_root(&|key| std::env::var(key).ok())
+        })
+}
 
 fn main() {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -910,6 +920,58 @@ impl krusty_lsp::Analysis for WorkerHost {
         finish_analysis(&mut self.analysis_pending, result, sources.len())
     }
 
+    /// Class names from the project's own classpath, read once per project model.
+    ///
+    /// Built here rather than in the worker because it needs only the jar catalogues -- the entry
+    /// names in each archive -- not decoded classes, and shipping the list over the worker wire
+    /// would cost more than reading it.
+    fn dependency_index(&mut self) -> krusty_lsp::DependencySymbolIndex {
+        let Some(sync) = self.sync.as_ref() else {
+            return krusty_lsp::DependencySymbolIndex::default();
+        };
+        let mut entries = sync.project_classpath();
+        entries.extend(self.platform_classpath.iter().cloned());
+        if entries.is_empty() {
+            return krusty_lsp::DependencySymbolIndex::default();
+        }
+        krusty_lsp::DependencySymbolIndex::from_classpath(&Classpath::new(entries))
+    }
+
+    /// Write out the classes a query is about to return, through the worker that already holds a
+    /// decoded classpath. Off the request path: the query it serves was answered without them.
+    fn locate_dependencies(
+        &mut self,
+        candidates: Vec<krusty_lsp::DependencyCandidate>,
+    ) -> Vec<krusty_lsp::LocatedDependency> {
+        let cache_root = deps_cache_root(&self.options);
+        let use_sources = self.options.deps_sources_enabled();
+        let mut located = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let reference = LibraryRef {
+                fqn: candidate.internal.clone(),
+                member_name: String::new(),
+                member_desc: String::new(),
+            };
+            let Ok(Some((text, span))) = self
+                .worker
+                .materialize_library_definition(&reference, use_sources)
+            else {
+                continue;
+            };
+            let Ok(path) = krusty_lsp::deps_cache::store(&cache_root, &candidate.internal, &text)
+            else {
+                continue;
+            };
+            located.push(krusty_lsp::LocatedDependency {
+                candidate,
+                path,
+                span,
+                text,
+            });
+        }
+        located
+    }
+
     fn materialize_library_definition(
         &mut self,
         reference: &LibraryRef,
@@ -919,13 +981,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             .materialize_library_definition(reference, self.options.deps_sources_enabled())
             .ok()
             .flatten()?;
-        let cache_root = self
-            .options
-            .deps_cache_dir()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| {
-                krusty_lsp::deps_cache::default_cache_root(&|key| std::env::var(key).ok())
-            });
+        let cache_root = deps_cache_root(&self.options);
         let path = krusty_lsp::deps_cache::store(&cache_root, &reference.fqn, &text).ok()?;
         Some(MaterializedDefinition {
             path,
