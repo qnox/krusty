@@ -352,6 +352,8 @@ mod diagnostic_markers_e2e;
 mod diagnostics_match_kotlinc;
 #[path = "diverging_init_e2e.rs"]
 mod diverging_init_e2e;
+#[path = "diverging_value_position_e2e.rs"]
+mod diverging_value_position_e2e;
 #[path = "do_while_e2e.rs"]
 mod do_while_e2e;
 #[path = "dotted_extension_receiver_e2e.rs"]
@@ -660,6 +662,8 @@ mod map_entry_destructure_e2e;
 mod map_get_nullable_elvis_e2e;
 #[path = "mapped_collection_scope_e2e.rs"]
 mod mapped_collection_scope_e2e;
+#[path = "mapped_string_scope_e2e.rs"]
+mod mapped_string_scope_e2e;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
@@ -882,6 +886,8 @@ mod safe_call_member_on_generic_result_e2e;
 mod safe_call_prim_intrinsic_e2e;
 #[path = "safe_call_primitive_e2e.rs"]
 mod safe_call_primitive_e2e;
+#[path = "safe_call_unresolved_member_e2e.rs"]
+mod safe_call_unresolved_member_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
 mod safe_cast_elvis_e2e;
 #[path = "sam_classpath_e2e.rs"]

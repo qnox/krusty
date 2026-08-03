@@ -526,6 +526,42 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a plain nullable receiver (no higher-order call involved). The value form (`val r = c?.let { return … }`)
   types `r` as `Nothing?`, which flows into any reference target. (Only the SAFE-call `?.` form is handled;
   a non-safe qualified `b.also { return … }` remains unsupported.) (`tests/qq1_safecall_diverging_scope_block_e2e.rs`).
+- **A receiver that can only be `null` — `null?.m()`, `Nothing?`, `Nothing`.** `Nothing` has no non-null
+  value, so a `?.` on a receiver typed `Null`, `Nothing?`, or `Nothing` never invokes the member: the whole
+  safe call is `null`. The lowerer folds it to `{ evaluate receiver; null }` — the receiver still runs for
+  its side effects, and a *diverging* receiver (`boom()?.toString()`) simply terminates there. This is one
+  rule for all three receiver types rather than a special case for the `null` literal; a `Nothing?` receiver
+  has no class internal to look a member up on, so no other lowering could serve it.
+  The fold bypasses member resolution entirely, which is sound only because the CHECKER reports an
+  unresolved member behind `?.` (next bullet). (`tests/safe_call_unresolved_member_e2e.rs`.)
+- **An unresolved member behind `?.` is a checker diagnostic, exactly as for the qualified form.**
+  `s?.thisDoesNotExist()` reports `unresolved reference 'thisDoesNotExist'.` at the member-name span,
+  matching kotlinc. Previously only the PROPERTY spelling (`s?.thisDoesNotExist`) reported — it routes
+  through `check_member` — while the CALL spelling exhausted every callable origin and returned a silent
+  `Ty::Error`. The consequences were that the backend bail ("this construct is not yet supported by the IR
+  backend") did frontend duty for a `String?` receiver, and that `null?.thisDoesNotExist()` compiled clean,
+  because the always-null fold returns before any backend check. The report is guarded by a diagnostic
+  checkpoint so an origin that already reported (a rejected classpath overload, an unmappable labelled call)
+  is not reported twice, and by an EXISTENCE probe (`member_name_exists_on`, shared with the qualified
+  arm's nullable-receiver check) so a member that exists but that this arm merely cannot SELECT stays a
+  silent `Ty::Error`. That distinction is the whole point: `d?.toInt()`, `b?.not()`, `f?.invoke(1)`, and an
+  arity mismatch like `s?.let(1)` are all real Kotlin krusty rejects in the BACKEND, and calling them
+  "unresolved reference" would tell the user their program is wrong. Only a name that exists nowhere on the
+  receiver is a typo. The classpath-less String fallback stores name, parameter shapes, and return in one
+  semantic table: selection matches a complete shape, while the existence guard checks the name alone, so
+  an overload mismatch cannot be mislabeled as a missing member. The same name-only rule covers universal
+  `Any` callables (`toString`/`hashCode`/`equals`) on every receiver and function-value `invoke`; argument
+  count and types never participate in the typo predicate.
+  A second consequence of no longer being silent: the qualified and safe-call arms must agree about what
+  EXISTS, so the classpath-less `String` table (`substring`/`indexOf`/`trimIndent`/`trimMargin`,
+  consulted only when no stdlib is on the classpath) is shared by both. Those names are stdlib EXTENSIONS
+  on `kotlin.String` rather than members of it, so both call forms consult the table LAST — after the
+  ordinary source/classpath extension ladder — and a user's same-named extension wins. The lowerer's
+  constant fold for literal `trimIndent`/`trimMargin` follows the same rule: it runs only when the checker
+  recorded no callable target, never merely because the member name matches.
+  Known gap: the checkpoint is taken after the receiver but before the arguments, so an argument that
+  itself reports (`s?.nope(undefinedVar)`) suppresses the member report — the program is still rejected,
+  with one diagnostic instead of two. (`tests/safe_call_unresolved_member_e2e.rs`.)
 - Lambdas `{ a, b -> … }`: a function type `(A,…) -> R` is the JVM interface
   `kotlin/jvm/functions/Function{arity}`. A non-capturing lambda compiles to `invokedynamic` bound by
   `LambdaMetafactory.metafactory` to a synthesized `private static` method `<enclosing>$lambda$<n>`
@@ -848,6 +884,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them
   would leave a dead branch target without the stackmap frame the JVM verifier requires (`VerifyError:
   Expecting a stack map frame` — seen with `try { throw …; <unreachable> } catch …`).
+- **Dead-code suppression in the emitter — divergence in VALUE position.** The rule above is a lowering
+  decision about *statements*; it cannot cover a diverging expression used as a VALUE, because the
+  consuming construct always emits opcodes after the value: a local's `istore`, an outer call's
+  `invokevirtual`, a method's implicit `return`. When the value diverges, those trailing opcodes are dead
+  straight-line bytecode the verifier rejects. `CodeBuilder` therefore tracks reachability directly: after
+  an unconditional terminator (`goto`, `athrow`, any `*return`) instructions are DROPPED until control can
+  demonstrably arrive again. Operand-height tracking, `max_stack`, and `max_locals` keep running while
+  dead, so a resumption point sees the state it would have seen anyway; `LineNumberTable`/
+  `LocalVariableTable` entries that would land in (or one past) a dropped region are dropped with it,
+  since their `start_pc` must index the code array. Because this is a property of the instruction stream,
+  no consuming construct needs its own divergence check — `boom()?.hashCode()`,
+  `val y: Int = boom() ?: 1`, `println(boom())`, `boom().toString()`, `if (true) { boom(); 1 }`, and a
+  BRANCHY sibling (`g(boom(), if (b) 1 else 2)`, the `when`/`&&`/`try` spellings, an inline-spliced
+  `5.let { … }`) are all the same case.
+  **What counts as arrival is the whole design.** Binding a label revives ONLY when some
+  already-emitted branch targets it (a recorded fixup). A branch emitted while dead was itself dropped
+  and left no fixup, so its target stays dead and the rest of that construct is dropped with it — without
+  that rule, `g(boom(), if (b) 1 else 2)` resurrects the `else` arm and the `istore`/`invoke` tail around
+  the hole where its condition used to be (`VerifyError: Bad local variable type`). A backward target
+  (a loop head) is bound before its back-edge and so never revives: reaching the head while dead means
+  the whole loop is unreachable. An EXCEPTION HANDLER has no incoming branch at all, so it binds through
+  `bind_handler`, which revives on whether its protected range holds live emitted bytes — that is exactly
+  the `try` whose body diverges (dead at the handler, yet the handler runs), while a `try` that is itself
+  inside a dropped region guards nothing and goes with it. A label bound inside a dropped region sits at
+  the same offset as the next live instruction, so its frame is dropped too: registered first, it would
+  otherwise out-rank the live label's frame in `build_stackmap`'s same-offset dedup. An inline splice in a
+  dead region is dropped as well — its relocated frames are bound INSIDE the body, never at its first
+  byte, so emitting it would leave an unreachable region with no entry frame; `bind_at` is a no-op while
+  dead and every consumer (`resolved_frames`, `build_stackmap`, `resolved_exceptions`) drops entries for
+  an unbound label.
+  Relatedly, a `Nothing`-returning REAL call is emitted with zero result words
+  (`slot_words(Nothing) == 0`) yet physically leaves a `Void`; the terminating
+  `throw KotlinNothingValueException()` re-declares that word before discarding it, or `max_stack` is
+  undercounted by whatever sits beneath it (`VerifyError: Operand stack overflow` on `println(boom())`).
+  (`tests/diverging_value_position_e2e.rs`.)
 - **A `for`-range `step` is evaluated exactly once** (hoisted to a temp before the loop), not per
   iteration — a side-effecting `step` (`a until b step sideEffect()`) must run a single time, matching
   kotlinc's evaluation order. `DeadCodeAndStep` in `tests/feature_box_e2e.rs`.
@@ -1109,13 +1180,60 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `arrayListOf(10, 20, 30).remove(10)` removes the ELEMENT on both `ArrayList` and `AbstractList`
   receivers, while `removeAt(0)` emits `remove(I)`.
 
-  Limited to the COLLECTION mapped builtins. `kotlin/String` also leaks its JVM class's members, but two of
-  them are load-bearing: kotlinc reaches `String.substring` and `String.indexOf` through `kotlin.text`
-  EXTENSIONS (an `@InlineOnly` splice down to the Java member, and `StringsKt.indexOf$default`), a path
-  krusty does not yet cover — today they resolve only via the leak. Everything else on `String` (`replace`,
-  `split`, `trim`, `uppercase`, `startsWith`, `contains`, `get`, `length`, `plus`, `compareTo`) already
-  resolves as an extension or a builtin member. Widening this to the remaining mapped builtins is gated on
-  those two, not on anything in the member-scope model.
+  The COLLECTIONS **and `kotlin/String`**. `java.lang.String`'s method set had been leaking wholesale into
+  the Kotlin scope — measured against kotlinc 2.4.10, 18 names it reports as unresolved (`getChars`,
+  `concat`, `replaceAll`, `equalsIgnoreCase`, `compareToIgnoreCase`, `getBytes`, `strip*`, `transform`,
+  `indent`, …). One of them miscompiled rather than merely over-accepting: `java.lang.String.split(String)`
+  splits on a REGEX and returns `Array<String>`, so it shadowed Kotlin's literal-delimiter
+  `CharSequence.split(vararg delimiters: String): List<String>` and `"abcdef".split("c")` produced the wrong
+  type from the wrong semantics. Making the builtins authoritative closes all 18.
+
+  Whether a mapped builtin's Kotlin declaration REPLACES or JOINS its JVM source scope is stored beside
+  that builtin's centralized Kotlin↔JVM erasure identity. The classpath loader therefore consumes a
+  semantic provenance property plus the fact that metadata was decoded; it does not reconstruct a
+  collection-or-class-name exception branch. This keeps members and supertypes on one policy and gives
+  future whitelist work one mapping table to change.
+
+  Two things had to move with it. The three shapes the Java set had been covering — `substring(Int)`,
+  `substring(Int, Int)`, `indexOf(String)` — are `kotlin.text` EXTENSIONS (an `@InlineOnly` splice down to
+  the Java member, and `StringsKt.indexOf$default`), and the extension seam resolves all three; what stopped
+  them was a hardcoded `rt == Ty::String` arm in the checker that typed them WITHOUT recording a call
+  target. Sitting above the extension section it took over the moment the Java members went away, so the
+  front end accepted the call and the IR lowerer bailed with "unrecorded qualified call target". It now sits
+  BELOW that section, where it is only what it was always meant to be: a typing fallback for a
+  CLASSPATH-FREE check, with no `StringsKt` to bind. Emitted bytecode matches kotlinc exactly —
+  `substring` → `invokevirtual java/lang/String.substring`, `indexOf` → `invokestatic
+  kotlin/text/StringsKt.indexOf$default`. Second, the authoritative test is the PRESENCE of the decoded
+  `.kotlin_builtins` declaration, never a non-empty member or supertype vector — an authoritative
+  declaration is allowed to state an empty set, and switching only half the shape would recreate the leak.
+  Presence is also what keeps a classpath carrying a JDK but no kotlin-stdlib correct: nothing decodes
+  there, so `String` keeps the JVM class's supertypes instead of being left with none (it would otherwise
+  lose `CharSequence`, `Comparable` and `Any`, and every subtype test against them would fail).
+
+  One supertype survives the replacement: `java/io/Serializable`. It is not a Kotlin type, so it appears in
+  no `.kotlin_builtins` declaration — but kotlinc still reports a mapped builtin as implementing it whenever
+  the Java class does, adding it back in `JvmBuiltInsCustomizer.getSupertypes` (`isSerializableInJava`).
+  Dropping it made `val v: java.io.Serializable = "abc"` an error against a kotlinc that accepts it. The
+  mapped COLLECTIONS never exposed this: `java/util/List` does not implement `Serializable`, and a concrete
+  `java.util` class that does (`ArrayList`) is not an authoritative name. A member-name probe cannot see
+  supertypes, so this needs its own coverage. Tests: `tests/mapped_string_scope_e2e.rs`.
+
+  Still NOT the remaining mapped builtins, and the reason is a mechanism krusty does not have. kotlinc does
+  not hide every Java method on a mapped type: `JvmBuiltInsCustomizer` re-admits an explicit whitelist
+  (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) on top of the builtins scope. Measured against
+  kotlinc, making the remaining names authoritative would WRONGLY reject `java.lang.CharSequence.chars` /
+  `codePoints`, `java.lang.Enum.name` / `ordinal`, and `java.lang.Throwable.fillInStackTrace` /
+  `getLocalizedMessage` / `getStackTrace` / `getSuppressed` / `initCause` / `setStackTrace` — all of which
+  kotlinc keeps. (`kotlin/Throwable` is also the one place a leak survives in the other direction: kotlinc
+  hides `getCause`/`getMessage` in favour of the `cause`/`message` properties, and krusty still accepts
+  them.) A residual leak still reaches `String` itself, one rung up from `kotlin/CharSequence` — kept
+  JOINED precisely so `chars`/`codePoints` survive. Its size is **JDK-DEPENDENT**, because it is whatever
+  `java.lang.CharSequence` happens to declare: `charAt` on every JDK, plus `getChars` as of **JDK 25**,
+  which added it as a `default` method. That makes any negative test over the `String` scope invalid if it
+  probes a name `CharSequence` also declares — `getChars` passes such a probe on a JDK 21 developer machine
+  and fails on a JDK 25 CI runner. Probe `java.lang.String`-ONLY members (`concat`, `replaceAll`,
+  `equalsIgnoreCase`, `compareToIgnoreCase`, `getBytes`). Widening further is gated on porting that
+  whitelist, not on anything in the member-scope model.
 
 - **Kotlin members on JVM-mapped built-ins (`CharSequence`/`Number`/`Comparable`).** kotlinc maps these
   Kotlin types to JVM classes (`java/lang/CharSequence`, …) but their Kotlin API differs from the JVM

@@ -1060,6 +1060,43 @@ fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
     Some(sc)
 }
 
+/// The classpath-less `String` extension fallback: with no stdlib/JDK on the classpath there is no
+/// signature to resolve against, so the few `String` names whose result type is fixed by the language
+/// are answered directly. All of them are stdlib EXTENSIONS on `kotlin.String` rather than members of
+/// it (`kotlin.String` declares only `plus`/`get`/`subSequence`/`compareTo`/`length`/`equals`/
+/// `hashCode`/`toString`), so this table must never out-rank a user's own extension of the same name.
+///
+/// Shared by the qualified arm and the safe-call arm on purpose: they must agree about what exists,
+/// or `s!!.substring(1)` compiles while `s?.substring(1)` reports an unresolved reference. (Only the
+/// qualified arm had this table, and the asymmetry was invisible while the safe-call arm returned a
+/// silent `Ty::Error` instead of reporting.) Both call forms consult it only after the ordinary
+/// member/extension resolution ladder has declined the call. That ordering is part of the semantic
+/// contract: this table supplies missing standard-library metadata; it must never masquerade as a
+/// member and outrank a real source or classpath extension with the same name.
+const CLASSPATHLESS_STRING_EXTENSION_SIGNATURES: &[(&str, &[Ty], Ty)] = &[
+    ("substring", &[Ty::Int], Ty::String),
+    ("substring", &[Ty::Int, Ty::Int], Ty::String),
+    ("indexOf", &[Ty::String], Ty::Int),
+    // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile time on a
+    // string-literal receiver (codegen rejects a non-literal receiver).
+    ("trimIndent", &[], Ty::String),
+    ("trimMargin", &[], Ty::String),
+];
+
+fn classpathless_string_extension_ret(name: &str, arg_tys: &[Ty]) -> Option<Ty> {
+    CLASSPATHLESS_STRING_EXTENSION_SIGNATURES
+        .iter()
+        .find_map(|&(candidate, params, ret)| {
+            (candidate == name && params == arg_tys).then_some(ret)
+        })
+}
+
+fn classpathless_string_extension_exists(name: &str) -> bool {
+    CLASSPATHLESS_STRING_EXTENSION_SIGNATURES
+        .iter()
+        .any(|(candidate, _, _)| *candidate == name)
+}
+
 /// Recognize and safely fold the integer-constant syntax accepted at call sites.
 ///
 /// This is deliberately the one AST walk used by both lightweight signature inference and the full
@@ -22546,6 +22583,9 @@ impl<'a> Checker<'a> {
             if rt == Ty::Error {
                 return Ty::Error;
             }
+            // Diagnostic checkpoint for the "nothing resolved, nothing reported" report below. Taken
+            // AFTER the receiver so a receiver-only diagnostic doesn't mask an unresolved member.
+            let checkpoint = self.diags.diags.len();
             // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): the receiver is non-null
             // inside; type it like the non-safe form, then wrap the result nullable below.
             let result = if let Some(t) = self.safe_scope_call_result(rt, &name, &args) {
@@ -22823,6 +22863,54 @@ impl<'a> Checker<'a> {
             } else {
                 result
             };
+            // The arguments' RECORDED types. Read, never re-checked: `arg_tys` runs the checker over
+            // each argument again, and a re-check of a lambda body duplicates every diagnostic inside
+            // it (a `when` exhaustiveness error reported twice). Every path that reaches here has
+            // already typed the arguments.
+            let member_arg_tys: Vec<Ty> = args
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|a| self.expr_types[a.0 as usize])
+                .collect();
+            // The classpath-less `String` member fallback, tried LAST — after every classpath, source,
+            // and module origin AND after the source-extension fallback above. `substring`/`indexOf`/
+            // `trimIndent`/`trimMargin` are stdlib EXTENSIONS on `kotlin.String`, not members of it, so
+            // a user's own extension with the same spelling must win over this table; it only stands in
+            // when there is no stdlib on the classpath to resolve against. `concat` is deliberately
+            // absent: it is a Java-only member that Kotlin does not expose.
+            let result = if result == Ty::Error
+                && args.is_some()
+                && rt.non_null() == Ty::String
+                && !self.file.call_arg_names.contains_key(&e.0)
+            {
+                classpathless_string_extension_ret(&name, &member_arg_tys).unwrap_or(Ty::Error)
+            } else {
+                result
+            };
+            // Every callable origin was exhausted, NOTHING was reported, and no member of that name
+            // exists on the receiver at all: the member behind `?.` is a typo. A safe call must
+            // diagnose that exactly like the qualified form — the property spelling (`args: None`)
+            // already does, via `check_member`, but the call spelling returned a silent `Ty::Error`.
+            // Consequences of the silence: on a `String?` receiver the BACKEND bail ("this construct
+            // is not yet supported by the IR backend") stood in for a frontend diagnostic, and on a
+            // statically-`null` receiver — whose lowering folds to `null` without ever looking a
+            // member up — an invalid program compiled clean.
+            //
+            // Both guards matter. The CHECKPOINT keeps an origin that already reported (a rejected
+            // classpath overload, an unmappable labelled call) from being reported twice. The
+            // EXISTENCE probe keeps a member this arm merely cannot select (`d?.toInt()`,
+            // `b?.not()`, `f?.invoke(1)` — all valid Kotlin) from being mislabelled a typo; those
+            // stay a silent `Ty::Error` so the backend bail reports the gap honestly.
+            if result == Ty::Error
+                && self.diags.diags.len() == checkpoint
+                && !self.member_name_exists_on(rt.non_null(), &name)
+            {
+                self.diags.error(
+                    self.member_name_span(e, &name),
+                    format!("unresolved reference '{name}'."),
+                );
+            }
             // Named arguments must have a checker-owned parameter-slot mapping before lowering.
             if result != Ty::Error
                 && !self.resolved_call_arg_slots.contains_key(&e)
@@ -27934,6 +28022,39 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// Does ANY callable or property named `name` exist on `recv`, ignoring applicability?
+    ///
+    /// This is deliberately the "is it a typo?" question, kept apart from "can this arm select and
+    /// lower it?". A member that EXISTS but that a particular resolution arm can't handle is a krusty
+    /// gap — the backend bail reports that honestly — and must never be spelled "unresolved
+    /// reference", which tells the user their program is wrong. `Double?.toInt()`, `Boolean?.not()`,
+    /// and `((Int) -> Int)?.invoke(1)` are all real Kotlin the safe-call arm cannot yet resolve.
+    ///
+    /// Shared by the qualified arm's nullable-receiver probe and the safe-call arm's unresolved-member
+    /// report so both agree about what exists. Side-effect free: it reports nothing itself.
+    fn member_name_exists_on(&self, recv: Ty, name: &str) -> bool {
+        self.resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(recv),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .is_some_and(|overloads| !overloads.is_empty())
+            // Existence deliberately ignores applicability. Keep the fallback's names and selectable
+            // shapes in one table, but do not call an existing `substring` "unresolved" merely because
+            // this invocation has the wrong arity/type and the no-classpath checker cannot select it.
+            || (recv == Ty::String && classpathless_string_extension_exists(name))
+            || (name == CALLABLE_INVOKE_OPERATOR && matches!(recv, Ty::Fun(_)))
+            // Kotlin's universal names exist independently of the invocation shape. Primitive and
+            // `Nothing` receivers still inherit these semantic names even when this checker arm cannot
+            // select a wrong-arity spelling; applicability must not leak back into typo detection.
+            || matches!(name, "toString" | "hashCode" | "equals")
+            // A callable PROPERTY (`val f: () -> Int`) is invoked with the same spelling.
+            || self.probe_property_read(recv, name).is_some()
+    }
+
     fn probe_property_read(&self, rt: Ty, name: &str) -> Option<PropertyReadProbe> {
         if let Ty::Obj(internal_name, _) = rt {
             if let Some((owner, ty, _, _)) = self.lookup_prop_with_owner_name(internal_name, name) {
@@ -30609,19 +30730,6 @@ impl<'a> Checker<'a> {
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
                     }
-                    match (name.as_str(), arg_tys.as_slice()) {
-                        ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => {
-                            return Ty::String;
-                        }
-                        ("indexOf", [Ty::String]) => return Ty::Int,
-                        ("concat", [Ty::String]) => return Ty::String,
-                        _ => {}
-                    }
-                    // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile
-                    // time on a string-literal receiver (codegen rejects a non-literal receiver).
-                    if matches!(name.as_str(), "trimIndent" | "trimMargin") && arg_tys.is_empty() {
-                        return Ty::String;
-                    }
                 }
                 if matches!(
                     (rt, name.as_str(), arg_tys.as_slice()),
@@ -30803,6 +30911,19 @@ impl<'a> Checker<'a> {
                         ("toString", 0) => return Ty::String,
                         ("equals", 1) if !rt.is_nullable() => return Ty::Boolean,
                         _ => {}
+                    }
+                }
+                // The `kotlin.text` extensions that ARE the Kotlin API for these names — typed, but not
+                // resolved, for a CLASSPATH-FREE check (no stdlib jar, so no `StringsKt` to bind and no
+                // `java.lang.String` classfile either). The shared table must stay BELOW the extension
+                // section: its entries type an expression WITHOUT recording a call target, so reaching it ahead of a
+                // real resolution leaves the IR lowerer with nothing to emit ("unrecorded qualified call
+                // target"). That is precisely what `kotlin/String` taking its scope from the builtins
+                // exposed — the Java member set had been covering them, and above the extensions this
+                // arm silently took over and the front end accepted what the backend then bailed on.
+                if rt == Ty::String && !unknown_named_arg {
+                    if let Some(ret) = classpathless_string_extension_ret(&name, &arg_tys) {
+                        return ret;
                     }
                 }
                 // `a.contentEquals(b)` / `a.contentHashCode()` / `a.isEmpty()` on arrays.
@@ -31006,28 +31127,8 @@ impl<'a> Checker<'a> {
                         }
                         _ => false,
                     };
-                    let exists_on_non_null = self
-                        .resolver()
-                        .resolve_symbol(
-                            crate::symbol_resolver::SymRecv::Value(non_null),
-                            &name,
-                            &[],
-                            &[],
-                        )
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .is_some_and(|overloads| !overloads.is_empty())
-                        || {
-                            matches!(
-                                (non_null, name.as_str(), arg_tys.as_slice()),
-                                (Ty::String, "substring", [Ty::Int])
-                                    | (Ty::String, "substring", [Ty::Int, Ty::Int])
-                                    | (Ty::String, "indexOf", [Ty::String])
-                                    | (Ty::String, "concat", [Ty::String])
-                            )
-                        }
-                        || (name == CALLABLE_INVOKE_OPERATOR && matches!(non_null, Ty::Fun(_)))
-                        || (name == "equals" && arg_tys.len() == 1 && non_null.is_reference())
-                        || callable_property_exists;
+                    let exists_on_non_null =
+                        self.member_name_exists_on(non_null, &name) || callable_property_exists;
                     if exists_on_non_null {
                         self.report_nullable_receiver_call(call, rt);
                         return Ty::Error;
@@ -39461,7 +39562,9 @@ fun box(): String {
         ok("fun f(s: String): String = s.substring(1)");
         ok("fun f(s: String): String = s.substring(1, 3)");
         ok("fun f(s: String): Int = s.indexOf(\"x\")");
-        ok("fun f(s: String): String = s.concat(\"y\")");
+        // (`concat` is a `java.lang.String` method with no Kotlin counterpart — kotlinc reports it as
+        // unresolved, so the classpath-free fallback must not invent it either. Covered with the rest of
+        // the Java-only member set in `mapped_string_scope_e2e`, which checks against a real stdlib.)
         err_contains(
             "fun f(s: String): String = s.substring(\"x\")",
             "unresolved reference 'substring'.",
