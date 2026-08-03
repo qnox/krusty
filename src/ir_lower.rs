@@ -5764,6 +5764,19 @@ impl<'a> Lower<'a> {
         else {
             return None;
         };
+        // A FIELD-LESS custom-accessor companion property has NO static to read — the read IS the
+        // getter call on the companion singleton. This is the choke point for every read the checker
+        // records as a static-field read (an unqualified one from an instance or companion method, a
+        // member initializer, an imported one); the qualified `C.X` form is handled at its own site.
+        // Without this the emitted `getstatic C.X` names a field that was never emitted, which is a
+        // `NoSuchFieldError` at run time rather than the clean rejection this shape used to get.
+        if self
+            .companion_computed_props
+            .contains_key(&(owner, name.clone()))
+        {
+            let getter = property_getter_name(&name);
+            return self.lower_companion_computed_accessor(owner, &getter, None);
+        }
         let descriptor = match descriptor {
             Some(descriptor) => descriptor,
             None => self.runtime.type_descriptor(self.info.ty(expression))?,
@@ -11005,6 +11018,18 @@ impl<'a> Lower<'a> {
         Some(self.wrap_arg_prelude(dcall, prelude))
     }
 
+    /// The method name to EMIT for a resolved module top-level call. Resolution keys on the source
+    /// name, but `@JvmName` may have renamed the emitted method — and the callee's AST belongs to
+    /// another file, so the rename is read from the module-wide table the collect pass filled.
+    fn module_call_emit_name(&self, target: &ResolvedModuleTopLevelCall) -> String {
+        target
+            .source_file
+            .zip(target.source_decl)
+            .and_then(|(file, decl)| self.syms.toplevel_jvm_names.get(&(file, decl.0)))
+            .cloned()
+            .unwrap_or_else(|| target.name.clone())
+    }
+
     fn lower_cross_file_module_call(
         &mut self,
         call: AstExprId,
@@ -11030,7 +11055,7 @@ impl<'a> Lower<'a> {
             let physical_ret = ty_to_ir(target.physical_ret);
             let emitted = self.emit_cross_file_call(
                 facade,
-                target.name.clone(),
+                self.module_call_emit_name(target),
                 ir_params,
                 physical_ret,
                 lowered_args,
@@ -11135,7 +11160,7 @@ impl<'a> Lower<'a> {
         let ret = ty_to_ir(target.physical_ret);
         let emitted = self.emit_cross_file_call(
             facade,
-            target.name.clone(),
+            self.module_call_emit_name(target),
             ir_params.clone(),
             ret,
             lowered_args,
@@ -20835,6 +20860,11 @@ impl<'a> Lower<'a> {
                 if ret == Ty::Nothing {
                     return None;
                 }
+                // The reflection NAME stays the Kotlin source name (that is what `KFunction.name`
+                // reports), but the INVOKE must target the emitted method — which `@JvmName` may have
+                // renamed. Reading it off the resolved function keeps the two in step instead of
+                // assuming they are the same string.
+                let call_name = self.ir.functions[fid as usize].name.clone();
                 return self.make_func_ref(
                     e.0,
                     false,
@@ -20844,7 +20874,7 @@ impl<'a> Lower<'a> {
                     1,
                     crate::ir::FrDispatch::Static,
                     None,
-                    name.clone(),
+                    call_name,
                     false,
                     fn_params,
                     ret,

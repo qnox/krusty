@@ -45,9 +45,12 @@ pub fn is_computed_companion_prop(p: &PropDecl) -> bool {
         && p.getter.is_some()
         && !p.getter_reads_field
         && if p.is_var {
+            // A `private set` narrows only the SETTER, and the accessor synthesis emits an
+            // unconditionally public `setX` — accepting one would let a write through that kotlinc
+            // rejects, so those keep the rejection path until the narrowed visibility is modeled.
             p.setter
                 .as_ref()
-                .is_some_and(|setter| setter.body.is_some())
+                .is_some_and(|setter| setter.body.is_some() && !setter.is_private)
         } else {
             p.setter.is_none()
         }

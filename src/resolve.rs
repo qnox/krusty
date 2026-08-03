@@ -1602,6 +1602,11 @@ pub struct SymbolTable {
     pub context_prop_names: std::collections::HashSet<String>,
     /// Top-level *computed* properties (`val g: T get() = …`): a `getG()` static method, no field.
     pub computed_props: std::collections::HashSet<String>,
+    /// `(source file, declaration)` → the `@JvmName` spelling of a top-level function whose emitted
+    /// method name differs from its source name. A CROSS-FILE caller resolves the callee by source
+    /// name but must emit the annotated one, and the callee's AST is out of its reach — so the name
+    /// is recorded here, where the collect pass can see every file. Absent = the two agree.
+    pub toplevel_jvm_names: HashMap<(u32, u32), String>,
     /// Simple names declared as `object` singletons (accessed via `Name.member`).
     pub objects: std::collections::HashSet<String>,
     /// Declared `enum` types (simple name → entry names), accessed via `Name.ENTRY`.
@@ -1666,6 +1671,7 @@ impl Default for SymbolTable {
             context_props: HashMap::new(),
             context_prop_names: std::collections::HashSet::new(),
             computed_props: std::collections::HashSet::new(),
+            toplevel_jvm_names: HashMap::new(),
             objects: std::collections::HashSet::new(),
             enums: HashMap::new(),
             static_classifier_values: HashMap::new(),
@@ -4726,8 +4732,14 @@ fn collect_signatures_with_cp_impl(
                         // clash only while both are spelled `g`, so an `@JvmName` on either one
                         // separates them (kotlinc's rule). Overload SELECTION is unaffected — the
                         // source name still keys `table.funs` above.
+                        let jvm_name = f.jvm_name(file);
+                        if jvm_name != f.name {
+                            table
+                                .toplevel_jvm_names
+                                .insert((i as u32, d.0), jvm_name.clone());
+                        }
                         let group_index =
-                            top_level_fun_groups.get_or_insert((package, f.jvm_name(file), key));
+                            top_level_fun_groups.get_or_insert((package, jvm_name, key));
                         let group = &mut top_level_fun_groups.groups[group_index].1;
                         let private = f.visibility.is_private();
                         let current = TopLevelFunctionConflictDecl {
@@ -19590,9 +19602,17 @@ impl<'a> Checker<'a> {
         // Typing `get()` for those would turn a clean skip into a `NoSuchMethodError` /
         // `ClassCastException` at run time, so they stay RAW — `get()` then reports the erased upper
         // bound and the file skips, exactly as it did before references carried arguments at all.
+        // Both value-class flavours must be tested: `ty_is_value_class` only sees a SOURCE value
+        // class (one whose `ClassSig` carries a `value_field`), so a CLASSPATH one — `UInt`, and
+        // every other stdlib `@JvmInline` — needs the provider's own `value_underlying` probe. With
+        // only the source arm, `class H(val u: UInt)` typed `(h::u).get()` as `UInt` while the
+        // reference still returned the erased `Integer`, and the read blew up with a
+        // `ClassCastException` instead of skipping.
         let realizable = |&t: &Ty| {
-            !self.ty_is_value_class(t.non_null())
-                && !matches!(t.non_null(), Ty::Fun(sig) if sig.has_receiver || sig.context_count > 0)
+            let t = t.non_null();
+            !self.ty_is_value_class(t)
+                && self.syms.libraries.value_underlying(t).is_none()
+                && !matches!(t, Ty::Fun(sig) if sig.has_receiver || sig.context_count > 0)
         };
         let type_args: &[Ty] = if type_args.iter().all(realizable) {
             type_args

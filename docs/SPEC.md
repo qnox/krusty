@@ -3313,21 +3313,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   value-class-typed accessor emits kotlinc's spelling (`getZERO-dNj3LFw()I`). The property type comes
   from the declared type, or is inferred from an expression getter body the way an initializer would
   be. Accessor bodies are type-checked like any other body — without that the setter's parameter had
-  no type. Every OTHER accessor shape on a companion property (a getter reading `field`, a
-  visibility-only `private set`, an accessor on a `const` or delegated property) would still be
-  emitted as the default static accessor with the body ignored, so those stay rejected. Tests:
+  no type. Because there is no field, EVERY read routes through the accessor, not only the qualified
+  `C.X` form: an unqualified read from an instance method, from a companion method, or from a member
+  initializer goes through the same getter (they are the reads the checker records as static-field
+  reads, so one choke point covers them). Every OTHER accessor shape on a companion property — a
+  getter reading `field`, a visibility-only `private set`, a `var` whose custom setter is `private`
+  (the synthesized `setX` is unconditionally public, so accepting one would allow a write kotlinc
+  rejects), an accessor on a `const` or delegated property — would still be emitted as the default
+  static accessor with the body ignored, so those stay rejected. An unqualified WRITE to such a
+  property is still an unresolved reference, as it was before. Tests:
   `companion_e2e::companion_property_custom_accessors_run`,
+  `companion_e2e::computed_companion_property_reads_outside_a_qualified_receiver`,
   `feature_coverage_q_e2e::value_class_companion_function`.
 
 - **`@JvmName` on a top-level function names the emitted method, and decides the clash.** The
   annotation's constant string is the bytecode method name; call sites still resolve by the SOURCE
-  name, so they reach the same declaration and emit the annotated spelling. Because a platform
+  name, and each emits the annotated spelling — a same-file call and a callable reference through the
+  resolved function's own name, a CROSS-file call through a module-wide table keyed by declaration,
+  since that caller cannot see the callee's AST. A callable reference keeps the Kotlin name for
+  reflection and targets the JVM name for its invoke. Scope: top-level FUNCTIONS with a constant
+  string argument. A top-level EXTENSION is not renamed (nor is its clash key), and a non-literal
+  argument falls back to the source name — both are ABI divergences from kotlinc, not miscompiles.
+  Because a platform
   declaration clash is a statement about JVM signatures, the top-level overload-conflict key uses the
   emitted name rather than the source name: `fun g(x: String)` and `fun g(x: String?)` erase to one
   descriptor and conflict while both are spelled `g`, but not once `@JvmName("gNullable")` separates
   them — and, in the other direction, two distinct source names collapsed onto one `@JvmName` DO
   conflict. Overload selection is unaffected; it still keys on the source name. Tests:
   `frontend::tests::jvm_name_decides_the_top_level_clash`,
+  `jvm_name_toplevel_e2e::jvm_name_is_emitted_for_every_call_path`,
   `resolve_parse_deep_coverage_e2e::overload_by_nullability`.
 
 - **A property reference carries its type arguments.** `::p` / `obj::p` is `KProperty0<V>` (or
@@ -3338,7 +3352,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (annotating the result with its type already compiled before this). A reference whose arguments
   cannot be determined stays raw rather than binding a wrong type, and so does one whose property
   type the reference lowering cannot realize — a VALUE-class-typed property, whose accessor is
-  mangled (`getZ-<hash>`) and which the synthesized reference class does not spell, or a property
+  mangled (`getZ-<hash>`) and which the synthesized reference class does not spell (both flavours
+  count: a source `@JvmInline` class and a CLASSPATH one such as `UInt`, which is why the test asks
+  the provider as well as the source table), or a property
   typed as a function WITH a receiver or context parameters, which is not realized as a plain
   `FunctionN` there. Keeping the checker in lock-step with the lowerer that way leaves those cases
   as clean skips instead of a `NoSuchMethodError`/`ClassCastException` at run time. Tests:

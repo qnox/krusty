@@ -26,8 +26,8 @@ fn companion_property_custom_accessors_run() {
     // field for it, just `getZERO()`/`getLEVEL()`/`setLEVEL(int)` on `C$Companion`, and `C.ZERO`
     // compiles to `getstatic C.Companion; invokevirtual`. A plain companion property (`backing`)
     // still hoists to a static field on the OUTER class, so the accessors read and write it there.
-    // (The accessor bodies name `backing` QUALIFIED: reading a companion property unqualified from
-    // inside the companion is a separate, still-unsupported shape, and this test is about accessors.)
+    // (The accessor bodies name the plain `backing` QUALIFIED: reading a property that HAS a static
+    // field unqualified from inside the companion is a separate, still-unsupported shape.)
     let src = "class C {\n\
     companion object {\n\
         var backing = 10\n\
@@ -45,6 +45,31 @@ fun box(): String {\n\
     C.LEVEL = 41\n\
     if (C.LEVEL != 42) return \"f4\"\n\
     if (C.DERIVED != 84) return \"f5\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(src, "C");
+}
+
+#[test]
+fn computed_companion_property_reads_outside_a_qualified_receiver() {
+    // A field-less custom-accessor companion property has NO static field, so EVERY read of it must
+    // go through the accessor — not just the qualified `C.X` form. An unqualified read from an
+    // instance method, from a companion method, and from a member initializer each used to emit
+    // `getstatic C.X` for a field that is never emitted (`NoSuchFieldError` at run time).
+    let src = "class C {\n\
+    val fromInit: Int = ZERO\n\
+    companion object {\n\
+        val ZERO: Int get() = 5\n\
+        fun insideCompanion(): Int = ZERO\n\
+    }\n\
+    fun fromInstance(): Int = ZERO\n\
+}\n\
+fun box(): String {\n\
+    val c = C()\n\
+    if (C.ZERO != 5) return \"f1\"\n\
+    if (c.fromInstance() != 5) return \"f2\"\n\
+    if (C.insideCompanion() != 5) return \"f3\"\n\
+    if (c.fromInit != 5) return \"f4\"\n\
     return \"OK\"\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "C");
