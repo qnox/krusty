@@ -197,10 +197,11 @@ boundary.
   entered the symbol model, resolution, checking, and lowering must not select a different algorithm
   because a declaration came from the current file, another module, Java source, a classpath class,
   Kotlin metadata, or a generated source. Loaders and decoders normalize missing facts at their
-  boundary; downstream code consumes the common facts. Likewise, a package, module, file, class, or
-  host path must not act as a routing key. A language or JVM rule that genuinely names a declaration
-  is represented once in the backend's documented semantic mapping, rather than by scattered
-  conditionals at use sites.
+  boundary; downstream code consumes the common facts. Selected callables carry declaration
+  capabilities such as interface dispatch regardless of provider, even when one provider could be
+  queried again later. Likewise, a package, module, file, class, or host path must not act as a routing
+  key. A language or JVM rule that genuinely names a declaration is represented once in the backend's
+  documented semantic mapping, rather than by scattered conditionals at use sites.
 - **A call safety decision consumes the checker-selected target.** `TypeInfo::resolved_calls` carries
   suspend and inline capability on every callable target, including same-module extensions and class-
   body extensions. Lowering gates query that exact `ResolvedCall`; they must not scan declarations by

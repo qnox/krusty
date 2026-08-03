@@ -5314,6 +5314,7 @@ mod tests {
             physical_ret: Ty::Int,
             descriptor: "(I)I".to_string(),
             suspend: false,
+            owner_is_interface: false,
             inline: InlineKind::None,
             default_call: true,
             vararg_elem: None,

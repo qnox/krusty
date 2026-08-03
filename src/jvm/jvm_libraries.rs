@@ -3218,6 +3218,11 @@ impl SymbolSource for JvmLibraries {
                             inline: m.inline,
                             suspend,
                             signature: m.signature.clone(),
+                            // Whether the dispatch owner is an interface is the MEMBER's fact here.
+                            // For a mapped builtin resolved with no JDK on the classpath the JVM
+                            // owner (`java/util/List`) has no class file, so the call site cannot
+                            // recover it later — carry it on the selected callable.
+                            owner_is_interface: m.is_interface(),
                             ..LibraryCallable::library(
                                 m.owner.as_ref().cloned().unwrap_or(cn),
                                 m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
@@ -3446,10 +3451,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
+        // One identity table owns every Kotlin builtin and its mapped JVM face. This capability used
+        // to be inferred from three partial maps (Kotlin spelling, collection inverse, and a curated
+        // interface-name subset), so adding a mapped class could change the answer depending on which
+        // unrelated facet happened to list it.
         internal.starts_with("kotlin/")
-            || super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(internal).is_some()
-            || super::jvm_class_map::jvm_collection_to_kotlin_type_name(internal).is_some()
-            || super::jvm_class_map::jvm_mapped_builtin_is_interface_name(internal).is_some()
+            || super::jvm_class_map::type_name_to_jvm_builtin_internal(internal).is_some()
     }
 
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {
