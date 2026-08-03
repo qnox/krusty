@@ -2336,12 +2336,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A subclass `override val`/`var` replaces the base's `get<Name>()`/`set<Name>()`, never the base's
   own private backing field, so a `getfield`/`putfield` from a base member would touch the base's
   storage and silently bypass the override. kotlinc emits `invokevirtual get<Name>()` for exactly
-  this reason (a FINAL property keeps the direct field access, and a constructor's property
-  INITIALIZER stays a `putfield` in both compilers). The rule lives in the two places that choose a
-  realization — `ir_lower::implicit_source_property_field` for a bare `name` and
-  `jvm::ir_emit::direct_field_access` for a qualified one — which replaces the whole-file
-  `gate:base-reads-override-internally` bail that used to skip any class whose base read an
-  overridden property. Test: `tests/class_body_e2e.rs::open_property_virtual_dispatch`.
+  this reason. A FINAL property keeps the direct field access; so does a PRIVATE one, which has no
+  synthesized accessor to call (`private open` is not valid Kotlin, so this only decides what an input
+  kotlinc rejects compiles to). A constructor's property INITIALIZER stays a `putfield` in both
+  compilers — the field must be stored before any subclass accessor could run — while an `init { }`
+  assignment to an open `var` goes through the setter, again as kotlinc does. A `val` has no setter at
+  all, so the deferred initialization Kotlin permits for one (`open val c: B` assigned in `init { }`
+  under `-ProhibitOpenValDeferredInitialization`) stays a `putfield`; every write rule is therefore
+  conditioned on the property being a `var`.
+
+  This holds only if EVERY access path applies it, and the paths do not share one implementation: a
+  bare `name` read/write and an `x++` go through `ir_lower::open_source_property`, a qualified
+  `this.name` through `jvm::ir_emit::direct_field_access`, keyed on `IrProperty::is_open`. That flag
+  must therefore be set for a PRIMARY-CONSTRUCTOR property as well as a body one — both forms are
+  overridable, and a review found the two sites disagreeing for the constructor form, so a bare write
+  in a base member silently stored into the base's own field. It replaces the whole-file
+  `gate:base-reads-override-internally` bail, which used to skip any class whose base read an
+  overridden property. Tests: `tests/class_body_e2e.rs::open_property_virtual_dispatch`,
+  `::open_property_virtual_dispatch_through_a_grandparent`,
+  `::open_property_writes_and_constructor_declarations_dispatch_virtually`,
+  `::open_var_init_block_writes_through_the_setter`.
 - **A `when` subject compares against a BOXED primitive comparand.** `when (x: Any) { 1, 2, 3 -> … }`
   is valid Kotlin: `Int` is a subtype of `Any`, so the comparison can be non-trivially true, and
   kotlinc emits `Intrinsics.areEqual(x, Integer.valueOf(1))`. Comparability therefore tests the

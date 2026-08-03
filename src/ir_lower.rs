@@ -1693,13 +1693,24 @@ fn lower_file_at_reporting_impl(
                     let fty_ir = lo.ir.classes[id as usize].fields[fidx].ty;
                     let property_ir = ty_to_ir(*property_ty);
                     // `open`/`override` property accessors must stay non-final (kotlinc's member
-                    // modality — same rule as methods). Only BODY properties carry the flag;
-                    // an `open val` PRIMARY-CONSTRUCTOR property isn't modeled yet.
+                    // modality — same rule as methods). `field_props` interleaves PRIMARY-CONSTRUCTOR
+                    // and BODY properties, so both declaration forms must be consulted: the flag also
+                    // decides whether an in-class access may touch the raw backing field
+                    // (`jvm::ir_emit::direct_field_access`), and a ctor-declared `open val` overridden
+                    // by a subclass bypasses the override exactly like a body one.
                     let prop_open = c
-                        .body_props
+                        .props
                         .iter()
+                        .filter(|pp| pp.is_property)
                         .find(|pp| pp.name == *pname)
-                        .is_some_and(|pp| pp.is_open);
+                        .map(|pp| pp.is_open)
+                        .or_else(|| {
+                            c.body_props
+                                .iter()
+                                .find(|pp| pp.name == *pname)
+                                .map(|pp| pp.is_open)
+                        })
+                        .unwrap_or(false);
                     // A property that WRITES its own accessor over a backing field (`val x = init get() =
                     // field`) has source-written bodies, so its accessors must never be bypassed.
                     let prop_custom_accessor = c
@@ -2676,10 +2687,10 @@ fn lower_file_at_reporting_impl(
                         }
                     }
                     // A property redeclared in the subclass (`override val field`) overrides the base's
-                    // `getX()`, and every access — including a base member reading it internally — now
-                    // goes through that accessor, so the override is never bypassed. See
-                    // `ir_lower::implicit_source_property_field` and `jvm::ir_emit::direct_field_access`,
-                    // which decline the raw backing field for an `open` property.
+                    // `getX()`, and every access — including a base member reading or writing it
+                    // internally — goes through that accessor, so the override is never bypassed. See
+                    // `Lower::open_source_property` (bare `name`) and `jvm::ir_emit::direct_field_access`
+                    // (qualified `this.name`), which decline the raw backing field for an `open` property.
                 }
                 // An interface's abstract methods have no body; its DEFAULT methods (with a body) are
                 // lowered like instance methods (fall through to the normal method-body loop below).
@@ -6279,21 +6290,31 @@ impl<'a> Lower<'a> {
         })
     }
 
+    /// Whether `name` resolves to an OPEN property on `owner` (or one of its supertypes). Such a
+    /// property is reached through its ACCESSOR even from inside the declaring class: a subclass
+    /// `override val`/`var` replaces the accessor, not this class's private backing field, so a direct
+    /// field access from a base member would read/write the base's own storage and bypass the
+    /// override. kotlinc emits `invokevirtual get<Name>()`/`set<Name>()` there for that reason.
+    ///
+    /// A WRITE to an open `val` is exempt: a `val` declares no setter at all, so its only write is the
+    /// deferred initialization Kotlin permits in a constructor/`init` block (`open val c: B` assigned
+    /// under `-ProhibitOpenValDeferredInitialization`), which kotlinc also emits as a direct
+    /// `putfield`. Routing it through `set<Name>` would be a `NoSuchMethodError`.
+    fn open_source_property(&self, owner: TypeName, name: &str, writable: bool) -> bool {
+        self.syms
+            .declared_member_prop(owner, name)
+            .is_some_and(|(_, property)| {
+                property.is_open && (!writable || property.setter_name.is_some())
+            })
+    }
+
     fn implicit_source_property_field(
         &self,
         owner: TypeName,
         name: &str,
         writable: bool,
     ) -> Option<(u32, u32)> {
-        // An OPEN property is reached through its accessor even from inside the declaring class: a
-        // subclass `override val`/`var` replaces the ACCESSOR, not the base's private backing field, so
-        // a direct field access from a base member would read/write the base's own storage and bypass
-        // the override. kotlinc emits `invokevirtual get<Name>()`/`set<Name>()` there for that reason.
-        if self
-            .syms
-            .declared_member_prop(owner, name)
-            .is_some_and(|(_, property)| property.is_open)
-        {
+        if self.open_source_property(owner, name, writable) {
             return None;
         }
         if !self.can_access_source_private(owner)
@@ -17085,12 +17106,29 @@ impl<'a> Lower<'a> {
                 // A backing field of the enclosing class (`this.<field>`) shadows a same-named top-level
                 // property — resolve it BEFORE `statics` (kotlinc: a member's unqualified name binds to the
                 // class member first). Requires `this` in scope (a class member, not a top-level function).
+                // An OPEN property of the enclosing class is written through `setX` instead — see
+                // [`Self::open_source_property`]. This is the bare-name analogue of the qualified
+                // `this.x = …` write, which the emitter already routes through the accessor; without it
+                // the two spellings compile to different things in the same class body.
+                let own_open_property = self
+                    .lookup("this")
+                    .and_then(|(this_v, _)| self.cur_class.map(|c| (this_v, c)))
+                    .filter(|(_, owner)| self.open_source_property(*owner, &name, true))
+                    .and_then(|(this_v, owner)| {
+                        let ty = self.class_info_name(owner).and_then(|ci| {
+                            ci.fields.iter().find(|(f, _)| *f == name).map(|&(_, t)| t)
+                        })?;
+                        Some((this_v, owner, ty))
+                    });
                 let own_field = self.lookup("this").and_then(|(this_v, _)| {
                     self.cur_class.as_ref().and_then(|c| {
                         // A `var` custom-accessor property writes through `setX`, never the raw field.
                         // A `val` custom-accessor (no setter) is assigned once in a constructor by
                         // writing its backing field directly, so it is NOT excluded here.
                         if self.field_accessor_var_props.contains(&(*c, name.clone())) {
+                            return None;
+                        }
+                        if self.open_source_property(*c, &name, true) {
                             return None;
                         }
                         self.class_info_name(*c).and_then(|ci| {
@@ -17111,6 +17149,10 @@ impl<'a> Lower<'a> {
                     let recv = self.emit_get_value(this_v);
                     let val = self.lower_arg(value, &field_ty)?;
                     Some(self.emit_set_field(recv, class, idx, val))
+                } else if let Some((this_v, owner, ty)) = own_open_property {
+                    let recv = self.emit_get_value(this_v);
+                    let val = self.lower_arg(value, &ty_to_ir(ty))?;
+                    Some(self.emit_source_property_set(recv, owner, &name, ty, val))
                 } else if let Some(sfid) = self.computed_setters.get(&name).copied() {
                     // A top-level backing-field `var` with a custom setter → call `setX(value)` (which
                     // runs the custom body), not a direct `putstatic`.

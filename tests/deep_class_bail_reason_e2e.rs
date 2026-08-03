@@ -61,10 +61,11 @@ const GATED_CORPUS_CASES: &[(&str, &str)] = &[
         "gate:anon-object-outer-capture",
     ),
     ("classes/selfcreate.kt", "gate:anon-object-outer-capture"),
-    // (`gate:base-reads-override-internally` is gone: an `open` property is now read through its
-    // accessor even inside the declaring class, so a base member cannot bypass the override. Its two
-    // corpus cases — `properties/kt1168.kt` and `bridges/substitutionInSuperClass/property.kt` — now
-    // compile and run, and are covered by `class_body_e2e::open_property_virtual_dispatch`.)
+    // (`gate:base-reads-override-internally` is gone: an `open` property is now read AND written
+    // through its accessor even inside the declaring class, so a base member cannot bypass the
+    // override. Its two corpus cases — `properties/kt1168.kt` and
+    // `bridges/substitutionInSuperClass/property.kt` — now compile and run. The rule itself is
+    // covered by the `open_property_*` tests in `class_body_e2e`.)
     // A branchy body-property initializer (`when`/`if`/`try`/…) in the flat ctor emitter.
     ("lazyCodegen/when.kt", "gate:branchy-field-initializer"),
     ("regressions/kt3587.kt", "gate:branchy-field-initializer"),

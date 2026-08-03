@@ -183,13 +183,17 @@ fun box(): String {\n\
 /// Verified against kotlinc, which lowers these to `Intrinsics.areEqual(x, <Wrapper>.valueOf(…))` and
 /// `CollectionsKt.contains(range, x)`. `contains` compares with `equals`, so a value of the WRONG
 /// boxed type is never in the range (`3` is not in `1L..5L`) — pinned here because the lowering's
-/// `instanceof` guard is what has to reproduce that.
+/// `instanceof` guard is what has to reproduce that. The `1000`/`5000000000L` arms are deliberately
+/// OUTSIDE the JVM's `Integer`/`Long` cache: a comparison lowered as reference identity rather than
+/// `equals` would pass for small values and fail only here.
 #[test]
 fn when_widened_subject_boxes_every_primitive_comparand() {
     let src = "fun k(x: Any): String = when (x) {\n\
     1L -> \"long\"\n\
     'c' -> \"char\"\n\
     true -> \"bool\"\n\
+    1000 -> \"bigint\"\n\
+    5000000000L -> \"biglong\"\n\
     !in 100..200 -> \"outside\"\n\
     else -> \"inside\"\n\
 }\n\
@@ -201,6 +205,8 @@ fun box(): String {\n\
     if (k(1L) != \"long\") return \"f1\"\n\
     if (k('c') != \"char\") return \"f2\"\n\
     if (k(true) != \"bool\") return \"f3\"\n\
+    if (k(1000) != \"bigint\") return \"f4a\"\n\
+    if (k(5000000000L) != \"biglong\") return \"f4b\"\n\
     if (k(150) != \"inside\") return \"f5\"\n\
     if (k(\"z\") != \"outside\") return \"f6\"\n\
     if (!down(7)) return \"f7\"\n\
