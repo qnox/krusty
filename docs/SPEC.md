@@ -2325,6 +2325,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   gone — the nested fill verifies and runs, including reading and writing through both dimensions —
   so the rejection is removed. Verified against the box corpus, which is the oracle for the frame
   shapes this touches. Test: `tests/feature_coverage_h_e2e.rs::two_dimensional_arrays`.
+- **A package-level `const val` reached by name (`import kotlin.math.PI`).** A `const` has no
+  accessor, so it is absent from the property namespace — which models properties by their accessors —
+  and the import bound nothing while `import kotlin.math.sqrt` (a function from the same package)
+  worked. Which artifact holds the constant is a PLATFORM fact, so the platform answers with the field
+  (`kotlin/math/MathKt.PI`) and the ordinary external-static-field path inlines its `ConstantValue`,
+  which is what kotlinc emits at every use site. Test:
+  `tests/resolve_parse_deep_coverage_e2e.rs::import_top_level_math`.
 
 ## 8. Success criteria for the PoC
 

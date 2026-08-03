@@ -3201,6 +3201,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         self.static_field_name(internal, name)
     }
 
+    fn top_level_static_field(
+        &self,
+        package: TypeName,
+        name: &str,
+    ) -> Option<crate::libraries::StaticFieldRef> {
+        // A top-level `const val` is a `public static final` field on the package FACADE that carries
+        // the declaration (`kotlin.math.PI` → `kotlin/math/MathKt.PI`). Which facade that is, is a
+        // platform fact, so the scan lives here rather than in the resolver.
+        self.cp
+            .package_facades_name(package)
+            .into_iter()
+            .find_map(|facade| self.static_field_name(facade, name))
+    }
+
     fn static_field_name(
         &self,
         internal: TypeName,

@@ -20727,6 +20727,26 @@ impl<'a> Lower<'a> {
     }
 
     fn expr_inner_name(&mut self, e: AstExprId, n: String) -> Option<u32> {
+        // A library constant the checker selected — a companion constant (`Int.MAX_VALUE`) or a
+        // package-level `const val` reached by name (`import kotlin.math.PI`). Both inline their
+        // literal, which is what kotlinc emits at every use site.
+        if let Some(lc) = self.info.resolved_library_companion_const(e) {
+            let c = match lc.value {
+                // `Char.MAX_VALUE`/`MIN_VALUE` read back as an integer ConstantValue, but the
+                // constant's type is `Char` — emit a `Char` const so it boxes to `Character` (not
+                // `Integer`) in a vararg/generic position.
+                crate::libraries::LibConst::Int(v) if lc.ty == Ty::Char => {
+                    IrConst::Char(char::from_u32(v as u32).unwrap_or('\0'))
+                }
+                crate::libraries::LibConst::Int(v) => IrConst::Int(v),
+                crate::libraries::LibConst::Long(v) => IrConst::Long(v),
+                crate::libraries::LibConst::Float(v) => IrConst::Float(v),
+                crate::libraries::LibConst::Double(v) => IrConst::Double(v),
+                crate::libraries::LibConst::Str(v) => IrConst::String(v),
+            };
+            return Some(self.emit_const(c));
+        }
+
         let t = {
             if let Some(ExprLowering::ExtensionPropertyGet { getter }) =
                 self.info.expr_lowers.get(&e).cloned()

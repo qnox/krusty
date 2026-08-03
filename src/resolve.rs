@@ -22629,6 +22629,18 @@ impl<'a> Checker<'a> {
                     ty
                 } else if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
                     ty // top-level property
+                } else if let Some(field) = self.imports.get(&n).and_then(|full| {
+                    let (package, member) = full.rsplit_once('/')?;
+                    self.syms
+                        .libraries
+                        .top_level_static_field(type_name(package), member)
+                }) {
+                    // A CLASSPATH top-level `const val` reached by name (`import kotlin.math.PI`). A
+                    // `const` has no accessor, so it is absent from the property namespace that models
+                    // properties by their accessors; the platform answers with the field that holds it.
+                    // `record_external_static_field` inlines the literal when the field carries a
+                    // `ConstantValue`, which is what kotlinc does at every use site.
+                    self.record_external_static_field(Some(e), field)
                 } else if crate::libraries::coroutine_intrinsic(&n)
                     == Some(crate::libraries::CoroutineIntrinsic::CoroutineSuspended)
                 {
