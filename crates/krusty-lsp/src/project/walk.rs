@@ -47,6 +47,15 @@ pub(super) struct WalkRoot {
     pub(super) ignore_workspace_directories: bool,
 }
 
+/// Traversal failed after collecting a possibly useful prefix.
+///
+/// The walker deliberately carries no user-facing diagnostic policy: strict project loading maps
+/// this to its semantic-diagnostics suppression message, while workspace inventory keeps the prefix
+/// and marks the snapshot truncated. Keeping the error semantic and local prevents the generic
+/// traversal layer from depending back on either caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WalkError;
+
 /// Collect every Kotlin and Java source under `roots`.
 ///
 /// Every root is walked by one shared set of walkers, which is the whole point: a source root is
@@ -74,7 +83,7 @@ pub(super) fn walk_sources(
     sources: &mut Vec<PathBuf>,
     interval: Duration,
     progress: &mut dyn FnMut(crate::ScanProgress),
-) -> Result<(), String> {
+) -> Result<(), WalkError> {
     walk_sources_with(roots, excluded, sources, interval, walker_count(), progress)
 }
 
@@ -95,7 +104,7 @@ fn walk_sources_with(
     interval: Duration,
     threads: usize,
     progress: &mut dyn FnMut(crate::ScanProgress),
-) -> Result<(), String> {
+) -> Result<(), WalkError> {
     if roots.is_empty() {
         progress(crate::ScanProgress::Found { files: 0 });
         return Ok(());
@@ -114,19 +123,51 @@ fn walk_sources_with(
     if !queue.is_finished() {
         std::thread::scope(|scope| {
             let handles = (0..threads)
-                .map(|_| scope.spawn(|| walk.run(None, interval, None)))
+                .filter_map(|index| {
+                    // A constrained process can refuse another OS thread (`EAGAIN`). The old
+                    // `scope.spawn` form panicked here; a fallible builder lets whatever workers
+                    // were created share the queue, and the all-failed case below finishes it on
+                    // the caller thread instead of abandoning live work.
+                    std::thread::Builder::new()
+                        .name(format!("krusty-source-walk-{index}"))
+                        .spawn_scoped(scope, || {
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                walk.run(None, interval, None)
+                            }))
+                            .unwrap_or_else(|_| {
+                                // `ActiveClaim` covers the dangerous directory-reading interval,
+                                // but keep the worker boundary guarded as well: a future panic
+                                // between claims would otherwise leave queued work with no worker
+                                // and the monitor could wait forever. Failure is idempotent, so it
+                                // is safe when the active-claim guard already reported the panic.
+                                queue.fail();
+                                Vec::new()
+                            })
+                        })
+                        .ok()
+                })
                 .collect::<Vec<_>>();
-            let mut last_report = Instant::now();
-            while !queue.wait_for_progress(interval) {
-                if last_report.elapsed() >= interval {
-                    progress(crate::ScanProgress::Found {
-                        files: found.load(Ordering::Relaxed) as u64,
-                    });
-                    last_report = Instant::now();
+            if handles.is_empty() {
+                // The queue is still live and no helper exists to release a claim. Run the same
+                // generic worker on this thread; it owns progress callbacks just as the serial
+                // prefix did. This also makes a deliberately zero-helper test configuration safe.
+                collected.extend(walk.run(None, interval, Some(progress)));
+            } else {
+                let mut last_report = Instant::now();
+                while !queue.wait_for_progress(interval) {
+                    if last_report.elapsed() >= interval {
+                        progress(crate::ScanProgress::Found {
+                            files: found.load(Ordering::Relaxed) as u64,
+                        });
+                        last_report = Instant::now();
+                    }
                 }
-            }
-            for handle in handles {
-                collected.extend(handle.join().unwrap_or_default());
+                for handle in handles {
+                    // The claim guard and outer worker boundary convert a panic into the same
+                    // partial-walk failure. Keep the join defensive as a final scoped-thread
+                    // boundary rather than re-panicking on the caller thread.
+                    collected.extend(handle.join().unwrap_or_default());
+                }
             }
         });
     }
@@ -137,7 +178,7 @@ fn walk_sources_with(
         // The caller decides what a partial result is worth: strict discovery discards it, the
         // workspace inventory keeps it and reports itself incomplete. No final count is reported,
         // because a count that stopped early is not the total it would be read as.
-        return Err(super::sources::read_error_message());
+        return Err(WalkError);
     }
     progress(crate::ScanProgress::Found {
         files: sources.len() as u64,
@@ -171,13 +212,18 @@ impl Walk<'_> {
         let mut published = 0usize;
         let mut last_report = Instant::now();
         while limit.is_none_or(|limit| read < limit) {
-            let Some(claimed) = self.queue.claim() else {
+            let Some(directory) = self.queue.claim() else {
                 break;
             };
+            // A claim is structural queue state, so pair it with RAII rather than relying on every
+            // future directory-reading branch to remember `release`. If code inside a worker ever
+            // panics, dropping this guard decrements `reading`, marks the walk failed, and wakes the
+            // monitor instead of leaving it blocked forever on work that can no longer complete.
+            let claimed = ActiveClaim::new(self.queue, directory);
             read += 1;
             let mut children = Vec::new();
-            let failed = self.read_directory(&claimed, &mut children, &mut sources);
-            self.queue.release(children, failed);
+            let failed = self.read_directory(claimed.directory(), &mut children, &mut sources);
+            claimed.release(children, failed);
             // Published as the walk runs, not once it returns: the count a walker holds privately
             // is the count nobody can report, and the parallel phase is the whole scan on any
             // workspace big enough to reach it.
@@ -239,6 +285,40 @@ impl Walk<'_> {
             }
         }
         false
+    }
+}
+
+/// One queue claim that must be released exactly once.
+struct ActiveClaim<'a> {
+    queue: &'a WalkQueue,
+    directory: Option<ClaimedDirectory>,
+}
+
+impl<'a> ActiveClaim<'a> {
+    fn new(queue: &'a WalkQueue, directory: ClaimedDirectory) -> Self {
+        Self {
+            queue,
+            directory: Some(directory),
+        }
+    }
+
+    fn directory(&self) -> &ClaimedDirectory {
+        self.directory
+            .as_ref()
+            .expect("an active queue claim still owns its directory")
+    }
+
+    fn release(mut self, directories: Vec<ClaimedDirectory>, failed: bool) {
+        self.queue.release(directories, failed);
+        self.directory = None;
+    }
+}
+
+impl Drop for ActiveClaim<'_> {
+    fn drop(&mut self) {
+        if self.directory.take().is_some() {
+            self.queue.release(Vec::new(), true);
+        }
     }
 }
 
@@ -355,6 +435,16 @@ impl WalkQueue {
 
     fn failed(&self) -> bool {
         self.lock().failed
+    }
+
+    /// Stop the walk and wake every claimant or monitor.
+    ///
+    /// This is separate from releasing a directory because a worker can fail between claims. The
+    /// operation is intentionally idempotent: an unwinding `ActiveClaim` and the worker boundary
+    /// may both observe the same panic, and either one must be sufficient to unblock termination.
+    fn fail(&self) {
+        self.lock().failed = true;
+        self.ready.notify_all();
     }
 }
 
@@ -559,6 +649,92 @@ mod tests {
         sources.sort();
 
         assert_eq!(sources, expected);
+    }
+
+    #[test]
+    fn no_spawned_helper_falls_back_to_the_caller_thread() {
+        let tree = TempTree::new("walk-no-helper");
+        let mut expected = Vec::new();
+        for directory in 0..48 {
+            expected.push(tree.write(&format!("d{directory}/File.kt"), "class Type\n"));
+        }
+        expected.sort();
+
+        // `threads == 0` deterministically exercises the same branch used when every fallible
+        // `spawn_scoped` call is refused by the OS. The serial prefix stops at the parallel
+        // threshold, so correctness here proves the remaining live queue is drained rather than
+        // left waiting forever for a helper that does not exist.
+        let mut sources = Vec::new();
+        walk_sources_with(
+            std::slice::from_ref(&root(tree.root(), true)),
+            &[],
+            &mut sources,
+            Duration::from_millis(1),
+            0,
+            &mut |_| {},
+        )
+        .unwrap();
+        sources.sort();
+
+        assert_eq!(sources, expected);
+    }
+
+    #[test]
+    fn a_panicking_claim_is_released_as_a_failed_walk() {
+        let tree = TempTree::new("walk-panicking-claim");
+        let roots = [root(tree.root(), true)];
+        let queue = WalkQueue::new(&roots);
+        let directory = queue.claim().expect("the synthetic root is queued");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _claim = ActiveClaim::new(&queue, directory);
+            panic!("synthetic worker failure");
+        }));
+
+        assert!(panic.is_err());
+        assert!(
+            queue.failed(),
+            "an abandoned claim makes the partial walk fail"
+        );
+        assert!(
+            queue.is_finished(),
+            "the abandoned claim must not leave `reading` above zero"
+        );
+        assert!(queue.claim().is_none());
+    }
+
+    #[test]
+    fn a_read_error_returns_the_prefix_without_a_final_total() {
+        let tree = TempTree::new("walk-partial-error");
+        let valid_root = tree.directory("valid");
+        let kept = tree.write("valid/Kept.kt", "class Kept\n");
+        let invalid_root = tree.write("not-a-directory", "");
+        // The queue pops from the end: visit the valid root first, then fail when `read_dir` sees
+        // the regular file. This pins the generic walker contract that callers interpret
+        // differently: the prefix survives, but success-only final progress is not published.
+        let roots = vec![root(&invalid_root, true), root(&valid_root, true)];
+        let mut sources = Vec::new();
+        let mut reports = Vec::new();
+
+        let result = walk_sources_with(
+            &roots,
+            &[],
+            &mut sources,
+            Duration::from_secs(60),
+            1,
+            &mut |event| {
+                if let crate::ScanProgress::Found { files } = event {
+                    reports.push(files);
+                }
+            },
+        );
+
+        assert_eq!(result, Err(WalkError));
+        assert_eq!(sources, vec![kept]);
+        assert!(
+            reports.is_empty(),
+            "a partial count must not be reported as a completed total"
+        );
     }
 
     #[test]

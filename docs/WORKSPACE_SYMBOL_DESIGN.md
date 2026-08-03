@@ -175,6 +175,13 @@ with enough work to divide:
 Measured interleaved in one process, because the machine drifts between runs by more than the change
 is worth: separate runs of the same code varied by 80%.
 
+The shared queue remains correct when the process cannot create a helper thread: worker creation is
+fallible, and if every request is refused the caller thread drains the same queue instead. Each
+claimed directory is also guarded until release, so an unexpected worker panic marks the traversal
+failed and wakes waiters rather than leaving the in-flight count permanently nonzero. The caller
+boundary owns the meaning of that failure: strict semantic discovery discards the partial prefix,
+while workspace inventory retains it and marks the index incomplete.
+
 `git ls-files` would read the same set faster still, but it buys a dependency on the git binary, a
 fallback path for every workspace that is not a repository, and a second definition of what counts
 as a workspace source — for a cost that is already well under a second.

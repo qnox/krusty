@@ -690,7 +690,7 @@ fn size_limit_message(max_bytes: usize) -> String {
     )
 }
 
-pub(super) fn read_error_message() -> String {
+fn read_error_message() -> String {
     "module source set contains an unreadable source; semantic diagnostics suppressed".to_string()
 }
 
@@ -730,21 +730,29 @@ pub fn workspace_sources(
     let mut found = Vec::new();
     // Keep the discovered prefix on a read error. Dropping it would make the walk contribute no
     // files at all, even though the caller explicitly asked for best-effort coverage.
-    let mut truncated = find_sources_into(&walk_roots, &excluded, &mut found, progress).is_err();
-    let mut sources = Vec::with_capacity(found.len());
-    for path in found
-        .into_iter()
-        .filter(|path| krusty::source::is_supported_path(path))
-    {
-        if sources.len() >= crate::MAX_WORKSPACE_INDEX_FILES {
-            truncated = true;
-            break;
-        }
-        sources.push(path);
-    }
-    sources.sort();
-    sources.dedup();
-    (sources, truncated)
+    let scan_truncated = find_sources_into(&walk_roots, &excluded, &mut found, progress).is_err();
+    finish_workspace_sources(found, scan_truncated, crate::MAX_WORKSPACE_INDEX_FILES)
+}
+
+/// Apply workspace-inventory policy after the generic walk has finished.
+///
+/// Parallel walkers deliberately return paths in completion order. Sorting and deduplicating before
+/// applying the workspace budget is therefore a correctness boundary, not presentation cleanup: if
+/// the limit were applied first, an oversized workspace would retain a different set of files as OS
+/// scheduling changed. Java files are removed before the limit because they are useful to strict
+/// project discovery but are not entries in the Kotlin workspace-symbol index.
+fn finish_workspace_sources(
+    mut found: Vec<PathBuf>,
+    scan_truncated: bool,
+    max_files: usize,
+) -> (Vec<PathBuf>, bool) {
+    found.retain(|path| krusty::source::is_supported_path(path));
+    found.sort();
+    found.dedup();
+
+    let over_budget = found.len() > max_files;
+    found.truncate(max_files);
+    (found, scan_truncated || over_budget)
 }
 
 fn find_sources(
@@ -768,6 +776,7 @@ fn find_sources_into(
     progress: &mut dyn FnMut(crate::ScanProgress),
 ) -> Result<(), String> {
     super::walk::walk_sources(roots, excluded, sources, SCAN_PROGRESS_INTERVAL, progress)
+        .map_err(|_| read_error_message())
 }
 
 #[cfg(test)]
@@ -1615,6 +1624,30 @@ mod tests {
             ],
             "no depth or entry ceiling may cut the scan short"
         );
+    }
+
+    #[test]
+    fn workspace_budget_is_stable_across_parallel_completion_order() {
+        let directory = temp_path("stable-workspace-budget");
+        let first = directory.join("A.kt");
+        let later = directory.join("Z.kt");
+
+        // Put the lexically later source first to model workers finishing in the opposite order.
+        // The Java path and duplicate also prove the budget is applied to the final index domain,
+        // rather than to raw traversal events that cannot become workspace-symbol entries.
+        let (sources, truncated) = finish_workspace_sources(
+            vec![
+                later.clone(),
+                directory.join("Ignored.java"),
+                first.clone(),
+                later,
+            ],
+            false,
+            1,
+        );
+
+        assert_eq!(sources, vec![first]);
+        assert!(truncated);
     }
 
     #[test]
