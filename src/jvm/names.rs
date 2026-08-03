@@ -93,6 +93,32 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
     }
 }
 
+/// The Kotlin SOURCE name a `java.util` method is visible under, for a member found on a real JVM class
+/// rather than on a mapped Kotlin builtin — kotlinc's `LazyJavaClassMemberScope`, which hides a Java
+/// method whose signature matches a renamed builtin and exposes it under the Kotlin name. Returned as
+/// `(declaring JVM interface, Kotlin source name)`; the caller checks that the type it found the member on
+/// actually sits in that hierarchy, so an unrelated class declaring a same-shaped method is untouched.
+///
+/// A MAPPED builtin (`kotlin/collections/MutableList`) needs none of this: its members come from its
+/// `.kotlin_builtins` declaration, which states the Kotlin API directly. This table is the other half —
+/// `java/util/ArrayList` keeps its Java scope, so `remove(int)` has to be renamed out of it here or
+/// `arrayList.remove(10)` binds remove-BY-INDEX. It is the READ direction of
+/// [`mapped_builtin_virtual_name`]: keyed on the JVM name AND descriptor, because the rename is
+/// signature-specific — `java.util.List` declares both `remove(int)` (Kotlin's `removeAt`) and
+/// `remove(Object)` (Kotlin's `MutableCollection.remove`), and only the former is renamed.
+///
+/// Replacing the name rather than aliasing it is the point: kotlinc rejects `arrayList.remove(10)` as an
+/// index call, and rejects `map.keySet()`, `s.charAt(0)`, `n.intValue()` outright.
+pub fn renamed_java_member_source_name(
+    jvm_name: &str,
+    descriptor: &str,
+) -> Option<(&'static str, &'static str)> {
+    Some(match (jvm_name, descriptor) {
+        ("remove", "(I)Ljava/lang/Object;") => ("java/util/List", "removeAt"),
+        _ => return None,
+    })
+}
+
 pub fn mapped_builtin_virtual_source_name<'a>(owner: &str, name: &'a str) -> &'a str {
     match (owner, name) {
         ("java/lang/Number", "byteValue") => "toByte",
