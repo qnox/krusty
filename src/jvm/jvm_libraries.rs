@@ -996,6 +996,63 @@ impl JvmLibraries {
             .collect()
     }
 
+    /// A value class's own COMPUTED properties (`@JvmInline value class Wrap(val raw: String) { val
+    /// isTagged: Boolean get() = … }`), as zero-argument members under their SOURCE name.
+    ///
+    /// Such a property has no instance accessor at all: its getter compiles to a STATIC
+    /// `<getterName>-impl(<carrier>)` taking the erased underlying as its only JVM parameter. The
+    /// property namespace models properties BY their accessors, so it never surfaces one — which is why
+    /// `Result.isSuccess`/`isFailure` and every user value class's computed `val` read as unresolved.
+    /// Publishing them as members is the same shape (and the same receiver-as-first-JVM-argument
+    /// convention) [`Self::value_class_metadata_members_for_class`] already uses for the value class's
+    /// functions, so lowering and emit need no new case. A CONSTRUCTOR property keeps its ordinary
+    /// instance getter (`getRaw()`) and is left to the normal accessor path.
+    fn value_class_computed_property_members_for_class(
+        &self,
+        ci: &crate::jvm::classreader::ClassInfo,
+        inline: bool,
+    ) -> Vec<LibraryMember> {
+        if !inline {
+            return Vec::new();
+        }
+        metadata::class_properties(ci)
+            .iter()
+            .filter(|p| !p.is_extension && p.visibility == Visibility::Public)
+            .filter_map(|p| {
+                let getter = p.getter.as_ref()?;
+                // The static `-impl` form is the discriminator, read off the CLASS FILE rather than the
+                // name: only a method that is `static` and takes exactly the carrier can be one.
+                let method = ci
+                    .methods
+                    .iter()
+                    .find(|m| m.name == getter.name && m.descriptor == getter.desc)?;
+                if !method.is_static() {
+                    return None;
+                }
+                let (params, physical_ret) = parse_method_desc(&getter.desc)?;
+                if params.len() != 1 {
+                    return None;
+                }
+                let ret = metadata_return_info(p.ret_class, p.ret_nullable).apply(physical_ret);
+                let mut member =
+                    LibraryMember::new(p.name.clone(), vec![], ret, getter.desc.clone());
+                member.owner = Some(type_name(&ci.this_class()));
+                member.physical_name = Some(getter.name.clone());
+                member.physical_ret = physical_ret;
+                member.set_ret_nullable(p.ret_nullable);
+                crate::trace_compiler!(
+                    "value_classes",
+                    "value-class computed property {}.{} -> static {}{}",
+                    ci.this_class(),
+                    p.name,
+                    getter.name,
+                    getter.desc
+                );
+                Some(member)
+            })
+            .collect()
+    }
+
     /// Every value-class-TYPED property of `ci`, keyed by SOURCE property name. Such a property's getter is
     /// `@JvmName`-mangled (`getId-<hash>`) and its physical return erases to the value class's underlying,
     /// so ordinary getter resolution misses it. Each member carries the mangled getter name + physical
@@ -1103,6 +1160,10 @@ impl JvmLibraries {
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
             let meta_fns = metadata::class_functions(&ci);
+            // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
+            // source-level shape survives (a receiver function type erases to `FunctionN` in both the
+            // descriptor and the `Signature`).
+            let ctor_param_lists = metadata::class_constructor_params(&ci);
             for m in &ci.methods {
                 if m.is_bridge()
                     && ci.methods.iter().any(|target| {
@@ -1224,6 +1285,45 @@ impl JvmLibraries {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
                 if m.name == "<init>" {
+                    // A constructor is NOT in `class_functions`, so the shared member alignment above
+                    // left its receiver-function marks unrestored: `DslBase(init: Scope.() -> Unit)`
+                    // read as a plain `(Scope) -> Unit` and no lambda argument bound `this`. Restore
+                    // them from the class's `@Metadata` CONSTRUCTOR records, matched by source arity
+                    // (the same evidence `ctor_named_params` uses for names/defaults).
+                    if let (Some(gsig), Some(recv_fun)) = (
+                        member.generic_sig.as_mut(),
+                        ctor_param_lists
+                            .iter()
+                            .find(|params| {
+                                params.recv_fun.len() == member.params.len()
+                                    && params.recv_fun.iter().any(|&is_receiver| is_receiver)
+                            })
+                            .map(|params| params.recv_fun.clone()),
+                    ) {
+                        mark_receiver_fun_params(gsig, &recv_fun, false);
+                        // Publish the recovered shape the two ways constructor resolution reads it:
+                        // the parameter TYPE (overload/lambda matching walks `params`) and the call
+                        // sig's per-parameter receiver flags. Only a receiver-function parameter is
+                        // replaced — every other parameter keeps its descriptor-derived erasure, so
+                        // constructor selection is unchanged for them.
+                        let generic = member.generic_sig.as_ref().map(|g| g.params.clone());
+                        if let Some(generic) = generic.filter(|g| g.len() == member.params.len()) {
+                            for (param, shape) in member.params.iter_mut().zip(&generic) {
+                                if matches!(shape.non_null(), Ty::Fun(sig) if sig.has_receiver) {
+                                    *param = *shape;
+                                }
+                            }
+                        }
+                        member.call_sig.lambda_receiver_params = recv_fun;
+                        member.call_sig.lambda_receivers = member
+                            .params
+                            .iter()
+                            .map(|param| match param.non_null() {
+                                Ty::Fun(sig) if sig.has_receiver => sig.params.first().copied(),
+                                _ => None,
+                            })
+                            .collect();
+                    }
                     // The ctor's generic signature (decoded above, marks restored) lets the resolver infer a
                     // construction's type arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend
                     // signature strings. Re-parsing the raw attribute here would drop the receiver marks.
@@ -1452,8 +1552,11 @@ impl JvmLibraries {
                     crate::types::Ty::nullable(u)
                 }
             });
-            let value_class_metadata_members =
-                self.value_class_metadata_members_for_class(&ci, inline.is_some(), meta_fns);
+            let value_class_metadata_members = self
+                .value_class_metadata_members_for_class(&ci, inline.is_some(), meta_fns)
+                .into_iter()
+                .chain(self.value_class_computed_property_members_for_class(&ci, inline.is_some()))
+                .collect::<Vec<_>>();
             // The class's own formal type parameters (`Pair` → `[A, B]`), for constructor type-argument
             // inference; empty for a non-generic type.
             let type_params = ci

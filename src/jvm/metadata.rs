@@ -2253,6 +2253,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                 let mut cp = Pb { b: cbody, i: 0 };
                 let mut names = Vec::new();
                 let mut defaults = Vec::new();
+                let mut recv_fun = Vec::new();
                 let mut vararg = None;
                 while !cp.at_end() {
                     let Some(ct) = cp.varint() else { break };
@@ -2267,11 +2268,28 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                             let mut nid = 0u64;
                             let mut vflags = 0u64;
                             let mut is_vararg = false;
+                            let mut is_recv_fun = false;
                             while !vp.at_end() {
                                 let Some(vt) = vp.varint() else { break };
                                 match (vt >> 3, vt & 7) {
                                     (1, 0) => vflags = vp.varint().unwrap_or(0), // ValueParameter.flags
                                     (2, 0) => nid = vp.varint().unwrap_or(0), // ValueParameter.name
+                                    (3, 2) => {
+                                        // ValueParameter.type — a RECEIVER function type (`Recv.() -> R`)
+                                        // carries the `@ExtensionFunctionType` type annotation, which the
+                                        // `Function1` erasure in the `<init>` descriptor/`Signature` loses.
+                                        let Some(len) = vp.varint() else { break };
+                                        let Some(tb) = vp.bytes(len as usize) else {
+                                            break;
+                                        };
+                                        is_recv_fun =
+                                            parse_type_recv_fun(tb).0.iter().copied().any(|id| {
+                                                resolve_class_name(records, d2, id as usize)
+                                                    .is_some_and(|name| {
+                                                        name == "kotlin/ExtensionFunctionType"
+                                                    })
+                                            });
+                                    }
                                     (4, 2) => {
                                         let Some(len) = vp.varint() else { break };
                                         is_vararg = true;
@@ -2290,6 +2308,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                                 resolve_string(records, d2, nid as usize).unwrap_or_default(),
                             );
                             defaults.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
+                            recv_fun.push(is_recv_fun);
                             if is_vararg {
                                 vararg = Some(names.len() - 1);
                             }
@@ -2304,6 +2323,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                 out.push(ParamList {
                     names,
                     defaults,
+                    recv_fun,
                     vararg,
                 });
             }

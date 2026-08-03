@@ -17231,6 +17231,7 @@ impl<'a> Checker<'a> {
             let params = crate::libraries::ParamList {
                 names: candidate.param_names.clone(),
                 defaults: candidate.defaults.clone(),
+                recv_fun: candidate.lambda_receivers.clone(),
                 vararg: candidate.vararg,
             };
             if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
@@ -17305,6 +17306,21 @@ impl<'a> Checker<'a> {
             .any(|candidate| candidate.resolved.vararg.is_none())
         {
             matches.retain(|candidate| candidate.resolved.vararg.is_none());
+        }
+        // Numeric widening makes a wider primitive slot APPLICABLE (`A(1)` fits `A(b: Long)`), but an
+        // overload taking the argument's own type is the better match and must not become ambiguous
+        // with it — `receiver_is_assignable` relates neither `Int` to `Long` nor back, so the
+        // dominance test below cannot separate them. Prefer the exact-type matches whenever any
+        // candidate has them, which is Kotlin's own most-specific rule.
+        let actual_types = arguments
+            .args
+            .iter()
+            .map(|argument| self.expr_types[argument.0 as usize])
+            .collect::<Vec<_>>();
+        let exact =
+            |candidate: &MatchedCtorDelegation| candidate.resolved.argument_types == actual_types;
+        if matches.iter().any(exact) {
+            matches.retain(exact);
         }
         let dominated = |candidate: usize, other: usize| {
             let left = &matches[candidate].resolved.argument_types;
@@ -17618,8 +17634,14 @@ impl<'a> Checker<'a> {
                 ConstructorParameterConstraint::Concrete if lambda_literal => {
                     matches!(expected.non_null(), Ty::Fun(_))
                 }
+                // A numeric argument reaches a wider primitive slot the same way it does at a function
+                // call (`L(b: Long)` accepts `L(1)`): the emit site inserts the conversion. Subtyping
+                // alone rejected it, so every constructor with a `Long`/`Double`/… parameter was
+                // unreachable from an integer literal — the one call origin that did not admit the
+                // widening `expect_assignable` applies everywhere else.
                 ConstructorParameterConstraint::Concrete => {
                     self.receiver_is_assignable(actual, expected)
+                        || expected.accepts_numeric(actual)
                 }
                 ConstructorParameterConstraint::Inferred => true,
                 ConstructorParameterConstraint::GenericFunction => {
@@ -28337,6 +28359,88 @@ impl<'a> Checker<'a> {
             .then(|| (owner, member.to_string(), declared.ty, declared.visibility))
     }
 
+    /// The constructor parameter shapes a lambda argument of `Name(args)` is typed against: per
+    /// parameter, its type and whether that type is a RECEIVER function type (`Scope.() -> Unit`,
+    /// whose lambda binds `this`). Federated over both declaration origins — a module class answers
+    /// from its own signature (the same-file AST supplying the receiver marks its `Ty` erases), a
+    /// compiled class from the `LibraryType` constructor of the same arity, whose marks were restored
+    /// from `@Metadata`. Before this, only the module origin answered, so a lambda passed to a
+    /// compiled receiver-lambda constructor got no implicit `this` and a bare member call in it was
+    /// "expression is not callable".
+    fn construction_lambda_param_shapes(
+        &self,
+        name: &str,
+        arity: usize,
+    ) -> Option<Vec<(Ty, bool)>> {
+        if let Some(cls) = self.syms.classes.get(name) {
+            let recv_flags: Vec<bool> = self
+                .file
+                .decls
+                .iter()
+                .find_map(|&d| match self.file.decl(d) {
+                    Decl::Class(c) if c.name == name => {
+                        Some(c.props.iter().map(|p| p.ty.fun_has_receiver()).collect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| Self::semantic_lambda_receiver_flags(&cls.ctor_params));
+            return Some(
+                cls.ctor_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, parameter)| (*parameter, recv_flags.get(i).copied().unwrap_or(false)))
+                    .collect(),
+            );
+        }
+        let internal = self.syms.class_names.get(name)?;
+        let classifier = self.resolved_type_name(internal)?;
+        let constructor = classifier
+            .constructors
+            .iter()
+            .find(|member| member.params.len() == arity)?;
+        Some(
+            constructor
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, parameter)| {
+                    (
+                        *parameter,
+                        constructor
+                            .call_sig
+                            .lambda_receiver_params
+                            .get(i)
+                            .copied()
+                            .unwrap_or(false),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The vararg parameter slot of a selected TOP-LEVEL callable, recovered from the candidate set it
+    /// was picked out of. A [`crate::libraries::LibraryCallable`] records `vararg_index` only for the
+    /// `$default` form, but a positional argument check needs the slot for EVERY vararg call — without
+    /// it the first packed element is measured against the array parameter itself.
+    fn top_level_vararg_slot(
+        &self,
+        pkg_scope: &[TypeName],
+        name: &str,
+        selected: &crate::libraries::LibraryCallable,
+    ) -> Option<usize> {
+        if let Some(index) = selected.vararg_index {
+            return Some(index);
+        }
+        self.resolver_in_scope(pkg_scope)
+            .top_level_candidates(name)
+            .into_iter()
+            .find(|candidate| {
+                candidate.callable.owner == selected.owner
+                    && candidate.callable.descriptor == selected.descriptor
+            })
+            .and_then(|candidate| candidate.call_sig.vararg_index)
+    }
+
     /// Primary-constructor parameter names/defaults of a same-file class, in declaration order — for
     /// mapping named constructor arguments. `None` if `class_name` isn't a same-file primary constructor.
     fn primary_ctor_param_list(&self, class_name: &str) -> Option<ParamList> {
@@ -28347,6 +28451,7 @@ impl<'a> Checker<'a> {
                 Decl::Class(c) if c.name == class_name && c.has_primary_ctor => Some(ParamList {
                     names: c.props.iter().map(|p| p.name.clone()).collect(),
                     defaults: c.props.iter().map(|p| p.default.is_some()).collect(),
+                    recv_fun: c.props.iter().map(|p| p.ty.fun_has_receiver()).collect(),
                     vararg: c.props.iter().position(|p| p.is_vararg),
                 }),
                 _ => None,
@@ -28362,6 +28467,7 @@ impl<'a> Checker<'a> {
                         .map(|(n, _)| n.clone())
                         .collect(),
                     defaults: sig.ctor_param_names.iter().map(|(_, d)| *d).collect(),
+                    recv_fun: Self::semantic_lambda_receiver_flags(&sig.ctor_params),
                     vararg: sig.ctor_vararg,
                 })
             })
@@ -29113,7 +29219,7 @@ impl<'a> Checker<'a> {
                                     Err(()) => return Ty::Error,
                                 }
                             }
-                            if let Some(c) = self
+                            if let Some(mut c) = self
                                 .resolver_in_scope(&pkg_scope)
                                 .resolve_symbol(
                                     crate::symbol_resolver::SymRecv::TopLevel,
@@ -29141,14 +29247,54 @@ impl<'a> Checker<'a> {
                                             }
                                         }
                                     } else {
+                                        // A VARARG callee packs every trailing argument into ONE array
+                                        // parameter, so index-for-index pairing would measure the first
+                                        // element against `Array<Any>`. Check those arguments against the
+                                        // array's ELEMENT type — the representation-neutral rule the
+                                        // bare-name, member and local-function paths already apply. An
+                                        // explicit spread passes the array itself and keeps the array type.
+                                        let vararg = self
+                                            .top_level_vararg_slot(&pkg_scope, &name, &c)
+                                            .filter(|&slot| slot + 1 == c.params.len());
                                         for (i, a) in args.iter().enumerate() {
-                                            if let Some(p) = c.params.get(i) {
+                                            let expected = match vararg {
+                                                Some(slot)
+                                                    if i >= slot
+                                                        && !self.file.is_spread_arg(*a) =>
+                                                {
+                                                    c.params.get(slot).and_then(|p| p.array_elem())
+                                                }
+                                                Some(slot) if i >= slot => {
+                                                    c.params.get(slot).copied()
+                                                }
+                                                _ => c.params.get(i).copied(),
+                                            };
+                                            if let Some(p) = expected {
                                                 self.expect_assignable(
-                                                    *p,
+                                                    p,
                                                     arg_tys[i],
                                                     self.span(*a),
                                                     "argument",
                                                 );
+                                            }
+                                        }
+                                        // The lowerer must pack the same trailing arguments, and a
+                                        // `LibraryCallable` alone cannot say which slot is the vararg —
+                                        // record the slot the checker selected on (sole resolver). A
+                                        // single trailing argument that already IS the array (a spread,
+                                        // or the array itself) passes straight through, so it is not a
+                                        // packing site.
+                                        if let Some(slot) = vararg {
+                                            let packs = args.len() != slot + 1
+                                                || args.get(slot).is_some_and(|&a| {
+                                                    !self.file.is_spread_arg(a)
+                                                        && Some(arg_tys[slot])
+                                                            != c.params.get(slot).copied()
+                                                });
+                                            if packs {
+                                                c.vararg_elem =
+                                                    c.params.get(slot).and_then(|p| p.array_elem());
+                                                c.vararg_index = Some(slot);
                                             }
                                         }
                                     }
@@ -31621,26 +31767,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
                 {
-                    let recv_flags: Vec<bool> = self
-                        .file
-                        .decls
-                        .iter()
-                        .find_map(|&d| match self.file.decl(d) {
-                            Decl::Class(c) if c.name == fname => {
-                                Some(c.props.iter().map(|p| p.ty.fun_has_receiver()).collect())
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    self.syms.classes.get(&fname).map(|cls| {
-                        cls.ctor_params
-                            .iter()
-                            .enumerate()
-                            .map(|(i, parameter)| {
-                                (*parameter, recv_flags.get(i).copied().unwrap_or(false))
-                            })
-                            .collect()
-                    })
+                    self.construction_lambda_param_shapes(&fname, args.len())
                 } else {
                     None
                 };

@@ -3322,9 +3322,15 @@ pub(crate) fn resolve_constructor_from_type(
             // A module-declared argument class reaches its library supertype only through the
             // SOURCE federation (`class V : Visitor()` into `Holder(Visitor)`), mirroring member
             // overload selection: the platform oracle walks classpath supertypes only.
+            // A numeric argument also reaches a WIDER primitive slot here (`Child("a", 1, 2)` on
+            // `Child(String, Long, Long)`), the widening every other call origin admits and the emit
+            // site materializes. It runs only in this last pass, after the exact-parameter matches
+            // above, so an `(Int)`/`(Long)` overload pair still binds the exact one.
             (params.len() == args.len()
                 && params.iter().zip(args).all(|(p, a)| {
-                    abi_arg_assignable_to_param(lib, *a, *p) || source_arg_assignable(src, p, a)
+                    abi_arg_assignable_to_param(lib, *a, *p)
+                        || source_arg_assignable(src, p, a)
+                        || p.accepts_numeric(*a)
                 }))
             .then_some((params, m))
         }),

@@ -142,6 +142,8 @@ mod classpath_companion_ext_lambda_e2e;
 mod classpath_companion_invoke_e2e;
 #[path = "classpath_covariant_override_e2e.rs"]
 mod classpath_covariant_override_e2e;
+#[path = "classpath_ctor_receiver_lambda_e2e.rs"]
+mod classpath_ctor_receiver_lambda_e2e;
 #[path = "classpath_ctor_vs_same_named_function_e2e.rs"]
 mod classpath_ctor_vs_same_named_function_e2e;
 #[path = "classpath_data_copy_e2e.rs"]
@@ -224,6 +226,8 @@ mod classpath_typealias_e2e;
 mod classpath_unbound_callable_ref_e2e;
 #[path = "classpath_value_class_builder_e2e.rs"]
 mod classpath_value_class_builder_e2e;
+#[path = "classpath_value_class_computed_property_e2e.rs"]
+mod classpath_value_class_computed_property_e2e;
 #[path = "classpath_value_class_default_e2e.rs"]
 mod classpath_value_class_default_e2e;
 #[path = "classpath_value_class_member_e2e.rs"]
@@ -298,6 +302,8 @@ mod cross_file_ctor_default_e2e;
 mod cross_file_inline_call_e2e;
 #[path = "cross_file_operator_e2e.rs"]
 mod cross_file_operator_e2e;
+#[path = "ctor_numeric_widening_e2e.rs"]
+mod ctor_numeric_widening_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
 mod data_class_metadata_wiring_e2e;
 #[path = "data_class_param_check_e2e.rs"]
@@ -478,6 +484,8 @@ mod fq_source_typeref_e2e;
 mod fq_static_call_e2e;
 #[path = "fq_toplevel_call_e2e.rs"]
 mod fq_toplevel_call_e2e;
+#[path = "fq_vararg_call_e2e.rs"]
+mod fq_vararg_call_e2e;
 #[path = "front_end_errors_e2e.rs"]
 mod front_end_errors_e2e;
 #[path = "front_end_errors_more_e2e.rs"]
@@ -612,6 +620,8 @@ mod ksp_apt_loop_e2e;
 mod ksp_provision_e2e;
 #[path = "labeled_expression_e2e.rs"]
 mod labeled_expression_e2e;
+#[path = "labeled_lambda_return_e2e.rs"]
+mod labeled_lambda_return_e2e;
 #[path = "labeled_this_e2e.rs"]
 mod labeled_this_e2e;
 #[path = "lambda_e2e.rs"]

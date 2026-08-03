@@ -611,6 +611,11 @@ pub struct CallSig {
 pub struct ParamList {
     pub names: Vec<String>,
     pub defaults: Vec<bool>,
+    /// Per parameter: whether its declared type is a RECEIVER function type (`Recv.() -> R`). The JVM
+    /// descriptor and `Signature` both erase that to a plain `FunctionN`, so only the source-level
+    /// metadata carries it — and without it a lambda argument gets no implicit receiver, leaving a bare
+    /// member call inside unresolved. Empty when the origin records no per-parameter types.
+    pub recv_fun: Vec<bool>,
     pub vararg: Option<usize>,
 }
 
@@ -1662,6 +1667,7 @@ mod tests {
         let expected = ParamList {
             names: vec!["host".into(), "port".into()],
             defaults: vec![false, true],
+            recv_fun: vec![false, false],
             vararg: None,
         };
         let t = ty_with(|t| {
@@ -1674,6 +1680,7 @@ mod tests {
             t.ctor_named_params = vec![ParamList {
                 names: vec!["".into()],
                 defaults: vec![false],
+                recv_fun: vec![false],
                 vararg: None,
             }];
         });

@@ -236,6 +236,7 @@ fn lower_file_at_reporting_impl(
         reified_subst: Vec::new(),
         inline_return: Vec::new(),
         inline_lambda_ret: Vec::new(),
+        foreach_splice: Vec::new(),
         fn_body_tail: None,
     };
     lo.ir.source_line_count = file.source_line_count;
@@ -5404,6 +5405,11 @@ pub(crate) struct Lower<'a> {
     /// function result), so the return-lowering routes it through the frame instead of emitting a
     /// real `Return` the suspend flattener can't model inside the splice's `try`/`finally`.
     inline_lambda_ret: Vec<(String, u32, String, Ty, bool)>,
+    /// Active `forEach` lambda splices, innermost last: `(source label, IR loop label)`. `forEach` is
+    /// spliced into a for-each LOOP rather than through a result-slot frame, so a `return@<label>` in
+    /// its body is the loop's `continue`, not a break to a result slot. The source label is the
+    /// lambda's explicit one (`forEach inner@{ … }`) or the implicit `forEach`.
+    foreach_splice: Vec<(String, String)>,
     /// The enclosing function's TAIL expression (an expression body, a block's trailing value, or the
     /// value of a final `return`), if any — the expression whose value is the function's result.
     /// Consulted by tail-position splice gates (`fn_tail` above).
@@ -7642,7 +7648,30 @@ impl<'a> Lower<'a> {
         if !c.owner_package_matches(pkg.as_str()) {
             return None;
         }
-        // A vararg FQ call is a later slice (sound skip).
+        // A VARARG FQ call packs its trailing arguments into the callee's array parameter — exactly
+        // what the bare-name path does. The CHECKER selected the overload and recorded the packing
+        // slot; a callee whose last parameter merely IS an array is not evidence of a vararg, so
+        // that shape stays a sound skip.
+        let packed_vararg = (!c.default_call)
+            .then_some(c.vararg_index)
+            .flatten()
+            .filter(|&slot| slot + 1 == c.params.len() && args.len() >= slot)
+            .filter(|_| !self.info.resolved_call_arg_slots.contains_key(&e));
+        if let Some(slot) = packed_vararg {
+            let params = tys_to_ir(&c.params);
+            let a = self.lower_call_args_vararg(args, &params, true, slot)?;
+            let physical_ret = c.physical_ret;
+            let logical_ret = c.ret;
+            let call_inline = c.inline.can_inline();
+            let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
+            let suspend = c.suspend;
+            let call = self.emit_library_static_call(c, a, suspend);
+            return Some(if call_inline || erased_generic_ret {
+                self.coerce_erased_call_result(e, call, &physical_ret, true)
+            } else {
+                call
+            });
+        }
         let last_is_array = c.params.last().is_some_and(|p| p.array_elem().is_some());
         if last_is_array {
             return None;
@@ -8667,7 +8696,9 @@ impl<'a> Lower<'a> {
         // function must not capture a `return`/`return@label` lowered inside it (a non-local return
         // across a non-inline boundary is illegal Kotlin anyway; don't let one silently bind).
         let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
+        let saved_foreach = std::mem::take(&mut self.foreach_splice);
         let ve = self.expr(body);
+        self.foreach_splice = saved_foreach;
         self.inline_lambda_ret = saved_lam_frames;
         self.shared_cell_vars = saved_cells;
         if let Some(rt) = saved_ret_ty {
@@ -9236,9 +9267,11 @@ impl<'a> Lower<'a> {
             // The suspend-lambda machine is its own return scope — don't let an enclosing splice's
             // return frame capture a `return` lowered inside it (illegal across the boundary anyway).
             let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
+            let saved_foreach = std::mem::take(&mut self.foreach_splice);
             // Evaluate WITHOUT `?` so the `cur_fn_suspend` / `scope` state is always restored, even when the
             // body bails (an early `?` here would leak `cur_fn_suspend = true` into the enclosing method).
             let body_val = self.expr(body);
+            self.foreach_splice = saved_foreach;
             self.inline_lambda_ret = saved_lam_frames;
             self.cur_fn_suspend = saved_cur_suspend;
             self.in_suspend_lambda_body = saved_in_sl;
@@ -15704,6 +15737,80 @@ impl<'a> Lower<'a> {
     /// a safe-call scope fn (`s?.let { … }`). Binds `recv_val` to a fresh slot named `pname` (`it` for
     /// `let`/`also`, `this` for `run`/`apply` — which also clears `cur_class`), lowers the body, and
     /// yields the body value or the receiver (`returns_receiver`). Returns the inlined block value.
+    /// The label a `return@…` inside `lambda`'s body targets: the EXPLICIT label written on the literal
+    /// (`run outer@{ … }`), else the implicit one — the name of the callee it is an argument to.
+    fn lambda_label(&self, lambda: AstExprId, implicit: &str) -> String {
+        self.afile
+            .lambda_labels
+            .get(&lambda.0)
+            .cloned()
+            .unwrap_or_else(|| implicit.to_string())
+    }
+
+    /// The IR loop label a `return@<label>` should `continue`, when `label` names an active `forEach`
+    /// lambda splice (innermost first). `None` when no such splice is active for that label.
+    fn foreach_splice_loop_label(&self, label: &str) -> Option<String> {
+        self.foreach_splice
+            .iter()
+            .rev()
+            .find(|(source, _)| source == label)
+            .map(|(_, loop_label)| loop_label.clone())
+    }
+
+    /// Whether `label` is an EXPLICIT lambda label written anywhere in this file (`run outer@{ … }`).
+    /// Such a label names a LAMBDA, never the enclosing function, so lowering a `return@<label>` that
+    /// matched no active splice frame as a real function return would be a miscompile — its callers
+    /// bail instead.
+    fn is_explicit_lambda_label(&self, label: &str) -> bool {
+        self.afile.lambda_labels.values().any(|l| l == label)
+    }
+
+    /// Splice a lambda body inline, modelling a `return@<label>` in it as a LOCAL return from that
+    /// lambda: the body is wrapped in a `while(true){ … break }` and a frame is registered, so the
+    /// labeled return assigns the result slot and breaks out. Same shape as the inline-fn lambda-invoke
+    /// splice, shared so the receiver-less `run { … }` route models the same returns. A body with no
+    /// labeled return needs neither wrapper nor frame and splices directly.
+    fn splice_labelled_body(&mut self, body: AstExprId, label: &str, result: Ty) -> Option<u32> {
+        if !body_has_labeled_return_deep(self.afile, body, label) {
+            return self.expr(body);
+        }
+        // A body whose EVERY path is a labelled return has a `Nothing` fall-through: there is no value
+        // to store after the wrapper loop, and emitting the store anyway leaves unreachable code the
+        // verifier rejects ("control flow falls through code end"). Skip that (rarer) shape.
+        if self.info.ty(body) == Ty::Nothing {
+            return None;
+        }
+        let brk = format!("$lamret${}", self.fresh_value());
+        if result != Ty::Unit && result != Ty::Nothing {
+            let slot = self.fresh_value();
+            let dflt = self.emit_zero_value(result);
+            let decl = self.emit_variable(slot, ty_to_ir(result), Some(dflt));
+            self.inline_lambda_ret
+                .push((label.to_string(), slot, brk.clone(), result, false));
+            let body_val = self.expr(body);
+            self.inline_lambda_ret.pop();
+            let body_val = body_val?;
+            let assign = self.emit_set_value(slot, body_val);
+            let brk_stmt = self.emit_break(Some(brk.clone()));
+            let loop_body = self.emit_block(vec![assign, brk_stmt], None);
+            let cond = self.emit_const(IrConst::Boolean(true));
+            let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+            let get = self.emit_get_value(slot);
+            return Some(self.emit_block(vec![decl, loopw], Some(get)));
+        }
+        self.inline_lambda_ret
+            .push((label.to_string(), 0, brk.clone(), Ty::Unit, false));
+        let body_val = self.expr(body);
+        self.inline_lambda_ret.pop();
+        let body_val = body_val?;
+        let brk_stmt = self.emit_break(Some(brk.clone()));
+        let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
+        let cond = self.emit_const(IrConst::Boolean(true));
+        let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+        let unit = self.emit_unit();
+        Some(self.emit_block(vec![loopw], Some(unit)))
+    }
+
     fn lower_scope_inline_on(
         &mut self,
         recv_val: u32,
@@ -16610,6 +16717,18 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
+                // A `return@label` naming a `forEach` lambda spliced into a for-each LOOP is a local
+                // return from that lambda — i.e. the next iteration: `continue` the loop it spliced to.
+                // Before this, it fell through to the real-function-return path and emitted a bare
+                // `return` inside a value-returning method (a verifier error at class-load time).
+                if let Some(loop_label) = ret_label
+                    .as_deref()
+                    .and_then(|lbl| self.foreach_splice_loop_label(lbl))
+                {
+                    if e.is_none() {
+                        return Some(self.emit_continue(Some(loop_label)));
+                    }
+                }
                 // A `return@label` matching an active spliced-lambda frame is a LOCAL return from that
                 // lambda: break to the lambda's end label (`Unit` result — run any value for effect). A
                 // labeled return with no matching frame is a `return@enclosingFn` — fall through to the
@@ -16632,6 +16751,17 @@ impl<'a> Lower<'a> {
                 } else {
                     None
                 };
+                // An EXPLICIT lambda label (`run outer@{ … return@outer v … }`) never names the
+                // enclosing function, so the fall-through above would emit a real return out of the
+                // caller — a miscompile (a `String`-returning `box()` doing `areturn` on an `Int`).
+                // No frame matched ⇒ this splice route does not model the label yet: skip.
+                if frame.is_none()
+                    && ret_label
+                        .as_deref()
+                        .is_some_and(|lbl| self.is_explicit_lambda_label(lbl))
+                {
+                    return self.bail("unmodeled labelled lambda return");
+                }
                 {
                     if let Some((_, slot, brk, rty, _)) = frame {
                         let mut stmts = Vec::new();
@@ -18881,10 +19011,19 @@ impl<'a> Lower<'a> {
                     let value_params = ast::lambda_params_or_implicit(&params, value_arity)?;
                     let mut params = vec!["this".to_string(); context_count + receiver_count];
                     params.extend(value_params);
+                    // The label a `return@…` in this lambda's body may target: an EXPLICIT label on the
+                    // lambda literal (`run outer@{ … }`) REPLACES the implicit one, which is the inline
+                    // callee's own name.
+                    let lam_label = self
+                        .afile
+                        .lambda_labels
+                        .get(&args[ai].0)
+                        .cloned()
+                        .unwrap_or_else(|| fname.to_string());
                     // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
-                    // bail. A `return@<thisInlineFn>` IS modeled (a local return from the spliced lambda,
-                    // handled by the `inline_lambda_ret` frame set up at the invoke site), so it's allowed.
-                    if body_has_disallowed_return(self.afile, lbody, fname)
+                    // bail. A `return@<thisLambdaLabel>` IS modeled (a local return from the spliced
+                    // lambda, handled by the `inline_lambda_ret` frame set up at the invoke site).
+                    if body_has_disallowed_return(self.afile, lbody, &lam_label)
                         || params.len() != fnsig.params.len()
                     {
                         self.scope.truncate(depth);
@@ -18925,7 +19064,7 @@ impl<'a> Lower<'a> {
                         params,
                         body: lbody,
                         param_tys: lam_param_tys,
-                        label: fname.to_string(),
+                        label: lam_label,
                         lexical_scope: caller_scope.clone(),
                         lexical_class: caller_class,
                         lexical_fn_name: caller_fn_name.clone(),
@@ -19522,7 +19661,20 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 if let Some(lbl) = &label {
-                    if self.inline_lambda_ret.iter().any(|(l, ..)| l == lbl) {
+                    // A `return@label` naming a `forEach` lambda spliced into a loop continues that
+                    // loop (see the statement form). `forEach`'s lambda is `Unit`, so it carries no
+                    // value.
+                    if let Some(loop_label) = self.foreach_splice_loop_label(lbl) {
+                        if value.is_none() {
+                            return Some(self.emit_continue(Some(loop_label)));
+                        }
+                    }
+                    // A label naming an active splice frame needs the statement-return handling; an
+                    // EXPLICIT lambda label with no frame names a lambda this route does not model, and
+                    // emitting a real function return for it would be a miscompile. Skip both.
+                    if self.inline_lambda_ret.iter().any(|(l, ..)| l == lbl)
+                        || self.is_explicit_lambda_label(lbl)
+                    {
                         return None;
                     }
                 }
@@ -22715,14 +22867,19 @@ impl<'a> Lower<'a> {
             // block()`): inline the lambda body directly as the value. The receiver scope
             // functions (`x.let`/`with(x)`) are intercepted similarly; without this, no-receiver
             // `run` falls to the bytecode splicer, which bails on a branchy body (`run { if … }`).
-            if let ("run", Some((_, params, body)), true, true) = (
+            if let ("run", Some((arg, params, body)), true, true) = (
                 fname.as_str(),
                 one_lambda_arg.as_ref(),
                 self.lookup(&fname).is_none(),
                 !self.module_declares(&fname),
             ) {
-                if params.is_empty() && !body_has_labeled_return(self.afile, *body, "run") {
-                    return self.expr(*body);
+                if params.is_empty() {
+                    // A `return@run` (or `return@<explicit label>`) inside is a LOCAL return from the
+                    // lambda, not from the enclosing function — splice through the labeled-return
+                    // frame so it lands on the `run` result instead of returning out of the caller.
+                    let label = self.lambda_label(*arg, "run");
+                    let result = self.info.ty(e);
+                    return self.splice_labelled_body(*body, &label, result);
                 }
             }
             // A call to a lifted local function — the checker mapped this call to its decl.
@@ -23991,7 +24148,8 @@ impl<'a> Lower<'a> {
             // capture in the lambda works, exactly as kotlinc's inlining does. Gated on the
             // receiver being iterable (so a user `forEach` on a non-iterable falls through).
             let one_lambda_arg = self.single_lambda_arg(&args);
-            if let ("forEach", Some((_, params, lbody))) = (name.as_str(), one_lambda_arg.as_ref())
+            if let ("forEach", Some((arg, params, lbody))) =
+                (name.as_str(), one_lambda_arg.as_ref())
             {
                 let rty = self.info.ty(receiver);
                 // An array, a `String`, or an `Obj` iterable (List/Set/Iterable) — all handled
@@ -24004,7 +24162,16 @@ impl<'a> Lower<'a> {
                     });
                 if iterable {
                     let param = ast::first_lambda_param_or_it(params);
-                    return self.lower_for_each(&param, receiver, *lbody, None, true);
+                    // A `return@forEach` (or `return@<explicit label>`) in the body is a local return
+                    // from the lambda — the spliced loop's `continue`. Label the loop and register the
+                    // splice so the return lowering can find it.
+                    let source_label = self.lambda_label(*arg, "forEach");
+                    let loop_label = format!("$foreach${}", self.fresh_value());
+                    self.foreach_splice.push((source_label, loop_label.clone()));
+                    let lowered =
+                        self.lower_for_each(&param, receiver, *lbody, Some(loop_label), true);
+                    self.foreach_splice.pop();
+                    return lowered;
                 }
             }
             // `iterable.map/flatMap { … }` WHERE THE LAMBDA BODY SUSPENDS: a stdlib collection HOF
@@ -24804,6 +24971,33 @@ fn body_has_labeled_return(file: &ast::File, e: AstExprId, label: &str) -> bool 
     fn expr_has(file: &ast::File, e: AstExprId, lbl: &str) -> bool {
         if matches!(file.expr(e), Expr::Lambda { .. }) {
             return false;
+        }
+        file.any_child_expr(e, &mut |x| expr_has(file, x, lbl), &mut |s| {
+            stmt_has(file, s, lbl)
+        })
+    }
+    expr_has(file, e, label)
+}
+
+/// Does `e` contain a `return@<label>` anywhere, INCLUDING inside nested lambda literals, and in both
+/// the statement and the expression form? A nested lambda that is itself SPLICED (`forEach { … }` becomes
+/// a loop) is not its own return scope, so a `return@<outer label>` written inside it still targets this
+/// body's frame. Over-approximating is safe: an unused frame only wraps the body in a loop that breaks
+/// once, whereas missing one would emit a real function return — a miscompile.
+fn body_has_labeled_return_deep(file: &ast::File, e: AstExprId, label: &str) -> bool {
+    fn stmt_has(file: &ast::File, s: ast::StmtId, lbl: &str) -> bool {
+        if let Stmt::Return(_, Some(l)) = file.stmt(s) {
+            if l == lbl {
+                return true;
+            }
+        }
+        file.any_child_stmt(s, &mut |x| expr_has(file, x, lbl))
+    }
+    fn expr_has(file: &ast::File, e: AstExprId, lbl: &str) -> bool {
+        if let Expr::Return { label: Some(l), .. } = file.expr(e) {
+            if l == lbl {
+                return true;
+            }
         }
         file.any_child_expr(e, &mut |x| expr_has(file, x, lbl), &mut |s| {
             stmt_has(file, s, lbl)

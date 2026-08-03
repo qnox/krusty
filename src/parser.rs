@@ -6770,6 +6770,7 @@ impl<'a> Parser<'a> {
             // per-label self-recursion here would be an unguarded, un-grown stack path — a long
             // machine-generated label chain must degrade like any other deep nesting, and after
             // this loop the re-entry cannot reach this branch again (the next token is no label).
+            let mut labels = Vec::new();
             while self.at(TokenKind::Ident)
                 && !matches!(self.text(), "this" | "super")
                 && self
@@ -6777,10 +6778,13 @@ impl<'a> Parser<'a> {
                     .get(self.i + 1)
                     .is_some_and(|t| t.kind == TokenKind::At)
             {
+                labels.push(self.text().to_string());
                 self.bump(); // label name
                 self.bump(); // '@'
             }
-            return self.parse_prefix();
+            let labelled = self.parse_prefix();
+            self.record_lambda_labels(labelled, labels);
+            return labelled;
         }
         let unop = match self.kind() {
             TokenKind::Minus => Some(UnOp::Neg),
@@ -6830,10 +6834,40 @@ impl<'a> Parser<'a> {
         self.parse_postfix(primary)
     }
 
+    /// Whether the cursor sits on a chain of `label@` prefixes ending in `{` — a LABELLED TRAILING
+    /// LAMBDA. `this`/`super` are excluded: `this@Outer` is a labelled RECEIVER, not a label prefix.
+    fn at_labelled_trailing_lambda(&self) -> bool {
+        let mut i = self.i;
+        let mut seen = false;
+        while self.t.get(i).is_some_and(|t| t.kind == TokenKind::Ident)
+            && self.t.get(i + 1).is_some_and(|t| t.kind == TokenKind::At)
+            && !matches!(self.t[i].text(self.src), "this" | "super")
+        {
+            seen = true;
+            i += 2;
+        }
+        seen && self.t.get(i).is_some_and(|t| t.kind == TokenKind::LBrace)
+    }
+
+    /// Record `labels` as the explicit labels of `expr` when it is a lambda literal. On any other
+    /// expression a label is a semantic no-op; on a lambda it REPLACES the implicit callee-name label
+    /// that a `return@…` inside the body targets.
+    fn record_lambda_labels(&mut self, expr: ExprId, labels: Vec<String>) {
+        if labels.is_empty() || !matches!(self.file.expr(expr), Expr::Lambda { .. }) {
+            return;
+        }
+        for label in labels {
+            self.file.lambda_labels.insert(expr.0, label);
+        }
+    }
+
     fn parse_postfix(&mut self, mut lhs: ExprId) -> ExprId {
         // Explicit type arguments parsed just before a call paren (`foo<Int>(…)`), attached to the
         // call once it is built so a constructor instantiation (`ArrayList<Int>()`) keeps its args.
         let mut pending_targs: Vec<TypeRef> = Vec::new();
+        // Labels consumed just before a trailing lambda (`run outer@{ … }`), attached to the lambda
+        // once it is parsed so a `return@outer` inside it finds its target.
+        let mut pending_lambda_labels: Vec<String> = Vec::new();
         loop {
             // A postfix chain may continue on a following line: Kotlin treats a newline before `.` or
             // `?.` as part of the selector chain, not a statement terminator (`x\n  .foo()\n  .bar()`).
@@ -7057,8 +7091,27 @@ impl<'a> Parser<'a> {
                 // Trailing lambda: `expr { … }` / `recv.m(args) { … }` → append the lambda as the
                 // last call argument (same line only, to avoid swallowing an unrelated block).
                 TokenKind::LBrace if self.no_trailing_lambda => break,
+                // A trailing lambda may carry an explicit LABEL (`run outer@{ … }`, `xs.sumOf s@{ … }`)
+                // naming it as the target of a `return@outer` inside. Consume the label chain here so
+                // the `{` still attaches to the call; without it the callee stayed a bare name and the
+                // labelled block became a separate statement ("unresolved reference 'run'").
+                TokenKind::Ident
+                    if !self.no_trailing_lambda && self.at_labelled_trailing_lambda() =>
+                {
+                    while self.at(TokenKind::Ident)
+                        && self
+                            .t
+                            .get(self.i + 1)
+                            .is_some_and(|t| t.kind == TokenKind::At)
+                    {
+                        pending_lambda_labels.push(self.text().to_string());
+                        self.bump(); // label name
+                        self.bump(); // '@'
+                    }
+                }
                 TokenKind::LBrace => {
                     let lambda = self.parse_lambda();
+                    self.record_lambda_labels(lambda, std::mem::take(&mut pending_lambda_labels));
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.t[self.i.saturating_sub(1)].span;
                     let old = lhs;

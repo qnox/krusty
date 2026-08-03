@@ -2332,6 +2332,52 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`kotlin/math/MathKt.PI`) and the ordinary external-static-field path inlines its `ConstantValue`,
   which is what kotlinc emits at every use site. Test:
   `tests/resolve_parse_deep_coverage_e2e.rs::import_top_level_math`.
+- **A COMPUTED property of a value class (`Result.isSuccess`).** The same shape as the `const val`
+  above: a `@JvmInline value class`'s non-constructor `val` has NO instance accessor at all — kotlinc
+  compiles its getter to a static `<getterName>-impl(<carrier>)` — so the accessor-modelled property
+  namespace never surfaced it and every read was "unresolved reference". Such a property is published
+  as a zero-argument MEMBER under its source name, the same receiver-as-first-JVM-argument shape the
+  value class's own functions already use, so lowering and emit need no new case. The discriminator is
+  read off the class file (the accessor is `static` and takes exactly the carrier), never off the
+  method NAME; a constructor property keeps its ordinary `getRaw()` instance getter. Tests:
+  `tests/classpath_value_class_computed_property_e2e.rs`.
+- **A constructor parameter of RECEIVER function type on a compiled class.** `Base(init: Cfg.() ->
+  Unit)` erases to `Function1` in both the JVM descriptor and the `Signature` attribute, so only
+  `@Metadata`'s `@ExtensionFunctionType` mark distinguishes it from `(Cfg) -> Unit`. Members and
+  top-level callables already restored that mark, but a CONSTRUCTOR is absent from `@Metadata`'s
+  function records — it lives in the constructor records, which krusty decoded for names/defaults only.
+  Those records now also carry the per-parameter receiver mark, and a `<init>` member republishes it as
+  the parameter TYPE and on its call signature, so a lambda argument binds `this` and a bare member
+  call inside it resolves. Tests: `tests/classpath_ctor_receiver_lambda_e2e.rs`.
+- **An integer argument in a WIDER primitive constructor parameter.** `Row(a: String, b: Long)` called
+  as `Row("x", 1)`. krusty admits primitive widening at every call site (the emit site materializes the
+  conversion), but constructor selection measured arguments by SUBTYPING alone, so any constructor with
+  a `Long`/`Double`/… parameter was unreachable from an integer literal. Both constructor origins now
+  apply the widening, and each keeps it as the LAST applicability pass so an exact-parameter overload
+  still binds first; source-constructor selection additionally prefers the exact-type matches, since
+  subtyping relates neither `Int` to `Long` nor back and could not otherwise separate them. Tests:
+  `tests/ctor_numeric_widening_e2e.rs`.
+- **A FULLY-QUALIFIED call to a vararg function (`kotlin.collections.listOf(1, 2, 3)`).** A vararg
+  callee packs every trailing argument into ONE array parameter. The fully-qualified path paired
+  arguments with parameters index-for-index, so the first element was measured against `Array<Any>`,
+  and the lowerer skipped the shape outright. The checker now recovers the vararg slot from the
+  candidate it selected, checks the packed arguments against the array's ELEMENT type (an explicit
+  spread keeps the array type), and records the slot on the resolved callable so the lowerer packs the
+  same arguments. Tests: `tests/fq_vararg_call_e2e.rs`.
+- **A LABELLED trailing lambda and the local return it names (`run outer@{ … return@outer v … }`).**
+  Two facts. Syntactically, a `label@` may precede a trailing lambda; the parser did not attach such a
+  `{ … }` to the call, so the callee stayed a bare name ("unresolved reference 'run'"). Semantically, an
+  explicit label REPLACES the implicit one (the callee's own name) that a `return@…` inside the body
+  targets. A labelled return is LOCAL to its lambda, so lowering must model it per splice route: the
+  receiver-less `run { … }` splice wraps the body and routes the return through a result slot, and the
+  `forEach { … }` splice — which becomes a for-each LOOP — routes it to that loop's `continue`. A label
+  that reaches neither, on a route that does not model it, now SKIPS the file: the previous
+  fall-through emitted a real return out of the enclosing function, which the JVM verifier rejects at
+  class load. Tests: `tests/labeled_lambda_return_e2e.rs`.
+
+  Still open: a labelled return from a stdlib HOF that is lowered as a CLOSURE rather than spliced
+  (`xs.sumOf tag@{ … return@tag 0 … }`) — the closure's own return type is not yet the one a local
+  return coerces to, so it skips rather than compile.
 
 ## 8. Success criteria for the PoC
 
