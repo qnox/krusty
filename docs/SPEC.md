@@ -289,22 +289,46 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the (documented, safe) over-approximation stays narrow. An extension body may now suspend on a MEMBER
   of its receiver — the receiver is an ordinary parameter and the member call threads its own
   continuation, so `gate:extension-suspend-fn-member-suspension` is retired
-  (`tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member`). Two residual shapes the
-  corpus proved are NOT about extensions keep their own bails: a cross-loop labeled jump (below), and a
+  (`tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member`). One residual shape the
+  corpus proved is NOT about extensions keeps its own bail: a
   suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
   (`Controller.run(c: suspend Controller.() -> Unit)`), which is not routed to `lower_suspend_lambda`,
   so its lambda class is a plain `FunctionN` that never threads a continuation
   (`gate:suspend-lambda-into-member-parameter`).
-- **`suspend fun` — a cross-loop labeled `break`/`continue` is refused, not miscompiled.** The flattener
-  gives each loop its own states and routes an unlabeled jump through them; a labeled jump that leaves an
-  INNER loop for an OUTER one lands on a state the assembler never reaches through the normal dispatch,
-  so the target instruction gets no stackmap frame and the method fails verification ("Expecting a stack
-  map frame"). Pre-existing and NOT receiver- or extension-specific — a plain `suspend fun test(c: Ctl)`
-  with `break@outer` reproduces it on an unmodified tree. Only the POST-TEST (`do … while`) lowering is
-  affected: its condition sits after the body, so the crossing jump targets a state the dispatch never
-  falls into. A cross-loop jump between PRE-TEST loops (`for`/`while`) assembles correctly and is left
-  alone — nested labeled loops are ordinary Kotlin. `suspending_cross_loop_labeled_jump` skips only the
-  post-test form (`tests/suspend_e2e.rs::suspend_cross_loop_labeled_break_still_skips` and
+- **A never-entered branch emits NO body — the folded jump makes what follows it dead.**
+  `emit_cond_branch` folds a constant condition: an always-taken test becomes an unconditional `goto`
+  and an always-failing one emits no branch at all. Every instruction after an unconditional `goto` is
+  reachable only by a jump, so it needs a stack-map frame; the never-taken branch has none, and the
+  verifier rejects the method outright ("Expecting a stack map frame") rather than ignoring the dead
+  code. `emit_cond_branch` therefore REPORTS whether it emitted the jump unconditionally, and both
+  callers emit nothing on the path that follows: `emit_when` skips a branch whose condition folds to
+  `false`, and the loop emitter skips the whole body/update/back-edge of a `while (false)`. kotlinc
+  emits no body for a never-entered loop either. A post-test `do … while (false)` is unaffected — its
+  body always runs once and only the folded back-edge disappears.
+  Skipping the CODE must not skip the MERGE-POINT accounting. `diverges` deliberately does not fold
+  constant conditions, so a `when` whose only falling-through branch is the dead one still reports as
+  falling through and the caller keeps emitting at the merge — which therefore still needs its frame.
+  `emit_when` marks the merge reachable for a skipped non-diverging branch; without that,
+  `if (FALSE_CONST) "a" else return "b"` merely moved the same VerifyError from the dead body to the
+  merge. (Binding a `val` to an `if` whose branches ALL diverge is a separate, pre-existing IR-backend
+  refusal — a clean skip, not a miscompile, and not specific to constant conditions.)
+  (`tests/empty_loop_body_e2e.rs::never_entered_while_emits_no_body`,
+  `::never_selected_when_branch_emits_no_body`, `::never_selected_branch_still_frames_the_merge`.)
+- **`suspend fun` — a cross-loop labeled `break`/`continue` compiles and runs.** A labeled jump leaving
+  an INNER loop for an OUTER one used to produce an unverifiable method, and was refused
+  (`suspending_cross_loop_labeled_jump`, now retired). The cause was the dead-branch defect above, not
+  the flattener's jump routing: a `do … while (false)` whose own body never suspends is dragged into the
+  state machine ONLY by such a crossing jump (`expr_jumps_to_active_frame`), and the flattener then gives
+  it a header state holding `when (false) { goto body } else { goto exit }` — the literal condition the
+  source wrote. `loop_targets`/`loop_jump_target` always picked the right target state; the emitter's
+  never-taken `goto body` branch is what carried no frame. This is why only the POST-TEST form appeared
+  broken: `do … while (false)` is the idiomatic never-repeating loop, so its header condition is a
+  constant, while a pre-test `for`/`while` cross-loop jump normally tests something dynamic. A post-test
+  loop with a NON-constant condition never failed, and a pre-test `while (false)` fails identically
+  outside any suspend body. Verified against kotlinc for `break@outer`, `continue@outer`, a suspension in
+  the inner body, and three nesting levels
+  (`tests/suspend_e2e.rs::suspend_cross_loop_labeled_break_runs`,
+  `::suspend_cross_loop_labeled_continue_and_three_levels_run`,
   `::suspend_cross_loop_labeled_jump_between_pretest_loops_runs`; corpus
   `coroutines/controlFlow/doubleBreak`).
 - **`suspend fun` — a suspension whose own ARGUMENT writes a local is refused, not miscompiled.** The

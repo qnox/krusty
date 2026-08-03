@@ -7704,9 +7704,13 @@ impl<'a> Emitter<'a> {
                 code.bind(start);
                 // A pre-test loop checks the condition before the body; a `do…while` skips this and
                 // tests at the bottom (`cont`), so the body always runs once.
-                if !post_test {
-                    // Jump out of the loop when the condition is false (fused comparison branch).
-                    self.emit_cond_branch(cond, end, false, code);
+                if !post_test && self.emit_cond_branch(cond, end, false, code) {
+                    // `while (false)`: the jump-out is unconditional, so the body/update/back-edge
+                    // that would follow are unreachable — emitting them leaves frameless dead code
+                    // the verifier rejects. kotlinc emits no body for a never-entered loop either.
+                    self.frame(end, vec![], code);
+                    code.bind(end);
+                    return;
                 }
                 // `continue` targets `cont` (run the update / bottom test); `break` targets `end`.
                 self.loop_stack.push((cont, end, label.clone()));
@@ -7724,7 +7728,11 @@ impl<'a> Emitter<'a> {
                 self.loop_stack.pop();
                 if post_test {
                     // `do…while`: loop back while the condition holds, then fall through to `end`.
-                    self.emit_cond_branch(cond, start, true, code);
+                    // A `while (true)` back-edge IS unconditional, and the only thing after it is the
+                    // `frame(end)`/`bind(end)` below — which is exactly what a dead-but-framed `end`
+                    // needs, so the flag is deliberately ignored here. Anything emitted after this
+                    // point in future would have to honour it.
+                    let _ = self.emit_cond_branch(cond, start, true, code);
                 } else {
                     self.frame(start, vec![], code);
                     code.goto(start);
@@ -10796,13 +10804,21 @@ impl<'a> Emitter<'a> {
     /// When `cond` is a primitive/reference comparison it is FUSED into the branch (`if_icmpge`,
     /// `ifnull`, `if_acmpeq`, `lcmp;ifge`, …) instead of materializing a 0/1 boolean and testing it
     /// with `ifeq`/`ifne` — the bytecode kotlinc emits for every `if`/`while`/`for` over a comparison.
+    ///
+    /// Returns `true` when the jump was emitted UNCONDITIONALLY (a constant condition that always
+    /// takes it): the caller's fall-through path is then statically unreachable, and whatever it would
+    /// emit next lands after a `goto` with nothing branching to it — dead code with no stack-map frame,
+    /// which the verifier rejects outright ("Expecting a stack map frame"). Such a caller must emit
+    /// nothing on that path. kotlinc likewise emits no body for a never-entered branch.
+    #[must_use = "an unconditionally-taken jump makes the fall-through path dead — emitting there \
+                  leaves frameless code the verifier rejects"]
     fn emit_cond_branch(
         &mut self,
         cond: u32,
         target: Label,
         jump_when_true: bool,
         code: &mut CodeBuilder,
-    ) {
+    ) -> bool {
         // A constant condition folds: `while (true)` (a `Boolean(true)` pre-test, jump-out-when-false)
         // emits NO branch — a spurious `ifeq end` to the method end leaves a branch target with no
         // stack-map frame. An always-taken branch becomes an unconditional `goto`.
@@ -10812,14 +10828,15 @@ impl<'a> Emitter<'a> {
             self.frame(target, vec![], code);
             if b == jump_when_true {
                 code.goto(target);
+                return true;
             }
-            return;
+            return false;
         }
         if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(cond) {
             use IrBinOp::*;
             if matches!(op, Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe) {
                 self.emit_compare_branch(op, lhs, rhs, target, jump_when_true, code);
-                return;
+                return false;
             }
         }
         // Fuse `x is T` / `x !is T` (a reference target) into `instanceof; if{ne,eq}` — no 0/1 boolean is
@@ -10856,7 +10873,7 @@ impl<'a> Emitter<'a> {
             } else {
                 code.ifeq(target);
             }
-            return;
+            return false;
         }
         self.emit_value(cond, code);
         self.frame(target, vec![], code);
@@ -10865,6 +10882,7 @@ impl<'a> Emitter<'a> {
         } else {
             code.ifeq(target);
         }
+        false
     }
 
     /// Emit the comparison `lhs <op> rhs` directly as a single conditional jump to `target`, taken when
@@ -11043,7 +11061,26 @@ impl<'a> Emitter<'a> {
                 Some(c) => {
                     // Skip to the next branch when this condition is false (fused comparison branch).
                     let next = code.new_label();
-                    self.emit_cond_branch(*c, next, false, code);
+                    // A condition that folds to a constant `false` never selects this branch, and the
+                    // skip above is then an unconditional `goto next` — so the body would be laid down
+                    // after it, unreachable and unframed ("Expecting a stack map frame"). The suspend
+                    // flattener builds exactly that shape: a `do … while (false)` loop dragged into the
+                    // state machine (by a labeled jump crossing out of it) becomes a header state whose
+                    // `when` tests the literal `false` (see docs/SPEC.md). Emit nothing for it.
+                    if self.emit_cond_branch(*c, next, false, code) {
+                        // Skipping the CODE must not skip the merge-point accounting: `diverges` does
+                        // not fold constant conditions, so a `when` whose only falling-through branch is
+                        // this dead one still reports as falling through, and the caller keeps emitting
+                        // at `end`. Leaving `end` unframed just moves the same VerifyError there —
+                        // `if (FALSE_CONST) "a" else return "b"` failed at the merge instead of at the
+                        // dead body. Mirror what the emitted path does, minus the code.
+                        if !self.diverges(*body) {
+                            end_reachable = true;
+                        }
+                        code.bind(next);
+                        code.set_stack(entry_height);
+                        continue;
+                    }
                     self.emit_value(*body, code);
                     if !self.diverges(*body) {
                         // A diverging branch (e.g. an inlined `error(...)`) left nothing and ended in

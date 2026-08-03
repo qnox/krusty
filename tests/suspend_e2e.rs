@@ -2136,14 +2136,19 @@ fun box(): String {\n\
     );
 }
 
-/// A labeled `break` that leaves an INNER loop for an OUTER one, inside a suspending body, is skipped.
+/// A labeled `break` that leaves an INNER `do … while` for an OUTER one, inside a suspending body.
 ///
-/// The flattener gives each loop its own states; a jump crossing a loop boundary lands on a state the
-/// assembler never reaches through the normal dispatch, so the target gets no stackmap frame. This is
-/// not receiver- or extension-specific — the plain `suspend fun` below reproduced an unverifiable
-/// method (`VerifyError: Expecting a stack map frame`) before the bail.
+/// The crossing jump is what drags the inner `do … while (false)` into the state machine — its own
+/// body never suspends — and the flattener then gives that loop a header state holding
+/// `when (false) { … }`. The emitter folds the always-false test to an unconditional `goto <else>`,
+/// but used to lay the never-taken branch down after it: unreachable, unframed, and rejected outright
+/// (`VerifyError: Expecting a stack map frame`). Nothing about the jump's target state was ever wrong
+/// — the dead branch was. See `emit_cond_branch`/`emit_when` in `src/jvm/ir_emit.rs`, docs/SPEC.md.
+///
+/// This is the corpus `codegen/box/coroutines/controlFlow/doubleBreak.kt` shape; the result matches
+/// kotlinc's.
 #[test]
-fn suspend_cross_loop_labeled_break_still_skips() {
+fn suspend_cross_loop_labeled_break_runs() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let src = "import kotlin.coroutines.*\n\
@@ -2169,10 +2174,82 @@ fun box(): String {\n\
     val r = runBlocking { test(Ctl()) }\n\
     return if (r == 2) \"OK\" else \"FAIL:$r\"\n\
 }\n";
-    assert!(
-        common::compile_and_run_box(src, "SuspendCrossLoopBreak", &[stdlib], Some(jdk.as_path()))
-            .is_none(),
-        "a cross-loop labeled jump in a suspending body must be skipped, never emitted"
+    let out = common::expect_box_run(src, "SuspendCrossLoopBreak", &[stdlib], Some(jdk.as_path()));
+    assert_eq!(
+        out.trim(),
+        "OK",
+        "a labeled break out of a post-test inner loop must run, not skip"
+    );
+}
+
+/// The `continue@outer` counterpart of [`suspend_cross_loop_labeled_break_runs`], plus a third nesting
+/// level: the crossing jump skips BOTH inner `do … while (false)` headers, each of which the flattener
+/// gives an always-false `when`. Both results are kotlinc's.
+#[test]
+fn suspend_cross_loop_labeled_continue_and_three_levels_run() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let prelude = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+class Ctl { var count = 0; var log = \"\" }\n\
+suspend fun bump(c: Ctl) { c.count++ }\n";
+    let cont = format!(
+        "{prelude}\
+suspend fun test(c: Ctl): String {{\n\
+    outer@do {{\n\
+        bump(c)\n\
+        inner@do {{\n\
+            if (c.count > 3) break@outer\n\
+            continue@outer\n\
+        }} while (false)\n\
+    }} while (true)\n\
+    return \"n=${{c.count}}\"\n\
+}}\n\
+fun box(): String = runBlocking {{ test(Ctl()) }}\n"
+    );
+    assert_eq!(
+        common::expect_box_run(
+            &cont,
+            "SuspendCrossLoopContinue",
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path())
+        )
+        .trim(),
+        "n=4",
+        "a labeled continue out of a post-test inner loop must run"
+    );
+    let three = format!(
+        "{prelude}\
+suspend fun test(c: Ctl): String {{\n\
+    a@do {{\n\
+        bump(c)\n\
+        b@do {{\n\
+            d@do {{\n\
+                if (c.count > 2) break@a\n\
+                break@b\n\
+            }} while (false)\n\
+            c.log += \"b\"\n\
+        }} while (false)\n\
+    }} while (true)\n\
+    return \"n=${{c.count}},${{c.log}}\"\n\
+}}\n\
+fun box(): String = runBlocking {{ test(Ctl()) }}\n"
+    );
+    assert_eq!(
+        common::expect_box_run(
+            &three,
+            "SuspendCrossLoopThree",
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path())
+        )
+        .trim(),
+        "n=3,",
+        "a labeled break crossing TWO post-test loops must run"
     );
 }
 
