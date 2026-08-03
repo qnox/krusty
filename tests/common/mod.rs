@@ -1511,8 +1511,11 @@ pub fn expect_box_run(
     })
 }
 
-/// [`expect_box_run`] gated on kotlin-stdlib + the JDK modules. `None` means ONLY that they are not
-/// provisioned — the legitimate skip; a rejected source panics instead of masquerading as one.
+/// [`expect_box_run`] against kotlin-stdlib + the JDK modules.
+///
+/// The `Option` is VESTIGIAL: both accessors panic when the toolchain is unprovisioned and a rejected
+/// source panics with its diagnostics, so this only ever returns `Some`. Callers keep a `let Some(..)
+/// else { return }` that can no longer fire; collapsing the signature is a mechanical follow-up.
 #[allow(dead_code)]
 pub fn expect_box_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
     let stdlib = stdlib_jar();
@@ -1535,7 +1538,8 @@ pub fn expect_compile_in_process(
     })
 }
 
-/// [`expect_compile_in_process`] gated on kotlin-stdlib + the JDK modules. `None` ⇒ unprovisioned.
+/// [`expect_compile_in_process`] against kotlin-stdlib + the JDK modules. The `Option` is vestigial,
+/// as above.
 #[allow(dead_code)]
 pub fn expect_classes_with_stdlib(src: &str, stem: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let stdlib = stdlib_jar();
@@ -1738,8 +1742,13 @@ fn checker_diags_with_classpath(main: &str, classpath: Vec<PathBuf>) -> Vec<Stri
 /// needs both). `false` ⇒ the test should skip.
 #[allow(dead_code)]
 pub fn corpus_ready() -> bool {
-    // Library forms again — a probe must report, not panic.
-    krusty::toolchain::stdlib_jar().is_some()
+    // Library forms again — a probe must report, not panic. JAVA_HOME is checked SEPARATELY from the
+    // jimage: `KRUSTY_SURVEY_JDK_MODULES` can supply the latter while the former is unset, and the box
+    // runner needs a `java` binary, so reporting "ready" on the jimage alone would panic downstream.
+    std::env::var("KRUSTY_REF_JAVA_HOME")
+        .or_else(|_| std::env::var("JAVA_HOME"))
+        .is_ok_and(|home| !home.is_empty())
+        && krusty::toolchain::stdlib_jar().is_some()
         && krusty::toolchain::jdk_modules().is_some()
         && box_corpus_dir().is_some()
 }
