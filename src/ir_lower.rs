@@ -199,6 +199,7 @@ fn lower_file_at_reporting_impl(
         ext_fun_id_by_sig: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
         companion_consts: HashMap::new(),
+        companion_computed_props: HashMap::new(),
         const_lits: HashMap::new(),
         object_const_lits: HashMap::new(),
         ext_prop_set_ids: HashMap::new(),
@@ -460,12 +461,43 @@ fn lower_file_at_reporting_impl(
         })
         .collect();
     if !top_suspend.is_empty() || !member_suspend.is_empty() {
-        // Extension suspend fns aren't modeled. (A leaf member suspend fn IS — its CPS signature on the
-        // instance method; a member suspension point is skipped by the pass.)
+        // A top-level `suspend` EXTENSION is modeled: its receiver is an ordinary leading static
+        // parameter, so the coroutine pass appends the CPS `Continuation` after it and threads call
+        // sites like any other static suspend call (registered in `suspend_funs` in pass 1b).
+        // EXCEPT one shape: an extension body that suspends on a MEMBER of its receiver
+        // (`suspend fun Controller.test() { … foo() … }` reaching `Controller.foo()` through the implicit
+        // receiver). A member suspension resumes against the machine's `this`, which an extension has
+        // not got — its receiver is a parameter slot — so the resumed call would target the wrong
+        // instance. Skip the file (never miscompile) until member suspension points are threaded.
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
-                if f.is_suspend() && f.receiver.is_some() {
+                if !f.is_suspend() || f.receiver.is_none() {
+                    continue;
+                }
+                // An INLINE suspend extension is spliced at its call sites, where the splice and the CPS
+                // rewrite do not compose: the caller's machine inlines the pre-CPS body and drops the
+                // assignment it performs (`suspend { r = 1.plusOne() }` leaves `r` at 0). Keep skipping.
+                if f.is_inline() {
                     return lo.bail("gate:extension-suspend-fn");
+                }
+                let body = match &f.body {
+                    FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
+                    FunBody::None => None,
+                };
+                let _ = body;
+                // A suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
+                // (`Controller.run(c: suspend Controller.() -> Unit)`) is not routed to
+                // `lower_suspend_lambda`, so the lambda class is a plain `FunctionN` whose body never
+                // threads a continuation — driven as a coroutine it silently completes without running
+                // the machine. Skip the file (never miscompile) while an extension suspend fn is in play.
+                if file.decls.iter().any(|&d| match file.decl(d) {
+                    Decl::Class(c) => c
+                        .methods
+                        .iter()
+                        .any(|m| m.params.iter().any(|parameter| parameter.ty.fun_suspend())),
+                    _ => false,
+                }) {
+                    return lo.bail("gate:suspend-lambda-into-member-parameter");
                 }
             }
         }
@@ -1866,6 +1898,17 @@ fn lower_file_at_reporting_impl(
             // non-const `val` initialized in the outer class's `<clinit>` (see `emit_class`).
             for cp in &c.companion_props {
                 let cty = body_prop_ty(file, info, cp, &*syms.libraries);
+                // A field-less custom-accessor property has NO static to hoist: it is realized purely
+                // as accessor methods on the synthesized `C$Companion`, built in the companion-synthesis
+                // block below. Record its type/mutability so reads and writes can find those accessors.
+                if ast::is_computed_companion_prop(cp) {
+                    if cty == Ty::Error {
+                        return None;
+                    }
+                    lo.companion_computed_props
+                        .insert((type_name(&internal), cp.name.clone()), (cty, cp.is_var));
+                    continue;
+                }
                 lo.cur_class = None;
                 lo.scope.clear();
                 lo.boxed_elem.clear();
@@ -2143,6 +2186,57 @@ fn lower_file_at_reporting_impl(
                         .push((mi as u32, fid, ret));
                     cmethod_fids.push(fid);
                 }
+                // A FIELD-LESS custom-accessor companion property is realized as accessor METHODS on
+                // the companion (kotlinc's layout: `getZERO()`/`setLEVEL(int)` on `C$Companion`, no
+                // static anywhere). Declaring them here — beside the companion's own methods, in the
+                // same `methods` map — is what makes reads/writes resolve and gives value-class-typed
+                // accessors the same name mangling a companion method already gets.
+                for cp in c
+                    .companion_props
+                    .iter()
+                    .filter(|p| ast::is_computed_companion_prop(p))
+                {
+                    let cty = body_prop_ty(file, info, cp, &*syms.libraries);
+                    if cty == Ty::Error {
+                        return None;
+                    }
+                    let cty_ir = ty_to_ir(cty);
+                    // The recorded index is the accessor's position in the companion's method-fid
+                    // vector — that is what a `MethodCall` resolves against.
+                    let getter = property_getter_name(&cp.name);
+                    let gid = lo.ir.add_fun(IrFunction {
+                        name: getter.clone(),
+                        params: vec![],
+                        ret: cty_ir,
+                        body: None,
+                        is_static: false,
+                        dispatch_receiver: Some(type_name(&comp_fq)),
+                        param_checks: vec![],
+                    });
+                    cmethods
+                        .entry(getter)
+                        .or_default()
+                        .push((cmethod_fids.len() as u32, gid, cty));
+                    cmethod_fids.push(gid);
+                    if cp.is_var {
+                        let setter = property_setter_name(&cp.name);
+                        let sid = lo.ir.add_fun(IrFunction {
+                            name: setter.clone(),
+                            params: vec![cty_ir],
+                            ret: ty_to_ir(Ty::Unit),
+                            body: None,
+                            is_static: false,
+                            dispatch_receiver: Some(type_name(&comp_fq)),
+                            param_checks: vec![],
+                        });
+                        cmethods.entry(setter).or_default().push((
+                            cmethod_fids.len() as u32,
+                            sid,
+                            Ty::Unit,
+                        ));
+                        cmethod_fids.push(sid);
+                    }
+                }
                 lo.ir.classes[comp_id as usize].methods = cmethod_fids;
                 lo.ir.classes[id as usize].companion_class = Some(type_name(&comp_fq));
                 lo.insert_class_info(
@@ -2289,6 +2383,12 @@ fn lower_file_at_reporting_impl(
                 if f.visibility.is_private() {
                     lo.ir.private_methods.insert(id);
                 }
+                // Tag a `suspend` extension exactly like a plain top-level `suspend fun`: the receiver
+                // is already an ordinary leading static parameter, so the coroutine pass appends the
+                // CPS `Continuation` after it and threads call sites unchanged.
+                if f.is_suspend() {
+                    lo.ir.suspend_funs.push(id);
+                }
             } else {
                 let sig = syms.funs.get(&f.name)?.iter().find(|sig| {
                     sig.source_file == Some(lo.file_index) && sig.source_decl == Some(d)
@@ -2316,7 +2416,9 @@ fn lower_file_at_reporting_impl(
                 let param_checks =
                     param_checks_for(f, &sig.params, &[], &std::collections::HashSet::new());
                 let id = lo.ir.add_fun(IrFunction {
-                    name: f.name.clone(),
+                    // The BYTECODE name honours `@JvmName`; call sites still resolve by the SOURCE
+                    // name (`fun_ids` below), so they reach this id and emit the annotated spelling.
+                    name: f.jvm_name(file),
                     params,
                     ret,
                     body: None,
@@ -3199,6 +3301,51 @@ fn lower_file_at_reporting_impl(
                         }
                         let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                         lo.lower_body(&m.body, &ret_ty, fid)?;
+                    }
+                    // The accessor bodies of a field-less companion property, lowered exactly like a
+                    // companion method: `this` is the companion instance at slot 0, and the setter's
+                    // parameter follows it.
+                    for cp in c
+                        .companion_props
+                        .iter()
+                        .filter(|p| ast::is_computed_companion_prop(p))
+                    {
+                        let cty = body_prop_ty(file, info, cp, &*syms.libraries);
+                        let getter_body = cp.getter.clone()?;
+                        let getter = property_getter_name(&cp.name);
+                        let (_, gid, _) = *lo.class_info(&comp_fq)?.methods[&getter].first()?;
+                        lo.scope.clear();
+                        lo.boxed_elem.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(comp_name);
+                        lo.cur_fn_name = getter.clone();
+                        let this_v = lo.fresh_value();
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
+                        let ret_ty = lo.ir.functions[gid as usize].ret;
+                        lo.lower_body(&getter_body, &ret_ty, gid)?;
+                        if !cp.is_var {
+                            continue;
+                        }
+                        let accessor = cp.setter.clone()?;
+                        let setter_body = accessor.body.clone()?;
+                        let setter = property_setter_name(&cp.name);
+                        let (_, sid, _) = *lo.class_info(&comp_fq)?.methods[&setter].first()?;
+                        lo.scope.clear();
+                        lo.boxed_elem.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(comp_name);
+                        lo.cur_fn_name = setter.clone();
+                        let this_v = lo.fresh_value();
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
+                        let value_v = lo.fresh_value();
+                        lo.scope.push((
+                            ast::setter_param_or_value(accessor.param.as_ref()),
+                            value_v,
+                            cty,
+                        ));
+                        lo.lower_body(&setter_body, &ty_to_ir(Ty::Unit), sid)?;
                     }
                 }
                 // A superclass whose constructor needs more arguments than are supplied (`object : A()`
@@ -4759,9 +4906,14 @@ fn companion_props_lowerable(c: &ast::ClassDecl) -> bool {
     // A plain companion property with an initializer and no custom accessor/delegate — emitted as a
     // static field on the OUTER class (a `const val` as a `ConstantValue`, a non-const one initialized
     // in the outer class's `<clinit>`), read as `getstatic C.X`. A `var` is the same backing field,
-    // written with `putstatic`.
+    // written with `putstatic`. A FIELD-LESS custom-accessor property has no static at all: it lowers
+    // to accessor methods on the synthesized `C$Companion` (see `is_computed_companion_prop`).
     c.companion_props.iter().all(|p| {
-        p.init.is_some() && p.getter.is_none() && p.setter.is_none() && p.delegate.is_none()
+        ast::is_computed_companion_prop(p)
+            || (p.init.is_some()
+                && p.getter.is_none()
+                && p.setter.is_none()
+                && p.delegate.is_none())
     })
 }
 
@@ -5307,6 +5459,11 @@ pub(crate) struct Lower<'a> {
     /// `(outer class internal, companion `const val` name)` → its type. Such a const lives as a
     /// `public static final` field on the OUTER class; a `C.X` read lowers to `getstatic C.X`.
     companion_consts: HashMap<(TypeName, String), Ty>,
+    /// `(outer class internal, companion property name)` → `(type, is_var)` for a FIELD-LESS
+    /// custom-accessor companion property. It has no static field at all: a `C.X` read lowers to
+    /// `getstatic C.Companion; invokevirtual C$Companion.getX()`, and a `C.X = v` write to the
+    /// matching `setX(v)`. See `is_computed_companion_prop`.
+    companion_computed_props: HashMap<(TypeName, String), (Ty, bool)>,
     /// Top-level `const val` name → its compile-time literal value. A same-file read inlines this as a
     /// constant (kotlinc's `ldc`), exactly like the reference compiler — byte-identical, no `getstatic`.
     const_lits: HashMap<String, crate::ir::IrConst>,
@@ -5697,6 +5854,19 @@ impl<'a> Lower<'a> {
         else {
             return None;
         };
+        // A FIELD-LESS custom-accessor companion property has NO static to read — the read IS the
+        // getter call on the companion singleton. This is the choke point for every read the checker
+        // records as a static-field read (an unqualified one from an instance or companion method, a
+        // member initializer, an imported one); the qualified `C.X` form is handled at its own site.
+        // Without this the emitted `getstatic C.X` names a field that was never emitted, which is a
+        // `NoSuchFieldError` at run time rather than the clean rejection this shape used to get.
+        if self
+            .companion_computed_props
+            .contains_key(&(owner, name.clone()))
+        {
+            let getter = property_getter_name(&name);
+            return self.lower_companion_computed_accessor(owner, &getter, None);
+        }
         let descriptor = match descriptor {
             Some(descriptor) => descriptor,
             None => self.runtime.type_descriptor(self.info.ty(expression))?,
@@ -7003,6 +7173,30 @@ impl<'a> Lower<'a> {
     }
 
     /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
+    /// A read or write of a FIELD-LESS custom-accessor companion property (`C.ZERO`, `C.LEVEL = v`).
+    /// It has no static field, so both directions go through the accessor methods synthesized on
+    /// `C$Companion`: read the `Companion` singleton, then invoke `getX()` / `setX(value)`. `value`
+    /// is `None` for a read. See `is_computed_companion_prop`.
+    fn lower_companion_computed_accessor(
+        &mut self,
+        outer: TypeName,
+        accessor: &str,
+        value: Option<u32>,
+    ) -> Option<u32> {
+        let outer_internal = outer.render();
+        let comp_internal = format!("{outer_internal}$Companion");
+        let field =
+            self.runtime
+                .companion_instance_field(&outer_internal, &comp_internal, "Companion")?;
+        let recv = self.platform_static_field(field);
+        let comp_name = type_name(&comp_internal);
+        let args: Vec<Option<u32>> = value.into_iter().map(Some).collect();
+        let (class_id, index, _, _) = self
+            .resolve_method_by_arity(comp_name, accessor, args.len())
+            .or_else(|| self.resolve_method_name(comp_name, accessor))?;
+        Some(self.emit_method_call(class_id, index, recv, args))
+    }
+
     /// recorded by the checker as [`ExprLowering::ObjectMemberCall`]). Reads the singleton
     /// (`getstatic Obj.INSTANCE`) as the dispatch receiver and invokes the member — the same shape a
     /// qualified `Obj.m(args)` lowers to. `call_expr` is the AST call, for generic-return coercion.
@@ -9018,6 +9212,33 @@ impl<'a> Lower<'a> {
             .any(|n| susp_names.contains(n))
         {
             return true;
+        }
+        // Top-level suspend EXTENSIONS reached through an explicit receiver (`Ctl(40).run2()`). Such a
+        // call is a `Member` callee, so the bare-`Name` scan above misses it, and it is not an instance
+        // member of the receiver's type, so the resolved-member scan below misses it too — leaving the
+        // body classified as leaf and its call emitted without a `Continuation` ("call arity mismatch").
+        // Matched by name against the EXTENSIONS only, keeping the over-approximation narrow.
+        let susp_ext_names: std::collections::HashSet<&str> = self
+            .afile
+            .decls
+            .iter()
+            .filter_map(|&d| match self.afile.decl(d) {
+                ast::Decl::Fun(f) if f.is_suspend() && f.receiver.is_some() => {
+                    Some(f.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        if !susp_ext_names.is_empty() {
+            let member_names = std::cell::RefCell::new(Vec::new());
+            collect_member_call_names(self.afile, body, &member_names);
+            if member_names
+                .into_inner()
+                .iter()
+                .any(|n| susp_ext_names.contains(n.as_str()))
+            {
+                return true;
+            }
         }
         // A MEMBER / invoke-operator suspend call (`getResult()` = `GetResult.suspend operator fun
         // invoke()`, `x.m()` where `m` is `suspend`) is invisible to the top-level-name check above —
@@ -11046,6 +11267,18 @@ impl<'a> Lower<'a> {
         Some(self.wrap_arg_prelude(dcall, prelude))
     }
 
+    /// The method name to EMIT for a resolved module top-level call. Resolution keys on the source
+    /// name, but `@JvmName` may have renamed the emitted method — and the callee's AST belongs to
+    /// another file, so the rename is read from the module-wide table the collect pass filled.
+    fn module_call_emit_name(&self, target: &ResolvedModuleTopLevelCall) -> String {
+        target
+            .source_file
+            .zip(target.source_decl)
+            .and_then(|(file, decl)| self.syms.toplevel_jvm_names.get(&(file, decl.0)))
+            .cloned()
+            .unwrap_or_else(|| target.name.clone())
+    }
+
     fn lower_cross_file_module_call(
         &mut self,
         call: AstExprId,
@@ -11071,7 +11304,7 @@ impl<'a> Lower<'a> {
             let physical_ret = ty_to_ir(target.physical_ret);
             let emitted = self.emit_cross_file_call(
                 facade,
-                target.name.clone(),
+                self.module_call_emit_name(target),
                 ir_params,
                 physical_ret,
                 lowered_args,
@@ -11176,7 +11409,7 @@ impl<'a> Lower<'a> {
         let ret = ty_to_ir(target.physical_ret);
         let emitted = self.emit_cross_file_call(
             facade,
-            target.name.clone(),
+            self.module_call_emit_name(target),
             ir_params.clone(),
             ret,
             lowered_args,
@@ -16791,6 +17024,16 @@ impl<'a> Lower<'a> {
             self.info.stmt_lowers.get(&s).cloned()
         {
             if let Stmt::AssignMember { value, .. } = self.afile.stmt(s).clone() {
+                // A FIELD-LESS custom-accessor companion property has no static to `putstatic`: the
+                // write IS the setter call on the companion singleton.
+                if self
+                    .companion_computed_props
+                    .contains_key(&(owner, name.clone()))
+                {
+                    let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
+                    let setter = property_setter_name(&name);
+                    return self.lower_companion_computed_accessor(owner, &setter, Some(lowered));
+                }
                 // `ir.statics` holds only the statics of the file being LOWERED, so a companion
                 // declared in another file of the module has no index here. Writing one needs an
                 // external static store, which the IR has no node for (`ExternalStaticField` is a read
@@ -20920,6 +21163,11 @@ impl<'a> Lower<'a> {
                 if ret == Ty::Nothing {
                     return None;
                 }
+                // The reflection NAME stays the Kotlin source name (that is what `KFunction.name`
+                // reports), but the INVOKE must target the emitted method — which `@JvmName` may have
+                // renamed. Reading it off the resolved function keeps the two in step instead of
+                // assuming they are the same string.
+                let call_name = self.ir.functions[fid as usize].name.clone();
                 return self.make_func_ref(
                     e.0,
                     false,
@@ -20929,7 +21177,7 @@ impl<'a> Lower<'a> {
                     1,
                     crate::ir::FrDispatch::Static,
                     None,
-                    name.clone(),
+                    call_name,
                     false,
                     fn_params,
                     ret,
@@ -21602,6 +21850,15 @@ impl<'a> Lower<'a> {
                         name.clone(),
                         self.runtime.type_descriptor(*cty)?,
                     ));
+                }
+                // `C.X` where `X` is a FIELD-LESS custom-accessor companion property — there is no
+                // static to fetch, so the read IS the getter call on the companion singleton.
+                if self
+                    .companion_computed_props
+                    .contains_key(&(internal_name, name.clone()))
+                {
+                    let getter = property_getter_name(&name);
+                    return self.lower_companion_computed_accessor(internal_name, &getter, None);
                 }
             }
             if rt == Ty::Char && name == "code" {
@@ -25984,6 +26241,35 @@ fn collect_calls(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<As
         &mut |s| {
             file.any_child_stmt(s, &mut |c| {
                 collect_calls(file, c, out);
+                false
+            });
+            false
+        },
+    );
+}
+
+/// The NAME of each call made through an explicit receiver (`x.f()`). A top-level `suspend` EXTENSION
+/// reached that way is neither a bare `Name` call nor an instance member of the receiver's type, so it
+/// is invisible to both of [`Lowering::ast_body_suspends`]'s scans without this.
+fn collect_member_call_names(
+    file: &ast::File,
+    e: AstExprId,
+    out: &std::cell::RefCell<Vec<String>>,
+) {
+    if let ast::Expr::Call { callee, .. } = file.expr(e) {
+        if let ast::Expr::Member { name, .. } = file.expr(*callee) {
+            out.borrow_mut().push(name.clone());
+        }
+    }
+    file.any_child_expr(
+        e,
+        &mut |c| {
+            collect_member_call_names(file, c, out);
+            false
+        },
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                collect_member_call_names(file, c, out);
                 false
             });
             false

@@ -615,26 +615,21 @@ pub fn lower_value_classes(
         .filter(|(fid, _)| suspend_fids.contains(&(*fid as u32)))
         .map(|(fid, f)| (f.dispatch_receiver, f.name.clone(), orig_params[fid].len()))
         .collect();
-    // Suspend ⨯ value-class interplay is not yet modeled: a suspend fn's result crosses the
-    // `Continuation` `Object` boundary BOXED (kotlinc re-boxes at every suspension and unboxes on
-    // resume), while krusty's erasure keeps it unboxed — the resume-side `checkcast X` then meets the
-    // raw underlying (CCE/VerifyError). Until the boxed-resume ABI is implemented, a file where a
-    // suspend fn's LOGICAL signature (or a cross-unit suspend call's logical type) carries a value
-    // class bails → the gate SKIPS it, never miscompiles.
+    // A suspend fn's result crosses the `Continuation` `Object` boundary BOXED (kotlinc boxes at the
+    // CPS `areturn` and `checkcast X` + `unbox-impl`s on resume), while erasure would otherwise keep it
+    // unboxed. A SAME-FILE declaration is handled: step 6 boxes its tail and records the class in
+    // `suspend_boxed_value_class_returns` for the coroutine pass's resume side. A CROSS-UNIT suspend
+    // call (`ir.suspend_calls` — a callee in another file/dependency, absent from `suspend_funs`) has
+    // no such record, so the resume side would meet a box it does not know to unwrap: still bail there.
     let mentions_vc = |t: &Ty| {
         t.non_null()
             .obj_internal()
             .is_some_and(|fq| under.contains_key(&fq))
     };
-    // Only a NON-NULL value-class RETURN is unmodeled (the resume-side `checkcast X` meets the raw
-    // underlying); VC PARAMS pass unboxed through the mangled CPS signature and work, and a nullable
-    // `X?` return is already the boxed form.
+    // Only a NON-NULL value-class RETURN is at stake; VC PARAMS pass unboxed through the mangled CPS
+    // signature and work, and a nullable `X?` return is already the boxed form.
     let vc_ret = |t: &Ty| !t.is_nullable() && mentions_vc(t);
-    let suspend_vc = suspend_fids
-        .iter()
-        .any(|&fid| orig_rets.get(fid as usize).is_some_and(vc_ret))
-        || ir.suspend_calls.values().any(vc_ret);
-    if suspend_vc {
+    if ir.suspend_calls.values().any(vc_ret) {
         return false;
     }
     let slot_types: Vec<HashMap<u32, Ty>> = ir
@@ -2883,7 +2878,25 @@ pub fn lower_value_classes(
             // BOXED value (the `!!` of a nullable safe-call yields a boxed `Z`) must `unbox-impl` it — the
             // erased return is the underlying.
             let x = *fq_name;
-            if under.contains_key(&x) {
+            if under.contains_key(&x) && suspend_fids.contains(&(fid as u32)) {
+                // …EXCEPT a `suspend fun`: the coroutine pass erases its return to `Object`, so the value
+                // leaves BOXED (kotlinc: `box-impl` before the CPS `areturn`). Box the tail exactly like a
+                // lambda's erased `Object` result and record the class, so the resume side can undo it.
+                if let Some(body) = ir.functions[fid].body {
+                    ir.functions[fid].ret = Ty::obj_name(x);
+                    box_ref_tail(
+                        ir,
+                        body,
+                        x,
+                        &under,
+                        &orig_rets,
+                        &orig_fields,
+                        &slot_types[fid],
+                        &field_getters,
+                    );
+                    ir.suspend_boxed_value_class_returns.insert(fid as u32, x);
+                }
+            } else if under.contains_key(&x) {
                 if let Some(body) = ir.functions[fid].body {
                     unbox_tail(
                         ir,

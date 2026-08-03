@@ -1319,6 +1319,14 @@ pub struct IrFile {
     /// before the CPS rewrite, so a function that is both `suspend` and value-class-typed reports the
     /// fully declared signature here rather than the half-lowered one.
     pub vc_declared_sigs: std::collections::HashMap<u32, (String, Vec<Ty>, Ty)>,
+    /// Each `suspend fun` whose LOGICAL return is a NON-NULL `@JvmInline value class` → that class's
+    /// internal name, recorded by the value-class pass as it boxes the function's tail. A CPS return
+    /// is `Object`, so the value crosses the resume boundary in its BOXED form (`X.box-impl`) — the
+    /// erasure that turns `X` into its underlying type everywhere else would otherwise leave the
+    /// coroutine pass with no way to know which class to `checkcast` + `unbox-impl` on the resume
+    /// side. Value-class knowledge stays in the value-class pass; this records only the erasure it
+    /// deliberately did NOT apply, which the coroutine pass must undo per suspension.
+    pub suspend_boxed_value_class_returns: std::collections::HashMap<u32, TypeName>,
     /// `ExprId` of each direct call to a `suspend fun` → the callee's LOGICAL return type (the source
     /// return, before CPS erasure to `Object`). Recorded by ir_lower from the resolver
     /// (`flags.suspend`), so the coroutine pass recognizes a suspend call to ANOTHER file or a classpath

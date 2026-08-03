@@ -262,6 +262,106 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`invokestatic check(Continuation)` with no continuation argument → an operand-stack VerifyError).
   Proven: `if (c && check()) return 1` drives `bar(true)`→1, `bar(false)`→2
   (`tests/suspend_e2e.rs::suspend_fun_suspension_in_and_condition`).
+- **`suspend fun` — an unnamed TEMP that is live across a suspension gets a spill slot.** Hoisting a
+  multi-suspension expression (`a() + b() + c()`) materializes one unnamed `Variable` per operand, so
+  the first operand's value must survive the *later* suspensions. The per-suspension scope snapshot
+  (`ScopeWalk`, kotlinc's positional-spill model — see `docs/POSITIONAL_SPILLS.md`) previously admitted
+  only `named: true` variables, so those temps were in the spilled union (hence stored) but in no
+  resume arm's restore list (hence read back as `null`/a wrongly-typed slot). A NAMED variable still
+  spills by lexical SCOPE (kotlinc's rule — every splice-materialization local is emitted `named` at its
+  lowering site, so scope and liveness agree for them); an unnamed TEMP now spills by LIVENESS: it is
+  included exactly when some expression that may still execute — a later statement of an enclosing list,
+  or a whole enclosing loop, which re-runs on the back-edge — reads it. Liveness rather than scope is
+  what keeps the per-kind field maxima at kotlinc's count: a dead temp would inflate them. kotlinc
+  spills a live operand the same way (`a() + b()` stores its partial `StringBuilder` in `L$0` and
+  restores it in every later arm). Proven: `runBlocking { pick(0) + pick(1) + pick(2) }` → `"abc"`
+  (`tests/feature_coverage_j_e2e.rs::suspend_when_branch_around_suspend_calls`). The model covers a
+  RECEIVER lambda too — its leading `this`/capture fields do NOT displace a temp's positional slot
+  (`tests/suspend_e2e.rs::suspend_receiver_lambda_spills_hoisted_temps`). A spilled local of type
+  `Nothing` still bails: its expression never yields a value, so the slot has no JVM type and merges to
+  `top` at a join ("Bad local variable type" — `spills_bottom_typed_local`).
+- **`suspend fun` — a `suspend` EXTENSION called through an explicit receiver is a suspension point.**
+  `ast_body_suspends` classified the CALLER's body as leaf for `Ctl(40).run2()`: a top-level suspend
+  extension reached that way is a `Member` callee, invisible to the bare-`Name` scan, and it is not an
+  instance member of the receiver's type, so the resolved-member scan misses it too. The lambda then got
+  no state machine and the call emitted without a `Continuation` ("call arity mismatch").
+  `collect_member_call_names` closes it, matched by name against the file's suspend EXTENSIONS only so
+  the (documented, safe) over-approximation stays narrow. An extension body may now suspend on a MEMBER
+  of its receiver — the receiver is an ordinary parameter and the member call threads its own
+  continuation, so `gate:extension-suspend-fn-member-suspension` is retired
+  (`tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member`). Two residual shapes the
+  corpus proved are NOT about extensions keep their own bails: a cross-loop labeled jump (below), and a
+  suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
+  (`Controller.run(c: suspend Controller.() -> Unit)`), which is not routed to `lower_suspend_lambda`,
+  so its lambda class is a plain `FunctionN` that never threads a continuation
+  (`gate:suspend-lambda-into-member-parameter`).
+- **`suspend fun` — a cross-loop labeled `break`/`continue` is refused, not miscompiled.** The flattener
+  gives each loop its own states and routes an unlabeled jump through them; a labeled jump that leaves an
+  INNER loop for an OUTER one lands on a state the assembler never reaches through the normal dispatch,
+  so the target instruction gets no stackmap frame and the method fails verification ("Expecting a stack
+  map frame"). Pre-existing and NOT receiver- or extension-specific — a plain `suspend fun test(c: Ctl)`
+  with `break@outer` reproduces it on an unmodified tree. Only the POST-TEST (`do … while`) lowering is
+  affected: its condition sits after the body, so the crossing jump targets a state the dispatch never
+  falls into. A cross-loop jump between PRE-TEST loops (`for`/`while`) assembles correctly and is left
+  alone — nested labeled loops are ordinary Kotlin. `suspending_cross_loop_labeled_jump` skips only the
+  post-test form (`tests/suspend_e2e.rs::suspend_cross_loop_labeled_break_still_skips` and
+  `::suspend_cross_loop_labeled_jump_between_pretest_loops_runs`; corpus
+  `coroutines/controlFlow/doubleBreak`).
+- **`suspend fun` — a suspension whose own ARGUMENT writes a local is refused, not miscompiled.** The
+  spill stores are emitted ahead of the call, so an argument's update to a spilled local (`foo(i++)`)
+  lands in the local but never in the field, and the resume restores the PRE-evaluation value —
+  `bars(foo(i++), foo(i++))` silently answered `"1;1;"` instead of `"1;2;"`. kotlinc has its arguments
+  on the operand stack before its `putfield`s, so its spill always sees the post-evaluation state;
+  modelling that needs the receiver/arguments materialized into typed temps ahead of the spill. Until
+  then `suspension_operand_writes_local` skips the file. It covers both suspending call shapes — a
+  static `Call` and a same-file member `MethodCall`, whose RECEIVER (`cs[i++].foo()`) is as much an
+  operand as its arguments — and fires only when the written slot is SPILLED and read somewhere outside
+  the operand: a scratch whose every read is inside the operand itself (`foo(run { t = 2; t })`) is
+  re-assigned before each read, so its stale field is never observed. This was the actual cause of the
+  corpus `suspendCallsInArguments` divergence — a silent wrong answer in an otherwise-accepted shape,
+  not a spill-slot displacement
+  (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_still_skips`,
+  `::suspend_member_call_whose_operand_writes_a_local_still_skips`,
+  `::suspend_operand_write_to_a_locally_dead_scratch_runs`).
+- **`suspend fun` — a `Nothing?` local live across a suspension is REMATERIALIZED, not spilled.**
+  `var x = null` has exactly one possible value, so kotlinc gives it no continuation field and re-emits
+  `aconst_null; astore` in each resume arm. Spilling it instead is wrong twice over: the local's
+  verification type widens from `null` to the field's `Object`, so the next typed use of it
+  (`bar(x: String?, …)`) fails with "Bad type on operand stack", and the extra field diverges from
+  kotlinc's count. `is_rematerialized_null` keeps such a local out of the spill layout and out of
+  `kind_positions`, and each arm restores it with `Const(Null)`. Continuation fields are then identical
+  to kotlinc's for the corpus `varSpilling/nullSpilling` shape (`L$0` for the crossing `String` temp,
+  `result`, `label`)
+  (`tests/suspend_e2e.rs::suspend_bottom_typed_local_across_a_suspension_is_rematerialized`).
+- **`suspend fun` — a top-level `suspend` EXTENSION function.** `suspend fun Counter.next(): Int` needs
+  no CPS machinery of its own: an extension receiver is already lowered to an ordinary LEADING static
+  parameter, so the coroutine pass appends the `Continuation` after it (`next(Counter, Continuation)
+  Object`) and threads call sites like any other static suspend call. The only thing missing was the
+  registration — pass 1b's extension branch never pushed the `FunId` into `ir.suspend_funs`, so the
+  pass saw neither the declaration nor its call sites (the call site then kept its pre-CPS arity: "call
+  arity mismatch"). Registering it there retires the blanket `gate:extension-suspend-fn` file skip.
+  Proven: `suspend fun Counter.next()` suspending on `bump(base)` → 42
+  (`tests/feature_coverage_s_e2e.rs::suspend_extension_function_on_user_type`). Two extension shapes
+  still skip. (1) An extension body that suspends on a MEMBER of its receiver: a member suspension
+  resumes against the machine's `this`, which an extension has not got — its receiver is a parameter
+  slot — so the resumed call would target the wrong instance. Fixed: see the next entry. (2) An
+  `inline suspend` extension, spliced at its call sites where the splice and the CPS rewrite do not
+  compose — the caller's machine inlines the pre-CPS body and drops the assignment it performs
+  (`suspend { r = 1.plusOne() }` leaves `r` at 0):
+  `tests/cross_file_inline_call_e2e.rs::suspend_inline_extension_cross_file_still_rejects`.
+- **`suspend fun` returning a `@JvmInline value class` — the result crosses the CPS boundary BOXED.**
+  A CPS return is `Object`, so a non-null value-class result cannot ride in its erased underlying form:
+  kotlinc emits `X.box-impl` before the `areturn` and `checkcast X` + `X.unbox-impl()` on the resume
+  side. The value-class pass runs BEFORE the coroutine pass and erases `X` to its underlying everywhere,
+  so it now boxes such a suspend function's tail (the same `box_ref_tail` a lambda's erased `Object`
+  result uses) and records the class in `ir.suspend_boxed_value_class_returns`; the coroutine pass's
+  `bind_from_r` consults that record and unwraps the box instead of applying the ordinary
+  `Object`→declared-type coercion. Value-class knowledge stays in the value-class pass — the record
+  carries only the erasure it deliberately did NOT apply. Byte-identical to kotlinc for
+  `suspend fun distance(): Meters` (`constructor-impl` → `box-impl` → `areturn`). A CROSS-UNIT suspend
+  call whose logical return is a value class (`ir.suspend_calls`, a callee in another file with no such
+  record) still skips the file. Proven: `runBlocking { compute() }` where `compute` binds `distance()`
+  and reads `m.v` → 42 (`tests/feature_coverage_s_e2e.rs::suspend_returns_value_class`).
 - **`@Metadata` writer — the suspend round-trip.** krusty now emits a `@kotlin.Metadata` annotation on
   a file facade that has top-level `suspend fun`s, so its OWN compiled output is consumable as a
   classpath dependency (a suspend fn's physical method is `Object foo(…, Continuation)` — only
@@ -2468,6 +2568,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nothing rules the builder out. Tests:
   `tests/scope_function_value_arg_e2e.rs::apply_accepts_receiver_function_value_argument`,
   `tests/lower_bail_reason_e2e.rs::gated_corpus_cases_report_precise_lower_bail`.
+- **A typealias keeps its target's type ARGUMENTS.** The parser recorded only the target's head name
+  and skipped the rest of the line, so `typealias IntList = List<Int>` aliased a RAW `List` and
+  `for (x in xs)` handed back the erased bound ("operator cannot be applied to 'Int' and 'Any'"). An
+  alias whose target carries type arguments now expands STRUCTURALLY, through the same pass and
+  use-site substitution the function-type aliases already used (`typealias Table<V> = Map<String, V>`
+  → `Table<Int>` is `Map<String, Int>`). A bare `typealias A = Foo` keeps the name map, which the
+  constructor-alias registration and classifier lookups are keyed by. Tests:
+  `tests/feature_coverage_r_e2e.rs::typealias_in_signatures_and_bodies`,
+  `tests/feature_coverage_x_e2e.rs::typealias_function_and_generic`.
+- **Sealed exhaustiveness descends the hierarchy.** A sealed subclass that is ITSELF sealed is
+  covered when all of ITS subclasses are: the hierarchy is a tree and only its LEAVES can be
+  instantiated. Checking only the DIRECT subclasses reported
+  `sealed class Node { sealed class Leaf : Node(); … }` covered by `IntLeaf`/`StrLeaf`/`Branch` as
+  non-exhaustive, demanding an `is Leaf` branch kotlinc rejects as redundant. Test:
+  `tests/feature_coverage_r_e2e.rs::nested_sealed_hierarchy`.
 
 ## 8. Success criteria for the PoC
 
@@ -3429,3 +3544,81 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `definitely_non_null_type_e2e::generic_function_constructor_still_requires_a_function_argument`
   and
   `definitely_non_null_type_e2e::concrete_secondary_beats_an_incompatible_generic_function_primary`.
+
+- **A companion object's `private` members are in scope throughout the containing class.** Member
+  access is decided on the LEXICAL enclosing chain, not the receiver chain — a nested (non-`inner`)
+  class has no outer receiver at all, yet sits inside its outer class's body. On top of that, a member
+  declared `private` inside `companion object` is reachable from the containing class's body and from
+  every class nested inside it, at any depth (`C.ZZZ`, `C.ZZZ.Deep`), because a companion's members
+  belong to the containing class's scope. That downward reach is the COMPANION's alone: a sibling
+  nested class's own `private` member stays out of reach in both directions (`C.ZZZ` cannot read
+  `C.Inner`'s private member, nor can the companion), and an unrelated top-level class still cannot
+  reach the companion's private member. Tests:
+  `resolve::tests::private_companion_member_reaches_the_containing_class_body`,
+  `companion_e2e::property_inferred_from_generic_companion_method`.
+
+- **A field-less `companion object` property is its accessors.** `companion object { val ZERO: T get()
+  = … }` has no static field anywhere: it lowers to `getZERO()` (plus `setX(T)` for a `var` with a
+  bodied setter) on the synthesized `C$Companion`, exactly as kotlinc emits it, and `C.ZERO` /
+  `C.LEVEL = v` compile to `getstatic C.Companion; invokevirtual`. Declaring the accessors beside the
+  companion's own methods gives them the same name mangling a companion method already gets, so a
+  value-class-typed accessor emits kotlinc's spelling (`getZERO-dNj3LFw()I`). The property type comes
+  from the declared type, or is inferred from an expression getter body the way an initializer would
+  be. Accessor bodies are type-checked like any other body — without that the setter's parameter had
+  no type. Because there is no field, EVERY read routes through the accessor, not only the qualified
+  `C.X` form: an unqualified read from an instance method, from a companion method, or from a member
+  initializer goes through the same getter (they are the reads the checker records as static-field
+  reads, so one choke point covers them). Every OTHER accessor shape on a companion property — a
+  getter reading `field`, a visibility-only `private set`, a `var` whose custom setter is `private`
+  (the synthesized `setX` is unconditionally public, so accepting one would allow a write kotlinc
+  rejects), an accessor on a `const` or delegated property — would still be emitted as the default
+  static accessor with the body ignored, so those stay rejected. An unqualified WRITE to such a
+  property is still an unresolved reference, as it was before. Tests:
+  `companion_e2e::companion_property_custom_accessors_run`,
+  `companion_e2e::computed_companion_property_reads_outside_a_qualified_receiver`,
+  `feature_coverage_q_e2e::value_class_companion_function`.
+
+- **`@JvmName` on a top-level function names the emitted method, and decides the clash.** The
+  annotation's constant string is the bytecode method name; call sites still resolve by the SOURCE
+  name, and each emits the annotated spelling — a same-file call and a callable reference through the
+  resolved function's own name, a CROSS-file call through a module-wide table keyed by declaration,
+  since that caller cannot see the callee's AST. A callable reference keeps the Kotlin name for
+  reflection and targets the JVM name for its invoke. Scope: top-level FUNCTIONS with a constant
+  string argument. A top-level EXTENSION is not renamed (nor is its clash key), and a non-literal
+  argument falls back to the source name — both are ABI divergences from kotlinc, not miscompiles.
+  Because a platform
+  declaration clash is a statement about JVM signatures, the top-level overload-conflict key uses the
+  emitted name rather than the source name: `fun g(x: String)` and `fun g(x: String?)` erase to one
+  descriptor and conflict while both are spelled `g`, but not once `@JvmName("gNullable")` separates
+  them — and, in the other direction, two distinct source names collapsed onto one `@JvmName` DO
+  conflict. Overload selection is unaffected; it still keys on the source name. Tests:
+  `frontend::tests::jvm_name_decides_the_top_level_clash`,
+  `jvm_name_toplevel_e2e::jvm_name_is_emitted_for_every_call_path`,
+  `resolve_parse_deep_coverage_e2e::overload_by_nullability`.
+
+- **A property reference carries its type arguments.** `::p` / `obj::p` is `KProperty0<V>` (or
+  `KMutableProperty0<V>`) and `Type::p` is `KProperty1<T, V>`, not the raw class — so `get()` reports
+  the property's own type and a member read on the result (`p.get().value`) resolves. Every reference
+  form supplies them: top-level, implicit-`this`, bound member, bound extension, unbound member,
+  unbound extension, object, and classpath. The arguments are semantic only; emission is unchanged
+  (annotating the result with its type already compiled before this). A reference whose arguments
+  cannot be determined stays raw rather than binding a wrong type, and so does one whose property
+  type the reference lowering cannot realize — a VALUE-class-typed property, whose accessor is
+  mangled (`getZ-<hash>`) and which the synthesized reference class does not spell (both flavours
+  count: a source `@JvmInline` class and a CLASSPATH one such as `UInt`, which is why the test asks
+  the provider as well as the source table), or a property
+  typed as a function WITH a receiver or context parameters, which is not realized as a plain
+  `FunctionN` there. Keeping the checker in lock-step with the lowerer that way leaves those cases
+  as clean skips instead of a `NoSuchMethodError`/`ClassCastException` at run time. Tests:
+  `mutable_property_ref_e2e::property_reference_get_reports_the_property_type`,
+  `toplevel_property_ref_e2e::toplevel_property_refs_run`.
+
+- **Compiler-realized property reads are one list, shared by checking and signature inference.**
+  `"s".length`, `c.code`, and an array's `size` are realized directly rather than through a declared
+  getter — `Char.code` in particular resolves through no getter at all, since `Char` is a primitive
+  and `code` is a stdlib extension. The checker and the signature-phase initializer inference read
+  the same `intrinsic_property_read` list, so a top-level `const val code = a.code` infers `Int`
+  instead of reporting "cannot infer the type of property"; before, the identical read type-checked
+  inside a function body or under an explicit type annotation but not when a top-level property's
+  type had to be inferred from it. Test:
+  `toplevel_property_inference_e2e::toplevel_property_cross_reference`.
