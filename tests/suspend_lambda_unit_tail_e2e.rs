@@ -86,6 +86,70 @@ fun box(): String {
     );
 }
 
+/// The same present/null safe-call tails without an earlier suspension use the leaf `invokeSuspend`
+/// path. Its result coercion must share the general state machine's `Unit?` rule; otherwise it tries to
+/// box the void safe-call IR and emits `areturn` with an empty operand stack.
+#[test]
+fn suspend_lambda_leaf_safe_call_unit_tails() {
+    run(
+        r#"
+import kotlin.coroutines.*
+
+var out = ""
+
+class Holder {
+    fun act() {
+        out += "h"
+    }
+}
+
+fun builder(c: suspend () -> Unit) {
+    c.startCoroutine(Continuation(EmptyCoroutineContext) {})
+}
+
+fun box(): String {
+    val present: Holder? = Holder()
+    val absent: Holder? = null
+    builder { present?.act() }
+    builder { absent?.act() }
+    return if (out == "h") "OK" else "FAIL $out"
+}
+"#,
+        "LeafSafeTailsKt",
+    );
+}
+
+/// A non-suspending void tail call whose ARGUMENT suspends must still be materialized. Argument
+/// evaluation is lowered ahead of the call and remains visible to the coroutine flattener; treating
+/// every call subtree containing suspension as a suspending tail would incorrectly leave the outer
+/// void call unwrapped and reintroduce the empty-stack store after the argument resumes.
+#[test]
+fn suspend_lambda_void_tail_with_suspending_argument() {
+    run(
+        r#"
+import kotlin.coroutines.*
+
+suspend fun value(): Int = 5
+
+var out = 0
+
+fun sink(value: Int) {
+    out = value
+}
+
+fun builder(c: suspend () -> Unit) {
+    c.startCoroutine(Continuation(EmptyCoroutineContext) {})
+}
+
+fun box(): String {
+    builder { sink(value()) }
+    return if (out == 5) "OK" else "FAIL $out"
+}
+"#,
+        "SuspendingArgumentTailKt",
+    );
+}
+
 /// `run { … }` — an inline-SPLICED `Unit` tail, whose value ends up in a nested block.
 #[test]
 fn suspend_lambda_inline_spliced_unit_tail() {

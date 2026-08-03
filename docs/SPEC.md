@@ -375,7 +375,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   yielding `kotlin/Unit.INSTANCE` is uniformly correct — the same coercion a `Unit` value gets in
   argument position, and what the leaf form already did. A SAFE CALL counts: its `Unit?` is a `Unit` tail
   too (the value is discarded either way, and both arms of the null test leave the stack as they found
-  it). The exception is a tail that SUSPENDS, which keeps its own shape so the flattener still sees it —
+  it). Both suspend-lambda lowering forms apply that same semantic test: the general state-machine path
+  and the leaf `invokeSuspend` path used when the body itself never suspends. The exception is a tail that
+  SUSPENDS, which keeps its own shape so the flattener still sees it —
   for a CALL that means the call node itself (its arguments are evaluated unconditionally and hoist ahead
   of it, so a suspending argument is no reason to leave the void call unwrapped), for anything else
   anywhere inside (the suspension sits in control flow rewritten in place, and that machine still SKIPS
@@ -383,7 +385,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `coroutines/intLikeVarSpilling` failures, which the sub-int/array spill bail had been skipping by proxy
   (it keyed on a machine's leading `this` field, i.e. on the callee being a receiver lambda); that bail is
   removed and those cases now compile and run. Proven box-run for a void call, a function VALUE, a `try`,
-  a safe call on both a present and a null receiver, and an inline-SPLICED tail
+  a safe call on both a present and a null receiver in the leaf and general-machine forms, a void tail
+  whose argument suspends, and an inline-SPLICED tail
   (`tests/suspend_receiver_lambda_e2e.rs`, `tests/suspend_lambda_unit_tail_e2e.rs`).
 - **A `suspend inline` callee inside a suspend lambda SKIPS (never miscompiles).** Its body must be
   spliced at the call site — the compiled method is not the one the source signature names — and the
