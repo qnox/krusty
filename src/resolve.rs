@@ -10444,6 +10444,44 @@ fn make_checker<'a>(
     }
 }
 
+fn class_declaration_label(name: &str) -> String {
+    name.rsplit('.').next().unwrap_or(name).to_string()
+}
+
+fn class_receiver_labels(
+    class: &ClassDecl,
+    symbols: &SymbolTable,
+    current: Option<Ty>,
+) -> Vec<(String, Ty, bool)> {
+    let mut labels = Vec::new();
+    let mut outer = class.inner_of.as_deref().and_then(|name| {
+        class
+            .name
+            .rsplit_once('.')
+            .and_then(|(owner, _)| symbols.classes.get(owner))
+            .or_else(|| symbols.classes.get(name))
+            .map(ClassSig::internal_name)
+            .or_else(|| existing_type_name(name))
+    });
+    while let Some(internal) = outer {
+        let Some(signature) = symbols.class_by_type_name(internal) else {
+            break;
+        };
+        let declaration = symbols.class_simple_name(internal).unwrap_or("<anonymous>");
+        labels.push((
+            class_declaration_label(declaration),
+            Ty::obj_name(signature.internal_name()),
+            true,
+        ));
+        outer = signature.inner_of_name();
+    }
+    labels.reverse();
+    if let Some(ty) = current {
+        labels.push((class_declaration_label(&class.name), ty, true));
+    }
+    labels
+}
+
 fn anonymous_body_bound_names(
     file: &File,
     declaration: DeclId,
@@ -11076,8 +11114,10 @@ fn preinfer_returns_pass(
                     .map(|name| class_tparams.erase(name))
                     .collect::<Vec<_>>(),
             );
+            let labels_depth = pre.this_labels.len();
             pre.set_this_ty(Some(dispatch_ty));
-            pre.this_labels.push((cl.name.clone(), dispatch_ty, true));
+            pre.this_labels
+                .extend(class_receiver_labels(cl, pre.syms, Some(dispatch_ty)));
             let properties = pre.scoped_properties(internal_name);
             for (property_index, property) in cl.body_props.iter().enumerate() {
                 let Some((receiver, getter)) = member_extension_property_preinfer_body(property)
@@ -11134,7 +11174,7 @@ fn preinfer_returns_pass(
                     pre.reified_tparams.clear();
                 }
             }
-            pre.this_labels.pop();
+            pre.this_labels.truncate(labels_depth);
             pre.set_this_ty(None);
         }
     }
@@ -11463,36 +11503,9 @@ fn check_file_at_impl_mode(
                 // Push the enclosing-class labels for the duration of this class's member checks: the
                 // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
                 // class's own label (`this@C`) innermost. Walk `inner_of` outward.
-                let mut label_depth = 0usize;
-                {
-                    let mut chain: Vec<(String, Ty)> = Vec::new();
-                    let mut outer = cl.inner_of.as_deref().and_then(|o| {
-                        syms.classes
-                            .get(o)
-                            .map(ClassSig::internal_name)
-                            .or_else(|| existing_type_name(o))
-                    });
-                    while let Some(o) = outer {
-                        if let Some(s) = syms.class_by_type_name(o) {
-                            let key = syms
-                                .class_simple_name(o)
-                                .unwrap_or("<anonymous>")
-                                .to_string();
-                            chain.push((key, Ty::obj_name(s.internal_name())));
-                            outer = s.inner_of_name();
-                        } else {
-                            break;
-                        }
-                    }
-                    for (n, ty) in chain.into_iter().rev() {
-                        c.this_labels.push((n, ty, true));
-                        label_depth += 1;
-                    }
-                }
-                if let Some(ty) = c.this_ty {
-                    c.this_labels.push((cl.name.clone(), ty, true));
-                    label_depth += 1;
-                }
+                let labels = class_receiver_labels(cl, c.syms, c.this_ty);
+                let label_depth = labels.len();
+                c.this_labels.extend(labels);
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
                 c.check_no_erased_clash(&methods);
                 if let Some(internal) = syms.classes.get(&cl.name).map(ClassSig::internal_name) {
@@ -34340,6 +34353,78 @@ val result = object { fun value(): String = captured }
             .iter()
             .map(|diagnostic| diagnostic.msg.clone())
             .collect()
+    }
+
+    #[test]
+    fn nested_class_self_label_uses_the_simple_declaration_name() {
+        let (errors, _) = check(
+            "class Outer {\n\
+                 inner class FilterAction {\n\
+                     init {\n\
+                         \"receiver\".apply { this@FilterAction }\n\
+                     }\n\
+                 }\n\
+             }",
+        );
+
+        assert!(
+            errors.is_empty(),
+            "nested class self-label should resolve: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nested_class_outer_label_uses_the_simple_declaration_name() {
+        let (errors, _) = check(
+            "class Outer {\n\
+                 inner class Middle {\n\
+                     inner class Leaf {\n\
+                         init {\n\
+                             \"receiver\".apply { this@Middle }\n\
+                         }\n\
+                     }\n\
+                 }\n\
+             }",
+        );
+
+        assert!(
+            errors.is_empty(),
+            "nested class outer label should resolve: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nested_class_outer_label_participates_in_return_preinference() {
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(
+            "class Outer(val value: String) {\n\
+                 inner class Middle {\n\
+                     fun outerValue() = this@Outer.value\n\
+                 }\n\
+             }",
+            &mut diagnostics,
+        );
+        let file = parse(
+            "class Outer(val value: String) {\n\
+                 inner class Middle {\n\
+                     fun outerValue() = this@Outer.value\n\
+                 }\n\
+             }",
+            &tokens,
+            &mut diagnostics,
+        );
+        let files = vec![file];
+        let mut symbols = collect_signatures(&files, &mut diagnostics);
+
+        preinfer_returns_pass(&files[0], 0, &mut symbols);
+
+        let method = symbols
+            .classes
+            .get("Outer.Middle")
+            .and_then(|class| class.methods.get("outerValue"))
+            .and_then(|overloads| overloads.first())
+            .expect("nested method signature");
+        assert_eq!(method.ret, Ty::String);
     }
 
     fn ok(src: &str) {
