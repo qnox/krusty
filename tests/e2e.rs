@@ -10,6 +10,8 @@ mod abstract_instantiation_check_e2e;
 mod abstract_member_check_e2e;
 #[path = "abstract_modifier_consistency_e2e.rs"]
 mod abstract_modifier_consistency_e2e;
+#[path = "annotated_setter_parameter_e2e.rs"]
+mod annotated_setter_parameter_e2e;
 #[path = "annotation_instantiation_e2e.rs"]
 mod annotation_instantiation_e2e;
 #[path = "anon_fun_statement_e2e.rs"]
@@ -108,6 +110,8 @@ mod catch_annotation_comma_e2e;
 mod checker_operator_methods_e2e;
 #[path = "class_body_e2e.rs"]
 mod class_body_e2e;
+#[path = "class_header_newline_e2e.rs"]
+mod class_header_newline_e2e;
 #[path = "class_literal_e2e.rs"]
 mod class_literal_e2e;
 #[path = "class_metadata_roundtrip.rs"]
@@ -140,12 +144,16 @@ mod classpath_covariant_override_e2e;
 mod classpath_ctor_vs_same_named_function_e2e;
 #[path = "classpath_data_copy_e2e.rs"]
 mod classpath_data_copy_e2e;
+#[path = "classpath_default_arg_subtype_e2e.rs"]
+mod classpath_default_arg_subtype_e2e;
 #[path = "classpath_default_args_e2e.rs"]
 mod classpath_default_args_e2e;
 #[path = "classpath_default_vararg_call_e2e.rs"]
 mod classpath_default_vararg_call_e2e;
 #[path = "classpath_enum_regex_vc_e2e.rs"]
 mod classpath_enum_regex_vc_e2e;
+#[path = "classpath_extension_default_implicit_receiver_e2e.rs"]
+mod classpath_extension_default_implicit_receiver_e2e;
 #[path = "classpath_function_reference_e2e.rs"]
 mod classpath_function_reference_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
@@ -158,6 +166,8 @@ mod classpath_jdk_static_e2e;
 mod classpath_jvmstatic_object_property_e2e;
 #[path = "classpath_member_metadata_alignment_e2e.rs"]
 mod classpath_member_metadata_alignment_e2e;
+#[path = "classpath_member_receiver_lambda_e2e.rs"]
+mod classpath_member_receiver_lambda_e2e;
 #[path = "classpath_named_arg_skips_default_e2e.rs"]
 mod classpath_named_arg_skips_default_e2e;
 #[path = "classpath_nested_ctor_reordered_named_valueclass_e2e.rs"]
@@ -188,6 +198,8 @@ mod classpath_protected_member_e2e;
 mod classpath_qualified_nested_named_ctor_e2e;
 #[path = "classpath_receiver_lambda_e2e.rs"]
 mod classpath_receiver_lambda_e2e;
+#[path = "classpath_receiver_lambda_overload_e2e.rs"]
+mod classpath_receiver_lambda_overload_e2e;
 #[path = "classpath_reified_inline_toplevel_e2e.rs"]
 mod classpath_reified_inline_toplevel_e2e;
 #[path = "classpath_runblocking_e2e.rs"]
@@ -196,12 +208,16 @@ mod classpath_runblocking_e2e;
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]
 mod classpath_subtype_ctor_arg_e2e;
+#[path = "classpath_super_call_e2e.rs"]
+mod classpath_super_call_e2e;
 #[path = "classpath_super_ctor_args_e2e.rs"]
 mod classpath_super_ctor_args_e2e;
 #[path = "classpath_suspend_receiver_lambda_e2e.rs"]
 mod classpath_suspend_receiver_lambda_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
+#[path = "classpath_top_level_property_e2e.rs"]
+mod classpath_top_level_property_e2e;
 #[path = "classpath_type_ref_e2e.rs"]
 mod classpath_type_ref_e2e;
 #[path = "classpath_typealias_e2e.rs"]
@@ -640,6 +656,8 @@ mod mangled_member_null_arg_e2e;
 mod map_entry_destructure_e2e;
 #[path = "map_get_nullable_elvis_e2e.rs"]
 mod map_get_nullable_elvis_e2e;
+#[path = "mapped_collection_scope_e2e.rs"]
+mod mapped_collection_scope_e2e;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
@@ -844,6 +862,8 @@ mod resolver_regression_e2e;
 mod result_e2e;
 #[path = "run_noreceiver_e2e.rs"]
 mod run_noreceiver_e2e;
+#[path = "safe_call_any_member_e2e.rs"]
+mod safe_call_any_member_e2e;
 #[path = "safe_call_argument_list_e2e.rs"]
 mod safe_call_argument_list_e2e;
 #[path = "safe_call_e2e.rs"]

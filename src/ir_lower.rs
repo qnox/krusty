@@ -12939,7 +12939,15 @@ impl<'a> Lower<'a> {
                 owner,
                 source,
                 vararg,
+                requires_splice,
             } => {
+                // The checker forwards the resolved callable's generic `MustInline` capability.
+                // Do not infer call legality here from whether a facade happens to be emitted: a
+                // reified method can exist to publish inline code while its erased body remains an
+                // illegal direct target. After the splicer has had its opportunity, this path bails.
+                if requires_splice {
+                    return None;
+                }
                 // The recorded receiver matches the call site directly, or in its NON-NULL form
                 // (a safe call records the non-null receiver — and a nullable PRIMITIVE keys
                 // apart from the unboxed one under `erased_recv`, so compare both ways). The
@@ -13012,11 +13020,14 @@ impl<'a> Lower<'a> {
                     .and_then(|(file, declaration)| {
                         self.syms
                             .source_extension_function(file, ast::DeclId(declaration))
-                            .and_then(|(declared, _)| {
-                                declared
-                                    .non_null()
-                                    .is_ty_param()
-                                    .then(|| declared.erased_recv())
+                            // A sibling facade's static descriptor is defined by the declaration,
+                            // not by the possibly-more-specific call-site receiver.
+                            .map(|(declared, _)| {
+                                if declared.non_null().is_ty_param() {
+                                    declared.erased_recv()
+                                } else {
+                                    declared
+                                }
                             })
                     })
                     .unwrap_or(receiver);
@@ -13039,8 +13050,11 @@ impl<'a> Lower<'a> {
                     }
                     None => return None,
                 };
-                let receiver_value =
-                    self.spill_receiver_before_args(receiver_value, recv_ty, &mut prelude);
+                let receiver_value = self.spill_receiver_before_args(
+                    receiver_value,
+                    physical_receiver,
+                    &mut prelude,
+                );
                 let mut lowered = vec![receiver_value];
                 lowered.extend(arguments);
                 let mut physical_params = Vec::with_capacity(selected_params.len() + 1);
@@ -14321,12 +14335,27 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
+        self.add_property_read_target(receiver, owner, name, ty, interface, None)
+    }
+
+    /// Construct a property read with the exact declaration target selected by resolution. The caller
+    /// does not classify source/module/classpath origins; it merely forwards the semantic selection.
+    fn add_property_read_target(
+        &mut self,
+        receiver: u32,
+        owner: TypeName,
+        name: &str,
+        ty: Ty,
+        interface: bool,
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
+    ) -> u32 {
         let read = self.ir.add_expr(IrExpr::PropertyRead {
             receiver,
             owner,
             name: name.to_string(),
             ty,
             interface,
+            field,
             operation: None,
         });
         self.record_property_declaration_type(read, owner, name, ty);
@@ -14697,13 +14726,17 @@ impl<'a> Lower<'a> {
         // decision, made from the owner's declaration. Without the record the read resolved to something
         // else, and the caller's other paths handle it.
         let ty = self.info.ty(e);
-        if let Some(ExprLowering::MemberPropertyRead { owner, interface }) =
-            self.info.expr_lowers.get(&e)
+        if let Some(ExprLowering::MemberPropertyRead {
+            owner,
+            interface,
+            field,
+        }) = self.info.expr_lowers.get(&e)
         {
             if self.source_property_read_needs_generic_value_class_box(*owner, name, e) {
                 return None;
             }
-            let read = self.add_property_read(recv, *owner, name, ty, *interface);
+            let read =
+                self.add_property_read_target(recv, *owner, name, ty, *interface, field.clone());
             return Some(read);
         }
         // A MEMBER EXTENSION PROPERTY read reached through the implicit-receiver path.
@@ -15218,11 +15251,20 @@ impl<'a> Lower<'a> {
         let mut a = vec![recv];
         let explicit_params = c.params.get(1..)?;
         let mut arg_prelude = Vec::new();
+        // Argument-to-parameter binding is a CHECKER decision. Lowering consumes the same semantic slot
+        // handoff for labelled, reordered, positional-default, and trailing-lambda calls; it must not
+        // rediscover a different mapping based on this callable's classpath-extension emit branch.
         if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
             let (slot_args, prelude) =
                 self.lower_call_slot_args_source_order(args, &slots, explicit_params, true)?;
             arg_prelude = prelude;
             if c.default_call {
+                // This emitter currently writes one 32-bit `$default` mask. The checker may faithfully
+                // record a larger semantic map for another consumer; decline here instead of shifting by
+                // an invalid amount or emitting an ABI shape this branch cannot represent.
+                if slots.len() > 32 {
+                    return None;
+                }
                 let mask: i32 = slots
                     .iter()
                     .enumerate()
@@ -20718,6 +20760,15 @@ impl<'a> Lower<'a> {
                 let receiver = self.coerce_argument_value(receiver, this_ty, target)?;
                 return Some(self.emit_extension_property_get(e, *getter, receiver));
             }
+            // A resolved TOP-LEVEL property read: the selected facade's static getter, no receiver. The
+            // callable carries its origin/owner, so this semantic handoff is identical for every provider.
+            if let Some(ExprLowering::TopLevelPropertyGet { getter }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let physical_ret = getter.physical_ret;
+                let call = self.emit_library_static_call(*getter, Vec::new(), false);
+                return Some(self.coerce_erased_call_result(e, call, &physical_ret, true));
+            }
             if let Some(ExprLowering::IntrinsicProperty(member)) =
                 self.info.expr_lowers.get(&e).cloned()
             {
@@ -21113,6 +21164,28 @@ impl<'a> Lower<'a> {
         name: String,
     ) -> Option<u32> {
         let t = {
+            if let Some(ExprLowering::EnumEntriesRead { owner, accessor }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let Some(accessor) = accessor else {
+                    // The enum kind makes `entries` a valid semantic property, but not every symbol
+                    // provider advertises a direct static realization. Decline before emission until
+                    // an alternative realization (for example a generated cached mapping) is modeled;
+                    // never guess from whether the declaration came from source or a dependency.
+                    self.set_bail("enum entries has no direct accessor");
+                    return None;
+                };
+                let accessor = *accessor;
+                let target_owner = accessor.owner.unwrap_or(owner);
+                let target_name = accessor.physical_name.unwrap_or(accessor.name);
+                return Some(self.emit_static_call(
+                    target_owner,
+                    target_name,
+                    accessor.descriptor,
+                    accessor.inline,
+                    vec![],
+                ));
+            }
             if let Some(ExprLowering::IntrinsicProperty(member)) =
                 self.info.expr_lowers.get(&e).cloned()
             {
@@ -21293,7 +21366,20 @@ impl<'a> Lower<'a> {
                 };
                 // All property realizations use the same semantic read operation. The backend owns
                 // the field-versus-accessor decision, including computed and delegated properties.
-                self.lower_field_read_on(recv, &recv_internal, &name, e, slot_ty)?
+                match self.lower_field_read_on(recv, &recv_internal, &name, e, slot_ty) {
+                    Some(read) => read,
+                    None if matches!(
+                        self.info.expr_lowers.get(&e),
+                        Some(ExprLowering::MemberPropertyRead { field: Some(_), .. })
+                    ) =>
+                    {
+                        // The receiver is emitted in this file, but the selected declaration may be
+                        // inherited from any provider. Forward the checker-selected target through the
+                        // ordinary member-read path instead of branching on that provider's origin.
+                        self.lower_member_read_on(recv, rt, &name, e)?
+                    }
+                    None => return None,
+                }
             } else {
                 // A property read on a builtin/library/another-file receiver (`s.length`,
                 // `list.size`, a sibling class's `getX()`): resolved generically through the shared
@@ -22809,6 +22895,11 @@ impl<'a> Lower<'a> {
                             let (v, _) = self.lookup(src)?;
                             a.push(self.emit_get_value(v));
                         }
+                        // Both vectors are the PHYSICAL callable shape: signature collection prepends
+                        // context parameters to `params`, and parser normalization prepends the same
+                        // declarations to `FunDecl::params`, from which `param_meta` is built. Source
+                        // arguments address only the value suffix, so slice both vectors at the same
+                        // boundary before handing them to the origin-neutral argument mapper.
                         let (mut value_args, prelude) =
                             self.lower_args_defaulted(e, &meta[ctx_n..], &args, &params[ctx_n..])?;
                         a.append(&mut value_args);
@@ -23697,26 +23788,42 @@ impl<'a> Lower<'a> {
                 }
                 let this = self.emit_get_value(0);
                 let target = self.info.resolved_super_call(e).cloned()?;
-                let descriptor = target.descriptor.clone().map(Some).unwrap_or_else(|| {
-                    self.runtime.method_descriptor(&target.params, target.ret)
-                })?;
-                if target.params.len() != args.len() {
+                // Every JVM fact comes from the target the checker recorded — it states its own emitted
+                // name (which a Kotlin rename may differ from), descriptor, and erased result. Only a
+                // source target leaves the descriptor to be derived from the signature being emitted.
+                let owner = target.owner()?;
+                let jvm_name = target.emitted_name(&name).to_string();
+                let descriptor = match target.descriptor() {
+                    Some(descriptor) => descriptor.to_string(),
+                    None => self
+                        .runtime
+                        .method_descriptor(target.params(), target.ret())?,
+                };
+                let params = target.params().to_vec();
+                if params.len() != args.len() {
                     return None;
                 }
                 let mut a = Vec::new();
-                for (arg, pt) in args.iter().zip(&target.params) {
+                for (arg, pt) in args.iter().zip(&params) {
                     a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                 }
-                return Some(self.emit_call(
+                let call = self.emit_call(
                     Callee::Special {
-                        owner: target.owner,
-                        name: name.clone(),
+                        owner,
+                        name: jvm_name,
                         descriptor,
-                        interface: target.interface,
+                        interface: target.interface(),
                     },
                     Some(this),
                     a,
-                ));
+                );
+                // A generic classpath member's descriptor returns the erased `Object` while `ret` is the
+                // type recovered from the base's bound arguments (`ArrayList<Int>.get` ⇒ `Int`); narrow
+                // it, or the value's physical type contradicts its use.
+                return Some(match target.erased_ret() {
+                    Some(erased) => self.coerce_to_static(call, target.ret(), erased),
+                    None => call,
+                });
             }
             // Reified kotlinx.serialization round-trip: `fmt.encodeToString(x)` /
             // `fmt.decodeFromString<C>(s)` are `reified inline` (uncallable directly) — desugar to

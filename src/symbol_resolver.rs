@@ -579,7 +579,23 @@ pub(crate) fn specialized_lambda_member_params(
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    specialized_lambda_params(&member.params, member.generic_sig.as_ref(), args, type_args)
+    // A `suspend` member's generic signature carries the trailing `Continuation` that its LOGICAL
+    // parameter list drops. Trim it so the two align — otherwise specialization bails on the length
+    // check and every lambda argument of a suspend member loses its expected shape.
+    let trimmed;
+    let generic_sig = match member.generic_sig.as_ref() {
+        Some(signature)
+            if member.suspend() && signature.params.len() == member.params.len() + 1 =>
+        {
+            trimmed = GenericSig {
+                params: signature.params[..member.params.len()].to_vec(),
+                ..signature.clone()
+            };
+            Some(&trimmed)
+        }
+        signature => signature,
+    };
+    specialized_lambda_params(&member.params, generic_sig, args, type_args)
 }
 
 fn specialized_lambda_params(
@@ -655,6 +671,28 @@ fn specialize_property(mut property: PropertyInfo, receiver: Ty) -> PropertyInfo
     property.ty = ty_subst(property.ty, &binds);
     property.getter.ret = property.ty;
     property
+}
+
+/// Extract the property half of a namespace record. The namespace arrives behind a shared memo handle, so
+/// candidates are cloned into the selection's owned working set; both top-level and extension-property
+/// selection consume this exact helper, preventing their `Properties`/`Both` handling from drifting when
+/// [`crate::libraries::Callables`] gains another mixed shape.
+fn property_overloads(callables: &crate::libraries::Callables) -> Vec<PropertyInfo> {
+    match callables {
+        crate::libraries::Callables::Properties(properties)
+        | crate::libraries::Callables::Both { properties, .. } => properties.overloads.clone(),
+        crate::libraries::Callables::None | crate::libraries::Callables::Functions(_) => Vec::new(),
+    }
+}
+
+/// Source visibility for package-level properties, applied BEFORE ambiguity/receiver ranking. A JVM
+/// `internal`/private declaration may still have a public bytecode accessor, so accessor flags alone must
+/// never make it callable from another module. Module-origin facts remain governed by the module's
+/// file-aware [`SymbolSource`] overlay (which admits same-file private and hides sibling private); applying
+/// a second, file-blind filter here would incorrectly reject the former.
+fn source_property_visible(property: &PropertyInfo) -> bool {
+    property.visibility == Visibility::Public
+        || matches!(property.getter.origin, Origin::Module { .. })
 }
 
 fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> Ty {
@@ -1676,6 +1714,24 @@ impl<'a> SymbolResolver<'a> {
             .unwrap_or_default()
     }
 
+    /// The receiver-less TOP-LEVEL property this unqualified name denotes, over the resolver's import
+    /// scope (`import pkg.plugin`, `import pkg.*`, or the file's own package). The property analogue of
+    /// the `SymRecv::TopLevel` callable query: a read of the name is a read of this property, realized
+    /// through its declaring facade's static getter. `None` when the name is not a top-level property, or
+    /// when two in-scope packages declare one (ambiguous — the caller reports the name unresolved rather
+    /// than picking arbitrarily).
+    pub fn resolve_top_level_property(&self, name: &str) -> Option<PropertyInfo> {
+        let mut candidates = self
+            .symbols_in_scope(name)
+            .into_iter()
+            .flat_map(|(_, symbols)| property_overloads(&symbols.callables))
+            .filter(|property| property.kind == PropKind::TopLevel)
+            .filter(|property| property.context_count == 0)
+            .filter(source_property_visible);
+        let selected = candidates.next()?;
+        candidates.next().is_none().then_some(selected)
+    }
+
     /// Select the nearest in-scope extension property, rejecting equal-rank candidates.
     pub fn resolve_extension_property(
         &self,
@@ -1686,15 +1742,10 @@ impl<'a> SymbolResolver<'a> {
         let mut candidates = self
             .symbols_in_scope(name)
             .into_iter()
-            .flat_map(|(_, symbols)| match &symbols.callables {
-                crate::libraries::Callables::Properties(properties) => properties.overloads.clone(),
-                crate::libraries::Callables::Both { properties, .. } => {
-                    properties.overloads.clone()
-                }
-                _ => Vec::new(),
-            })
+            .flat_map(|(_, symbols)| property_overloads(&symbols.callables))
             .filter(|property| property.kind == PropKind::Extension)
             .filter(|property| property.context_count == 0)
+            .filter(source_property_visible)
             .filter_map(|property| {
                 let declared = ty_subst(property.receiver?, &std::collections::HashMap::new());
                 if receiver.is_nullable() && !declared.is_nullable() {
@@ -1751,7 +1802,16 @@ impl<'a> SymbolResolver<'a> {
     /// finding one. Returns the selected declaration owner and its interface shape beside the logical
     /// property type so lowering does not rediscover either from a source-specific table. Nearest
     /// declaration wins, as for any member.
-    pub fn member_property_type(&self, recv: Ty, name: &str) -> Option<(TypeName, Ty, bool)> {
+    pub fn member_property_type(
+        &self,
+        recv: Ty,
+        name: &str,
+    ) -> Option<(
+        TypeName,
+        Ty,
+        bool,
+        Option<crate::libraries::InstanceFieldRef>,
+    )> {
         let receiver_accessible = !recv.is_nullable()
             && recv
                 .kotlin_class_internal()
@@ -1765,23 +1825,67 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: &self.lexical_classes,
             receiver: Some(recv),
         };
-        self.src
-            .property_members(recv, name)
-            .overloads
-            .into_iter()
-            .filter(|property| {
-                property.kind == PropKind::Member
-                    && property.context_count == 0
-                    && member_visible(Some(&access), property.visibility, property.owner)
-            })
-            .min_by_key(|property| property.receiver_rank)
-            .map(|property| {
+        // Walk properties and physical fields together, one classifier rung at a time. This is the
+        // single precedence boundary for same-file, module, dependency-source, and compiled shapes:
+        // a declaration on the nearest classifier wins, and an unreadable/static field still hides an
+        // inherited readable field. Providers only report declarations; none performs its own MRO walk.
+        let mut queue = std::collections::VecDeque::from([recv]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = queue.pop_front() {
+            let internal = current.obj_internal()?;
+            if !seen.insert(internal) {
+                continue;
+            }
+            let shape = self.src.resolve_type_name(internal)?;
+            let local_property = self
+                .src
+                .property_members(current, name)
+                .overloads
+                .into_iter()
+                .filter(|property| {
+                    property.kind == PropKind::Member
+                        && property.context_count == 0
+                        && property.receiver_rank == 0
+                })
+                .min_by_key(|property| property.receiver_rank);
+            if let Some(property) = local_property {
+                if !member_visible(Some(&access), property.visibility, property.owner) {
+                    return None;
+                }
                 let interface = self
                     .src
                     .resolve_type_name(property.owner)
                     .is_some_and(|owner| owner.is_interface());
-                (property.owner, property.ty, interface)
-            })
+                return Some((property.owner, property.ty, interface, None));
+            }
+            if let Some(field) = shape.fields.iter().find(|field| field.name == name) {
+                if field.is_static || field.visibility != crate::types::Visibility::Public {
+                    return None;
+                }
+                let arguments = current.type_args();
+                let fully_applied = shape.type_params.len() == arguments.len();
+                let ty = if fully_applied {
+                    let bindings = shape
+                        .type_params
+                        .iter()
+                        .cloned()
+                        .zip(arguments.iter().copied())
+                        .collect();
+                    ty_subst(field.ty, &bindings)
+                } else {
+                    field.erased_ty
+                };
+                let target = crate::libraries::InstanceFieldRef {
+                    owner: internal,
+                    name: field.name.clone(),
+                    ty,
+                    descriptor: field.descriptor.clone(),
+                };
+                return Some((internal, ty, shape.is_interface(), Some(target)));
+            }
+            queue.extend(self.src.direct_supertypes(current));
+        }
+        None
     }
 
     /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance
@@ -2117,9 +2221,13 @@ impl<'a> SymbolResolver<'a> {
         )
     }
 
+    /// Resolve `super.f(…)` against a classpath base class. `recv` is the APPLIED supertype
+    /// (`ArrayList<Int>` for `class C : ArrayList<Int>()`), not the bare classifier: the member query is
+    /// receiver-coupled, so its type arguments are what recover a generic return (`E` → `Int`) instead of
+    /// erasing it to `Any`.
     pub(crate) fn resolve_super_instance(
         &self,
-        internal: TypeName,
+        recv: Ty,
         name: &str,
         args: &[CallArgKind],
     ) -> Option<LibraryMember> {
@@ -2129,7 +2237,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: &self.lexical_classes,
             receiver: None,
         };
-        resolve_instance_name(self.lib, internal, name, args, Some(&access))
+        resolve_instance_ty(self.lib, recv, name, args, Some(&access))
     }
 
     /// Overload-resolve a top-level call against an already-built [`FunctionSet`] (from the resolver's
@@ -2669,6 +2777,56 @@ impl<'a> SymbolResolver<'a> {
         Some(mapping)
     }
 
+    /// The parameter types a `$default` synthetic would actually receive `args` at, or `None` when it
+    /// cannot take the call. The measure a defaulted call is RANKED by: only the parameters the call
+    /// supplies distinguish two candidates, the omitted ones are filled identically either way. Reads the
+    /// mapping the same way the emit does — by LABEL when the arguments name their parameters, else
+    /// positionally — so ranking never disagrees with what it ranks.
+    fn default_call_shape(
+        &self,
+        info: &FunctionInfo,
+        args: &[Ty],
+        slots: Option<&[usize]>,
+    ) -> Option<Vec<Ty>> {
+        if !info.public() && !info.flags.inline.must_inline() {
+            return None;
+        }
+        let params = &info.callable.params;
+        let mapping = match slots {
+            Some(slots) => self.named_default_arg_mapping(info, params, args, slots)?,
+            None => self.default_arg_mapping(info, params, args)?,
+        };
+        Some(
+            mapping
+                .iter()
+                .filter_map(|(parameter, _)| params.get(*parameter).copied())
+                .collect(),
+        )
+    }
+
+    /// Select a `$default` candidate with the SAME strict-dominance primitive every other overload
+    /// family uses. Candidates with mutually assignable supplied shapes are semantically equivalent;
+    /// sorting by declared arity first makes the documented secondary rule (fill fewer defaults) choose
+    /// which equivalent fact survives de-duplication. Incomparable maximal shapes remain ambiguous rather
+    /// than falling through to classpath/declaration order.
+    fn select_default_candidate<'b>(
+        &self,
+        candidates: impl IntoIterator<Item = &'b FunctionInfo>,
+        args: &[Ty],
+        slots: Option<&[usize]>,
+    ) -> CandidateSelection<&'b FunctionInfo> {
+        let mut applicable = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                Some((self.default_call_shape(candidate, args, slots)?, candidate))
+            })
+            .collect::<Vec<_>>();
+        applicable.sort_by_key(|(_, candidate)| candidate.callable.params.len());
+        unique_most_specific(applicable, |_, sub, sup| {
+            resolution_subtype(self.lib, &self.src, sub, sup)
+        })
+    }
+
     fn default_arg_mapping(
         &self,
         info: &FunctionInfo,
@@ -2680,7 +2838,11 @@ impl<'a> SymbolResolver<'a> {
         if args.len() > real_count {
             return None;
         }
-        let fits = |p: &Ty, a: &Ty| arg_fits_platform(self.lib, p, a);
+        // Applicability is a SOURCE question: an argument fits a parameter when it is assignable to it,
+        // subtypes included (`plainDefault(sub)` for `plainDefault(base: Base, n: Int = 3)`). The
+        // platform-only check answers "same erased shape", which silently rejects every subtype argument
+        // — and only on the defaulted path, so the same call with all arguments spelled out resolved.
+        let fits = |p: &Ty, a: &Ty| self.arg_fits_or_subtype(p, a);
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
         if trailing_lambda && args.len() < real_count {
             let last_param = real_count.checked_sub(1)?;
@@ -2828,10 +2990,10 @@ impl<'a> SymbolResolver<'a> {
             Some(callable)
         };
         let fsd = function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default")));
-        for o in fsd.top_level() {
-            if let Some(callable) = try_default(o) {
-                return Some(callable);
-            }
+        match self.select_default_candidate(fsd.top_level(), args, slots) {
+            CandidateSelection::Selected(candidate) => return try_default(candidate),
+            CandidateSelection::Ambiguous => return None,
+            CandidateSelection::None => {}
         }
         // A `@JvmName`/value-class-mangled base (`sourceName` → `sourceName-<hash>`) mangles its
         // `$default` synthetic too. The import scope only knows the SOURCE spelling (`{name}$default` maps through
@@ -2839,6 +3001,7 @@ impl<'a> SymbolResolver<'a> {
         // facade package. Probed LAST: an unmangled name never reaches this (the common case pays no
         // extra scope query).
         let mut seen_spellings = std::collections::HashSet::new();
+        let mut mangled_defaults = Vec::new();
         for base in function_set_from_symbols(self.symbols_in_scope(name)).into_top_level() {
             let spelling = base.callable.name.clone();
             if spelling == name || !seen_spellings.insert(spelling.clone()) {
@@ -2850,13 +3013,12 @@ impl<'a> SymbolResolver<'a> {
             let fqn = crate::types::type_name_child(pkg, &format!("{spelling}$default"));
             let record = self.src.resolve_symbols_name(fqn);
             let fs = function_set_from_symbols(std::iter::once((fqn, record)));
-            for o in fs.top_level() {
-                if let Some(callable) = try_default(o) {
-                    return Some(callable);
-                }
-            }
+            mangled_defaults.extend(fs.into_top_level());
         }
-        None
+        match self.select_default_candidate(mangled_defaults.iter(), args, slots) {
+            CandidateSelection::Selected(candidate) => try_default(candidate),
+            CandidateSelection::None | CandidateSelection::Ambiguous => None,
+        }
     }
 
     fn resolve_top_level_inline_only_callable(
@@ -3464,7 +3626,19 @@ fn resolve_instance_name(
     args: &[CallArgKind],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryMember> {
-    select_instance_info(lib, Ty::obj_name(internal), name, args, member_access).map(|o| {
+    resolve_instance_ty(lib, Ty::obj_name(internal), name, args, member_access)
+}
+
+/// [`resolve_instance_name`] against an APPLIED receiver type — the form that keeps type arguments, so a
+/// generic member's return is recovered from them rather than erased.
+fn resolve_instance_ty(
+    lib: &dyn SemanticPlatform,
+    recv: Ty,
+    name: &str,
+    args: &[CallArgKind],
+    member_access: Option<&MemberAccess<'_>>,
+) -> Option<LibraryMember> {
+    select_instance_info(lib, recv, name, args, member_access).map(|o| {
         let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })
@@ -5021,6 +5195,7 @@ mod tests {
             kind: TypeKind::Class,
             supertypes: supertypes.into(),
             constructors,
+            fields: vec![],
             members: vec![],
             companion: vec![],
             companion_consts: std::collections::HashMap::new(),
@@ -5032,6 +5207,7 @@ mod tests {
             type_params: Vec::new(),
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: Vec::new(),
+            enum_entries_accessor: None,
             value_ctor_has_default: false,
             ctor_named_params: Vec::new(),
             value_class_properties: Vec::new(),

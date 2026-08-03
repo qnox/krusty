@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use krusty::jvm::classfile::ClassWriter;
 use krusty_lsp::{read_framed, write_framed, MAX_MESSAGE_BYTES};
 use serde_json::{json, Value};
 
@@ -326,6 +327,100 @@ fn stdio_server_uses_the_compiler_worker_and_exits_cleanly() {
         }])
     );
 
+    server.shutdown_and_exit();
+}
+
+#[test]
+fn stdio_server_starts_a_worker_for_an_oversized_jps_classpath() {
+    const ENTRY_COUNT: usize = 2_752;
+    let project = TempProject::new("oversized-worker-classpath");
+    project.write(
+        ".idea/modules.xml",
+        r#"<project><component name="ProjectModuleManager"><modules>
+             <module filepath="$PROJECT_DIR$/app/app.iml" />
+           </modules></component></project>"#,
+    );
+    project.write(
+        "app/app.iml",
+        r#"<module><component name="NewModuleRootManager">
+             <content url="file://$MODULE_DIR$">
+               <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+             </content>
+             <orderEntry type="library" name="oversized" level="project" />
+           </component></module>"#,
+    );
+    let mut library =
+        String::from(r#"<component name="libraryTable"><library name="oversized"><CLASSES>"#);
+    let entry_suffix = "segment".repeat(10);
+    for index in 0..ENTRY_COUNT {
+        library.push_str(&format!(
+            r#"<root url="file://$PROJECT_DIR$/dependencies/component-{index:04}-{}" />"#,
+            entry_suffix
+        ));
+    }
+    library.push_str("</CLASSES></library></component>");
+    assert!(
+        library.len() > 128 * 1024,
+        "the JPS classpath must exceed the common Unix per-argument ceiling"
+    );
+    project.write(".idea/libraries/oversized.xml", &library);
+    let final_entry = project.path().join(format!(
+        "dependencies/component-{:04}-{entry_suffix}/oversized",
+        ENTRY_COUNT - 1
+    ));
+    std::fs::create_dir_all(&final_entry).expect("create final classpath entry");
+    std::fs::write(
+        final_entry.join("LastEntry.class"),
+        ClassWriter::new("oversized/LastEntry", "java/lang/Object").finish(),
+    )
+    .expect("write final classpath class");
+    let source = "import oversized.LastEntry\nfun identity(value: LastEntry): LastEntry = value\n";
+    let uri = project.uri("app/src/Main.kt");
+    project.write("app/src/Main.kt", source);
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+
+    let mut server = ServerProcess::start(&[]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    let mut saw_model = false;
+    let mut registered_watcher = false;
+    while !saw_model || !registered_watcher {
+        let message = server.receive().expect("project configuration message");
+        if message["method"] == "window/showMessage" {
+            let text = message["params"]["message"].as_str().unwrap_or_default();
+            assert!(
+                !text.contains("could not restart analysis worker"),
+                "oversized classpath must not enter the worker restart loop: {text}"
+            );
+        }
+        if message["method"] == "window/logMessage" {
+            saw_model |= message["params"]["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("2752 classpath entries"));
+        }
+        if message["method"] == "client/registerCapability" {
+            registered_watcher = true;
+            server.send(&json!({
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": null
+            }));
+        }
+    }
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    assert!(server.await_diagnostics(&uri).is_empty());
     server.shutdown_and_exit();
 }
 
@@ -849,6 +944,97 @@ fn stdio_server_finds_workspace_symbols_in_files_nothing_opened() {
         member["result"][0]["containerName"],
         "sample.NeverOpenedMarker"
     );
+
+    server.shutdown_and_exit();
+}
+
+#[test]
+fn stdio_server_locates_a_dependency_workspace_symbol_through_the_real_worker() {
+    let project = TempProject::new("dependency-workspace-symbol");
+    project.write(
+        ".idea/modules.xml",
+        r#"<project><component name="ProjectModuleManager"><modules>
+             <module filepath="$PROJECT_DIR$/app/app.iml" />
+           </modules></component></project>"#,
+    );
+    project.write(
+        "app/app.iml",
+        r#"<module><component name="NewModuleRootManager">
+             <content url="file://$MODULE_DIR$">
+               <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+             </content>
+             <orderEntry type="library" name="dependency" level="project" />
+           </component></module>"#,
+    );
+    project.write(
+        ".idea/libraries/dependency.xml",
+        r#"<component name="libraryTable"><library name="dependency"><CLASSES>
+             <root url="file://$PROJECT_DIR$/dependencies/classes" />
+           </CLASSES></library></component>"#,
+    );
+    let class = project
+        .path()
+        .join("dependencies/classes/vendor/DependencyMarker.class");
+    std::fs::create_dir_all(class.parent().unwrap()).expect("create dependency package");
+    std::fs::write(
+        &class,
+        ClassWriter::new("vendor/DependencyMarker", "java/lang/Object").finish(),
+    )
+    .expect("write dependency class");
+    let open_uri = project.uri("app/src/Open.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+    let cache = project.path().join("dependency-cache");
+    let cache = cache.to_string_lossy().into_owned();
+
+    let mut server = ServerProcess::start(&["-deps-cache-dir", &cache]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    server.receive_until(|message| message["method"] == "client/registerCapability");
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": open_uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": "package app\nfun opened(): Int = 1\n"
+            }
+        }),
+    );
+    assert!(server.await_diagnostics(&open_uri).is_empty());
+
+    // The first matching query schedules worker materialization and answers without blocking. Poll
+    // exactly as a picker does so this covers the production WorkerHost transport, engine event,
+    // content-addressed write, and the next-query convergence rather than injecting an index or a
+    // located result into the service.
+    let mut found = Value::Null;
+    for attempt in 0..200 {
+        let response = server.request(
+            300 + attempt,
+            "workspace/symbol",
+            json!({"query": "DependencyMarker"}),
+        );
+        if response["result"][0].is_object() {
+            found = response["result"][0].clone();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(found["name"], "DependencyMarker");
+    assert_eq!(found["containerName"], "vendor");
+    let rendered_uri = found["location"]["uri"]
+        .as_str()
+        .expect("dependency symbol has a URI");
+    let rendered_path = url::Url::parse(rendered_uri)
+        .unwrap()
+        .to_file_path()
+        .expect("dependency URI is a local cache file");
+    let rendered = std::fs::read_to_string(rendered_path).expect("rendered dependency source");
+    assert!(rendered.contains("class DependencyMarker"));
+    assert_eq!(found["location"]["range"]["start"]["line"], 2);
 
     server.shutdown_and_exit();
 }
