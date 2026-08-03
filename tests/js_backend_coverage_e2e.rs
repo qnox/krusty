@@ -372,6 +372,14 @@ fn char_comparison() {
     check("fun box(): Boolean = 'a' < 'b'", "true");
 }
 
+#[test]
+fn lone_surrogate_char_keeps_its_utf16_code_unit() {
+    // JavaScript strings, like Kotlin/JVM `Char`, can hold an individual UTF-16 code unit. Comparing
+    // the surrogate against NUL catches both lossy Unicode-scalar conversion in the parser/IR and an
+    // emitter that substitutes a printable replacement instead of spelling the exact `\uXXXX` unit.
+    check(r"fun box(): Boolean = '\uD800' != '\u0000'", "true");
+}
+
 // ---------------------------------------------------------------------------
 // Break / continue with labels inside nested loops
 // ---------------------------------------------------------------------------

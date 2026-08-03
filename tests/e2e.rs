@@ -610,6 +610,8 @@ mod js_backend_e2e;
 mod kclass_type_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
+#[path = "krusty_roundtrip_class_metadata_e2e.rs"]
+mod krusty_roundtrip_class_metadata_e2e;
 #[path = "ksp_apt_loop_e2e.rs"]
 mod ksp_apt_loop_e2e;
 #[path = "ksp_provision_e2e.rs"]
@@ -662,6 +664,8 @@ mod map_entry_destructure_e2e;
 mod map_get_nullable_elvis_e2e;
 #[path = "mapped_collection_scope_e2e.rs"]
 mod mapped_collection_scope_e2e;
+#[path = "mapped_string_scope_e2e.rs"]
+mod mapped_string_scope_e2e;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
@@ -788,6 +792,8 @@ mod object_member_overload_e2e;
 mod object_member_ref_import_e2e;
 #[path = "object_method_ref_e2e.rs"]
 mod object_method_ref_e2e;
+#[path = "object_receiver_lambda_e2e.rs"]
+mod object_receiver_lambda_e2e;
 #[path = "object_value_inference_e2e.rs"]
 mod object_value_inference_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
@@ -972,6 +978,8 @@ mod suspend_inline_hof_suspending_lambda_reject_e2e;
 mod suspend_inline_statementless_block_e2e;
 #[path = "suspend_interface_delegation_e2e.rs"]
 mod suspend_interface_delegation_e2e;
+#[path = "suspend_lambda_unit_tail_e2e.rs"]
+mod suspend_lambda_unit_tail_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]
 mod suspend_loop_compound_assign_e2e;
 #[path = "suspend_loop_continue_break_e2e.rs"]
