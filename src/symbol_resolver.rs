@@ -2622,6 +2622,53 @@ impl<'a> SymbolResolver<'a> {
         arg_fits_source(self.lib, &self.src, param, arg)
     }
 
+    /// The argument→parameter mapping for a call whose arguments name their parameters
+    /// (`mockk(relaxed = true)`): `slots[i]` is the parameter position argument `i` labels.
+    ///
+    /// A LABEL, not a position, decides which parameter an argument is checked against. The
+    /// positional form below cannot express that: it compares the argument list against the LEADING
+    /// parameters, so a call that names a later parameter and omits an earlier one was checked
+    /// against the wrong declaration and reported "unresolved function". Every parameter no
+    /// argument names must carry a default — that is what makes the `$default` synthetic callable.
+    ///
+    /// `slots` are VALUE-parameter positions (the checker builds them against a signature stripped of
+    /// context parameters), while `params` is the full list, so the two only agree when there are no
+    /// context parameters. Rather than index across that mismatch, such a callable is declined here and
+    /// the positional path takes it — the same thing lowering does, which handles only `ctx_n == 0`.
+    fn named_default_arg_mapping(
+        &self,
+        info: &FunctionInfo,
+        params: &[Ty],
+        args: &[Ty],
+        slots: &[usize],
+    ) -> Option<Vec<(usize, usize)>> {
+        if slots.len() != args.len() || info.context_count != 0 {
+            return None;
+        }
+        let sig = &info.call_sig;
+        let mut mapping = Vec::with_capacity(args.len());
+        for (argument, (&parameter, argument_ty)) in slots.iter().zip(args).enumerate() {
+            let declared = params.get(parameter)?;
+            if !arg_fits_platform(self.lib, declared, argument_ty) {
+                return None;
+            }
+            mapping.push((parameter, argument));
+        }
+        // Every unfilled parameter must be defaulted (a vararg slot may always stay empty). An empty
+        // `param_defaults` means the provider recorded no default facts at all — the same "unknown, do
+        // not reject" reading `has_known_required_param` takes.
+        if !sig.param_defaults.is_empty()
+            && (0..params.len()).any(|parameter| {
+                !slots.contains(&parameter)
+                    && !sig.param_has_default(parameter)
+                    && sig.vararg_index != Some(parameter)
+            })
+        {
+            return None;
+        }
+        Some(mapping)
+    }
+
     fn default_arg_mapping(
         &self,
         info: &FunctionInfo,
@@ -2668,10 +2715,40 @@ impl<'a> SymbolResolver<'a> {
         Some((0..args.len()).map(|i| (i, i)).collect())
     }
 
+    /// Resolve a call that names its parameters onto the `$default` synthetic, checking each argument
+    /// against the parameter its LABEL selects (`slots[i]`) rather than against parameter `i`.
+    pub(crate) fn resolve_top_level_named_default_callable(
+        &self,
+        name: &str,
+        args: &[Ty],
+        slots: &[usize],
+        type_args: &[Ty],
+        expected: Option<Ty>,
+    ) -> Option<LibraryCallable> {
+        self.resolve_top_level_default_callable_with_slots(
+            name,
+            args,
+            Some(slots),
+            type_args,
+            expected,
+        )
+    }
+
     fn resolve_top_level_default_callable(
         &self,
         name: &str,
         args: &[Ty],
+        type_args: &[Ty],
+        expected: Option<Ty>,
+    ) -> Option<LibraryCallable> {
+        self.resolve_top_level_default_callable_with_slots(name, args, None, type_args, expected)
+    }
+
+    fn resolve_top_level_default_callable_with_slots(
+        &self,
+        name: &str,
+        args: &[Ty],
+        slots: Option<&[usize]>,
         type_args: &[Ty],
         expected: Option<Ty>,
     ) -> Option<LibraryCallable> {
@@ -2683,30 +2760,35 @@ impl<'a> SymbolResolver<'a> {
                 return None;
             }
             let params = &c.params;
-            let mapping = self.default_arg_mapping(o, params, args)?;
+            let mapping = match slots {
+                Some(slots) => self.named_default_arg_mapping(o, params, args, slots)?,
+                None => self.default_arg_mapping(o, params, args)?,
+            };
             // A `$default` synthetic usually carries NO generic `Signature` (it isn't API), so binding the
             // return type parameter off it fails and the erased `Object` return leaks (`runBlocking { … }`
             // → `Any`, losing the block's result type). Fall back to the BASE function's gsig — its leading
             // real parameters (and their type-parameter positions) align with the `$default`'s, so unifying
             // the provided args against it recovers `T` (`runBlocking<T>(block: () -> T): T` → `T = Ch`).
+            // Resolve the base ONCE for every metadata facet the synthetic may lack. Arity alone is
+            // not identity: two overloads can have the same number of parameters but different JVM
+            // spellings and unrelated type variables. Borrowing either one's generic signature can
+            // bind a return or reified marker to the wrong formal while still producing valid bytecode.
+            //
+            // krusty models `$default` with only the real parameters, so exact JVM spelling plus the
+            // logical parameter vector identifies its base without reconstructing a descriptor from
+            // lossy `Ty` values (`Byte`/`Short` both appear as `Int`).
+            let base_spelling = c.name.strip_suffix("$default");
+            let base = base_spelling.and_then(|spelling| {
+                function_set_from_symbols(self.symbols_in_scope(name))
+                    .into_top_level()
+                    .find(|candidate| {
+                        candidate.callable.name == spelling
+                            && candidate.callable.params.as_slice() == params.as_slice()
+                    })
+            });
             let base_gsig = o.generic_sig.clone().or_else(|| {
-                // The `$default` (krusty models it with the REAL params, no mask/marker) shares its base
-                // function's parameter shape, so a SAME-ARITY base overload's generic signature applies.
-                // Among same-arity candidates, prefer one whose return is a bare type PARAMETER (the
-                // generic `fun <T> …(): T` form we need to bind), so a same-name/same-arity non-generic
-                // sibling doesn't cross-bind.
-                let bases: Vec<FunctionInfo> =
-                    function_set_from_symbols(self.symbols_in_scope(name))
-                        .into_top_level()
-                        .filter(|b| {
-                            b.generic_sig.is_some() && b.callable.params.len() == params.len()
-                        })
-                        .collect();
-                bases
-                    .iter()
-                    .find(|b| b.generic_sig.as_ref().is_some_and(|g| g.ret.is_ty_param()))
-                    .or_else(|| bases.first())
-                    .and_then(|b| b.generic_sig.clone())
+                base.as_ref()
+                    .and_then(|candidate| candidate.generic_sig.clone())
             });
             let ret_ty = base_gsig
                 .as_ref()
@@ -2728,6 +2810,20 @@ impl<'a> SymbolResolver<'a> {
             );
             let ret_ty = o.ret.apply(ret_ty);
             let mut callable = callable_with_return(c, ret_ty, true);
+            // Same reasoning as `base_gsig`, for the JVM `Signature`: the `$default` synthetic carries
+            // none, and a `<reified T>` splice reads its formal type-parameter NAMES from there to bind
+            // the call's type arguments. The base's formals ARE the synthetic's — the mask/marker
+            // parameters the synthetic appends introduce no type variables — so an omitted-default call
+            // to a reified inline can specialize its body instead of falling back to a direct
+            // (throwing) invoke.
+            //
+            // The base is identified by SPELLING, not by arity alone: the formal type-parameter names
+            // are what the splice substitutes by, so borrowing a same-arity SIBLING overload's
+            // signature would specialize the body against the wrong names. `sourceName-<hash>$default`
+            // belongs to `sourceName-<hash>`, and only that one.
+            if callable.signature.is_none() {
+                callable.signature = base.and_then(|candidate| candidate.callable.signature);
+            }
             record_default_vararg_slot(&mut callable, o.call_sig.vararg_index, params, args);
             Some(callable)
         };
@@ -5052,6 +5148,7 @@ mod tests {
             context_count: 0,
             contract: None,
             generic_sig: None,
+            singleton_dispatch: None,
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),

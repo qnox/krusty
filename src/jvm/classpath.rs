@@ -186,6 +186,44 @@ fn metadata_value_class_underlying(
     })
 }
 
+/// The VALUE CLASS each descriptor parameter position really has, per `@Metadata`.
+///
+/// A `@JvmInline value class` erases to its underlying in the descriptor, so the parsed parameter is
+/// `J`/`Ljava/lang/String;` while the source type is `Duration`/`Tag`. Overload selection compares the
+/// ARGUMENT's Kotlin type against the parameter, so without this a call passing the value class matches
+/// nothing. Only a position whose metadata names a value class AND whose descriptor carries exactly
+/// that value class's underlying is reported — anything else stays `None` and the erased type stands.
+///
+/// A NULLABLE value class is boxed (the descriptor carries the class itself), so it needs no recovery;
+/// `metadata_value_class_underlying` already returns `None` for it.
+fn value_class_param_types(
+    callable: &super::metadata::MetaFn,
+    desc_params: &[Ty],
+    extension: bool,
+    kept: usize,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> Vec<Option<Ty>> {
+    let mut out = vec![None; desc_params.len()];
+    // Descriptor layout: [extension receiver] [context params] [value params].
+    let logical = kept.saturating_sub(usize::from(extension));
+    let leading = logical.saturating_sub(callable.value_params.len());
+    for (index, parameter) in callable.value_params.iter().enumerate() {
+        let position = usize::from(extension) + leading + index;
+        let (Some(name), Some(declared)) = (parameter.ty, desc_params.get(position)) else {
+            continue;
+        };
+        let Some(underlying) =
+            metadata_value_class_underlying(name, parameter.nullable(), value_underlying)
+        else {
+            continue;
+        };
+        if underlying.non_null() == declared.non_null() {
+            out[position] = Some(Ty::obj_name(name));
+        }
+    }
+    out
+}
+
 /// Whether a `@Metadata` source value-parameter class name aligns with a JVM-descriptor parameter `Ty`.
 /// This keeps the hot overload-alignment path in borrowed names: mapped builtins compare through
 /// `to_jvm_internal`, arrays/functions use structural `Ty` facts, and no descriptor `String` is built just
@@ -218,6 +256,18 @@ fn meta_param_compat(
             prim => desc == prim,
         };
     }
+    // A value class erases to its UNDERLYING in the JVM descriptor (`kotlin/time/Duration` compiles to
+    // `J`, `Tag(val v: String)` to `Ljava/lang/String;`), while `@Metadata` names the class itself —
+    // admit the underlying, or every value-class-parametered function loses its metadata alignment
+    // (parameter names, defaults, kept-param count). Decided BEFORE the by-descriptor arms below: a
+    // REFERENCE underlying would otherwise be judged by the arm for its erasure (`Ty::String` asks only
+    // whether the metadata name IS `String`) and rejected before ever reaching the value-class case.
+    // The underlying normalizes like the mapped builtins above (`UInt` → `Int`).
+    if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
+        return erased.non_null() == desc.non_null()
+            || (erased.is_reference() && desc.is_reference())
+            || (ty_erases_to_object(*desc) && !desc.is_array());
+    }
     if name == ids.unit {
         *desc == Ty::Unit
     } else if name == ids.nothing {
@@ -230,16 +280,6 @@ fn meta_param_compat(
         crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
     }) {
         true
-    } else if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
-        // A value class erases to its UNDERLYING in the JVM descriptor (`kotlin/time/Duration`
-        // compiles to `J`), while `@Metadata` names the class itself — admit the underlying here
-        // or every value-class-parametered function loses its metadata alignment (parameter names,
-        // defaults, kept-param count). The underlying normalizes like the mapped builtins above
-        // (`UInt` → `Int`); a reference underlying or an `Object`-erased descriptor stays
-        // permissive, matching the erased-to-Object rule below.
-        erased.non_null() == desc.non_null()
-            || (erased.is_reference() && desc.is_reference())
-            || (ty_erases_to_object(*desc) && !desc.is_array())
     } else {
         ty_erases_to_object(*desc) && !desc.is_array()
     }
@@ -280,22 +320,23 @@ fn meta_param_exact(
             prim => desc == prim,
         };
     }
+    // A value class erases to its underlying — `runTest(timeout: Duration)` aligns its metadata against
+    // the erased `J` exactly only through it (unsigned underlyings normalize like the mapped builtins:
+    // `UInt` → `Int`). Decided BEFORE the by-descriptor arms below, or a REFERENCE underlying is judged
+    // by the arm for its erasure and rejected — see `meta_param_compat`.
+    if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
+        return erased.non_null() == desc.non_null();
+    }
     if name == ids.unit {
         *desc == Ty::Unit
     } else if name == ids.nothing {
         *desc == Ty::Nothing
     } else if matches!(*desc, Ty::String) {
         name == ids.string_kotlin || name == ids.string_java
-    } else if desc.obj_internal().is_some_and(|desc_internal| {
-        crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
-    }) {
-        true
     } else {
-        // A value class erases to its underlying — `runTest(timeout: Duration)` aligns its
-        // metadata against the erased `J` exactly only through it (unsigned underlyings
-        // normalize like the mapped builtins: `UInt` → `Int`).
-        metadata_value_class_underlying(name, nullable, value_underlying)
-            .is_some_and(|erased| erased.non_null() == desc.non_null())
+        desc.obj_internal().is_some_and(|desc_internal| {
+            crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
+        })
     }
 }
 
@@ -783,6 +824,13 @@ pub struct MetadataCallFacts {
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
     /// Leading context parameters (supplied implicitly by the caller, not positionally).
     pub context_count: usize,
+    /// Per DESCRIPTOR parameter position, the VALUE CLASS `@Metadata` declares there when the JVM
+    /// descriptor carries its erased underlying (`timeout: kotlin.time.Duration` ↔ `J`).
+    ///
+    /// The descriptor is the emit token and stays erased; resolution needs the Kotlin type, or a call
+    /// passing a `Duration` is checked against `Long` and no overload is applicable. `None` at a
+    /// position whose declared type is not a value class (the overwhelming majority).
+    pub value_class_params: Vec<Option<Ty>>,
 }
 
 impl MetadataCallFacts {
@@ -794,6 +842,7 @@ impl MetadataCallFacts {
             is_operator: false,
             contract: None,
             context_count: 0,
+            value_class_params: Vec::new(),
         }
     }
 }
@@ -1730,6 +1779,13 @@ impl Classpath {
             is_operator: c.is_operator(),
             contract: c.contract.clone(),
             context_count: c.context_count,
+            value_class_params: value_class_param_types(
+                c,
+                desc_params,
+                extension,
+                end,
+                value_underlying,
+            ),
         }
     }
 
@@ -1754,6 +1810,9 @@ impl Classpath {
             is_operator: function.is_operator(),
             contract: function.contract.clone(),
             context_count: function.context_count,
+            // Members recover their logical value-class parameters on their own path (the mangled-member
+            // loop in `jvm_libraries`), so this facet stays empty here rather than duplicating it.
+            value_class_params: Vec::new(),
         })
     }
 
