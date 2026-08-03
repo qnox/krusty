@@ -22203,6 +22203,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                         } else if let Ty::Obj(internal, _) = recv {
                             // Source members take precedence over extensions and classpath members.
@@ -22293,6 +22294,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                         } else {
                             // Every non-`String`, non-`Obj` receiver reaches one semantic plan after
@@ -22320,6 +22322,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                             }
                         }
@@ -24997,6 +25000,25 @@ impl<'a> Checker<'a> {
             self.synthetic_member_calls
                 .insert((anchor, name.to_string()), member);
         }
+    }
+
+    /// Emit the single argument diagnostic for a LABELLED call only after every callable origin has
+    /// declined it. Individual member/extension/top-level probes must remain read-only on a miss so a
+    /// later origin still gets its turn; these terminal receiver branches call this helper once their
+    /// generic resolution ladder is exhausted.
+    fn report_unmapped_labelled_call(&mut self, call: ExprId, args: &[ExprId]) -> Option<Ty> {
+        if !self.file.call_arg_names.contains_key(&call.0) {
+            return None;
+        }
+        if !self.report_pending_unknown_named_arg(call)
+            && !self.call_already_has_argument_diagnostic(call, args)
+        {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+            );
+        }
+        Some(Ty::Error)
     }
 
     fn record_extension_call_from_args(

@@ -2405,18 +2405,22 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             .and_then(|table| type_table_entry(table, tid as usize))
             .is_some_and(|(body, table_nullable)| table_nullable || parse_type_nullable(body))
     };
-    // `Property.flags` is field 11, not field 1 (unlike several older declaration messages). Its
-    // shared declaration prefix is HAS_ANNOTATIONS(0) · VISIBILITY(1..3) · MODALITY(4..5) ·
-    // MEMBER_KIND(6..7), so the property-specific IS_VAR and IS_CONST facts live at bits 8 and 11.
-    // The shared constants also drive both metadata writers: interpreting this like a function flag word
-    // silently turns omitted flags into `internal` and reads ordinary getter bits as property semantics.
+    // Current `Property.flags` is field 11. Its shared declaration prefix is HAS_ANNOTATIONS(0) ·
+    // VISIBILITY(1..3) · MODALITY(4..5) · MEMBER_KIND(6..7), so property-specific IS_VAR and IS_CONST
+    // live at bits 8 and 11. Older metadata may instead carry `old_flags` in field 1, whose shorter
+    // layout puts those facts at bits 6 and 9. Decode the two words independently and prefer field 11
+    // regardless of wire order; collapsing them into one mutable word would let a reordered legacy
+    // field override the authoritative modern value. The shared modern constants also drive both writers.
+    const LEGACY_IS_VAR: u64 = 1 << 6;
+    const LEGACY_IS_CONST: u64 = 1 << 9;
     for prop in props {
         let mut p = Pb { b: prop, i: 0 };
         let mut name_id = None;
         let mut ret = None;
         let mut ret_nullable = false;
         let mut ret_body = None;
-        let mut flags = crate::metadata::property_flags::DEFAULT;
+        let mut legacy_flags = None;
+        let mut modern_flags = None;
         let mut sig = (None, None);
         let mut receiver_class = None;
         let mut receiver_body = None;
@@ -2425,11 +2429,8 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
         while !p.at_end() {
             let Some(tag) = p.varint() else { break };
             match (tag >> 3, tag & 7) {
-                (11, 0) => {
-                    flags = p
-                        .varint()
-                        .unwrap_or(crate::metadata::property_flags::DEFAULT)
-                }
+                (1, 0) => legacy_flags = p.varint(),
+                (11, 0) => modern_flags = p.varint(),
                 (2, 0) => name_id = p.varint(),
                 (3, 2) => {
                     let Some(n) = p.varint() else { break };
@@ -2501,7 +2502,26 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
                 desc: resolve_string(records, d2, did as usize)?,
             })
         };
-        let is_var = setter.is_some() || flags & crate::metadata::property_flags::IS_VAR != 0;
+        let (flags, is_var_bit, is_const_bit) = modern_flags.map_or_else(
+            || {
+                legacy_flags.map_or(
+                    (
+                        crate::metadata::property_flags::DEFAULT,
+                        crate::metadata::property_flags::IS_VAR,
+                        crate::metadata::property_flags::IS_CONST,
+                    ),
+                    |flags| (flags, LEGACY_IS_VAR, LEGACY_IS_CONST),
+                )
+            },
+            |flags| {
+                (
+                    flags,
+                    crate::metadata::property_flags::IS_VAR,
+                    crate::metadata::property_flags::IS_CONST,
+                )
+            },
+        );
+        let is_var = setter.is_some() || flags & is_var_bit != 0;
         let generic_sig = build_property_generic_sig(
             &type_params,
             ret_body,
@@ -2519,7 +2539,7 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             getter: getter.and_then(resolve_sig),
             setter: setter.and_then(resolve_sig),
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
-            is_const: flags & crate::metadata::property_flags::IS_CONST != 0,
+            is_const: flags & is_const_bit != 0,
             is_var,
             receiver_class,
             is_extension: receiver_body.is_some(),
@@ -3490,35 +3510,42 @@ mod module_reader_tests {
     }
 
     #[test]
-    fn property_flags_read_field_eleven_and_honor_the_schema_layout() {
-        // A Package containing four minimal Property messages. `ordinary` omits flags, which Kotlin's
+    fn property_flags_honor_modern_and_legacy_schema_layouts() {
+        // A Package containing five minimal Property messages. `ordinary` omits flags, which Kotlin's
         // schema defines as 518 (public/final/default getter). `moduleOnly` writes field 11 as 512:
         // the same default word with VISIBILITY bits 1..3 cleared to INTERNAL. The last two declarations
         // isolate property-specific IS_VAR (bit 8) and IS_CONST (bit 11); both sit past MEMBER_KIND and
         // therefore catch the former function-style offsets too. Keeping these assertions at the protobuf
         // boundary prevents a JVM accessor—or a later resolver policy—from masking a layout regression.
+        // `legacy` exercises old_flags field 1 with that layout's earlier IS_VAR/IS_CONST positions.
         let msg = [
             0x22, 0x06, // Package.property, six-byte public property body
             0x10, 0x00, // Property.name = d2[0]
-            0x1a, 0x02, 0x30, 0x04, // returnType.className = d2[4]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
             0x22, 0x09, // Package.property, nine-byte internal property body
             0x10, 0x01, // Property.name = d2[1]
-            0x1a, 0x02, 0x30, 0x04, // returnType.className = d2[4]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
             0x58, 0x80, 0x04, // Property.flags (field 11) = 512
             0x22, 0x09, // Package.property, nine-byte mutable property body
             0x10, 0x02, // Property.name = d2[2]
-            0x1a, 0x02, 0x30, 0x04, // returnType.className = d2[4]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
             0x58, 0x86, 0x0e, // Property.flags = 1798 (default + isVar + hasSetter)
             0x22, 0x09, // Package.property, nine-byte const property body
             0x10, 0x03, // Property.name = d2[3]
-            0x1a, 0x02, 0x30, 0x04, // returnType.className = d2[4]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
             0x58, 0x86, 0x14, // Property.flags = 2566 (default + isConst)
+            0x22, 0x09, // Package.property, nine-byte legacy property body
+            0x08, 0xc0,
+            0x04, // Property.old_flags (field 1) = 576 (internal + isVar + isConst)
+            0x10, 0x04, // Property.name = d2[4]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
         ];
         let d2 = vec![
             "ordinary".to_string(),
             "moduleOnly".to_string(),
             "mutable".to_string(),
             "constant".to_string(),
+            "legacy".to_string(),
             "kotlin/Int".to_string(),
         ];
         let ctx = MetaCtx {
@@ -3530,12 +3557,15 @@ mod module_reader_tests {
 
         let properties = decode_properties(&ctx, 4);
 
-        assert_eq!(properties.len(), 4);
+        assert_eq!(properties.len(), 5);
         assert_eq!(properties[0].visibility, crate::types::Visibility::Public);
         assert_eq!(properties[1].visibility, crate::types::Visibility::Internal);
         assert!(properties[2].is_var);
         assert!(!properties[2].is_const);
         assert!(!properties[3].is_var);
         assert!(properties[3].is_const);
+        assert_eq!(properties[4].visibility, crate::types::Visibility::Internal);
+        assert!(properties[4].is_var);
+        assert!(properties[4].is_const);
     }
 }
