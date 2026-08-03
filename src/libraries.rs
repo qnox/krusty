@@ -389,6 +389,7 @@ impl LibraryCallable {
             context_count: 0,
             contract: None,
             generic_sig: None,
+            singleton_dispatch: None,
         }
     }
 
@@ -508,6 +509,21 @@ pub struct LibraryCallable {
     /// in [`Self::signature`] is absent on krusty-emitted classes. Boxed: this struct rides the
     /// `ResolvedCall` enum, whose variant size must stay flat.
     pub generic_sig: Option<Box<GenericSig>>,
+    /// The static field holding this callable's dispatch receiver, for a member declared inside an
+    /// `object` / `companion object` and brought into scope by `import Owner.name`.
+    ///
+    /// Kotlin's rule is that importing an object's member carries the object along as the implicit
+    /// dispatch receiver; for a member EXTENSION the use site supplies the extension receiver and the
+    /// singleton is the dispatch. The JVM realization is not a facade `invokestatic` but a load of the
+    /// singleton followed by an INSTANCE invoke — and where that singleton lives differs by shape: a
+    /// plain `object` owns `INSTANCE`, while a companion's singleton is a field on the OUTER class whose
+    /// name is the companion's (`Companion` unless it was named). Resolution already had to find that
+    /// field to recognize the owner as an object, so it travels here rather than being re-derived from a
+    /// name at emit. `None` for every other callable.
+    ///
+    /// Boxed for the same reason as [`Self::generic_sig`]: this struct rides the `ResolvedCall` enum,
+    /// whose variant size must stay flat, and only a vanishing fraction of callables carry one.
+    pub singleton_dispatch: Option<Box<StaticFieldRef>>,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member

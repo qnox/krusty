@@ -1187,6 +1187,101 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   when it matches, resolve/emit an `invokestatic` on the object class (the instance receiver is dropped,
   as kotlinc does). Test: `tests/interface_supertype_members_e2e.rs::jvmstatic_object_member`.
 
+- **An OBJECT is a legal parent of a callable name, not just a package.** `import
+  kotlin.time.Duration.Companion.minutes` did not resolve, so `10.minutes` was `unresolved reference`.
+  Kotlin's rule is that importing a member of an object brings that name into scope WITH the object as
+  its implicit dispatch receiver; for a member EXTENSION the use site supplies the extension receiver
+  and the singleton is the dispatch. krusty's callable namespace is keyed by fully-qualified name, and
+  `resolve_symbols_name` only ever read the parent of that name as a PACKAGE (`package_facades_name`),
+  so an object or companion parent surfaced nothing — the one shape that worked,
+  `import Obj.memberFun`, did so through a separate special case rather than the namespace.
+  `object_member_extensions` now contributes the owner's member extensions as ordinary extension
+  callables, so SELECTION is unchanged; only the emit differs, and that difference rides on
+  `LibraryCallable::singleton_dispatch`. Three facts the shape forces:
+  a companion is NOT `TypeKind::Object` (it has no `INSTANCE`; its singleton is a field on the OUTER
+  class, named after the companion), so object-ness is decided by finding that field, and the field
+  itself travels on the callable rather than being re-derived from a guessed name at emit;
+  an import path spells every segment alike (`…/Duration/Companion`) while a nested class uses `$`, and
+  which trailing segments are nesting is not knowable from the path, so split points are tried
+  outward-in;
+  and an `@InlineOnly` accessor (`Duration.Companion`'s are `private` in the class file) has no callable
+  form at all, so a non-public accessor is surfaced as `MustInline` and emitted as a splice with the
+  singleton bound as receiver instead of an invoke. Tests:
+  `tests/classpath_object_member_extension_import_e2e.rs`.
+
+- **A VALUE CLASS passed to a classpath TOP-LEVEL function resolves against its DECLARED type, not its
+  erasure.** `taggedOnly(Tag("x"))` was `unresolved function`; `spend(budget = …)` was `argument type
+  mismatch: actual type is 'lib.Budget', but 'Long' was expected`. A `@JvmInline value class` erases to
+  its underlying in the descriptor (`Budget(val millis: Long)` → `J`, `Tag(val v: String)` →
+  `Ljava/lang/String;`) while `@Metadata` names the class, and the erased form leaked into two places
+  that must decide against the Kotlin type. (1) `top_level_overloads` published the DESCRIPTOR's
+  parameter types, so selection compared a `Budget` argument against `Long`; the declared types are now
+  restored from `@Metadata` (`MetadataCallFacts::value_class_params`) — LAST, after every
+  metadata/bytecode alignment has matched the erased form the class file actually spells. The emit
+  descriptor stays physical and the value-classes pass unboxes at the call, exactly as a mangled MEMBER
+  with a value-class parameter is already exposed. (2) `meta_param_compat` / `meta_param_exact` decided
+  the value-class case in the FINAL arm of an `else if` chain, so a value class with a REFERENCE
+  underlying was judged by the arm for its erasure (`Ty::String` asks only whether the metadata name IS
+  `String`) and rejected before reaching it — costing such a function its metadata alignment outright,
+  parameter names and defaults included, which is why even a call passing NO value-class argument
+  failed. Both now decide it up front. Test: `tests/classpath_value_class_param_e2e.rs` (both
+  underlying kinds; members/constructors stay covered by `classpath_value_class_default_e2e`).
+
+- **A TOP-LEVEL classpath `inline fun <reified T>` splices, and a body that cannot splice BAILS.**
+  `nameOf<Svc>()` compiled clean and then threw `UnsupportedOperationException: This function has a
+  reified type parameter…` — kotlinc's compiled body for a reified inline exists only to throw, so a
+  direct call is never a legal fallback. The splice machinery was already correct; its INPUT was
+  missing at three points, each a separate defect. (1) `reified_call_subst_for` — which pairs the
+  callee's formal type-parameter names with the call's type arguments — was invoked only on the two
+  EXTENSION lowering paths, and the checker recorded `resolved_call_type_args` only for extension and
+  source calls, so a top-level call had no substitution and `splice_unified` refused to specialize.
+  Both now cover the top-level arm. (2) A `$default` synthetic carries no generic `Signature`, so even
+  with type arguments the formal NAMES were unknown; `resolve_top_level_default_callable` now
+  propagates the BASE overload's signature onto the synthetic — the same reasoning already applied to
+  `base_gsig`, and sound because the mask/marker parameters introduce no type variables. (3)
+  `try_inline_static_as` declined every `$default` body outright; that retreat is only safe when a
+  direct call is legal, so it now applies to non-reified callees only. The guard meant to catch this
+  class of miscompile (`ir_emit`: bail rather than fall back) was itself keyed on the absent
+  substitution, which is why a wrong program compiled silently.
+  **Not spliceable, and refused rather than approximated:** a body calling
+  `Intrinsics.needClassReification` (kotlinc's marker for "this materializes a class whose shape
+  depends on `T` — regenerate it per call site", emitted for e.g. a default lambda typed on `T`).
+  krusty splices instructions and does not regenerate a dependency's compiled inner classes, so
+  `splice_unified` returns `None` and the backend reports an inline-splice error. `mockk<T>(…)` is
+  this shape. Tests: `tests/classpath_reified_inline_toplevel_e2e.rs`.
+
+- **A named argument binds by LABEL, including when it skips a defaulted parameter.** A classpath call
+  that names a parameter and omits an earlier one (`mockk(relaxed = true)`, `runTest(timeout = …)`) was
+  reported as `unresolved function`. The label→slot mapping was computed and then discarded: the
+  arguments were compacted into a dense list and matched against the LEADING parameters, so the call
+  resolved only when the supplied types happened to be assignable at those positions — `f(a: Int = 1,
+  b: Int = 2)` called as `f(b = 5)` "worked" while `f(a: Int = 1, b: String = "z")` called as
+  `f(b = "x")` did not, which is why the failure looked type-dependent and arbitrary. Selection
+  (`symbol_resolver::resolve_top_level_named_default_callable` → `named_default_arg_mapping`) and the
+  checker's argument check now both use the parameter slot the label names, and every unfilled slot
+  must be defaulted for the `$default` synthetic to be applicable — with one documented exception: an
+  EMPTY `param_defaults` means the provider recorded no default facts at all, which is read as
+  "unknown, do not reject" exactly as `has_known_required_param` does, rather than as "nothing is
+  defaulted". A callable with context parameters is declined outright, since the slots are
+  value-parameter-relative while the parameter list is not. Lowering masks exactly the unfilled
+  slots — EXCEPT a vararg: `$default` passes the array straight through and never fills it, so an
+  omitted vararg is an EMPTY array with its mask bit CLEAR (`lower_default_slot_args` /
+  `default_masked_slots`); masking it reached the callee as `null` and tripped its non-null parameter
+  check at runtime.
+  The TRAILING LAMBDA is shaped from its slot the same way. A lambda literal is typed BEFORE overload
+  resolution, from the callee's block parameter — that is what gives it its receiver and arity — and
+  `top_level_lambda_shape_in_scope` mapped arguments positionally, so `f(budget = 3) { }` aligned the
+  `Int` against parameter 0, judged every overload inapplicable, and left the literal a bare
+  `() -> Unit` that then failed against the erased `FunctionN`. It now maps through
+  `call_argument_parameter_indices` — the same full Kotlin mapping the argument path uses, so labels,
+  defaults, vararg, AND the trailing-lambda rule (an unlabelled `{ … }` binds the LAST parameter, not
+  the next position) agree; `named_argument_map` alone does NOT encode that last rule, and using it
+  here bound the lambda to the parameter after the labelled one. Exact-arity narrowing is skipped for
+  a labelled call, whose argument count says nothing about which parameters are filled. All lambda
+  kinds were affected identically — plain, receiver, `suspend`, `suspend` receiver — which is why the
+  failure looked specific to `suspend` receivers. Test:
+  `tests/classpath_named_arg_skips_default_e2e.rs`.
+
 - **A property read is a property read; how it is READ is the target's business.** `Dispatchers.IO` was
   reported as `unresolved reference 'IO'`, and the cause was a category error rather than a missing case:
   the use denotes a Kotlin property, not a JVM accessor call — `getIO()` is only one possible class-file
@@ -1410,8 +1505,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   non-suspending body, a tail suspend call, and a bound suspension (`val x = work(); …`); a suspension nested
   in an `if`/`when` CONDITION cleanly SKIPS (the pre-existing flattener limit), never miscompiles. Test:
   `tests/classpath_runblocking_e2e.rs`.
-- **`kotlinx.coroutines.test.runTest { … }` resolves, lowers, and RUNS** — the value-class-parametered
-  sibling of the `runBlocking` case. `runTest(timeout: kotlin.time.Duration = …, testBody)` mangles its
+- **An under-applied VALUE-CLASS-parametered builder with a trailing lambda resolves, lowers, and RUNS**
+  — the value-class-parametered sibling of the `runBlocking` case, and the shape
+  `kotlinx.coroutines.test.runTest { … }` has. A builder
+  `run…(timeout: kotlin.time.Duration = …, testBody)` mangles its
   JVM name (`sourceName-<hash>`) AND its `$default` synthetic because of a value-class
   parameter, which broke the call at TWO seams. METADATA ALIGNMENT (`classpath.rs`): `@Metadata` names
   the value class while the descriptor carries its erased underlying (`J`), so `meta_param_compat` /
@@ -1422,9 +1519,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   members; unsigned underlyings normalize like the mapped builtins, `UInt` → `Int`) — before, alignment failed and the function
   silently lost its parameter names/defaults, making every under-applied call inapplicable. DEFAULT-CALL
   LOOKUP (`symbol_resolver.rs`): `resolve_top_level_default_callable` probed only the SOURCE spelling
-  (`runTest$default` — the deprecated unmangled overload); it now also resolves each mangled spelling's
+  (the unmangled overload); it now also resolves each mangled spelling's
   `$default` directly in its base candidate's facade package (the import scope only knows the source
-  name). Tests: `tests/classpath_runtest_e2e.rs`, `jvm::classpath` `metadata_param_matching_*`.
+  name). Tests: `tests/classpath_value_class_builder_e2e.rs` — a kotlinc-built FIXTURE reproducing the
+  shape (mangled name + mangled `$default` + `@JvmMultifileClass` part), so the coverage owns its
+  dependency instead of pinning a third-party jar version — and `jvm::classpath`
+  `metadata_param_matching_*`.
 - **An imported Java STATIC accepts a lambda for a SAM-interface parameter** (`import
   org.junit.jupiter.api.Assertions.assertThrows`; `assertThrows(T::class.java) { … }`, `import
   java.util.concurrent.CompletableFuture.runAsync`). Two gaps made the unqualified call unresolved.
