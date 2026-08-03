@@ -271,10 +271,7 @@ pub fn classpath_inner_class_resolver(
         // attribute at all, so the JDK-less class file diverges from the JDK-present one.
         cp.find(internal)
             .and_then(|class| {
-                let entry = class
-                    .inner_classes
-                    .iter()
-                    .find(|entry| entry.inner == internal)?;
+                let entry = class.inner_class_self()?;
                 Some(crate::jvm::classfile::InnerClassDetails {
                     outer: entry.outer.clone(),
                     name: entry.name.clone(),

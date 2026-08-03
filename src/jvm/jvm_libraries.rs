@@ -25,24 +25,9 @@ use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
-        .inner_classes
-        .iter()
-        .find(|entry| type_name(&entry.inner) == class.this_class)
+        .inner_class_self()
         .map(|entry| entry.access)
         .unwrap_or(class.access)
-}
-
-fn inherited_class_access(
-    class: &super::classreader::ClassInfo,
-    internal_name: TypeName,
-) -> Option<u16> {
-    let nested = super::jvm_class_map::to_jvm_type_name(internal_name).render();
-    let (outer, _) = nested.rsplit_once('$')?;
-    class
-        .inner_classes
-        .iter()
-        .find(|entry| entry.inner == nested && entry.outer.as_deref() == Some(outer))
-        .map(|entry| entry.access)
 }
 
 fn internal_package(internal: TypeName) -> String {
@@ -2669,7 +2654,9 @@ impl SymbolSource for JvmLibraries {
     ) -> Option<std::rc::Rc<LibraryType>> {
         let jvm_name = super::jvm_class_map::to_jvm_type_name(internal_name);
         let class = self.cp.find_name(jvm_name)?;
-        let access = inherited_class_access(&class, internal_name)?;
+        // Inherited lookup applies only to a genuine member classifier. Requiring a structural self
+        // entry avoids treating a top-level class whose legal name contains `$` as inheritable.
+        let access = class.inner_class_self()?.access;
         let accessible = if let Some(visibility) = class.meta.class_visibility {
             matches!(visibility, Visibility::Public | Visibility::Protected)
         } else {
@@ -4116,6 +4103,31 @@ mod tests {
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
     use crate::types::Ty;
+
+    #[test]
+    fn inherited_access_finds_self_entry_when_member_name_contains_dollar() {
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &[(
+                String::new(),
+                "class Outer { public static class Inner$Part {} }".into(),
+            )],
+            crate::jvm::java_stub::StubMode::Strict,
+            &|candidate| candidate == "java/lang/Object",
+        )
+        .expect("stubs");
+        let class = stubs
+            .iter()
+            .find(|(name, _)| name == "Outer$Inner$Part")
+            .and_then(|(_, bytes)| crate::jvm::classreader::parse_class(bytes).ok())
+            .expect("member class");
+
+        assert_eq!(
+            class
+                .inner_class_self()
+                .map(|entry| entry.access & crate::jvm::classfile::ACC_PUBLIC),
+            Some(crate::jvm::classfile::ACC_PUBLIC)
+        );
+    }
 
     #[test]
     fn descriptor_void_reference_normalizes_before_core() {
