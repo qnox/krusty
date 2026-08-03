@@ -1228,10 +1228,6 @@ pub struct File {
     pub call_has_trailing_lambda: std::collections::HashSet<u32>,
     /// End offset of the parenthesized portion of calls with trailing lambdas.
     pub trailing_call_close_paren_ends: std::collections::HashMap<u32, u32>,
-    /// Explicit label on a lambda literal (`run rr@{ … }`), keyed by the lambda's `ExprId`. A lambda
-    /// otherwise takes its label from the function it is passed to (`return@run`), which is why an
-    /// explicit one has to be carried separately for `return@rr` to find its frame.
-    pub lambda_labels: std::collections::HashMap<u32, String>,
     /// `ExprId`s of `Expr::Call`s produced from infix-call syntax (`a foo b`). The callee is still the
     /// ordinary `Member { receiver: a, name: "foo" }`, but resolver/lowering need the source form for
     /// primitive builtin names where Kotlin treats `a rem b` differently from `a.rem(b)`.
@@ -1255,6 +1251,11 @@ pub struct File {
     /// checker types it as a `suspend (…) -> …` function type; the lowerer builds a
     /// `SuspendLambda` state machine for it instead of a plain `FunctionN` closure.
     pub suspend_lambdas: std::collections::HashSet<u32>,
+    /// The EXPLICIT label a lambda literal was written with (`list.forEach outer@{ … }`), keyed by the
+    /// lambda's `ExprId.0`. A labelled lambda REPLACES the implicit label (the callee's name) a
+    /// `return@name` inside it targets, so the splicer must register `outer`, not `forEach`. Absent ⇒
+    /// the lambda is unlabelled and keeps the implicit callee-name label.
+    pub lambda_labels: std::collections::HashMap<u32, String>,
     /// NAME-BASED destructuring: for a `Stmt::Destructure` whose entries bind by property NAME
     /// (`val (number = pCProp, text = pCVarProp) = src`), maps the statement's id to the source
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
@@ -1374,13 +1375,13 @@ impl File {
         self.non_adjacent_member_dot_spans = Default::default();
         self.call_has_trailing_lambda = Default::default();
         self.trailing_call_close_paren_ends = Default::default();
-        self.lambda_labels = Default::default();
         self.infix_calls = Default::default();
         self.call_type_args = Default::default();
         self.anonymous_object_classes = Default::default();
         self.lambda_param_types = Default::default();
         self.anon_fun_lambdas = Default::default();
         self.suspend_lambdas = Default::default();
+        self.lambda_labels = Default::default();
         self.destructure_source_props = Default::default();
         self.base_arg_names = Default::default();
         self.anon_fun_ret = Default::default();

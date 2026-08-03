@@ -2506,6 +2506,114 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`kotlin/math/MathKt.PI`) and the ordinary external-static-field path inlines its `ConstantValue`,
   which is what kotlinc emits at every use site. Test:
   `tests/resolve_parse_deep_coverage_e2e.rs::import_top_level_math`.
+- **A COMPUTED property of a value class (`Result.isSuccess`) — still open, and why.** The same shape
+  as the `const val` above: a `@JvmInline value class`'s non-constructor `val` has NO instance accessor
+  at all — kotlinc compiles its getter to a static `<getterName>-impl(<carrier>)` — so the
+  accessor-modelled property namespace never surfaces it and every read is "unresolved reference".
+  Publishing such properties as zero-argument members under their source name (the same
+  receiver-as-first-JVM-argument shape the value class's own FUNCTIONS already use) resolves and runs
+  them, but it also makes two box-corpus cases reach a SEPARATE, pre-existing defect and MISCOMPILE:
+  a value-class value passed through a `fun interface` method (`ResultHandler<T>.onResult(Result<T>)`)
+  is handed over as the raw carrier where the erased interface descriptor expects the BOX, so the
+  callee's `checkcast` throws. That defect is reachable without this feature (any `Result` argument to
+  such a method), it simply has no corpus case that reaches it today. The property support therefore
+  waits on the value-class boxing at an erased interface-parameter boundary; until then a read stays
+  unresolved rather than compiling into a `ClassCastException`.
+- **A constructor parameter of RECEIVER function type on a compiled class.** `Base(init: Cfg.() ->
+  Unit)` erases to `Function1` in both the JVM descriptor and the `Signature` attribute, so only
+  `@Metadata`'s `@ExtensionFunctionType` mark distinguishes it from `(Cfg) -> Unit`. Members and
+  top-level callables already restored that mark, but a CONSTRUCTOR is absent from `@Metadata`'s
+  function records — it lives in the constructor records, which krusty decoded for names/defaults only.
+  Those records now also carry the per-parameter receiver mark, and a `<init>` member republishes it as
+  the parameter TYPE and on its call signature, so a lambda argument binds `this` and a bare member
+  call inside it resolves. Tests: `tests/classpath_ctor_receiver_lambda_e2e.rs`.
+- **An integer argument in a WIDER primitive constructor parameter.** `Row(a: String, b: Long)` called
+  as `Row("x", 1)`. krusty admits primitive widening at every call site (the emit site materializes the
+  conversion), but constructor selection measured arguments by SUBTYPING alone, so any constructor with
+  a `Long`/`Double`/… parameter was unreachable from an integer literal. Both constructor origins now
+  apply the widening, and each keeps it as the LAST applicability pass so an exact-parameter overload
+  still binds first; source-constructor selection additionally prefers the exact-type matches, since
+  subtyping relates neither `Int` to `Long` nor back and could not otherwise separate them. Tests:
+  `tests/ctor_numeric_widening_e2e.rs`.
+- **A FULLY-QUALIFIED call to a vararg function (`kotlin.collections.listOf(1, 2, 3)`).** A vararg
+  callee packs every trailing argument into ONE array parameter. The fully-qualified path paired
+  arguments with parameters index-for-index, so the first element was measured against `Array<Any>`,
+  and the lowerer skipped the shape outright. The checker now recovers the vararg slot from the
+  candidate it selected, checks the packed arguments against the array's ELEMENT type (an explicit
+  spread keeps the array type), and records the slot on the resolved callable so the lowerer packs the
+  same arguments. Tests: `tests/fq_vararg_call_e2e.rs`.
+- **A LABELLED trailing lambda and the local return it names (`run outer@{ … return@outer v … }`).**
+  Two facts. Syntactically, a `label@` may precede a trailing lambda; the parser did not attach such a
+  `{ … }` to the call, so the callee stayed a bare name ("unresolved reference 'run'"). Semantically, an
+  explicit label REPLACES the implicit one (the callee's own name) that a `return@…` inside the body
+  targets. A labelled return is LOCAL to its lambda, so lowering must model it per splice route: the
+  receiver-less `run { … }` splice wraps the body and routes the return through a result slot, and the
+  `forEach { … }` splice — which becomes a for-each LOOP — routes it to that loop's `continue`. A label
+  that reaches neither, on a route that does not model it, now SKIPS the file: the previous
+  fall-through emitted a real return out of the enclosing function, which the JVM verifier rejects at
+  class load. Tests: `tests/labeled_lambda_return_e2e.rs`.
+
+  A labelled lambda that is a VALUE rather than an argument (`val f = lbl@{ x: Int -> … return@lbl a
+  … }`) is never spliced, so its label IS the closure method's own return scope and the closure route
+  serves it directly. Such a lambda withholds its splice form: the same return node, spliced, would be
+  a non-local return of the enclosing function carrying the wrong type. Test:
+  `tests/labeled_lambda_return_e2e.rs::a_standalone_labelled_lambda_returns_locally`.
+
+  Still open: a labelled return from a stdlib HOF whose lambda is routed through the bytecode splicer
+  (`xs.sumOf tag@{ … return@tag 0 … }`). Withholding the splice form leaves that route no body to
+  inline, and the closure fallback does not reach it, so the file skips.
+- **An `open` property is read and written through its ACCESSOR, even inside the declaring class.**
+  A subclass `override val`/`var` replaces the base's `get<Name>()`/`set<Name>()`, never the base's
+  own private backing field, so a `getfield`/`putfield` from a base member would touch the base's
+  storage and silently bypass the override. kotlinc emits `invokevirtual get<Name>()` for exactly
+  this reason. A FINAL property keeps the direct field access; so does a PRIVATE one, which has no
+  synthesized accessor to call (`private open` is not valid Kotlin, so this only decides what an input
+  kotlinc rejects compiles to). A constructor's property INITIALIZER stays a `putfield` in both
+  compilers — the field must be stored before any subclass accessor could run — while an `init { }`
+  assignment to an open `var` goes through the setter, again as kotlinc does. A `val` has no setter at
+  all, so the deferred initialization Kotlin permits for one (`open val c: B` assigned in `init { }`
+  under `-ProhibitOpenValDeferredInitialization`) stays a `putfield`; every write rule is therefore
+  conditioned on the property being a `var`.
+
+  This holds only if EVERY access path applies it, and the paths do not share one implementation: a
+  bare `name` read/write and an `x++` go through `ir_lower::open_source_property`, a qualified
+  `this.name` through `jvm::ir_emit::direct_field_access`, keyed on `IrProperty::is_open`. That flag
+  must therefore be set for a PRIMARY-CONSTRUCTOR property as well as a body one — both forms are
+  overridable, and a review found the two sites disagreeing for the constructor form, so a bare write
+  in a base member silently stored into the base's own field. It replaces the whole-file
+  `gate:base-reads-override-internally` bail, which used to skip any class whose base read an
+  overridden property. Tests: `tests/class_body_e2e.rs::open_property_virtual_dispatch`,
+  `::open_property_virtual_dispatch_through_a_grandparent`,
+  `::open_property_writes_and_constructor_declarations_dispatch_virtually`,
+  `::open_var_init_block_writes_through_the_setter`.
+- **A `when` subject compares against a BOXED primitive comparand.** `when (x: Any) { 1, 2, 3 -> … }`
+  is valid Kotlin: `Int` is a subtype of `Any`, so the comparison can be non-trivially true, and
+  kotlinc emits `Intrinsics.areEqual(x, Integer.valueOf(1))`. Comparability therefore tests the
+  subject and the comparand in their REFERENCE forms (a primitive boxes to its Kotlin class, `String`
+  names `kotlin/String`), and lowering boxes the comparand instead of rejecting the mixed
+  primitive/reference compare. The converse — a primitive subject with a reference comparand
+  (`when (i: Int) { null -> … }`) — has no such form and is still refused. Two comparand kinds keep
+  bailing in LOWERING (the comparability rule above is unconditional, matching kotlinc): an unsigned
+  one boxes to its own inline class rather than a plain wrapper, and a FLOAT/DOUBLE one compares by
+  IEEE `==` whenever the subject is a primitive, which `Double.equals` is not (`-0.0 != 0.0`,
+  `NaN == NaN`) — which of the two applies turns on whether an earlier `is` arm smart-casts the
+  SUBJECT to the primitive, per-arm narrowing the lowering does not model (corpus case
+  `ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt`). Tests:
+  `tests/feature_coverage_p_e2e.rs::when_comma_conditions_and_mixed_is_in`,
+  `::when_widened_subject_boxes_every_primitive_comparand`.
+- **`x in a..b` over a WIDENED value.** `when (x: Any) { in 4..10 -> … }` compiles: kotlinc lowers it
+  to `CollectionsKt.contains(4..10, x)`, and an `IntRange` is not a `Collection`, so that walks the
+  range comparing with `equals` — true exactly when `x` is a BOXED element of the range. krusty keeps
+  its comparison chain and guards it with the `instanceof` that fact implies (`x is Integer &&
+  4 <= x.intValue() <= 10`). The guard must short-circuit, so it is a branch, not the eager `iand`:
+  unboxing a value of another class would throw. A value type unrelated to the boxed element
+  (`x: String in 4..10`) is still rejected. The widened form is `Iterable<T>.contains`, so only
+  `Int`/`Long`/`Char` elements qualify: a floating-point range is a `ClosedFloatingPointRange`, not an
+  `Iterable` (kotlinc rejects `x: Any in 1.0..2.0` outright); a `Byte`/`Short` range is really an
+  `IntRange`, whose elements box to `Integer` rather than the bound's own wrapper; and an unsigned
+  range's elements box to their inline class, which krusty erases to the signed primitive. Tests:
+  `tests/feature_coverage_p_e2e.rs::when_comma_conditions_and_mixed_is_in`,
+  `::when_widened_subject_boxes_every_primitive_comparand`.
 - **`private` visibility is LEXICAL, and the JVM's is not.** A nested (non-`inner`) class, the
   companion and an `inline` body spliced into a caller all sit inside the owner's braces, so Kotlin
   lets them reach its private members; each is a SEPARATE class file, so `invokespecial` on a private
@@ -2581,8 +2689,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   covered when all of ITS subclasses are: the hierarchy is a tree and only its LEAVES can be
   instantiated. Checking only the DIRECT subclasses reported
   `sealed class Node { sealed class Leaf : Node(); … }` covered by `IntLeaf`/`StrLeaf`/`Branch` as
-  non-exhaustive, demanding an `is Leaf` branch kotlinc rejects as redundant. Test:
-  `tests/feature_coverage_r_e2e.rs::nested_sealed_hierarchy`.
+  non-exhaustive, demanding an `is Leaf` branch kotlinc rejects as redundant. A subclass the arms DO
+  cover (`is Leaf ->`) stands for its whole branch and is not re-reported through its children. The
+  same tree is walked when deciding which arms COVER something: an `object` arm may name a subclass of
+  a nested sealed class, so membership is tested against every sealed descendant rather than the direct
+  subclasses alone. Tests: `tests/feature_coverage_r_e2e.rs::nested_sealed_hierarchy`,
+  `resolve::tests::nested_sealed_hierarchy_is_exhausted_by_its_leaves`,
+  `::covering_a_nested_sealed_class_directly_covers_its_branch`,
+  `::a_missing_nested_sealed_leaf_is_reported_by_name`.
 
 ## 8. Success criteria for the PoC
 

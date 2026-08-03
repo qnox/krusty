@@ -17360,6 +17360,7 @@ impl<'a> Checker<'a> {
             let params = crate::libraries::ParamList {
                 names: candidate.param_names.clone(),
                 defaults: candidate.defaults.clone(),
+                recv_fun: candidate.lambda_receivers.clone(),
                 vararg: candidate.vararg,
             };
             if let Err(failure) = map_param_list_args(args, names, &params, trailing_lambda) {
@@ -17434,6 +17435,21 @@ impl<'a> Checker<'a> {
             .any(|candidate| candidate.resolved.vararg.is_none())
         {
             matches.retain(|candidate| candidate.resolved.vararg.is_none());
+        }
+        // Numeric widening makes a wider primitive slot APPLICABLE (`A(1)` fits `A(b: Long)`), but an
+        // overload taking the argument's own type is the better match and must not become ambiguous
+        // with it — `receiver_is_assignable` relates neither `Int` to `Long` nor back, so the
+        // dominance test below cannot separate them. Prefer the exact-type matches whenever any
+        // candidate has them, which is Kotlin's own most-specific rule.
+        let actual_types = arguments
+            .args
+            .iter()
+            .map(|argument| self.expr_types[argument.0 as usize])
+            .collect::<Vec<_>>();
+        let exact =
+            |candidate: &MatchedCtorDelegation| candidate.resolved.argument_types == actual_types;
+        if matches.iter().any(exact) {
+            matches.retain(exact);
         }
         let dominated = |candidate: usize, other: usize| {
             let left = &matches[candidate].resolved.argument_types;
@@ -17747,8 +17763,20 @@ impl<'a> Checker<'a> {
                 ConstructorParameterConstraint::Concrete if lambda_literal => {
                     matches!(expected.non_null(), Ty::Fun(_))
                 }
+                // A numeric argument reaches another primitive slot the same way it does at a function
+                // call (`L(b: Long)` accepts `L(1)`): the emit site inserts the conversion. Subtyping
+                // alone rejected it, so every constructor with a `Long`/`Double`/… parameter was
+                // unreachable from an integer literal — the one call origin that did not admit the
+                // conversion `expect_assignable` applies everywhere else.
+                //
+                // `accepts_numeric` is the shared predicate and is deliberately the SAME one those
+                // origins use, so this inherits their leniency rather than inventing a constructor
+                // rule: it also admits `Int` into `Byte`/`Short`, where kotlinc requires an explicit
+                // conversion. Narrowing that predicate is a project-wide decision (the plain-call and
+                // classpath-constructor origins already take it), not one to fork here.
                 ConstructorParameterConstraint::Concrete => {
                     self.receiver_is_assignable(actual, expected)
+                        || expected.accepts_numeric(actual)
                 }
                 ConstructorParameterConstraint::Inferred => true,
                 ConstructorParameterConstraint::GenericFunction => {
@@ -18422,6 +18450,22 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Every sealed descendant of `roots`, transitively (the roots themselves included). A sealed class
+    /// may nest a further sealed class, so the hierarchy under a sealed subject is a tree, not a list.
+    fn sealed_descendants(&self, roots: &[TypeName]) -> std::collections::HashSet<TypeName> {
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = roots.to_vec();
+        while let Some(subclass) = pending.pop() {
+            if !seen.insert(subclass) {
+                continue;
+            }
+            if let Some(shape) = self.resolved_type_name(subclass) {
+                pending.extend(shape.sealed_subclasses.iter_ids());
+            }
+        }
+        seen
+    }
+
     fn when_sealed_missing_branches(
         &self,
         subject_ty: Option<Ty>,
@@ -18435,6 +18479,10 @@ impl<'a> Checker<'a> {
             return None;
         }
         subclasses.sort_by_key(|subclass| subclass.render());
+        // Every sealed descendant, not just the direct ones: an `object` arm may name a subclass of a
+        // NESTED sealed class (`sealed class Node { sealed class Leaf : Node() … }`), and that arm still
+        // covers part of the hierarchy.
+        let descendants = self.sealed_descendants(&subclasses);
 
         let mut covered = std::collections::HashSet::new();
         let mut covers_null = false;
@@ -18457,7 +18505,7 @@ impl<'a> Checker<'a> {
                                 .then_some(internal)
                         }),
                     };
-                    if let Some(object) = object.filter(|internal| subclasses.contains(internal)) {
+                    if let Some(object) = object.filter(|internal| descendants.contains(internal)) {
                         covered.insert(object);
                     }
                 }
@@ -19528,13 +19576,24 @@ impl<'a> Checker<'a> {
     /// Are two reference types comparable as `when`-subject value arms? A `when (s) { A -> … }` over a
     /// sealed subject `s: S` matches the *object* `A` (a subtype of `S`) by `==` — valid in Kotlin
     /// whenever one operand's type is a subtype of the other (the comparison can be non-trivially true).
-    /// Only object/array reference types qualify; primitives go through `Ty::promote`.
+    /// A primitive or `String` operand takes part through its REFERENCE form: `when (x: Any) { 1 -> … }`
+    /// compares the boxed `Int` with the `Any` subject (kotlinc emits `Intrinsics.areEqual`), and the
+    /// comparison can be non-trivially true for exactly the same subtype reason.
     fn when_objs_comparable(&self, st: Ty, ct: Ty) -> bool {
-        match (st, ct) {
+        match (Self::when_reference_form(st), Self::when_reference_form(ct)) {
             (Ty::Obj(a, _), Ty::Obj(b, _)) => {
                 self.obj_name_is_subtype(a, b) || self.obj_name_is_subtype(b, a)
             }
             _ => false,
+        }
+    }
+
+    /// The reference (object) form of a value type: a primitive boxes to its Kotlin class
+    /// (`Int` → `kotlin/Int`), `String` names `kotlin/String`, and any other type is returned as is.
+    fn when_reference_form(t: Ty) -> Ty {
+        match t {
+            Ty::String => Ty::obj("kotlin/String"),
+            _ => t.boxed_ref().unwrap_or(t),
         }
     }
 
@@ -22160,6 +22219,26 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
+    /// Whether `x in a..b` has a REFERENCE value over a primitive range whose elements can actually
+    /// inhabit it (`x: Any` over `4..10`). The membership test then reduces to "is `x` a boxed element
+    /// of the range", so a value type unrelated to the boxed element (`x: String` over `4..10`) is
+    /// excluded — that comparison is never non-trivially true and kotlinc rejects it.
+    ///
+    /// Only `Int`/`Long`/`Char` elements qualify, because the widened form is `Iterable<T>.contains`:
+    /// a FLOATING-POINT range is a `ClosedFloatingPointRange`, not an `Iterable`, so kotlinc rejects
+    /// `x: Any in 1.0..2.0` outright; a `Byte`/`Short` range is really an `IntRange` (its elements box
+    /// to `Integer`, not to the bound's own wrapper); and an unsigned range's elements box to their
+    /// inline class, which krusty erases to the signed primitive.
+    fn in_range_widened_value(&self, value: Ty, element: Ty) -> bool {
+        if !matches!(element, Ty::Int | Ty::Long | Ty::Char) {
+            return false;
+        }
+        let Some(boxed) = element.boxed_ref() else {
+            return false;
+        };
+        value.is_reference() && self.when_objs_comparable(value.non_null(), boxed)
+    }
+
     fn expr_inner_in_range(&mut self, e: ExprId, value: ExprId, start: ExprId, end: ExprId) -> Ty {
         let t = {
             let vt = self.expr(value);
@@ -22184,6 +22263,12 @@ impl<'a> Checker<'a> {
             // Require uniform operand types — the lowering emits direct same-type comparisons, so a
             // mixed range (Int value, Long bounds) would need promotion that isn't modeled yet.
             if prim(&vt) && vt == st && st == et {
+                Ty::Boolean
+            } else if prim(&st) && st == et && self.in_range_widened_value(vt, st) {
+                // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
+                // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
+                // BOXED element of the range — so it stays a comparison chain, guarded by the
+                // `instanceof` the boxed element type implies (see `ir_lower::expr_inner_in_range`).
                 Ty::Boolean
             } else if st.is_reference() && st == et {
                 // A REFERENCE range `a..b` with a user/library `rangeTo` operator: `x in a..b`
@@ -28583,6 +28668,99 @@ impl<'a> Checker<'a> {
             .then(|| (owner, member.to_string(), declared.ty, declared.visibility))
     }
 
+    /// The constructor parameter shapes a lambda argument of `Name(args)` is typed against: per
+    /// parameter, its type and whether that type is a RECEIVER function type (`Scope.() -> Unit`,
+    /// whose lambda binds `this`). Federated over both declaration origins — a module class answers
+    /// from its own signature (the same-file AST supplying the receiver marks its `Ty` erases), a
+    /// compiled class from the `LibraryType` constructor of the same arity, whose marks were restored
+    /// from `@Metadata`. Before this, only the module origin answered, so a lambda passed to a
+    /// compiled receiver-lambda constructor got no implicit `this` and a bare member call in it was
+    /// "expression is not callable".
+    fn construction_lambda_param_shapes(
+        &self,
+        name: &str,
+        arity: usize,
+    ) -> Option<Vec<(Ty, bool)>> {
+        if let Some(cls) = self.syms.classes.get(name) {
+            let recv_flags: Vec<bool> = self
+                .file
+                .decls
+                .iter()
+                .find_map(|&d| match self.file.decl(d) {
+                    Decl::Class(c) if c.name == name => {
+                        Some(c.props.iter().map(|p| p.ty.fun_has_receiver()).collect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| Self::semantic_lambda_receiver_flags(&cls.ctor_params));
+            return Some(
+                cls.ctor_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, parameter)| (*parameter, recv_flags.get(i).copied().unwrap_or(false)))
+                    .collect(),
+            );
+        }
+        let internal = self.syms.class_names.get(name)?;
+        let classifier = self.resolved_type_name(internal)?;
+        // Arity alone must also decide WHETHER a constructor can answer: this runs before overload
+        // selection, so with two same-arity constructors the first one's parameter shapes would be
+        // imposed on a call meant for the other — typing a lambda against a receiver it does not have.
+        // Answer only when the arity identifies one constructor; otherwise the lambda keeps the
+        // expected-type-free shape it had before this federation.
+        let constructor = {
+            let mut same_arity = classifier
+                .constructors
+                .iter()
+                .filter(|member| member.params.len() == arity);
+            match (same_arity.next(), same_arity.next()) {
+                (Some(member), None) => member,
+                _ => return None,
+            }
+        };
+        Some(
+            constructor
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, parameter)| {
+                    (
+                        *parameter,
+                        constructor
+                            .call_sig
+                            .lambda_receiver_params
+                            .get(i)
+                            .copied()
+                            .unwrap_or(false),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The vararg parameter slot of a selected TOP-LEVEL callable, recovered from the candidate set it
+    /// was picked out of. A [`crate::libraries::LibraryCallable`] records `vararg_index` only for the
+    /// `$default` form, but a positional argument check needs the slot for EVERY vararg call — without
+    /// it the first packed element is measured against the array parameter itself.
+    fn top_level_vararg_slot(
+        &self,
+        pkg_scope: &[TypeName],
+        name: &str,
+        selected: &crate::libraries::LibraryCallable,
+    ) -> Option<usize> {
+        if let Some(index) = selected.vararg_index {
+            return Some(index);
+        }
+        self.resolver_in_scope(pkg_scope)
+            .top_level_candidates(name)
+            .into_iter()
+            .find(|candidate| {
+                candidate.callable.owner == selected.owner
+                    && candidate.callable.descriptor == selected.descriptor
+            })
+            .and_then(|candidate| candidate.call_sig.vararg_index)
+    }
+
     /// Primary-constructor parameter names/defaults of a same-file class, in declaration order — for
     /// mapping named constructor arguments. `None` if `class_name` isn't a same-file primary constructor.
     fn primary_ctor_param_list(&self, class_name: &str) -> Option<ParamList> {
@@ -28593,6 +28771,7 @@ impl<'a> Checker<'a> {
                 Decl::Class(c) if c.name == class_name && c.has_primary_ctor => Some(ParamList {
                     names: c.props.iter().map(|p| p.name.clone()).collect(),
                     defaults: c.props.iter().map(|p| p.default.is_some()).collect(),
+                    recv_fun: c.props.iter().map(|p| p.ty.fun_has_receiver()).collect(),
                     vararg: c.props.iter().position(|p| p.is_vararg),
                 }),
                 _ => None,
@@ -28608,6 +28787,7 @@ impl<'a> Checker<'a> {
                         .map(|(n, _)| n.clone())
                         .collect(),
                     defaults: sig.ctor_param_names.iter().map(|(_, d)| *d).collect(),
+                    recv_fun: Self::semantic_lambda_receiver_flags(&sig.ctor_params),
                     vararg: sig.ctor_vararg,
                 })
             })
@@ -29359,7 +29539,7 @@ impl<'a> Checker<'a> {
                                     Err(()) => return Ty::Error,
                                 }
                             }
-                            if let Some(c) = self
+                            if let Some(mut c) = self
                                 .resolver_in_scope(&pkg_scope)
                                 .resolve_symbol(
                                     crate::symbol_resolver::SymRecv::TopLevel,
@@ -29387,14 +29567,54 @@ impl<'a> Checker<'a> {
                                             }
                                         }
                                     } else {
+                                        // A VARARG callee packs every trailing argument into ONE array
+                                        // parameter, so index-for-index pairing would measure the first
+                                        // element against `Array<Any>`. Check those arguments against the
+                                        // array's ELEMENT type — the representation-neutral rule the
+                                        // bare-name, member and local-function paths already apply. An
+                                        // explicit spread passes the array itself and keeps the array type.
+                                        let vararg = self
+                                            .top_level_vararg_slot(&pkg_scope, &name, &c)
+                                            .filter(|&slot| slot + 1 == c.params.len());
                                         for (i, a) in args.iter().enumerate() {
-                                            if let Some(p) = c.params.get(i) {
+                                            let expected = match vararg {
+                                                Some(slot)
+                                                    if i >= slot
+                                                        && !self.file.is_spread_arg(*a) =>
+                                                {
+                                                    c.params.get(slot).and_then(|p| p.array_elem())
+                                                }
+                                                Some(slot) if i >= slot => {
+                                                    c.params.get(slot).copied()
+                                                }
+                                                _ => c.params.get(i).copied(),
+                                            };
+                                            if let Some(p) = expected {
                                                 self.expect_assignable(
-                                                    *p,
+                                                    p,
                                                     arg_tys[i],
                                                     self.span(*a),
                                                     "argument",
                                                 );
+                                            }
+                                        }
+                                        // The lowerer must pack the same trailing arguments, and a
+                                        // `LibraryCallable` alone cannot say which slot is the vararg —
+                                        // record the slot the checker selected on (sole resolver). A
+                                        // single trailing argument that already IS the array (a spread,
+                                        // or the array itself) passes straight through, so it is not a
+                                        // packing site.
+                                        if let Some(slot) = vararg {
+                                            let packs = args.len() != slot + 1
+                                                || args.get(slot).is_some_and(|&a| {
+                                                    !self.file.is_spread_arg(a)
+                                                        && Some(arg_tys[slot])
+                                                            != c.params.get(slot).copied()
+                                                });
+                                            if packs {
+                                                c.vararg_elem =
+                                                    c.params.get(slot).and_then(|p| p.array_elem());
+                                                c.vararg_index = Some(slot);
                                             }
                                         }
                                     }
@@ -31867,26 +32087,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
                 {
-                    let recv_flags: Vec<bool> = self
-                        .file
-                        .decls
-                        .iter()
-                        .find_map(|&d| match self.file.decl(d) {
-                            Decl::Class(c) if c.name == fname => {
-                                Some(c.props.iter().map(|p| p.ty.fun_has_receiver()).collect())
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    self.syms.classes.get(&fname).map(|cls| {
-                        cls.ctor_params
-                            .iter()
-                            .enumerate()
-                            .map(|(i, parameter)| {
-                                (*parameter, recv_flags.get(i).copied().unwrap_or(false))
-                            })
-                            .collect()
-                    })
+                    self.construction_lambda_param_shapes(&fname, args.len())
                 } else {
                     None
                 };
@@ -35397,6 +35598,103 @@ val result = object { fun value(): String = captured }
                 consumer?.consume { when (value) { 2 -> println(value) } }\n\
                 consumer?.consumeReceiver { when (value) { 2 -> println(length) } }\n\
             }");
+    }
+
+    /// A NESTED sealed class is exhausted by covering its own subclasses: Kotlin's rule is over the
+    /// leaves of the sealed tree, and a sealed class is abstract, so `Leaf` itself is never an
+    /// instance.
+    #[test]
+    fn nested_sealed_hierarchy_is_exhausted_by_its_leaves() {
+        ok("sealed class Node {\n\
+                sealed class Leaf : Node()\n\
+                class IntLeaf : Leaf()\n\
+                class StrLeaf : Leaf()\n\
+                class Branch : Node()\n\
+            }\n\
+            fun count(n: Node): Int = when (n) {\n\
+                is Node.IntLeaf -> 1\n\
+                is Node.StrLeaf -> 1\n\
+                is Node.Branch -> 2\n\
+            }");
+    }
+
+    /// The intermediate sealed class covered DIRECTLY covers its whole branch — its children must not
+    /// be re-reported through it.
+    #[test]
+    fn covering_a_nested_sealed_class_directly_covers_its_branch() {
+        ok("sealed class Node {\n\
+                sealed class Leaf : Node()\n\
+                class IntLeaf : Leaf()\n\
+                class StrLeaf : Leaf()\n\
+                class Branch : Node()\n\
+            }\n\
+            fun count(n: Node): Int = when (n) {\n\
+                is Node.Leaf -> 1\n\
+                is Node.Branch -> 2\n\
+            }");
+    }
+
+    /// Expansion does not weaken the diagnostic: a genuinely uncovered LEAF is still named, by its own
+    /// name rather than its sealed parent's.
+    #[test]
+    fn a_missing_nested_sealed_leaf_is_reported_by_name() {
+        let (errors, _) = check(
+            "sealed class Node {\n\
+                 sealed class Leaf : Node()\n\
+                 class IntLeaf : Leaf()\n\
+                 class StrLeaf : Leaf()\n\
+                 class Branch : Node()\n\
+             }\n\
+             fun count(n: Node): Int = when (n) {\n\
+                 is Node.IntLeaf -> 1\n\
+                 is Node.Branch -> 2\n\
+             }",
+        );
+
+        assert_eq!(
+            errors,
+            ["'when' expression must be exhaustive. Add the 'is StrLeaf' branch or an 'else' branch."]
+        );
+    }
+
+    /// `when (x: Any) { 1 -> … }` is a BOXED comparison, not a type error: `Int` is a subtype of the
+    /// subject's type, so the equality can be non-trivially true.
+    #[test]
+    fn a_reference_when_subject_accepts_primitive_and_string_comparands() {
+        ok("fun f(x: Any): String = when (x) {\n\
+                1 -> \"i\"\n\
+                2L -> \"l\"\n\
+                'c' -> \"c\"\n\
+                \"s\" -> \"s\"\n\
+                in 4..10 -> \"r\"\n\
+                else -> \"o\"\n\
+            }");
+    }
+
+    /// …but an UNRELATED comparand still has no way to be equal, and a range whose boxed element the
+    /// value can never hold stays rejected.
+    #[test]
+    fn an_unrelated_comparand_is_still_not_comparable_to_the_subject() {
+        let (errors, _) =
+            check("fun f(x: String): String = when (x) { 1 -> \"i\"; else -> \"o\" }");
+        assert_eq!(
+            errors,
+            ["when condition type 'Int' is not comparable to subject 'String'"]
+        );
+
+        let (errors, _) = check("fun g(x: String): Boolean = x in 4..10");
+        assert_eq!(
+            errors,
+            ["krusty: 'in' is only supported for primitive numeric ranges"]
+        );
+
+        // A floating-point range is a `ClosedFloatingPointRange`, not an `Iterable`, so it has no
+        // widened `contains` — kotlinc rejects this too.
+        let (errors, _) = check("fun h(x: Any): Boolean = x in 1.0..2.0");
+        assert_eq!(
+            errors,
+            ["krusty: 'in' is only supported for primitive numeric ranges"]
+        );
     }
 
     #[test]

@@ -159,10 +159,13 @@ fn classpath_callable_references_resolve_reflection_targets() {
         import fixtures.Marker
         import fixtures.Sample
         import fixtures.isTagged
+        import kotlin.reflect.KFunction0
 
         class PrivateSample {
             private fun reveal(): String = "OK"
-            fun reference(): () -> String = ::reveal
+            // `KFunction0`, not `() -> String`: the plain function type has no `returnType` member, so
+            // the assertion below would not be valid Kotlin (kotlinc rejects it too).
+            fun reference(): KFunction0<String> = ::reveal
         }
 
         fun box(): String {
