@@ -41,14 +41,24 @@ fn runtime_annotation_on_enum_constant_is_emitted() {
     );
 }
 
+/// The negative half: an annotation that is DECLARED but never applied leaves no trace on the enum.
+/// The check is the annotation TYPE's descriptor, not the `RuntimeVisibleAnnotations` attribute name —
+/// every emitted class carries that attribute for its own `@kotlin.Metadata` (kotlinc's plain `Role`
+/// has it too), so its mere presence says nothing about the enum CONSTANTS.
 #[test]
-fn plain_enum_has_no_annotation_attribute() {
+fn unapplied_annotation_leaves_no_trace_on_a_plain_enum() {
     let bytes = role_bytes(
         "package demo\n\
+         @Retention(AnnotationRetention.RUNTIME)\n\
+         annotation class Mark(val v: String)\n\
          enum class Role(val v: String) { SYSTEM(\"system\"), USER(\"user\") }\n",
     );
     assert!(
-        !contains(&bytes, "RuntimeVisibleAnnotations"),
-        "unexpected annotation attribute on a plain enum",
+        !contains(&bytes, "Ldemo/Mark;"),
+        "unexpected annotation on a plain enum's constants",
+    );
+    assert!(
+        contains(&bytes, "Lkotlin/Metadata;"),
+        "the enum still carries its own class @Metadata",
     );
 }

@@ -92,7 +92,7 @@ fn first_error(src: &str, cp: &Rc<Classpath>, stem: &str) -> Option<String> {
         Some(ir) => ir,
         None => return Some(format!("lower: {}", lower_bail.borrow())),
     };
-    emit_checked_ir(&mut ir, &files[0], 0, &facade, &syms, cp)
+    emit_checked_ir(&mut ir, &files[0], 0, stem, &facade, &syms, cp)
         .and_then(require_compilation_output)
         .err()
 }
@@ -101,6 +101,7 @@ fn emit_checked_ir(
     ir: &mut IrFile,
     file: &krusty::ast::File,
     file_index: u32,
+    stem: &str,
     facade: &str,
     syms: &FrontendSymbols,
     cp: &Rc<Classpath>,
@@ -123,12 +124,11 @@ fn emit_checked_ir(
     // module's output from the classpath and needs it to resolve cross-module extensions.
     let metadata = krusty::jvm::backend::facade_package_metadata(file, file_index, syms);
     let run = krusty::jvm::ir_emit::EmitRun::default();
-    let opts = krusty::jvm::ir_emit::EmitOptions {
-        inner_class_resolver: Some(krusty::jvm::backend::classpath_inner_class_resolver(
-            cp.clone(),
-        )),
-        ..Default::default()
-    };
+    // Survey exactly the artifact shape users receive. A survey-local partial option literal used to
+    // omit class metadata and `SourceFile`, masking failures that only occur when a later module reads
+    // the emitted class. Filename normalization and metadata admission belong to the shared shipping
+    // constructor, including for logical nested testdata paths.
+    let opts = krusty::jvm::backend::shipping_emit_options(stem, "main", None, cp.clone());
     match krusty::jvm::ir_emit::emit_all_with_opts(
         ir,
         facade,
@@ -231,7 +231,13 @@ fn first_error_blocks(
             None => return Err(format!("lower: {}", lower_bail.borrow())),
         };
         all.extend(emit_checked_ir(
-            &mut ir, file, i as u32, &facade, &syms, cp,
+            &mut ir,
+            file,
+            i as u32,
+            &blocks[i].0,
+            &facade,
+            &syms,
+            cp,
         )?);
     }
     require_compilation_output(all)
