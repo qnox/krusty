@@ -2648,3 +2648,128 @@ fun box(): String = runBlocking { go() }\n";
         "a write to a locally dead scratch must not bail the file"
     );
 }
+
+/// A suspend LAMBDA flowing into a MEMBER function's `suspend`-function-typed parameter is ordinary.
+///
+/// `gate:suspend-lambda-into-member-parameter` claimed the argument was not routed to
+/// `lower_suspend_lambda`, leaving a plain `FunctionN` whose body never threads a `Continuation`. It is
+/// routed: a member call's parameter types come from the IR signature (`ir.functions[mfid].params`) and
+/// `ty_to_ir` is the IDENTITY on `Ty::Fun`, so `suspend` survives into `lower_arg`'s
+/// `Ty::Fun(s) if s.suspend` route exactly as it does for a top-level builder. `Holder.accept` below
+/// gets a real `SuspendLambda` (`box$suspend$0`) that suspends and resumes to `"s!"`, matching kotlinc.
+///
+/// The RECEIVER form (`suspend Controller.() -> Unit`) is deliberately not used here: a receiver lambda
+/// that both suspends and calls a member of its receiver fails to verify — but identically through a
+/// TOP-LEVEL builder, so that is a separate pre-existing defect in suspend receiver lambdas, not a
+/// member-parameter routing divergence.
+#[test]
+fn suspend_lambda_into_member_parameter_runs() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+class Holder {\n\
+    fun accept(block: suspend () -> String): String = runBlocking(block)\n\
+}\n\
+suspend fun step(): String = suspendCoroutineUninterceptedOrReturn { x ->\n\
+    x.resume(\"s\")\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+fun box(): String = Holder().accept { val a = step(); a + \"!\" }\n";
+    let Some(out) = common::compile_and_run_box(
+        src,
+        "SuspendLambdaMemberParam",
+        &[stdlib],
+        Some(jdk.as_path()),
+    ) else {
+        panic!(
+            "SuspendLambdaMemberParam: the front end accepted the source, so lowering/emit bailed"
+        );
+    };
+    assert_eq!(
+        out.trim(),
+        "s!",
+        "a suspend lambda into a MEMBER function's suspend parameter must run its state machine"
+    );
+}
+
+/// A `try` that CATCHES over a suspension point, with a value live across it, is skipped.
+///
+/// The coroutine pass wraps the whole `label`-dispatch loop in ONE `catch Throwable` that routes on the
+/// in-flight `label` and re-enters the loop WITHOUT restoring the locals its predecessor spilled. A
+/// resumed machine re-enters the static body as `f(null, …)`, so `a` here read back `null` and `box()`
+/// threw an NPE where kotlinc answers `"A-end"`. `f` has no parameters and no receiver — an ordinary
+/// spilled LOCAL is enough, which is why the bail keys on "a value is live across the try" rather than
+/// on the enclosing function being an extension or a member.
+#[test]
+fn suspend_try_catch_over_a_suspension_still_skips() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun boom(): Int = suspendCoroutineUninterceptedOrReturn { x ->\n\
+    x.resumeWithException(IllegalStateException(\"boom\"))\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+suspend fun ok(s: String): String = suspendCoroutineUninterceptedOrReturn { x ->\n\
+    x.resume(s)\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+suspend fun f(): String {\n\
+    val a = ok(\"A\")\n\
+    try { boom() } catch (e: Exception) { }\n\
+    return a + \"-end\"\n\
+}\n\
+fun box(): String = runBlocking { f() }\n";
+    assert!(
+        common::compile_and_run_box(src, "SuspendTryCatch", &[stdlib], Some(jdk.as_path()))
+            .is_none(),
+        "a catching try over a suspension with a live local must be skipped, never emitted"
+    );
+}
+
+/// The `try`/`catch` bail stays NARROW: a `try` with no suspension point in any of its regions still
+/// compiles, even inside a suspend function that suspends elsewhere. Without this the gate would
+/// swallow every suspend body that merely mentions a `try`.
+#[test]
+fn suspend_try_catch_without_a_suspension_runs() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun step(): String = \"s\"\n\
+fun boom(): String = throw RuntimeException(\"x\")\n\
+suspend fun go(): String {\n\
+    val a = step()\n\
+    val b = try { boom() } catch (e: RuntimeException) { \"caught\" }\n\
+    return a + b\n\
+}\n\
+fun box(): String = runBlocking { go() }\n";
+    let Some(out) =
+        common::compile_and_run_box(src, "SuspendTryCatchNoSusp", &[stdlib], Some(jdk.as_path()))
+    else {
+        panic!("SuspendTryCatchNoSusp: the front end accepted the source, so lowering/emit bailed");
+    };
+    assert_eq!(
+        out.trim(),
+        "scaught",
+        "a try/catch with no suspension in it must not bail the file"
+    );
+}

@@ -467,25 +467,219 @@ fn lower_file_at_reporting_impl(
         // this file or a sibling one: its receiver is an ordinary leading static parameter, so the
         // coroutine pass appends the CPS `Continuation` after it and threads call sites like any other
         // static suspend call (registered in `suspend_funs` in pass 1b for a same-file callee, in
-        // `ir.suspend_calls` for a sibling-file one). One shape around it still isn't:
+        // `ir.suspend_calls` for a sibling-file one).
+        // A `try` that CATCHES over a REAL suspension, in a body that has a value live across it.
+        //
+        // The coroutine pass flattens a suspend body into a `label`-dispatch loop and wraps the whole
+        // loop in ONE `catch Throwable` (`jvm::suspend::wrap_dispatch_for_handlers`). That handler
+        // routes purely on which `label` was in flight: it stores the exception into `result`, sets
+        // `label` to the handler's state and re-enters the loop — WITHOUT restoring the locals the
+        // predecessor state spilled into the continuation. A resumed machine re-enters the static body
+        // as `f(null, …)`, so a parameter, extension receiver or spilled local read at or after the
+        // `catch` reads back `null`: `suspend fun f(): String { val a = ok("A"); try { boom() } catch
+        // (e: Exception) {}; return a + "-end" }` threw an NPE where kotlinc answers `"A-end"`.
+        //
+        // Four conditions keep the bail off shapes that demonstrably round-trip today:
+        //   * The `try` must have a CATCH. A `finally`-only try's handler always re-throws, so it never
+        //     re-enters the dispatch loop (`tests/suspend_try_finally_body_e2e.rs` proves that shape).
+        //   * Its PROTECTED region must contain a REAL suspension — one whose callee chain reaches a
+        //     suspension INTRINSIC (see the fixpoint below). A `try` guarding ordinary code, or a leaf
+        //     suspend chain that returns synchronously, is flattened like any other branch.
+        //   * Some value must be live to lose: the owning suspend function has a value parameter, an
+        //     extension receiver, or declares a local. With nothing to restore the missing restore is
+        //     unobservable, so `suspend fun f(): Int { try { return d() } catch (e: Exception) { return
+        //     d() } }` stays ACCEPTED (`backend_rejection_coverage_e2e::suspend_try_catch_accepted`).
+        //   * The loss must be observable past the `try`: a catch body reads one of those names, or
+        //     itself suspends (resuming INSIDE the handler needs the same restores), or the `try` sits
+        //     in STATEMENT position so ordinary code can follow it.
+        //
+        // NOT covered, deliberately: the same handler never tests the DECLARED CATCH TYPE either, so
+        // `catch (e: RuntimeException)` also swallows a plain `Exception` that Kotlin requires to
+        // propagate. Whether that fires depends on what the callee throws, which no AST scan can decide,
+        // and paying for it would mean a blanket skip of every suspending `try`/`catch`. Left as a known
+        // gap — see docs/SPEC.md.
+        //
+        // "Suspension point" is the same file-local name approximation `gate:suspend-call-from-non-
+        // suspend` below uses, so a suspend callee from ANOTHER file is not seen here either.
+
+        // Every expression reachable from `root`. An explicit worklist rather than a recursive pair of
+        // closures: `any_child_expr` takes two callbacks and both would have to hold `&mut` on the same
+        // accumulator.
+        let reachable = |root: AstExprId| -> Vec<AstExprId> {
+            let stack = std::cell::RefCell::new(vec![root]);
+            let mut seen = Vec::new();
+            loop {
+                let next = stack.borrow_mut().pop();
+                let Some(e) = next else { break };
+                seen.push(e);
+                file.any_child_expr(
+                    e,
+                    &mut |c| {
+                        stack.borrow_mut().push(c);
+                        false
+                    },
+                    &mut |s| {
+                        file.any_child_stmt(s, &mut |c| {
+                            stack.borrow_mut().push(c);
+                            false
+                        })
+                    },
+                );
+            }
+            seen
+        };
+        // The bail's trigger is a REAL suspension — one that returns `COROUTINE_SUSPENDED` and resumes
+        // the machine later. Merely CALLING a suspend function is a suspension *point* in the state
+        // machine, but if the whole callee chain returns synchronously the frame is never re-entered and
+        // the missing restore cannot be observed: `suspend fun tick(sb: StringBuilder, t: String): Int`
+        // that only appends is a leaf, and a `try`/`catch` around it round-trips today
+        // (`suspend_in_catch_body_spills_exception`). So count only this file's suspend functions whose
+        // body reaches a suspension INTRINSIC, directly or through another such function (a least
+        // fixpoint over the file's suspend declarations). A callee from another file is invisible to
+        // this name scan either way, so it is not counted — the same file-local approximation
+        // `gate:suspend-call-from-non-suspend` makes.
+        const SUSPENSION_INTRINSICS: [&str; 3] = [
+            "suspendCoroutineUninterceptedOrReturn",
+            "suspendCoroutine",
+            "suspendCancellableCoroutine",
+        ];
+        let suspend_decl_bodies: Vec<(String, AstExprId)> = {
+            let mut out = Vec::new();
+            let mut note = |f: &FunDecl| {
+                if let (true, FunBody::Expr(b) | FunBody::Block(b)) = (f.is_suspend(), &f.body) {
+                    out.push((f.name.clone(), *b));
+                }
+            };
+            for &d in &file.decls {
+                match file.decl(d) {
+                    Decl::Fun(f) => note(f),
+                    Decl::Class(c) => c.methods.iter().for_each(&mut note),
+                    Decl::Property(_) => {}
+                }
+            }
+            out
+        };
+        // Scan each body ONCE into (reaches an intrinsic directly, which sibling declarations it calls),
+        // then take the fixpoint over that call graph. Re-walking every body for every candidate name on
+        // every round instead would be quadratic in the file's suspend declarations.
+        let really_suspends: Vec<String> = {
+            let mut seeded: Vec<bool> = Vec::with_capacity(suspend_decl_bodies.len());
+            let mut calls: Vec<Vec<usize>> = Vec::with_capacity(suspend_decl_bodies.len());
+            for (_, body) in &suspend_decl_bodies {
+                seeded.push(
+                    SUSPENSION_INTRINSICS
+                        .iter()
+                        .any(|i| file.expr_uses_name_deep(*body, i)),
+                );
+                calls.push(
+                    suspend_decl_bodies
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (name, _))| file.expr_uses_name_deep(*body, name))
+                        .map(|(i, _)| i)
+                        .collect(),
+                );
+            }
+            loop {
+                let mut changed = false;
+                for i in 0..seeded.len() {
+                    if !seeded[i] && calls[i].iter().any(|&c| seeded[c]) {
+                        seeded[i] = true;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            suspend_decl_bodies
+                .iter()
+                .zip(&seeded)
+                .filter(|(_, &s)| s)
+                .map(|((name, _), _)| name.clone())
+                .collect()
+        };
+        let has_suspension = |e: AstExprId| -> bool {
+            really_suspends
+                .iter()
+                .any(|name| file.expr_uses_name_deep(e, name))
+        };
+        // `try` expressions in STATEMENT position — ordinary code can follow them, so a value spilled
+        // before the `try` can be read after it.
+        let stmt_position_tries: std::collections::HashSet<u32> = file
+            .stmt_arena
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Expr(e) => matches!(file.expr(*e), Expr::Try { .. }).then_some(e.0),
+                _ => None,
+            })
+            .collect();
+        // Each suspend body with the names whose value must survive a resume into a handler.
+        let mut suspend_bodies: Vec<(AstExprId, Vec<String>)> = Vec::new();
+        let mut note_suspend_fun = |f: &FunDecl| {
+            if !f.is_suspend() {
+                return;
+            }
+            let (FunBody::Expr(body) | FunBody::Block(body)) = f.body else {
+                return;
+            };
+            let mut names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
+            if f.receiver.is_some() {
+                names.push("this".to_string());
+            }
+            suspend_bodies.push((body, names));
+        };
         for &d in &file.decls {
-            if let Decl::Fun(f) = file.decl(d) {
-                if !f.is_suspend() || f.receiver.is_none() {
+            match file.decl(d) {
+                Decl::Fun(f) => note_suspend_fun(f),
+                Decl::Class(c) => c.methods.iter().for_each(&mut note_suspend_fun),
+                Decl::Property(_) => {}
+            }
+        }
+        for (body, params) in &suspend_bodies {
+            let body_exprs = reachable(*body);
+            // Locals declared anywhere in this body — each is a candidate spill slot.
+            let mut names = params.clone();
+            for &e in &body_exprs {
+                let Expr::Block { stmts, .. } = file.expr(e) else {
+                    continue;
+                };
+                for &s in stmts {
+                    match file.stmt(s) {
+                        Stmt::Local { name, .. }
+                        | Stmt::LocalLateinit { name, .. }
+                        | Stmt::LocalDelegate { name, .. }
+                        | Stmt::For { name, .. }
+                        | Stmt::ForEach { name, .. } => names.push(name.clone()),
+                        Stmt::Destructure { entries, .. } => {
+                            names.extend(entries.iter().map(|(n, _)| n.clone()))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if names.is_empty() {
+                continue;
+            }
+            for e in body_exprs {
+                let Expr::Try {
+                    body: guarded,
+                    catches,
+                    ..
+                } = file.expr(e)
+                else {
+                    continue;
+                };
+                if catches.is_empty() || !has_suspension(*guarded) {
                     continue;
                 }
-                // A suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
-                // (`Controller.run(c: suspend Controller.() -> Unit)`) is not routed to
-                // `lower_suspend_lambda`, so the lambda class is a plain `FunctionN` whose body never
-                // threads a continuation — driven as a coroutine it silently completes without running
-                // the machine. Skip the file (never miscompile) while an extension suspend fn is in play.
-                if file.decls.iter().any(|&d| match file.decl(d) {
-                    Decl::Class(c) => c
-                        .methods
-                        .iter()
-                        .any(|m| m.params.iter().any(|parameter| parameter.ty.fun_suspend())),
-                    _ => false,
-                }) {
-                    return lo.bail("gate:suspend-lambda-into-member-parameter");
+                let observable = stmt_position_tries.contains(&e.0)
+                    || catches.iter().any(|c| {
+                        has_suspension(c.body)
+                            || names.iter().any(|n| file.expr_uses_name_deep(c.body, n))
+                    });
+                if observable {
+                    return lo.bail("gate:suspend-try-catch");
                 }
             }
         }

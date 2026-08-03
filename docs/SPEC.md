@@ -290,11 +290,64 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of its receiver — the receiver is an ordinary parameter and the member call threads its own
   continuation, so `gate:extension-suspend-fn-member-suspension` is retired
   (`tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member`). One residual shape the
-  corpus proved is NOT about extensions keeps its own bail: a
-  suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
-  (`Controller.run(c: suspend Controller.() -> Unit)`), which is not routed to `lower_suspend_lambda`,
-  so its lambda class is a plain `FunctionN` that never threads a continuation
-  (`gate:suspend-lambda-into-member-parameter`).
+  corpus proved is NOT about extensions keeps its own bail: a `try`/`catch` over a REAL suspension
+  (`gate:suspend-try-catch`, below).
+- **`suspend fun` — a suspend LAMBDA into a MEMBER function's `suspend`-function-typed parameter is
+  ordinary, not a blocker.** `gate:suspend-lambda-into-member-parameter` claimed that
+  `Controller.drive(c: suspend Controller.() -> Unit)` left its lambda argument a plain `FunctionN`
+  whose body never threads a `Continuation`. It does not. A member call's parameter types come from the
+  IR signature (`self.ir.functions[mfid].params`) and `ty_to_ir` is the IDENTITY on `Ty::Fun`, so
+  `suspend` survives into `lower_arg`'s `Ty::Fun(s) if s.suspend` route exactly as it does for a
+  top-level builder — the member and top-level paths never diverged. Verified end to end:
+  `Holder().accept { val a = step(); a + "!" }` on a member `accept(block: suspend () -> String)` builds
+  a real `SuspendLambda` (`box$suspend$0`), suspends and resumes to `"s!"`, matching kotlinc
+  (`tests/suspend_e2e.rs::suspend_lambda_into_member_parameter_runs`). The gate was a pure
+  false-positive file skip and is retired. Two things it was blamed for are separate and NOT
+  member-specific: a suspend RECEIVER lambda that both suspends and calls a member of its receiver fails
+  to verify identically through a top-level builder, and what actually blocks the corpus case the gate
+  was attached to (`coroutines/suspendFunctionAsCoroutine/handleException`) is the `try`/`catch` entry
+  below — a file with no member `suspend`-typed parameter at all reproduces that miscompile with the
+  retired gate still enabled, so its scan was not merely too narrow but keyed to the wrong construct.
+- **`suspend fun` — a `try` that CATCHES over a REAL suspension, with a value live across it, is
+  refused rather than miscompiled.** The coroutine pass flattens a suspend body into a `label`-dispatch
+  loop and wraps the whole loop in ONE `catch Throwable` (`jvm::suspend::wrap_dispatch_for_handlers`).
+  That handler routes purely on which `label` was in flight: it stores the exception into `result`, sets
+  `label` to the handler's state and re-enters the loop — WITHOUT restoring the locals the predecessor
+  state spilled into the continuation. A resumed machine re-enters the static body as `f(null, …)`, so a
+  parameter, extension receiver or spilled local read at or after the `catch` reads back `null`:
+  `suspend fun f(): String { val a = ok("A"); try { boom() } catch (e: Exception) {}; return a + "-end" }`
+  threw an NPE where kotlinc answers `"A-end"`. Not extension- or member-specific — that reproduction
+  has neither a receiver nor a parameter, only an ordinary spilled LOCAL.
+
+  `gate:suspend-try-catch` therefore keys on "a value is live across the `try`", and four conditions
+  keep it off shapes that demonstrably round-trip today. (1) The `try` must have a CATCH: a
+  `finally`-only handler always re-throws and never re-enters the loop
+  (`tests/suspend_try_finally_body_e2e.rs`). (2) Its protected region must contain a REAL suspension —
+  one whose callee chain reaches a suspension INTRINSIC
+  (`suspendCoroutineUninterceptedOrReturn`/`suspendCoroutine`/`suspendCancellableCoroutine`), computed
+  as a least fixpoint over the file's suspend declarations. Merely CALLING a suspend function is a
+  suspension *point*, but a leaf chain returns synchronously, the frame is never re-entered, and the
+  missing restore cannot be observed — which is why `suspend_in_catch_body_spills_exception` (whose
+  `tick`/`setup` only append and return) keeps passing. (3) Some value must be live to lose: the owning
+  suspend function has a value parameter, an extension receiver, or declares a local — so
+  `suspend fun f(): Int { try { return d() } catch (e: Exception) { return d() } }` stays ACCEPTED
+  (`backend_rejection_coverage_e2e::suspend_try_catch_accepted`). (4) The loss must be observable past
+  the `try`: a catch body reads one of those names, or itself suspends (resuming INSIDE the handler
+  needs the same restores), or the `try` sits in STATEMENT position so ordinary code can follow it.
+  The scan walks each suspend body's reachable expressions, so a `try` inside a lambda, a local fun or a
+  hoisted nested class is seen; "suspension point" is the same file-local name approximation
+  `gate:suspend-call-from-non-suspend` makes, so a suspend callee from another file is not counted.
+
+  KNOWN GAP, deliberately not covered: the same handler never tests the DECLARED CATCH TYPE either, so
+  `catch (e: RuntimeException)` also swallows a plain `Exception` that Kotlin requires to propagate to
+  the completion (krusty answers `"no-exception"` where kotlinc propagates `"propagated"`). Whether that
+  fires depends on what the callee throws, which no AST scan can decide, and covering it would mean a
+  blanket skip of every suspending `try`/`catch` — including the accepted shapes above. It stays an
+  accepted unsoundness until the exception dispatch emits a real type test
+  (`tests/suspend_e2e.rs::suspend_try_catch_over_a_suspension_still_skips`,
+  `::suspend_try_catch_without_a_suspension_runs`; corpus
+  `coroutines/suspendFunctionAsCoroutine/handleException`, whose other blocker — the cross-loop labeled
+  jump — is now fixed, leaving this bail as the only reason it still skips).
 - **A never-entered branch emits NO body — the folded jump makes what follows it dead.**
   `emit_cond_branch` folds a constant condition: an always-taken test becomes an unconditional `goto`
   and an always-failing one emits no branch at all. Every instruction after an unconditional `goto` is
@@ -328,8 +381,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   outside any suspend body. Verified against kotlinc for `break@outer`, `continue@outer`, a suspension in
   the inner body, and three nesting levels
   (`tests/suspend_e2e.rs::suspend_cross_loop_labeled_break_runs`,
-  `::suspend_cross_loop_labeled_continue_and_three_levels_run`,
-  `::suspend_cross_loop_labeled_jump_between_pretest_loops_runs`; corpus
+  `::suspend_cross_loop_labeled_continue_and_three_levels_run`,  `::suspend_cross_loop_labeled_jump_between_pretest_loops_runs`; corpus
   `coroutines/controlFlow/doubleBreak`).
 - **`suspend fun` — a suspension's RECEIVER/ARGUMENTS are evaluated into temps BEFORE the spill.** The
   spill stores used to be emitted ahead of the call, so an argument's update to a spilled local
