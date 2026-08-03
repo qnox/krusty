@@ -1411,19 +1411,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instead of whichever parameter happens to share the source argument's position.
   Test: `tests/classpath_companion_ext_lambda_e2e.rs`.
 
-- **A SAFE call to a classpath member shapes its lambda argument exactly as the qualified call
-  does.** `re?.replace(s) { m -> m.value }` reaches the same `Regex.replace(CharSequence,
-  (MatchResult) -> CharSequence)` as `re.replace(…)`, so the `?` must not change how the lambda's
-  parameters bind. The safe-call argument seam (`Checker::ext_arg_tys`) consulted only SOURCE member
-  shapes and EXTENSION shapes; a classpath member's expectation had no provider there, so the
-  lambda's parameters typed as `Any` and a member read on them reported "unresolved reference". It
-  now falls back to the same `provider_member_lambda_expectations` the qualified path uses, against
-  the NON-NULL receiver (`?.` narrows the receiver before member lookup). The fallback is probed
-  only for lambda arguments the source-member and extension providers leave unshaped, so those
-  providers keep precedence and the two never compete — the same one-provider-at-a-time discipline
-  the qualified path applies. Because the expectation is the shared one, a receiver function type
-  (`Cfg.() -> String`) binds `this` and a plain function type binds its value parameters, through
-  `?.` as through `.`. Test: `tests/library_fun_type_lambda_param_e2e.rs`.
+- **A SAFE call to a classpath member binds its lambda argument like the qualified call.**
+  `re?.replace(s) { m -> m.value }` reaches the same `Regex.replace(CharSequence, (MatchResult) ->
+  CharSequence)` as `re.replace(…)`, so the `?` must not change how the lambda's parameters bind.
+  Two independent seams dropped that parity, and both are on the safe-call path only:
+  - **Shape.** The safe-call argument seam (`Checker::ext_arg_tys`) had providers for SOURCE member
+    shapes and EXTENSION shapes only; a classpath member's expectation had no provider there, so the
+    lambda's parameters typed as `Any` and a member read on them reported "unresolved reference". It
+    now falls back to the same `provider_member_lambda_expectations` the qualified path uses, against
+    the NON-NULL receiver (`?.` narrows the receiver before member lookup). Provider order is source
+    member > extension > semantic-provider member; the fallback is PROBED when any lambda argument is
+    left unshaped and APPLIED only to those arguments, so the providers never compete for one slot.
+    A slot the extension provider MATERIALIZED counts as shaped despite an empty parameter list — a
+    zero-parameter functional interface (`Executor.execute(Runnable)`) is a real shape. This is per
+    ARGUMENT where the qualified path gates per CALL, so a two-lambda call in which an extension
+    shapes one argument and leaves the other empty shapes more through `?.` than through `.`.
+  - **Selection.** The classpath member lookup in the safe-call arm passed argument TYPES only, so a
+    lambda literal reached a Java functional-interface parameter as a plain `Ty::Fun` and matched no
+    SAM parameter: the member did not resolve, the arguments were re-checked unshaped, and the shape
+    above was discarded. It now resolves through the kind-aware entry point
+    (`resolve_instance_name_with_lambda_args`), the same channel the qualified arm uses, so SAM
+    conversion and integer-literal adaptation apply after `?.` as before it.
+
+  Together: a receiver function type (`Cfg.() -> String`) binds `this`, a plain function type binds
+  its value parameters, and a Java SAM parameter binds its method's parameters, through `?.` as
+  through `.`. Test: `tests/library_fun_type_lambda_param_e2e.rs`.
 
 - **Aliased imports (`import a.b.Member as Alias`).** The import map binds the alias directly to the
   full target for types and values. Ordinary lexical resolution handles local shadowing; lowering uses

@@ -14727,6 +14727,28 @@ impl<'a> Checker<'a> {
             .and_then(Symbol::instance)
     }
 
+    /// [`Self::resolve_instance_name`] carrying each argument's syntactic provenance. A LAMBDA
+    /// LITERAL only SAM-converts to a Java functional-interface parameter (`Box.mapped(Mapper)`)
+    /// when the resolver knows it was written as a literal: the checked argument type is a plain
+    /// `Ty::Fun`, which matches no SAM parameter on its own. Integer-literal provenance rides the
+    /// same channel, so a literal argument still adapts to a wider primitive parameter.
+    fn resolve_instance_name_with_lambda_args(
+        &self,
+        internal: TypeName,
+        name: &str,
+        args: &[CallArgKind],
+    ) -> Option<crate::libraries::LibraryMember> {
+        use crate::symbol_resolver::{SymRecv, Symbol};
+        self.resolver()
+            .resolve_symbol_with_literal_and_lambda_args(
+                SymRecv::TypeName(internal),
+                name,
+                args,
+                &[],
+            )
+            .and_then(Symbol::instance)
+    }
+
     fn resolve_super_instance_name(
         &self,
         internal: TypeName,
@@ -20604,24 +20626,41 @@ impl<'a> Checker<'a> {
         });
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
-        // A CLASSPATH member's lambda shape (`re?.replace(s) { m -> m.value }`). The providers
-        // above answer source members and extensions only, so a `?.` call to a library member
-        // whose parameter is a function type or a Java SAM interface left its lambda unshaped and
-        // the parameters typed as `Any` — one `?` away from what the qualified path already does.
-        // Probed only for lambda arguments the providers above leave unshaped, so a source member
-        // or extension shape always wins and the two never compete.
-        let unshaped_lambda_argument = args.iter().enumerate().any(|(index, &argument)| {
-            matches!(self.file.expr(argument), Expr::Lambda { .. })
-                && module_shape
-                    .as_ref()
-                    .and_then(|shape| shape.param_types.get(index))
-                    .and_then(Option::as_deref)
-                    .is_none()
-                && pts
-                    .and_then(|parameters| parameters.get(index))
-                    .is_none_or(Vec::is_empty)
-        });
-        let provider_member_expectations = unshaped_lambda_argument
+        let materialized = shape.as_ref().and_then(|shape| shape.materialized.as_ref());
+        // A SEMANTIC-PROVIDER member's lambda shape (`re?.replace(s) { m -> m.value }`). The
+        // providers above answer source members and extensions only, so a `?.` call to a library
+        // member whose parameter is a function type or a Java SAM interface left its lambda
+        // unshaped and the parameters typed as `Any` — one `?` away from what the qualified path
+        // already does. Probed when ANY lambda argument is left unshaped and APPLIED only to those
+        // arguments, so a source member or extension shape always wins and the two never compete.
+        //
+        // A slot the extension provider MATERIALIZED counts as shaped even though its parameter
+        // list is empty: a zero-parameter functional interface (`Executor.execute(Runnable)`) is a
+        // real shape, and the `pt` derivation below cannot tell it from "no shape" by emptiness
+        // alone. Without this the provider probe would re-shape such a slot from a different
+        // callable rather than leaving it to the plain check it had before.
+        let unshaped_lambda_arguments: Vec<bool> = args
+            .iter()
+            .enumerate()
+            .map(|(index, &argument)| {
+                matches!(self.file.expr(argument), Expr::Lambda { .. })
+                    && module_shape
+                        .as_ref()
+                        .and_then(|shape| shape.param_types.get(index))
+                        .and_then(Option::as_deref)
+                        .is_none()
+                    && pts
+                        .and_then(|parameters| parameters.get(index))
+                        .is_none_or(Vec::is_empty)
+                    && !materialized
+                        .and_then(|slots| slots.get(index))
+                        .copied()
+                        .unwrap_or(false)
+            })
+            .collect();
+        let provider_member_expectations = unshaped_lambda_arguments
+            .iter()
+            .any(|unshaped| *unshaped)
             .then(|| {
                 self.provider_member_lambda_expectations(
                     call,
@@ -20688,9 +20727,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ => {
+                        // Applied to exactly the arguments the gate above found unshaped, so the
+                        // probe's whole-call trigger never reaches a slot another provider owns.
                         match provider_member_expectations
                             .as_ref()
-                            .filter(|_| matches!(self.file.expr(x), Expr::Lambda { .. }))
+                            .filter(|_| unshaped_lambda_arguments[i])
                             .and_then(|all| all.get(i))
                             .and_then(Option::as_ref)
                         {
@@ -22320,23 +22361,34 @@ impl<'a> Checker<'a> {
                                     if labelled {
                                         return None;
                                     }
-                                    self.resolve_instance_name(internal, &name, &arg_tys)
-                                        .map(|m| {
-                                            let ret = m.ret;
-                                            let suspend = m.suspend();
-                                            self.resolved_calls.insert(
-                                                e,
-                                                ResolvedCall::Member(
-                                                    crate::symbol_resolver::ResolvedMember {
-                                                        member: m,
-                                                        ret,
-                                                        projected_return_hazard: false,
-                                                        suspend,
-                                                    },
-                                                ),
-                                            );
-                                            ret
-                                        })
+                                    // Argument PROVENANCE, not just types: the qualified arm
+                                    // resolves the same member through a kind-aware lookup, and
+                                    // without it a lambda literal never SAM-converts to a Java
+                                    // functional-interface parameter after `?.`.
+                                    let arg_kinds: Vec<CallArgKind> = a
+                                        .iter()
+                                        .zip(&arg_tys)
+                                        .map(|(&x, &ty)| call_arg_kind(self.file, x, ty))
+                                        .collect();
+                                    self.resolve_instance_name_with_lambda_args(
+                                        internal, &name, &arg_kinds,
+                                    )
+                                    .map(|m| {
+                                        let ret = m.ret;
+                                        let suspend = m.suspend();
+                                        self.resolved_calls.insert(
+                                            e,
+                                            ResolvedCall::Member(
+                                                crate::symbol_resolver::ResolvedMember {
+                                                    member: m,
+                                                    ret,
+                                                    projected_return_hazard: false,
+                                                    suspend,
+                                                },
+                                            ),
+                                        );
+                                        ret
+                                    })
                                 })
                                 .or_else(|| {
                                     self.check_member_extension_function_call(
