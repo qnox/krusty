@@ -3955,6 +3955,9 @@ impl super::inline::MethodBodies for Classpath {
         inherited_property_access(self, owner, property, class_property_read_access)
             .or_else(|| self.builtin_property_read_access(owner, property))
     }
+    /// No builtins fallback, deliberately: `.kotlin_builtins` declares no `var` on a mapped type, so
+    /// there is no setter for one to answer with (`MutableMap.MutableEntry` exposes `setValue` as a
+    /// FUNCTION, which resolves as an ordinary member call, not a property write).
     fn property_write_access(
         &self,
         owner: &str,
