@@ -394,28 +394,35 @@ fn build_class_metadata(
     // when the classpath value-class RETURN is modelled (`MetadataCallFacts` carries
     // `value_class_params` but has no return counterpart). Pinned by the box corpus's
     // `compileKotlinAgainstKotlin/inlineClasses/*` MODULE chains.
-    // The signal is the MANGLING itself, not `vc_declared_sigs`: that table holds non-synthesized
-    // FUNCTIONS only, so a value-class-typed CONSTRUCTOR PARAMETER (`class Holder(val id: ItemId)`,
-    // whose generated `getId-YyT5sjE` is "synthesized") and a value-class property GETTER both slip
-    // past it. A `-` cannot occur in a Kotlin source name, so it marks a value-class-mangled member
-    // exactly. `Holder` is the case that proves the wider net is needed: krusty described `id` as
-    // `String` (kotlinc: `LItemId;`), named the PRIVATE `<init>(Ljava/lang/String;)V` rather than
+    // The property signal is its stamped JVM REALIZATION, not `vc_declared_sigs`: that table holds
+    // non-synthesized FUNCTIONS only, so a value-class-typed CONSTRUCTOR PARAMETER
+    // (`class Holder(val id: ItemId)`, whose generated `getId-YyT5sjE` is synthesized) and a
+    // value-class-typed BODY PROPERTY both slip past it. The value-class pass has already resolved
+    // whether a property's getter/setter needs mangling and records the exact spelling on the
+    // declaration; consulting that stamp here keeps metadata admission tied to the same semantic fact
+    // that accessor emission consumes. Do not infer ownership from the global function table:
+    // synthesized property accessors are emitted directly from `IrProperty` and deliberately have no
+    // `IrFunction` entry, so a dispatch-receiver scan cannot see them.
+    //
+    // `Holder` is the constructor-property case that proves the wider net is needed: krusty described
+    // `id` as `String` (kotlinc: `LItemId;`), named the PRIVATE `<init>(Ljava/lang/String;)V` rather than
     // kotlinc's `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`, and dropped the
     // getter's mangled name — real kotlinc reading that record rejects `Holder(ItemId("OK"))` as a
     // type mismatch, and a caller that satisfied it would `invokespecial` the private constructor.
-    // Scan by DISPATCH RECEIVER, not `c.methods`: a value-class property's mangled getter
-    // (`getK-XLNMDGE`) is realized as a function owned by this class without being listed there, so a
-    // `c.methods` scan misses it and the class goes on to describe a plain `getK` that does not exist.
-    let self_id = c.fq_name_id();
-    let has_mangled_member = ir
-        .functions
+    // A stamp is present only when the ordinary property convention is not the physical ABI. Testing
+    // both sides keeps this admission rule correct for `var` even if a future realization needs only a
+    // setter override. The conservative decline is temporary until the metadata reader can preserve
+    // value-class property types and consume these exact JVM signatures end to end.
+    let has_value_class_property_realization = c
+        .properties
         .iter()
-        .any(|f| f.name.contains('-') && f.dispatch_receiver == Some(self_id));
+        .any(|p| p.getter_jvm_name.is_some() || p.setter_jvm_name.is_some());
     let has_value_class_member = declared_fids
         .iter()
         .any(|fid| ir.vc_declared_sigs.contains_key(fid));
     if has_value_class_member
-        || (!c.is_value && (has_mangled_member || ir.has_value_param_ctor(&c.fq_name())))
+        || (!c.is_value
+            && (has_value_class_property_realization || ir.has_value_param_ctor(&c.fq_name())))
         || (c.is_value && !declared_fids.is_empty())
     {
         return None;

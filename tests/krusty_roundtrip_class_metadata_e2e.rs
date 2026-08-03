@@ -94,6 +94,40 @@ fn a_class_carries_its_own_metadata_by_default() {
     assert_eq!(properties, ["x", "y"], "and its constructor properties");
 }
 
+/// A value-class-typed body property is physically exposed through a mangled accessor, but the
+/// metadata builder cannot yet describe/read that ABI safely. Admission consumes the exact JVM name
+/// stamped on `IrProperty` by the value-class pass (body-property accessors are synthesized directly,
+/// not stored in `IrClass::methods`) and withholds the whole record instead of advertising a
+/// nonexistent plain `getK` to downstream callers.
+#[test]
+fn value_class_body_property_withholds_the_record() {
+    let source = "@JvmInline value class K(val v: String)\n\
+                  class Holder { val k: K = K(\"OK\") }\n";
+    let Some((_, classes)) = krusty_lib_dir("vc_body_property", source) else {
+        eprintln!("skip (kotlin stdlib / JDK unavailable)");
+        return;
+    };
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "Holder")
+        .expect("krusty emits Holder.class");
+    let info = parse_class(bytes).expect("Holder.class parses");
+    assert!(
+        info.methods
+            .iter()
+            .any(|method| method.name.starts_with("getK-")),
+        "the value-class pass must realize the body property with its mangled getter",
+    );
+    // An absent annotation and a present-but-empty annotation decode to the same empty collections.
+    // Pin the class-file descriptor so this cannot pass by emitting a different misleading record.
+    assert!(
+        !bytes
+            .windows(b"Lkotlin/Metadata;".len())
+            .any(|window| window == b"Lkotlin/Metadata;"),
+        "metadata must be withheld rather than advertise a plain getter that does not exist",
+    );
+}
+
 /// The end-to-end gap this closes: `copy(y = 4)` needs `copy`'s PARAMETER NAMES and `val (a, b) = q`
 /// needs `component1`/`component2`'s `operator` marks. Both methods were always emitted into the class
 /// file; only the `@Metadata` describing them was missing, so a second krusty compilation reported

@@ -328,12 +328,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   pass BEFORE erasure loses the parameter's identity — is the signal; `vc_declared_sigs` cannot be,
   since it holds non-synthesized FUNCTIONS only. Test:
   `krusty_roundtrip_class_metadata_e2e::a_value_class_constructor_parameter_withholds_the_record`.
-  **Still open, same family:** a value-class-typed BODY PROPERTY (`class Holder { val k: K }`) is
-  still described, and described wrongly — the record says `k: String` with getter `getK`, while the
-  emitted method is the mangled `getK-XLNMDGE` (kotlinc: `k: LK;`, `getK-XLNMDGE`). A reader binding
-  `getK` gets a NoSuchMethodError. The accessor is not reachable from `c.methods` or by dispatch
-  receiver, so the mangled name has no signal at the builder; closing this needs the value-class pass
-  to record the mangled accessor per field.
+  **A VALUE-CLASS-typed BODY PROPERTY also withholds the record.** Its accessor is not listed in
+  `c.methods`, so scanning only declared method ids misses it and would describe `k: String` with a
+  plain `getK` even though the class file defines the mangled `getK-XLNMDGE` (kotlinc describes
+  `k: LK;`). The value-class pass stamps that exact JVM accessor spelling on the semantic
+  `IrProperty`; metadata admission consumes the same declaration-level realization as accessor
+  emission and conservatively withholds the whole record before a downstream reader can bind a
+  nonexistent getter. Tests:
+  `data_class_metadata_wiring_e2e::value_class_body_property_matches_kotlinc_without_metadata` and
+  `krusty_roundtrip_class_metadata_e2e::value_class_body_property_withholds_the_record`.
   **A VALUE-CLASS-INVOLVED member is WITHHELD — the write side is right, the read side is not.** The
   value-class pass realizes such a member as a mangled method over the ERASED underlying, and the
   byte-identity tests show krusty's record for one matches kotlinc exactly. What is missing is the

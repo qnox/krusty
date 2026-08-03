@@ -95,12 +95,16 @@ fn assert_methods_match_kotlinc_but_metadata_is_withheld(src: &str, class_intern
         members(&ko_info),
         "{class_internal}: mangled names + erased descriptors must match kotlinc",
     );
+    // Parsing an absent annotation and parsing a present-but-empty annotation both yield empty
+    // metadata collections. Inspect the annotation descriptor itself so this test pins the actual
+    // admission contract: the class carries no record at all, rather than a misleading empty one.
     assert!(
-        kr_info.meta.class_functions.is_empty() && kr_info.meta.class_properties.is_empty(),
+        !kr.windows(b"Lkotlin/Metadata;".len())
+            .any(|window| window == b"Lkotlin/Metadata;"),
         "{class_internal}: a value-class-involved member means the class @Metadata is withheld",
     );
     assert!(
-        !ko_info.meta.class_functions.is_empty(),
+        !ko_info.meta.class_functions.is_empty() || !ko_info.meta.class_properties.is_empty(),
         "{class_internal}: kotlinc DOES describe it — this is the gap the decline stands in for",
     );
 }
@@ -173,6 +177,19 @@ fn value_class_return_member_matches_kotlinc_without_metadata() {
     assert_methods_match_kotlinc_but_metadata_is_withheld(
         "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\ninterface I {\n    fun f(): K\n}\n",
         "demo/I",
+    );
+}
+
+/// A value-class-typed BODY property is not present in `IrClass::methods`: its accessor is synthesized
+/// directly from the property declaration. The value-class pass stamps the declaration with its exact
+/// mangled JVM realization, so class-metadata admission must consume that semantic property fact;
+/// otherwise it advertises plain `getK` while the class file defines `getK-<hash>`, and a downstream
+/// caller links a missing method.
+#[test]
+fn value_class_body_property_matches_kotlinc_without_metadata() {
+    assert_methods_match_kotlinc_but_metadata_is_withheld(
+        "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\nclass Holder {\n    val k: K = K(\"OK\")\n}\n",
+        "demo/Holder",
     );
 }
 
