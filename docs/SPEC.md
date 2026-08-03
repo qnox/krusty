@@ -2270,6 +2270,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   which is what makes this the ordinary static read; a NON-const object property is an instance field
   on `INSTANCE` and is deliberately not matched, since it needs the singleton receiver. Test:
   `tests/resolve_parse_deep_coverage_e2e.rs::import_object_member`.
+- **An unqualified read of an INHERITED member (`name` inside an enum method).** `this.name`
+  lowered; the bare `name` did not. The implicit-`this` read tried the class's declared properties,
+  then an enclosing class's through `this$0`, and gave up — while the extension / receiver-lambda
+  branch beside it already ended in the general "same path a qualified `this.n` takes" fallback. The
+  in-class branch now ends there too, so a member inherited from a supertype (`name` / `ordinal` from
+  `java.lang.Enum`, and any classpath supertype's) reads unqualified. Test:
+  `tests/feature_coverage_x_e2e.rs::enum_rich_members`.
 
 ## 8. Success criteria for the PoC
 

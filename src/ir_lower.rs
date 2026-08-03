@@ -21067,24 +21067,36 @@ impl<'a> Lower<'a> {
                             Some(IrField { name: n0, ty, .. })
                                 if n0 == "this$0" && ty.non_null().obj_internal().is_some() =>
                             {
-                                ty.non_null().obj_internal().unwrap().to_string()
+                                ty.non_null().obj_internal().map(|o| o.to_string())
                             }
-                            _ => return None,
+                            _ => None,
                         };
-                        let this0 = if let Some((v, vty)) = self.lookup("this$0") {
-                            if !vty
-                                .obj_internal()
-                                .is_some_and(|n| n.matches(outer.as_str()))
-                            {
-                                return None;
-                            }
-                            self.emit_get_value(v)
-                        } else {
-                            self.emit_get_field(recv, cur_id, 0)
-                        };
-                        // The outer property, read from the inner class — a different class, so the
-                        // backend takes its accessor.
-                        self.lower_field_read_on(this0, &outer, &n, e, None)?
+                        let enclosing = outer.and_then(|outer| {
+                            let this0 = match self.lookup("this$0") {
+                                Some((v, vty)) => {
+                                    if !vty
+                                        .obj_internal()
+                                        .is_some_and(|n| n.matches(outer.as_str()))
+                                    {
+                                        return None;
+                                    }
+                                    self.emit_get_value(v)
+                                }
+                                None => self.emit_get_field(recv, cur_id, 0),
+                            };
+                            // The outer property, read from the inner class — a different class, so
+                            // the backend takes its accessor.
+                            self.lower_field_read_on(this0, &outer, &n, e, None)
+                        });
+                        match enclosing {
+                            Some(read) => read,
+                            // Neither a declared property of this class nor an enclosing one: an
+                            // unqualified read of a member INHERITED from a supertype (`name` /
+                            // `ordinal` on an enum, from `java.lang.Enum`). That is simply `this.n`,
+                            // so take the same path the QUALIFIED read takes — the extension /
+                            // receiver-lambda branch below already ends in this fallback.
+                            None => self.lower_member_read_on(recv, this_ty, &n, e)?,
+                        }
                     }
                 } else {
                     // An extension/receiver-lambda implicit receiver: `fun A.f() = n` (or
