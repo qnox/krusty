@@ -2295,12 +2295,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/bounded_type_param_e2e.rs::comparable_operator_bounded_generic_called_with_primitive_runs`.
 - **`EnumName.entries`.** Kotlin 2.x's replacement for `values()`. The emitter already synthesized
   the `$ENTRIES` field and its `getEntries()` accessor on every enum class (that is what kotlinc's
-  byte-parity requires); only the READ had no resolution. The checker types `E.entries` as `List<E>` —
-  kotlinc types it `EnumEntries<E>`, which IS-A `List<E>`, and the list type is what makes `size`,
-  `[0]` and `for (x in …)` resolve while the accessor's actual return stays assignable to it. Lowering
-  emits the same `invokestatic <E>.getEntries()Lkotlin/enums/EnumEntries;` kotlinc does. Tests:
+  byte-parity requires); only the READ had no resolution. The checker types `E.entries` as
+  `EnumEntries<E>` — exactly what kotlinc types it — and `EnumEntries<E>` IS-A `List<E>`, so `size`,
+  `[0]` and `for (x in …)` resolve through ordinary supertype member lookup. Resolution goes through
+  ONE path for every enum: the classifier's semantic identity, then the `enum_entries_accessor`
+  capability its symbol provider advertises, recorded as `ExprLowering::EnumEntriesRead` and consumed
+  verbatim by lowering. An enum declared in the file being compiled is reached through that same
+  provider seam (`ModuleSymbols` publishes the synthetic accessor for module enums), so `entries` has
+  no source-origin branch on either side: a second checker arm that typed only `syms.enums`-backed
+  receivers as `List<E>` shadowed the provider arm, left no recorded lowering, and made lowering fall
+  through to evaluating the bare classifier receiver as a value (`expr Name` bail). Lowering emits the
+  same `invokestatic <E>.getEntries()Lkotlin/enums/EnumEntries;` kotlinc does. The sibling synthetic
+  members `values()`/`valueOf()` are NOT yet on this seam — they still gate on `syms.enums` and record
+  no lowering; converting them is separate work. Tests:
+  `src/resolve.rs::tests::source_enum_entries_records_the_declaring_owner_and_its_accessor`,
   `tests/feature_coverage_a_e2e.rs::enum_entries`,
-  `tests/feature_coverage_r_e2e.rs::enum_reflection_members`.
+  `tests/feature_coverage_r_e2e.rs::enum_reflection_members`,
+  `tests/feature_coverage_x_e2e.rs::enum_rich_members`,
+  `tests/nested_enum_access_e2e.rs::enum_entry_and_entries_property_from_another_source_file_use_the_declaring_owner`.
 - **`this@Inner` — a nested class's own qualified-this label.** The enclosing chain (`this@Outer`
   from an `inner class`) already resolved; the class's OWN label did not, because a nested declaration
   is flattened under its dotted name (`Outer.Inner`) and that dotted string was pushed as the label,
@@ -2413,6 +2425,49 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is
   withheld. Test: `tests/companion_e2e.rs::a_private_property_keeps_its_source_written_setter`,
   box `properties/kt3551.kt`.
+- **A property reference carries its type arguments.** `::foo` typed as a RAW `KProperty0`, so
+  `(::foo).get()` erased to the upper bound and `(::foo).get().value` did not resolve. The reference
+  type is built with the property's own type (`[V]` at arity 0, `[Recv, V]` at arity 1). Two things
+  are deliberately NOT asserted, because a wrong type is worse than none: a type still mentioning a
+  type parameter (the use site's substitution is not applied here), and an EXTENSION property's value
+  type (written in terms of the property's own parameters). A VALUE-CLASS-typed property reference
+  declines outright — kotlinc emits those accessors under the value-class name mangle, which the
+  reference does not yet carry. Tests: `tests/toplevel_property_ref_e2e.rs::toplevel_property_refs_run`,
+  box `callableReference/property/extensionPropertyWithExtensionType.kt`,
+  `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt`.
+- **A property on a BUILTIN receiver is one table, read by both phases.** `String.length`, `Char.code`
+  and an array's `size` have no class file to resolve against. The body checker knew them; the
+  SIGNATURE phase did not, so `const val code = a.code` reported "cannot infer the type of property"
+  for an expression the checker accepts. `String.length` alone records its resolved member — the other
+  two are backend intrinsics, and recording a member for them retargets the read into unverifiable
+  bytecode. Test: `tests/toplevel_property_inference_e2e.rs::toplevel_property_cross_reference`.
+- **A lambda may carry its own label, and a labelled return is LOCAL to it.** `run rr@{ … }` puts the
+  label tokens between the callee and the `{`, which ended the postfix parse before the block: the
+  lambda was never attached as an argument and the callee reported as an unresolved reference. Every
+  site that decides whether a labelled return is local now asks for the lambda's EFFECTIVE label — its
+  own when written, else the name of the function it is passed to. `return@run v` itself lowered as
+  the ENCLOSING function's return, pushing the lambda's value where the function's type is required
+  (a `VerifyError`, not merely a wrong answer); it now breaks out of a splice frame, the same
+  mechanism a user `inline fun` already used. A body whose every path is a labelled return still
+  declines: the checker types the call from the `Nothing` fall-through, so there is no result type to
+  bind — typing a lambda from the JOIN of its labelled returns is the checker-side fix that shape
+  needs. Tests: `tests/inline_vc_suspend_coverage_e2e.rs::labelled_trailing_lambda_parses`,
+  `::labelled_return_leaves_the_lambda_not_the_function`,
+  `::inline_local_labeled_return`.
+- **A lambda argument to the invoke operator is CONTEXTUAL.** `b { it + 1 }` on a
+  `class Box { operator fun invoke(f: (Int) -> Int) }` types `it` from the operator's parameter. The
+  arguments were typed with no expectation, so `it` came out as the erased upper bound and the call
+  reported "operator cannot be applied to 'Any' and 'Int'" before the operator was ever consulted —
+  the expectation has to be supplied when the arguments are typed, not after selection. Test:
+  `tests/inline_vc_suspend_coverage_e2e.rs::inline_operator_fun`.
+- **The `sequence {}` / `iterator {}` gate asks who `yield` belongs to.** Those builders drive a
+  suspend lambda through `yield`/`yieldAll` suspension points, a state machine the pass does not model,
+  so the file is skipped. The gate matched the SPELLING, so an ordinary user method
+  (`class Buildee<T> { fun yield(arg: T) }`) skipped its file for no reason. It now gates on the
+  resolved owner being `kotlin.sequences.SequenceScope` — or on the call being unresolved, where
+  nothing rules the builder out. Tests:
+  `tests/scope_function_value_arg_e2e.rs::apply_accepts_receiver_function_value_argument`,
+  `tests/lower_bail_reason_e2e.rs::gated_corpus_cases_report_precise_lower_bail`.
 
 ## 8. Success criteria for the PoC
 
