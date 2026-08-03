@@ -12856,7 +12856,15 @@ impl<'a> Lower<'a> {
                 owner,
                 source,
                 vararg,
+                requires_splice,
             } => {
+                // The checker forwards the resolved callable's generic `MustInline` capability.
+                // Do not infer call legality here from whether a facade happens to be emitted: a
+                // reified method can exist to publish inline code while its erased body remains an
+                // illegal direct target. After the splicer has had its opportunity, this path bails.
+                if requires_splice {
+                    return None;
+                }
                 // The recorded receiver matches the call site directly, or in its NON-NULL form
                 // (a safe call records the non-null receiver — and a nullable PRIMITIVE keys
                 // apart from the unboxed one under `erased_recv`, so compare both ways). The
@@ -12929,11 +12937,14 @@ impl<'a> Lower<'a> {
                     .and_then(|(file, declaration)| {
                         self.syms
                             .source_extension_function(file, ast::DeclId(declaration))
-                            .and_then(|(declared, _)| {
-                                declared
-                                    .non_null()
-                                    .is_ty_param()
-                                    .then(|| declared.erased_recv())
+                            // A sibling facade's static descriptor is defined by the declaration,
+                            // not by the possibly-more-specific call-site receiver.
+                            .map(|(declared, _)| {
+                                if declared.non_null().is_ty_param() {
+                                    declared.erased_recv()
+                                } else {
+                                    declared
+                                }
                             })
                     })
                     .unwrap_or(receiver);
@@ -12956,8 +12967,11 @@ impl<'a> Lower<'a> {
                     }
                     None => return None,
                 };
-                let receiver_value =
-                    self.spill_receiver_before_args(receiver_value, recv_ty, &mut prelude);
+                let receiver_value = self.spill_receiver_before_args(
+                    receiver_value,
+                    physical_receiver,
+                    &mut prelude,
+                );
                 let mut lowered = vec![receiver_value];
                 lowered.extend(arguments);
                 let mut physical_params = Vec::with_capacity(selected_params.len() + 1);

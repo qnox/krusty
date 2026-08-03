@@ -147,9 +147,9 @@ pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 pub(crate) use crate::symbol_resolver::FunctionImportScope;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
-/// `is_override`/`is_final`/`is_suspend` into one byte. Read through the `Signature` accessors of the
-/// same names; `vararg` is also mutated through `set_vararg`; built with the `with_*` chain. Headroom
-/// for two more flags.
+/// `is_override`/`is_final`/`is_suspend`/`requires_splice` into one byte. Read through the
+/// `Signature` accessors of the same names; `vararg` is also mutated through `set_vararg`; built with
+/// the `with_*` chain. Headroom for one more flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SigFlags(u8);
 
@@ -160,6 +160,7 @@ impl SigFlags {
     const IS_OVERRIDE: u8 = 1 << 3;
     const IS_FINAL: u8 = 1 << 4;
     const IS_SUSPEND: u8 = 1 << 5;
+    const REQUIRES_SPLICE: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -199,6 +200,10 @@ impl SigFlags {
     pub const fn with_is_suspend(self, on: bool) -> Self {
         self.with(Self::IS_SUSPEND, on)
     }
+    #[inline]
+    pub const fn with_requires_splice(self, on: bool) -> Self {
+        self.with(Self::REQUIRES_SPLICE, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -208,9 +213,11 @@ pub struct Signature {
     /// Declared generic callable shape retained for call-site inference.
     pub generic_sig: Option<GenericSig>,
     pub projected_return_hazard: bool,
-    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend` (read via the
-    /// accessors below; `vararg` set via `set_vararg`). `vararg` marks a variadic signature.
-    /// `is_final` — a `final` member a subclass cannot override. `is_suspend` — a `suspend fun`.
+    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend`/
+    /// `requires_splice` (read via the accessors below; `vararg` set via `set_vararg`). `vararg` marks
+    /// a variadic signature. `is_final` — a `final` member a subclass cannot override. `is_suspend`
+    /// — a `suspend fun`. `requires_splice` — no direct-call fallback is semantically legal even when
+    /// the backend emits a method so another compilation can obtain and inline its body.
     pub flags: SigFlags,
     pub vararg_index: Option<usize>,
     /// Minimum number of arguments a caller must supply — params beyond this have default values
@@ -302,6 +309,10 @@ impl Signature {
     #[inline]
     pub fn is_suspend(&self) -> bool {
         self.flags.has(SigFlags::IS_SUSPEND)
+    }
+    #[inline]
+    pub fn requires_splice(&self) -> bool {
+        self.flags.has(SigFlags::REQUIRES_SPLICE)
     }
     #[inline]
     pub fn set_vararg(&mut self, on: bool) {
@@ -4604,7 +4615,14 @@ fn collect_signatures_with_cp_impl(
                             .with_is_operator(f.is_operator())
                             .with_is_override(f.is_override())
                             .with_is_final(f.is_final())
-                            .with_is_suspend(f.is_suspend()),
+                            .with_is_suspend(f.is_suspend())
+                            // Reified source bodies may be emitted to make their inline body
+                            // available across a compilation boundary, but their erased JVM method
+                            // is not a legal direct-call fallback. Encode that semantic capability on
+                            // the signature itself so every source callable origin maps it to the
+                            // shared `InlineKind::MustInline` state instead of consulting a parallel
+                            // declaration set or rediscovering `reified` in individual call paths.
+                            .with_requires_splice(!f.reified_type_params.is_empty()),
                         vararg_index,
                         required,
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
@@ -4972,22 +4990,46 @@ fn collect_signatures_with_cp_impl(
                                 crate::symbol_resolver::InheritedNestedClassifier::NotFound => {}
                             }
                         }
-                        let prefix = format!("{}.", c.name);
+                        // Own nested classifiers from every lexical owner are in scope inside a nested
+                        // class. For `Outer { inner class First; inner class Second(val first: First) }`,
+                        // `First` belongs to `Outer`, not `Outer.Second`, so probing only `c.name` loses
+                        // the sibling during signature collection. Index direct children of all lexical
+                        // owners in one declaration scan; a nearer owner wins when names shadow.
+                        let lexical_owner_ranks = lexical_inheritors
+                            .iter()
+                            .copied()
+                            .enumerate()
+                            .map(|(rank, owner)| (owner, rank))
+                            .collect::<HashMap<_, _>>();
+                        let mut lexical_nested = HashMap::<String, (usize, TypeName)>::new();
                         for &nd in &file.decls {
                             if let Decl::Class(nc) = file.decl(nd) {
-                                if let Some(seg) = nc.name.strip_prefix(&prefix) {
-                                    // Kotlin nested-type scoping: the enclosing class's own nested type
-                                    // SHADOWS a same-named top-level/imported type — insert unconditionally
-                                    // (overwriting any top-level entry). Consistent with the checker's
-                                    // `enclosing_nested_type` expression-path fallback.
-                                    if !seg.contains('.') {
-                                        let ni = class_names.get(&nc.name).unwrap_or_else(|| {
-                                            type_name(&class_internal(file, &nc.name))
-                                        });
-                                        ext.insert_name(seg.to_string(), ni);
+                                let Some((owner, simple)) = nc.name.rsplit_once('.') else {
+                                    continue;
+                                };
+                                let owner = type_name(&class_internal(file, owner));
+                                let Some(&rank) = lexical_owner_ranks.get(&owner) else {
+                                    continue;
+                                };
+                                let internal = class_names
+                                    .get(&nc.name)
+                                    .unwrap_or_else(|| type_name(&class_internal(file, &nc.name)));
+                                match lexical_nested.entry(simple.to_string()) {
+                                    std::collections::hash_map::Entry::Vacant(entry) => {
+                                        entry.insert((rank, internal));
                                     }
+                                    std::collections::hash_map::Entry::Occupied(mut entry)
+                                        if rank < entry.get().0 =>
+                                    {
+                                        entry.insert((rank, internal));
+                                    }
+                                    std::collections::hash_map::Entry::Occupied(_) => {}
                                 }
                             }
+                        }
+                        for (simple, (_, internal)) in lexical_nested {
+                            // A lexical nested classifier shadows top-level/imported classifiers.
+                            ext.insert_name(simple, internal);
                         }
                         ext
                     };
@@ -9335,6 +9377,11 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
+        /// The selected callable's generic [`InlineKind::MustInline`] capability: a direct fallback
+        /// is semantically illegal even if a facade method is physically emitted to publish inline
+        /// code. Same-file lowering may splice it first; every remaining path must bail. Carrying
+        /// the resolved capability keeps lowering independent of source syntax and symbol origin.
+        requires_splice: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -13410,7 +13457,8 @@ impl<'a> Checker<'a> {
             flags: SigFlags::default()
                 .with_vararg(selected.call_sig.vararg_index.is_some())
                 .with_is_inline(selected.flags.inline.can_inline())
-                .with_is_suspend(selected.flags.suspend),
+                .with_is_suspend(selected.flags.suspend)
+                .with_requires_splice(selected.flags.inline.must_inline()),
             vararg_index: selected.call_sig.vararg_index,
             required: selected.call_sig.required,
             param_defaults: selected.call_sig.param_defaults.clone(),
@@ -13427,6 +13475,15 @@ impl<'a> Checker<'a> {
             contract: None,
         };
         Some((selected, signature))
+    }
+
+    fn source_extension_requires_splice(&self, selected: &crate::libraries::FunctionInfo) -> bool {
+        // Inline fallback legality is part of the resolved callable's semantic state. In
+        // particular, a reified source extension may have a physically emitted facade so another
+        // compilation can read and splice its body, while calling that erased method directly is
+        // still illegal. Reading `InlineKind::MustInline` keeps that distinction independent of
+        // source-file keys and avoids a reified-only side index or per-origin lowering branches.
+        selected.flags.inline.must_inline()
     }
 
     fn check_source_extension_call_args(
@@ -15229,7 +15286,10 @@ impl<'a> Checker<'a> {
                                 params: sig.params.clone(),
                                 physical_ret: sig.ret,
                                 ret: sig.ret,
-                                inline: InlineKind::from_flags(sig.is_inline(), false),
+                                inline: InlineKind::from_flags(
+                                    sig.is_inline(),
+                                    sig.requires_splice(),
+                                ),
                                 interface: self
                                     .syms
                                     .class_by_type_name(owner)
@@ -15254,7 +15314,7 @@ impl<'a> Checker<'a> {
                             params: sig.params.clone(),
                             physical_ret: sig.ret,
                             ret: sig.ret,
-                            inline: InlineKind::from_flags(sig.is_inline(), false),
+                            inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
                             interface,
                             vararg_index: sig.vararg_index,
                             suspend: sig.is_suspend(),
@@ -15269,6 +15329,7 @@ impl<'a> Checker<'a> {
             .selected_source_extension(receiver, name, &arg_kinds)
             .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
         {
+            let requires_splice = self.source_extension_requires_splice(&selected);
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
             let owner = sig
                 .source_file
@@ -15289,6 +15350,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
+                    requires_splice,
                 },
             ));
         }
@@ -21620,7 +21682,10 @@ impl<'a> Checker<'a> {
                                 params: sig.params.clone(),
                                 physical_ret: sig.ret,
                                 ret: sig.ret,
-                                inline: InlineKind::from_flags(sig.is_inline(), false),
+                                inline: InlineKind::from_flags(
+                                    sig.is_inline(),
+                                    sig.requires_splice(),
+                                ),
                                 interface,
                                 vararg_index: sig.vararg_index,
                                 suspend: sig.is_suspend(),
@@ -21636,6 +21701,7 @@ impl<'a> Checker<'a> {
                 .selected_source_extension(at, "get", &index_kinds)
                 .filter(|(_, signature)| signature.is_operator())
             {
+                let requires_splice = self.source_extension_requires_splice(&selected);
                 for (i, &pt) in sig.params.iter().enumerate() {
                     self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                 }
@@ -21659,6 +21725,7 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
+                        requires_splice,
                     },
                 );
                 return self.set(e, sig.ret);
@@ -22827,6 +22894,7 @@ impl<'a> Checker<'a> {
                     .selected_source_extension(lt, "compareTo", &rhs_kind)
                     .filter(|(_, signature)| signature.is_operator() && signature.ret == Ty::Int)
                 {
+                    let requires_splice = self.source_extension_requires_splice(&selected);
                     let Some(param) = signature.single_param() else {
                         return self.check_binary(op, lt, rt, self.span(e));
                     };
@@ -22849,6 +22917,7 @@ impl<'a> Checker<'a> {
                             owner,
                             source: selected.source_key,
                             vararg: selected.call_sig.vararg,
+                            requires_splice,
                         },
                     );
                     return self.set(e, Ty::Boolean);
@@ -24026,6 +24095,7 @@ impl<'a> Checker<'a> {
         arg_kinds: &[CallArgKind],
     ) -> Option<Ty> {
         let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
+        let requires_splice = self.source_extension_requires_splice(&selected);
         // Validate against the resolver's instantiated value parameters, not the declaration's
         // potentially generic signature. This is the contract the former qualified-call block used;
         // retaining it here prevents helper reuse from accepting a safe call that selected a generic
@@ -24061,6 +24131,7 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
+                requires_splice,
             },
         );
         // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
@@ -25419,6 +25490,7 @@ impl<'a> Checker<'a> {
             );
         }
         if matches!(fi.callable.origin, Origin::Module { .. }) {
+            let requires_splice = self.source_extension_requires_splice(&fi);
             let (file, declaration) = fi.source_key?;
             let (_, signature) = self
                 .syms
@@ -25446,6 +25518,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
+                    requires_splice,
                 },
             );
             self.resolved_call_arg_slots.insert(call, slots);
