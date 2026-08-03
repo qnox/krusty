@@ -240,7 +240,15 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// The platform/library type used for a property reference with the given arity and mutability.
     /// Resolver needs this type so direct property-reference APIs (`get`, `name`) keep working, but the
     /// actual class name is provider-owned.
-    fn property_reference_type(&self, _arity: usize, _mutable: bool) -> Option<Ty> {
+    ///
+    /// `type_args` are the reference's semantic arguments — `[value]` for arity 0, `[receiver, value]`
+    /// for arity 1 — so `get()` reports the property's own type instead of the erased upper bound.
+    fn property_reference_type(
+        &self,
+        _arity: usize,
+        _mutable: bool,
+        _type_args: &[Ty],
+    ) -> Option<Ty> {
         None
     }
 

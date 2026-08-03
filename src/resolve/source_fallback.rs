@@ -756,8 +756,9 @@ impl SemanticPlatform for SourceFallbackPlatform {
         self.platform.supports_member_reference(member)
     }
 
-    fn property_reference_type(&self, arity: usize, mutable: bool) -> Option<Ty> {
-        self.platform.property_reference_type(arity, mutable)
+    fn property_reference_type(&self, arity: usize, mutable: bool, type_args: &[Ty]) -> Option<Ty> {
+        self.platform
+            .property_reference_type(arity, mutable, type_args)
     }
 
     fn class_literal_type(&self) -> Option<Ty> {

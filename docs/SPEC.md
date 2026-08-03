@@ -3292,3 +3292,65 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `definitely_non_null_type_e2e::generic_function_constructor_still_requires_a_function_argument`
   and
   `definitely_non_null_type_e2e::concrete_secondary_beats_an_incompatible_generic_function_primary`.
+
+- **A companion object's `private` members are in scope throughout the containing class.** A member
+  declared `private` inside `companion object` is reachable from the containing class's body and from
+  every class nested inside it, at any depth (`C.ZZZ`, `C.ZZZ.Deep`), because the companion's members
+  belong to the containing class's scope. The widening is the companion's alone and reaches only the
+  containing class: a sibling nested class's own `private` member stays out of reach in both
+  directions (`C.ZZZ` cannot read `C.Inner`'s private member, nor can the companion), and an
+  unrelated top-level class still cannot reach the companion's private member. kotlinc routes the
+  accepted calls through a synthetic `access$…` bridge on `C$Companion`; krusty instead emits the
+  companion method as public, so the two agree on what compiles while differing on that bridge. Tests:
+  `resolve::tests::private_companion_member_reaches_the_containing_class_body`,
+  `companion_e2e::property_inferred_from_generic_companion_method`.
+
+- **A field-less `companion object` property is its accessors.** `companion object { val ZERO: T get()
+  = … }` has no static field anywhere: it lowers to `getZERO()` (plus `setX(T)` for a `var` with a
+  bodied setter) on the synthesized `C$Companion`, exactly as kotlinc emits it, and `C.ZERO` /
+  `C.LEVEL = v` compile to `getstatic C.Companion; invokevirtual`. Declaring the accessors beside the
+  companion's own methods gives them the same name mangling a companion method already gets, so a
+  value-class-typed accessor emits kotlinc's spelling (`getZERO-dNj3LFw()I`). The property type comes
+  from the declared type, or is inferred from an expression getter body the way an initializer would
+  be. Accessor bodies are type-checked like any other body — without that the setter's parameter had
+  no type. Every OTHER accessor shape on a companion property (a getter reading `field`, a
+  visibility-only `private set`, an accessor on a `const` or delegated property) would still be
+  emitted as the default static accessor with the body ignored, so those stay rejected. Tests:
+  `companion_e2e::companion_property_custom_accessors_run`,
+  `feature_coverage_q_e2e::value_class_companion_function`.
+
+- **`@JvmName` on a top-level function names the emitted method, and decides the clash.** The
+  annotation's constant string is the bytecode method name; call sites still resolve by the SOURCE
+  name, so they reach the same declaration and emit the annotated spelling. Because a platform
+  declaration clash is a statement about JVM signatures, the top-level overload-conflict key uses the
+  emitted name rather than the source name: `fun g(x: String)` and `fun g(x: String?)` erase to one
+  descriptor and conflict while both are spelled `g`, but not once `@JvmName("gNullable")` separates
+  them — and, in the other direction, two distinct source names collapsed onto one `@JvmName` DO
+  conflict. Overload selection is unaffected; it still keys on the source name. Tests:
+  `frontend::tests::jvm_name_decides_the_top_level_clash`,
+  `resolve_parse_deep_coverage_e2e::overload_by_nullability`.
+
+- **A property reference carries its type arguments.** `::p` / `obj::p` is `KProperty0<V>` (or
+  `KMutableProperty0<V>`) and `Type::p` is `KProperty1<T, V>`, not the raw class — so `get()` reports
+  the property's own type and a member read on the result (`p.get().value`) resolves. Every reference
+  form supplies them: top-level, implicit-`this`, bound member, bound extension, unbound member,
+  unbound extension, object, and classpath. The arguments are semantic only; emission is unchanged
+  (annotating the result with its type already compiled before this). A reference whose arguments
+  cannot be determined stays raw rather than binding a wrong type, and so does one whose property
+  type the reference lowering cannot realize — a VALUE-class-typed property, whose accessor is
+  mangled (`getZ-<hash>`) and which the synthesized reference class does not spell, or a property
+  typed as a function WITH a receiver or context parameters, which is not realized as a plain
+  `FunctionN` there. Keeping the checker in lock-step with the lowerer that way leaves those cases
+  as clean skips instead of a `NoSuchMethodError`/`ClassCastException` at run time. Tests:
+  `mutable_property_ref_e2e::property_reference_get_reports_the_property_type`,
+  `toplevel_property_ref_e2e::toplevel_property_refs_run`.
+
+- **Compiler-realized property reads are one list, shared by checking and signature inference.**
+  `"s".length`, `c.code`, and an array's `size` are realized directly rather than through a declared
+  getter — `Char.code` in particular resolves through no getter at all, since `Char` is a primitive
+  and `code` is a stdlib extension. The checker and the signature-phase initializer inference read
+  the same `intrinsic_property_read` list, so a top-level `const val code = a.code` infers `Int`
+  instead of reporting "cannot infer the type of property"; before, the identical read type-checked
+  inside a function body or under an explicit type annotation but not when a top-level property's
+  type had to be inferred from it. Test:
+  `toplevel_property_inference_e2e::toplevel_property_cross_reference`.

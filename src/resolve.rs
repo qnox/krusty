@@ -4721,8 +4721,13 @@ fn collect_signatures_with_cp_impl(
                     } else {
                         let key = erased_params_semantic_key(&sig);
                         let overloads = table.funs.entry(f.name.clone()).or_default();
+                        // A platform declaration clash is decided on the emitted JVM NAME, not the
+                        // source name: `g(String)` and `g(String?)` erase to the same descriptor and
+                        // clash only while both are spelled `g`, so an `@JvmName` on either one
+                        // separates them (kotlinc's rule). Overload SELECTION is unaffected — the
+                        // source name still keys `table.funs` above.
                         let group_index =
-                            top_level_fun_groups.get_or_insert((package, f.name.clone(), key));
+                            top_level_fun_groups.get_or_insert((package, f.jvm_name(file), key));
                         let group = &mut top_level_fun_groups.groups[group_index].1;
                         let private = f.visibility.is_private();
                         let current = TopLevelFunctionConflictDecl {
@@ -5819,6 +5824,13 @@ fn collect_signatures_with_cp_impl(
                                 Some(r) => ty_of_ref(r, &class_names, &ctp, diags),
                                 None => p
                                     .init
+                                    // A field-less custom-accessor property has no initializer, so its
+                                    // EXPRESSION getter body is what determines the type — inferred
+                                    // exactly as an initializer would be (`val X get() = 0` → `Int`).
+                                    .or(match p.getter.as_ref() {
+                                        Some(FunBody::Expr(e)) => Some(*e),
+                                        _ => None,
+                                    })
                                     .map(|i| {
                                         infer_lit_ty(file, i, &class_names, &fun_rets, &*libraries)
                                     })
@@ -5930,14 +5942,22 @@ fn collect_signatures_with_cp_impl(
                         .iter()
                         .zip(companion_property_scope.iter())
                         .map(|(p, (name, ty, _))| {
-                            if *ty == Ty::Error && p.init.is_some() && p.ty.is_none() {
+                            let is_computed = crate::ast::is_computed_companion_prop(p);
+                            if *ty == Ty::Error
+                                && p.ty.is_none()
+                                && (p.init.is_some() || is_computed)
+                            {
                                 diags.error(p.span, format!("krusty: cannot infer the type of property '{}'; add an explicit type", p.name));
                             }
-                            // Custom accessors on a `companion object` property are emitted as the
-                            // default static getter/setter (the body is ignored) — reject rather
+                            // A FIELD-LESS custom-accessor companion property IS its accessors: it
+                            // lowers to `getX`/`setX` on the synthesized `C$Companion`, which is
+                            // kotlinc's own layout. Every OTHER accessor shape here — a getter that
+                            // reads `field`, a visibility-only `private set`, an accessor on a
+                            // `const` or delegated property — would still be emitted as the default
+                            // static accessor with the body ignored, so keep rejecting those rather
                             // than miscompile.
-                            if p.getter.is_some() || p.setter.is_some() {
-                                diags.error(p.span, "krusty: companion-object property custom accessors are not supported".to_string());
+                            if (p.getter.is_some() || p.setter.is_some()) && !is_computed {
+                                diags.error(p.span, "krusty: this companion-object property accessor shape is not supported".to_string());
                             }
                             (name.clone(), (*ty, p.visibility))
                         })
@@ -7852,6 +7872,22 @@ fn infer_lit_ty_scoped(
     infer_lit_ty_p(file, e, class_names, fun_rets, props, src, &env)
 }
 
+/// Property reads the compiler realizes directly rather than through a declared getter.
+///
+/// `Char.code` has no member to resolve at all (`Char` is a primitive and `code` is a stdlib
+/// extension), so only this list knows it; `String.length` and an array's `size` are realized
+/// directly for the same reason the lowerer emits them inline. The checker and the signature-phase
+/// inference must agree on the set: a read the checker types but inference does not know leaves a
+/// top-level property's type uninferred, even though the identical read checks fine inside a
+/// function body.
+fn intrinsic_property_read(receiver: Ty, name: &str) -> Option<Ty> {
+    match (receiver, name) {
+        (Ty::String, "length") | (Ty::Char, "code") => Some(Ty::Int),
+        (_, "size") if receiver.array_elem().is_some() => Some(Ty::Int),
+        _ => None,
+    }
+}
+
 fn infer_lit_ty_p(
     file: &File,
     e: ExprId,
@@ -7976,6 +8012,11 @@ fn infer_lit_ty_p(
             // Property read (`s.length`, `list.size`, `vc.value`). Use the scoped resolver so an
             // imported extension property such as `Char.code` can resolve through its getter.
             let rt = infer_lit_ty_p(file, *receiver, class_names, fun_rets, props, src, env);
+            // A compiler-realized read first, exactly as the checker does — `Char.code` resolves
+            // through no getter at all, so the resolver below would leave it `Ty::Error`.
+            if let Some(intrinsic) = intrinsic_property_read(rt, name) {
+                return intrinsic;
+            }
             if let Some(m) = resolver
                 .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
                 .and_then(crate::symbol_resolver::Symbol::property)
@@ -12281,6 +12322,45 @@ fn check_file_at_impl_mode(
                                     "companion property",
                                 );
                             }
+                        }
+                        // A field-less custom-accessor companion property lowers to accessor METHODS
+                        // on the companion, so their bodies need checking like any other body — the
+                        // initializer-only walk above left the setter's parameter untyped, which the
+                        // lowerer then had no type for.
+                        let prop_ty = c
+                            .syms
+                            .classes
+                            .get(&cl.name)
+                            .and_then(|class| class.static_props.get(&p.name))
+                            .map(|&(ty, _)| ty)
+                            .unwrap_or(Ty::Error);
+                        if let Some(getter) = &p.getter {
+                            match getter {
+                                FunBody::Expr(g) => {
+                                    let gt = c.expr_expected(*g, prop_ty);
+                                    c.expect_assignable(prop_ty, gt, c.span(*g), "getter body");
+                                }
+                                FunBody::Block(g) => {
+                                    c.with_ret(prop_ty, |c| {
+                                        let _ = c.expr_statement(*g);
+                                    });
+                                }
+                                FunBody::None => {}
+                            }
+                        }
+                        if let Some(body) = p.setter.as_ref().and_then(|s| s.body.as_ref()) {
+                            c.push_scope();
+                            let pname = crate::ast::setter_param_or_value(
+                                p.setter.as_ref().and_then(|s| s.param.as_ref()),
+                            );
+                            c.declare(&pname, prop_ty, true);
+                            c.with_ret(Ty::Unit, |c| match body {
+                                FunBody::Expr(g) | FunBody::Block(g) => {
+                                    let _ = c.expr_statement(*g);
+                                }
+                                FunBody::None => {}
+                            });
+                            c.pop_scope();
                         }
                     }
                     for (method_index, m) in cl.companion_methods.iter().enumerate() {
@@ -19501,8 +19581,27 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn property_ref_ty(&self, arity: usize, mutable: bool) -> Option<Ty> {
-        self.syms.libraries.property_reference_type(arity, mutable)
+    fn property_ref_ty(&self, arity: usize, mutable: bool, type_args: &[Ty]) -> Option<Ty> {
+        // The arguments are attached only for property types whose accessors the reference lowering
+        // can actually call, keeping the checker in lock-step with it (the same discipline as
+        // `lower_bound_expr_ref`'s guard). A VALUE-class-typed property has a mangled accessor
+        // (`getZ-<hash>`) that the synthesized reference class does not spell, and a property whose
+        // type is a function type WITH a receiver is not realized as a plain `FunctionN` there.
+        // Typing `get()` for those would turn a clean skip into a `NoSuchMethodError` /
+        // `ClassCastException` at run time, so they stay RAW — `get()` then reports the erased upper
+        // bound and the file skips, exactly as it did before references carried arguments at all.
+        let realizable = |&t: &Ty| {
+            !self.ty_is_value_class(t.non_null())
+                && !matches!(t.non_null(), Ty::Fun(sig) if sig.has_receiver || sig.context_count > 0)
+        };
+        let type_args: &[Ty] = if type_args.iter().all(realizable) {
+            type_args
+        } else {
+            &[]
+        };
+        self.syms
+            .libraries
+            .property_reference_type(arity, mutable, type_args)
     }
 
     /// If `name` is a CLASSPATH class with a companion object, the companion instance's type
@@ -23553,7 +23652,7 @@ impl<'a> Checker<'a> {
                     //     an illegal-access miscompile);
                     //   * a computed (backing-field-less) property IS typed here but declined by
                     //     the lowerer — a sound skip, never a mis-bind.
-                    if let Some((owner, _, is_var, setter_visibility)) =
+                    if let Some((owner, property_ty, is_var, setter_visibility)) =
                         self.lookup_prop_with_owner_name(internal, &name)
                     {
                         // The same declaration resolver supplies every property fact. A private base
@@ -23573,7 +23672,7 @@ impl<'a> Checker<'a> {
                             && accessible(visibility)
                             && (!is_var || setter_visibility.is_none_or(accessible))
                         {
-                            if let Some(ty) = self.property_ref_ty(0, is_var) {
+                            if let Some(ty) = self.property_ref_ty(0, is_var, &[property_ty]) {
                                 // Record the semantic selection once. Lowering must not repeat the
                                 // hierarchy/visibility walk: this marker both supplies the exact
                                 // dispatch owner and makes a computed member fail closed instead of
@@ -23613,8 +23712,8 @@ impl<'a> Checker<'a> {
                 }
                 // Top-level property reference `::foo` keeps its property-reference API (`get`,
                 // `name`) while the provider marks it callable-like for function-typed positions.
-                if let Some((_, is_var, _)) = self.syms.props.get(&name) {
-                    if let Some(ty) = self.property_ref_ty(0, *is_var) {
+                if let Some((property_ty, is_var, _)) = self.syms.props.get(&name) {
+                    if let Some(ty) = self.property_ref_ty(0, *is_var, &[*property_ty]) {
                         return self.set(e, ty);
                     }
                 }
@@ -23707,8 +23806,10 @@ impl<'a> Checker<'a> {
                                     return self.set(e, Ty::fun(sig.params.clone(), sig.ret));
                                 }
                             }
-                            if let Some((_, is_var)) = self.lookup_prop_name(internal, &name) {
-                                if let Some(ty) = self.property_ref_ty(0, is_var) {
+                            if let Some((property_ty, is_var)) =
+                                self.lookup_prop_name(internal, &name)
+                            {
+                                if let Some(ty) = self.property_ref_ty(0, is_var, &[property_ty]) {
                                     self.mark_current_extension_receiver_used(e);
                                     return self.set(e, ty);
                                 }
@@ -23725,15 +23826,15 @@ impl<'a> Checker<'a> {
                                 }
                             }
                             // bound property reference `obj::prop` keeps property-reference APIs.
-                            if let Some(is_var) =
+                            if let Some((property_ty, is_var)) =
                                 self.syms.class_by_type_name(internal).and_then(|c| {
                                     c.props
                                         .iter()
-                                        .find_map(|(n, _, v)| (*n == name).then_some(*v))
+                                        .find_map(|(n, t, v)| (*n == name).then_some((*t, *v)))
                                 })
                             {
                                 self.expr(r); // capture the receiver
-                                if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                if let Some(ty) = self.property_ref_ty(0, is_var, &[property_ty]) {
                                     return self.set(e, ty);
                                 }
                             }
@@ -23744,8 +23845,11 @@ impl<'a> Checker<'a> {
                                 .visible_source_extension_property(Ty::obj_name(internal), &name)
                             {
                                 self.expr(r); // capture the receiver
-                                if let Some(ty) = self.property_ref_ty(0, property.setter.is_some())
-                                {
+                                if let Some(ty) = self.property_ref_ty(
+                                    0,
+                                    property.setter.is_some(),
+                                    &[property.ty],
+                                ) {
                                     self.source_extension_properties.insert(e, property.clone());
                                     return self.set(e, ty);
                                 }
@@ -23776,20 +23880,25 @@ impl<'a> Checker<'a> {
                                 return self.set(e, ty);
                             }
                             // unbound property reference `Type::prop` keeps property-reference APIs.
-                            if let Some(is_var) = cls
+                            if let Some((property_ty, is_var)) = cls
                                 .props
                                 .iter()
-                                .find_map(|(n, _, v)| (*n == name).then_some(*v))
+                                .find_map(|(n, t, v)| (*n == name).then_some((*t, *v)))
                             {
-                                if let Some(ty) = self.property_ref_ty(1, is_var) {
+                                if let Some(ty) =
+                                    self.property_ref_ty(1, is_var, &[recv_ty, property_ty])
+                                {
                                     return self.set(e, ty);
                                 }
                             }
                         }
                         if let Some(recv_ty) = self.class_literal_unbound_ty(&rn) {
                             if let Some(property) = self.resolve_property_ref(recv_ty, &name) {
-                                if let Some(ty) = self.property_ref_ty(1, property.setter.is_some())
-                                {
+                                if let Some(ty) = self.property_ref_ty(
+                                    1,
+                                    property.setter.is_some(),
+                                    &[recv_ty, property.prop_ty],
+                                ) {
                                     self.expr_lowers.insert(
                                         e,
                                         ExprLowering::ClasspathUnboundPropertyRef(Box::new(
@@ -23825,8 +23934,11 @@ impl<'a> Checker<'a> {
                             if let Ok(Some(property)) =
                                 self.visible_source_extension_property(recv_ty, &name)
                             {
-                                if let Some(ty) = self.property_ref_ty(1, property.setter.is_some())
-                                {
+                                if let Some(ty) = self.property_ref_ty(
+                                    1,
+                                    property.setter.is_some(),
+                                    &[recv_ty, property.ty],
+                                ) {
                                     self.source_extension_properties.insert(e, property.clone());
                                     return self.set(e, ty);
                                 }
@@ -23834,8 +23946,11 @@ impl<'a> Checker<'a> {
                             if let Some(property) =
                                 self.resolve_extension_property_ref(recv_ty, &name)
                             {
-                                if let Some(ty) = self.property_ref_ty(1, property.setter.is_some())
-                                {
+                                if let Some(ty) = self.property_ref_ty(
+                                    1,
+                                    property.setter.is_some(),
+                                    &[recv_ty, property.prop_ty],
+                                ) {
                                     self.expr_lowers.insert(
                                         e,
                                         ExprLowering::ClasspathUnboundPropertyRef(Box::new(
@@ -23859,20 +23974,23 @@ impl<'a> Checker<'a> {
                             }
                             // Object property reference `O::p` — bound to the singleton, a
                             // `KProperty0` whose get/set dispatch the member accessor on `O.INSTANCE`.
-                            if let Some(is_var) = cls
+                            if let Some((property_ty, is_var)) = cls
                                 .props
                                 .iter()
-                                .find_map(|(n, _, v)| (*n == name).then_some(*v))
+                                .find_map(|(n, t, v)| (*n == name).then_some((*t, *v)))
                             {
-                                if let Some(ty) = self.property_ref_ty(0, is_var) {
+                                if let Some(ty) = self.property_ref_ty(0, is_var, &[property_ty]) {
                                     return self.set(e, ty);
                                 }
                             }
                             if let Ok(Some(property)) = self
                                 .visible_source_extension_property(Ty::obj(&cls.internal()), &name)
                             {
-                                if let Some(ty) = self.property_ref_ty(0, property.setter.is_some())
-                                {
+                                if let Some(ty) = self.property_ref_ty(
+                                    0,
+                                    property.setter.is_some(),
+                                    &[property.ty],
+                                ) {
                                     self.expr(r);
                                     self.source_extension_properties.insert(e, property.clone());
                                     return self.set(e, ty);
@@ -23910,13 +24028,13 @@ impl<'a> Checker<'a> {
                     // reference; a `var` (mutable reference) isn't lowered, so don't type it. (The
                     // `obj::p` Name form is handled above; a bound METHOD ref on such a receiver is
                     // handled by the member-method path in the lowerer.)
-                    let immutable_prop = self.syms.class_by_type_name(internal).and_then(|c| {
+                    let selected = self.syms.class_by_type_name(internal).and_then(|c| {
                         c.props
                             .iter()
-                            .find_map(|(n, _, v)| (*n == name).then_some(*v))
-                    }) == Some(false);
-                    if immutable_prop {
-                        if let Some(ty) = self.property_ref_ty(0, false) {
+                            .find_map(|(n, t, v)| (*n == name).then_some((*t, *v)))
+                    });
+                    if let Some((property_ty, false)) = selected {
+                        if let Some(ty) = self.property_ref_ty(0, false, &[property_ty]) {
                             return self.set(e, ty);
                         }
                     }
@@ -23977,7 +24095,9 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Ok(Some(property)) = self.visible_source_extension_property(rty, &name) {
-                    if let Some(ty) = self.property_ref_ty(0, property.setter.is_some()) {
+                    if let Some(ty) =
+                        self.property_ref_ty(0, property.setter.is_some(), &[property.ty])
+                    {
                         self.source_extension_properties.insert(e, property.clone());
                         return self.set(e, ty);
                     }
@@ -23998,7 +24118,9 @@ impl<'a> Checker<'a> {
                     // `get()` yields the value — resolve it (the resolver decides property-vs-method
                     // and emittability) BEFORE the plain-function path, so `.get()`/`.name` resolve.
                     if let Some(prop_ref) = self.resolve_property_ref(rty, &name) {
-                        if let Some(ty) = self.property_ref_ty(0, prop_ref.setter.is_some()) {
+                        if let Some(ty) =
+                            self.property_ref_ty(0, prop_ref.setter.is_some(), &[prop_ref.prop_ty])
+                        {
                             self.bound_property_refs.insert(e, prop_ref);
                             return self.set(e, ty);
                         }
@@ -26723,25 +26845,47 @@ impl<'a> Checker<'a> {
         match vis {
             Visibility::Public | Visibility::Internal => true,
             Visibility::Private | Visibility::Protected => {
-                let nested_prefix = format!("{}$", owner.render());
-                self.this_labels
-                    .iter()
-                    .filter(|(_, _, is_class)| *is_class)
-                    .filter_map(|(_, receiver, _)| receiver.obj_internal())
-                    .any(|enclosing| {
-                        let enclosing_prefix = format!("{}$", enclosing.render());
-                        enclosing == owner
-                            || enclosing.starts_with(&nested_prefix)
-                            || owner.starts_with(&enclosing_prefix)
-                            // `protected` additionally reaches from a subclass of the owner.
-                            || (vis == Visibility::Protected
-                                && self
-                                    .syms
-                                    .supertype_internal_names_from(enclosing)
-                                    .contains(&owner))
-                    })
+                // A `companion object`'s members are also in scope throughout the CONTAINING class's
+                // body, so a private one is reachable from the containing class and everything nested
+                // in it (`C.ZZZ`, `C.ZZZ.Deep`), not just from the companion itself. Testing the
+                // containing class as a second owner is what admits those sites; it grants nothing
+                // else, since a sibling nested class is not nested inside the containing class's
+                // companion. Only the companion is widened this way — a sibling nested class's own
+                // private member stays out of reach in both directions, as in kotlinc.
+                let owners = [Some(owner), self.companion_containing_class(owner)];
+                owners.into_iter().flatten().any(|owner| {
+                    let nested_prefix = format!("{}$", owner.render());
+                    self.this_labels
+                        .iter()
+                        .filter(|(_, _, is_class)| *is_class)
+                        .filter_map(|(_, receiver, _)| receiver.obj_internal())
+                        .any(|enclosing| {
+                            let enclosing_prefix = format!("{}$", enclosing.render());
+                            enclosing == owner
+                                || enclosing.starts_with(&nested_prefix)
+                                || owner.starts_with(&enclosing_prefix)
+                                // `protected` additionally reaches from a subclass of the owner.
+                                || (vis == Visibility::Protected
+                                    && self
+                                        .syms
+                                        .supertype_internal_names_from(enclosing)
+                                        .contains(&owner))
+                        })
+                })
             }
         }
+    }
+
+    /// The class whose `companion object` is `owner`, when `owner` names one. A source companion is
+    /// emitted as `<Outer>$Companion` and its members are registered on the OUTER class's signature
+    /// (`static_methods`/`static_props`), so requiring those to be present keeps a nested class that
+    /// is merely *named* `Companion` from being mistaken for one.
+    fn companion_containing_class(&self, owner: TypeName) -> Option<TypeName> {
+        let rendered = owner.render();
+        let outer = type_name(rendered.strip_suffix("$Companion")?);
+        let sig = self.syms.class_by_type_name(outer)?;
+        (!sig.static_methods.is_empty() || !sig.static_props.is_empty())
+            .then(|| sig.internal_name())
     }
 
     fn effective_property_visibility(
@@ -27737,20 +27881,19 @@ impl<'a> Checker<'a> {
         if rt == Ty::Error {
             return Ty::Error;
         }
-        if let (Ty::String, "length") = (rt, name) {
-            if let Some(m) = self.resolve_property_member(rt, name) {
-                if let Some(me) = mexpr {
-                    self.resolved_calls.insert(me, ResolvedCall::Member(m));
+        // A compiler-realized read (`"s".length`, `c.code`, `arr.size`) — see
+        // [`intrinsic_property_read`], which the signature-phase inference consults too.
+        if let Some(intrinsic) = intrinsic_property_read(rt, name) {
+            // `String.length` additionally records the resolved member, so lowering emits the
+            // classpath accessor rather than rediscovering it.
+            if let (Ty::String, "length") = (rt, name) {
+                if let Some(m) = self.resolve_property_member(rt, name) {
+                    if let Some(me) = mexpr {
+                        self.resolved_calls.insert(me, ResolvedCall::Member(m));
+                    }
                 }
             }
-            return Ty::Int;
-        }
-        if let (Ty::Char, "code") = (rt, name) {
-            return Ty::Int; // `c.code` — the Char's UTF-16 code unit as an `Int`.
-        }
-        if name == "size" && rt.array_elem().is_some() {
-            // `arr.size` — covers primitive arrays and a boxed `Array<T>` (`array_elem` sees both).
-            return Ty::Int;
+            return intrinsic;
         }
         if let Some(ty) = self.resolve_property_read(rt, name, span, mexpr) {
             return ty;
@@ -38754,6 +38897,32 @@ fun box(): String {
             "class C { private fun choose(value: Int) = value; fun choose(value: String) = value }\n\
              fun box(): Int = C().choose(1)",
             "it is private in 'C'",
+        );
+    }
+
+    #[test]
+    fn private_companion_member_reaches_the_containing_class_body() {
+        // A `companion object`'s `private` members are in scope throughout the CONTAINING class's
+        // body — including its nested classes, at any depth. kotlinc accepts all of these (it routes
+        // the call through a synthetic `access$…` bridge); krusty widens the companion method to
+        // public instead, so the only question here is the front-end check.
+        ok("class C {\n  companion object { private fun make(): Int = 1 }\n  fun f(): Int = make()\n}");
+        ok("class C {\n  companion object { private fun make(): Int = 1 }\n  class ZZZ { fun f(): Int = C.make() }\n}");
+        ok("class C {\n  companion object { private fun make(): Int = 1 }\n  class ZZZ { class Deep { fun f(): Int = C.make() } }\n}");
+        // The widening is the COMPANION's alone, and reaches only the containing class. A sibling
+        // nested class's private member stays private to itself (kotlinc rejects both directions)…
+        err_contains(
+            "class C {\n  class Inner { private fun m(): Int = 1 }\n  class ZZZ { fun f(x: C.Inner): Int = x.m() }\n}",
+            "it is private in 'C$Inner'",
+        );
+        err_contains(
+            "class C {\n  class Inner { private fun m(): Int = 1 }\n  companion object { fun f(x: C.Inner): Int = x.m() }\n}",
+            "it is private in 'C$Inner'",
+        );
+        // …and an unrelated top-level class still cannot reach the companion's private member.
+        err_contains(
+            "class C { companion object { private fun m(): Int = 1 } }\nclass D { fun f(): Int = C.m() }",
+            "it is private in 'C$Companion'",
         );
     }
 

@@ -27,6 +27,32 @@ pub fn lambda_params_or_implicit(params: &[String], arity: usize) -> Option<Vec<
     }
 }
 
+/// A FIELD-LESS `companion object` property (`companion object { val ZERO: T get() = … }`): it IS
+/// its accessors, so there is no static to hoist onto the outer class — kotlinc emits only `getX`
+/// (plus `setX` for a `var`) on `C$Companion`, and that is what the companion synthesis builds.
+///
+/// A `var` requires a BODIED setter for the same reason a `val` requires a getter: with no backing
+/// field a default setter would have nothing to write. A getter that reads `field`, an initializer,
+/// an explicit backing field, a delegate, or `const` all mean a real static exists, so those keep
+/// the plain companion-property path.
+pub fn is_computed_companion_prop(p: &PropDecl) -> bool {
+    p.receiver.is_none()
+        && !p.is_lateinit
+        && !p.is_const
+        && p.init.is_none()
+        && p.delegate.is_none()
+        && p.explicit_backing_field.is_none()
+        && p.getter.is_some()
+        && !p.getter_reads_field
+        && if p.is_var {
+            p.setter
+                .as_ref()
+                .is_some_and(|setter| setter.body.is_some())
+        } else {
+            p.setter.is_none()
+        }
+}
+
 pub fn setter_param_or_value(param: Option<&String>) -> String {
     param.cloned().unwrap_or_else(|| "value".to_string())
 }
@@ -658,9 +684,30 @@ pub struct FunDecl {
     /// mirroring `ClassDecl.annotations`. Used by the compiler-extension surface (`crate::plugins`) to
     /// find annotated functions.
     pub annotations: Vec<String>,
+    /// The argument expressions of each annotation in [`Self::annotations`] (same order/length),
+    /// mirroring `ClassDecl::annotation_args`. `@JvmName("gNullable")` reads its bytecode name here.
+    pub annotation_args: Vec<Vec<ExprId>>,
 }
 
 impl FunDecl {
+    /// The bytecode method name this function is emitted under: the `@JvmName("…")` spelling when the
+    /// annotation is present with a constant string argument, otherwise the source name.
+    ///
+    /// The JVM name — not the source name — is the identity that decides a platform declaration
+    /// clash, so two overloads erasing to the same descriptor (`g(String)` / `g(String?)`) are legal
+    /// exactly when `@JvmName` separates them, as in kotlinc.
+    pub fn jvm_name(&self, file: &File) -> String {
+        self.annotations
+            .iter()
+            .position(|a| a.rsplit(['/', '.']).next().unwrap_or(a) == "JvmName")
+            .and_then(|i| self.annotation_args.get(i)?.first())
+            .and_then(|&arg| match file.expr(arg) {
+                Expr::StringLit(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| self.name.clone())
+    }
+
     pub(crate) fn has_callable_inline_extension_body(&self) -> bool {
         // Emit the inline fn as a REAL (static) method too, like kotlinc does — a separate
         // compilation can then resolve and splice it. Type parameters (incl. `reified`) are fine:

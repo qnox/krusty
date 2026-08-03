@@ -197,6 +197,7 @@ fn lower_file_at_reporting_impl(
         ext_fun_id_by_sig: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
         companion_consts: HashMap::new(),
+        companion_computed_props: HashMap::new(),
         const_lits: HashMap::new(),
         object_const_lits: HashMap::new(),
         ext_prop_set_ids: HashMap::new(),
@@ -1860,6 +1861,17 @@ fn lower_file_at_reporting_impl(
             // non-const `val` initialized in the outer class's `<clinit>` (see `emit_class`).
             for cp in &c.companion_props {
                 let cty = body_prop_ty(file, info, cp, &*syms.libraries);
+                // A field-less custom-accessor property has NO static to hoist: it is realized purely
+                // as accessor methods on the synthesized `C$Companion`, built in the companion-synthesis
+                // block below. Record its type/mutability so reads and writes can find those accessors.
+                if ast::is_computed_companion_prop(cp) {
+                    if cty == Ty::Error {
+                        return None;
+                    }
+                    lo.companion_computed_props
+                        .insert((type_name(&internal), cp.name.clone()), (cty, cp.is_var));
+                    continue;
+                }
                 lo.cur_class = None;
                 lo.scope.clear();
                 lo.boxed_elem.clear();
@@ -2137,6 +2149,57 @@ fn lower_file_at_reporting_impl(
                         .push((mi as u32, fid, ret));
                     cmethod_fids.push(fid);
                 }
+                // A FIELD-LESS custom-accessor companion property is realized as accessor METHODS on
+                // the companion (kotlinc's layout: `getZERO()`/`setLEVEL(int)` on `C$Companion`, no
+                // static anywhere). Declaring them here — beside the companion's own methods, in the
+                // same `methods` map — is what makes reads/writes resolve and gives value-class-typed
+                // accessors the same name mangling a companion method already gets.
+                for cp in c
+                    .companion_props
+                    .iter()
+                    .filter(|p| ast::is_computed_companion_prop(p))
+                {
+                    let cty = body_prop_ty(file, info, cp, &*syms.libraries);
+                    if cty == Ty::Error {
+                        return None;
+                    }
+                    let cty_ir = ty_to_ir(cty);
+                    // The recorded index is the accessor's position in the companion's method-fid
+                    // vector — that is what a `MethodCall` resolves against.
+                    let getter = property_getter_name(&cp.name);
+                    let gid = lo.ir.add_fun(IrFunction {
+                        name: getter.clone(),
+                        params: vec![],
+                        ret: cty_ir,
+                        body: None,
+                        is_static: false,
+                        dispatch_receiver: Some(type_name(&comp_fq)),
+                        param_checks: vec![],
+                    });
+                    cmethods
+                        .entry(getter)
+                        .or_default()
+                        .push((cmethod_fids.len() as u32, gid, cty));
+                    cmethod_fids.push(gid);
+                    if cp.is_var {
+                        let setter = property_setter_name(&cp.name);
+                        let sid = lo.ir.add_fun(IrFunction {
+                            name: setter.clone(),
+                            params: vec![cty_ir],
+                            ret: ty_to_ir(Ty::Unit),
+                            body: None,
+                            is_static: false,
+                            dispatch_receiver: Some(type_name(&comp_fq)),
+                            param_checks: vec![],
+                        });
+                        cmethods.entry(setter).or_default().push((
+                            cmethod_fids.len() as u32,
+                            sid,
+                            Ty::Unit,
+                        ));
+                        cmethod_fids.push(sid);
+                    }
+                }
                 lo.ir.classes[comp_id as usize].methods = cmethod_fids;
                 lo.ir.classes[id as usize].companion_class = Some(type_name(&comp_fq));
                 lo.insert_class_info(
@@ -2310,7 +2373,9 @@ fn lower_file_at_reporting_impl(
                 let param_checks =
                     param_checks_for(f, &sig.params, &[], &std::collections::HashSet::new());
                 let id = lo.ir.add_fun(IrFunction {
-                    name: f.name.clone(),
+                    // The BYTECODE name honours `@JvmName`; call sites still resolve by the SOURCE
+                    // name (`fun_ids` below), so they reach this id and emit the annotated spelling.
+                    name: f.jvm_name(file),
                     params,
                     ret,
                     body: None,
@@ -3193,6 +3258,51 @@ fn lower_file_at_reporting_impl(
                         }
                         let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                         lo.lower_body(&m.body, &ret_ty, fid)?;
+                    }
+                    // The accessor bodies of a field-less companion property, lowered exactly like a
+                    // companion method: `this` is the companion instance at slot 0, and the setter's
+                    // parameter follows it.
+                    for cp in c
+                        .companion_props
+                        .iter()
+                        .filter(|p| ast::is_computed_companion_prop(p))
+                    {
+                        let cty = body_prop_ty(file, info, cp, &*syms.libraries);
+                        let getter_body = cp.getter.clone()?;
+                        let getter = property_getter_name(&cp.name);
+                        let (_, gid, _) = *lo.class_info(&comp_fq)?.methods[&getter].first()?;
+                        lo.scope.clear();
+                        lo.boxed_elem.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(comp_name);
+                        lo.cur_fn_name = getter.clone();
+                        let this_v = lo.fresh_value();
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
+                        let ret_ty = lo.ir.functions[gid as usize].ret;
+                        lo.lower_body(&getter_body, &ret_ty, gid)?;
+                        if !cp.is_var {
+                            continue;
+                        }
+                        let accessor = cp.setter.clone()?;
+                        let setter_body = accessor.body.clone()?;
+                        let setter = property_setter_name(&cp.name);
+                        let (_, sid, _) = *lo.class_info(&comp_fq)?.methods[&setter].first()?;
+                        lo.scope.clear();
+                        lo.boxed_elem.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(comp_name);
+                        lo.cur_fn_name = setter.clone();
+                        let this_v = lo.fresh_value();
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
+                        let value_v = lo.fresh_value();
+                        lo.scope.push((
+                            ast::setter_param_or_value(accessor.param.as_ref()),
+                            value_v,
+                            cty,
+                        ));
+                        lo.lower_body(&setter_body, &ty_to_ir(Ty::Unit), sid)?;
                     }
                 }
                 // A superclass whose constructor needs more arguments than are supplied (`object : A()`
@@ -4721,9 +4831,14 @@ fn companion_props_lowerable(c: &ast::ClassDecl) -> bool {
     // A plain companion property with an initializer and no custom accessor/delegate — emitted as a
     // static field on the OUTER class (a `const val` as a `ConstantValue`, a non-const one initialized
     // in the outer class's `<clinit>`), read as `getstatic C.X`. A `var` is the same backing field,
-    // written with `putstatic`.
+    // written with `putstatic`. A FIELD-LESS custom-accessor property has no static at all: it lowers
+    // to accessor methods on the synthesized `C$Companion` (see `is_computed_companion_prop`).
     c.companion_props.iter().all(|p| {
-        p.init.is_some() && p.getter.is_none() && p.setter.is_none() && p.delegate.is_none()
+        ast::is_computed_companion_prop(p)
+            || (p.init.is_some()
+                && p.getter.is_none()
+                && p.setter.is_none()
+                && p.delegate.is_none())
     })
 }
 
@@ -5259,6 +5374,11 @@ pub(crate) struct Lower<'a> {
     /// `(outer class internal, companion `const val` name)` → its type. Such a const lives as a
     /// `public static final` field on the OUTER class; a `C.X` read lowers to `getstatic C.X`.
     companion_consts: HashMap<(TypeName, String), Ty>,
+    /// `(outer class internal, companion property name)` → `(type, is_var)` for a FIELD-LESS
+    /// custom-accessor companion property. It has no static field at all: a `C.X` read lowers to
+    /// `getstatic C.Companion; invokevirtual C$Companion.getX()`, and a `C.X = v` write to the
+    /// matching `setX(v)`. See `is_computed_companion_prop`.
+    companion_computed_props: HashMap<(TypeName, String), (Ty, bool)>,
     /// Top-level `const val` name → its compile-time literal value. A same-file read inlines this as a
     /// constant (kotlinc's `ldc`), exactly like the reference compiler — byte-identical, no `getstatic`.
     const_lits: HashMap<String, crate::ir::IrConst>,
@@ -6905,6 +7025,30 @@ impl<'a> Lower<'a> {
     }
 
     /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
+    /// A read or write of a FIELD-LESS custom-accessor companion property (`C.ZERO`, `C.LEVEL = v`).
+    /// It has no static field, so both directions go through the accessor methods synthesized on
+    /// `C$Companion`: read the `Companion` singleton, then invoke `getX()` / `setX(value)`. `value`
+    /// is `None` for a read. See `is_computed_companion_prop`.
+    fn lower_companion_computed_accessor(
+        &mut self,
+        outer: TypeName,
+        accessor: &str,
+        value: Option<u32>,
+    ) -> Option<u32> {
+        let outer_internal = outer.render();
+        let comp_internal = format!("{outer_internal}$Companion");
+        let field =
+            self.runtime
+                .companion_instance_field(&outer_internal, &comp_internal, "Companion")?;
+        let recv = self.platform_static_field(field);
+        let comp_name = type_name(&comp_internal);
+        let args: Vec<Option<u32>> = value.into_iter().map(Some).collect();
+        let (class_id, index, _, _) = self
+            .resolve_method_by_arity(comp_name, accessor, args.len())
+            .or_else(|| self.resolve_method_name(comp_name, accessor))?;
+        Some(self.emit_method_call(class_id, index, recv, args))
+    }
+
     /// recorded by the checker as [`ExprLowering::ObjectMemberCall`]). Reads the singleton
     /// (`getstatic Obj.INSTANCE`) as the dispatch receiver and invokes the member — the same shape a
     /// qualified `Obj.m(args)` lowers to. `call_expr` is the AST call, for generic-return coercion.
@@ -16566,6 +16710,16 @@ impl<'a> Lower<'a> {
             self.info.stmt_lowers.get(&s).cloned()
         {
             if let Stmt::AssignMember { value, .. } = self.afile.stmt(s).clone() {
+                // A FIELD-LESS custom-accessor companion property has no static to `putstatic`: the
+                // write IS the setter call on the companion singleton.
+                if self
+                    .companion_computed_props
+                    .contains_key(&(owner, name.clone()))
+                {
+                    let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
+                    let setter = property_setter_name(&name);
+                    return self.lower_companion_computed_accessor(owner, &setter, Some(lowered));
+                }
                 let index = self.ir.statics.iter().position(|static_field| {
                     static_field.owner == Some(owner) && static_field.name == name
                 })? as u32;
@@ -21387,6 +21541,15 @@ impl<'a> Lower<'a> {
                         name.clone(),
                         self.runtime.type_descriptor(*cty)?,
                     ));
+                }
+                // `C.X` where `X` is a FIELD-LESS custom-accessor companion property — there is no
+                // static to fetch, so the read IS the getter call on the companion singleton.
+                if self
+                    .companion_computed_props
+                    .contains_key(&(internal_name, name.clone()))
+                {
+                    let getter = property_getter_name(&name);
+                    return self.lower_companion_computed_accessor(internal_name, &getter, None);
                 }
             }
             if rt == Ty::Char && name == "code" {

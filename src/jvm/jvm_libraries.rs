@@ -3369,7 +3369,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         })
     }
 
-    fn property_reference_type(&self, arity: usize, mutable: bool) -> Option<Ty> {
+    fn property_reference_type(&self, arity: usize, mutable: bool, type_args: &[Ty]) -> Option<Ty> {
         let internal = match (arity, mutable) {
             (0, false) => "kotlin/reflect/KProperty0",
             (0, true) => "kotlin/reflect/KMutableProperty0",
@@ -3377,6 +3377,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             (1, true) => "kotlin/reflect/KMutableProperty1",
             _ => return None,
         };
+        // `KProperty0<V>` / `KProperty1<T, V>`: carrying the arguments is what lets `get()` report
+        // the property's type rather than the erased `Object` upper bound. An argument list of the
+        // wrong length (or one that could not be determined) leaves the reference raw, as before.
+        if type_args.len() == arity + 1 && !type_args.contains(&Ty::Error) {
+            return Some(Ty::obj_args(internal, type_args));
+        }
         Some(Ty::obj(internal))
     }
 

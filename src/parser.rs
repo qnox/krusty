@@ -2709,7 +2709,7 @@ impl<'a> Parser<'a> {
         // Annotations consumed by `skip_decl_prefix` before this function, attached here (mirrors how
         // classes take them) so function-annotation plugins can see them; otherwise they are discarded.
         let annotations = self.take_pending_annotations();
-        let _ = self.take_pending_annotation_args(); // a function decl doesn't carry annotation args yet
+        let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
@@ -2745,6 +2745,7 @@ impl<'a> Parser<'a> {
                 flags: FdFlags::default(),
                 visibility: Visibility::Public,
                 annotations,
+                annotation_args,
                 decl_line: 0, // filled by the parser post-pass
                 body_close_line: 0,
             };
@@ -2820,6 +2821,7 @@ impl<'a> Parser<'a> {
                 .with_is_tailrec(is_tailrec),
             visibility: Visibility::Public,
             annotations,
+            annotation_args,
             decl_line: 0, // filled by the parser post-pass
             body_close_line: 0,
         }
