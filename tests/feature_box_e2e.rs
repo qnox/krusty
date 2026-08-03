@@ -534,8 +534,7 @@ fun box(): String {
     ),
     // No-lambda stdlib `@InlineOnly` extensions on a primitive receiver — `Char.isDigit()`/`isLetter()`/
     // `uppercaseChar()`/… inline their real body (`Character.isDigit(this)`/`toUpperCase(this)`). Accepted
-    // only for a non-unsigned primitive receiver + primitive/`String` return (an unsigned return like
-    // `toUShort(): UShort` is rejected — krusty can't model it, so it skips rather than miscompiling).
+    // only for a non-unsigned primitive receiver + primitive/`String` return.
     (
         "PrimitiveInlineExtension",
         r#"

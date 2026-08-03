@@ -193,6 +193,106 @@ fn ubyte_and_ushort() {
     assert_eq!(out, "OK");
 }
 
+/// `UByte`/`UShort` have no arithmetic of their own — Kotlin defines each operator as `toInt()`
+/// (zero-extend) followed by the `UInt` one, so the result is a `UInt`, never the narrow type.
+#[test]
+fn ubyte_and_ushort_arithmetic_promotes_to_uint() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val b: UByte = 100u\n\
+    val s: UShort = 40000u\n\
+    val t: UShort = 1000u\n\
+    if (a + b != 300u) return \"add ${a + b}\"\n\
+    if (a - b != 100u) return \"sub ${a - b}\"\n\
+    if (a / b != 2u) return \"div ${a / b}\"\n\
+    if (a % b != 0u) return \"rem ${a % b}\"\n\
+    if (s + t != 41000u) return \"sadd ${s + t}\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteArith") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// Ordering is UNSIGNED: `200u` as a `UByte` is the byte `-56`, so a signed compare would invert it.
+#[test]
+fn ubyte_and_ushort_comparison_is_unsigned() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val b: UByte = 100u\n\
+    val s: UShort = 40000u\n\
+    val t: UShort = 1000u\n\
+    if (!(b < a)) return \"lt\"\n\
+    if (b > a) return \"gt\"\n\
+    if (!(a >= b)) return \"ge\"\n\
+    if (!(t < s)) return \"slt\"\n\
+    if (a == b) return \"eq\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteCmp") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// Widening out of the sign-extended `byte`/`short` zero-extends; narrowing to the signed primitive
+/// is the raw reinterpret (`200u.toByte()` is `-56`).
+#[test]
+fn ubyte_and_ushort_conversions() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val s: UShort = 40000u\n\
+    if (a.toLong() != 200L) return \"toLong ${a.toLong()}\"\n\
+    if (a.toUInt() != 200u) return \"toUInt ${a.toUInt()}\"\n\
+    if (a.toByte() != (-56).toByte()) return \"toByte ${a.toByte()}\"\n\
+    if (s.toInt() != 40000) return \"toInt ${s.toInt()}\"\n\
+    if (200.toUByte() != a) return \"toUByte\"\n\
+    if (40000.toUShort() != s) return \"toUShort\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteConv") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// An unsigned literal takes its EXPECTED type, exactly as a signed integer literal does.
+#[test]
+fn unsigned_literal_takes_the_expected_type() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val s: UShort = 40000u\n\
+    val i: UInt = 7u\n\
+    val l: ULong = 7u\n\
+    if (a.toInt() != 200) return \"ub\"\n\
+    if (s.toInt() != 40000) return \"us\"\n\
+    if (i != 7u) return \"ui\"\n\
+    if (l != 7uL) return \"ul\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UExpected") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// Interpolation prints the UNSIGNED decimal, not the signed `byte`/`short` the value is stored in.
+#[test]
+fn ubyte_and_ushort_interpolate_unsigned() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val s: UShort = 40000u\n\
+    if (\"$a\" != \"200\") return \"ub $a\"\n\
+    if (\"$s\" != \"40000\") return \"us $s\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteStr") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
 #[test]
 fn uint_comparison() {
     let src = "fun box(): String {\n\

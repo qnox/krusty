@@ -468,6 +468,10 @@ pub enum Ty {
     Char,
     /// Unsigned integers — Kotlin inline-class types with unsigned operation semantics. Kept distinct
     /// from signed types so those operations and widening (`toLong` = zero-extend) are selected correctly.
+    /// `UByte`/`UShort` are represented by the SIGN-extended `byte`/`short` the JVM loads, so every
+    /// widening out of that representation masks first (see [`Ty::unsigned_widen_mask`]).
+    UByte,
+    UShort,
     UInt,
     ULong,
     String,
@@ -612,6 +616,8 @@ impl Ty {
             Ty::Char => Some(type_name("kotlin/Char")),
             Ty::Float => Some(type_name("kotlin/Float")),
             Ty::Double => Some(type_name("kotlin/Double")),
+            Ty::UByte => Some(type_name("kotlin/UByte")),
+            Ty::UShort => Some(type_name("kotlin/UShort")),
             Ty::UInt => Some(type_name("kotlin/UInt")),
             Ty::ULong => Some(type_name("kotlin/ULong")),
             Ty::Nullable(inner) => inner.kotlin_class_internal(),
@@ -846,6 +852,8 @@ impl Ty {
             "Double" => Ty::Double,
             "Boolean" => Ty::Boolean,
             "Char" => Ty::Char,
+            "UByte" => Ty::UByte,
+            "UShort" => Ty::UShort,
             "UInt" => Ty::UInt,
             "ULong" => Ty::ULong,
             "String" => Ty::String,
@@ -893,6 +901,8 @@ impl Ty {
             Ty::Char => "kotlin/Char",
             // Unsigned types box to their OWN inline-class wrapper (`UInt` → `kotlin/UInt`), not a
             // `java/lang/*`; `kotlin_prim_to_wrapper` maps the wrapper to itself.
+            Ty::UByte => "kotlin/UByte",
+            Ty::UShort => "kotlin/UShort",
             Ty::UInt => "kotlin/UInt",
             Ty::ULong => "kotlin/ULong",
             _ => return None,
@@ -931,6 +941,8 @@ impl Ty {
             Ty::Double => "Double".to_string(),
             Ty::Boolean => "Boolean".to_string(),
             Ty::Char => "Char".to_string(),
+            Ty::UByte => "UByte".to_string(),
+            Ty::UShort => "UShort".to_string(),
             Ty::UInt => "UInt".to_string(),
             Ty::ULong => "ULong".to_string(),
             Ty::String => "String".to_string(),
@@ -988,6 +1000,8 @@ impl Ty {
             Ty::Double => "Double".to_string(),
             Ty::Boolean => "Boolean".to_string(),
             Ty::Char => "Char".to_string(),
+            Ty::UByte => "UByte".to_string(),
+            Ty::UShort => "UShort".to_string(),
             Ty::UInt => "UInt".to_string(),
             Ty::ULong => "ULong".to_string(),
             Ty::String => "String".to_string(),
@@ -1100,7 +1114,31 @@ impl Ty {
 
     /// True for the unsigned integer types (inline classes over a signed primitive).
     pub fn is_unsigned(self) -> bool {
-        matches!(self, Ty::UInt | Ty::ULong)
+        matches!(self, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
+    }
+
+    /// The zero-extension mask an unsigned value needs when it leaves its own representation, or
+    /// `None` when the representation already spans the whole operation width (`UInt` = `int`,
+    /// `ULong` = `long`). `UByte`/`UShort` live in a `byte`/`short`, which the JVM SIGN-extends on
+    /// every load, so `UByte.toInt()` is `iload; sipush 255; iand` — exactly what kotlinc emits.
+    pub fn unsigned_widen_mask(self) -> Option<i32> {
+        match self {
+            Ty::UByte => Some(0xFF),
+            Ty::UShort => Some(0xFFFF),
+            _ => None,
+        }
+    }
+
+    /// The unsigned type an operator on `self` actually computes in. Kotlin gives `UByte`/`UShort` no
+    /// arithmetic of their own: each operator is defined as `toInt()` (zero-extend) followed by the
+    /// `UInt` operator, so both promote to `UInt` and an operation on them yields `UInt`. `UInt`/`ULong`
+    /// operate in themselves. `None` for a signed type.
+    pub fn unsigned_op_type(self) -> Option<Ty> {
+        match self {
+            Ty::UByte | Ty::UShort | Ty::UInt => Some(Ty::UInt),
+            Ty::ULong => Some(Ty::ULong),
+            _ => None,
+        }
     }
 
     /// True for Kotlin scalar values that the JVM backend carries in primitive slots.
@@ -1119,6 +1157,8 @@ impl Ty {
             | Ty::Double
             | Ty::Boolean
             | Ty::Char => self,
+            Ty::UByte => Ty::Byte,
+            Ty::UShort => Ty::Short,
             Ty::UInt => Ty::Int,
             Ty::ULong => Ty::Long,
             _ => return None,

@@ -86,6 +86,8 @@ fn is_scalar(t: Ty) -> bool {
             | Ty::Double
             | Ty::Boolean
             | Ty::Char
+            | Ty::UByte
+            | Ty::UShort
             | Ty::UInt
             | Ty::ULong
     )

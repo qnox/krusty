@@ -45,6 +45,8 @@ pub(super) fn kotlin_name_to_ty(name: &str) -> Ty {
         "kotlin/Float" => Ty::Float,
         "kotlin/Byte" => Ty::Byte,
         "kotlin/Short" => Ty::Short,
+        "kotlin/UByte" => Ty::UByte,
+        "kotlin/UShort" => Ty::UShort,
         "kotlin/UInt" => Ty::UInt,
         "kotlin/ULong" => Ty::ULong,
         "kotlin/String" => Ty::String,
@@ -72,6 +74,10 @@ pub(super) fn kotlin_type_name_to_ty(name: TypeName) -> Ty {
         Ty::Byte
     } else if name.matches("kotlin/Short") {
         Ty::Short
+    } else if name.matches("kotlin/UByte") {
+        Ty::UByte
+    } else if name.matches("kotlin/UShort") {
+        Ty::UShort
     } else if name.matches("kotlin/UInt") {
         Ty::UInt
     } else if name.matches("kotlin/ULong") {
@@ -115,6 +121,8 @@ fn meta_ids() -> &'static MetaNameIds {
             ("kotlin/Float", Ty::Float),
             ("kotlin/Byte", Ty::Byte),
             ("kotlin/Short", Ty::Short),
+            ("kotlin/UByte", Ty::UByte),
+            ("kotlin/UShort", Ty::UShort),
             ("kotlin/UInt", Ty::UInt),
             ("kotlin/ULong", Ty::ULong),
         ]
@@ -179,10 +187,11 @@ fn metadata_value_class_underlying(
     if nullable {
         return None;
     }
-    value_underlying(name).map(|underlying| match underlying {
-        Ty::UInt => Ty::Int,
-        Ty::ULong => Ty::Long,
-        underlying => underlying,
+    value_underlying(name).map(|underlying| {
+        underlying
+            .scalar_value_repr()
+            .filter(|_| underlying.is_unsigned())
+            .unwrap_or(underlying)
     })
 }
 
@@ -251,8 +260,9 @@ fn meta_param_compat(
             });
         }
         return match prim {
-            Ty::UInt => matches!(*desc, Ty::UInt | Ty::Int),
-            Ty::ULong => matches!(*desc, Ty::ULong | Ty::Long),
+            // An unsigned parameter is metadata-compatible with its own name and with the signed
+            // primitive it erases to (`UInt` <-> `Int`, `UByte` <-> `Byte`, …).
+            u if u.is_unsigned() => *desc == *u || Some(*desc) == u.scalar_value_repr(),
             prim => desc == prim,
         };
     }
@@ -315,8 +325,9 @@ fn meta_param_exact(
             });
         }
         return match prim {
-            Ty::UInt => matches!(*desc, Ty::UInt | Ty::Int),
-            Ty::ULong => matches!(*desc, Ty::ULong | Ty::Long),
+            // An unsigned parameter is metadata-compatible with its own name and with the signed
+            // primitive it erases to (`UInt` <-> `Int`, `UByte` <-> `Byte`, …).
+            u if u.is_unsigned() => *desc == *u || Some(*desc) == u.scalar_value_repr(),
             prim => desc == prim,
         };
     }

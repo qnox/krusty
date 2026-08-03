@@ -3278,6 +3278,25 @@ fn erased_type_key(t: Ty) -> ErasedTypeKey {
     ErasedTypeKey::Ty(key)
 }
 
+/// The type of an unsigned integer literal (`200u`). Kotlin types an integer literal from its
+/// CONTEXT, unsigned exactly like signed: `val a: UByte = 200u` is a `UByte` the same way
+/// `val b: Byte = 100` is a `Byte`, and `val c: ULong = 7u` is a `ULong`. Absent an unsigned
+/// expected type the literal is `UInt` (the parser already promoted anything above `UInt.MAX` to a
+/// `ULongLit`). A magnitude that does NOT fit the expected type stays `UInt` so the ordinary
+/// initializer-mismatch diagnostic reports it instead of the value silently truncating.
+fn unsigned_literal_ty(value: i64, expected: Option<Ty>) -> Ty {
+    let fits = |t: Ty| match t {
+        Ty::UByte => (0..=0xFF).contains(&value),
+        Ty::UShort => (0..=0xFFFF).contains(&value),
+        Ty::UInt | Ty::ULong => true,
+        _ => false,
+    };
+    expected
+        .map(Ty::non_null)
+        .filter(|t| fits(*t))
+        .unwrap_or(Ty::UInt)
+}
+
 fn same_erased_params(left: &[Ty], right: &[Ty]) -> bool {
     left.len() == right.len()
         && left
@@ -3297,8 +3316,10 @@ fn extension_receiver_physical_key(t: Ty) -> ErasedTypeKey {
 
 fn extension_receiver_physical_key_inner(t: Ty, boxed_array_element: bool) -> ErasedTypeKey {
     match t {
-        Ty::UInt if !boxed_array_element => ErasedTypeKey::Ty(Ty::Int),
-        Ty::ULong if !boxed_array_element => ErasedTypeKey::Ty(Ty::Long),
+        // An unsigned receiver keys under the signed primitive it erases to (`UByte` → `Byte`).
+        u if u.is_unsigned() && !boxed_array_element => {
+            ErasedTypeKey::Ty(u.scalar_value_repr().unwrap_or(u))
+        }
         Ty::Fun(signature) => {
             ErasedTypeKey::Function(signature.params.len() + usize::from(signature.suspend))
         }
@@ -18049,7 +18070,7 @@ impl<'a> Checker<'a> {
         // kotlinc, but `.java.isPrimitive` would observe `Integer` where kotlinc's `KClass<Int>` reports
         // the primitive `int` — no corpus file exercises that, and the gate would flag it as a FAIL.)
         // Unsigned types box to an inline-class wrapper (`kotlin/UInt`), not a plain `java/lang/*` — skip.
-        if matches!(ty, Ty::UInt | Ty::ULong) {
+        if ty.is_unsigned() {
             return None;
         }
         ty.boxed_ref()
@@ -21299,7 +21320,7 @@ impl<'a> Checker<'a> {
         let t = match self.file.expr(e).clone() {
             Expr::IntLit(_) => Ty::Int,
             Expr::LongLit(_) => Ty::Long,
-            Expr::UIntLit(_) => Ty::UInt,
+            Expr::UIntLit(v) => unsigned_literal_ty(v, expected),
             Expr::ULongLit(_) => Ty::ULong,
             Expr::DoubleLit(_) => Ty::Double,
             Expr::FloatLit(_) => Ty::Float,
@@ -24234,7 +24255,11 @@ impl<'a> Checker<'a> {
         // types those are; mixed signed/unsigned falls through to the ordinary type error.
         if lt.is_unsigned() && lt == rt {
             return match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => lt,
+                // `UByte`/`UShort` have no arithmetic of their own — Kotlin defines each operator as
+                // `toInt()` followed by the `UInt` one, so both yield `UInt` (`Ty` owns the promotion).
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                    lt.unsigned_op_type().unwrap_or(lt)
+                }
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
                     Ty::Boolean
                 }
