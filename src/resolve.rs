@@ -4351,6 +4351,10 @@ fn collect_signatures_with_cp_impl(
             names
         })
         .collect();
+    let anonymous_lexical_scopes = files
+        .iter()
+        .map(anonymous_lexical_class_scope)
+        .collect::<Vec<_>>();
     let source_classifier_visibility = files
         .iter()
         .flat_map(|file| {
@@ -4461,6 +4465,7 @@ fn collect_signatures_with_cp_impl(
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
+        let anonymous_lexical_scope = &anonymous_lexical_scopes[i];
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
@@ -4868,10 +4873,7 @@ fn collect_signatures_with_cp_impl(
                     }
                 }
                 Decl::Class(c) => {
-                    let anonymous_object = file
-                        .anonymous_object_classes
-                        .values()
-                        .any(|declaration| *declaration == d);
+                    let anonymous_object = anonymous_lexical_scope.declarations.contains(&d);
                     let internal = class_names
                         .get(&c.name)
                         .map(TypeName::render)
@@ -4917,12 +4919,12 @@ fn collect_signatures_with_cp_impl(
                     // type is a hoisted top-level `Decl::Class` named `Outer.Inner`; map its last segment.
                     let class_names = {
                         let mut ext = class_names.clone();
-                        let inheritor = type_name(&class_internal(file, &c.name));
-                        let lexical_inheritors =
-                            crate::symbol_resolver::lexical_enclosing_classifier_names(
-                                inheritor,
-                                |candidate| source_direct_supertypes.contains_key(&candidate),
-                            );
+                        let lexical_inheritors = declaration_lexical_class_names(
+                            file,
+                            d,
+                            anonymous_lexical_scope,
+                            |candidate| source_direct_supertypes.contains_key(&candidate),
+                        );
                         let mut referenced_types = std::collections::HashSet::new();
                         collect_class_type_names(file, c, &mut referenced_types);
                         for name in &referenced_types {
@@ -10530,6 +10532,8 @@ fn make_checker<'a>(
         this_extension_receiver: None,
         this_narrow: None,
         this_labels: Vec::new(),
+        lexical_class_context: Vec::new(),
+        exact_anonymous_class_roots: std::collections::HashSet::new(),
         extension_receiver_labels: Vec::new(),
         field_ty: None,
         companion_of: None,
@@ -11068,6 +11072,93 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
     }
 }
 
+#[derive(Default)]
+struct AnonymousLexicalClassScope {
+    owners: HashMap<DeclId, DeclId>,
+    declarations: std::collections::HashSet<DeclId>,
+}
+
+/// The source class whose expression tree contains each hoisted anonymous-object construction.
+/// Anonymous classes are file-level synthetic declarations, but their superclass arguments retain
+/// the lexical classifier scope of the construction site (`object : Base(Inner()) {}` inside `Outer`
+/// may name `Outer.Inner` unqualified). This map preserves that source relationship without making
+/// the anonymous class an `inner` class or changing its runtime capture ABI.
+fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
+    if file.anonymous_object_classes.is_empty() {
+        return AnonymousLexicalClassScope::default();
+    }
+    let mut owners = HashMap::new();
+    let declarations = file
+        .anonymous_object_classes
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let targets = file
+        .anonymous_object_classes
+        .keys()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    for &owner in &file.decls {
+        if !matches!(file.decl(owner), Decl::Class(_)) {
+            continue;
+        }
+        let mut roots = Vec::new();
+        file.any_decl_expr(owner, &mut |expression| {
+            roots.push(expression);
+            false
+        });
+        let mut constructions = std::collections::HashSet::new();
+        record_capture_targets(file, &targets, roots, &mut constructions);
+        for construction in constructions {
+            if let Some(&anonymous) = file.anonymous_object_classes.get(&construction) {
+                owners.entry(anonymous).or_insert(owner);
+            }
+        }
+    }
+    AnonymousLexicalClassScope {
+        owners,
+        declarations,
+    }
+}
+
+/// Classifier roots visible from a declaration in nearest-first order. Ordinary nested declarations
+/// may derive their source parents from their hoisted internal name; anonymous declarations may not —
+/// their generated `$` name is exact, and their parents come only from the structural ownership map.
+fn declaration_lexical_class_names(
+    file: &File,
+    declaration: DeclId,
+    scope: &AnonymousLexicalClassScope,
+    mut exists: impl FnMut(TypeName) -> bool,
+) -> Vec<TypeName> {
+    let mut classes = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut current = Some(declaration);
+    while let Some(candidate) = current {
+        if !visited.insert(candidate) {
+            break;
+        }
+        if let Decl::Class(class) = file.decl(candidate) {
+            let internal = type_name(&class_internal(file, &class.name));
+            if scope.declarations.contains(&candidate) {
+                if !classes.contains(&internal) {
+                    classes.push(internal);
+                }
+            } else {
+                for lexical in crate::symbol_resolver::lexical_enclosing_classifier_names(
+                    internal,
+                    &mut exists,
+                ) {
+                    if !classes.contains(&lexical) {
+                        classes.push(lexical);
+                    }
+                }
+            }
+        }
+        current = scope.owners.get(&candidate).copied();
+    }
+    classes
+}
+
 fn discover_anonymous_object_captures_at(file: &File, file_index: u32, syms: &mut SymbolTable) {
     let declarations = file
         .anonymous_object_classes
@@ -11221,15 +11312,27 @@ fn file_may_depend_on_preinfer_names(
 /// class methods). Returns the names of changed signatures so the module fixpoint can revisit only
 /// files that may depend on them. Runs on a scratch `DiagSink` (inference diagnostics are not the real
 /// check's).
+#[cfg(test)]
 fn preinfer_returns_pass(
     file: &File,
     file_index: u32,
     syms: &mut SymbolTable,
 ) -> PreinferPassResult {
+    let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    preinfer_returns_pass_with_owners(file, file_index, syms, &anonymous_lexical_scope)
+}
+
+fn preinfer_returns_pass_with_owners(
+    file: &File,
+    file_index: u32,
+    syms: &mut SymbolTable,
+    anonymous_lexical_scope: &AnonymousLexicalClassScope,
+) -> PreinferPassResult {
     let mut scratch = DiagSink::new();
     let mut pre = make_checker(file, file_index, None, &*syms, &mut scratch);
     let mut inferred_member_ext_rets = Vec::new();
     for &d in &file.decls {
+        pre.set_anonymous_lexical_class_context(d, anonymous_lexical_scope);
         if let Decl::Fun(f) = file.decl(d) {
             if function_needs_return_preinfer(f) {
                 let resolve = class_internal_resolver(pre.syms);
@@ -11411,6 +11514,10 @@ pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &m
 fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
     discover_anonymous_object_captures(files, syms);
     let saved = diags.current_file();
+    let anonymous_lexical_scopes = files
+        .iter()
+        .map(anonymous_lexical_class_scope)
+        .collect::<Vec<_>>();
     let candidates = files
         .iter()
         .map(file_has_preinfer_candidates)
@@ -11423,7 +11530,15 @@ fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &
                 continue;
             }
             diags.set_file(i as u32);
-            changed_names.extend(preinfer_returns_pass(file, i as u32, syms).changed_names);
+            changed_names.extend(
+                preinfer_returns_pass_with_owners(
+                    file,
+                    i as u32,
+                    syms,
+                    &anonymous_lexical_scopes[i],
+                )
+                .changed_names,
+            );
         }
         if changed_names.is_empty() {
             break;
@@ -11455,6 +11570,7 @@ fn check_file_at_impl_mode(
     if !capture_discovery {
         discover_anonymous_object_captures_at(file, file_index, syms);
     }
+    let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     // Pre-infer EXPRESSION-body return types (top-level functions AND class methods) and patch the
     // signature table BEFORE the main check — so a call to `fun m() = f()` resolves to its real return,
     // not the collection default `Unit`. Without this, a method whose return couldn't be inferred at
@@ -11465,7 +11581,9 @@ fn check_file_at_impl_mode(
     // dependency chain is shallow; an unresolvable case simply stops improving).
     if !capture_discovery {
         for _pass in 0..8 {
-            if !preinfer_returns_pass(file, file_index, syms).changed() {
+            if !preinfer_returns_pass_with_owners(file, file_index, syms, &anonymous_lexical_scope)
+                .changed()
+            {
                 break;
             }
         }
@@ -11492,6 +11610,7 @@ fn check_file_at_impl_mode(
             continue;
         }
         c.scopes.truncate(base_scope_depth);
+        c.set_anonymous_lexical_class_context(d, &anonymous_lexical_scope);
         match file.decl(d) {
             Decl::Fun(f) => {
                 let resolve = class_internal_resolver(c.syms);
@@ -12935,6 +13054,12 @@ struct Checker<'a> {
     /// nothing but classes between) lowers via the inner class's `this$0`. Anything else type-checks but
     /// the lowerer skips it (it can't yet reach a captured / multi-level outer receiver).
     this_labels: Vec<(String, Ty, bool)>,
+    /// Source class owners of a hoisted anonymous-object declaration, nearest first. They contribute
+    /// lexical classifier scope but are not implicit runtime receivers (captures remain a separate ABI).
+    lexical_class_context: Vec<TypeName>,
+    /// Anonymous classifiers in the current structural ownership chain. Their generated `$` names are
+    /// exact roots, never evidence of lexical parents; those come only from `lexical_class_context`.
+    exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
     extension_receiver_labels: Vec<(usize, Span)>,
     /// The backing-field type while checking a property accessor body — makes the `field`
     /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
@@ -18012,15 +18137,24 @@ impl<'a> Checker<'a> {
             .as_deref()
             .and_then(|class| self.syms.classes.get(class))
             .map(ClassSig::internal_name);
-        let roots = companion.into_iter().chain(
-            self.this_labels
-                .iter()
-                .rev()
-                .filter(|(_, _, is_class)| *is_class)
-                .filter_map(|(_, receiver, _)| receiver.obj_internal()),
-        );
+        let roots = companion
+            .into_iter()
+            .chain(
+                self.this_labels
+                    .iter()
+                    .rev()
+                    .filter(|(_, _, is_class)| *is_class)
+                    .filter_map(|(_, receiver, _)| receiver.obj_internal()),
+            )
+            .chain(self.lexical_class_context.iter().copied());
         let mut classes = Vec::new();
         for owner in roots {
+            if self.exact_anonymous_class_roots.contains(&owner) {
+                if !classes.contains(&owner) {
+                    classes.push(owner);
+                }
+                continue;
+            }
             for internal in
                 crate::symbol_resolver::lexical_enclosing_classifier_names(owner, |candidate| {
                     self.syms.class_by_type_name(candidate).is_some()
@@ -18032,6 +18166,51 @@ impl<'a> Checker<'a> {
             }
         }
         classes
+    }
+
+    /// Install the source-class ownership chain for a hoisted anonymous-object declaration. The AST
+    /// relation is acyclic, but retain explicit cycle detection so malformed/recovered trees cannot
+    /// spin forever without imposing an arbitrary nesting limit on valid generated Kotlin.
+    fn set_anonymous_lexical_class_context(
+        &mut self,
+        declaration: DeclId,
+        scope: &AnonymousLexicalClassScope,
+    ) {
+        self.lexical_class_context.clear();
+        self.exact_anonymous_class_roots.clear();
+        if scope.declarations.contains(&declaration) {
+            if let Decl::Class(class) = self.file.decl(declaration) {
+                if let Some(internal) = self
+                    .syms
+                    .classes
+                    .get(&class.name)
+                    .map(ClassSig::internal_name)
+                {
+                    self.exact_anonymous_class_roots.insert(internal);
+                }
+            }
+        }
+        let mut lexical_owner = scope.owners.get(&declaration).copied();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(owner) = lexical_owner {
+            if !visited.insert(owner) {
+                break;
+            }
+            if let Decl::Class(class) = self.file.decl(owner) {
+                if let Some(internal) = self
+                    .syms
+                    .classes
+                    .get(&class.name)
+                    .map(ClassSig::internal_name)
+                {
+                    self.lexical_class_context.push(internal);
+                    if scope.declarations.contains(&owner) {
+                        self.exact_anonymous_class_roots.insert(internal);
+                    }
+                }
+            }
+            lexical_owner = scope.owners.get(&owner).copied();
+        }
     }
 
     fn source_package_name(&self) -> TypeName {
@@ -34876,6 +35055,25 @@ val result = object { fun value(): String = captured }
             errors.is_empty(),
             "nested class self-label should resolve: {errors:?}"
         );
+    }
+
+    #[test]
+    fn anonymous_object_records_its_lexical_source_class_owner() {
+        let source = "open class Base(value: Any)\n\
+                      class Outer {\n\
+                      \u{20} fun build() = object : Base(Inner()) {}\n\
+                      \u{20} private inner class Inner\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let scope = anonymous_lexical_class_scope(&file);
+        let (&anonymous, &owner) = scope.owners.iter().next().expect("anonymous owner");
+        assert!(file
+            .anonymous_object_classes
+            .values()
+            .any(|id| *id == anonymous));
+        assert!(matches!(file.decl(owner), Decl::Class(class) if class.name == "Outer"));
     }
 
     #[test]
