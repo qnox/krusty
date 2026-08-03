@@ -256,6 +256,24 @@ fun box(): String {\n\
     run_ok(src, "CompanionIface");
 }
 
+/// A companion's members are in scope throughout the class body, so an INSTANCE member calls a
+/// companion function unqualified; and a companion `var` is a static backing field that reads back.
+#[test]
+fn companion_member_unqualified_from_instance() {
+    let src = "class Widget(val id: Int) {\n\
+    companion object {\n\
+        val seed: Int = 5\n\
+        fun tag(): String = \"w\"\n\
+    }\n\
+    fun describe(): String = tag() + id + seed\n\
+}\n\
+fun box(): String {\n\
+    if (Widget(7).describe() != \"w75\") return \"f1: \" + Widget(7).describe()\n\
+    return \"OK\"\n\
+}\n";
+    run_ok(src, "CompanionUnqualified");
+}
+
 #[test]
 fn companion_jvmstatic() {
     let src = "class Registry {\n\

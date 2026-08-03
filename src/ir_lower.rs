@@ -4718,15 +4718,12 @@ fn reordered_base_args(file: &ast::File, c: &ast::ClassDecl) -> Option<Vec<AstEx
 }
 
 fn companion_props_lowerable(c: &ast::ClassDecl) -> bool {
-    // A plain companion `val` with an initializer and no custom accessor/delegate — emitted as a static
-    // field on the OUTER class (a `const val` as a `ConstantValue`, a non-const `val` initialized in the
-    // outer class's `<clinit>`), read as `getstatic C.X`.
+    // A plain companion property with an initializer and no custom accessor/delegate — emitted as a
+    // static field on the OUTER class (a `const val` as a `ConstantValue`, a non-const one initialized
+    // in the outer class's `<clinit>`), read as `getstatic C.X`. A `var` is the same backing field,
+    // written with `putstatic`.
     c.companion_props.iter().all(|p| {
-        !p.is_var
-            && p.init.is_some()
-            && p.getter.is_none()
-            && p.setter.is_none()
-            && p.delegate.is_none()
+        p.init.is_some() && p.getter.is_none() && p.setter.is_none() && p.delegate.is_none()
     })
 }
 
@@ -23014,6 +23011,35 @@ impl<'a> Lower<'a> {
                 } else {
                     None
                 }
+            } {
+                r
+            } else if let Some(r) = {
+                // An unqualified call to a COMPANION method from an instance member of its own class
+                // (`class C { companion object { fun tag() = … }; fun describe() = tag() }`). A
+                // companion's members are in scope throughout the class body, and the emitted shape is
+                // the one a qualified `C.tag()` already produces: `getstatic C.Companion; invokevirtual
+                // C$Companion.tag()`. Reached only after the instance-member attempt above declines,
+                // so a same-named member of the class still wins.
+                self.cur_class
+                    .filter(|_| self.lookup(&fname).is_none() && !self.module_declares(&fname))
+                    .and_then(|cur| {
+                        let outer = cur.render();
+                        let companion = format!("{outer}$Companion");
+                        let companion_name = type_name(&companion);
+                        let (class, index, _, _) =
+                            self.resolve_method_name(companion_name, &fname)?;
+                        let field = self.runtime.companion_instance_field(
+                            &outer,
+                            &companion,
+                            "Companion",
+                        )?;
+                        let receiver = self.platform_static_field(field);
+                        let mut lowered = Vec::with_capacity(args.len());
+                        for &arg in &args {
+                            lowered.push(Some(self.expr(arg)?));
+                        }
+                        Some(self.emit_method_call(class, index, receiver, lowered))
+                    })
             } {
                 r
             } else if let Some(r) = {

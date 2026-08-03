@@ -2295,6 +2295,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the bare-name form, only a companion that DECLARES a supertype gets a registered `C$Companion`
   ClassSig — a plain companion is not a first-class value. Test:
   `tests/feature_coverage_r_e2e.rs::companion_implementing_interface`.
+- **A companion's members in scope through the class body.** `class C { companion object { fun tag()
+  … }; fun describe() = tag() }` — an INSTANCE member calls a companion function unqualified. Kotlin
+  puts a companion's members in scope throughout the class body, so this binds the same static a
+  qualified `C.tag()` does, and emits the same shape: `getstatic C.Companion; invokevirtual
+  C$Companion.tag()`. The instance-member lookup is attempted first, so a same-named member of the
+  class still wins. A companion `var` is admitted too — the same static backing field on the outer
+  class a companion `val` already uses. Test:
+  `tests/feature_coverage_r_e2e.rs::companion_member_unqualified_from_instance`.
+
+  Still open: WRITING a companion `var` through the class name (`C.created = 3`). The read is a
+  `getstatic`; the write needs a static-field-write lowering hook that does not exist yet.
 
 ## 8. Success criteria for the PoC
 

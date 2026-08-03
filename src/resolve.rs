@@ -31939,8 +31939,18 @@ impl<'a> Checker<'a> {
                             return t;
                         }
                     }
-                    // Unqualified companion (static) method call inside a companion member.
-                    if let Some(cls) = self.companion_of.clone() {
+                    // Unqualified companion (static) method call — from inside a companion member,
+                    // and from an INSTANCE member of the companion's own class. A companion's members
+                    // are in scope throughout the class body in Kotlin, so `fun describe() = tag()`
+                    // binds the companion's `tag` exactly as a call from a companion member does; both
+                    // spellings reach the same static.
+                    let companion_owner = self.companion_of.clone().or_else(|| {
+                        self.this_ty
+                            .and_then(|receiver| receiver.obj_internal())
+                            .and_then(|internal| self.syms.class_simple_name(internal))
+                            .map(str::to_string)
+                    });
+                    if let Some(cls) = companion_owner {
                         if let Some(sig) = self
                             .syms
                             .classes
