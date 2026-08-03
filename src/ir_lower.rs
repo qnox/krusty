@@ -12858,6 +12858,10 @@ impl<'a> Lower<'a> {
                 vararg,
                 requires_splice,
             } => {
+                // The checker forwards the resolved callable's generic `MustInline` capability.
+                // Do not infer call legality here from whether a facade happens to be emitted: a
+                // reified method can exist to publish inline code while its erased body remains an
+                // illegal direct target. After the splicer has had its opportunity, this path bails.
                 if requires_splice {
                     return None;
                 }

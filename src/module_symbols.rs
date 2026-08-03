@@ -493,7 +493,7 @@ fn lib_member(name: &str, sig: &Signature, owner: TypeName, is_interface: bool) 
     m.set_is_interface(is_interface);
     m.set_suspend(sig.is_suspend());
     m.visibility = sig.visibility;
-    m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), false);
+    m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), sig.requires_splice());
     m.call_sig = sig.call_sig();
     m
 }
@@ -523,7 +523,7 @@ fn fn_info(
         ret: sig.ret,
         physical_ret: sig.ret,
         suspend: sig.is_suspend(),
-        inline: InlineKind::from_flags(sig.is_inline(), false),
+        inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
         default_call: false,
         vararg_elem: None,
         vararg_index: None,
@@ -547,7 +547,7 @@ fn fn_info(
             .zip(sig.source_decl)
             .map(|(file, decl)| (file, decl.0)),
         flags: FnFlags {
-            inline: InlineKind::from_flags(sig.is_inline(), false),
+            inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
             // Same-file `suspend fun` — flows from the AST via `Signature.is_suspend` so the resolver
             // reports suspend-ness uniformly with classpath callees (whose flag comes from @Metadata).
             suspend: sig.is_suspend(),
@@ -1166,6 +1166,34 @@ mod tests {
         assert_eq!(overloads.overloads.len(), 1);
         assert!(overloads.overloads[0].flags.inline.can_inline());
         assert!(overloads.overloads[0].callable.inline.can_inline());
+    }
+
+    #[test]
+    fn required_splice_flows_as_the_generic_inline_capability() {
+        let mut symbols = FrontendSymbols::default();
+        let receiver = Ty::obj("demo/Receiver");
+        let mut signature = sig(vec![Ty::Int], Ty::Boolean);
+        // An emitted method and a legal direct fallback are independent capabilities. Reified
+        // source declarations use this signature bit even when their facade exists, and all module
+        // callable projections must preserve it as the shared `MustInline` semantic state.
+        signature.flags = signature
+            .flags
+            .with_is_inline(true)
+            .with_requires_splice(true);
+        symbols
+            .ext_funs
+            .entry("check".into())
+            .or_default()
+            .insert(receiver.extension_recv_key(), vec![signature]);
+        let module = ModuleSymbols::new(&symbols);
+
+        let functions = match module.resolve_symbols("check").callables {
+            crate::libraries::Callables::Functions(functions) => functions.overloads,
+            _ => Vec::new(),
+        };
+        assert_eq!(functions.len(), 1);
+        assert!(functions[0].flags.inline.must_inline());
+        assert!(functions[0].callable.inline.must_inline());
     }
 
     #[test]

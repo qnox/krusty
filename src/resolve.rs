@@ -147,9 +147,9 @@ pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
 pub(crate) use crate::symbol_resolver::FunctionImportScope;
 
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
-/// `is_override`/`is_final`/`is_suspend` into one byte. Read through the `Signature` accessors of the
-/// same names; `vararg` is also mutated through `set_vararg`; built with the `with_*` chain. Headroom
-/// for two more flags.
+/// `is_override`/`is_final`/`is_suspend`/`requires_splice` into one byte. Read through the
+/// `Signature` accessors of the same names; `vararg` is also mutated through `set_vararg`; built with
+/// the `with_*` chain. Headroom for one more flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SigFlags(u8);
 
@@ -160,6 +160,7 @@ impl SigFlags {
     const IS_OVERRIDE: u8 = 1 << 3;
     const IS_FINAL: u8 = 1 << 4;
     const IS_SUSPEND: u8 = 1 << 5;
+    const REQUIRES_SPLICE: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -199,6 +200,10 @@ impl SigFlags {
     pub const fn with_is_suspend(self, on: bool) -> Self {
         self.with(Self::IS_SUSPEND, on)
     }
+    #[inline]
+    pub const fn with_requires_splice(self, on: bool) -> Self {
+        self.with(Self::REQUIRES_SPLICE, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -208,9 +213,11 @@ pub struct Signature {
     /// Declared generic callable shape retained for call-site inference.
     pub generic_sig: Option<GenericSig>,
     pub projected_return_hazard: bool,
-    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend` (read via the
-    /// accessors below; `vararg` set via `set_vararg`). `vararg` marks a variadic signature.
-    /// `is_final` — a `final` member a subclass cannot override. `is_suspend` — a `suspend fun`.
+    /// Bit-packed `vararg`/`is_inline`/`is_operator`/`is_override`/`is_final`/`is_suspend`/
+    /// `requires_splice` (read via the accessors below; `vararg` set via `set_vararg`). `vararg` marks
+    /// a variadic signature. `is_final` — a `final` member a subclass cannot override. `is_suspend`
+    /// — a `suspend fun`. `requires_splice` — no direct-call fallback is semantically legal even when
+    /// the backend emits a method so another compilation can obtain and inline its body.
     pub flags: SigFlags,
     pub vararg_index: Option<usize>,
     /// Minimum number of arguments a caller must supply — params beyond this have default values
@@ -302,6 +309,10 @@ impl Signature {
     #[inline]
     pub fn is_suspend(&self) -> bool {
         self.flags.has(SigFlags::IS_SUSPEND)
+    }
+    #[inline]
+    pub fn requires_splice(&self) -> bool {
+        self.flags.has(SigFlags::REQUIRES_SPLICE)
     }
     #[inline]
     pub fn set_vararg(&mut self, on: bool) {
@@ -1640,8 +1651,6 @@ pub struct SymbolTable {
     unemitted_fn_facades_by_decl: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands keyed by source declaration.
     pub source_generic_value_operand_slots: HashMap<(u32, u32), Vec<u32>>,
-    /// Source functions whose reified parameters require call-site splicing.
-    source_reified_functions: std::collections::HashSet<(u32, u32)>,
     /// Bare generic value operands for source members.
     pub(crate) source_generic_member_value_operand_slots: GenericMemberValueOperandSlots,
     pub source_projected_return_hazards: std::collections::HashSet<(u32, u32)>,
@@ -1680,7 +1689,6 @@ impl Default for SymbolTable {
             fn_facades_by_decl: HashMap::new(),
             unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
             source_generic_value_operand_slots: HashMap::new(),
-            source_reified_functions: std::collections::HashSet::new(),
             source_generic_member_value_operand_slots: HashMap::new(),
             source_projected_return_hazards: std::collections::HashSet::new(),
             ext_prop_facades_by_decl: HashMap::new(),
@@ -1782,10 +1790,6 @@ impl SymbolTable {
                 .into_iter()
                 .map(|((file, declaration), slots)| ((file + offset, declaration), slots))
                 .collect();
-        self.source_reified_functions = std::mem::take(&mut self.source_reified_functions)
-            .into_iter()
-            .map(|(file, declaration)| (file + offset, declaration))
-            .collect();
         self.source_projected_return_hazards =
             std::mem::take(&mut self.source_projected_return_hazards)
                 .into_iter()
@@ -4465,9 +4469,6 @@ fn collect_signatures_with_cp_impl(
             match file.decl(d) {
                 Decl::Fun(f) => {
                     let source_key = (i as u32, d.0);
-                    if !f.reified_type_params.is_empty() {
-                        table.source_reified_functions.insert(source_key);
-                    }
                     let value_operand_slots = generic_value_operand_slots(f, &[]);
                     if !value_operand_slots.is_empty() {
                         table
@@ -4614,7 +4615,14 @@ fn collect_signatures_with_cp_impl(
                             .with_is_operator(f.is_operator())
                             .with_is_override(f.is_override())
                             .with_is_final(f.is_final())
-                            .with_is_suspend(f.is_suspend()),
+                            .with_is_suspend(f.is_suspend())
+                            // Reified source bodies may be emitted to make their inline body
+                            // available across a compilation boundary, but their erased JVM method
+                            // is not a legal direct-call fallback. Encode that semantic capability on
+                            // the signature itself so every source callable origin maps it to the
+                            // shared `InlineKind::MustInline` state instead of consulting a parallel
+                            // declaration set or rediscovering `reified` in individual call paths.
+                            .with_requires_splice(!f.reified_type_params.is_empty()),
                         vararg_index,
                         required,
                         param_defaults: f.params.iter().map(|p| p.default.is_some()).collect(),
@@ -9369,8 +9377,11 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
-        /// The selected declaration has reified type parameters, so a direct facade call is unsound.
-        /// Same-file lowering may splice it first; every remaining path must bail.
+        /// JVM module registration determined that the selected declaration has no callable
+        /// facade. Same-file lowering may still splice an inline body first; every remaining path
+        /// must bail instead of inventing an `invokestatic` target. This semantic flag deliberately
+        /// carries the registrar's complete decision rather than one source-language reason (for
+        /// example `reified`), so new splice-only or ABI-restricted shapes cannot bypass it.
         requires_splice: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
@@ -13447,7 +13458,8 @@ impl<'a> Checker<'a> {
             flags: SigFlags::default()
                 .with_vararg(selected.call_sig.vararg_index.is_some())
                 .with_is_inline(selected.flags.inline.can_inline())
-                .with_is_suspend(selected.flags.suspend),
+                .with_is_suspend(selected.flags.suspend)
+                .with_requires_splice(selected.flags.inline.must_inline()),
             vararg_index: selected.call_sig.vararg_index,
             required: selected.call_sig.required,
             param_defaults: selected.call_sig.param_defaults.clone(),
@@ -13467,9 +13479,12 @@ impl<'a> Checker<'a> {
     }
 
     fn source_extension_requires_splice(&self, selected: &crate::libraries::FunctionInfo) -> bool {
-        selected
-            .source_key
-            .is_some_and(|source| self.syms.source_reified_functions.contains(&source))
+        // Inline fallback legality is part of the resolved callable's semantic state. In
+        // particular, a reified source extension may have a physically emitted facade so another
+        // compilation can read and splice its body, while calling that erased method directly is
+        // still illegal. Reading `InlineKind::MustInline` keeps that distinction independent of
+        // source-file keys and avoids a reified-only side index or per-origin lowering branches.
+        selected.flags.inline.must_inline()
     }
 
     fn check_source_extension_call_args(
@@ -15272,7 +15287,10 @@ impl<'a> Checker<'a> {
                                 params: sig.params.clone(),
                                 physical_ret: sig.ret,
                                 ret: sig.ret,
-                                inline: InlineKind::from_flags(sig.is_inline(), false),
+                                inline: InlineKind::from_flags(
+                                    sig.is_inline(),
+                                    sig.requires_splice(),
+                                ),
                                 interface: self
                                     .syms
                                     .class_by_type_name(owner)
@@ -15297,7 +15315,7 @@ impl<'a> Checker<'a> {
                             params: sig.params.clone(),
                             physical_ret: sig.ret,
                             ret: sig.ret,
-                            inline: InlineKind::from_flags(sig.is_inline(), false),
+                            inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
                             interface,
                             vararg_index: sig.vararg_index,
                             suspend: sig.is_suspend(),
@@ -21665,7 +21683,10 @@ impl<'a> Checker<'a> {
                                 params: sig.params.clone(),
                                 physical_ret: sig.ret,
                                 ret: sig.ret,
-                                inline: InlineKind::from_flags(sig.is_inline(), false),
+                                inline: InlineKind::from_flags(
+                                    sig.is_inline(),
+                                    sig.requires_splice(),
+                                ),
                                 interface,
                                 vararg_index: sig.vararg_index,
                                 suspend: sig.is_suspend(),
