@@ -2478,6 +2478,62 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   loop recursion) and `tests/deep_expression_nesting_check_e2e.rs`
   (450-level `0+(…)` right-nesting through the checker and lowering, end-to-end).
 
+- **A member called on an OBJECT or COMPANION receiver types its lambda arguments from the selected
+  candidate, exactly as an instance receiver does.** `Wrap.apply2 { it * 2 }` on
+  `object Wrap { fun apply2(f: (Int) -> Int): Int }` must bind `it` to `Int`. The instance-receiver
+  arm of `check_call` postpones lambda arguments (`None` in the partial argument types), selects the
+  member against the non-lambda arguments, and only then checks each lambda against that member's
+  function-type parameter (`best_module_member_candidate` → `plan_generic_member` →
+  `module_member_lambda_shape` → `check_lambda_with_types`). The classifier-receiver arms reached
+  `check_module_member_call` with argument types computed up front by `arg_tys`, so a lambda was
+  checked with no expectation, `it` bound as `Any`, and the body was rejected
+  (`operator cannot be applied to 'Any' and 'Int'`) — a lambda argument to an object member was
+  effectively unusable. Those arms now share one seam, `classifier_member_arg_tys`, which runs the
+  instance path's postpone-select-check sequence against the classifier's own type: the object's
+  internal name for `object` members, and `C$Companion` for companion members (the receiver type
+  `check_source_companion_call` already dispatches on, so selection and checking agree). It applies
+  to the receiverless, receiver-lambda (`Int.() -> Int`), and defaulted/named/trailing call shapes,
+  because the shape comes from the same `CallSig` slot mapping; with no lambda argument it is
+  `arg_tys` unchanged. A companion is not a `this` receiver unless it declares a supertype, so an
+  unqualified call to a sibling companion function from inside the companion had no implicit
+  receiver carrying the member either; `implicit_member_receiver_types` adds the `C$Companion` type
+  to the implicit-receiver list the member-shape lookup walks. An unqualified companion call from an
+  ordinary INSTANCE member of the class stays unresolved — that is a separate scope gap (it fails
+  with no lambda involved), not a lambda-typing one. Type-parameter inference for a lambda
+  parameter bound by a FUNCTION-level type parameter (`fun <T> pick(v: T, f: (T) -> String)`) is
+  equally absent on instance receivers and is likewise out of scope here.
+  Test: `tests/object_receiver_lambda_e2e.rs`.
+
+- **`Type { … }` selects a SOURCE companion's `operator fun invoke` when no constructor is
+  applicable.** For `class Wrap(val v: Int) { companion object { operator fun invoke(f: (Int) -> Int): Int } }`,
+  kotlinc resolves `Wrap { it * 2 }` to the companion operator — a lambda is not applicable to the
+  constructor's `Int` parameter — while `Wrap(7)` stays a construction. krusty had this for CLASSPATH
+  types (`classpath_companion_ty` + `record_invoke`) and for source INTERFACES (which have no
+  constructor), but a source CLASS went to the constructor unconditionally and reported
+  `return type mismatch: expected 'Int', actual 'Wrap'`. The source class path now falls back to
+  `check_source_companion_call(CALLABLE_INVOKE_OPERATOR, require_operator = true)` when
+  `select_source_constructor` finds no applicable candidate, lowering as
+  `getstatic Wrap.Companion; invokevirtual Wrap$Companion.invoke` — kotlinc's
+  `Wrap.Companion.invoke(…)`. Constructor selection still wins whenever a constructor is applicable,
+  so the operator never shadows a construction. The arguments are re-typed against the operator's
+  parameters and the constructor pass's diagnostics for them are dropped: that pass had no
+  expectation for a lambda argument, and its complaints never applied to the call kotlinc selects.
+  Selection does NOT depend on whether the argument bodies type-check — backing out of the operator
+  because a lambda body has an unrelated error reported the construction's own failure
+  (`cannot create an instance of an interface`) on top of that error, so the operator is taken
+  whenever the call resolves to it and its own diagnostics are kept. `Ty::Error` with nothing
+  reported is not a resolution: `check_module_member_call` suppresses its inapplicable-overload
+  diagnostic when the call already carries an argument diagnostic, and that is precisely the
+  provisional pass this would then erase, which would leave the call silent.
+  Two gaps are shared with the pre-existing member-call paths and are NOT introduced here, but this
+  fallback makes the first reachable from `Type { … }`: a lambda's inferred RETURN type is not
+  checked against the expected function type (`O.apply2 { it + 1; "s" }` on an object receiver and
+  `P().apply2 { … }` on an instance receiver are accepted identically, and fail at runtime with a
+  `ClassCastException`), and an overload set whose members differ only in a POSTPONED lambda slot
+  scores every candidate equally, so declaration order decides
+  (`fun ap(f: (Int) -> Int)` + `fun ap(s: String)` fails on object and instance receivers alike).
+  Test: `tests/object_receiver_lambda_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
