@@ -148,6 +148,8 @@ mod classpath_default_args_e2e;
 mod classpath_default_vararg_call_e2e;
 #[path = "classpath_enum_regex_vc_e2e.rs"]
 mod classpath_enum_regex_vc_e2e;
+#[path = "classpath_extension_default_implicit_receiver_e2e.rs"]
+mod classpath_extension_default_implicit_receiver_e2e;
 #[path = "classpath_function_reference_e2e.rs"]
 mod classpath_function_reference_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]

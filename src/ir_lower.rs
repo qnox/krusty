@@ -15138,7 +15138,46 @@ impl<'a> Lower<'a> {
         let mut a = vec![recv];
         let explicit_params = c.params.get(1..)?;
         let mut arg_prelude = Vec::new();
-        if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
+        // An UNLABELLED call has no recorded slot mapping — the record exists to carry a mapping the
+        // call's own shape does not already give (labels, reordering). Unlabelled, the shape gives it:
+        // positional arguments fill parameters left to right and a TRAILING LAMBDA binds the LAST
+        // parameter, so an omitted default can sit BETWEEN them (`configure("x") { … }` omitting a middle
+        // default) — filling left to right there would pass the lambda in the omitted parameter's slot.
+        // Deriving the mapping keeps both spellings of one call on one path instead of skipping the file
+        // for the unlabelled one. A vararg call is excluded: its trailing slot is an array the emit
+        // builds, not an omitted parameter.
+        let slots = self
+            .info
+            .resolved_call_arg_slots
+            .get(&e)
+            .cloned()
+            .or_else(|| {
+                // Past 32 parameters the `$default` ABI takes SEVERAL mask ints, which the mask built
+                // below does not yet emit; keep the loud skip rather than route a call into an emit that
+                // cannot express it.
+                (c.default_call
+                    && c.vararg_elem.is_none()
+                    && explicit_params.len() <= 32
+                    && args.len() < explicit_params.len())
+                .then(|| {
+                    let trailing_lambda =
+                        self.afile.call_has_trailing_lambda.contains(&e.0) && !args.is_empty();
+                    let positional = args.len() - usize::from(trailing_lambda);
+                    let last = explicit_params.len() - 1;
+                    (0..explicit_params.len())
+                        .map(|parameter| {
+                            if trailing_lambda && parameter == last {
+                                args.last().copied()
+                            } else if parameter < positional {
+                                Some(args[parameter])
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+            });
+        if let Some(slots) = slots {
             let (slot_args, prelude) =
                 self.lower_call_slot_args_source_order(args, &slots, explicit_params, true)?;
             arg_prelude = prelude;

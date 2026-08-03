@@ -1489,6 +1489,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   both `pick(b: Base, n: Int = 3)` and `pick(s: Sub, n: Int = 4)` for `pick(Sub())`, so the most specific
   parameter shape is tried first (declaration order breaks ties). Test:
   `tests/classpath_default_arg_subtype_e2e.rs`.
+- **An omitted default is recorded the same way however the receiver is spelled.** A classpath EXTENSION
+  call omitting a defaulted argument resolves to the `$default` synthetic, whose emit needs the call's
+  argument→parameter mapping. Only the explicit-receiver spelling recorded one, so the same call on an
+  IMPLICIT receiver (`build { tag("a") }`) skipped the whole file with "not yet supported by the IR
+  backend". The record exists to carry a mapping the call's own shape does not give (labels, reordering);
+  unlabelled, the shape gives it — positional arguments fill parameters left to right and a TRAILING
+  LAMBDA binds the LAST parameter, so an omitted default may sit BETWEEN them — and the emit derives it
+  instead of treating its absence as "unknown". Derived at the emit rather than recorded by the checker so the
+  paths that never reach it — an `inline` extension is SPLICED, never emitted as a `$default` call — keep
+  behaving as they did. A vararg call is excluded: its trailing slot is an array the emit builds, not an
+  omitted parameter, and so is a callable past 32 parameters, whose `$default` ABI takes several mask
+  ints the emit does not yet build. Test: `tests/classpath_extension_default_implicit_receiver_e2e.rs`.
 - **A failed constructor probe leaves the call's arguments as it found them.** For `Name(args)` where
   `Name` is both a classpath class and a top-level function, the constructor is probed first; it re-checked
   every argument with no expected type, overwriting a trailing lambda already shaped against the function's
