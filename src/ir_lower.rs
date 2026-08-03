@@ -1386,48 +1386,37 @@ fn lower_file_at_reporting_impl(
                 .enumerate()
                 .filter(|(_, p)| is_member_ext_prop(p))
             {
-                let class_sig = syms.classes.get(&c.name)?;
-                // Extension overloads (same name, different receivers) occupy one signature table in
-                // declaration order — select by overload index, exactly like member extension funs.
-                let overload_idx = c.body_props[..pi]
-                    .iter()
-                    .filter(|q| q.name == p.name && q.receiver.is_some())
-                    .count();
-                let sig = class_sig
-                    .member_ext_props(&p.name)
-                    .get(overload_idx)?
-                    .clone();
+                let sig = member_extension_property_plan(syms, c, pi)?;
                 // Only the concrete shape: a receiver/return mentioning a class type parameter's own
                 // type erases through bounds the read/write handoff doesn't carry, and a value-class
                 // receiver/return needs the boxed/mangled form — both stay gated (skip, never
                 // miscompile).
-                if !sig.type_params().is_empty()
-                    || ty_mentions_param(sig.receiver_ty(), &c.type_params)
-                    || ty_mentions_param(sig.ret(), &c.type_params)
-                    || lo
-                        .value_class_underlying(sig.receiver_ty().non_null())
-                        .is_some()
-                    || lo.value_class_underlying(sig.ret().non_null()).is_some()
+                if sig.has_type_params
+                    || ty_mentions_param(sig.receiver, &c.type_params)
+                    || ty_mentions_param(sig.ret, &c.type_params)
+                    || lo.value_class_underlying(sig.receiver.non_null()).is_some()
+                    || lo.value_class_underlying(sig.ret.non_null()).is_some()
                 {
                     lo.set_bail("gate:member-ext-prop-generic");
                     return None;
                 }
-                let receiver_ir = if p.receiver.as_ref().is_some_and(|r| r.nullable()) {
-                    mark_nullable(ty_to_ir(sig.receiver_ty()))
-                } else {
-                    ty_to_ir(sig.receiver_ty())
-                };
-                let ret = sig.ret();
-                let ret_ir = if p.ty.as_ref().is_some_and(|r| r.nullable()) {
-                    mark_nullable(ty_to_ir(ret))
-                } else {
-                    ty_to_ir(ret)
-                };
+                let (receiver_ir, ret_ir) = sig.ir_types(p);
+                let ret = sig.ret;
                 let gname = property_getter_name(&p.name);
+                let getter_params = [receiver_ir];
+                if registered_method_signature(&methods, &lo.ir, lo.runtime, &gname, &getter_params)
+                {
+                    // The physical accessor parameter signature is what Kotlin/JVM overload
+                    // resolution owns. A source function or previously synthesized accessor with
+                    // the same name and parameters cannot coexist, regardless of which Kotlin
+                    // declaration shape produced it.
+                    lo.set_bail("gate:member-ext-prop-signature-clash");
+                    return None;
+                }
                 let mi = method_fids.len() as u32;
                 let gfid = lo.ir.add_fun(IrFunction {
                     name: gname.clone(),
-                    params: vec![receiver_ir],
+                    params: getter_params.to_vec(),
                     ret: ret_ir,
                     body: None,
                     is_static: false,
@@ -1445,10 +1434,21 @@ fn lower_file_at_reporting_impl(
                 if p.is_var {
                     let setter = p.setter.as_ref()?;
                     let sname = property_setter_name(&p.name);
+                    let setter_params = [receiver_ir, ret_ir];
+                    if registered_method_signature(
+                        &methods,
+                        &lo.ir,
+                        lo.runtime,
+                        &sname,
+                        &setter_params,
+                    ) {
+                        lo.set_bail("gate:member-ext-prop-signature-clash");
+                        return None;
+                    }
                     let mi = method_fids.len() as u32;
                     let sfid = lo.ir.add_fun(IrFunction {
                         name: sname.clone(),
-                        params: vec![receiver_ir, ret_ir],
+                        params: setter_params.to_vec(),
                         ret: ty_to_ir(Ty::Unit),
                         body: None,
                         is_static: false,
@@ -2918,25 +2918,8 @@ fn lower_file_at_reporting_impl(
                     .enumerate()
                     .filter(|(_, p)| is_member_ext_prop(p))
                 {
-                    let class_sig = syms.classes.get(&c.name)?;
-                    let overload_idx = c.body_props[..pi]
-                        .iter()
-                        .filter(|q| q.name == p.name && q.receiver.is_some())
-                        .count();
-                    let sig = class_sig
-                        .member_ext_props(&p.name)
-                        .get(overload_idx)?
-                        .clone();
-                    let receiver_ir = if p.receiver.as_ref().is_some_and(|r| r.nullable()) {
-                        mark_nullable(ty_to_ir(sig.receiver_ty()))
-                    } else {
-                        ty_to_ir(sig.receiver_ty())
-                    };
-                    let ret_ir = if p.ty.as_ref().is_some_and(|r| r.nullable()) {
-                        mark_nullable(ty_to_ir(sig.ret()))
-                    } else {
-                        ty_to_ir(sig.ret())
-                    };
+                    let sig = member_extension_property_plan(syms, c, pi)?;
+                    let (receiver_ir, ret_ir) = sig.ir_types(p);
                     // Link the accessor by name AND parameter list: a plain computed property of the
                     // same name registers `getX()` first, and receiver overloads share `getX` —
                     // first-by-name would write this body into the wrong fid.
@@ -2957,8 +2940,7 @@ fn lower_file_at_reporting_impl(
                     lo.scope
                         .push(("$dispatch".to_string(), dispatch_v, Ty::obj(&internal)));
                     let this_v = lo.fresh_value();
-                    lo.scope
-                        .push(("this".to_string(), this_v, sig.receiver_ty()));
+                    lo.scope.push(("this".to_string(), this_v, sig.receiver));
                     let ret_ty = lo.ir.functions[gfid as usize].ret;
                     lo.lower_body(&p.getter.clone().unwrap(), &ret_ty, gfid)?;
                     if let Some(setter) = p.setter.as_ref().filter(|s| s.body.is_some()).cloned() {
@@ -2979,10 +2961,9 @@ fn lower_file_at_reporting_impl(
                         lo.scope
                             .push(("$dispatch".to_string(), dispatch_v, Ty::obj(&internal)));
                         let this_v = lo.fresh_value();
-                        lo.scope
-                            .push(("this".to_string(), this_v, sig.receiver_ty()));
+                        lo.scope.push(("this".to_string(), this_v, sig.receiver));
                         let v_v = lo.fresh_value();
-                        lo.scope.push((setter_param, v_v, sig.ret()));
+                        lo.scope.push((setter_param, v_v, sig.ret));
                         lo.lower_body(&setter.body.clone().unwrap(), &Ty::Unit, sfid)?;
                     }
                 }
@@ -5048,6 +5029,102 @@ fn is_member_ext_prop(p: &ast::PropDecl) -> bool {
         && p.context_params.is_empty()
         && p.type_params.is_empty()
         && (!p.is_var || p.setter.as_ref().is_some_and(|s| s.body.is_some()))
+}
+
+#[derive(Clone, Copy)]
+struct MemberExtensionPropertyPlan {
+    receiver: Ty,
+    ret: Ty,
+    has_type_params: bool,
+}
+
+impl MemberExtensionPropertyPlan {
+    /// Physical accessor types shared by both lowering passes. Declared `?` markers stay attached
+    /// for value-representation and metadata decisions without changing overload-slot selection.
+    fn ir_types(self, property: &ast::PropDecl) -> (Ty, Ty) {
+        let receiver = ty_to_ir(self.receiver);
+        let receiver = if property
+            .receiver
+            .as_ref()
+            .is_some_and(|reference| reference.nullable())
+        {
+            mark_nullable(receiver)
+        } else {
+            receiver
+        };
+        let ret = ty_to_ir(self.ret);
+        let ret = if property
+            .ty
+            .as_ref()
+            .is_some_and(|reference| reference.nullable())
+        {
+            mark_nullable(ret)
+        } else {
+            ret
+        };
+        (receiver, ret)
+    }
+}
+
+/// Resolve the declaration-time signature used by both accessor registration and body lowering.
+///
+/// The semantic table stores same-named extension properties in source order. Count every earlier
+/// receiver property—not only shapes the lowering gate currently accepts—because unsupported
+/// declarations still occupy their semantic slot. Keeping this calculation in one place prevents
+/// pass 1 from registering one overload while pass 2 links and overwrites another overload's body.
+fn member_extension_property_plan(
+    symbols: &FrontendSymbols,
+    class: &ast::ClassDecl,
+    property_index: usize,
+) -> Option<MemberExtensionPropertyPlan> {
+    let property = class.body_props.get(property_index)?;
+    let overload_index = class.body_props[..property_index]
+        .iter()
+        .filter(|candidate| candidate.name == property.name && candidate.receiver.is_some())
+        .count();
+    let signature = symbols
+        .classes
+        .get(&class.name)?
+        .member_ext_props(&property.name)
+        .get(overload_index)?;
+    Some(MemberExtensionPropertyPlan {
+        receiver: signature.receiver_ty(),
+        ret: signature.ret(),
+        has_type_params: !signature.type_params().is_empty(),
+    })
+}
+
+/// Whether a class method with this physical JVM signature is already registered.
+///
+/// The method table contains source methods and synthesized accessors together. Checking that one
+/// shared table prevents a new accessor from using a declaration-origin branch (method versus
+/// property, ordinary versus extension) to evade Kotlin/JVM's name-plus-physical-parameter rule.
+fn registered_method_signature(
+    methods: &HashMap<String, Vec<(u32, u32, Ty)>>,
+    ir: &IrFile,
+    runtime: &dyn TargetRuntime,
+    name: &str,
+    params: &[Ty],
+) -> bool {
+    // Ask the target runtime for the physical descriptor instead of approximating it from source
+    // types. Reference nullability and generic arguments are not descriptor components, and
+    // platform/value representations belong to the target rather than common lowering. A
+    // descriptor that cannot be formed is unsafe to register and is conservatively treated as
+    // occupied.
+    let Some(proposed) = runtime.method_descriptor(params, Ty::Unit) else {
+        return true;
+    };
+    methods.get(name).is_some_and(|overloads| {
+        overloads.iter().any(|(_, function, _)| {
+            ir.functions
+                .get(*function as usize)
+                .is_some_and(|function| {
+                    runtime
+                        .method_descriptor(&function.params, Ty::Unit)
+                        .is_none_or(|registered| registered == proposed)
+                })
+        })
+    })
 }
 
 /// A body property with a real backing field — neither a computed property (custom getter, no field)

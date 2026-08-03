@@ -151,6 +151,41 @@ fun box(): String {
     );
 }
 
+/// A `private set` remains private when the dispatch receiver is supplied implicitly outside the
+/// declaring class. The member-extension resolver must carry accessor visibility independently
+/// from the public property; otherwise the checker accepts the write and lowering attempts an
+/// illegal call to the private JVM method.
+#[test]
+fn member_ext_prop_private_setter_is_inaccessible_outside_the_owner() {
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    let source = r#"
+class SyntheticOwner {
+    var Int.token: String
+        get() = "readable"
+        private set(value) {}
+}
+
+fun box(): String = with(SyntheticOwner()) {
+    1.token = "not allowed"
+    1.token
+}
+"#;
+    let classpath = krusty::toolchain::classpath_jars_for(source);
+    let outcome = common::backend_outcome_in_process(
+        source,
+        "MemberExtPropPrivateSetterAccess",
+        &classpath,
+        Some(&jdk),
+    );
+    assert_ne!(
+        outcome,
+        Some(common::BackendOutcome::Emitted),
+        "a public member extension property must not expose its private setter"
+    );
+}
+
 /// Primitive receivers of different widths (`Double` vs `Long`): the receiver parameter keeps its
 /// own slot shape, and two same-named-on-different-receivers properties coexist on one class.
 #[test]
@@ -326,6 +361,7 @@ fn member_ext_prop_compound_assign() {
         r#"
 class Test {
     var storage = "Fail"
+    var receiverCalls = 0
 
     var Int.foo: String
         get() = storage
@@ -333,11 +369,15 @@ class Test {
             storage = value
         }
 
+    fun nextReceiver(): Int {
+        receiverCalls += 1
+        return 1
+    }
+
     fun test(): String {
-        val i = 1
-        i.foo = "O"
-        i.foo += "K"
-        return i.foo
+        storage = "O"
+        nextReceiver().foo += "K"
+        return if (receiverCalls == 1) 1.foo else "receiver evaluated twice"
     }
 }
 
@@ -460,6 +500,53 @@ class Derived : Base() {
 }
 
 fun box(): String = with(Derived()) { 1.foo }
+"#,
+        ),
+        // A source method can spell the exact accessor JVM signature. Registering both would emit
+        // duplicate `getToken(I)Ljava/lang/String;` methods; the class must be rejected instead of
+        // relying on the JVM to fail while loading it.
+        (
+            "MemberExtPropAccessorCollision",
+            r#"
+class SyntheticOwner {
+    val Int.token: String
+        get() = "property"
+
+    fun getToken(value: Int): String = "method"
+}
+
+fun box(): String = with(SyntheticOwner()) { 1.token }
+"#,
+        ),
+        // Nullability is metadata, not part of the JVM parameter descriptor. The collision guard
+        // must compare target-provided physical descriptors, so `String?` does not evade a
+        // `getToken(String)` declaration that owns the same bytecode signature.
+        (
+            "MemberExtPropNullableAccessorCollision",
+            r#"
+class SyntheticOwner {
+    val String?.token: String
+        get() = "property"
+
+    fun getToken(value: String): String = "method"
+}
+
+fun box(): String = with(SyntheticOwner()) { null.token }
+"#,
+        ),
+        // Setter accessors obey the same physical-signature rule as getters.
+        (
+            "MemberExtPropSetterCollision",
+            r#"
+class SyntheticOwner {
+    var Int.token: String
+        get() = "property"
+        set(value) {}
+
+    fun setToken(receiver: Int, value: String) {}
+}
+
+fun box(): String = with(SyntheticOwner()) { 1.token }
 "#,
         ),
     ];
