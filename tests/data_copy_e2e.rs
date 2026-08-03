@@ -19,7 +19,7 @@ if (s.x != 2 || s.y != \"c\") return \"f3\"\n\
 if (t.x != 1 || t.y != \"a\") return \"f4\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "D");
+    common::expect_box_ok_with_stdlib(src, "D");
 }
 
 #[test]
@@ -49,5 +49,5 @@ val c = b.retagged(\"z\")\n\
 if (c.version != 2 || c.tag != \"z\") return \"f3\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "D");
+    common::expect_box_ok_with_stdlib(src, "D");
 }

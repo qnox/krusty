@@ -136,9 +136,12 @@ fn extension_function_and_property_can_share_a_name() {
         }
     "#;
 
-    if let Some(output) = common::run_box_against("classpath_shared_callable_name", library, main) {
-        assert_eq!(output, "OK");
-    }
+    let Some(output) =
+        common::expect_box_run_against("classpath_shared_callable_name", library, main)
+    else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(output, "OK");
 }
 
 #[test]
@@ -176,11 +179,14 @@ fn classpath_callable_references_resolve_reflection_targets() {
         }
     "#;
 
-    if let Some(output) =
-        common::run_box_against_with_reflect("classpath_extension_reflection", library, main)
-    {
-        assert_eq!(output, "OK");
-    }
+    let Some(output) = common::expect_box_run_against_with_reflect(
+        "classpath_extension_reflection",
+        library,
+        main,
+    ) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(output, "OK");
 }
 
 #[test]

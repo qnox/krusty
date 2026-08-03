@@ -9,13 +9,21 @@ use krusty::jvm::classreader::parse_class;
 use std::path::PathBuf;
 
 /// krusty's emitted bytes for `class_internal`, compiled in-process with class metadata on.
-fn krusty_bytes(src: &str, class_internal: &str, cp: &[PathBuf]) -> Option<Vec<u8>> {
+///
+/// A `None` from `compile_in_process_metadata_cp` conflates "toolchain unavailable" with "krusty
+/// REJECTED the source", so it is not a skip signal: the caller gates on the toolchain first and this
+/// panics with the front-end diagnostics instead of reporting a declined source as a pass.
+fn krusty_bytes(src: &str, class_internal: &str, cp: &[PathBuf]) -> Vec<u8> {
     let stem = class_internal.rsplit('/').next().unwrap();
-    let classes = common::compile_in_process_metadata_cp(src, stem, cp)?;
+    let classes = common::compile_in_process_metadata_cp(src, stem, cp).unwrap_or_else(|| {
+        let diagnostics = common::front_end_diagnostics(src, cp, None);
+        panic!("{class_internal}: krusty declined the source; diagnostics: {diagnostics:?}")
+    });
     classes
         .into_iter()
         .find(|(n, _)| n == class_internal)
         .map(|(_, b)| b)
+        .unwrap_or_else(|| panic!("{class_internal} was not emitted"))
 }
 
 /// kotlinc's reference bytes for `class_internal` (server-backed). `None` ⇒ toolchain unavailable.
@@ -44,17 +52,14 @@ fn kotlinc_bytes(src: &str, stem: &str, class_internal: &str, cp: &[PathBuf]) ->
 }
 
 /// Assert krusty's in-process output for `class_internal` is byte-for-byte identical to kotlinc's.
-/// Skips (does not fail) when krusty declines the source or the kotlinc toolchain is unavailable.
+/// Skips only when the reference kotlinc toolchain is unavailable; a source krusty declines FAILS.
 fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
-    let Some(kr) = krusty_bytes(src, class_internal, cp) else {
-        eprintln!("skip ({class_internal}: krusty declined the source)");
-        return;
-    };
     let stem = class_internal.rsplit('/').next().unwrap();
     let Some(ko) = kotlinc_bytes(src, stem, class_internal, cp) else {
         eprintln!("skip ({class_internal}: provisioned kotlinc unavailable)");
         return;
     };
+    let kr = krusty_bytes(src, class_internal, cp);
     assert_eq!(
         kr,
         ko,
@@ -746,7 +751,7 @@ fn single_string_holder_shape_is_byte_identical() {
 #[test]
 fn data_class_emits_metadata_debug_tables_and_annotations() {
     let src = "package demo\ndata class Point(val x: Int, var y: String)\n";
-    let bytes = krusty_bytes(src, "demo/Point", &[]).expect("krusty compiles the data class");
+    let bytes = krusty_bytes(src, "demo/Point", &[]);
     let info = parse_class(&bytes).expect("parses back");
     let fns: Vec<&str> = info
         .meta
@@ -794,14 +799,11 @@ fn generic_list_property_with_default_metadata_byte_identical() {
     let cp = [stdlib];
     let src = "package demo\n\
         data class C(val a: String, val b: String, val items: List<String> = emptyList())\n";
-    let Some(kr) = krusty_bytes(src, "demo/C", &cp) else {
-        eprintln!("skip (krusty declined)");
-        return;
-    };
     let Some(ko) = kotlinc_bytes(src, "C", "demo/C", &cp) else {
         eprintln!("skip (kotlinc unavailable)");
         return;
     };
+    let kr = krusty_bytes(src, "demo/C", &cp);
     // The whole data class isn't byte-identical yet (debug tables/annotations), but its @Metadata is —
     // so the decoded shape must match kotlinc exactly: same property names, function names, and the
     // `items: List<String>` return type resolving to the `List` builtin (a generic/argument/default

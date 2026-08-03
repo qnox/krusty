@@ -42,6 +42,8 @@ mod bound_expr_ref_e2e;
 mod bound_library_ref_e2e;
 #[path = "bounded_type_param_e2e.rs"]
 mod bounded_type_param_e2e;
+#[path = "box_harness_skip_semantics_e2e.rs"]
+mod box_harness_skip_semantics_e2e;
 #[path = "boxed_array_construction_e2e.rs"]
 mod boxed_array_construction_e2e;
 #[path = "bracket_lambda_param_e2e.rs"]

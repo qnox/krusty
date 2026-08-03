@@ -24,7 +24,7 @@ fn run(lib: Option<(&str, &str)>, main: &str) -> Option<String> {
     if let Some((tag, src)) = lib {
         cp.insert(0, common::compile_lib(tag, src)?);
     }
-    common::compile_and_run_box(main, "Main", &cp, Some(&jdk))
+    Some(common::expect_box_run(main, "Main", &cp, Some(&jdk)))
 }
 
 #[test]

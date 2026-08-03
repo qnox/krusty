@@ -485,9 +485,13 @@ fn value_block(ir: &IrFile, e: ExprId) -> Option<(Vec<ExprId>, ExprId)> {
     }
 }
 
-/// Rewrite each top-level `return <suspend call>` in `b` into `val tmp = <suspend call>; return tmp`
-/// (a fresh local typed `ret_ty`), so a tail-position suspension is handled as an ordinary bound-local
+/// Rewrite each `return <suspend call>` in `b` into `val tmp = <suspend call>; return tmp` (a fresh
+/// local typed `ret_ty`), so a tail-position suspension is handled as an ordinary bound-local
 /// suspension point. Runs before the CPS rewrite, so `ret_ty` is the function's declared return type.
+///
+/// Descends into STATEMENT-position `when` arms and nested blocks: `when (n) { 0 -> return a() }` puts
+/// the suspending `return` one level down, where the flattener (which models a suspending `Variable`
+/// init, not a suspending `Return`) would otherwise bail out of the whole file.
 fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
@@ -512,6 +516,7 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
                 continue;
             }
         }
+        desugar_returns_under(ir, s, suspend_set, ret_ty);
         new_stmts.push(s);
     }
     if changed {
@@ -519,6 +524,43 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
             stmts: new_stmts,
             value,
         };
+    }
+}
+
+/// Apply [`desugar_tail_suspend`]'s rewrite to the `return`s nested inside a statement — the arms of a
+/// statement-position `when`, and any block reachable through them.
+///
+/// A `Lambda` body is a SEPARATE state machine with its own return semantics, so it is never descended
+/// into (matching the flattener's own treatment).
+fn desugar_returns_under(ir: &mut IrFile, s: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
+    match ir.exprs[s as usize].clone() {
+        IrExpr::Block { .. } => desugar_tail_suspend(ir, s, suspend_set, ret_ty),
+        IrExpr::When { branches } => {
+            for (_, body) in branches {
+                // A bare `0 -> return a()` arm: the arm body IS the `Return`, so it becomes the
+                // two-statement block the flattener can walk.
+                if let IrExpr::Return(Some(e)) = ir.exprs[body as usize] {
+                    if is_suspension_point(ir, e, suspend_set) {
+                        let tmp = max_value_index(ir) + 1;
+                        let var = ir.add_expr(IrExpr::Variable {
+                            index: tmp,
+                            ty: *ret_ty,
+                            init: Some(e),
+                            named: false,
+                        });
+                        let get = ir.add_expr(IrExpr::GetValue(tmp));
+                        let ret = ir.add_expr(IrExpr::Return(Some(get)));
+                        ir.exprs[body as usize] = IrExpr::Block {
+                            stmts: vec![var, ret],
+                            value: None,
+                        };
+                        continue;
+                    }
+                }
+                desugar_returns_under(ir, body, suspend_set, ret_ty);
+            }
+        }
+        _ => {}
     }
 }
 

@@ -39,11 +39,12 @@ fun box(): String {
     return if (x == 2) "OK" else "x=$x"
 }
 "#;
-    let Some(classes) =
-        common::compile_in_process(src, "ShadowCell", std::slice::from_ref(&stdlib), Some(&jdk))
-    else {
-        return;
-    };
+    let classes = common::expect_compile_in_process(
+        src,
+        "ShadowCell",
+        std::slice::from_ref(&stdlib),
+        Some(&jdk),
+    );
     let box_class = common::find_box_class(&classes).expect("box class");
     assert_eq!(
         common::run_box(&classes, &box_class, &[stdlib]).as_deref(),

@@ -34,18 +34,23 @@ fn work_dir(tag: &str) -> PathBuf {
 }
 
 /// Compile `main` against the kotlinc-built `lib` and run its `box()` on the JVM.
+/// `None` means ONLY that the kotlinc/JVM toolchain isn't provisioned; a `main` krusty rejects panics
+/// with its front-end diagnostics instead of reporting as a passing skip.
 fn run_box_against(lib: &str, main: &str, tag: &str) -> Option<String> {
     let work = work_dir(tag);
     let libout = build_lib(&work, lib)?;
     let stdlib = common::stdlib_jar()?;
-    let out = common::compile_and_run_box(
-        main,
-        "Main",
-        &[libout, stdlib],
-        common::jdk_modules().as_deref(),
-    );
+    let jdk = common::jdk_modules();
+    // The work dir must be reclaimed even when the compile step PANICS (`work_dir` only sweeps
+    // same-pid leftovers), so the cleanup runs on unwind rather than after the call.
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        common::expect_box_run(main, "Main", &[libout, stdlib], jdk.as_deref())
+    }));
     let _ = fs::remove_dir_all(&work);
-    out
+    match out {
+        Ok(s) => Some(s),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 #[test]

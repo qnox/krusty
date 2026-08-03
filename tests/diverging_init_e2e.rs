@@ -55,10 +55,10 @@ fn diverging_property_initializer_runs() {
     );
 
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(SRC, "Div", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(
+        common::expect_box_run(SRC, "Div", &[stdlib], Some(&jdk)),
+        "OK"
+    );
 }
 
 #[test]

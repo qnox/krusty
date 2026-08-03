@@ -38,9 +38,7 @@ fn run_ok(src: &str, stem: &str) {
         return;
     };
     let jdk = common::jdk_modules();
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], jdk.as_deref()) else {
-        return;
-    };
+    let out = common::expect_box_run(src, stem, &[stdlib], jdk.as_deref());
     assert_eq!(out, "OK", "{stem} produced wrong box() result");
 }
 

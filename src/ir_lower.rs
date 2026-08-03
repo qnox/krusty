@@ -4760,7 +4760,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || is_field_accessor_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || is_member_ext_prop(p) || p.delegate.is_some())
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || is_field_accessor_prop(p) || p.is_abstract || is_deferred_prop(p) || is_lateinit_prop(p) || is_member_ext_prop(p) || p.delegate.is_some())
 }
 
 /// An `enum class` the IR can emit: a primary constructor of `val`/`var` props, concrete (non-extension,
@@ -4918,12 +4918,16 @@ fn ast_init_is_jvm_default(file: &ast::File, e: AstExprId) -> bool {
     }
 }
 
-/// A *deferred* `val` body property: declared with an explicit type and NO initializer/getter/setter
-/// (`val a: Int`), assigned exactly once in an `init` block. It's a real backing field, just initialized
-/// in the constructor body rather than at the declaration.
-fn is_deferred_val_prop(p: &ast::PropDecl) -> bool {
-    !p.is_var
-        && p.receiver.is_none()
+/// A *deferred* body property: declared with an explicit type and NO initializer/getter/setter
+/// (`val a: Int`), assigned in an `init` block or a constructor body. It's a real backing field, just
+/// initialized in the constructor body rather than at the declaration.
+///
+/// A deferred `var` is the same shape — the only difference is the synthesized setter, which the plain
+/// backing-field path already emits. (A `var` reachable with no assignment at all is only well-formed
+/// when an earlier initializer DIVERGES, e.g. `val x: String = TODO()`; kotlinc emits the field and
+/// throws before any store, so there is nothing extra to lower.)
+fn is_deferred_prop(p: &ast::PropDecl) -> bool {
+    p.receiver.is_none()
         && !p.is_lateinit
         && p.init.is_none()
         && p.getter.is_none()
@@ -5414,6 +5418,23 @@ impl<'a> Lower<'a> {
     /// internal `deep*`-phase refinement). Replaces the former free `set_bail` thread-local write.
     fn set_bail(&self, reason: &str) {
         *self.bail.borrow_mut() = reason.to_string();
+    }
+
+    /// The dotted CLASS path a qualifier expression spells — `Registry.Const` for
+    /// `Member { Name("Registry"), "Const" }` — or `None` when it isn't a chain of plain names.
+    ///
+    /// A nested declaration is flattened into `file.decls` under its dotted name, so this is the key
+    /// `object_const_lits` / `companion_consts` record it under. Without the chain, only a top-level
+    /// `Obj.CONST` matched and a nested `Outer.Obj.CONST` fell through to a bail. A path rooted in a
+    /// value (`a.b.c`) simply misses both maps, so no extra guard is needed.
+    fn dotted_class_path(&self, e: AstExprId) -> Option<String> {
+        match self.afile.expr(e) {
+            Expr::Name(n) => Some(n.clone()),
+            Expr::Member { receiver, name } => {
+                Some(format!("{}.{}", self.dotted_class_path(*receiver)?, name))
+            }
+            _ => None,
+        }
     }
 
     /// Stop lowering at a named, source-independent feature boundary.
@@ -8147,27 +8168,31 @@ impl<'a> Lower<'a> {
     /// Lower `val (a, b, …) = init` into `out`: a temp bound to `init`, then one local per component
     /// (`a = temp.component1()`, …). Each component is a user-class `componentN` (data class) or a
     /// library member (`Pair`, `Map.Entry`); a generic component's erased return coerces to its element.
-    /// Lower a single-spread call `foo(*a)` to a top-level `vararg` function: pass the array through
-    /// the platform array-copy helper + `checkcast`, exactly as kotlinc does, instead of packing the
-    /// array as one element. Returns `None` (→ the file skips) for any shape this doesn't handle: more
-    /// than one argument, a non-spread sole argument, a non-`Name` (non-reusable) spread expression, an
-    /// unsupported element type, or a callee that isn't a single-`vararg`-parameter top-level function in
-    /// this file.
-    fn lower_single_spread_call(
+    /// Lower a spread call `foo(*a)` / `foo(x, *a, y)` to a top-level `vararg` function in this file.
+    ///
+    /// The SOLE-spread form passes the array through the platform array-copy helper + `checkcast`,
+    /// exactly as kotlinc does, instead of packing the array as one element. A MIXED call (spreads and
+    /// plain arguments together, in any order) packs one `Vararg` node carrying a per-element spread
+    /// flag — the emitter turns that into kotlinc's `SpreadBuilder`/`<Prim>SpreadBuilder` sequence.
+    ///
+    /// Returns `None` (→ the file skips) for any shape this doesn't handle: a non-`Name` (non-reusable)
+    /// sole spread expression, an unsupported element type, or a callee that isn't a
+    /// single-`vararg`-parameter top-level function in this file. The caller diverts EVERY
+    /// spread-carrying call here, so a spread argument never reaches the spread-unaware packers.
+    fn lower_spread_call(
         &mut self,
         call: AstExprId,
         callee: AstExprId,
         args: &[AstExprId],
     ) -> Option<ExprId> {
-        let spread = match args {
-            [spread] if self.afile.is_spread_arg(*spread) => *spread,
-            _ => {
-                self.set_bail("call spread: not single spread arg");
-                return None;
-            }
+        let sole_spread = match args {
+            [spread] if self.afile.is_spread_arg(*spread) => Some(*spread),
+            _ => None,
         };
-        // kotlinc loads the spread twice; only a simple reusable name is safe without a temp.
-        if !matches!(self.afile.expr(spread), ast::Expr::Name(_)) {
+        // kotlinc loads the sole spread twice (array + its `size`); only a simple reusable name is safe
+        // without a temp. A MIXED call loads each argument once, so it has no such restriction.
+        if sole_spread.is_some_and(|spread| !matches!(self.afile.expr(spread), ast::Expr::Name(_)))
+        {
             self.set_bail("call spread: non-reusable spread expression");
             return None;
         }
@@ -8218,6 +8243,22 @@ impl<'a> Lower<'a> {
         }
         let array_ty = target.params[0];
         let array_ir = ty_to_ir(array_ty);
+
+        // Mixed spread: one packed array built by the platform spread builder. Each argument is lowered
+        // once — a spread at the ARRAY type (the builder's `addSpread` takes the whole array), a plain
+        // argument at the ELEMENT type — and the parallel flags tell the emitter which is which.
+        let Some(spread) = sole_spread else {
+            let mut elements = Vec::with_capacity(args.len());
+            let mut spreads = Vec::with_capacity(args.len());
+            for &arg in args {
+                let is_spread = self.afile.is_spread_arg(arg);
+                let want = if is_spread { array_ir } else { ty_to_ir(elem) };
+                elements.push(self.lower_arg(arg, &want)?);
+                spreads.push(is_spread);
+            }
+            let packed = self.emit_vararg_with_spreads(array_ir, elements, spreads);
+            return Some(self.emit_local_call(fid, vec![packed]));
+        };
 
         // Platform array copy. The JVM primitive overload returns the exact array type (no cast); the
         // reference overload returns `Object[]` and needs a `checkcast` to the element array type.
@@ -18370,18 +18411,22 @@ impl<'a> Lower<'a> {
         };
         // Default parameters ARE modeled (an inline fn substitutes the default expression directly — no
         // `$default` method): an omitted parameter is filled with its default below. A `vararg` IS
-        // supported, but only as the LAST parameter of a plain (non-extension) inline fn whose element
-        // isn't a type parameter or a function type. The two aren't combined (rare) — bail on the overlap.
+        // supported on a plain (non-extension) inline fn whose element isn't a type parameter or a
+        // function type. The two aren't combined (rare) — bail on the overlap.
+        //
+        // The vararg need not be LAST: `inline fun pick(vararg xs: Int, f: (Int) -> Boolean)` is the
+        // idiomatic shape for a trailing lambda after a vararg. Parameters AFTER it are supplied
+        // positionally at the END of the argument list, so the vararg takes the middle span.
         let has_default = f.params.iter().any(|p| p.default.is_some());
-        let vararg = f.params.last().is_some_and(|p| p.is_vararg);
+        let vararg_index = f.params.iter().position(|p| p.is_vararg);
+        let vararg = vararg_index.is_some();
+        // Parameters declared after the vararg — bound from the TAIL of the argument list.
+        let n_after = vararg_index.map_or(0, |vi| f.params.len() - vi - 1);
         if has_default && vararg {
             return None;
         }
-        if f.params.iter().rev().skip(1).any(|p| p.is_vararg) {
-            return None; // a non-last vararg (only reachable with trailing named args) — bail
-        }
-        if vararg {
-            let vp = f.params.last().unwrap();
+        if let Some(vi) = vararg_index {
+            let vp = &f.params[vi];
             let is_tparam = f.type_params.iter().any(|tp| tp == &vp.ty.name);
             if (recv_ty.is_some() && member.is_none()) || is_tparam || !vp.ty.fun_params.is_empty()
             {
@@ -18452,11 +18497,9 @@ impl<'a> Lower<'a> {
         if sig_params.len() != pnames.len() {
             return None;
         }
-        let n_fixed = if vararg {
-            sig_params.len() - 1
-        } else {
-            sig_params.len()
-        };
+        // The vararg parameter's INDEX: every earlier parameter binds args positionally by index,
+        // every later one binds from the argument list's tail.
+        let n_fixed = vararg_index.unwrap_or(sig_params.len());
         let source_args = args.to_vec();
         let eff_storage: Vec<AstExprId>;
         let mut named_vararg_omitted = false;
@@ -18466,6 +18509,9 @@ impl<'a> Lower<'a> {
             .get(&call_id)
             .is_some_and(|n| n.iter().any(|x| x.is_some()));
         let args: &[AstExprId] = if vararg && has_named {
+            if n_after > 0 {
+                return None; // named args around a non-last vararg — not modeled
+            }
             let slots = self.info.resolved_call_arg_slots.get(&AstExprId(call_id))?;
             if slots.len() != sig_params.len() || slots[..n_fixed].iter().any(Option::is_none) {
                 return None;
@@ -18474,7 +18520,7 @@ impl<'a> Lower<'a> {
             eff_storage = slots.iter().flatten().copied().collect();
             &eff_storage
         } else if vararg {
-            if args.len() < n_fixed {
+            if args.len() < n_fixed + n_after {
                 return None;
             }
             args
@@ -18720,6 +18766,13 @@ impl<'a> Lower<'a> {
             }
         }
         for (i, pty) in sig_params.iter().enumerate() {
+            // Parameters BEFORE the vararg bind by index; those after it bind from the argument
+            // list's tail (the vararg absorbs the variable-width middle span).
+            let ai = if vararg && i > n_fixed {
+                args.len() - (sig_params.len() - i)
+            } else {
+                i
+            };
             if vararg && i == n_fixed {
                 if has_named {
                     if named_vararg_omitted {
@@ -18730,10 +18783,10 @@ impl<'a> Lower<'a> {
                         continue;
                     }
                     let Some(value) = prelowered_args
-                        .get(&args[i])
+                        .get(&args[ai])
                         .copied()
                         .map(|slot| self.emit_get_value(slot))
-                        .or_else(|| self.lower_arg(args[i], &ty_to_ir(*pty)))
+                        .or_else(|| self.lower_arg(args[ai], &ty_to_ir(*pty)))
                     else {
                         self.scope.truncate(depth);
                         self.inline_lambdas.truncate(lam_depth);
@@ -18758,7 +18811,7 @@ impl<'a> Lower<'a> {
                 };
                 let elem_ir = ty_to_ir(elem_ty);
                 let mut elements = Vec::new();
-                for &arg in &args[n_fixed..] {
+                for &arg in &args[n_fixed..args.len() - n_after] {
                     if is_branchy(self.afile, arg) {
                         self.scope.truncate(depth);
                         self.inline_lambdas.truncate(lam_depth);
@@ -18790,7 +18843,7 @@ impl<'a> Lower<'a> {
                 // is also used as a VALUE — passed to another call (`a(f)`), stored, or returned — it must
                 // be materialized as a `FunctionN` instead (the value-binding branch below); a callable-ref
                 // argument is never a body to splice.
-                let arg_expr = self.afile.expr(args[i]).clone();
+                let arg_expr = self.afile.expr(args[ai]).clone();
                 let splice = matches!(arg_expr, Expr::Lambda { .. })
                     && !name_used_as_value(self.afile, body, &pnames[i]);
                 if let (
@@ -18868,10 +18921,10 @@ impl<'a> Lower<'a> {
                     // the value form is box-OK and verifies) — no FunctionN-drop bookkeeping needed.
                     let slot = self.fresh_value();
                     let val = match prelowered_args
-                        .get(&args[i])
+                        .get(&args[ai])
                         .copied()
                         .map(|slot| self.emit_get_value(slot))
-                        .or_else(|| self.lower_arg(args[i], &ty_to_ir(*pty)))
+                        .or_else(|| self.lower_arg(args[ai], &ty_to_ir(*pty)))
                     {
                         Some(v) => v,
                         None => {
@@ -18898,10 +18951,10 @@ impl<'a> Lower<'a> {
                     .unwrap_or(*pty);
                 let slot = self.fresh_value();
                 let val = match prelowered_args
-                    .get(&args[i])
+                    .get(&args[ai])
                     .copied()
                     .map(|slot| self.emit_get_value(slot))
-                    .or_else(|| self.lower_arg(args[i], &ty_to_ir(spty)))
+                    .or_else(|| self.lower_arg(args[ai], &ty_to_ir(spty)))
                 {
                     Some(v) => v,
                     None => {
@@ -19854,13 +19907,14 @@ impl<'a> Lower<'a> {
                     _ => return None,
                 }
             }
-            // A call with a spread argument (`foo(*a)`). Only the single-spread-to-a-top-level-vararg
-            // form is handled (the array is passed through via the platform copy helper); ANY other
-            // shape (mixed spreads, fixed args, member/library callee, primitive element, complex spread
-            // expr) returns `None` → the file skips, never miscompiles. The guard ensures a spread arg
-            // never reaches the normal vararg-packing paths below.
+            // A call with a spread argument (`foo(*a)`, `foo(x, *a, y)`). Only a top-level single-
+            // `vararg` callee IN THIS FILE is handled — a sole spread passes the array through the
+            // platform copy helper, a mixed call packs one spread-flagged array; ANY other shape
+            // (member/library callee, unsupported element type) returns `None` → the file skips, never
+            // miscompiles. The guard ensures a spread arg never reaches the normal (spread-unaware)
+            // vararg-packing paths below.
             Expr::Call { callee, args } if args.iter().any(|&a| self.afile.is_spread_arg(a)) => {
-                self.lower_single_spread_call(e, callee, &args)?
+                self.lower_spread_call(e, callee, &args)?
             }
             Expr::Call { args, .. }
                 if self
@@ -21228,7 +21282,7 @@ impl<'a> Lower<'a> {
             if let Some(entry) = self.lower_resolved_enum_entry(e, &name) {
                 return Some(entry);
             }
-            if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
+            if let Some(rn) = self.dotted_class_path(receiver) {
                 let internal = class_internal(self.afile, &rn);
                 // `Obj.NAME` where `NAME` is a `const val` of an `object` → inline the literal
                 // (kotlinc inlines a const read; no `getstatic`).
@@ -22381,10 +22435,21 @@ impl<'a> Lower<'a> {
             if any_unit && !all_unit {
                 return None;
             }
-            // An unsigned subject compares its arms with unsigned `==` (bit-equal, same as signed),
-            // but a `ULong` subject whose magnitude exceeds `Long.MAX` needs care, and the unsigned
-            // const-val arms aren't materialized yet — bail rather than risk a mismatch.
-            if subject.map_or(false, |s| self.info.ty(s).is_unsigned()) {
+            // An unsigned subject compares its arms with unsigned `==`, which is BIT equality — the
+            // same comparison the emitter already produces for the underlying `int`/`long`, for
+            // `UInt` and `ULong` alike (magnitude never enters an equality test). So a subject whose
+            // arms are all unsigned LITERALS lowers exactly like a signed one.
+            //
+            // Everything else still bails: an `in` test needs unsigned ORDERING (where a `ULong`
+            // above `Long.MAX` really does differ from the signed compare), and an unsigned
+            // `const val` comparand isn't materialized yet.
+            if subject.is_some_and(|s| self.info.ty(s).is_unsigned())
+                && !arms.iter().all(|arm| {
+                    arm.conditions.iter().all(|&c| {
+                        matches!(self.afile.expr(c), Expr::UIntLit(_) | Expr::ULongLit(_))
+                    })
+                })
+            {
                 return None;
             }
             // A no-`else` `when` used as a *value* is only accepted by the checker when it is

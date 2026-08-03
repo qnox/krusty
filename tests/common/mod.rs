@@ -1446,16 +1446,70 @@ pub fn compile_and_run_files_with_stdlib(sources: &[(&str, &str)]) -> Option<Str
     compile_and_run_box_files(sources, &[stdlib], Some(&jdk))
 }
 
-/// Compile `src` with kotlin-stdlib + JDK modules, run `box()`, and assert it returns `OK`.
-#[allow(dead_code)]
-pub fn assert_box_ok_with_stdlib(src: &str, stem: &str) {
-    if let Some(out) = compile_and_run_with_stdlib(src, stem) {
-        assert_eq!(out, "OK", "box() for {stem} returned {out:?}");
+/// Render the front-end diagnostics behind a `None` from the compile helpers. Empty means the front
+/// end ACCEPTED the source, so the `None` came from a lowering/emit bail instead.
+fn why(diagnostics: &[String]) -> String {
+    if diagnostics.is_empty() {
+        "the front end accepted it, so lowering/emit bailed".to_string()
+    } else {
+        format!("front-end diagnostics: {diagnostics:?}")
     }
 }
 
-/// Like [`assert_box_ok_with_stdlib`], but treats a compile/run `None` as a regression once
-/// stdlib + JDK modules are provisioned.
+/// Compile `src` and run `box()`, treating a `None` as a REGRESSION rather than a skip.
+///
+/// [`compile_and_run_box`] returns `None` for two unrelated reasons — the JVM toolchain isn't
+/// provisioned, or the front end/backend REJECTED the source. A caller that has already resolved the
+/// toolchain (stdlib jar, JDK modules, JVM runner) has ruled the first out, so the remaining causes
+/// are a compile failure or a lowering/emit bail: a real failure that must not report as a pass.
+/// Panics with the front-end diagnostics (empty ⇒ the front end accepted it and lowering/emit bailed).
+#[allow(dead_code)]
+pub fn expect_box_run(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+) -> String {
+    compile_and_run_box(src, stem, cp_jars, jdk_modules).unwrap_or_else(|| {
+        let diagnostics = front_end_diagnostics(src, cp_jars, jdk_modules);
+        panic!("{stem}: compile/run returned None; {}", why(&diagnostics))
+    })
+}
+
+/// [`expect_box_run`] gated on kotlin-stdlib + the JDK modules. `None` means ONLY that they are not
+/// provisioned — the legitimate skip; a rejected source panics instead of masquerading as one.
+#[allow(dead_code)]
+pub fn expect_box_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
+    let stdlib = stdlib_jar()?;
+    let jdk = jdk_modules()?;
+    Some(expect_box_run(src, stem, &[stdlib], Some(&jdk)))
+}
+
+/// [`expect_box_run`] for a compile-only consumer: the emitted classes, or a panic naming why the
+/// source was rejected. Same contract — the caller must have resolved the toolchain first.
+#[allow(dead_code)]
+pub fn expect_compile_in_process(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+) -> Vec<(String, Vec<u8>)> {
+    compile_in_process(src, stem, cp_jars, jdk_modules).unwrap_or_else(|| {
+        let diagnostics = front_end_diagnostics(src, cp_jars, jdk_modules);
+        panic!("{stem}: compile returned None; {}", why(&diagnostics))
+    })
+}
+
+/// [`expect_compile_in_process`] gated on kotlin-stdlib + the JDK modules. `None` ⇒ unprovisioned.
+#[allow(dead_code)]
+pub fn expect_classes_with_stdlib(src: &str, stem: &str) -> Option<Vec<(String, Vec<u8>)>> {
+    let stdlib = stdlib_jar()?;
+    let jdk = jdk_modules()?;
+    Some(expect_compile_in_process(src, stem, &[stdlib], Some(&jdk)))
+}
+
+/// Compile `src` with kotlin-stdlib + JDK modules, run `box()`, and assert it returns `OK`. Once
+/// stdlib + JDK modules are provisioned a compile/run `None` is a regression, not a skip.
 #[allow(dead_code)]
 pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
     let Some(stdlib) = stdlib_jar() else {
@@ -1464,10 +1518,11 @@ pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
     let Some(jdk) = jdk_modules() else {
         return;
     };
-    let Some(out) = compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        panic!("{stem}: compile/run returned None");
-    };
-    assert_eq!(out, "OK", "{stem}");
+    assert_eq!(
+        expect_box_run(src, stem, &[stdlib], Some(&jdk)),
+        "OK",
+        "{stem}"
+    );
 }
 
 /// Multi-file form of [`expect_box_ok_with_stdlib`].
@@ -1479,9 +1534,12 @@ pub fn expect_box_ok_files_with_stdlib(sources: &[(&str, &str)], stem: &str) {
     let Some(jdk) = jdk_modules() else {
         return;
     };
-    let Some(out) = compile_and_run_box_files(sources, &[stdlib], Some(&jdk)) else {
-        panic!("{stem}: compile/run returned None");
-    };
+    let cp = [stdlib];
+    let out = compile_and_run_box_files(sources, &cp, Some(&jdk)).unwrap_or_else(|| {
+        let files: Vec<&str> = sources.iter().map(|(_, src)| *src).collect();
+        let diagnostics = front_end_diagnostics_files(&files, &cp, Some(&jdk));
+        panic!("{stem}: compile/run returned None; {}", why(&diagnostics))
+    });
     assert_eq!(out, "OK", "{stem}");
 }
 
@@ -1544,6 +1602,38 @@ pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
     compile_and_run_box(main, "Main", &[libout, stdlib], jdk_modules().as_deref())
 }
 
+/// [`run_box_against`] with the strict contract: `None` means ONLY that the kotlinc/JVM toolchain
+/// isn't provisioned. A `main` the front end REJECTS panics with its diagnostics instead of
+/// collapsing into the same `None` and reporting as a passing skip.
+#[allow(dead_code)]
+pub fn expect_box_run_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
+    let libout = compile_lib(tag, lib_src)?;
+    let stdlib = stdlib_jar()?;
+    let jdk = jdk_modules();
+    Some(expect_box_run(
+        main,
+        "Main",
+        &[libout, stdlib],
+        jdk.as_deref(),
+    ))
+}
+
+/// [`expect_box_run_against`] with `kotlin-reflect` on the classpath.
+#[allow(dead_code)]
+pub fn expect_box_run_against_with_reflect(tag: &str, lib_src: &str, main: &str) -> Option<String> {
+    let libout = compile_lib(tag, lib_src)?;
+    let stdlib = stdlib_jar()?;
+    let reflect =
+        dist_jar("kotlin-reflect.jar").or_else(|| find_jar("kotlin-reflect-", &["sources"]))?;
+    let jdk = jdk_modules();
+    Some(expect_box_run(
+        main,
+        "Main",
+        &[libout, stdlib, reflect],
+        jdk.as_deref(),
+    ))
+}
+
 /// Frontend diagnostics for `main` against a kotlinc-built source dependency.
 #[allow(dead_code)]
 pub fn diagnostics_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
@@ -1571,21 +1661,6 @@ pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
         panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
     });
     assert_eq!(output, "OK", "{tag}");
-}
-
-/// [`run_box_against`] with `kotlin-reflect` on the classpath.
-#[allow(dead_code)]
-pub fn run_box_against_with_reflect(tag: &str, lib_src: &str, main: &str) -> Option<String> {
-    let libout = compile_lib(tag, lib_src)?;
-    let stdlib = stdlib_jar()?;
-    let reflect =
-        dist_jar("kotlin-reflect.jar").or_else(|| find_jar("kotlin-reflect-", &["sources"]))?;
-    compile_and_run_box(
-        main,
-        "Main",
-        &[libout, stdlib, reflect],
-        jdk_modules().as_deref(),
-    )
 }
 
 /// Compile `main` against a kotlinc-built `lib_src` up to the CHECKER only (no lowering/emit), returning

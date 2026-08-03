@@ -34,9 +34,7 @@ fn run_ok(src: &str, stem: &str) {
         return;
     };
     let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        return;
-    };
+    let out = common::expect_box_run(src, stem, &[stdlib], Some(&jdk));
     assert_eq!(out, "OK", "{stem} produced wrong box() result");
 }
 

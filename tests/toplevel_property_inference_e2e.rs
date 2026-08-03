@@ -1,6 +1,6 @@
 //! Signature-phase inference for top-level property initializers that read earlier properties,
 //! including nested calls and imported extension properties.
-use super::common::assert_box_ok_with_stdlib;
+use super::common::expect_box_ok_with_stdlib;
 
 #[test]
 fn toplevel_property_cross_reference() {
@@ -17,5 +17,5 @@ fun box(): String {
     return "OK"
 }
 "#;
-    assert_box_ok_with_stdlib(src, "toplevel_property_cross_reference");
+    expect_box_ok_with_stdlib(src, "toplevel_property_cross_reference");
 }

@@ -142,8 +142,8 @@ fn classpath_super_ctor_receiver_lambda_uses_shared_resolution() {
         }
     "#;
 
-    let Some(output) = common::run_box_against("invoke_classpath_super", LIB, MAIN) else {
-        return;
+    let Some(output) = common::expect_box_run_against("invoke_classpath_super", LIB, MAIN) else {
+        return; // toolchain not provisioned
     };
     assert_eq!(
         output, "OK",

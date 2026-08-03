@@ -5,7 +5,7 @@
 use super::common;
 
 fn run_box(_name: &str, src: &str) {
-    common::assert_box_ok_with_stdlib(src, "B");
+    common::expect_box_ok_with_stdlib(src, "B");
 }
 
 #[test]

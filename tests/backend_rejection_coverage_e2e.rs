@@ -63,12 +63,12 @@ fn ubyte_to_int_rejected() {
     ));
 }
 
-// --- Mixed spread in a vararg call (`f(0, *a, 3)`) — SpreadBuilder path not modeled; src/ir_lower.rs
-//     bails ("call f"), backend surfaces the generic unsupported diagnostic. ---
+// --- Mixed spread in a vararg call (`f(0, *a, 3)`) — lowered through the platform spread builder
+//     (`IntSpreadBuilder` here), so it is ACCEPTED. ---
 
 #[test]
-fn mixed_spread_vararg_rejected() {
-    assert!(rejects(
+fn mixed_spread_vararg_accepted() {
+    assert!(!rejects(
         "fun f(vararg xs: Int) = xs.sum()\nfun main() { val a = intArrayOf(1, 2); println(f(0, *a, 3)) }\n"
     ));
 }

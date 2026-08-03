@@ -20,5 +20,5 @@ fn nested_data_class_tostring_uses_innermost_simple_name() {
         \x20   if (Top(1).toString() != \"Top(n=1)\") return Top(1).toString()\n\
         \x20   return \"OK\"\n\
         }\n";
-    common::assert_box_ok_with_stdlib(src, "NestedToString");
+    common::expect_box_ok_with_stdlib(src, "NestedToString");
 }

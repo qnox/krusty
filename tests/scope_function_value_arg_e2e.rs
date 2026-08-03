@@ -18,5 +18,5 @@ fun box(): String {\n\
     val b = build<String> { yield(\"OK\") }\n\
     return b.out\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "ScopeValueArg");
+    common::expect_box_ok_with_stdlib(SRC, "ScopeValueArg");
 }

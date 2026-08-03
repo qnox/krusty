@@ -8,7 +8,7 @@ use super::common;
 /// Shared harness: compile `src`'s `box()` under `stem` and assert it returns "OK".
 /// Returns without asserting (skips) when the toolchain/stdlib/JDK is unavailable.
 fn run(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 // --- exceptions ---------------------------------------------------------------------------

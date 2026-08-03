@@ -616,11 +616,11 @@ fn local_delegated_val_rejected() {
     ));
 }
 
-// --- mixed spread with a leading fixed argument (SpreadBuilder path not modeled) — ir_lower bail ---
+// --- mixed spread with a leading fixed argument — packed by the reference `SpreadBuilder`, accepted ---
 
 #[test]
-fn leading_fixed_then_string_spread_rejected() {
-    assert!(rejects(
+fn leading_fixed_then_string_spread_accepted() {
+    assert!(!rejects(
         "fun f(vararg xs: String) = xs.size\n\
          fun main() { val a = arrayOf(\"a\", \"b\"); println(f(\"x\", *a)) }\n"
     ));

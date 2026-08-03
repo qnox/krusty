@@ -5,10 +5,17 @@
 
 use super::common;
 
+/// `None` means ONLY that the toolchain isn't provisioned — a source krusty REJECTS panics with its
+/// diagnostics rather than skipping the assertions below.
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let stdlib = common::stdlib_jar()?;
     let jdk = common::jdk_modules()?;
-    common::compile_in_process(src, "G", &[stdlib], Some(&jdk))
+    Some(common::expect_compile_in_process(
+        src,
+        "G",
+        &[stdlib],
+        Some(&jdk),
+    ))
 }
 
 fn method_signature(cs: &[(String, Vec<u8>)], facade: &str, name: &str) -> Option<String> {

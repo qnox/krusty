@@ -17,7 +17,7 @@ b.y = \"z\"\n\
 if (b.y != \"z\") return \"f3\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "B");
+    common::expect_box_ok_with_stdlib(src, "B");
 }
 
 #[test]
@@ -35,5 +35,5 @@ fun box(): String {\n\
   target().value = if (chooseFirst) selected() else \"FAIL\"\n\
   return if (shared.value == \"OK\" && trace == \"RV\") \"OK\" else shared.value + trace\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "BranchingProperty");
+    common::expect_box_ok_with_stdlib(src, "BranchingProperty");
 }

@@ -11,7 +11,7 @@ use super::common;
 /// Compile `src` (entry `box()`), run it, and assert the result is `"OK"`. Skips (returns) when the
 /// JDK / stdlib toolchain isn't provisioned, matching the other `*_e2e` tests.
 fn run_ok(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

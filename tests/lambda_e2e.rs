@@ -17,7 +17,7 @@ if (call1({ it * 2 }, 41) != 82) return \"f3\"\n\
 if (call2({ a, b -> a + b }) != 42) return \"f4\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "L");
+    common::expect_box_ok_with_stdlib(src, "L");
 }
 
 #[test]

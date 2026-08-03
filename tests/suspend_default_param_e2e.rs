@@ -16,7 +16,8 @@ fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
     let sl = common::stdlib_jar()?;
     let corou = common::coroutines_jar()?;
     let libout = common::compile_lib(tag, lib)?;
-    common::compile_and_run_box(main, "Main", &[libout, sl, corou, jdk.clone()], Some(&jdk))
+    let cp = [libout, sl, corou, jdk.clone()];
+    Some(common::expect_box_run(main, "Main", &cp, Some(&jdk)))
 }
 
 const LIB: &str = "package lib\n\

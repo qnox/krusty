@@ -9,8 +9,10 @@
 
 use super::common;
 
+/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
+/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
 fn run(src: &str, stem: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, stem)
+    common::expect_box_run_with_stdlib(src, stem)
 }
 
 #[test]

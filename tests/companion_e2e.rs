@@ -17,7 +17,7 @@ if (C.answer() != 42) return \"f1\"\n\
 if (C.greet(\"x\") != \"hi x\") return \"f2\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "C");
+    common::expect_box_ok_with_stdlib(src, "C");
 }
 
 #[test]
@@ -31,5 +31,5 @@ fn property_inferred_from_generic_companion_method() {
     class ZZZ { val c = C.create<String>() }\n\
 }\n\
 fun box(): String { C.ZZZ().c; return \"OK\" }\n";
-    common::assert_box_ok_with_stdlib(src, "C");
+    common::expect_box_ok_with_stdlib(src, "C");
 }

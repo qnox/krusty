@@ -8,7 +8,7 @@ use super::common;
 /// Compile `src`, run `box()` on the JVM, and assert it returns "OK". Skips (does not fail) when the
 /// toolchain is unavailable so the suite stays green off a provisioned machine.
 fn run_ok(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

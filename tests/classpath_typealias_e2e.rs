@@ -30,9 +30,7 @@ fn classpath_typealias_ctor_and_type_position() {
         \x20 if (c.get() != 3) return \"fail alias-chain: ${c.get()}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("typealias", LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    common::expect_box_ok_against("typealias", LIB, main);
 }
 
 #[test]

@@ -2168,6 +2168,55 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   loop recursion) and `tests/deep_expression_nesting_check_e2e.rs`
   (450-level `0+(…)` right-nesting through the checker and lowering, end-to-end).
 
+- **Vararg spread arguments mixed with plain ones (`f(x, *a, y)`).** A call that mixes spreads and
+  plain arguments packs ONE array through the platform spread builder, exactly as kotlinc does:
+  `kotlin/jvm/internal/SpreadBuilder` for a reference element, `<Prim>SpreadBuilder`
+  (`IntSpreadBuilder`, …) for a scalar one — `new`, then `addSpread(array)` / `add(element)` per
+  argument in source order, then `toArray`. A SOLE spread (`f(*a)`) keeps its own path: the array
+  goes through the platform array-copy helper plus a `checkcast`, which is what kotlinc emits and is
+  cheaper than a builder. The IR carries this as one `Vararg` node with a `spreads` flag per element,
+  so the JS backend renders the same node as a native array literal with `...` spreads. Only a
+  top-level single-`vararg` callee declared in the same file is lowered; any other callee still
+  skips the file rather than risk a mis-pack, because the other vararg-packing paths ignore the
+  spread flag. Tests: `tests/feature_coverage_v_e2e.rs::vararg_spread_forwarding`,
+  `tests/resolve_parse_deep_coverage_e2e.rs::spread_operator_into_vararg`,
+  `tests/feature_coverage_p_e2e.rs::vararg_named_and_spread_in_middle`,
+  `tests/backend_rejection_coverage_e2e.rs::mixed_spread_vararg_accepted`,
+  `tests/ir_lower_bail_coverage_e2e.rs::leading_fixed_then_string_spread_accepted`.
+- **`when` on an unsigned subject.** Unsigned `==` is BIT equality — identical to the signed compare
+  on the underlying `int`/`long`, for `UInt` and `ULong` alike, since magnitude never enters an
+  equality test (`when (u: ULong) { ULong.MAX_VALUE -> … }` matches on the bit pattern `-1L`). So a
+  `when` whose arm conditions are all unsigned literals lowers exactly like a signed one. An `in`
+  test still skips the file: unsigned ORDERING differs from the signed compare above `Long.MAX`, and
+  an unsigned `const val` comparand is not materialized yet. Test:
+  `tests/feature_coverage_i_e2e.rs::unsigned_in_when`.
+- **A deferred `var` body property.** `class C { var x: String }` — declared with a type and no
+  initializer, assigned in an `init` block or a constructor body — is the same backing-field shape as
+  a deferred `val`, plus the setter the plain property path already emits. A `var` with NO assignment
+  on any path is well-formed only when an earlier initializer DIVERGES (`val t: String = TODO()`
+  makes the remaining initialization unreachable, which is why kotlinc accepts it); the field is
+  emitted and `<init>` throws before any store. Test:
+  `tests/diverging_init_e2e.rs::diverging_property_initializer_runs`.
+- **A `const val` of a NESTED object read through its outer class (`Registry.Const.MAX`).** A const
+  read inlines its literal at the use site (kotlinc emits `ldc`, never a `getstatic`). Nested
+  declarations are flattened under their dotted name, so the qualifier is matched as a whole dotted
+  CHAIN of plain names rather than a single one — otherwise only a top-level `Obj.CONST` inlined and
+  the nested form skipped the file. Test:
+  `tests/resolve_parse_deep_coverage_e2e.rs::nested_class_qualified_access`.
+- **A `vararg` parameter that is not last on an `inline fun`.** `inline fun pick(vararg xs: Int, f:
+  (Int) -> Boolean)` is the idiomatic shape for a trailing lambda after a vararg. At the splice, the
+  parameters before the vararg bind by index, the parameters after it bind from the END of the
+  argument list, and the vararg absorbs the variable-width middle span. Named arguments around a
+  non-last vararg are not modeled and still skip. Test:
+  `tests/inline_vc_suspend_coverage_e2e.rs::inline_vararg_param`.
+- **`return <suspend call>` inside a statement `when` arm.** `suspend fun pick(n: Int): Int { when (n)
+  { 0 -> return a(); else -> return c() } }` — the CPS flattener models a suspending `Variable` init,
+  not a suspending `Return`, so each such `return` is desugared to `val tmp = <call>; return tmp`
+  first. That rewrite now descends into statement-position `when` arms and nested blocks instead of
+  walking only the body's top-level statements; a `Lambda` body is a separate state machine and is
+  never descended into. Test:
+  `tests/feature_coverage_s_e2e.rs::suspend_when_returns_from_multiple_arms`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

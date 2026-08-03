@@ -5,17 +5,32 @@
 
 use super::common;
 
+/// Raw compile — a `None` is AMBIGUOUS (unprovisioned toolchain or a declined source), so this form
+/// is for the REJECTION test below, which asserts the `None` on a provisioned toolchain.
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let stdlib = common::stdlib_jar()?;
     let jdk = common::jdk_modules()?;
     common::compile_in_process(src, "P", &[stdlib], Some(&jdk))
 }
 
+/// Positive form: `None` means ONLY that the toolchain isn't provisioned; a declined source panics
+/// with its front-end diagnostics instead of skipping as a silent pass.
+fn expect_classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
+    let stdlib = common::stdlib_jar()?;
+    let jdk = common::jdk_modules()?;
+    Some(common::expect_compile_in_process(
+        src,
+        "P",
+        &[stdlib],
+        Some(&jdk),
+    ))
+}
+
 #[test]
 fn integral_bounded_type_param_specializes_to_primitive_descriptor() {
     let src =
         "fun <T : Int> idi(t: T): T = t\nfun box(): String = if (idi(3) == 3) \"OK\" else \"no\"\n";
-    let Some(cs) = classes(src) else {
+    let Some(cs) = expect_classes(src) else {
         return; // toolchain unavailable
     };
     // The facade `PKt` must declare `idi` with the specialized primitive descriptor `(I)I`.
@@ -46,7 +61,9 @@ fn integral_bounded_type_param_specializes_to_primitive_descriptor() {
 #[test]
 fn char_bounded_type_param_runs() {
     let src = "fun <T : Char> idc(c: T): T = c\nfun box(): String = if (idc('K') == 'K') \"OK\" else \"no\"\n";
-    let Some(cs) = classes(src) else { return };
+    let Some(cs) = expect_classes(src) else {
+        return;
+    };
     let pkt = cs
         .iter()
         .find(|(n, _)| n.ends_with("PKt"))

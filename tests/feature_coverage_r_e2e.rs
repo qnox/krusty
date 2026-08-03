@@ -7,7 +7,7 @@ use super::common;
 /// Compile `src` (with a `box()` returning "OK") under `stem` against the stdlib + JDK modules and
 /// assert it prints "OK". Skips (returns) when the toolchain isn't provisioned.
 fn run_ok(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

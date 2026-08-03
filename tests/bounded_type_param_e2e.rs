@@ -10,9 +10,12 @@ fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let stdlib = common::stdlib_jar()?;
     let jdk = common::jdk_modules()?;
     // Toolchain present ⇒ compilation MUST succeed (a `None` here is a real failure, not a skip).
-    let cs = common::compile_in_process(src, "P", &[stdlib], Some(&jdk));
-    assert!(cs.is_some(), "krusty failed to compile:\n{src}");
-    cs
+    Some(common::expect_compile_in_process(
+        src,
+        "P",
+        &[stdlib],
+        Some(&jdk),
+    ))
 }
 
 fn method(
