@@ -22747,6 +22747,11 @@ impl<'a> Lower<'a> {
                             let (v, _) = self.lookup(src)?;
                             a.push(self.emit_get_value(v));
                         }
+                        // Both vectors are the PHYSICAL callable shape: signature collection prepends
+                        // context parameters to `params`, and parser normalization prepends the same
+                        // declarations to `FunDecl::params`, from which `param_meta` is built. Source
+                        // arguments address only the value suffix, so slice both vectors at the same
+                        // boundary before handing them to the origin-neutral argument mapper.
                         let (mut value_args, prelude) =
                             self.lower_args_defaulted(e, &meta[ctx_n..], &args, &params[ctx_n..])?;
                         a.append(&mut value_args);

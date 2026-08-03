@@ -15357,7 +15357,9 @@ impl<'a> Checker<'a> {
     fn resolve_context_module_top_level(
         &self,
         name: &str,
-        arg_tys: &[Ty],
+        args: &[ExprId],
+        argument_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<(crate::libraries::FunctionInfo, Vec<String>)> {
         let mut best: Option<(usize, usize, crate::libraries::FunctionInfo, Vec<String>)> = None;
         for (idx, fi) in self
@@ -15371,26 +15373,37 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let value_params = &fi.callable.params[ctx_count..];
-            if arg_tys.len() > value_params.len() {
+            // Context parameters are PHYSICAL leading parameters but never source arguments. Use the
+            // same semantic argument mapper as every other call path against the context-stripped
+            // signature: it handles labels, reordered arguments, omissions, and a trailing lambda in
+            // one place. The former positional zip made `f(b = value)` test `value` against `a`, and
+            // separately reimplemented only the trailing-default subset of the mapper's rules.
+            let value_signature = call_sig_without_context(&fi.call_sig, ctx_count);
+            let Ok(slots) = map_call_sig_args_with_trailing(
+                args,
+                argument_names,
+                &value_signature,
+                trailing_lambda,
+            ) else {
                 continue;
-            }
-            let omitted_ok = (arg_tys.len()..value_params.len())
-                .all(|i| fi.call_sig.param_has_default(ctx_count + i));
-            if !omitted_ok {
-                continue;
-            }
+            };
             let Some(sources) = self.resolve_context_args(&fi.callable.params[..ctx_count]) else {
                 continue;
             };
             let mut score = 0;
-            for (&p, &a) in value_params.iter().zip(arg_tys) {
+            let mut applicable = true;
+            for (&p, argument) in value_params.iter().zip(&slots) {
+                let Some(argument) = argument else {
+                    continue;
+                };
+                let a = self.expr_types[argument.0 as usize];
                 if !arg_assignable_simple(p, a) {
-                    score = 0;
+                    applicable = false;
                     break;
                 }
                 score += if p == a { 2 } else { 1 };
             }
-            if score == 0 && !arg_tys.is_empty() {
+            if !applicable {
                 continue;
             }
             if best.as_ref().is_none_or(|(best_score, best_idx, ..)| {
@@ -24996,19 +25009,12 @@ impl<'a> Checker<'a> {
         type_args: &[Ty],
     ) -> Option<Ty> {
         if self.file.call_arg_names.contains_key(&call.0) {
-            return self
-                .record_extension_call_with_slots(call, name, receiver, args, type_args)
-                .or_else(|| {
-                    if !self.report_pending_unknown_named_arg(call)
-                        && !self.call_already_has_argument_diagnostic(call, args)
-                    {
-                        self.diags.error(
-                            self.call_callee_name_span(call),
-                            INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                        );
-                    }
-                    Some(Ty::Error)
-                });
+            // A labelled extension probe may legitimately find no extension: this same helper is used
+            // while walking implicit receivers, before a receiver-less top-level callable gets its turn.
+            // `record_extension_call_with_slots` already reports mapping/applicability errors when an
+            // extension family exists; preserve `None` when the family is absent so this generic probe
+            // cannot poison a later resolution rung with a fabricated overload diagnostic.
+            return self.record_extension_call_with_slots(call, name, receiver, args, type_args);
         }
         let arg_kinds = self.checked_call_arg_kinds(args);
         let resolved = self.record_library_extension_call_with_arg_kinds(
@@ -32153,9 +32159,12 @@ impl<'a> Checker<'a> {
                         || self.resolve_instance_member(t, &fname, &arg_tys).is_some()
                 });
                 if module_top.is_none() && !shadowed_by_member {
-                    if let Some((fi, sources)) =
-                        self.resolve_context_module_top_level(&fname, &arg_tys)
-                    {
+                    if let Some((fi, sources)) = self.resolve_context_module_top_level(
+                        &fname,
+                        args,
+                        arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
+                    ) {
                         let params = &fi.callable.params;
                         let ctx_count = fi.context_count;
                         let ret_ty = self.module_top_level_return(call, &fi, &arg_tys, expected);
