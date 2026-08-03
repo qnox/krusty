@@ -2095,3 +2095,336 @@ public class M {\n\
         "async suspend/resume: wrong result; got {out}",
     );
 }
+
+/// An extension `suspend fun` whose body suspends on a MEMBER of its receiver.
+///
+/// `ast_body_suspends` classified the CALLER's lambda as leaf here: a top-level suspend EXTENSION
+/// reached through an explicit receiver (`Ctl(40).run2()`) is a `Member` callee, so the bare-`Name`
+/// scan missed it, and it is not an instance member of the receiver's type, so the resolved-member
+/// scan missed it too — the call then emitted without a `Continuation` ("call arity mismatch").
+#[test]
+fn suspend_extension_suspending_on_a_receiver_member() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+class Ctl(val n: Int) {\n\
+    suspend fun step(): Int = n + 1\n\
+}\n\
+suspend fun Ctl.run2(): Int {\n\
+    val a = step()\n\
+    return a + 1\n\
+}\n\
+fun box(): String {\n\
+    val r = runBlocking { Ctl(40).run2() }\n\
+    return if (r == 42) \"OK\" else \"FAIL:$r\"\n\
+}\n";
+    let Some(out) =
+        common::compile_and_run_box(src, "SuspendExtMember", &[stdlib], Some(jdk.as_path()))
+    else {
+        panic!("SuspendExtMember: the front end accepted the source, so lowering/emit bailed");
+    };
+    assert_eq!(
+        out.trim(),
+        "OK",
+        "a suspend extension may suspend on a member of its receiver"
+    );
+}
+
+/// A labeled `break` that leaves an INNER loop for an OUTER one, inside a suspending body, is skipped.
+///
+/// The flattener gives each loop its own states; a jump crossing a loop boundary lands on a state the
+/// assembler never reaches through the normal dispatch, so the target gets no stackmap frame. This is
+/// not receiver- or extension-specific — the plain `suspend fun` below reproduced an unverifiable
+/// method (`VerifyError: Expecting a stack map frame`) before the bail.
+#[test]
+fn suspend_cross_loop_labeled_break_still_skips() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+class Ctl { var count = 0 }\n\
+suspend fun bump(c: Ctl) { c.count++ }\n\
+suspend fun test(c: Ctl): Int {\n\
+    outer@do {\n\
+        bump(c)\n\
+        inner@do {\n\
+            if (c.count > 1) break@outer\n\
+            break@inner\n\
+        } while (false)\n\
+    } while (true)\n\
+    return c.count\n\
+}\n\
+fun box(): String {\n\
+    val r = runBlocking { test(Ctl()) }\n\
+    return if (r == 2) \"OK\" else \"FAIL:$r\"\n\
+}\n";
+    assert!(
+        common::compile_and_run_box(src, "SuspendCrossLoopBreak", &[stdlib], Some(jdk.as_path()))
+            .is_none(),
+        "a cross-loop labeled jump in a suspending body must be skipped, never emitted"
+    );
+}
+
+/// A local of the BOTTOM type (`var x = null`, i.e. `Nothing?`) that is live across a suspension is
+/// REMATERIALIZED, not spilled.
+///
+/// Such a local has exactly one possible value, so kotlinc gives it no continuation field and re-emits
+/// `aconst_null; astore` in each resume arm. krusty spilled it into an `Object` field instead, which
+/// both widened the slot's verification type past `null` (breaking the later `bar(x: String?, …)` use)
+/// and mis-framed the loop back-edge. Continuation fields here are byte-identical to kotlinc's
+/// (`L$0`, `result`, `label` — one field, for the crossing `String` temp only).
+#[test]
+fn suspend_bottom_typed_local_across_a_suspension_is_rematerialized() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun foo(value: String): String = suspendCoroutineUninterceptedOrReturn { x ->\n\
+    x.resume(value)\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+fun bar(x: String?, y: String, z: String): String {\n\
+    if (x != null) throw RuntimeException(\"fail 0\")\n\
+    return y + z\n\
+}\n\
+suspend fun baz(): String {\n\
+    var x = null\n\
+    for (i in 1..3) {\n\
+        x = null\n\
+    }\n\
+    return bar(x, foo(\"O\"), foo(\"K\"))\n\
+}\n\
+fun box(): String = runBlocking { baz() }\n";
+    let Some(out) =
+        common::compile_and_run_box(src, "SuspendNullLocal", &[stdlib], Some(jdk.as_path()))
+    else {
+        panic!("SuspendNullLocal: the front end accepted the source, so lowering/emit bailed");
+    };
+    assert_eq!(
+        out.trim(),
+        "OK",
+        "a bottom-typed local live across a suspension must rematerialize as null"
+    );
+}
+
+/// Hoisted temps crossing a suspension inside a RECEIVER lambda (`suspend Controller.() -> Unit`).
+///
+/// The leading `this`/capture fields were suspected of displacing a temp's positional spill slot; they
+/// do not — the corpus failure this shape used to show was the argument-evaluation ordering covered by
+/// `suspend_call_whose_argument_writes_a_local_still_skips`.
+#[test]
+fn suspend_receiver_lambda_spills_hoisted_temps() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+class Controller { var result = \"\" }\n\
+\n\
+fun builder(c: suspend Controller.() -> Unit): String {\n\
+    val cc = Controller()\n\
+    c.startCoroutine(cc, Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    return cc.result\n\
+}\n\
+suspend fun foo(i: Int): String = \"$i;\"\n\
+suspend fun bars(p1: String, p2: String): String = p1 + p2\n\
+fun box(): String = builder { result = bars(foo(1), foo(2)) }\n";
+    let Some(out) = common::compile_and_run_box(
+        src,
+        "SuspendRecvLambdaTemps",
+        &[stdlib],
+        Some(jdk.as_path()),
+    ) else {
+        panic!(
+            "SuspendRecvLambdaTemps: the front end accepted the source, so lowering/emit bailed"
+        );
+    };
+    assert_eq!(
+        out.trim(),
+        "1;2;",
+        "receiver-lambda temps must survive resumption"
+    );
+}
+
+/// A suspension whose own ARGUMENT writes a local (`foo(i++)`) is still skipped.
+///
+/// The spill stores are emitted ahead of the call, so the argument's update to `i` lands in the local
+/// but never in the field, and the resume restores the pre-increment value — `bars(foo(i++), foo(i++))`
+/// silently yielded `"1;1;"` instead of `"1;2;"`. Until the operands are materialized into typed temps
+/// ahead of the spill, the file must be REFUSED rather than answer wrongly.
+#[test]
+fn suspend_call_whose_argument_writes_a_local_still_skips() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun foo(i: Int): String = \"$i;\"\n\
+suspend fun bars(p1: String, p2: String): String = p1 + p2\n\
+fun box(): String = runBlocking {\n\
+    var i = 1\n\
+    val a = foo(i++)\n\
+    val b = foo(i++)\n\
+    bars(a, b)\n\
+}\n";
+    assert!(
+        common::compile_and_run_box(src, "SuspendArgWrites", &[stdlib], Some(jdk.as_path()))
+            .is_none(),
+        "a suspension whose argument writes a live local must be skipped, never miscompiled"
+    );
+}
+
+/// The same ordering hazard through a MEMBER suspend call (`c.foo(i++)`, an `IrExpr::MethodCall`) and
+/// through its RECEIVER (`cs[i++].foo()`), which the top-level-callee form above does not exercise.
+#[test]
+fn suspend_member_call_whose_operand_writes_a_local_still_skips() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let preamble = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n";
+    let argument = format!(
+        "{preamble}\
+class C {{\n\
+    suspend fun foo(i: Int): String = \"$i;\"\n\
+    suspend fun bars(p1: String, p2: String): String = p1 + p2\n\
+}}\n\
+suspend fun go(): String {{\n\
+    val c = C()\n\
+    var i = 1\n\
+    val a = c.foo(i++)\n\
+    val b = c.foo(i++)\n\
+    return c.bars(a, b)\n\
+}}\n\
+fun box(): String = runBlocking {{ go() }}\n"
+    );
+    let receiver = format!(
+        "{preamble}\
+class C(val k: Int) {{ suspend fun foo(): String = \"$k;\" }}\n\
+suspend fun bars(p1: String, p2: String): String = p1 + p2\n\
+suspend fun go(): String {{\n\
+    val cs = arrayOf(C(1), C(2))\n\
+    var i = 0\n\
+    val a = cs[i++].foo()\n\
+    val b = cs[i++].foo()\n\
+    return bars(a, b)\n\
+}}\n\
+fun box(): String = runBlocking {{ go() }}\n"
+    );
+    for (tag, src) in [
+        ("SuspendMemberArgWrites", &argument),
+        ("SuspendMemberRecvWrites", &receiver),
+    ] {
+        assert!(
+            common::compile_and_run_box(
+                src,
+                tag,
+                std::slice::from_ref(&stdlib),
+                Some(jdk.as_path())
+            )
+            .is_none(),
+            "{tag}: a member suspension whose operand writes a live local must be skipped"
+        );
+    }
+}
+
+/// A cross-loop labeled jump between PRE-TEST loops (`for`/`while`) is NOT refused — only the
+/// post-test (`do … while`) lowering mis-frames. Nested labeled loops are ordinary Kotlin.
+#[test]
+fn suspend_cross_loop_labeled_jump_between_pretest_loops_runs() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun foo(i: Int): String = \"$i;\"\n\
+suspend fun go(): String {\n\
+    var r = \"\"\n\
+    outer@ for (i in 0..2) {\n\
+        for (j in 0..2) {\n\
+            r += foo(i * 10 + j)\n\
+            if (j == 1) continue@outer\n\
+            if (i == 2) break@outer\n\
+        }\n\
+    }\n\
+    return r\n\
+}\n\
+fun box(): String = runBlocking { go() }\n";
+    let Some(out) = common::compile_and_run_box(
+        src,
+        "SuspendPretestLabeledJump",
+        &[stdlib],
+        Some(jdk.as_path()),
+    ) else {
+        panic!(
+            "SuspendPretestLabeledJump: the front end accepted the source, so lowering/emit bailed"
+        );
+    };
+    assert_eq!(
+        out.trim(),
+        "0;1;10;11;20;",
+        "pre-test cross-loop labeled jumps must run"
+    );
+}
+
+/// A scratch local written ONLY inside a suspension's own operand (`foo(run { t = 2; t })`) does not
+/// trip the operand-write bail: every read of it is inside that operand, so the stale spill field is
+/// never observed and the file compiles.
+#[test]
+fn suspend_operand_write_to_a_locally_dead_scratch_runs() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun foo(i: Int): String = \"$i;\"\n\
+suspend fun go(): String {\n\
+    val a = foo(1)\n\
+    var t = 0\n\
+    val b = foo(run { t = 2; t })\n\
+    return a + b\n\
+}\n\
+fun box(): String = runBlocking { go() }\n";
+    let Some(out) =
+        common::compile_and_run_box(src, "SuspendDeadScratch", &[stdlib], Some(jdk.as_path()))
+    else {
+        panic!("SuspendDeadScratch: the front end accepted the source, so lowering/emit bailed");
+    };
+    assert_eq!(
+        out.trim(),
+        "1;2;",
+        "a write to a locally dead scratch must not bail the file"
+    );
+}
