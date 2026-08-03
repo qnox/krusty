@@ -1,6 +1,7 @@
 mod analysis;
 mod compiler_analysis;
 mod dependency_sources;
+mod dependency_symbols;
 pub mod deps_cache;
 pub mod dump_cache;
 mod options;
@@ -12,6 +13,7 @@ mod worker;
 pub use analysis::*;
 pub use compiler_analysis::LibraryRef;
 pub use dependency_sources::render as deps_render;
+pub use dependency_symbols::{DependencyCandidate, DependencySymbolIndex, MAX_DEPENDENCY_CLASSES};
 pub use options::*;
 pub use project::{
     detect, resolve_jdk, JdkRequest, LoadedProjectSources, ProcessRunner, ProjectModel,

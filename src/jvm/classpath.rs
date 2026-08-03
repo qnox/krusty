@@ -3477,6 +3477,21 @@ pub struct PackageTree {
 }
 
 impl PackageTree {
+    /// Every class the classpath declares, as its slashed internal name and the jar that owns it.
+    ///
+    /// Sorted by name and classpath order, which is the order the catalog was composed in: the
+    /// first jar to declare a name is the one that wins resolution, and iteration preserves that.
+    pub fn classes(&self) -> impl Iterator<Item = (String, JarId)> + '_ {
+        self.classes
+            .iter()
+            .map(|(name, jar)| (self.names.render(*name), *jar))
+    }
+
+    /// How many classes [`PackageTree::classes`] would yield.
+    pub fn class_count(&self) -> usize {
+        self.classes.len()
+    }
+
     /// The node for a slashed package path (`""` = this root), or `None` if no jar declares it. The
     /// resolution seam (wired in a later rollout step); exercised now by the compose unit tests.
     #[allow(dead_code)]

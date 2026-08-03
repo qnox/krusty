@@ -546,3 +546,40 @@ fn materialize_prefers_attached_source_and_honors_the_flag() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn the_real_stdlib_classpath_is_searchable_by_class_name() {
+    let cp = Rc::new(stdlib_classpath());
+    if cp.scan_types().is_empty() {
+        return;
+    }
+    let tree = cp.package_tree();
+    let index = krusty_lsp::DependencySymbolIndex::from_internal_names(
+        tree.classes().map(|(internal, _)| internal),
+    );
+
+    assert!(
+        index.class_count() > 100,
+        "the stdlib declares more than a handful of classes, got {}",
+        index.class_count()
+    );
+    assert!(index.is_complete());
+
+    let found = index.candidates("AbstractList", 8);
+    let listed = found
+        .iter()
+        .find(|candidate| candidate.internal == "kotlin/collections/AbstractList")
+        .expect("kotlin.collections.AbstractList is on the stdlib classpath");
+    assert_eq!(listed.name, "AbstractList");
+    assert_eq!(listed.package, "kotlin.collections");
+
+    // Every candidate must name a class the classpath can actually resolve, or the location step
+    // would have nothing to render.
+    for candidate in index.candidates("Iterable", 8) {
+        assert!(
+            cp.find(&candidate.internal).is_some(),
+            "{} was indexed but the classpath cannot find it",
+            candidate.internal
+        );
+    }
+}

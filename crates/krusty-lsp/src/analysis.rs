@@ -2263,11 +2263,11 @@ fn workspace_symbol_parent_is_valid(
 /// after the last `::` for its own filter, so an empty remainder disables client filtering and leaves
 /// the server authoritative.
 #[derive(Debug, PartialEq, Eq)]
-struct WorkspaceQuery {
+pub(crate) struct WorkspaceQuery {
     /// Folded name pattern; may contain `*` and `?` when `globbed` is set.
-    pattern: String,
+    pub(crate) pattern: String,
     /// Folded package prefix, when the query was written qualified (`kotlin.collections.listOf`).
-    package: Option<String>,
+    pub(crate) package: Option<String>,
     /// Separator used by the client. Qualified response names preserve it so a client that
     /// re-filters the returned text can match both dotted and slashed queries.
     separator: Option<char>,
@@ -2275,7 +2275,7 @@ struct WorkspaceQuery {
 }
 
 impl WorkspaceQuery {
-    fn parse(raw: &str) -> WorkspaceQuery {
+    pub(crate) fn parse(raw: &str) -> WorkspaceQuery {
         // Everything before the last `::` is the server-side query; the marker itself is not matched.
         let body = raw.rsplit_once("::").map_or(
             raw,
@@ -2386,7 +2386,7 @@ fn next_character(value: &str, offset: usize) -> Option<(char, usize)> {
 /// Positional ЙЦУКЕН -> QWERTY mapping, for a query typed without switching layout.
 ///
 /// Returns `None` when the query holds no Cyrillic, so callers can skip the second search.
-fn qwerty_from_cyrillic(query: &str) -> Option<String> {
+pub(crate) fn qwerty_from_cyrillic(query: &str) -> Option<String> {
     let mut mapped = String::with_capacity(query.len());
     let mut translated = false;
     for character in query.chars() {
@@ -2441,7 +2441,7 @@ fn qwerty_from_cyrillic_character(character: char) -> Option<char> {
     })
 }
 
-fn camel_hump_initials(name: &str) -> String {
+pub(crate) fn camel_hump_initials(name: &str) -> String {
     let mut initials = String::new();
     let mut chars = name.chars().peekable();
     let mut previous = None;
@@ -2460,7 +2460,7 @@ fn camel_hump_initials(name: &str) -> String {
     initials
 }
 
-fn is_ordered_subsequence_lowercase(haystack: &str, lowercase_needle: &str) -> bool {
+pub(crate) fn is_ordered_subsequence_lowercase(haystack: &str, lowercase_needle: &str) -> bool {
     if lowercase_needle.is_empty() {
         return true;
     }
@@ -2496,7 +2496,7 @@ fn is_ordered_subsequence_lowercase(haystack: &str, lowercase_needle: &str) -> b
     false
 }
 
-fn starts_with_lowercase(haystack: &str, lowercase_needle: &str) -> bool {
+pub(crate) fn starts_with_lowercase(haystack: &str, lowercase_needle: &str) -> bool {
     if !haystack.is_ascii() || !lowercase_needle.is_ascii() {
         return haystack.to_lowercase().starts_with(lowercase_needle);
     }
