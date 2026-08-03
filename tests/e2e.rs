@@ -354,6 +354,8 @@ mod diagnostic_markers_e2e;
 mod diagnostics_match_kotlinc;
 #[path = "diverging_init_e2e.rs"]
 mod diverging_init_e2e;
+#[path = "diverging_lambda_e2e.rs"]
+mod diverging_lambda_e2e;
 #[path = "do_while_e2e.rs"]
 mod do_while_e2e;
 #[path = "dotted_extension_receiver_e2e.rs"]

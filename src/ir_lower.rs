@@ -9031,13 +9031,37 @@ impl<'a> Lower<'a> {
         let implicit_count = context_count + receiver_count;
         let has_implicit_receiver = implicit_count > 0;
         let value_arity = arity.saturating_sub(implicit_count);
-        // A `Nothing`-returning lambda whose body is an unconditional NON-LOCAL `return` (`f { return … }`)
-        // is handled by the diverging path below: it only ever splices (the impl method is marked
-        // inline-only and not emitted), so its `return` becomes the enclosing fn's return, and the splicer
-        // synthesizes the stack-map frame the host's now-unreachable post-invoke continuation needs. But a
-        // Nothing lambda WITHOUT a bare return (a `throw`, or only a `return@label` — which can materialize
-        // as a real closure) isn't modeled that way — bail (skip, never miscompile) as before.
-        if sig.ret == Ty::Nothing && !body_has_bare_return(self.afile, body) {
+        // A `Nothing`-returning lambda needs no special handling here. One whose body is an
+        // unconditional NON-LOCAL `return` (`f { return … }`) only ever splices — the impl method is
+        // marked inline-only below and never emitted — so its `return` becomes the enclosing fn's
+        // return and the splicer synthesizes the stack-map frame the host's now-unreachable
+        // post-invoke continuation needs. One that diverges any OTHER way (a `throw`, or only a
+        // `return@label`) materializes as an ordinary closure whose impl method simply never falls off
+        // its end, which the diverging path below already emits.
+        //
+        // …with one correction to the declared type. A body that leaves ONLY through the lambda's own
+        // `return@label` is typed `Nothing` — it never falls off its end — yet it still produces that
+        // return's value, and the closure method is what returns it. Taking `Nothing` literally emits a
+        // void `return` with the value still on the operand stack ("Method expects a return value").
+        // Recover the labelled returns' common type; `Nothing` stands for every other divergence.
+        let lambda_ret = if sig.ret == Ty::Nothing {
+            self.afile
+                .lambda_labels
+                .get(&e.0)
+                .and_then(|label| self.labeled_return_ty(body, label))
+                .unwrap_or(sig.ret)
+        } else {
+            sig.ret
+        };
+        // A body that returns a value the recovery above could not type — a labelled return whose
+        // label is implicit (`build { return@build … }`, not spelled on the lambda), or a valueless
+        // `return@label` in a `Unit` lambda — would emit that same void `return` under a `Nothing`
+        // closure type. Skip those rather than miscompile; a body that diverges without returning at
+        // all (a `throw`) is unaffected, since it never reaches a return instruction.
+        if lambda_ret == Ty::Nothing
+            && body_has_return(self.afile, body)
+            && !body_has_bare_return(self.afile, body)
+        {
             return None;
         }
         // Bound parameter names: explicit, or the implicit single `it` for a unary lambda. For a receiver
@@ -9152,7 +9176,7 @@ impl<'a> Lower<'a> {
         // Closures return `Unit` through its reference carrier, including for `Unit?`.
         let sam_void_pre = matches!(&sam, Some((_, _, _, true)));
         let returns_unit_ref =
-            sig.ret.non_null() == Ty::Unit && !sam_void_pre && self.info.ty(body) != Ty::Nothing;
+            lambda_ret.non_null() == Ty::Unit && !sam_void_pre && self.info.ty(body) != Ty::Nothing;
         let saved_unit_ref =
             std::mem::replace(&mut self.cur_method_returns_unit_ref, returns_unit_ref);
         // When this closure does NOT capture the enclosing `this`, lower its body with `cur_class`
@@ -9181,7 +9205,7 @@ impl<'a> Lower<'a> {
             .filter(|_| !body_has_bare_return(self.afile, body))
             .cloned();
         let saved_ret_ty = if is_anon_fun || own_closure_label.is_some() {
-            Some(std::mem::replace(&mut self.cur_ret_ty, sig.ret))
+            Some(std::mem::replace(&mut self.cur_ret_ty, lambda_ret))
         } else {
             None
         };
@@ -9224,29 +9248,29 @@ impl<'a> Lower<'a> {
         // non-local return), not the lambda.
         let (ret_ty, block, inline_body) = if diverges {
             let b = self.emit_block(vec![ve], None);
-            (ty_to_ir(sig.ret), b, ve)
+            (ty_to_ir(lambda_ret), b, ve)
         } else if sam_void {
             // The SAM method returns `void` (`run()V`): run the body for effect, no return value.
             let b = self.emit_block(vec![ve], None);
             (ty_to_ir(Ty::Unit), b, ve)
-        } else if sig.ret == Ty::Unit {
+        } else if lambda_ret == Ty::Unit {
             let unit = self.emit_unit();
             let ret = self.emit_return(Some(unit));
             let b = self.emit_block(vec![ve, ret], None);
             let inline_b = self.emit_block(vec![ve], Some(unit));
             (ty_to_ir(stored_value_ty(Ty::Unit)), b, inline_b)
         } else {
-            let ret_val = if sig.ret.is_reference()
-                && !matches!(sig.ret, Ty::Null)
-                && !sig.ret.is_erased_top()
+            let ret_val = if lambda_ret.is_reference()
+                && !matches!(lambda_ret, Ty::Null)
+                && !lambda_ret.is_erased_top()
             {
-                self.emit_type_op(IrTypeOp::Cast, ve, ty_to_ir(sig.ret))
+                self.emit_type_op(IrTypeOp::Cast, ve, ty_to_ir(lambda_ret))
             } else {
                 ve
             };
             let ret = self.emit_return(Some(ret_val));
             let b = self.emit_block(vec![ret], None);
-            (ty_to_ir(sig.ret), b, ret_val)
+            (ty_to_ir(lambda_ret), b, ret_val)
         };
         let seq = self.next_synthetic_seq();
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, seq);

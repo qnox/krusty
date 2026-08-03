@@ -4008,3 +4008,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class. Tests: `fun_interface_value_class_e2e` (parameter, return, scalar underlying, and the generic
   slot that must still box), corpus `inlineClasses/funInterface/{argumentResult,returnResult}.kt`,
   `inlineClasses/kt44141.kt`.
+
+- **A `Nothing`-bodied lambda materializes as an ordinary closure.** A lambda whose body diverges is
+  typed `-> Nothing`, and krusty skipped the whole file on one that did NOT diverge through a bare
+  non-local `return` — which is what made `runCatching { throw … }` uncompilable. Nothing about the
+  shape needs modelling: the closure's impl method simply never falls off its end, so the existing
+  diverging path emits it. One correction to the declared type is owed, though. A body that leaves
+  ONLY through the lambda's own `return@label` is also typed `Nothing` — it never falls off its end —
+  yet it still produces that return's value and the closure method is what returns it; taking
+  `Nothing` literally emits a void `return` with the value still on the operand stack ("Method expects
+  a return value"). The labelled returns' common type is recovered and used as the closure's return.
+  A body whose returned value that recovery cannot type — an IMPLICIT label (`build { return@build … }`,
+  not spelled on the lambda) or a valueless `return@label` in a `Unit` lambda — still skips, since it
+  would emit exactly that void return; a body that diverges without returning at all is unaffected,
+  never reaching a return instruction. Tests: `diverging_lambda_e2e`,
+  `feature_coverage_n_e2e::result_is_success`; corpus `labels/infixCallLabelling.kt` and
+  `coroutines/nonLocalReturn.kt` are the shapes still skipped.
