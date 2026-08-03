@@ -2532,6 +2532,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor-alias registration and classifier lookups are keyed by. Tests:
   `tests/feature_coverage_r_e2e.rs::typealias_in_signatures_and_bodies`,
   `tests/feature_coverage_x_e2e.rs::typealias_function_and_generic`.
+- **Sealed exhaustiveness descends the hierarchy.** A sealed subclass that is ITSELF sealed is
+  covered when all of ITS subclasses are: the hierarchy is a tree and only its LEAVES can be
+  instantiated. Checking only the DIRECT subclasses reported
+  `sealed class Node { sealed class Leaf : Node(); … }` covered by `IntLeaf`/`StrLeaf`/`Branch` as
+  non-exhaustive, demanding an `is Leaf` branch kotlinc rejects as redundant. Test:
+  `tests/feature_coverage_r_e2e.rs::nested_sealed_hierarchy`.
 
 ## 8. Success criteria for the PoC
 

@@ -18445,9 +18445,42 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let mut missing = subclasses
+        // A sealed subclass that is ITSELF sealed is covered when all of ITS subclasses are: the
+        // hierarchy is a tree, and only its LEAVES can be instantiated. `sealed class Node { sealed
+        // class Leaf : Node(); … }` covered by `IntLeaf`/`StrLeaf`/`Branch` is exhaustive, and
+        // demanding `is Leaf` asked for a branch kotlinc rejects as redundant. The depth cap only
+        // guards against a malformed hierarchy looping.
+        fn uncovered_leaves(
+            checker: &Checker<'_>,
+            subclass: TypeName,
+            covered: &std::collections::HashSet<TypeName>,
+            depth: u32,
+            out: &mut Vec<TypeName>,
+        ) {
+            if covered.contains(&subclass) {
+                return;
+            }
+            let nested: Vec<TypeName> = (depth < 16)
+                .then(|| checker.resolved_type_name(subclass))
+                .flatten()
+                .map(|shape| shape.sealed_subclasses.iter_ids().collect())
+                .unwrap_or_default();
+            if nested.is_empty() {
+                out.push(subclass);
+                return;
+            }
+            for child in nested {
+                uncovered_leaves(checker, child, covered, depth + 1, out);
+            }
+        }
+        let mut uncovered = Vec::new();
+        for subclass in subclasses {
+            uncovered_leaves(self, subclass, &covered, 0, &mut uncovered);
+        }
+        uncovered.sort_by_key(|subclass| subclass.render());
+        uncovered.dedup();
+        let mut missing = uncovered
             .into_iter()
-            .filter(|subclass| !covered.contains(subclass))
             .map(|subclass| {
                 let rendered = subclass.render();
                 let name = rendered.rsplit(['/', '$', '.']).next().unwrap_or(&rendered);
