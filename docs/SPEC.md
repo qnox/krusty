@@ -2423,6 +2423,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nothing rules the builder out. Tests:
   `tests/scope_function_value_arg_e2e.rs::apply_accepts_receiver_function_value_argument`,
   `tests/lower_bail_reason_e2e.rs::gated_corpus_cases_report_precise_lower_bail`.
+- **A typealias keeps its target's type ARGUMENTS.** The parser recorded only the target's head name
+  and skipped the rest of the line, so `typealias IntList = List<Int>` aliased a RAW `List` and
+  `for (x in xs)` handed back the erased bound ("operator cannot be applied to 'Int' and 'Any'"). An
+  alias whose target carries type arguments now expands STRUCTURALLY, through the same pass and
+  use-site substitution the function-type aliases already used (`typealias Table<V> = Map<String, V>`
+  → `Table<Int>` is `Map<String, Int>`). A bare `typealias A = Foo` keeps the name map, which the
+  constructor-alias registration and classifier lookups are keyed by. Tests:
+  `tests/feature_coverage_r_e2e.rs::typealias_in_signatures_and_bodies`,
+  `tests/feature_coverage_x_e2e.rs::typealias_function_and_generic`.
 
 ## 8. Success criteria for the PoC
 
