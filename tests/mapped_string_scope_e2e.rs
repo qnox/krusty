@@ -1,9 +1,9 @@
 //! `kotlin/String`'s member scope is its `.kotlin_builtins` declaration, not the method set of the
 //! `java.lang.String` it maps to. Taking the Java set put the whole JDK API into the Kotlin scope —
 //! `getChars`, `concat`, `replaceAll`, `equalsIgnoreCase`, … — every one of which kotlinc reports as
-//! unresolved. Unlike the collections' `remove(int)` this leak silently miscompiled nothing, but it
-//! accepted a large body of source kotlinc rejects, and each such member shadowed the `kotlin.text`
-//! extension that IS the Kotlin API for that operation.
+//! unresolved. Most merely accepted source kotlinc rejects, but `java.lang.String.split(String)` also
+//! selected regex/array semantics instead of Kotlin's literal-delimiter/List extension. Each leaked
+//! Java member could likewise shadow a `kotlin.text` or user extension that IS the Kotlin API.
 //!
 //! The three shapes the Java scope had been covering — `substring(Int)`, `substring(Int, Int)` and
 //! `indexOf(String)` — reach their `kotlin.text` extensions instead. They must be RUN, not merely
@@ -121,6 +121,23 @@ fn a_same_module_extension_shadows_the_java_member() {
         r#"
         fun String.substring(n: Int): String = "shadow"
         fun box(): String = "abcdef".substring(1)
+        "#,
+        "Main",
+    ) else {
+        panic!("compile/run returned None");
+    };
+    assert_eq!(output, "shadow");
+}
+
+#[test]
+fn a_selected_source_extension_is_not_replaced_by_a_name_based_fallback() {
+    // The checker and lowerer must consume the same selected origin. `trimIndent` has a deliberately
+    // classpath-less constant-fold fallback, but a source extension wins overload resolution; lowering
+    // must not see the familiar name and fold the literal as though no callable had been selected.
+    let Some(output) = common::compile_and_run_with_stdlib(
+        r#"
+        fun String.trimIndent(): String = "shadow"
+        fun box(): String = "  original  ".trimIndent()
         "#,
         "Main",
     ) else {

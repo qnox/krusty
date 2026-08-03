@@ -1060,6 +1060,43 @@ fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
     Some(sc)
 }
 
+/// The classpath-less `String` extension fallback: with no stdlib/JDK on the classpath there is no
+/// signature to resolve against, so the few `String` names whose result type is fixed by the language
+/// are answered directly. All of them are stdlib EXTENSIONS on `kotlin.String` rather than members of
+/// it (`kotlin.String` declares only `plus`/`get`/`subSequence`/`compareTo`/`length`/`equals`/
+/// `hashCode`/`toString`), so this table must never out-rank a user's own extension of the same name.
+///
+/// Shared by the qualified arm and the safe-call arm on purpose: they must agree about what exists,
+/// or `s!!.substring(1)` compiles while `s?.substring(1)` reports an unresolved reference. (Only the
+/// qualified arm had this table, and the asymmetry was invisible while the safe-call arm returned a
+/// silent `Ty::Error` instead of reporting.) Both call forms consult it only after the ordinary
+/// member/extension resolution ladder has declined the call. That ordering is part of the semantic
+/// contract: this table supplies missing standard-library metadata; it must never masquerade as a
+/// member and outrank a real source or classpath extension with the same name.
+const CLASSPATHLESS_STRING_EXTENSION_SIGNATURES: &[(&str, &[Ty], Ty)] = &[
+    ("substring", &[Ty::Int], Ty::String),
+    ("substring", &[Ty::Int, Ty::Int], Ty::String),
+    ("indexOf", &[Ty::String], Ty::Int),
+    // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile time on a
+    // string-literal receiver (codegen rejects a non-literal receiver).
+    ("trimIndent", &[], Ty::String),
+    ("trimMargin", &[], Ty::String),
+];
+
+fn classpathless_string_extension_ret(name: &str, arg_tys: &[Ty]) -> Option<Ty> {
+    CLASSPATHLESS_STRING_EXTENSION_SIGNATURES
+        .iter()
+        .find_map(|&(candidate, params, ret)| {
+            (candidate == name && params == arg_tys).then_some(ret)
+        })
+}
+
+fn classpathless_string_extension_exists(name: &str) -> bool {
+    CLASSPATHLESS_STRING_EXTENSION_SIGNATURES
+        .iter()
+        .any(|(candidate, _, _)| *candidate == name)
+}
+
 /// Recognize and safely fold the integer-constant syntax accepted at call sites.
 ///
 /// This is deliberately the one AST walk used by both lightweight signature inference and the full
@@ -4358,6 +4395,10 @@ fn collect_signatures_with_cp_impl(
             names
         })
         .collect();
+    let anonymous_lexical_scopes = files
+        .iter()
+        .map(anonymous_lexical_class_scope)
+        .collect::<Vec<_>>();
     let source_classifier_visibility = files
         .iter()
         .flat_map(|file| {
@@ -4468,6 +4509,7 @@ fn collect_signatures_with_cp_impl(
     for (i, file) in files.iter().enumerate() {
         diags.set_file(i as u32);
         let class_names = file_class_names[i].clone();
+        let anonymous_lexical_scope = &anonymous_lexical_scopes[i];
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
@@ -4879,10 +4921,7 @@ fn collect_signatures_with_cp_impl(
                     }
                 }
                 Decl::Class(c) => {
-                    let anonymous_object = file
-                        .anonymous_object_classes
-                        .values()
-                        .any(|declaration| *declaration == d);
+                    let anonymous_object = anonymous_lexical_scope.declarations.contains(&d);
                     let internal = class_names
                         .get(&c.name)
                         .map(TypeName::render)
@@ -4928,12 +4967,12 @@ fn collect_signatures_with_cp_impl(
                     // type is a hoisted top-level `Decl::Class` named `Outer.Inner`; map its last segment.
                     let class_names = {
                         let mut ext = class_names.clone();
-                        let inheritor = type_name(&class_internal(file, &c.name));
-                        let lexical_inheritors =
-                            crate::symbol_resolver::lexical_enclosing_classifier_names(
-                                inheritor,
-                                |candidate| source_direct_supertypes.contains_key(&candidate),
-                            );
+                        let lexical_inheritors = declaration_lexical_class_names(
+                            file,
+                            d,
+                            anonymous_lexical_scope,
+                            |candidate| source_direct_supertypes.contains_key(&candidate),
+                        );
                         let mut referenced_types = std::collections::HashSet::new();
                         collect_class_type_names(file, c, &mut referenced_types);
                         for name in &referenced_types {
@@ -9367,6 +9406,11 @@ pub enum ResolvedCall {
         physical_params: Vec<Ty>,
         ret: Ty,
         physical_ret: Ty,
+        /// Selected callable capabilities. These stay on the semantic target so every later consumer
+        /// answers "does this exact call suspend/require splicing?" without looking the source name up
+        /// again or branching on whether the declaration came from this file or a dependency.
+        inline: InlineKind,
+        suspend: bool,
         interface: bool,
         /// The semantic vararg slot. Its presence is the vararg flag and its value drives packing.
         vararg_index: Option<usize>,
@@ -9380,11 +9424,11 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
-        /// The selected callable's generic [`InlineKind::MustInline`] capability: a direct fallback
-        /// is semantically illegal even if a facade method is physically emitted to publish inline
-        /// code. Same-file lowering may splice it first; every remaining path must bail. Carrying
-        /// the resolved capability keeps lowering independent of source syntax and symbol origin.
-        requires_splice: bool,
+        /// Selected callable capabilities. Carrying the complete semantic facts, rather than only a
+        /// derived `requires_splice` bit, lets safety gates distinguish `suspend inline` from ordinary
+        /// inline calls and keeps those gates independent of declaration name and symbol origin.
+        inline: InlineKind,
+        suspend: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -9421,6 +9465,51 @@ impl ResolvedCall {
             Self::ModuleExtension { owner, .. } => *owner,
             Self::ModuleTopLevel(_) | Self::LocalFunction(_) => None,
         }
+    }
+
+    /// Whether this exact checker-selected call suspends. This is the common classification consumed
+    /// by AST-level coroutine discovery before an IR suspension set exists.
+    pub(crate) fn is_suspend(&self) -> bool {
+        match self {
+            Self::Member(resolved) => resolved.suspend,
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => callable.suspend,
+            Self::Companion(member) => member.suspend(),
+            Self::ModuleMember { suspend, .. }
+            | Self::ModuleMemberExtension { suspend, .. }
+            | Self::ModuleExtension { suspend, .. } => *suspend,
+            Self::ModuleTopLevel(callable) => callable.suspend,
+            Self::LocalFunction(callable) => callable.sig.is_suspend(),
+        }
+    }
+
+    /// Inline capability of the exact selected target. `None` means an ordinary callable, while the
+    /// stronger states preserve whether splicing is optional or mandatory.
+    fn inline_kind(&self) -> InlineKind {
+        match self {
+            Self::Member(resolved) => resolved.member.inline,
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => callable.inline,
+            Self::Companion(member) => member.inline,
+            Self::ModuleMember { inline, .. }
+            | Self::ModuleMemberExtension { inline, .. }
+            | Self::ModuleExtension { inline, .. } => *inline,
+            Self::ModuleTopLevel(callable) => callable.inline,
+            Self::LocalFunction(callable) => {
+                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice())
+            }
+        }
+    }
+
+    /// Whether this EXACT checker-selected call is both suspending and inline. A suspend lambda's
+    /// state-machine body cannot currently splice such a callee, so lowering must decline it before
+    /// emitting a direct call. Keeping this classification on the resolved target is important: a
+    /// name-wide lookup would conflate overloads and unrelated members, while origin-specific probes
+    /// would make source, sibling-module, and classpath calls disagree.
+    pub(crate) fn is_suspend_inline(&self) -> bool {
+        self.is_suspend() && self.inline_kind().can_inline()
     }
 }
 
@@ -10618,6 +10707,8 @@ fn make_checker<'a>(
         this_extension_receiver: None,
         this_narrow: None,
         this_labels: Vec::new(),
+        lexical_class_context: Vec::new(),
+        exact_anonymous_class_roots: std::collections::HashSet::new(),
         extension_receiver_labels: Vec::new(),
         field_ty: None,
         companion_of: None,
@@ -10938,10 +11029,10 @@ fn install_anonymous_object_captures(
 }
 
 /// Walk expression/statement arenas iteratively from already-identified declaration roots and
-/// record every anonymous-object construction encountered. Keeping the arena walk separate from
-/// `File::any_decl_expr` lets the AST layer describe generic containment while this pass supplies
-/// capture-specific targets and completeness accounting.
-fn record_capture_targets(
+/// record every requested expression encountered. Keeping this traversal generic is important:
+/// capture discovery and lexical-owner discovery ask the same structural containment question, and
+/// neither should grow an origin-specific AST walk that can drift as expression shapes are added.
+fn record_expression_targets(
     file: &File,
     targets: &std::collections::HashSet<ExprId>,
     roots: impl IntoIterator<Item = ExprId>,
@@ -10989,7 +11080,7 @@ fn record_function_capture_targets(
         roots.push(expression);
         false
     });
-    record_capture_targets(file, targets, roots, discovered)
+    record_expression_targets(file, targets, roots, discovered)
 }
 
 /// Kotlin gives these unqualified instance methods a fixed return even when source omits the
@@ -11119,7 +11210,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
             });
             let mut declaration_targets = std::collections::HashSet::new();
             let owns_target =
-                record_capture_targets(file, &targets, roots, &mut declaration_targets);
+                record_expression_targets(file, &targets, roots, &mut declaration_targets);
             if owns_target {
                 if let Decl::Class(class) = file.decl(*declaration) {
                     class_plans.insert(
@@ -11134,7 +11225,7 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
         .collect::<std::collections::HashSet<_>>();
     let script_body = file
         .script_body
-        .is_some_and(|body| record_capture_targets(file, &targets, [body], &mut discovered));
+        .is_some_and(|body| record_expression_targets(file, &targets, [body], &mut discovered));
     // Keep capture analysis conservative as the AST evolves. If a parser change retains an
     // anonymous construction outside the generic declaration-root inventory, retain the old
     // full-file semantic pass rather than silently treating that construction as capture-free.
@@ -11154,6 +11245,106 @@ fn capture_discovery_scope(file: &File) -> CaptureDiscoveryScope {
             std::collections::HashMap::new()
         },
     }
+}
+
+#[derive(Default)]
+struct AnonymousLexicalClassScope {
+    owners: HashMap<DeclId, DeclId>,
+    declarations: std::collections::HashSet<DeclId>,
+}
+
+impl AnonymousLexicalClassScope {
+    /// The declaration followed by its structurally recorded anonymous-object owners, nearest first.
+    /// This is the single graph walk used by signature collection, pre-inference, and the main checker;
+    /// central cycle protection prevents those phases from disagreeing on malformed/recovered input.
+    fn declaration_chain(&self, declaration: DeclId) -> Vec<DeclId> {
+        let mut chain = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut current = Some(declaration);
+        while let Some(candidate) = current {
+            if !visited.insert(candidate) {
+                break;
+            }
+            chain.push(candidate);
+            current = self.owners.get(&candidate).copied();
+        }
+        chain
+    }
+}
+
+/// The source class whose expression tree contains each hoisted anonymous-object construction.
+/// Anonymous classes are file-level synthetic declarations, but their superclass arguments retain
+/// the lexical classifier scope of the construction site (`object : Base(Inner()) {}` inside `Outer`
+/// may name `Outer.Inner` unqualified). This map preserves that source relationship without making
+/// the anonymous class an `inner` class or changing its runtime capture ABI.
+fn anonymous_lexical_class_scope(file: &File) -> AnonymousLexicalClassScope {
+    if file.anonymous_object_classes.is_empty() {
+        return AnonymousLexicalClassScope::default();
+    }
+    let mut owners = HashMap::new();
+    let declarations = file
+        .anonymous_object_classes
+        .values()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let targets = file
+        .anonymous_object_classes
+        .keys()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    for &owner in &file.decls {
+        if !matches!(file.decl(owner), Decl::Class(_)) {
+            continue;
+        }
+        let mut roots = Vec::new();
+        file.any_decl_expr(owner, &mut |expression| {
+            roots.push(expression);
+            false
+        });
+        let mut constructions = std::collections::HashSet::new();
+        record_expression_targets(file, &targets, roots, &mut constructions);
+        for construction in constructions {
+            if let Some(&anonymous) = file.anonymous_object_classes.get(&construction) {
+                owners.entry(anonymous).or_insert(owner);
+            }
+        }
+    }
+    AnonymousLexicalClassScope {
+        owners,
+        declarations,
+    }
+}
+
+/// Classifier roots visible from a declaration in nearest-first order. Ordinary nested declarations
+/// may derive their source parents from their hoisted internal name; anonymous declarations may not —
+/// their generated `$` name is exact, and their parents come only from the structural ownership map.
+fn declaration_lexical_class_names(
+    file: &File,
+    declaration: DeclId,
+    scope: &AnonymousLexicalClassScope,
+    mut exists: impl FnMut(TypeName) -> bool,
+) -> Vec<TypeName> {
+    let mut classes = Vec::new();
+    for candidate in scope.declaration_chain(declaration) {
+        if let Decl::Class(class) = file.decl(candidate) {
+            let internal = type_name(&class_internal(file, &class.name));
+            if scope.declarations.contains(&candidate) {
+                if !classes.contains(&internal) {
+                    classes.push(internal);
+                }
+            } else {
+                for lexical in crate::symbol_resolver::lexical_enclosing_classifier_names(
+                    internal,
+                    &mut exists,
+                ) {
+                    if !classes.contains(&lexical) {
+                        classes.push(lexical);
+                    }
+                }
+            }
+        }
+    }
+    classes
 }
 
 fn discover_anonymous_object_captures_at(file: &File, file_index: u32, syms: &mut SymbolTable) {
@@ -11309,15 +11500,27 @@ fn file_may_depend_on_preinfer_names(
 /// class methods). Returns the names of changed signatures so the module fixpoint can revisit only
 /// files that may depend on them. Runs on a scratch `DiagSink` (inference diagnostics are not the real
 /// check's).
+#[cfg(test)]
 fn preinfer_returns_pass(
     file: &File,
     file_index: u32,
     syms: &mut SymbolTable,
 ) -> PreinferPassResult {
+    let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
+    preinfer_returns_pass_with_owners(file, file_index, syms, &anonymous_lexical_scope)
+}
+
+fn preinfer_returns_pass_with_owners(
+    file: &File,
+    file_index: u32,
+    syms: &mut SymbolTable,
+    anonymous_lexical_scope: &AnonymousLexicalClassScope,
+) -> PreinferPassResult {
     let mut scratch = DiagSink::new();
     let mut pre = make_checker(file, file_index, None, &*syms, &mut scratch);
     let mut inferred_member_ext_rets = Vec::new();
     for &d in &file.decls {
+        pre.set_anonymous_lexical_class_context(d, anonymous_lexical_scope);
         if let Decl::Fun(f) = file.decl(d) {
             if function_needs_return_preinfer(f) {
                 let resolve = class_internal_resolver(pre.syms);
@@ -11499,6 +11702,10 @@ pub fn preinfer_module_returns(files: &[File], syms: &mut SymbolTable, diags: &m
 fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &mut DiagSink) {
     discover_anonymous_object_captures(files, syms);
     let saved = diags.current_file();
+    let anonymous_lexical_scopes = files
+        .iter()
+        .map(anonymous_lexical_class_scope)
+        .collect::<Vec<_>>();
     let candidates = files
         .iter()
         .map(file_has_preinfer_candidates)
@@ -11511,7 +11718,15 @@ fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &
                 continue;
             }
             diags.set_file(i as u32);
-            changed_names.extend(preinfer_returns_pass(file, i as u32, syms).changed_names);
+            changed_names.extend(
+                preinfer_returns_pass_with_owners(
+                    file,
+                    i as u32,
+                    syms,
+                    &anonymous_lexical_scopes[i],
+                )
+                .changed_names,
+            );
         }
         if changed_names.is_empty() {
             break;
@@ -11543,6 +11758,7 @@ fn check_file_at_impl_mode(
     if !capture_discovery {
         discover_anonymous_object_captures_at(file, file_index, syms);
     }
+    let anonymous_lexical_scope = anonymous_lexical_class_scope(file);
     // Pre-infer EXPRESSION-body return types (top-level functions AND class methods) and patch the
     // signature table BEFORE the main check — so a call to `fun m() = f()` resolves to its real return,
     // not the collection default `Unit`. Without this, a method whose return couldn't be inferred at
@@ -11553,7 +11769,9 @@ fn check_file_at_impl_mode(
     // dependency chain is shallow; an unresolvable case simply stops improving).
     if !capture_discovery {
         for _pass in 0..8 {
-            if !preinfer_returns_pass(file, file_index, syms).changed() {
+            if !preinfer_returns_pass_with_owners(file, file_index, syms, &anonymous_lexical_scope)
+                .changed()
+            {
                 break;
             }
         }
@@ -11580,6 +11798,7 @@ fn check_file_at_impl_mode(
             continue;
         }
         c.scopes.truncate(base_scope_depth);
+        c.set_anonymous_lexical_class_context(d, &anonymous_lexical_scope);
         match file.decl(d) {
             Decl::Fun(f) => {
                 let resolve = class_internal_resolver(c.syms);
@@ -12858,6 +13077,8 @@ struct MemberExtensionFunctionCandidate {
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
     is_operator: bool,
+    inline: InlineKind,
+    suspend: bool,
     owner: TypeName,
 }
 
@@ -12872,6 +13093,8 @@ impl MemberExtensionFunctionCandidate {
             physical_params: self.physical_params.clone(),
             ret: self.ret,
             physical_ret: self.physical_ret,
+            inline: self.inline,
+            suspend: self.suspend,
             interface,
             vararg_index: self.call_sig.vararg_index,
         }
@@ -13023,6 +13246,12 @@ struct Checker<'a> {
     /// nothing but classes between) lowers via the inner class's `this$0`. Anything else type-checks but
     /// the lowerer skips it (it can't yet reach a captured / multi-level outer receiver).
     this_labels: Vec<(String, Ty, bool)>,
+    /// Source class owners of a hoisted anonymous-object declaration, nearest first. They contribute
+    /// lexical classifier scope but are not implicit runtime receivers (captures remain a separate ABI).
+    lexical_class_context: Vec<TypeName>,
+    /// Anonymous classifiers in the current structural ownership chain. Their generated `$` names are
+    /// exact roots, never evidence of lexical parents; those come only from `lexical_class_context`.
+    exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
     extension_receiver_labels: Vec<(usize, Span)>,
     /// The backing-field type while checking a property accessor body — makes the `field`
     /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
@@ -13553,15 +13782,6 @@ impl<'a> Checker<'a> {
             contract: None,
         };
         Some((selected, signature))
-    }
-
-    fn source_extension_requires_splice(&self, selected: &crate::libraries::FunctionInfo) -> bool {
-        // Inline fallback legality is part of the resolved callable's semantic state. In
-        // particular, a reified source extension may have a physically emitted facade so another
-        // compilation can read and splice its body, while calling that erased method directly is
-        // still illegal. Reading `InlineKind::MustInline` keeps that distinction independent of
-        // source-file keys and avoids a reified-only side index or per-origin lowering branches.
-        selected.flags.inline.must_inline()
     }
 
     fn check_source_extension_call_args(
@@ -15407,7 +15627,8 @@ impl<'a> Checker<'a> {
             .selected_source_extension(receiver, name, &arg_kinds)
             .filter(|(_, signature)| signature.is_operator() && !signature.vararg())
         {
-            let requires_splice = self.source_extension_requires_splice(&selected);
+            let inline = selected.flags.inline;
+            let suspend = selected.flags.suspend;
             self.expect_call_args(&sig.params, false, arg_exprs, arg_tys);
             let owner = sig
                 .source_file
@@ -15428,7 +15649,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
-                    requires_splice,
+                    inline,
+                    suspend,
                 },
             ));
         }
@@ -18107,15 +18329,24 @@ impl<'a> Checker<'a> {
             .as_deref()
             .and_then(|class| self.syms.classes.get(class))
             .map(ClassSig::internal_name);
-        let roots = companion.into_iter().chain(
-            self.this_labels
-                .iter()
-                .rev()
-                .filter(|(_, _, is_class)| *is_class)
-                .filter_map(|(_, receiver, _)| receiver.obj_internal()),
-        );
+        let roots = companion
+            .into_iter()
+            .chain(
+                self.this_labels
+                    .iter()
+                    .rev()
+                    .filter(|(_, _, is_class)| *is_class)
+                    .filter_map(|(_, receiver, _)| receiver.obj_internal()),
+            )
+            .chain(self.lexical_class_context.iter().copied());
         let mut classes = Vec::new();
         for owner in roots {
+            if self.exact_anonymous_class_roots.contains(&owner) {
+                if !classes.contains(&owner) {
+                    classes.push(owner);
+                }
+                continue;
+            }
             for internal in
                 crate::symbol_resolver::lexical_enclosing_classifier_names(owner, |candidate| {
                     self.syms.class_by_type_name(candidate).is_some()
@@ -18127,6 +18358,38 @@ impl<'a> Checker<'a> {
             }
         }
         classes
+    }
+
+    /// Install the source-class ownership chain for a hoisted anonymous-object declaration. The AST
+    /// relation is acyclic, but retain explicit cycle detection so malformed/recovered trees cannot
+    /// spin forever without imposing an arbitrary nesting limit on valid generated Kotlin.
+    fn set_anonymous_lexical_class_context(
+        &mut self,
+        declaration: DeclId,
+        scope: &AnonymousLexicalClassScope,
+    ) {
+        self.lexical_class_context.clear();
+        self.exact_anonymous_class_roots.clear();
+        for (index, candidate) in scope.declaration_chain(declaration).into_iter().enumerate() {
+            if let Decl::Class(class) = self.file.decl(candidate) {
+                if let Some(internal) = self
+                    .syms
+                    .classes
+                    .get(&class.name)
+                    .map(ClassSig::internal_name)
+                {
+                    // The current declaration already enters through `this_labels`; only structural
+                    // owners belong in the supplemental context. Anonymous roots at either position
+                    // stay exact so a `$` in their generated name never invents another source owner.
+                    if index > 0 {
+                        self.lexical_class_context.push(internal);
+                    }
+                    if scope.declarations.contains(&candidate) {
+                        self.exact_anonymous_class_roots.insert(internal);
+                    }
+                }
+            }
+        }
     }
 
     fn source_package_name(&self) -> TypeName {
@@ -20773,6 +21036,25 @@ impl<'a> Checker<'a> {
         });
         let pts = shape.as_ref().and_then(|shape| shape.param_types.as_ref());
         let receivers = shape.as_ref().and_then(|shape| shape.receivers.as_ref());
+        // A SEMANTIC-PROVIDER member's lambda shape (`re?.replace(s) { m -> m.value }`). The
+        // providers above answer source members and extensions only, so a `?.` call to a library
+        // member whose parameter is a function type or a Java SAM interface left its lambda
+        // unshaped and the parameters typed as `Any` — one `?` away from what the qualified path
+        // already does. Callable precedence is a WHOLE-CALL decision: once a source member or an
+        // extension supplies a shape, never fill an empty slot from a different provider candidate.
+        // This is the qualified path's rule too and keeps two-lambda calls from combining
+        // expectations belonging to callables that cannot both be selected.
+        let provider_member_expectations = (module_shape.is_none() && shape.is_none()).then(|| {
+            self.provider_member_lambda_expectations(
+                call,
+                crate::symbol_resolver::SymRecv::Value(receiver),
+                name,
+                args,
+                &partial,
+                explicit_type_args,
+            )
+        });
+        let provider_member_expectations = provider_member_expectations.flatten();
         args.iter()
             .enumerate()
             .map(|(i, &x)| {
@@ -20827,7 +21109,19 @@ impl<'a> Checker<'a> {
                             self.check_lambda_with_types(x, pt)
                         }
                     }
-                    _ => partial[i].unwrap_or_else(|| self.expr(x)),
+                    _ => {
+                        match provider_member_expectations
+                            .as_ref()
+                            .and_then(|all| all.get(i))
+                            .and_then(Option::as_ref)
+                        {
+                            Some(expectation) => {
+                                let expectation = expectation.clone();
+                                self.check_lambda_with_expectation(x, &expectation, Some(name))
+                            }
+                            None => partial[i].unwrap_or_else(|| self.expr(x)),
+                        }
+                    }
                 }
             })
             .collect()
@@ -21779,7 +22073,8 @@ impl<'a> Checker<'a> {
                 .selected_source_extension(at, "get", &index_kinds)
                 .filter(|(_, signature)| signature.is_operator())
             {
-                let requires_splice = self.source_extension_requires_splice(&selected);
+                let inline = selected.flags.inline;
+                let suspend = selected.flags.suspend;
                 for (i, &pt) in sig.params.iter().enumerate() {
                     self.expect_assignable(pt, its[i], self.span(indices[i]), "index");
                 }
@@ -21803,7 +22098,8 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
-                        requires_splice,
+                        inline,
+                        suspend,
                     },
                 );
                 return self.set(e, sig.ret);
@@ -22287,6 +22583,9 @@ impl<'a> Checker<'a> {
             if rt == Ty::Error {
                 return Ty::Error;
             }
+            // Diagnostic checkpoint for the "nothing resolved, nothing reported" report below. Taken
+            // AFTER the receiver so a receiver-only diagnostic doesn't mask an unresolved member.
+            let checkpoint = self.diags.diags.len();
             // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): the receiver is non-null
             // inside; type it like the non-safe form, then wrap the result nullable below.
             let result = if let Some(t) = self.safe_scope_call_result(rt, &name, &args) {
@@ -22396,7 +22695,7 @@ impl<'a> Checker<'a> {
                                 })
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
-                        } else if let Ty::Obj(internal, _) = recv {
+                        } else if let Ty::Obj(_, _) = recv {
                             // Source members take precedence over extensions and classpath members.
                             let arg_names = self.file.call_arg_names.get(&e.0).cloned();
                             let full_arg_tys =
@@ -22452,23 +22751,25 @@ impl<'a> Checker<'a> {
                                     if labelled {
                                         return None;
                                     }
-                                    self.resolve_instance_name(internal, &name, &arg_tys)
-                                        .map(|m| {
-                                            let ret = m.ret;
-                                            let suspend = m.suspend();
-                                            self.resolved_calls.insert(
-                                                e,
-                                                ResolvedCall::Member(
-                                                    crate::symbol_resolver::ResolvedMember {
-                                                        member: m,
-                                                        ret,
-                                                        projected_return_hazard: false,
-                                                        suspend,
-                                                    },
-                                                ),
-                                            );
-                                            ret
-                                        })
+                                    // Reuse the qualified path's VALUE-receiver resolver. Besides
+                                    // carrying lambda/integer-literal provenance for SAM conversion,
+                                    // it preserves the complete semantic receiver and returns the
+                                    // canonical `ResolvedMember`; resolving by bare class name here
+                                    // would create a second selection path and duplicate selected-
+                                    // member reconstruction below the common resolver.
+                                    let arg_kinds: Vec<CallArgKind> = a
+                                        .iter()
+                                        .zip(&arg_tys)
+                                        .map(|(&x, &ty)| call_arg_kind(self.file, x, ty))
+                                        .collect();
+                                    self.resolve_instance_member_with_literal_and_lambda_args(
+                                        recv, &name, &arg_kinds,
+                                    )
+                                    .map(|member| {
+                                        let ret = member.ret;
+                                        self.resolved_calls.insert(e, ResolvedCall::Member(member));
+                                        ret
+                                    })
                                 })
                                 .or_else(|| {
                                     self.check_member_extension_function_call(
@@ -22562,6 +22863,54 @@ impl<'a> Checker<'a> {
             } else {
                 result
             };
+            // The arguments' RECORDED types. Read, never re-checked: `arg_tys` runs the checker over
+            // each argument again, and a re-check of a lambda body duplicates every diagnostic inside
+            // it (a `when` exhaustiveness error reported twice). Every path that reaches here has
+            // already typed the arguments.
+            let member_arg_tys: Vec<Ty> = args
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|a| self.expr_types[a.0 as usize])
+                .collect();
+            // The classpath-less `String` member fallback, tried LAST — after every classpath, source,
+            // and module origin AND after the source-extension fallback above. `substring`/`indexOf`/
+            // `trimIndent`/`trimMargin` are stdlib EXTENSIONS on `kotlin.String`, not members of it, so
+            // a user's own extension with the same spelling must win over this table; it only stands in
+            // when there is no stdlib on the classpath to resolve against. `concat` is deliberately
+            // absent: it is a Java-only member that Kotlin does not expose.
+            let result = if result == Ty::Error
+                && args.is_some()
+                && rt.non_null() == Ty::String
+                && !self.file.call_arg_names.contains_key(&e.0)
+            {
+                classpathless_string_extension_ret(&name, &member_arg_tys).unwrap_or(Ty::Error)
+            } else {
+                result
+            };
+            // Every callable origin was exhausted, NOTHING was reported, and no member of that name
+            // exists on the receiver at all: the member behind `?.` is a typo. A safe call must
+            // diagnose that exactly like the qualified form — the property spelling (`args: None`)
+            // already does, via `check_member`, but the call spelling returned a silent `Ty::Error`.
+            // Consequences of the silence: on a `String?` receiver the BACKEND bail ("this construct
+            // is not yet supported by the IR backend") stood in for a frontend diagnostic, and on a
+            // statically-`null` receiver — whose lowering folds to `null` without ever looking a
+            // member up — an invalid program compiled clean.
+            //
+            // Both guards matter. The CHECKPOINT keeps an origin that already reported (a rejected
+            // classpath overload, an unmappable labelled call) from being reported twice. The
+            // EXISTENCE probe keeps a member this arm merely cannot select (`d?.toInt()`,
+            // `b?.not()`, `f?.invoke(1)` — all valid Kotlin) from being mislabelled a typo; those
+            // stay a silent `Ty::Error` so the backend bail reports the gap honestly.
+            if result == Ty::Error
+                && self.diags.diags.len() == checkpoint
+                && !self.member_name_exists_on(rt.non_null(), &name)
+            {
+                self.diags.error(
+                    self.member_name_span(e, &name),
+                    format!("unresolved reference '{name}'."),
+                );
+            }
             // Named arguments must have a checker-owned parameter-slot mapping before lowering.
             if result != Ty::Error
                 && !self.resolved_call_arg_slots.contains_key(&e)
@@ -22972,7 +23321,8 @@ impl<'a> Checker<'a> {
                     .selected_source_extension(lt, "compareTo", &rhs_kind)
                     .filter(|(_, signature)| signature.is_operator() && signature.ret == Ty::Int)
                 {
-                    let requires_splice = self.source_extension_requires_splice(&selected);
+                    let inline = selected.flags.inline;
+                    let suspend = selected.flags.suspend;
                     let Some(param) = signature.single_param() else {
                         return self.check_binary(op, lt, rt, self.span(e));
                     };
@@ -22995,7 +23345,8 @@ impl<'a> Checker<'a> {
                             owner,
                             source: selected.source_key,
                             vararg: selected.call_sig.vararg,
-                            requires_splice,
+                            inline,
+                            suspend,
                         },
                     );
                     return self.set(e, Ty::Boolean);
@@ -24173,7 +24524,8 @@ impl<'a> Checker<'a> {
         arg_kinds: &[CallArgKind],
     ) -> Option<Ty> {
         let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
-        let requires_splice = self.source_extension_requires_splice(&selected);
+        let inline = selected.flags.inline;
+        let suspend = selected.flags.suspend;
         // Validate against the resolver's instantiated value parameters, not the declaration's
         // potentially generic signature. This is the contract the former qualified-call block used;
         // retaining it here prevents helper reuse from accepting a safe call that selected a generic
@@ -24209,7 +24561,8 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
-                requires_splice,
+                inline,
+                suspend,
             },
         );
         // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
@@ -25568,7 +25921,8 @@ impl<'a> Checker<'a> {
             );
         }
         if matches!(fi.callable.origin, Origin::Module { .. }) {
-            let requires_splice = self.source_extension_requires_splice(&fi);
+            let inline = fi.flags.inline;
+            let suspend = fi.flags.suspend;
             let (file, declaration) = fi.source_key?;
             let (_, signature) = self
                 .syms
@@ -25596,7 +25950,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
-                    requires_splice,
+                    inline,
+                    suspend,
                 },
             );
             self.resolved_call_arg_slots.insert(call, slots);
@@ -27340,6 +27695,11 @@ impl<'a> Checker<'a> {
                 argument_parameters: instantiated.argument_parameters,
                 visibility: shape.function.signature.visibility,
                 is_operator: shape.is_operator,
+                inline: InlineKind::from_flags(
+                    shape.function.signature.is_inline(),
+                    shape.function.signature.requires_splice(),
+                ),
+                suspend: shape.function.signature.is_suspend(),
                 owner: shape.owner,
             });
         }
@@ -27660,6 +28020,39 @@ impl<'a> Checker<'a> {
             return Some(ret);
         }
         None
+    }
+
+    /// Does ANY callable or property named `name` exist on `recv`, ignoring applicability?
+    ///
+    /// This is deliberately the "is it a typo?" question, kept apart from "can this arm select and
+    /// lower it?". A member that EXISTS but that a particular resolution arm can't handle is a krusty
+    /// gap — the backend bail reports that honestly — and must never be spelled "unresolved
+    /// reference", which tells the user their program is wrong. `Double?.toInt()`, `Boolean?.not()`,
+    /// and `((Int) -> Int)?.invoke(1)` are all real Kotlin the safe-call arm cannot yet resolve.
+    ///
+    /// Shared by the qualified arm's nullable-receiver probe and the safe-call arm's unresolved-member
+    /// report so both agree about what exists. Side-effect free: it reports nothing itself.
+    fn member_name_exists_on(&self, recv: Ty, name: &str) -> bool {
+        self.resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(recv),
+                name,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .is_some_and(|overloads| !overloads.is_empty())
+            // Existence deliberately ignores applicability. Keep the fallback's names and selectable
+            // shapes in one table, but do not call an existing `substring` "unresolved" merely because
+            // this invocation has the wrong arity/type and the no-classpath checker cannot select it.
+            || (recv == Ty::String && classpathless_string_extension_exists(name))
+            || (name == CALLABLE_INVOKE_OPERATOR && matches!(recv, Ty::Fun(_)))
+            // Kotlin's universal names exist independently of the invocation shape. Primitive and
+            // `Nothing` receivers still inherit these semantic names even when this checker arm cannot
+            // select a wrong-arity spelling; applicability must not leak back into typo detection.
+            || matches!(name, "toString" | "hashCode" | "equals")
+            // A callable PROPERTY (`val f: () -> Int`) is invoked with the same spelling.
+            || self.probe_property_read(recv, name).is_some()
     }
 
     fn probe_property_read(&self, rt: Ty, name: &str) -> Option<PropertyReadProbe> {
@@ -30337,11 +30730,6 @@ impl<'a> Checker<'a> {
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
                     }
-                    // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile
-                    // time on a string-literal receiver (codegen rejects a non-literal receiver).
-                    if matches!(name.as_str(), "trimIndent" | "trimMargin") && arg_tys.is_empty() {
-                        return Ty::String;
-                    }
                 }
                 if matches!(
                     (rt, name.as_str(), arg_tys.as_slice()),
@@ -30527,19 +30915,15 @@ impl<'a> Checker<'a> {
                 }
                 // The `kotlin.text` extensions that ARE the Kotlin API for these names — typed, but not
                 // resolved, for a CLASSPATH-FREE check (no stdlib jar, so no `StringsKt` to bind and no
-                // `java.lang.String` classfile either). It must stay BELOW the extension section: these
-                // three type an expression WITHOUT recording a call target, so reaching them ahead of a
+                // `java.lang.String` classfile either). The shared table must stay BELOW the extension
+                // section: its entries type an expression WITHOUT recording a call target, so reaching it ahead of a
                 // real resolution leaves the IR lowerer with nothing to emit ("unrecorded qualified call
                 // target"). That is precisely what `kotlin/String` taking its scope from the builtins
                 // exposed — the Java member set had been covering them, and above the extensions this
                 // arm silently took over and the front end accepted what the backend then bailed on.
                 if rt == Ty::String && !unknown_named_arg {
-                    match (name.as_str(), arg_tys.as_slice()) {
-                        ("substring", [Ty::Int]) | ("substring", [Ty::Int, Ty::Int]) => {
-                            return Ty::String;
-                        }
-                        ("indexOf", [Ty::String]) => return Ty::Int,
-                        _ => {}
+                    if let Some(ret) = classpathless_string_extension_ret(&name, &arg_tys) {
+                        return ret;
                     }
                 }
                 // `a.contentEquals(b)` / `a.contentHashCode()` / `a.isEmpty()` on arrays.
@@ -30743,31 +31127,8 @@ impl<'a> Checker<'a> {
                         }
                         _ => false,
                     };
-                    let exists_on_non_null = self
-                        .resolver()
-                        .resolve_symbol(
-                            crate::symbol_resolver::SymRecv::Value(non_null),
-                            &name,
-                            &[],
-                            &[],
-                        )
-                        .map(crate::symbol_resolver::Symbol::overloads)
-                        .is_some_and(|overloads| !overloads.is_empty())
-                        || {
-                            matches!(
-                                (non_null, name.as_str(), arg_tys.as_slice()),
-                                // The same three shapes the classpath-free typing fallback covers, and
-                                // no more: `concat` came out with it, so a nullable-receiver
-                                // `s.concat("x")` now reports the unresolved reference kotlinc reports
-                                // rather than "only safe (?.) calls are allowed".
-                                (Ty::String, "substring", [Ty::Int])
-                                    | (Ty::String, "substring", [Ty::Int, Ty::Int])
-                                    | (Ty::String, "indexOf", [Ty::String])
-                            )
-                        }
-                        || (name == CALLABLE_INVOKE_OPERATOR && matches!(non_null, Ty::Fun(_)))
-                        || (name == "equals" && arg_tys.len() == 1 && non_null.is_reference())
-                        || callable_property_exists;
+                    let exists_on_non_null =
+                        self.member_name_exists_on(non_null, &name) || callable_property_exists;
                     if exists_on_non_null {
                         self.report_nullable_receiver_call(call, rt);
                         return Ty::Error;
@@ -34988,6 +35349,25 @@ val result = object { fun value(): String = captured }
             errors.is_empty(),
             "nested class self-label should resolve: {errors:?}"
         );
+    }
+
+    #[test]
+    fn anonymous_object_records_its_lexical_source_class_owner() {
+        let source = "open class Base(value: Any)\n\
+                      class Outer {\n\
+                      \u{20} fun build() = object : Base(Inner()) {}\n\
+                      \u{20} private inner class Inner\n\
+                      }";
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        let scope = anonymous_lexical_class_scope(&file);
+        let (&anonymous, &owner) = scope.owners.iter().next().expect("anonymous owner");
+        assert!(file
+            .anonymous_object_classes
+            .values()
+            .any(|id| *id == anonymous));
+        assert!(matches!(file.decl(owner), Decl::Class(class) if class.name == "Outer"));
     }
 
     #[test]

@@ -25,24 +25,9 @@ use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
-        .inner_classes
-        .iter()
-        .find(|entry| type_name(&entry.inner) == class.this_class)
+        .inner_class_self()
         .map(|entry| entry.access)
         .unwrap_or(class.access)
-}
-
-fn inherited_class_access(
-    class: &super::classreader::ClassInfo,
-    internal_name: TypeName,
-) -> Option<u16> {
-    let nested = super::jvm_class_map::to_jvm_type_name(internal_name).render();
-    let (outer, _) = nested.rsplit_once('$')?;
-    class
-        .inner_classes
-        .iter()
-        .find(|entry| entry.inner == nested && entry.outer.as_deref() == Some(outer))
-        .map(|entry| entry.access)
 }
 
 fn internal_package(internal: TypeName) -> String {
@@ -1425,11 +1410,11 @@ impl JvmLibraries {
             // and `Any`, and every subtype test against them would start failing).
             let kotlin_scope_is_authoritative = is_mapped_builtin
                 && self.cp.builtin_is_interface(&rendered_internal).is_some()
-                && (super::jvm_class_map::jvm_collection_to_kotlin_type_name(
-                    super::jvm_class_map::to_jvm_type_name(internal_name),
-                )
-                .is_some()
-                    || internal_name.matches("kotlin/String"));
+                // Scope provenance belongs to the central Kotlin↔JVM mapping. Keeping the policy
+                // there avoids a classpath-origin branch (and a second collection/String name list)
+                // in this loader; this site only combines that semantic policy with the runtime
+                // capability that the corresponding builtins declaration was actually decoded.
+                && super::jvm_class_map::mapped_builtin_has_authoritative_kotlin_scope(internal_name);
             let mut supertypes = TypeNameList::new();
             if kotlin_scope_is_authoritative {
                 // `java/io/Serializable` survives the replacement. It is not a Kotlin type and so is
@@ -2693,7 +2678,9 @@ impl SymbolSource for JvmLibraries {
     ) -> Option<std::rc::Rc<LibraryType>> {
         let jvm_name = super::jvm_class_map::to_jvm_type_name(internal_name);
         let class = self.cp.find_name(jvm_name)?;
-        let access = inherited_class_access(&class, internal_name)?;
+        // Inherited lookup applies only to a genuine member classifier. Requiring a structural self
+        // entry avoids treating a top-level class whose legal name contains `$` as inheritable.
+        let access = class.inner_class_self()?.access;
         let accessible = if let Some(visibility) = class.meta.class_visibility {
             matches!(visibility, Visibility::Public | Visibility::Protected)
         } else {
@@ -3242,6 +3229,11 @@ impl SymbolSource for JvmLibraries {
                             inline: m.inline,
                             suspend,
                             signature: m.signature.clone(),
+                            // Whether the dispatch owner is an interface is the MEMBER's fact here.
+                            // For a mapped builtin resolved with no JDK on the classpath the JVM
+                            // owner (`java/util/List`) has no class file, so the call site cannot
+                            // recover it later — carry it on the selected callable.
+                            owner_is_interface: m.is_interface(),
                             ..LibraryCallable::library(
                                 m.owner.as_ref().cloned().unwrap_or(cn),
                                 m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
@@ -3470,10 +3462,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
+        // One identity table owns every Kotlin builtin and its mapped JVM face. This capability used
+        // to be inferred from three partial maps (Kotlin spelling, collection inverse, and a curated
+        // interface-name subset), so adding a mapped class could change the answer depending on which
+        // unrelated facet happened to list it.
         internal.starts_with("kotlin/")
-            || super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(internal).is_some()
-            || super::jvm_class_map::jvm_collection_to_kotlin_type_name(internal).is_some()
-            || super::jvm_class_map::jvm_mapped_builtin_is_interface_name(internal).is_some()
+            || super::jvm_class_map::type_name_to_jvm_builtin_internal(internal).is_some()
     }
 
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {
@@ -4133,6 +4127,31 @@ mod tests {
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
     use crate::types::Ty;
+
+    #[test]
+    fn inherited_access_finds_self_entry_when_member_name_contains_dollar() {
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &[(
+                String::new(),
+                "class Outer { public static class Inner$Part {} }".into(),
+            )],
+            crate::jvm::java_stub::StubMode::Strict,
+            &|candidate| candidate == "java/lang/Object",
+        )
+        .expect("stubs");
+        let class = stubs
+            .iter()
+            .find(|(name, _)| name == "Outer$Inner$Part")
+            .and_then(|(_, bytes)| crate::jvm::classreader::parse_class(bytes).ok())
+            .expect("member class");
+
+        assert_eq!(
+            class
+                .inner_class_self()
+                .map(|entry| entry.access & crate::jvm::classfile::ACC_PUBLIC),
+            Some(crate::jvm::classfile::ACC_PUBLIC)
+        );
+    }
 
     #[test]
     fn descriptor_void_reference_normalizes_before_core() {

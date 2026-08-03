@@ -212,6 +212,8 @@ mod classpath_subtype_ctor_arg_e2e;
 mod classpath_super_call_e2e;
 #[path = "classpath_super_ctor_args_e2e.rs"]
 mod classpath_super_ctor_args_e2e;
+#[path = "classpath_suspend_receiver_lambda_e2e.rs"]
+mod classpath_suspend_receiver_lambda_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
 #[path = "classpath_top_level_property_e2e.rs"]
@@ -350,6 +352,8 @@ mod diagnostic_markers_e2e;
 mod diagnostics_match_kotlinc;
 #[path = "diverging_init_e2e.rs"]
 mod diverging_init_e2e;
+#[path = "diverging_value_position_e2e.rs"]
+mod diverging_value_position_e2e;
 #[path = "do_while_e2e.rs"]
 mod do_while_e2e;
 #[path = "dotted_extension_receiver_e2e.rs"]
@@ -622,6 +626,8 @@ mod lambda_vs_block_fun_type_e2e;
 mod lateinit_local_e2e;
 #[path = "lib_fixture_parallel_e2e.rs"]
 mod lib_fixture_parallel_e2e;
+#[path = "library_fun_type_lambda_param_e2e.rs"]
+mod library_fun_type_lambda_param_e2e;
 #[path = "list_fold_e2e.rs"]
 mod list_fold_e2e;
 #[path = "literal_escapes_coverage_e2e.rs"]
@@ -738,6 +744,8 @@ mod nested_type_scope_e2e;
 mod nested_type_shadowing_e2e;
 #[path = "newline_method_chain_e2e.rs"]
 mod newline_method_chain_e2e;
+#[path = "no_jdk_builtin_emit_e2e.rs"]
+mod no_jdk_builtin_emit_e2e;
 #[path = "non_field_ctor_metadata_e2e.rs"]
 mod non_field_ctor_metadata_e2e;
 #[path = "not_null_assert_e2e.rs"]
@@ -878,6 +886,8 @@ mod safe_call_member_on_generic_result_e2e;
 mod safe_call_prim_intrinsic_e2e;
 #[path = "safe_call_primitive_e2e.rs"]
 mod safe_call_primitive_e2e;
+#[path = "safe_call_unresolved_member_e2e.rs"]
+mod safe_call_unresolved_member_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
 mod safe_cast_elvis_e2e;
 #[path = "sam_classpath_e2e.rs"]

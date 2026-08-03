@@ -8405,6 +8405,13 @@ impl<'a> Emitter<'a> {
         if !self.is_real_nothing_call(node) {
             return false;
         }
+        // The invoke was emitted with ZERO result words — `slot_words(Nothing)` is 0 because a
+        // `Nothing` call yields no VALUE — yet it physically leaves one `Void` word. Re-declare that
+        // word before discarding it: otherwise the tracked height sits one below the real stack from
+        // the invoke onwards, `max_stack` is undercounted by whatever this path pushes on top
+        // (`println(boom())` needs the `PrintStream` receiver underneath), and the JVM rejects the
+        // method with "Operand stack overflow".
+        code.set_stack((code.stack_height().max(0) + 1) as u16);
         code.pop();
         let cls = self.cw.class_ref("kotlin/KotlinNothingValueException");
         code.new_obj(cls);
@@ -11074,7 +11081,10 @@ impl<'a> Emitter<'a> {
         let mut fin_ranges: Vec<(Label, Label)> = vec![(start, end)];
         for c in catches {
             let handler = code.new_label();
-            code.bind(handler);
+            // A handler is entered over the exception edge, not by a branch — and a diverging `try`
+            // body leaves the stream dead exactly here, so binding must revive on the range it guards
+            // rather than on an incoming branch.
+            code.bind_handler(handler, &[(start, end)]);
             let exc_internal = c.exc_internal.render();
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
@@ -11132,7 +11142,9 @@ impl<'a> Emitter<'a> {
         // inlined finally code — which lies past those ranges, so it doesn't re-catch itself.
         if let Some(f) = finally {
             let fin_handler = code.new_label();
-            code.bind(fin_handler);
+            // Exception edge — see the `catch` handler above; this one guards the body and every
+            // catch body (`fin_ranges`), which are complete by now.
+            code.bind_handler(fin_handler, &fin_ranges);
             let thr_ci = self.cw.class_ref("java/lang/Throwable");
             self.frame(fin_handler, vec![VerifType::Object(thr_ci)], code);
             let thr_ty = Ty::obj("java/lang/Throwable");
