@@ -60,6 +60,38 @@ fn ubyte_to_int_rejected() {
     ));
 }
 
+// --- `Array(n) { … }` with an ARRAY element inside an enclosing loop — the loop-fill's StackMapTable
+//     interacts with the surrounding loop, so it must be DECLINED rather than emitted as a class file
+//     that fails verification. The straight-line form (no enclosing loop) compiles and runs, so a
+//     rejection test without one proves nothing; kotlinc accepts both. ---
+
+#[test]
+fn nested_array_fill_inside_a_loop_rejected() {
+    // Reported by the CHECKER, not as a backend bail, so `rejects` (which only sees an emit outcome
+    // and reads a checker error as "no answer") is the wrong probe here.
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let diagnostics = common::front_end_diagnostics(
+        "fun box(): String {\n\
+         \x20 var total = 0\n\
+         \x20 for (k in 0 until 2) {\n\
+         \x20   val grid = Array(2) { i -> DoubleArray(2) { j -> (i + j).toDouble() } }\n\
+         \x20   for (row in grid) for (v in row) total += v.toInt()\n\
+         \x20   while (total > 1000) total -= 1\n\
+         \x20 }\n\
+         \x20 return \"OK\"\n\
+         }\n",
+        &[stdlib],
+        Some(jdk.as_path()),
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.contains("Array(n) {…} with an array element")),
+        "the nested fill must be declined, not emitted as an unverifiable class: {diagnostics:?}"
+    );
+}
+
 // --- Mixed spread in a vararg call (`f(0, *a, 3)`) — lowered through the platform spread builder
 //     (`IntSpreadBuilder` here), so it is ACCEPTED. ---
 

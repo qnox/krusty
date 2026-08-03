@@ -2320,11 +2320,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   comparison node so the branch/stackmap shape stays the one every other comparison uses. Tests:
   `tests/feature_coverage_v_e2e.rs::lateinit_and_isinitialized`,
   `tests/implicit_this_callable_ref_e2e.rs::lateinit_is_initialized_runs` (the box-corpus case).
-- **`Array(n) { … }` with an ARRAY element.** `Array(3) { i -> IntArray(3) { j -> … } }` was rejected
-  because the loop-fill's StackMapTable interacted badly with surrounding loops. That interaction is
-  gone — the nested fill verifies and runs, including reading and writing through both dimensions —
-  so the rejection is removed. Verified against the box corpus, which is the oracle for the frame
-  shapes this touches. Test: `tests/feature_coverage_h_e2e.rs::two_dimensional_arrays`.
+- **`Array(n) { … }` with an ARRAY element stays rejected.** The loop-fill's StackMapTable interacts
+  badly with an ENCLOSING loop, so the nested fill is declined rather than emitted as a class file that
+  fails verification. The interaction needs a surrounding loop to appear — a straight-line
+  `Array(n) { IntArray(m) }` misleadingly compiles and runs — which is why the rejection must be pinned
+  by a case that has one. Test:
+  `tests/backend_rejection_coverage_e2e.rs::nested_array_fill_inside_a_loop_rejected`.
 - **A package-level `const val` reached by name (`import kotlin.math.PI`).** A `const` has no
   accessor, so it is absent from the property namespace — which models properties by their accessors —
   and the import bound nothing while `import kotlin.math.sqrt` (a function from the same package)

@@ -718,7 +718,10 @@ pub struct ClassSig {
     /// for a source companion function; a plugin-owned name is left to the plugin's own emit path.
     pub companion_fun_names: std::collections::HashSet<String>,
     /// `companion object` properties and their source visibility.
-    pub static_props: HashMap<String, (Ty, Visibility)>,
+    /// Companion (static) properties: name → (type, visibility, `is_var`). Mutability belongs here
+    /// rather than being re-derived from a declaration's AST — a write may come from any file of the
+    /// module, so the current file's declarations are not the authority on it.
+    pub static_props: HashMap<String, (Ty, Visibility, bool)>,
     /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
     pub lateinit_props: std::collections::HashSet<String>,
     /// Internal names of interfaces this type implements (for subtyping).
@@ -5925,7 +5928,7 @@ fn collect_signatures_with_cp_impl(
                             },
                         );
                     }
-                    let static_props: HashMap<String, (Ty, Visibility)> = c
+                    let static_props: HashMap<String, (Ty, Visibility, bool)> = c
                         .companion_props
                         .iter()
                         .zip(companion_property_scope.iter())
@@ -5939,7 +5942,7 @@ fn collect_signatures_with_cp_impl(
                             if p.getter.is_some() || p.setter.is_some() {
                                 diags.error(p.span, "krusty: companion-object property custom accessors are not supported".to_string());
                             }
-                            (name.clone(), (*ty, p.visibility))
+                            (name.clone(), (*ty, p.visibility, p.is_var))
                         })
                         .collect();
                     let lateinit_props: std::collections::HashSet<String> = c
@@ -22800,10 +22803,11 @@ impl<'a> Checker<'a> {
                     // separately): its `operator fun compareTo(o): Int` is on the classpath, not in
                     // `method_of`. Resolve it through the library set and record the selected member
                     // for lowering.
-                    // Only a REFERENCE right operand: an erased generic `Comparable<Double>.compareTo`
-                    // takes `Object`, so a PRIMITIVE argument would need a box the lowering path here
-                    // doesn't apply — leave that to the existing generic handling / a sound skip.
-                    if rt.is_reference() {
+                    // Only a NON-NULL REFERENCE right operand: an erased generic
+                    // `Comparable<Double>.compareTo` takes `Object`, so a PRIMITIVE argument would need
+                    // a box the lowering path here doesn't apply; and `compareTo` DEREFERENCES its
+                    // argument, so a nullable one would NPE inside the callee (kotlinc rejects it).
+                    if rt.is_reference() && !rt.is_nullable() {
                         if let Some(m) = self.resolve_instance_member(lt, "compareTo", &[rt]) {
                             if m.ret == Ty::Int {
                                 crate::trace_compiler!(
@@ -22891,7 +22895,13 @@ impl<'a> Checker<'a> {
                 && rt != Ty::Error
                 && rt.is_reference()
             {
-                if let Some(member) = self.resolve_instance_member(lt, "compareTo", &[rt]) {
+                if let Some(member) = self
+                    .resolve_instance_member(lt, "compareTo", &[rt])
+                    // `a > b` desugars to `a.compareTo(b)`, which DEREFERENCES the argument — kotlinc
+                    // rejects a nullable one ("argument type mismatch"), and accepting it here would
+                    // emit a call that NPEs inside the callee.
+                    .filter(|_| !rt.is_nullable())
+                {
                     if member.ret == Ty::Int {
                         crate::trace_compiler!(
                             "resolve",
@@ -22953,29 +22963,6 @@ impl<'a> Checker<'a> {
                             },
                         );
                         return self.set(e, Ty::Boolean);
-                    }
-                }
-            }
-            // `EnumName.entries` — the Kotlin 2.x replacement for `values()`. The emitter already
-            // synthesizes the `$ENTRIES` field and its `getEntries()` accessor on every enum class;
-            // only the READ needed a type. kotlinc types it `EnumEntries<E>`, which IS-A `List<E>`;
-            // typing it as the list is what makes `size` / `[0]` / `for (x in …)` resolve, and the
-            // accessor's actual return value is assignable to it.
-            if name == "entries" {
-                if let Expr::Name(enum_name) = self.file.expr(receiver).clone() {
-                    if !self.value_root_shadows_classifier(&enum_name)
-                        && self.syms.enums.contains_key(&enum_name)
-                    {
-                        let internal = self
-                            .syms
-                            .classes
-                            .get(&enum_name)
-                            .map(ClassSig::internal)
-                            .unwrap_or(enum_name);
-                        return self.set(
-                            e,
-                            Ty::obj_args("kotlin/collections/List", &[Ty::obj(&internal)]),
-                        );
                     }
                 }
             }
@@ -23099,7 +23086,7 @@ impl<'a> Checker<'a> {
                     }
                     // `ClassName.PROP` — a companion (static) property read.
                     if let Some(cs) = self.syms.classes.get(&en) {
-                        if let Some(&(ty, visibility)) = cs.static_props.get(&name) {
+                        if let Some(&(ty, visibility, _)) = cs.static_props.get(&name) {
                             self.reject_if_inaccessible(
                                 visibility,
                                 &name,
@@ -24475,6 +24462,18 @@ impl<'a> Checker<'a> {
             self.expect_assignable(Ty::Int, arg_tys[0], self.span(args[0]), "array size");
             let lam = self.check_lambda_with_types(args[1], &[Ty::Int]);
             let elem = lam.fun_ret().unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            // A nested-array element (`Array(n) { DoubleArray(m) }`) trips the loop-fill's
+            // StackMapTable interaction with SURROUNDING loops — skip rather than emit a class file
+            // that fails verification. The interaction needs an enclosing loop to show up, so a
+            // straight-line `Array(n) { IntArray(m) }` misleadingly runs fine; see
+            // `tests/backend_rejection_coverage_e2e.rs::nested_array_fill_inside_a_loop_rejected`.
+            if elem.is_array() {
+                self.diags.error(
+                    span,
+                    "krusty: Array(n) {…} with an array element is not supported".to_string(),
+                );
+                return Some(Ty::Error);
+            }
             // `Array(n) { … }` is always the reference `Array<T>` (`Obj("kotlin/Array", [T])`), distinct
             // from a primitive array. The element stays LOGICAL `T` (a primitive `Int` reads as `Int`,
             // not a boxed wrapper); the backend owns the physical boxed/value-class array layout.
@@ -27863,7 +27862,7 @@ impl<'a> Checker<'a> {
         owner: TypeName,
         name: &str,
     ) -> Option<Ty> {
-        let (ty, visibility) = *self
+        let (ty, visibility, _) = *self
             .syms
             .class_by_type_name(owner)?
             .static_props
@@ -28323,7 +28322,7 @@ impl<'a> Checker<'a> {
         let owner_path = owner_path.strip_suffix("/Companion").unwrap_or(owner_path);
         let owner = self.nested_internal_name(owner_path)?;
         let class = self.syms.class_by_type_name(owner)?;
-        if let Some(&(ty, visibility)) = class.static_props.get(member) {
+        if let Some(&(ty, visibility, _)) = class.static_props.get(member) {
             return Some((owner, member.to_string(), ty, visibility));
         }
         // A `const val` declared directly in an `object` is a real `public static final` field on the
@@ -33882,18 +33881,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Whether a same-file class's companion declares `name` as a `var` (so it may be reassigned).
-    fn companion_property_is_var(&self, class_name: &str, name: &str) -> bool {
-        self.file.decls.iter().any(|&declaration| {
-            matches!(self.file.decl(declaration), Decl::Class(class)
-                if class.name == class_name
-                    && class
-                        .companion_props
-                        .iter()
-                        .any(|property| property.name == name && property.is_var))
-        })
-    }
-
     fn stmt_assign_member(&mut self, s: StmtId, receiver: ExprId, name: String, value: ExprId) {
         // `recv.prop op= rhs` with a user `opAssign` operator → in-place call (legal on a `val`).
         if self.try_in_place_assignment(s, value) {
@@ -33905,7 +33892,7 @@ impl<'a> Checker<'a> {
         // (`getstatic C.prop`) already resolves through the same `static_props`.
         if let Expr::Name(class_name) = self.file.expr(receiver).clone() {
             if !self.value_root_shadows_classifier(&class_name) {
-                if let Some((property_ty, visibility)) = self
+                if let Some((property_ty, visibility, is_var)) = self
                     .syms
                     .classes
                     .get(&class_name)
@@ -33918,7 +33905,7 @@ impl<'a> Checker<'a> {
                         .map(ClassSig::internal_name)
                         .unwrap_or_else(|| type_name(&class_name));
                     self.reject_if_inaccessible(visibility, &name, owner, self.span(receiver));
-                    if !self.companion_property_is_var(&class_name, &name) {
+                    if !is_var {
                         self.diags.error(
                             self.file.stmt_spans[s.0 as usize],
                             format!("val cannot be reassigned: '{name}'"),
