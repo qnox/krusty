@@ -56,6 +56,9 @@ pub struct DependencySymbolIndex {
     initials: Vec<String>,
     packages: Vec<String>,
     by_name: Vec<u32>,
+    /// Nested-class entries sorted by their final source-name segment (`Entry` for `Map.Entry`).
+    /// Only nested entries participate, avoiding a full classpath scan for ordinary queries.
+    by_simple_segment: Vec<u32>,
     by_initials: Vec<u32>,
     complete: bool,
 }
@@ -173,7 +176,16 @@ impl DependencySymbolIndex {
                 .cmp(self.name_of(*right, &self.initials))
                 .then_with(|| left.cmp(right))
         });
+        let mut by_simple_segment = (0..self.entries.len() as u32)
+            .filter(|index| self.name_of(*index, &self.lowercase_names).contains('.'))
+            .collect::<Vec<_>>();
+        by_simple_segment.sort_unstable_by(|left, right| {
+            self.simple_segment(*left)
+                .cmp(self.simple_segment(*right))
+                .then_with(|| left.cmp(right))
+        });
         self.by_name = by_name;
+        self.by_simple_segment = by_simple_segment;
         self.by_initials = by_initials;
     }
 
@@ -288,14 +300,15 @@ impl DependencySymbolIndex {
                             break;
                         }
                     }
-                    if query.package.is_some() && ranked.len() < limit {
-                        // A qualified query spells the qualifier separately, so the pattern is the
-                        // last segment and a nested class has to be reachable by it.
-                        for index in 0..self.entries.len() as u32 {
-                            if self.simple_segment(index).starts_with(&query.pattern)
-                                && !self
-                                    .name_of(index, &self.lowercase_names)
-                                    .starts_with(&query.pattern)
+                    if ranked.len() < limit {
+                        // Nested declarations are source-visible by their leaf name with or without
+                        // an outer qualifier: `Entry` and `Map.Entry` both mean the entry represented
+                        // internally as `Map$Entry`. A dedicated sorted subset keeps that semantic
+                        // lookup logarithmic instead of scanning every class after most prefixes.
+                        for &index in self.simple_segment_prefix_range(&query.pattern) {
+                            if !self
+                                .name_of(index, &self.lowercase_names)
+                                .starts_with(&query.pattern)
                                 && !self.admit_ranked(index, query, limit, seen, &mut ranked)
                             {
                                 break;
@@ -405,6 +418,15 @@ impl DependencySymbolIndex {
         let start = order.partition_point(|index| key(index) < pattern);
         let count = order[start..].partition_point(|index| key(index).starts_with(pattern));
         &order[start..start + count]
+    }
+
+    fn simple_segment_prefix_range(&self, pattern: &str) -> &[u32] {
+        let start = self
+            .by_simple_segment
+            .partition_point(|index| self.simple_segment(*index) < pattern);
+        let count = self.by_simple_segment[start..]
+            .partition_point(|index| self.simple_segment(*index).starts_with(pattern));
+        &self.by_simple_segment[start..start + count]
     }
 
     fn name_of<'a>(&self, index: u32, table: &'a [String]) -> &'a str {
@@ -676,6 +698,7 @@ mod tests {
         let candidate = index.candidates("Map.Entry", 8).pop().unwrap();
         assert_eq!(candidate.name, "Map.Entry");
         assert_eq!(candidate.internal, "java/util/Map$Entry");
+        assert_eq!(names(&index, "Entry", 8), vec!["Map.Entry"]);
         assert_eq!(names(&index, "me", 8), vec!["Map.Entry"]);
     }
 
