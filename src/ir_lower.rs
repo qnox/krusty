@@ -23629,7 +23629,7 @@ impl<'a> Lower<'a> {
             // fold the stdlib transform to a string constant (kotlinc special-cases a constant
             // receiver too). A non-constant receiver falls through and is skipped.
             if args.is_empty() && matches!(name.as_str(), "trimIndent" | "trimMargin") {
-                if let Some(s) = const_string_value(self.afile, receiver) {
+                if let Some(s) = self.afile.const_string_value(receiver) {
                     let folded = if name == "trimIndent" {
                         trim_indent(&s)
                     } else {
@@ -24801,13 +24801,6 @@ fn is_when_test(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e), Expr::Is { .. } | Expr::InRange { .. })
 }
 
-/// Const-fold an annotation argument expression to a String: a string literal, a `const val` name, or a
-/// string template whose interpolations are themselves const-foldable (`"$prefix.bar"` with
-/// `const val prefix = "foo"` → `"foo.bar"`). `None` for anything not statically a string.
-fn const_string_value(file: &ast::File, e: AstExprId) -> Option<String> {
-    const_string_value_d(file, e, 0)
-}
-
 /// `String.trimIndent()`: split into lines, drop the common minimal indentation of the non-blank
 /// lines from every line, and omit a blank FIRST or LAST line — matching `kotlin.text.trimIndent`.
 fn trim_indent(s: &str) -> String {
@@ -24850,51 +24843,6 @@ fn trim_margin(s: &str, margin: &str) -> String {
         }
     }
     out.join("\n")
-}
-
-/// `depth` bounds the recursion through `const val` references so a cyclic chain
-/// (`const val a = b; const val b = a`) terminates with `None` instead of overflowing the stack.
-fn const_string_value_d(file: &ast::File, e: AstExprId, depth: u32) -> Option<String> {
-    if depth > 32 {
-        return None;
-    }
-    match file.expr(e) {
-        Expr::StringLit(s) => Some(s.clone()),
-        // `${'$'}` — the idiomatic literal `$` in a template. A code unit with no `char` form (a lone
-        // surrogate) has no Rust `String` spelling, so there is no constant to fold to: bail and let
-        // the runtime concat build the string rather than substitute a stand-in.
-        Expr::CharLit(c) => char::from_u32(*c as u32).map(|c| c.to_string()),
-        Expr::Name(n) => top_level_const_string_d(file, n, depth + 1),
-        Expr::Template(parts) => {
-            let mut out = String::new();
-            for p in parts {
-                match p {
-                    TemplatePart::Str(s) => out.push_str(s),
-                    TemplatePart::Expr(x) => {
-                        out.push_str(&const_string_value_d(file, *x, depth + 1)?)
-                    }
-                }
-            }
-            Some(out)
-        }
-        _ => None,
-    }
-}
-
-/// The string value of a top-level property `name` whose initializer const-folds to a string
-/// (`const val prefix = "foo"`), or `None`. (krusty's parser doesn't currently retain the `const`
-/// modifier on a top-level `val`, so this matches any top-level property with a foldable string init —
-/// safe, since only literals/foldable templates fold.)
-fn top_level_const_string_d(file: &ast::File, name: &str, depth: u32) -> Option<String> {
-    if depth > 32 {
-        return None;
-    }
-    file.decls.iter().find_map(|&d| match file.decl(d) {
-        Decl::Property(p) if p.name == name => p
-            .init
-            .and_then(|i| const_string_value_d(file, i, depth + 1)),
-        _ => None,
-    })
 }
 
 /// `(property_name, serial_name)` for each primary-constructor property carrying `@SerialName("…")`

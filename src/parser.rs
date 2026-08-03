@@ -8196,8 +8196,8 @@ fn infix_bp(op: BinOp) -> (u8, u8) {
     }
 }
 
-/// Decode a `'x'` char literal (with simple escapes) to a `char`.
-/// The UTF-16 code UNIT a `Char` literal denotes. A Kotlin `Char` is one code unit, so `\uXXXX` keeps
+/// Decode a `'x'` char literal (with simple escapes) to the UTF-16 code unit it denotes.
+/// A Kotlin `Char` is one code unit, so `\uXXXX` keeps
 /// its raw value even in the surrogate range D800..DFFF — `'\uD800'` is a legal `Char` (it is what
 /// `Char.MIN_HIGH_SURROGATE` equals) but not a legal Unicode scalar value, so a `char::from_u32`
 /// round-trip would reject it and silently yield NUL.

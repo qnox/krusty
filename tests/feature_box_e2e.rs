@@ -3900,8 +3900,9 @@ fun box(): String {
     // `${'$'}` is the idiomatic way to write a literal `$` in a Kotlin template, and it goes through the
     // constant-string fold, so a `Char` mis-rendered there (e.g. as its decimal code unit) silently
     // corrupts the folded string. A code unit with no `char` form (a lone surrogate) has no Rust
-    // `String` spelling at all, so the fold must BAIL to the runtime concat rather than substitute
-    // U+FFFD.
+    // `String` spelling at all, so a constant-string evaluator must return "not representable"
+    // rather than substitute U+FFFD. The currently unsupported trim call then takes the compiler's
+    // documented diagnostic-bail path; this case exercises the representable-Char success path.
     (
         "ConstCharTemplateFold",
         r#"
