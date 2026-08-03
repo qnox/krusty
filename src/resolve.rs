@@ -4972,22 +4972,46 @@ fn collect_signatures_with_cp_impl(
                                 crate::symbol_resolver::InheritedNestedClassifier::NotFound => {}
                             }
                         }
-                        let prefix = format!("{}.", c.name);
+                        // Own nested classifiers from every lexical owner are in scope inside a nested
+                        // class. For `Outer { inner class First; inner class Second(val first: First) }`,
+                        // `First` belongs to `Outer`, not `Outer.Second`, so probing only `c.name` loses
+                        // the sibling during signature collection. Index direct children of all lexical
+                        // owners in one declaration scan; a nearer owner wins when names shadow.
+                        let lexical_owner_ranks = lexical_inheritors
+                            .iter()
+                            .copied()
+                            .enumerate()
+                            .map(|(rank, owner)| (owner, rank))
+                            .collect::<HashMap<_, _>>();
+                        let mut lexical_nested = HashMap::<String, (usize, TypeName)>::new();
                         for &nd in &file.decls {
                             if let Decl::Class(nc) = file.decl(nd) {
-                                if let Some(seg) = nc.name.strip_prefix(&prefix) {
-                                    // Kotlin nested-type scoping: the enclosing class's own nested type
-                                    // SHADOWS a same-named top-level/imported type — insert unconditionally
-                                    // (overwriting any top-level entry). Consistent with the checker's
-                                    // `enclosing_nested_type` expression-path fallback.
-                                    if !seg.contains('.') {
-                                        let ni = class_names.get(&nc.name).unwrap_or_else(|| {
-                                            type_name(&class_internal(file, &nc.name))
-                                        });
-                                        ext.insert_name(seg.to_string(), ni);
+                                let Some((owner, simple)) = nc.name.rsplit_once('.') else {
+                                    continue;
+                                };
+                                let owner = type_name(&class_internal(file, owner));
+                                let Some(&rank) = lexical_owner_ranks.get(&owner) else {
+                                    continue;
+                                };
+                                let internal = class_names
+                                    .get(&nc.name)
+                                    .unwrap_or_else(|| type_name(&class_internal(file, &nc.name)));
+                                match lexical_nested.entry(simple.to_string()) {
+                                    std::collections::hash_map::Entry::Vacant(entry) => {
+                                        entry.insert((rank, internal));
                                     }
+                                    std::collections::hash_map::Entry::Occupied(mut entry)
+                                        if rank < entry.get().0 =>
+                                    {
+                                        entry.insert((rank, internal));
+                                    }
+                                    std::collections::hash_map::Entry::Occupied(_) => {}
                                 }
                             }
+                        }
+                        for (simple, (_, internal)) in lexical_nested {
+                            // A lexical nested classifier shadows top-level/imported classifiers.
+                            ext.insert_name(simple, internal);
                         }
                         ext
                     };
