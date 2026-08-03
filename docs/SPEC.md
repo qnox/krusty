@@ -2712,6 +2712,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve::tests::nested_sealed_hierarchy_is_exhausted_by_its_leaves`,
   `::covering_a_nested_sealed_class_directly_covers_its_branch`,
   `::a_missing_nested_sealed_leaf_is_reported_by_name`.
+- **A labelled lambda splices a CALL to its impl method.** `return@<own label>` is lowered as the
+  closure method's own return, so splicing the raw body would turn it into a non-local return of the
+  enclosing function, carrying the wrong type. Withholding the splice form instead is not an option:
+  an `@InlineOnly` callee (`sumOf`, `require`) has no callable body, so a declined splice fails the
+  whole file. Splicing a call keeps the labelled return inside the impl, where it is correct — the
+  same device the anonymous-function bare-return case already used. Test:
+  `tests/feature_coverage_t_e2e.rs::labeled_return_from_nested_lambda`.
+- **A type parameter carries every bound, not just the first.** Kotlin's `where T : A, T : B` is an
+  INTERSECTION, so a member declared on ANY bound is available; `Ty::TyParam` holds a single bound —
+  the erasure, which is the first, matching kotlinc's JVM rule. A member reached only through a later
+  bound (`x.name` on `T : Comparable<T>, T : Named`) resolved against `Comparable` and reported as
+  unresolved. The remaining bounds are kept beside the erasure and retried when the lookup fails; the
+  erasure itself is untouched, so descriptors still match kotlinc. Test:
+  `tests/feature_coverage_n_e2e.rs::where_clause_two_bounds`.
 
 ## 8. Success criteria for the PoC
 

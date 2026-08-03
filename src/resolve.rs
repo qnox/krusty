@@ -8430,6 +8430,11 @@ fn callable_reference_invoke_arity(internal: TypeName) -> Option<usize> {
 #[derive(Default, Clone)]
 pub struct TParams {
     erasure: std::collections::HashMap<String, Ty>,
+    /// Bounds BEYOND the first, for a parameter declared with several (`where T : A, T : B`). Kotlin
+    /// gives such a parameter an INTERSECTION bound; `Ty::TyParam` carries a single one — the erasure,
+    /// which is the FIRST, matching kotlinc's JVM rule. Member lookup consults these so a member
+    /// declared only on a later bound still resolves.
+    extra_bounds: std::collections::HashMap<String, Vec<Ty>>,
 }
 
 impl TParams {
@@ -8451,7 +8456,22 @@ impl TParams {
     pub fn from_bindings(bindings: impl IntoIterator<Item = (String, Ty)>) -> Self {
         TParams {
             erasure: bindings.into_iter().collect(),
+            ..Default::default()
         }
+    }
+
+    /// The bounds beyond the first of every parameter whose ERASURE is `erased`. A type parameter
+    /// reaches the body already erased to its first bound, so that erasure — not the parameter's name —
+    /// is what a member lookup has in hand; this maps back from it.
+    pub fn extra_bounds_for_erasure(&self, erased: Ty) -> Vec<Ty> {
+        let Some(want) = erased.obj_internal() else {
+            return Vec::new();
+        };
+        self.extra_bounds
+            .iter()
+            .filter(|(name, _)| self.erase(name).obj_internal() == Some(want))
+            .flat_map(|(_, bounds)| bounds.iter().copied())
+            .collect()
     }
 
     /// All parameters erased to `Object` (no primitive specialization). Used for CLASS type parameters:
@@ -8463,7 +8483,10 @@ impl TParams {
             .iter()
             .map(|n| (n.clone(), Ty::obj("kotlin/Any")))
             .collect();
-        TParams { erasure }
+        TParams {
+            erasure,
+            ..Default::default()
+        }
     }
 
     /// Build from declared names + their upper bounds, resolving a CLASS/interface bound to its JVM
@@ -8502,7 +8525,25 @@ impl TParams {
                 (n.clone(), erased)
             })
             .collect();
-        TParams { erasure }
+        // Every bound after the first for each name. The first IS the erasure above; the rest are only
+        // reachable through `extra_bounds`, since `Ty::TyParam` holds exactly one.
+        let extra_bounds = names
+            .iter()
+            .filter_map(|n| {
+                let rest: Vec<Ty> = bounds
+                    .iter()
+                    .filter(|(bn, _)| bn == n)
+                    .skip(1)
+                    .map(|(_, b)| tparam_bound_erasure(Some(b), resolve))
+                    .filter(|ty| *ty != Ty::obj("kotlin/Any"))
+                    .collect();
+                (!rest.is_empty()).then(|| (n.clone(), rest))
+            })
+            .collect();
+        TParams {
+            erasure,
+            extra_bounds,
+        }
     }
 
     pub fn extended_with(
@@ -8519,6 +8560,7 @@ impl TParams {
             }
         }
         out.erasure.extend(declared.erasure);
+        out.extra_bounds.extend(declared.extra_bounds);
         out
     }
 
@@ -8575,6 +8617,7 @@ impl TParams {
                     (name.clone(), Ty::ty_param(name, bound))
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 
@@ -28174,9 +28217,36 @@ impl<'a> Checker<'a> {
                 return Ty::Error;
             }
         }
+        // Kotlin's `where T : A, T : B` gives the parameter an INTERSECTION bound, so a member
+        // declared on ANY bound is available. `Ty::TyParam` carries a single bound — the erasure, which
+        // is the first, matching kotlinc's JVM rule — so a member reached only through a later bound
+        // (`x.name` on `T : Comparable<T>, T : Named`) resolved against `Comparable` and reported as
+        // unresolved. Retry against the remaining bounds before giving up; the ERASURE is untouched, so
+        // the descriptor still uses the first bound exactly as kotlinc emits it.
+        for bound in self.tparams.extra_bounds_for_erasure(rt.non_null()) {
+            let recovered = self.check_member_quietly(bound, name, span, mexpr);
+            if recovered != Ty::Error {
+                return recovered;
+            }
+        }
         self.diags
             .error(diagnostic_span, format!("unresolved reference '{name}'."));
         Ty::Error
+    }
+
+    /// [`Self::check_member`] with its diagnostics withheld — a speculative lookup whose failure is not
+    /// the user's error, because another candidate may still answer.
+    fn check_member_quietly(
+        &mut self,
+        rt: Ty,
+        name: &str,
+        span: Span,
+        mexpr: Option<ExprId>,
+    ) -> Ty {
+        let mark = self.diags.diags.len();
+        let ty = self.check_member(rt, name, span, mexpr);
+        self.diags.diags.truncate(mark);
+        ty
     }
 
     fn record_external_static_field(

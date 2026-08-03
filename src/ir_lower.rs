@@ -9106,12 +9106,20 @@ impl<'a> Lower<'a> {
         // instead. The splice binds value indices `0..` (captures, then the lambda's own parameters) to
         // the slots it prepared, so passing those very indices reproduces the closure call exactly, and
         // the impl's own `*return` stays inside the impl.
-        let inline_body = if is_anon_fun && body_has_bare_return(self.afile, body) {
-            let args = (0..params_len).map(|i| self.emit_get_value(i)).collect();
-            self.emit_local_call(fid, args)
-        } else {
-            inline_body
-        };
+        //
+        // A lambda owning its `return@<own label>` needs the SAME treatment, for the same reason: that
+        // node was lowered as this closure method's own return, so splicing the raw body would turn it
+        // into a non-local return of the enclosing function, carrying the wrong type. Withholding the
+        // splice form instead is not an option — an `@InlineOnly` callee (`sumOf`, `require`) has no
+        // callable body, so a declined splice bails the whole file ("inline splice failed"). Splicing a
+        // CALL keeps the labelled return inside the impl, where it is correct.
+        let inline_body =
+            if (is_anon_fun && body_has_bare_return(self.afile, body)) || owns_labelled_return {
+                let args = (0..params_len).map(|i| self.emit_get_value(i)).collect();
+                self.emit_local_call(fid, args)
+            } else {
+                inline_body
+            };
         // A lambda impl method lives ON THE CLASS declaring the enclosing member (kotlinc's placement:
         // same class as the `invokedynamic` call site, so a PRIVATE impl — and any enclosing-`this`
         // member access — resolves without bridges); a top-level declaration's lambda keeps its impl on
@@ -9132,12 +9140,7 @@ impl<'a> Lower<'a> {
             arity: arity as u8,
             captures: capture_vals,
             sam: sam.map(|(i, m, descriptor, _)| (i, m, descriptor)),
-            // The mirror of the bare-return rule above. A `return@<own label>` was lowered as THIS
-            // closure method's own return, which is only correct while the method exists: spliced
-            // through `inline_body` the very same node becomes a non-local return of the enclosing
-            // function, carrying the wrong type. Withhold the splice form so the lambda can only be
-            // emitted as the closure it was lowered as.
-            inline_body: (!owns_labelled_return).then_some(inline_body),
+            inline_body: Some(inline_body),
         }))
     }
 
