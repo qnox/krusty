@@ -9268,6 +9268,14 @@ impl<'a> Lower<'a> {
         // treat a reference-underlying value-class own-param as BOXED — it arrives through `FunctionN`'s
         // generic `Object` invoke slot. The lowerer stays value-class-agnostic; the pass decides VC-ness.
         self.ir.lambda_own_params_from.insert(fid, own_params_from);
+        // A SAM conversion targets a DECLARED method, not the generic `FunctionN.invoke` — record its
+        // declaration so the backend can realize each slot the way the interface actually spells it.
+        if let Some(declared) = sam
+            .as_ref()
+            .and_then(|(internal, ..)| self.sam_declared_signature(internal))
+        {
+            self.ir.lambda_sam_signature.insert(fid, declared);
+        }
         // A BARE `return` in a lambda body is a NON-LOCAL return (from the enclosing function) — valid only
         // when the lambda is spliced inline, never as a standalone closure method (the `areturn` would carry
         // the enclosing fn's return type, not the lambda's). Mark the impl method inline-only so the backend
@@ -14273,16 +14281,35 @@ impl<'a> Lower<'a> {
         Some((f.name.clone(), None, f.ret == ty_to_ir(Ty::Unit)))
     }
 
-    /// Whether `internal` is a SAM interface a lambda ARGUMENT can be soundly converted to: a non-generic
-    /// user `fun interface` whose method involves no value class (mirrors the checker's gate). Generic /
-    /// value-class / library SAMs are excluded — `lower_lambda_sam`'s metafactory descriptor can't model
-    /// them yet.
+    /// The DECLARED parameter types and return type of `internal`'s single abstract method, when
+    /// `internal` is a same-compilation `fun interface`. A lambda converted to it must realize those
+    /// exact declarations — which is not the same as its own inferred function type once the target
+    /// erases part of them (see [`crate::ir::IrFile::lambda_sam_signature`]).
+    fn sam_declared_signature(&self, internal: &str) -> Option<(Vec<Ty>, Ty)> {
+        let ci = self.class_info(internal)?;
+        let cls = &self.ir.classes[ci.id as usize];
+        if !cls.is_interface {
+            return None;
+        }
+        let mut abstract_methods = cls
+            .methods
+            .iter()
+            .filter(|&&m| self.ir.functions[m as usize].body.is_none());
+        let only = *abstract_methods.next()?;
+        if abstract_methods.next().is_some() {
+            return None;
+        }
+        let f = &self.ir.functions[only as usize];
+        Some((f.params.clone(), f.ret))
+    }
+
+    /// Whether `internal` is a SAM interface a lambda ARGUMENT can be soundly converted to: a user
+    /// `fun interface` in this compilation. Mirrors the checker's gate — see
+    /// `resolve::simple_fun_interface_name` for why generic and value-class methods both qualify.
     fn is_simple_fun_interface(&self, internal: &str) -> bool {
-        self.syms.class_by_internal(internal).is_some_and(|c| {
-            // Generic fun interfaces allowed (erased SAM descriptor); value-class methods excluded —
-            // see the matching note in `resolve::simple_fun_interface`.
-            c.is_fun_interface()
-        })
+        self.syms
+            .class_by_internal(internal)
+            .is_some_and(|c| c.is_fun_interface())
     }
 
     fn coerce_argument_value(&mut self, value: u32, actual: Ty, target: Ty) -> Option<u32> {

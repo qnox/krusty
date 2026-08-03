@@ -130,6 +130,65 @@ pub struct EmitOptions {
 ///   SEALED3) | bits6-8 classKind (CLASS0/INTERFACE1/ENUM2/ENUM_ENTRY3/ANNOTATION4/OBJECT5/COMPANION6)
 ///   | bit10 isData | bit13 isValue | bit15 hasEnumEntries.
 /// The writer omits the field at [`DEFAULT_CLASS_FLAGS`] (a public final class).
+/// Whether a realized property accessor consumes the receiver as an OPERAND. An instance accessor
+/// always does. A STATIC one does not — a `@JvmStatic` object property's `setX(V)` takes the VALUE,
+/// not a receiver — except on a `@JvmInline value class`, where every member is realized as a static
+/// `-impl` whose FIRST parameter is the receiver's carrier (`kotlin/Result.isSuccess` is
+/// `isSuccess-impl(Ljava/lang/Object;)Z`). Reading `!is_static` alone evaluated that receiver only for
+/// effect and then invoked the static with an empty stack.
+fn accessor_takes_receiver(access: &crate::jvm::inline::PropertyAccess) -> bool {
+    use crate::jvm::inline::PropertyAccess;
+    match access {
+        PropertyAccess::Field { is_static, .. } => !is_static,
+        PropertyAccess::Accessor {
+            is_static,
+            name,
+            descriptor,
+            ..
+        } => {
+            !is_static
+                || (is_value_class_impl_accessor(name)
+                    && crate::jvm::names::parse_method_descriptor(descriptor)
+                        .is_some_and(|(params, _)| !params.is_empty()))
+        }
+        // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
+        PropertyAccess::AccessBridge { .. } => true,
+    }
+}
+
+/// kotlinc's spelling for a `@JvmInline value class` member realized as a static over the carrier: the
+/// Kotlin name with an `-impl` suffix (`isSuccess-impl`, `getLabel-impl`). It is the only static
+/// accessor shape whose leading parameter is a receiver rather than a value.
+fn is_value_class_impl_accessor(name: &str) -> bool {
+    name.ends_with("-impl")
+}
+
+/// The type the receiver must hold ON THE STACK for `access`, given the property's `owner`.
+///
+/// Normally the owner itself. On a value class's static `-impl` accessor it is the accessor's first
+/// DECLARED parameter — the carrier (`isSuccess-impl(Ljava/lang/Object;)Z` consumes the erased
+/// underlying, never a `kotlin/Result` box). Narrowing an erased operand to the owner there emits a
+/// `checkcast` no unboxed carrier can pass.
+fn accessor_receiver_ty(access: &crate::jvm::inline::PropertyAccess, owner: &str) -> Ty {
+    use crate::jvm::inline::PropertyAccess;
+    if let PropertyAccess::Accessor {
+        is_static: true,
+        name,
+        descriptor,
+        ..
+    } = access
+    {
+        if is_value_class_impl_accessor(name) {
+            if let Some((params, _)) = crate::jvm::names::parse_method_descriptor(descriptor) {
+                if let Some(carrier) = params.first() {
+                    return crate::jvm::jvm_libraries::desc_to_ty(carrier);
+                }
+            }
+        }
+    }
+    Ty::obj(owner)
+}
+
 fn class_metadata_flags(c: &crate::ir::IrClass) -> u64 {
     const VIS_PUBLIC: u64 = 3;
     let modality: u64 = if c.is_sealed {
@@ -7918,16 +7977,12 @@ impl<'a> Emitter<'a> {
                 is_interface: operation.interface
                     || self.bodies.owner_is_interface(operation.owner),
             });
-        let (access_owner, takes_receiver) = match &access {
-            PropertyAccess::Field {
-                owner, is_static, ..
-            }
-            | PropertyAccess::Accessor {
-                owner, is_static, ..
-            } => (owner.clone(), !is_static),
-            // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
-            PropertyAccess::AccessBridge { owner, .. } => (owner.clone(), true),
+        let access_owner = match &access {
+            PropertyAccess::Field { owner, .. }
+            | PropertyAccess::Accessor { owner, .. }
+            | PropertyAccess::AccessBridge { owner, .. } => owner.clone(),
         };
+        let takes_receiver = accessor_takes_receiver(&access);
         // A branchy assigned value emits merge frames. It cannot do so with an instance receiver already
         // on the operand stack because those frames describe an empty baseline. Spill BOTH operands in
         // source evaluation order (receiver, then value), then reload them; spilling only the value would
@@ -7942,7 +7997,14 @@ impl<'a> Emitter<'a> {
             load(receiver_ty, slot, code);
             self.narrow_on_stack(receiver_ty, &Ty::obj(&access_owner), code);
         } else {
-            self.emit_property_receiver(operation.receiver, &access_owner, takes_receiver, code);
+            let receiver_ty = accessor_receiver_ty(&access, &access_owner);
+            self.emit_property_receiver(
+                operation.receiver,
+                &access_owner,
+                takes_receiver,
+                &receiver_ty,
+                code,
+            );
         }
         // The assigned value is bridged to what the realization stores, the mirror of the read's bridge.
         let target = match &access {
@@ -8046,11 +8108,12 @@ impl<'a> Emitter<'a> {
         receiver: crate::ir::ExprId,
         access_owner: &str,
         takes_receiver: bool,
+        expected: &Ty,
         code: &mut CodeBuilder,
     ) {
         if takes_receiver {
             self.emit_value(receiver, code);
-            self.narrow_on_stack(self.value_ty(receiver), &Ty::obj(access_owner), code);
+            self.narrow_on_stack(self.value_ty(receiver), expected, code);
             return;
         }
         // A receiverless realization does not make the receiver expression disappear. Elide only an
@@ -8294,17 +8357,14 @@ impl<'a> Emitter<'a> {
         code: &mut CodeBuilder,
     ) {
         use crate::jvm::inline::PropertyAccess;
-        let (access_owner, takes_receiver) = match &access {
-            PropertyAccess::Field {
-                owner, is_static, ..
-            }
-            | PropertyAccess::Accessor {
-                owner, is_static, ..
-            } => (owner.clone(), !is_static),
-            // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
-            PropertyAccess::AccessBridge { owner, .. } => (owner.clone(), true),
+        let access_owner = match &access {
+            PropertyAccess::Field { owner, .. }
+            | PropertyAccess::Accessor { owner, .. }
+            | PropertyAccess::AccessBridge { owner, .. } => owner.clone(),
         };
-        self.emit_property_receiver(receiver, &access_owner, takes_receiver, code);
+        let takes_receiver = accessor_takes_receiver(&access);
+        let receiver_ty = accessor_receiver_ty(&access, &access_owner);
+        self.emit_property_receiver(receiver, &access_owner, takes_receiver, &receiver_ty, code);
         let physical = match access {
             PropertyAccess::Field {
                 owner,

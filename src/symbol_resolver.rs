@@ -3833,9 +3833,6 @@ fn property_getter_via_query(
     property: &str,
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
-    // A value-class-typed property's getter is `@JvmName`-mangled (`getId-<hash>`) and erases its return
-    // to the underlying type; resolving it as a plain member would type the read as the underlying, not
-    // the value class. Leave those to the value-class fallback, which recovers the logical type.
     let getter = lib
         .property_members(recv, property)
         .overloads
@@ -3845,8 +3842,22 @@ fn property_getter_via_query(
                 && member_visible(member_access, property.visibility, property.owner)
         })
         .min_by_key(|p| p.receiver_rank)
-        .map(|p| p.getter.name)
-        .filter(|getter| !getter.contains('-'))?;
+        .map(|p| p.getter.name)?;
+    // A value-class-TYPED property's getter is `@JvmName`-mangled (`getId-<hash>`) AND erases its
+    // return to the underlying type; resolving it as a plain member would type the read as the
+    // underlying, not the value class. Leave those to the value-class fallback, which recovers the
+    // logical type.
+    //
+    // A mangled getter on a value-class RECEIVER is a different thing: `Result<T>.isSuccess` is the
+    // static `isSuccess-impl(Object)Z`, whose return is not erased at all. Rejecting every mangled
+    // spelling left those properties unresolved outright.
+    let value_class_typed = recv
+        .kotlin_class_internal()
+        .and_then(|internal| lib.resolve_type_name(internal))
+        .is_some_and(|declaration| declaration.value_class_property(property).is_some());
+    if getter.contains('-') && value_class_typed {
+        return None;
+    }
     resolve_instance_member(lib, recv, &getter, &[], member_access)
         .filter(|m| m.ret.is_read_value_result())
 }

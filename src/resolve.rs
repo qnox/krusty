@@ -19928,19 +19928,16 @@ impl<'a> Checker<'a> {
                 .all(|(&expected, &actual)| constructor_argument_matches(self, expected, actual))
     }
 
-    /// Whether `internal` is a user SAM interface whose method needs no value-class adaptation.
+    /// Whether `internal` is a user SAM interface a lambda argument may be converted to.
     fn simple_fun_interface_name(&self, internal: TypeName) -> bool {
         let Some(c) = self.syms.class_by_type_name(internal) else {
             return false;
         };
         // A generic fun interface is allowed: its method erases to `Object`, which the SAM descriptor
-        // (built from the erased interface method) and the erased lambda parameter types both match. A
-        // value-class method is still excluded (mangled name / boxing not modeled).
+        // (built from the erased interface method) and the erased lambda parameter types both match.
+        // A VALUE-CLASS method is allowed too: the JVM pass now realizes the declared slots (the
+        // mangled method name and the carrier-vs-box choice per slot), so no adaptation is owed here.
         c.is_fun_interface()
-            && c.methods.values().flatten().all(|sig| {
-                !self.ty_is_value_class(sig.ret)
-                    && sig.params.iter().all(|p| !self.ty_is_value_class(*p))
-            })
     }
 
     fn fun_interface_sam_params(&self, target: Ty) -> Option<Vec<Ty>> {

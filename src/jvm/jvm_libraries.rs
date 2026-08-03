@@ -2424,10 +2424,37 @@ impl SymbolSource for JvmLibraries {
                     let ret_ty = mp
                         .ret_class
                         .map_or(Ty::obj("kotlin/Any"), kotlin_type_name_to_ty);
-                    let ty = mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name);
-                    let Some((getter_params, getter_ret)) = parse_method_desc(&getter.desc) else {
+                    // `Ty::obj_name` is deliberate for a value-class-typed property (the logical class,
+                    // not its collapsed underlying). It is wrong only for a Kotlin PRIMITIVE, which it
+                    // keeps as the boxed class while the getter returns the unboxed form — the property's
+                    // declared type and its getter's return then disagreed ("return type mismatch:
+                    // expected 'Boolean', actual 'Boolean'").
+                    let ty = if ret_ty.is_jvm_scalar() {
+                        ret_ty
+                    } else {
+                        mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
+                    };
+                    let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter.desc)
+                    else {
                         continue;
                     };
+                    // On a `@JvmInline value class` every member is realized as a STATIC `-impl` whose
+                    // FIRST parameter is the CARRIER — the receiver, not a value parameter
+                    // (`kotlin/Result.isSuccess` is `isSuccess-impl(Ljava/lang/Object;)Z`). Dropping it
+                    // presents the same zero-parameter accessor an ordinary class exposes; the
+                    // value-class pass already routes such a member's `dispatch_receiver` through the
+                    // unboxed carrier. Without this the accessor was rejected as "takes an argument"
+                    // and the property read reported as an unresolved reference.
+                    // NOT the value class's own sole property: that one IS the carrier (`Result.value`),
+                    // reached as the underlying value itself rather than through a computed `-impl`
+                    // accessor, and rerouting it breaks the box/unbox boundary.
+                    let carrier_receiver = getter_params.len() == 1
+                        && metadata::class_inline(&ci).is_some_and(|inline| {
+                            inline.property_name.as_deref() != Some(mp.name.as_str())
+                        });
+                    if carrier_receiver {
+                        getter_params.clear();
+                    }
                     if !getter_params.is_empty() {
                         continue;
                     }

@@ -3971,3 +3971,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inside a function body or under an explicit type annotation but not when a top-level property's
   type had to be inferred from it. Test:
   `toplevel_property_inference_e2e::toplevel_property_cross_reference`.
+
+- **A classpath value class's member property is read through its static `-impl` accessor.** kotlinc
+  realizes every member of a `@JvmInline value class` as a static whose FIRST parameter is the
+  receiver's carrier (`kotlin/Result.isSuccess` → `isSuccess-impl(Ljava/lang/Object;)Z`,
+  `Celsius.label` → `getLabel-impl(I)Ljava/lang/String;`). Three facts have to line up for such a read
+  to resolve and verify. (1) The metadata query drops that carrier parameter, so the property presents
+  the zero-parameter accessor an ordinary class exposes — but NOT for the value class's own sole
+  property, which IS the carrier and keeps its ordinary instance getter (`getDegrees()I`). (2) The
+  property's declared type comes from the decoded primitive rather than a re-boxed class name, so it
+  agrees with the accessor's unboxed return. (3) At emit, a static accessor consumes the receiver
+  exactly when it is such an `-impl`; a `@JvmStatic` object property's static `setX(V)` takes a VALUE
+  in that slot, not a receiver, and the receiver it does consume is narrowed to the accessor's declared
+  carrier, never to the value-class box (no unboxed carrier passes `checkcast kotlin/Result`).
+  Symmetrically, the JVM pass must not box the receiver of such a read: boxing is right for a value
+  class krusty itself compiles (whose computed property is an instance accessor on the box) and wrong
+  for a classpath one. Tests:
+  `classpath_value_class_member_e2e::classpath_value_class_member_property_reads_through_impl_accessor`,
+  `feature_coverage_n_e2e::result_is_success`.
+
+- **A lambda converted to a `fun interface` realizes the interface's DECLARED slots, not `FunctionN`'s.**
+  A plain Kotlin lambda reaches its body through `FunctionN.invoke`, whose slots are generic, so a value
+  class travelling through one is BOXED. A SAM conversion targets a declared method instead, and a slot
+  the interface spells as the value class itself erases to the class's underlying — kotlinc's
+  `ResultHandler.onResult(Ljava/lang/Object;)` carries the *carrier*, not a `kotlin/Result` box. The
+  lowerer records the SAM method's declared parameter and return types (`IrFile::lambda_sam_signature`)
+  and the JVM pass decides per slot: declared-as-the-value-class ⇒ carrier, anything else (a type
+  parameter, or no SAM at all) ⇒ box, as before. The same declaration drives the return: such a lambda's
+  impl method keeps its erased return and its tail is neither boxed to `X` nor run through the generic
+  value-class tail boxing. Two further consequences of the interface method mangling
+  (`onResult` → `onResult-d1pmJ48`): the `invokedynamic` must name the MANGLED method, or the closure
+  implements nothing the interface declares (`AbstractMethodError` at the first call); and a call to such
+  a method already yields the carrier, so the cast to the declared type the lowerer wrapped it in — it
+  types calls before any erasure is known — is stripped rather than read as proof the result is a box.
+  With those in place the checker no longer refuses a `fun interface` whose method mentions a value
+  class. Tests: `fun_interface_value_class_e2e` (parameter, return, scalar underlying, and the generic
+  slot that must still box), corpus `inlineClasses/funInterface/{argumentResult,returnResult}.kt`,
+  `inlineClasses/kt44141.kt`.

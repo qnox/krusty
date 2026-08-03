@@ -329,6 +329,12 @@ pub fn lower_value_classes(
     // in the lowerer — the lowerer carries no value-class knowledge. Every referenced class name in the IR
     // is probed; a classpath value class contributes its `value_underlying`.
     let mut under = under;
+    // Value classes krusty does NOT compile: their members were realized by kotlinc, so a computed
+    // member property is the static `-impl` over the unboxed carrier rather than an instance accessor
+    // on the box. Recorded here because that is the only point where the two origins are still
+    // distinguishable — `under` merges them.
+    let mut classpath_value_classes: std::collections::HashSet<TypeName> =
+        std::collections::HashSet::new();
     for fq in referenced_class_names(ir) {
         if under.contains_key(&fq) || is_native_unsigned(fq) {
             continue;
@@ -336,6 +342,9 @@ pub fn lower_value_classes(
         let rendered = fq.render();
         if crate::types::prim_array_element(&rendered).is_some() {
             continue;
+        }
+        if !module_value_classes.contains_key(&fq) && resolver.value_underlying_name(fq).is_some() {
+            classpath_value_classes.insert(fq);
         }
         if let Some(u) = resolver
             .value_underlying_name(fq)
@@ -645,12 +654,21 @@ pub fn lower_value_classes(
             // extension call on it (`it.getOrThrow()`) unboxes it. A scalar-underlying value class keeps its
             // own handling. Value-class-ness is decided HERE (with `under`), not in the lambda-agnostic lowerer.
             let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
+            let sam_params = own_from.and_then(|s| {
+                lambda_sam_params(&ir.lambda_sam_signature, fid as u32, s, f.params.len())
+            });
             for (i, p) in f.params.iter().enumerate() {
                 let boxed_own = own_from.is_some_and(|s| i as u32 >= s)
                     && !p.is_nullable()
-                    && p.non_null()
-                        .obj_internal()
-                        .is_some_and(|fq| under.contains_key(&fq));
+                    && p.non_null().obj_internal().is_some_and(|fq| {
+                        under.contains_key(&fq)
+                            && lambda_slot_is_boxed(
+                                sam_params.and_then(|declared| {
+                                    declared.get(i - own_from.unwrap_or(0) as usize)
+                                }),
+                                fq,
+                            )
+                    });
                 let slot_ty = if boxed_own { Ty::nullable(*p) } else { *p };
                 m.insert(base + i as u32, slot_ty);
             }
@@ -901,6 +919,9 @@ pub fn lower_value_classes(
             }
         }
         let own_from = ir.lambda_own_params_from.get(&(fid as u32)).copied();
+        let sam_params = own_from.and_then(|s| {
+            lambda_sam_params(&ir.lambda_sam_signature, fid as u32, s, f.params.len())
+        });
         for (idx, p) in f.params.iter_mut().enumerate() {
             // A lifted lambda's OWN value-class parameter arrives BOXED through the `FunctionN`
             // generic invoke slot, so it must KEEP the boxed `LX;` in the impl signature — erased
@@ -909,11 +930,17 @@ pub fn lower_value_classes(
             // (kotlinc instead falls back to a lambda CLASS whose `invoke` bridge unbox-impls
             // before a mangled erased `invoke-<hash>` — the boxed-impl indy here is sound but
             // byte-divergent; the class shape is a separate parity work item.)
+            // A SAM-converted lambda answers to the interface's DECLARED slot instead: one spelled as
+            // the value class itself erases to the underlying, so that parameter must NOT stay boxed.
             if own_from.is_some_and(|s| idx as u32 >= s)
                 && !p.is_nullable()
-                && p.non_null()
-                    .obj_internal()
-                    .is_some_and(|fq| under.contains_key(&fq))
+                && p.non_null().obj_internal().is_some_and(|fq| {
+                    under.contains_key(&fq)
+                        && lambda_slot_is_boxed(
+                            sam_params.and_then(|d| d.get(idx - own_from.unwrap_or(0) as usize)),
+                            fq,
+                        )
+                })
             {
                 // A scalar underlying is covered by the boxed-slot repr (`X?` over a scalar IS the
                 // box, so `repr_of_ty` reads `Boxed` and each use unboxes). `X?` over a reference
@@ -1092,6 +1119,21 @@ pub fn lower_value_classes(
                 if let Some(mangled) = mangle_map.get(&(*owner, name.clone(), args.len())) {
                     *name = mangled.clone();
                     *descriptor = erase_descriptor(descriptor, &under);
+                }
+            }
+            // A SAM conversion names the interface method at the `invokedynamic` call site. When that
+            // method mangled (its signature mentions a value class), the closure must implement the
+            // MANGLED name — `LambdaMetafactory` binding the original spelling produces a class that
+            // implements nothing the interface declares (`AbstractMethodError` at the first call).
+            if let IrExpr::Lambda {
+                sam: Some((interface, method, _)),
+                arity,
+                ..
+            } = e
+            {
+                let owner = crate::types::type_name(interface);
+                if let Some(mangled) = mangle_map.get(&(owner, method.clone(), *arity as usize)) {
+                    *method = mangled.clone();
                 }
             }
         }
@@ -1547,6 +1589,48 @@ pub fn lower_value_classes(
             let desc = ir_method_desc(&b.erased_params, &b.erased_ret);
             method_keys.insert((b.name.clone(), desc))
         });
+    }
+
+    // 2b. A same-file method whose DECLARED return is a value class `X` but whose REALIZED return is
+    //     `X`'s erased underlying (an interface's `onResult-<hash>()Ljava/lang/Object;`) hands back the
+    //     CARRIER. The lowerer wrapped every such call in a `Cast` to the declared type — it types calls
+    //     before any erasure is known — and over a carrier that cast is a `checkcast X` no unboxed value
+    //     can pass. Strip it here, before the representation analysis, which would otherwise read the
+    //     cast as proof that the result is a box and `unbox-impl` it at the return tail.
+    let self_casts_over_carriers: Vec<(ExprId, ExprId)> = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(id, e)| {
+            let IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast | crate::ir::IrTypeOp::CastNonNull,
+                arg,
+                type_operand,
+            } = e
+            else {
+                return None;
+            };
+            let x = type_operand
+                .non_null()
+                .obj_internal()
+                .filter(|fq| under.contains_key(fq))?;
+            let IrExpr::MethodCall { class, index, .. } = &ir.exprs[*arg as usize] else {
+                return None;
+            };
+            let &fid = ir
+                .classes
+                .get(*class as usize)
+                .and_then(|c| c.methods.get(*index as usize))?;
+            let declared_x = orig_rets[fid as usize].non_null().obj_internal() == Some(x);
+            let realized_x = ir.functions[fid as usize].ret.non_null().obj_internal() == Some(x);
+            (declared_x && !realized_x).then_some((id as ExprId, *arg))
+        })
+        .collect();
+    for (id, arg) in self_casts_over_carriers {
+        ir.exprs[id as usize] = IrExpr::Block {
+            stmts: vec![],
+            value: Some(arg),
+        };
     }
 
     // A `checkcast X` that is the receiver of an `X.unbox-impl()` must KEEP its value-class type even for
@@ -2249,11 +2333,21 @@ pub fn lower_value_classes(
             // Reading a value class's OWN property that is not its sole stored one (a computed member)
             // dispatches on the boxed object exactly like a member call — box the receiver. The sole
             // property is not here: that read was rewritten to identity in step 4.
+            //
+            // NOT for a CLASSPATH value class: kotlinc realizes such a property as a static `-impl`
+            // whose sole parameter is the UNBOXED carrier (`isFreezing-impl(I)Z`), so boxing the
+            // receiver hands it an operand of the wrong type ("'lib/Celsius' is not assignable to
+            // integer"). There the unboxed representation is already what the accessor wants; a
+            // receiver that happens to be boxed is unboxed to reach it.
             if let IrExpr::PropertyRead {
                 receiver, owner, ..
             } = &ir.exprs[id as usize]
             {
-                if under.contains_key(owner) {
+                if classpath_value_classes.contains(owner) {
+                    if let Repr::Boxed(x) = repr_ctx.repr(*receiver) {
+                        ops.push((*receiver, BoxOp::Unbox(x)));
+                    }
+                } else if under.contains_key(owner) {
                     if let Repr::Unboxed(x) = repr_ctx.repr(*receiver) {
                         ops.push((*receiver, BoxOp::Box(x)));
                     }
@@ -2924,6 +3018,12 @@ pub fn lower_value_classes(
             ..
         } = e
         {
+            // A lambda SAM-converted to a method that DECLARES this very value class as its return is
+            // exempt from ALL of the tail boxing below — see the note on the loop. Its inline body
+            // shares the same tail node, so it must be exempt from `box_vc_tail` too.
+            if sam_declares_vc_return(ir, &orig_rets, *impl_fn, &under) {
+                continue;
+            }
             if let Some(body) = ir.functions.get(*impl_fn as usize).and_then(|f| f.body) {
                 lambda_impls.push((*impl_fn, body));
             }
@@ -2938,6 +3038,10 @@ pub fn lower_value_classes(
         // class `X`, box the tail to `X` uniformly — for EVERY value class (a classpath `kotlin/Result` is a
         // value class like any other) and EVERY tail form (`this`, a library call, a constructor) — unless
         // it is already a boxed `X`. The impl method's JVM return becomes the box type `X`.
+        // A lambda whose SAM method DECLARES this value class as its return was skipped when the list
+        // was collected: that return erases to the underlying (kotlinc's
+        // `onResult-d1pmJ48()Ljava/lang/Object;` hands back the carrier), so the already-erased return
+        // is the right one and the tail needs no boxing at all.
         if let Some(x) = orig_rets[impl_fn as usize]
             .non_null()
             .obj_internal()
@@ -4192,6 +4296,54 @@ fn box_wrap_nullable(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under, sl
 /// `X?` erases to the underlying ONLY when that underlying is a reference (which can itself hold null);
 /// over a primitive underlying, `X?` stays the boxed `X` (a primitive can't represent null). Non-value
 /// types pass through.
+/// Whether a lifted lambda realizes the value class in one of its OWN slots BOXED.
+///
+/// A plain `FunctionN.invoke` slot is generic (`Object`), and a value class travelling through one is
+/// boxed. A SAM conversion targets a DECLARED method instead, so the answer is whatever the interface
+/// spells: a slot declared as the value class itself erases to the underlying (kotlinc's
+/// `ResultHandler.onResult(Ljava/lang/Object;)` carries the *carrier*, not a `kotlin/Result` box),
+/// while a slot declared as a type parameter is generic again and does box. `declared` is the SAM
+/// method's declaration at that position; `None` means there is no SAM (or its arity doesn't line up
+/// with the lambda's own parameters), which keeps the `FunctionN` reading.
+fn lambda_slot_is_boxed(declared: Option<&Ty>, value_class: TypeName) -> bool {
+    declared.is_none_or(|t| t.non_null().obj_internal() != Some(value_class))
+}
+
+/// The SAM method's declared parameter types for a lifted lambda, aligned to the lambda's OWN
+/// parameters (`own_from` is where those begin, after the captures). `None` unless the lambda was SAM
+/// converted AND the two arities agree — an implicit receiver or context parameter in the lambda's
+/// own slots has no counterpart in the interface declaration, and misaligned slots must not be read.
+fn lambda_sam_params(
+    signatures: &HashMap<u32, (Vec<Ty>, Ty)>,
+    fid: u32,
+    own_from: u32,
+    total_params: usize,
+) -> Option<&[Ty]> {
+    let (params, _) = signatures.get(&fid)?;
+    (params.len() == total_params.saturating_sub(own_from as usize)).then_some(params.as_slice())
+}
+
+/// Whether the lambda `impl_fn` was SAM-converted to a method whose DECLARED return is the very value
+/// class the lambda declares — in which case the JVM return is that class's erased underlying and the
+/// body's tail already produces it.
+fn sam_declares_vc_return(
+    ir: &crate::ir::IrFile,
+    orig_rets: &[Ty],
+    impl_fn: u32,
+    under: &Under,
+) -> bool {
+    let Some(x) = orig_rets
+        .get(impl_fn as usize)
+        .and_then(|t| t.non_null().obj_internal())
+        .filter(|fq| under.contains_key(fq))
+    else {
+        return false;
+    };
+    ir.lambda_sam_signature
+        .get(&impl_fn)
+        .is_some_and(|(_, ret)| ret.non_null().obj_internal() == Some(x))
+}
+
 fn erase(t: &Ty, under: &Under) -> Ty {
     if let Some(fq_name) = t.non_null().obj_internal() {
         let nullable = t.is_nullable();
