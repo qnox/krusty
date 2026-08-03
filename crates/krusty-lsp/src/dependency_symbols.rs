@@ -10,6 +10,15 @@
 //! time. Ranking therefore happens here, over names, and produces candidates; turning a candidate
 //! into something a client can open is a separate step, taken for as few as possible.
 //!
+//! A nested class is searchable under either spelling a reader can write in source: the visible
+//! name `Map.Entry`, and the bare leaf `Entry`. Both the prefix rung and the wildcard rung match
+//! against both, each through its own sorted order, so `Entry`, `Entry*`, `*Entry` and `Ent?y` all
+//! reach `Map.Entry` — adding a wildcard no longer costs a query its nested matches. (It can still
+//! cost it others: a wildcard query runs the wildcard rung *alone*, so the camel-hump and
+//! subsequence rungs a plain query also gets are not consulted.) Leaves outnumber whole names
+//! several times over on a real classpath, so wherever both are searched the leaves take a
+//! reserved floor rather than an equal share; see [`NESTED_PREFIX_SHARE`].
+//!
 //! Building it costs about **6 µs per class**, measured across disjoint slices of a real Gradle
 //! cache at 4k, 28k, 55k and 79k classes — steady enough that class count, not jar count, is what
 //! predicts the cost. A dependency set of 200,000 classes is therefore a little over a second, once
@@ -35,12 +44,43 @@ use crate::analysis::{
 /// class is the largest table there would be and it is recoverable from the package and the name.
 pub const MAX_DEPENDENCY_CLASSES: usize = 1024 * 1024;
 
-/// One in this many prefix-response slots is held for nested classes matched by their leaf name.
+/// One in this many response slots is held for nested classes matched by their leaf name.
 ///
 /// A floor rather than a split: nested matches outnumber whole-name ones several times over, so
 /// without a reservation they never appear, and with an even share they crowd out the whole-name
 /// matches a reader is more likely to have meant.
+///
+/// Both rungs that search the two orderings together — the plain name prefix, and any wildcard
+/// query that does not open with `*` — divide the response the same way, because the imbalance
+/// they face is the same one.
 const NESTED_PREFIX_SHARE: usize = 4;
+
+/// Which spelling of a stored name a candidate range is matched against.
+///
+/// The two exist because a nested class has two source-visible names and one stored name: the
+/// index holds `Map.Entry`, and a reader may write either that or the bare `Entry`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameSpelling {
+    /// The name as stored, with any enclosing classes: `Map.Entry`.
+    WholeName,
+    /// The final segment only: `Entry` for `Map.Entry`. Only nested entries are ranked this way --
+    /// `by_simple_segment` holds no others, so an ordinary class is never matched twice.
+    Leaf,
+}
+
+/// What one walk of the rung ladder shares: the query it answers, what it has already admitted,
+/// and what is left of the request's wildcard transition budget.
+///
+/// Bundled because the two orderings a nested name is reachable through are walked by four
+/// interleaved passes, and threading five parameters through each of them obscured which of them
+/// carried state and which were constants.
+struct RankState<'a> {
+    query: &'a WorkspaceQuery,
+    limit: usize,
+    seen: &'a mut std::collections::HashSet<u32>,
+    ranked: &'a mut Vec<u32>,
+    remaining_glob_steps: &'a mut usize,
+}
 
 /// A class the classpath declares, ranked but not yet located.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,36 +308,72 @@ impl DependencySymbolIndex {
         if limit == 0 {
             return ranked;
         }
+        let mut state = RankState {
+            query,
+            limit,
+            seen,
+            ranked: &mut ranked,
+            remaining_glob_steps,
+        };
         for rung in query.rungs() {
-            if ranked.len() >= limit {
+            if state.ranked.len() >= limit {
                 break;
             }
             match rung {
                 WorkspaceSymbolRung::Every => {}
                 WorkspaceSymbolRung::Glob => {
+                    // A wildcard matches a nested class under either spelling the prefix rung
+                    // accepts: the visible `Map.Entry` and the bare leaf `Entry`. Matching only the
+                    // whole name made a wildcard *remove* results -- `Entry` found `Map.Entry`
+                    // through the leaf ordering and `Entry*` did not find it at all, while `*Entry`
+                    // did, but only because a leading star happens to span the qualifier.
+                    //
+                    // Each spelling narrows through its own sorted order by the pattern's literal
+                    // prefix. An empty prefix selects the whole of whichever orders the pattern
+                    // still needs -- a pattern opening with a wildcard degrades to a scan, which is
+                    // the cost of a leading wildcard.
+                    //
+                    // The leaf order is one the pattern does not always need: it is skipped
+                    // outright for a pattern opening with `*`, and that gives up nothing. `*P`
+                    // matches a text exactly when some suffix of it matches `P`, and a leaf is a
+                    // suffix of its whole name, so every leaf that pass could find the whole-name
+                    // pass has already found. Skipping keeps the unanchored query -- the expensive
+                    // one, and by far the common one -- costing what it did. The equivalence is
+                    // asserted directly in `a_leading_star_needs_no_second_match_attempt`, over
+                    // generated patterns rather than a handful, because it is the one claim that
+                    // would silently drop nested results from every `*` query if `matches_glob`
+                    // ever gained a construct that broke it.
+                    //
+                    // An empty prefix now walks `by_name` rather than insertion order, so which
+                    // slice of a very broad unanchored query comes back changed -- alphabetical and
+                    // stable, where classpath order was an artifact of jar resolution. Measured
+                    // below as no cost: the indirection is what `*ntry` and `*zzzzz` pay.
+                    //
+                    // Measured interleaved over 194,096 classes, 61,976 of them nested: `*ntry`
+                    // 0.360 -> 0.365 ms and `*zzzzz` 25.5 -> 26.0 ms, both unchanged as intended;
+                    // a literal-prefix glob pays 3-10 µs for the second binary search and floor
+                    // (`Entry*` 4 -> 12 µs, `A*` 2 -> 11 µs). Only a `?`-opening pattern pays the
+                    // second pass in full, because it alone has no prefix and cannot be inferred
+                    // from the whole name: `?ntry` 2.8 -> 4.0 ms while finding 32 classes instead
+                    // of 6, and a `?` pattern that matches nothing 3.0 -> 7.2 ms. That worst case
+                    // stays inside the envelope a query without a usable prefix already has -- the
+                    // subsequence rungs scan the whole index for about 11 ms, and `*zzzzz` costs
+                    // 26 ms through the same grammar. Restricting leaf matching to patterns with a
+                    // literal prefix would erase it, at the price of reintroducing exactly this
+                    // bug for `?`-opening queries.
                     let prefix = query.literal_prefix();
-                    let completed = if prefix.is_empty() {
-                        self.append_glob_candidates(
-                            0..self.entries.len() as u32,
-                            query,
-                            limit,
-                            seen,
-                            &mut ranked,
-                            remaining_glob_steps,
-                        )
+                    let whole = self.prefix_range(&self.by_name, &self.lowercase_names, prefix);
+                    let leaf = if query.pattern.starts_with('*') {
+                        &[][..]
                     } else {
-                        self.append_glob_candidates(
-                            self.prefix_range(&self.by_name, &self.lowercase_names, prefix)
-                                .iter()
-                                .copied(),
-                            query,
-                            limit,
-                            seen,
-                            &mut ranked,
-                            remaining_glob_steps,
-                        )
+                        self.simple_segment_prefix_range(prefix)
                     };
-                    if !completed {
+                    if !self.fill_from_both_orders(
+                        &mut whole.iter().copied(),
+                        &mut leaf.iter().copied(),
+                        true,
+                        &mut state,
+                    ) {
                         break;
                     }
                 }
@@ -321,34 +397,14 @@ impl DependencySymbolIndex {
                     let whole =
                         self.prefix_range(&self.by_name, &self.lowercase_names, &query.pattern);
                     let leaf = self.simple_segment_prefix_range(&query.pattern);
-                    let reserved = limit / NESTED_PREFIX_SHARE;
-                    let mut whole = whole.iter().copied();
-                    let mut leaf = leaf.iter().copied();
-
-                    // Quotas count ADMITTED candidates, never raw indices. A raw index can be
-                    // rejected by a package qualifier or already be present through another query
-                    // spelling/range; slicing before `admit_ranked` made those rejected entries
-                    // consume the quota and could hide a valid qualified prefix later in the sorted
-                    // range. Keep each iterator resumable so either side can fill unused capacity.
-                    self.append_ranked_until(
-                        &mut whole,
-                        limit - reserved,
-                        query,
-                        limit,
-                        seen,
-                        &mut ranked,
-                    );
-                    let leaf_floor = ranked.len().saturating_add(reserved).min(limit);
-                    self.append_ranked_until(
-                        &mut leaf,
-                        leaf_floor,
-                        query,
-                        limit,
-                        seen,
-                        &mut ranked,
-                    );
-                    self.append_ranked_until(&mut whole, limit, query, limit, seen, &mut ranked);
-                    self.append_ranked_until(&mut leaf, limit, query, limit, seen, &mut ranked);
+                    if !self.fill_from_both_orders(
+                        &mut whole.iter().copied(),
+                        &mut leaf.iter().copied(),
+                        false,
+                        &mut state,
+                    ) {
+                        break;
+                    }
                 }
                 WorkspaceSymbolRung::InitialsPrefix => {
                     for &index in
@@ -360,7 +416,7 @@ impl DependencySymbolIndex {
                         {
                             continue;
                         }
-                        if !self.admit_ranked(index, query, limit, seen, &mut ranked) {
+                        if !self.admit_ranked(index, &mut state) {
                             break;
                         }
                     }
@@ -373,7 +429,7 @@ impl DependencySymbolIndex {
                     });
                     for &index in &self.by_initials {
                         if self.name_matches(index, &matching)
-                            && !self.admit_ranked(index, query, limit, seen, &mut ranked)
+                            && !self.admit_ranked(index, &mut state)
                         {
                             break;
                         }
@@ -387,7 +443,7 @@ impl DependencySymbolIndex {
                     });
                     for index in 0..self.entries.len() as u32 {
                         if self.name_matches(index, &matching)
-                            && !self.admit_ranked(index, query, limit, seen, &mut ranked)
+                            && !self.admit_ranked(index, &mut state)
                         {
                             break;
                         }
@@ -398,80 +454,92 @@ impl DependencySymbolIndex {
         ranked
     }
 
-    fn append_glob_candidates(
+    /// Fill the response from the two orderings a nested name is reachable through: whole names
+    /// carry it, the leaves get a reserved floor, and whatever one range does not use the other
+    /// takes. `globbed` additionally requires each candidate to satisfy the wildcard pattern.
+    ///
+    /// `false` means stop the rung -- the response is full, or the wildcard transition budget is
+    /// spent. The prefix rung can only see the former.
+    ///
+    /// One routine rather than one per rung because the split is forced by the shape of a
+    /// classpath, not by how a query was written: leaves outnumber whole names several times over
+    /// either way, so both rungs have to divide the response identically or they drift apart.
+    fn fill_from_both_orders(
         &self,
-        candidates: impl IntoIterator<Item = u32>,
-        query: &WorkspaceQuery,
-        limit: usize,
-        seen: &mut std::collections::HashSet<u32>,
-        ranked: &mut Vec<u32>,
-        remaining_steps: &mut usize,
+        whole: &mut impl Iterator<Item = u32>,
+        leaf: &mut impl Iterator<Item = u32>,
+        globbed: bool,
+        state: &mut RankState<'_>,
     ) -> bool {
-        for index in candidates {
-            match matches_glob(
-                self.name_of(index, &self.lowercase_names),
-                &query.pattern,
-                remaining_steps,
-            ) {
-                Some(true) => {}
-                Some(false) => continue,
-                None => {
-                    *remaining_steps = 0;
-                    return false;
+        let limit = state.limit;
+        let reserved = limit / NESTED_PREFIX_SHARE;
+        self.append_until(
+            whole,
+            NameSpelling::WholeName,
+            limit - reserved,
+            globbed,
+            state,
+        ) && {
+            let leaf_floor = state.ranked.len().saturating_add(reserved).min(limit);
+            self.append_until(leaf, NameSpelling::Leaf, leaf_floor, globbed, state)
+        } && self.append_until(whole, NameSpelling::WholeName, limit, globbed, state)
+            && self.append_until(leaf, NameSpelling::Leaf, limit, globbed, state)
+    }
+
+    /// Consume a sorted candidate range until the response holds `target_len` admitted entries, the
+    /// range is exhausted, or the walk must stop.
+    ///
+    /// `target_len` is an OUTPUT quota. Entries rejected by the pattern, by a package qualifier, or
+    /// as duplicates must not consume it: those were never candidates in the response, and counting
+    /// them was the fixed-slice merge's qualified-query bug. The iterator is borrowed mutably so the
+    /// caller can resume the same range after giving the other ordering its floor. This retains no
+    /// intermediate vector; even when filtering requires walking farther into a range, memory
+    /// remains bounded by the response itself.
+    fn append_until(
+        &self,
+        candidates: &mut impl Iterator<Item = u32>,
+        spelling: NameSpelling,
+        target_len: usize,
+        globbed: bool,
+        state: &mut RankState<'_>,
+    ) -> bool {
+        let target_len = target_len.min(state.limit);
+        while state.ranked.len() < target_len {
+            let Some(index) = candidates.next() else {
+                return true;
+            };
+            if globbed {
+                let text = match spelling {
+                    NameSpelling::WholeName => self.name_of(index, &self.lowercase_names),
+                    NameSpelling::Leaf => self.simple_segment(index),
+                };
+                match matches_glob(text, &state.query.pattern, state.remaining_glob_steps) {
+                    Some(true) => {}
+                    Some(false) => continue,
+                    None => {
+                        *state.remaining_glob_steps = 0;
+                        return false;
+                    }
                 }
             }
-            if !self.admit_ranked(index, query, limit, seen, ranked) {
+            if !self.admit_ranked(index, state) {
                 return false;
             }
         }
         true
     }
 
-    /// Consume a sorted candidate range until `ranked` contains `target_len` admitted entries, the
-    /// range is exhausted, or the response is full. The iterator is borrowed mutably so the caller
-    /// can resume the same range after giving another ranking source its reserved floor.
-    ///
-    /// `target_len` is an OUTPUT quota. Package mismatches and duplicates must not consume it: those
-    /// entries were never candidates in the response, and counting them was the fixed-slice merge's
-    /// qualified-query bug. This retains no intermediate vector; even when filtering requires walking
-    /// farther into a prefix range, memory remains bounded by the response itself.
-    fn append_ranked_until(
-        &self,
-        candidates: &mut impl Iterator<Item = u32>,
-        target_len: usize,
-        query: &WorkspaceQuery,
-        limit: usize,
-        seen: &mut std::collections::HashSet<u32>,
-        ranked: &mut Vec<u32>,
-    ) {
-        let target_len = target_len.min(limit);
-        while ranked.len() < target_len {
-            let Some(index) = candidates.next() else {
-                break;
-            };
-            if !self.admit_ranked(index, query, limit, seen, ranked) {
-                break;
-            }
-        }
-    }
-
     /// Admit one entry under the common qualifier and de-duplication rules. `false` means the
     /// caller has filled the bounded response and must stop walking its current rung immediately.
-    fn admit_ranked(
-        &self,
-        index: u32,
-        query: &WorkspaceQuery,
-        limit: usize,
-        seen: &mut std::collections::HashSet<u32>,
-        ranked: &mut Vec<u32>,
-    ) -> bool {
-        if ranked.len() >= limit {
+    fn admit_ranked(&self, index: u32, state: &mut RankState<'_>) -> bool {
+        if state.ranked.len() >= state.limit {
             return false;
         }
-        if self.qualifier_matches(index, query.package.as_deref()) && seen.insert(index) {
-            ranked.push(index);
+        if self.qualifier_matches(index, state.query.package.as_deref()) && state.seen.insert(index)
+        {
+            state.ranked.push(index);
         }
-        ranked.len() < limit
+        state.ranked.len() < state.limit
     }
 
     /// Entry indices whose key in `table` starts with `pattern`, by binary search over `order`.
@@ -958,6 +1026,146 @@ mod tests {
             names(&index, "Abstract*List::", 8),
             vec!["AbstractList", "AbstractMutableList"]
         );
+    }
+
+    #[test]
+    fn a_wildcard_reaches_a_nested_class_by_its_leaf_name() {
+        let index = index(&["java/util/Map$Entry", "demo/EntryPoint"]);
+
+        // Adding a wildcard to a query that worked must not remove results. `Entry` reaches
+        // `Map.Entry` through the leaf ordering; every wildcard spelling of the same intent has to
+        // reach it too, not just the unanchored one that happens to span the qualifier.
+        assert_eq!(names(&index, "Entry", 8), vec!["EntryPoint", "Map.Entry"]);
+        assert_eq!(names(&index, "Entry*", 8), vec!["EntryPoint", "Map.Entry"]);
+        assert_eq!(names(&index, "Ent?y", 8), vec!["Map.Entry"]);
+        assert_eq!(names(&index, "*Entry", 8), vec!["Map.Entry"]);
+        assert_eq!(names(&index, "En*ry*", 8), vec!["EntryPoint", "Map.Entry"]);
+    }
+
+    #[test]
+    fn a_nested_class_survives_a_crowd_of_whole_name_wildcard_matches() {
+        // The prefix rung's starvation shape, restated for wildcards: far more whole names match
+        // `Entry*` than the response can hold, and the one nested class sorts nowhere near the
+        // front of that range. Two classes would never reach the limit and so could not see this.
+        let mut internals = vec!["java/util/Map$Entry".to_string()];
+        for index in 0..500 {
+            internals.push(format!("demo/Entry{index}Holder"));
+        }
+        let index = DependencySymbolIndex::from_internal_names(internals);
+
+        let found = index.candidates("Entry*", 32);
+        assert_eq!(found.len(), 32);
+        assert!(
+            found.iter().any(|c| c.internal == "java/util/Map$Entry"),
+            "the nested class must not be starved by whole-name wildcard matches"
+        );
+    }
+
+    #[test]
+    fn a_whole_name_wildcard_match_outranks_a_weak_nested_one() {
+        // The other half of the same trade. Reaching leaves must not cost a wildcard response its
+        // slots either: for `Base*`, `Base64` is what a reader wants.
+        let mut internals = vec!["demo/Base64".to_string(), "demo/Base62".to_string()];
+        for index in 0..50 {
+            internals.push(format!("vendor/Enclosing{index}$Base"));
+        }
+        let index = DependencySymbolIndex::from_internal_names(internals);
+
+        let found = names(&index, "Base*", 8);
+        assert!(
+            found.contains(&"Base62".to_string()) && found.contains(&"Base64".to_string()),
+            "whole-name matches must survive the nested ones: {found:?}"
+        );
+        assert_eq!(
+            found.len(),
+            8,
+            "nested matches fill unused whole-name slots"
+        );
+        assert_eq!(
+            found.iter().filter(|name| name.ends_with(".Base")).count(),
+            6,
+            "the two whole-name matches lead, then leaves extend into unused capacity"
+        );
+    }
+
+    #[test]
+    fn a_leading_star_needs_no_second_match_attempt() {
+        // The `Glob` rung skips the leaf order entirely for a `*`-opening pattern, on the grounds
+        // that `*P` matches a text exactly when some suffix of it matches `P`, so a whole name
+        // answers for its own leaf. That is the one claim in the rung that fails silently: break it
+        // and every `*` query quietly stops returning nested classes, with nothing to show for it.
+        //
+        // `matches_glob` is a hand-rolled backtracking matcher, not a regex, so the property is
+        // asserted against it directly and over generated patterns -- a handful of hand-picked ones
+        // would not survive the matcher gaining a construct. The counter-check matters as much as
+        // the check: the same implication is *false* for `?`-opening patterns, which is why the
+        // rung draws the line where it does rather than skipping the leaf order more often.
+        let alphabet = ['a', 'b', '.', '*', '?'];
+        let mut patterns = vec![String::new()];
+        for _ in 0..4 {
+            patterns = patterns
+                .iter()
+                .flat_map(|pattern| {
+                    alphabet.iter().map(move |character| {
+                        let mut longer = pattern.clone();
+                        longer.push(*character);
+                        longer
+                    })
+                })
+                .chain(patterns.iter().cloned())
+                .collect();
+        }
+        let mut starred = 0;
+        let mut question_counterexamples = 0;
+        for pattern in &patterns {
+            for outer in ["map", "a", "ab"] {
+                for leaf in ["entry", "a", "ab", ""] {
+                    let whole = format!("{outer}.{leaf}");
+                    let mut budget = usize::MAX;
+                    let leaf_matches = matches_glob(leaf, pattern, &mut budget) == Some(true);
+                    let whole_matches = matches_glob(&whole, pattern, &mut budget) == Some(true);
+                    if pattern.starts_with('*') {
+                        starred += 1;
+                        assert!(
+                            !leaf_matches || whole_matches,
+                            "{pattern} matched the leaf {leaf} but not {whole}: \
+                             the leaf pass may not be skipped"
+                        );
+                    } else if pattern.starts_with('?') && leaf_matches && !whole_matches {
+                        question_counterexamples += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            starred > 1000,
+            "the generated set must actually exercise it"
+        );
+        assert!(
+            question_counterexamples > 0,
+            "a `?`-opening pattern must still need the leaf pass, or the skip is drawn too narrowly"
+        );
+
+        let index = index(&["java/util/Map$Entry"]);
+        assert_eq!(names(&index, "*ntry", 8), vec!["Map.Entry"]);
+    }
+
+    #[test]
+    fn a_qualified_wildcard_still_selects_by_package() {
+        let index = index(&[
+            "kotlin/collections/Builder",
+            "demo/app/Builder",
+            "java/util/Map$Entry",
+        ]);
+
+        // The qualifier is parsed off before the pattern, so it constrains wildcard queries the
+        // same way, including when it names an enclosing class rather than a package.
+        let found = index.candidates("collections.Build*", 8);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].package, "kotlin.collections");
+        let nested = index.candidates("map.Ent*", 8);
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].internal, "java/util/Map$Entry");
     }
 
     #[test]
