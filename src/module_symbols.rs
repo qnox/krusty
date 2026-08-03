@@ -79,7 +79,7 @@ impl<'a> ModuleSymbols<'a> {
                     .map(move |s| lib_member(n, s, c.internal_name(), c.is_interface()))
             })
             .collect();
-        let mut companion: Vec<LibraryMember> = c
+        let companion: Vec<LibraryMember> = c
             .static_methods
             .iter()
             .map(|(n, s)| lib_member(n, s, c.internal_name(), c.is_interface()))
@@ -124,12 +124,14 @@ impl<'a> ModuleSymbols<'a> {
         } else {
             crate::libraries::TypeKind::Class
         };
-        if enum_entries.is_some() {
-            // Source enums emit this synthetic accessor even though it has no source declaration.
-            // Give it a non-source `name` so ordinary call resolution cannot expose `getEntries()`;
-            // consumers that model the `entries` property identify its physical JVM name instead.
+        let enum_entries_accessor = enum_entries.as_ref().map(|_| {
+            // Describe the accessor the backend emits even though it has no source declaration. This
+            // is the same LibraryMember capability dependency providers expose, so consumers retain
+            // one origin-independent target and lowering need not reconstruct its JVM call. Keep the
+            // logical name uncallable: `Enum.getEntries()` is not a Kotlin source function; only the
+            // synthetic `Enum.entries` property may select its physical name.
             let mut entries = LibraryMember::new(
-                "<get-enum-entries>".to_string(),
+                "<enum-entries-accessor>".to_string(),
                 Vec::new(),
                 Ty::obj_args(
                     "kotlin/enums/EnumEntries",
@@ -139,8 +141,8 @@ impl<'a> ModuleSymbols<'a> {
             );
             entries.owner = Some(c.internal_name());
             entries.physical_name = Some("getEntries".to_string());
-            companion.push(entries);
-        }
+            entries
+        });
         let enum_entries = enum_entries.unwrap_or_default();
         let sealed_subclasses = if c.is_sealed() {
             self.syms.subclass_names_of(c.internal_name()).into()
@@ -182,6 +184,7 @@ impl<'a> ModuleSymbols<'a> {
             type_params: Vec::new(),
             sealed_subclasses,
             enum_entries,
+            enum_entries_accessor,
             value_ctor_has_default: false,
             ctor_named_params,
             value_class_properties: Vec::new(),
@@ -965,11 +968,10 @@ mod tests {
         assert!(phase.is_enum());
         assert_eq!(phase.enum_entries, ["FIRST", "SECOND"]);
         let entries = phase
-            .companion
-            .iter()
-            .find(|member| member.physical_name.as_deref() == Some("getEntries"))
+            .enum_entries_accessor
+            .as_ref()
             .expect("source enum shape should retain its synthetic entries accessor");
-        assert_eq!(entries.name, "<get-enum-entries>");
+        assert_eq!(entries.name, "<enum-entries-accessor>");
         assert_eq!(entries.descriptor, "()Lkotlin/enums/EnumEntries;");
     }
 
