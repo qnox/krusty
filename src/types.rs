@@ -734,6 +734,23 @@ impl Ty {
         matches!(self, Ty::TyParam(..))
     }
 
+    /// Whether a type parameter appears ANYWHERE in this type — as the type itself, a type argument,
+    /// an array element, a function parameter/return, or under a `?`. A type that mentions one is not
+    /// yet a concrete answer: it still needs the use site's substitution, so asserting it (as a
+    /// reference type's argument, say) records `T.() -> String` where `Int.() -> String` is meant.
+    pub fn mentions_ty_param(self) -> bool {
+        match self {
+            Ty::TyParam(..) => true,
+            Ty::Nullable(inner) => inner.mentions_ty_param(),
+            Ty::Obj(_, args) => args.iter().any(|a| a.mentions_ty_param()),
+            Ty::Fun(signature) => {
+                signature.ret.mentions_ty_param()
+                    || signature.params.iter().any(|p| p.mentions_ty_param())
+            }
+            _ => false,
+        }
+    }
+
     /// The name of a type-parameter type (`T`), else `None`.
     pub fn ty_param_name(self) -> Option<&'static str> {
         match self {
@@ -1242,6 +1259,25 @@ impl Visibility {
     /// Whether this is `private` — the source `is_private` bool the parser/AST previously carried.
     pub fn is_private(self) -> bool {
         self == Visibility::Private
+    }
+}
+
+/// The type of a property that Kotlin defines on a BUILTIN receiver, where no class file answers the
+/// lookup: `Char.code` is an `inline` extension in the stdlib source, and `String.length` / an array's
+/// `size` are intrinsics on types that have no user-visible declaration to resolve against.
+///
+/// One table, because both phases need the same answer: the body checker types the READ, and the
+/// SIGNATURE phase types an unannotated top-level property's initializer (`const val code = a.code`)
+/// long before any body is checked. When only the checker knew them, the signature phase reported
+/// "cannot infer the type of property" for an expression the checker accepts.
+pub fn builtin_receiver_property_ty(receiver: Ty, name: &str) -> Option<Ty> {
+    match (receiver, name) {
+        (Ty::String, "length") => Some(Ty::Int),
+        // `c.code` — the Char's UTF-16 code unit as an `Int`.
+        (Ty::Char, "code") => Some(Ty::Int),
+        // `arr.size` — covers primitive arrays and a boxed `Array<T>` alike.
+        (_, "size") if receiver.array_elem().is_some() => Some(Ty::Int),
+        _ => None,
     }
 }
 

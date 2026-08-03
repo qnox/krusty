@@ -1672,20 +1672,13 @@ fn lower_file_at_reporting_impl(
                 let field_tp: std::collections::HashMap<String, String> =
                     class_field_tparams(c).into_iter().collect();
                 // kotlinc emits NO accessor for a `private` property (in-class reads go straight to the
-                // field); synthesizing one is an extra public member → an ABI divergence. Kept when the
-                // class HAS a companion — a companion reads the outer's privates through the getter
-                // (kotlinc uses an `access$…` bridge krusty doesn't emit yet; box `classes/kt504.kt`).
-                // A value class also keeps its getter (its unboxed-support synthesis expects it).
-                // Only a companion with CODE (methods, non-const props, a base) can read the
-                // outer class's privates through the getter (kt504); a CONST-ONLY companion never
-                // does — its outer keeps kotlinc's shape (no getter for a private property).
-                let has_companion = !c.companion_methods.is_empty()
-                    || c.companion_props.iter().any(|p| !p.is_const)
-                    || c.companion_base.is_some();
+                // field); synthesizing one is an extra public member → an ABI divergence. A reader in
+                // another class — the companion, a nested class, an inlined body — goes through the
+                // synthetic `access$…$p` bridge instead (`mark_private_access_bridge_if_outside`).
+                // A value class keeps its getter: its unboxed-support synthesis expects one.
                 for (pi, (pname, is_var, is_private, property_ty)) in field_props.iter().enumerate()
                 {
                     let fidx = pi + field_offset;
-                    let private_no_accessor = *is_private && !c.is_value && !has_companion;
                     let fty = fields[fidx].1;
                     // Use the class field's IrType (carries declared `?` via `mark_nullable`), not the
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the
@@ -1742,15 +1735,16 @@ fn lower_file_at_reporting_impl(
                             needs_access_bridge: false,
                         });
                     let prop_record = lo.ir.classes[id as usize].properties.len() - 1;
-                    // kotlinc emits NO accessor for a private property — in-class reads go straight to
-                    // the backing field. The DECLARATION is recorded above regardless, so a use from
-                    // outside the class can see there is nothing to call.
-                    if private_no_accessor {
-                        continue;
-                    }
-                    // A property with NO source-written accessor needs none from the language lowering:
-                    // its `getX`/`setX` are a target realization of the declaration recorded above, and
-                    // the backend synthesizes them.
+                    // kotlinc SYNTHESIZES no accessor for a private property — in-class reads go straight
+                    // to the backing field. The DECLARATION is recorded above regardless, so a use from
+                    // outside the class can see there is nothing to call. A SOURCE-WRITTEN accessor is
+                    // different: it is user code with a body, and dropping it silently replaces the
+                    // program's `set(l) { /* ignore */ }` with a plain field store (box
+                    // `properties/kt3551.kt`). So the private skip covers only the synthesized pair.
+                    //
+                    // A property with NO source-written accessor needs none from the language lowering
+                    // either: its `getX`/`setX` are a target realization of the declaration recorded
+                    // above, and the backend synthesizes them.
                     if !prop_custom_accessor {
                         continue;
                     }
@@ -5751,12 +5745,57 @@ impl<'a> Lower<'a> {
         receiver: u32,
         args: Vec<Option<u32>>,
     ) -> u32 {
+        let (class, index) = self
+            .private_member_call_target(class, index, &args)
+            .unwrap_or((class, index));
         self.ir.add_expr(IrExpr::MethodCall {
             class,
             index,
             receiver,
             args,
         })
+    }
+
+    /// A PRIVATE member is reached by `invokespecial`, which the JVM permits only from the member's OWN
+    /// class. Kotlin's private visibility is LEXICAL and wider than that: a nested class, the companion
+    /// and an `inline` body spliced into a caller all sit inside the owner's braces but land in separate
+    /// class files. kotlinc reaches the member from them through a synthetic `access$<name>` bridge on
+    /// the owner; without it the call is a `VerifyError` ("current class isn't assignable to reference
+    /// class"). Retargeting here — at the one place a member call is constructed — is why the rule holds
+    /// for every caller instead of the handful that each re-derived it.
+    ///
+    /// Returns `None` when the call is already legal, when the target is an accessor or a constructor,
+    /// or when no bridge can be built; a call with an OMITTED argument is left alone because the bridge
+    /// carries no `$default` stub to dispatch.
+    fn private_member_call_target(
+        &mut self,
+        class: u32,
+        index: u32,
+        args: &[Option<u32>],
+    ) -> Option<(u32, u32)> {
+        if args.iter().any(Option::is_none) {
+            return None;
+        }
+        let fid = *self
+            .ir
+            .classes
+            .get(class as usize)?
+            .methods
+            .get(index as usize)?;
+        if !self.ir.private_methods.contains(&fid) {
+            return None;
+        }
+        let name = self.ir.functions[fid as usize].name.clone();
+        if name.starts_with("access$") || name == "<init>" {
+            return None;
+        }
+        let owner = existing_type_name(&self.ir.classes[class as usize].fq_name())?;
+        if self.can_access_source_private(owner) {
+            return None;
+        }
+        let accessor = self.ensure_private_accessor_name(owner, &name)?;
+        let (class, index, _, _) = self.resolve_method_name(owner, &accessor)?;
+        Some((class, index))
     }
 
     fn emit_external_call(
@@ -10282,6 +10321,65 @@ impl<'a> Lower<'a> {
         ty.obj_internal().and_then(|i| self.class_info_name(i))
     }
 
+    /// The label a lambda answers to. An EXPLICITLY labelled literal (`run rr@{ … }`) answers to its
+    /// own name; otherwise the lambda takes the name of the function it is passed to, which is what
+    /// `return@run` / `return@forEach` targets. Every site that decides whether a labelled return is
+    /// local to the lambda must ask this, not assume the callee's name.
+    fn lambda_label(&self, lambda: AstExprId, callee: &str) -> String {
+        self.afile
+            .lambda_labels
+            .get(&lambda.0)
+            .cloned()
+            .unwrap_or_else(|| callee.to_string())
+    }
+
+    /// Splice a zero-parameter lambda body in place, giving a `return@<label>` inside it a LOCAL-return
+    /// frame: the body is wrapped in a `while (true) { … break@brk }` and the labelled return lowers to
+    /// `break@brk`, leaving its value in a slot. Without the frame the labelled return falls through to
+    /// the ENCLOSING function's return and pushes a value of the lambda's type where the function's is
+    /// required — unverifiable bytecode (`run { … return@run 30 … }` inside a `String` function).
+    fn splice_labeled_lambda_body(
+        &mut self,
+        body: AstExprId,
+        label: &str,
+        result_ty: Ty,
+    ) -> Option<u32> {
+        let brk = format!("$lamret${}", self.fresh_value());
+        // `result_ty` is the CALL's type, not the body's: a body whose every path is a `return@label`
+        // falls through as `Nothing` while the call still produces a value, and binding the slot as
+        // `Nothing` leaves the splice with no result at all ("control flow falls through code end").
+        if result_ty != Ty::Unit && result_ty != Ty::Nothing {
+            let ret = result_ty;
+            let result_slot = self.fresh_value();
+            let dflt = self.emit_zero_value(ret);
+            let decl = self.emit_variable(result_slot, ty_to_ir(ret), Some(dflt));
+            self.inline_lambda_ret
+                .push((label.to_string(), result_slot, brk.clone(), ret, false));
+            let body_val = self.expr(body);
+            self.inline_lambda_ret.pop();
+            let body_val = body_val?;
+            // Normal fall-through: the body's own value is the result.
+            let assign = self.emit_set_value(result_slot, body_val);
+            let brk_stmt = self.emit_break(Some(brk.clone()));
+            let loop_body = self.emit_block(vec![assign, brk_stmt], None);
+            let cond = self.emit_const(IrConst::Boolean(true));
+            let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+            let get = self.emit_get_value(result_slot);
+            return Some(self.emit_block(vec![decl, loopw], Some(get)));
+        }
+        self.inline_lambda_ret
+            .push((label.to_string(), 0, brk.clone(), Ty::Unit, false));
+        let body_val = self.expr(body);
+        self.inline_lambda_ret.pop();
+        let body_val = body_val?;
+        let brk_stmt = self.emit_break(Some(brk.clone()));
+        let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
+        let cond = self.emit_const(IrConst::Boolean(true));
+        let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+        let unit = self.emit_unit();
+        Some(self.emit_block(vec![loopw], Some(unit)))
+    }
+
     fn single_lambda_arg(&self, args: &[AstExprId]) -> Option<(AstExprId, Vec<String>, AstExprId)> {
         let [arg] = args else {
             return None;
@@ -11565,6 +11663,18 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        // Same rule for a VALUE-CLASS-typed property: kotlinc emits its accessors under the
+        // value-class name mangle (`getZ-<hash>()I`, over the UNDERLYING type), while the reference
+        // dispatches the plain `getZ()`. Until the reference carries the mangle, dispatching the
+        // unmangled name is a `NoSuchMethodError`, so decline (skip) instead
+        // (box `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt` and its three siblings).
+        if prop_ty
+            .obj_internal()
+            .and_then(|internal| self.syms.class_by_type_name(internal))
+            .is_some_and(|signature| signature.value_field.is_some())
+        {
+            return None;
+        }
         // A mutable (`var`) reference uses the `KMutableProperty*` runtime class and gets a `set`
         // method (emitted alongside `get`); an immutable one stays `KProperty*`.
         let bound = capture.is_some();
@@ -12632,7 +12742,14 @@ impl<'a> Lower<'a> {
         let args: Vec<Option<u32>> = (0..params.len())
             .map(|i| Some(self.emit_get_value((i + 1) as u32)))
             .collect();
-        let call = self.emit_method_call(class_id, index, recv, args);
+        // Constructed directly rather than through `emit_method_call`: this body IS the in-class call
+        // the bridge exists to provide, so it must not be retargeted at a bridge again.
+        let call = self.ir.add_expr(IrExpr::MethodCall {
+            class: class_id,
+            index,
+            receiver: recv,
+            args,
+        });
         // Wrap in an explicit return so the method's control flow terminates: `return this.<m>(args)`
         // for a value-returning target, or the call then a bare `return` for a `Unit`/void one.
         let stmts = if ret == Ty::Unit {
@@ -14318,6 +14435,7 @@ impl<'a> Lower<'a> {
         interface: bool,
         field: Option<Box<crate::libraries::InstanceFieldRef>>,
     ) -> u32 {
+        self.mark_private_access_bridge_if_outside(owner, name);
         let read = self.ir.add_expr(IrExpr::PropertyRead {
             receiver,
             owner,
@@ -14331,6 +14449,23 @@ impl<'a> Lower<'a> {
         read
     }
 
+    /// A PRIVATE property NAMED from outside its declaring class has no accessor to call: kotlinc emits
+    /// none for a private property, and the backing field is unreachable from another class file — even
+    /// a lexically enclosed one, since the companion, a nested class and an inlined body are all separate
+    /// classes on the JVM. Such a use is reached through the synthetic `access$…$p` bridge instead.
+    ///
+    /// This sits at the one place every property read and write is CONSTRUCTED, so no naming path can
+    /// forget it. It previously lived on two of the callers, and the `StmtLowering::MemberPropertyWrite`
+    /// path — which preempts them — emitted a call to a `setX` that is never generated
+    /// (`NoSuchMethodError`; box `classes/kt504.kt`, a companion writing its outer class's private `var`).
+    fn mark_private_access_bridge_if_outside(&mut self, owner: TypeName, name: &str) {
+        if let Some((declaring, _, true)) = self.declared_property(owner, name) {
+            if !self.can_access_source_private(declaring) {
+                self.mark_property_access_bridge(declaring, name);
+            }
+        }
+    }
+
     /// Write analogue of [`Self::add_property_read`]. Reads and writes therefore preserve declaration
     /// types under the same rule instead of duplicating origin-sensitive metadata at their call sites.
     fn add_property_write(
@@ -14342,6 +14477,7 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
+        self.mark_private_access_bridge_if_outside(owner, name);
         let write = self.ir.add_expr(IrExpr::PropertyWrite {
             receiver,
             owner,
@@ -14367,21 +14503,14 @@ impl<'a> Lower<'a> {
         }
         // A class whose declarations are not tracked yet (an enum entry's body, an anonymous object)
         // still has the backing field; read that.
-        let (declaring, ty, is_private) = match self.declared_property(owner, name) {
-            Some((declaring, ty, is_private)) => (declaring, ty, is_private),
-            None => (
-                owner,
-                self.resolve_field_name(owner, name).map(|(_, _, t)| t)?,
-                false,
-            ),
-        };
         // Reaching a PRIVATE property from outside its class is legal in Kotlin — an `inline` body is
-        // spliced into its caller — so the read stands and the declaring class exposes a synthetic
-        // accessor for it. Declining here would silently turn the `inline` call into an ordinary one,
-        // which is a different program.
-        if is_private && !self.can_access_source_private(owner) {
-            self.mark_property_access_bridge(declaring, name);
-        }
+        // spliced into its caller — so the read stands, and `add_property_read` marks the declaring
+        // class to expose the synthetic accessor. Declining here would silently turn the `inline` call
+        // into an ordinary one, which is a different program.
+        let ty = match self.declared_property(owner, name) {
+            Some((_, ty, _)) => ty,
+            None => self.resolve_field_name(owner, name).map(|(_, _, t)| t)?,
+        };
         let read = self.add_property_read(
             receiver,
             owner,
@@ -18207,13 +18336,6 @@ impl<'a> Lower<'a> {
         // The property's type comes from its backing field, or — for a property that has none (a custom
         // setter, a delegated `x$delegate`) — from the setter it declares. Neither means this is not a
         // property of the class, and the caller's other paths apply.
-        // A private property written from outside its class needs the synthetic setter, same as a read.
-        if let Some((declaring, _, true)) = self.declared_property(type_name(&owner_internal), name)
-        {
-            if !self.can_access_source_private(declaring) {
-                self.mark_property_access_bridge(declaring, name);
-            }
-        }
         let prop_ty = self
             .class_of(rt)
             .and_then(|ci| {
@@ -18918,6 +19040,11 @@ impl<'a> Lower<'a> {
                     },
                 ) = (splice, arg_expr)
                 {
+                    // An explicitly labelled lambda answers to its OWN label (`run rr@{ … return@rr
+                    // … }`); an unlabelled one takes the callee's name, which is what `return@run`
+                    // targets. Both the disallowed-return check and the splice frame use this name, so
+                    // it is resolved once here.
+                    let lam_label = self.lambda_label(args[ai], fname);
                     let context_count = fnsig.context_count.min(fnsig.params.len());
                     let receiver_count = usize::from(f.params[i].ty.fun_has_receiver())
                         .min(fnsig.params.len().saturating_sub(context_count));
@@ -18931,7 +19058,7 @@ impl<'a> Lower<'a> {
                     // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
                     // bail. A `return@<thisInlineFn>` IS modeled (a local return from the spliced lambda,
                     // handled by the `inline_lambda_ret` frame set up at the invoke site), so it's allowed.
-                    if body_has_disallowed_return(self.afile, lbody, fname)
+                    if body_has_disallowed_return(self.afile, lbody, &lam_label)
                         || params.len() != fnsig.params.len()
                     {
                         self.scope.truncate(depth);
@@ -18972,7 +19099,7 @@ impl<'a> Lower<'a> {
                         params,
                         body: lbody,
                         param_tys: lam_param_tys,
-                        label: fname.to_string(),
+                        label: lam_label,
                         lexical_scope: caller_scope.clone(),
                         lexical_class: caller_class,
                         lexical_fn_name: caller_fn_name.clone(),
@@ -22878,14 +23005,30 @@ impl<'a> Lower<'a> {
             // block()`): inline the lambda body directly as the value. The receiver scope
             // functions (`x.let`/`with(x)`) are intercepted similarly; without this, no-receiver
             // `run` falls to the bytecode splicer, which bails on a branchy body (`run { if … }`).
-            if let ("run", Some((_, params, body)), true, true) = (
+            if let ("run", Some((lambda, params, body)), true, true) = (
                 fname.as_str(),
                 one_lambda_arg.as_ref(),
                 self.lookup(&fname).is_none(),
                 !self.module_declares(&fname),
             ) {
-                if params.is_empty() && !body_has_labeled_return(self.afile, *body, "run") {
-                    return self.expr(*body);
+                let label = self.lambda_label(*lambda, "run");
+                if params.is_empty() {
+                    let (body, label) = (*body, label);
+                    return if body_has_labeled_return(self.afile, body, &label) {
+                        // A body whose every path is a `return@label` falls through as `Nothing`, and
+                        // the checker types the CALL from that fall-through — so there is no result
+                        // type for the splice to bind, and the enclosing expression body drops the
+                        // value instead of returning it. Typing the lambda from the JOIN of its
+                        // labelled returns is the real fix and belongs in the checker; until then this
+                        // shape declines rather than miscompiling.
+                        let result_ty = self.info.ty(e);
+                        if result_ty == Ty::Nothing {
+                            return None;
+                        }
+                        self.splice_labeled_lambda_body(body, &label, result_ty)
+                    } else {
+                        self.expr(body)
+                    };
                 }
             }
             // A call to a lifted local function — the checker mapped this call to its decl.

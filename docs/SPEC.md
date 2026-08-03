@@ -2416,6 +2416,60 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver reached any other way is a suspend extension/member, which the suspend gate already skips.
   Tests: `tests/scope_function_value_arg_e2e.rs::apply_accepts_receiver_function_value_argument`,
   `tests/lower_bail_reason_e2e.rs::gated_corpus_cases_report_precise_lower_bail`.
+- **`private` visibility is LEXICAL, and the JVM's is not.** A nested (non-`inner`) class, the
+  companion and an `inline` body spliced into a caller all sit inside the owner's braces, so Kotlin
+  lets them reach its private members; each is a SEPARATE class file, so `invokespecial` on a private
+  method and `getfield`/`putfield` on a private backing field are both illegal there. Accessibility is
+  therefore decided over the ENCLOSING chain (not the receiver chain, which a nested class has none
+  of), and the reach is realized through the synthetic bridges kotlinc emits on the owner —
+  `access$<name>` for a method, `access$get<X>$p` / `access$set<X>$p` for a property. Both are applied
+  at the single point the call/read/write node is CONSTRUCTED, so no lowering path can forget them; a
+  call with an omitted (defaulted) argument is left alone, since the bridge carries no `$default`
+  stub. This removed the divergence where a class with a companion kept public accessors for its
+  private properties. Tests: `tests/companion_e2e.rs::companion_reaches_the_outer_class_private_var`,
+  `::a_nested_class_reaches_the_outer_class_private_member`,
+  `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
+  `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **The accessor a `private` property does not get is the SYNTHESIZED one.** A source-written
+  accessor is user code with a body: skipping it replaces the program's `set(l) { /* ignore */ }` with
+  a plain field store, so the write silently takes effect. Only the synthesized `getX`/`setX` pair is
+  withheld. Test: `tests/companion_e2e.rs::a_private_property_keeps_its_source_written_setter`,
+  box `properties/kt3551.kt`.
+- **A property reference carries its type arguments.** `::foo` typed as a RAW `KProperty0`, so
+  `(::foo).get()` erased to the upper bound and `(::foo).get().value` did not resolve. The reference
+  type is built with the property's own type (`[V]` at arity 0, `[Recv, V]` at arity 1). Two things
+  are deliberately NOT asserted, because a wrong type is worse than none: a type still mentioning a
+  type parameter (the use site's substitution is not applied here), and an EXTENSION property's value
+  type (written in terms of the property's own parameters). A VALUE-CLASS-typed property reference
+  declines outright — kotlinc emits those accessors under the value-class name mangle, which the
+  reference does not yet carry. Tests: `tests/toplevel_property_ref_e2e.rs::toplevel_property_refs_run`,
+  box `callableReference/property/extensionPropertyWithExtensionType.kt`,
+  `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt`.
+- **A property on a BUILTIN receiver is one table, read by both phases.** `String.length`, `Char.code`
+  and an array's `size` have no class file to resolve against. The body checker knew them; the
+  SIGNATURE phase did not, so `const val code = a.code` reported "cannot infer the type of property"
+  for an expression the checker accepts. `String.length` alone records its resolved member — the other
+  two are backend intrinsics, and recording a member for them retargets the read into unverifiable
+  bytecode. Test: `tests/toplevel_property_inference_e2e.rs::toplevel_property_cross_reference`.
+- **A lambda may carry its own label, and a labelled return is LOCAL to it.** `run rr@{ … }` puts the
+  label tokens between the callee and the `{`, which ended the postfix parse before the block: the
+  lambda was never attached as an argument and the callee reported as an unresolved reference. Every
+  site that decides whether a labelled return is local now asks for the lambda's EFFECTIVE label — its
+  own when written, else the name of the function it is passed to. `return@run v` itself lowered as
+  the ENCLOSING function's return, pushing the lambda's value where the function's type is required
+  (a `VerifyError`, not merely a wrong answer); it now breaks out of a splice frame, the same
+  mechanism a user `inline fun` already used. A body whose every path is a labelled return still
+  declines: the checker types the call from the `Nothing` fall-through, so there is no result type to
+  bind — typing a lambda from the JOIN of its labelled returns is the checker-side fix that shape
+  needs. Tests: `tests/inline_vc_suspend_coverage_e2e.rs::labelled_trailing_lambda_parses`,
+  `::labelled_return_leaves_the_lambda_not_the_function`,
+  `::inline_local_labeled_return`.
+- **A lambda argument to the invoke operator is CONTEXTUAL.** `b { it + 1 }` on a
+  `class Box { operator fun invoke(f: (Int) -> Int) }` types `it` from the operator's parameter. The
+  arguments were typed with no expectation, so `it` came out as the erased upper bound and the call
+  reported "operator cannot be applied to 'Any' and 'Int'" before the operator was ever consulted —
+  the expectation has to be supplied when the arguments are typed, not after selection. Test:
+  `tests/inline_vc_suspend_coverage_e2e.rs::inline_operator_fun`.
 
 ## 8. Success criteria for the PoC
 
