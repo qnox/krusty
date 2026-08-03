@@ -1060,7 +1060,7 @@ fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
     Some(sc)
 }
 
-/// The classpath-less `String` member fallback: with no stdlib/JDK on the classpath there is no
+/// The classpath-less `String` extension fallback: with no stdlib/JDK on the classpath there is no
 /// signature to resolve against, so the few `String` names whose result type is fixed by the language
 /// are answered directly. All of them are stdlib EXTENSIONS on `kotlin.String` rather than members of
 /// it (`kotlin.String` declares only `plus`/`get`/`subSequence`/`compareTo`/`length`/`equals`/
@@ -1069,30 +1069,30 @@ fn positional_score(params: &[Ty], arg_tys: &[Ty]) -> Option<usize> {
 /// Shared by the qualified arm and the safe-call arm on purpose: they must agree about what exists,
 /// or `s!!.substring(1)` compiles while `s?.substring(1)` reports an unresolved reference. (Only the
 /// qualified arm had this table, and the asymmetry was invisible while the safe-call arm returned a
-/// silent `Ty::Error` instead of reporting.) The two arms consult it at DIFFERENT points — the
-/// safe-call arm after its source-extension fallback, the qualified arm before its extension
-/// resolution, which is pre-existing ordering this extraction deliberately left alone.
-const BUILTIN_STRING_MEMBER_SIGNATURES: &[(&str, &[Ty], Ty)] = &[
+/// silent `Ty::Error` instead of reporting.) Both call forms consult it only after the ordinary
+/// member/extension resolution ladder has declined the call. That ordering is part of the semantic
+/// contract: this table supplies missing standard-library metadata; it must never masquerade as a
+/// member and outrank a real source or classpath extension with the same name.
+const CLASSPATHLESS_STRING_EXTENSION_SIGNATURES: &[(&str, &[Ty], Ty)] = &[
     ("substring", &[Ty::Int], Ty::String),
     ("substring", &[Ty::Int, Ty::Int], Ty::String),
     ("indexOf", &[Ty::String], Ty::Int),
-    ("concat", &[Ty::String], Ty::String),
     // `trimIndent()`/`trimMargin()` — stdlib extensions; krusty folds them at compile time on a
     // string-literal receiver (codegen rejects a non-literal receiver).
     ("trimIndent", &[], Ty::String),
     ("trimMargin", &[], Ty::String),
 ];
 
-fn builtin_string_member_ret(name: &str, arg_tys: &[Ty]) -> Option<Ty> {
-    BUILTIN_STRING_MEMBER_SIGNATURES
+fn classpathless_string_extension_ret(name: &str, arg_tys: &[Ty]) -> Option<Ty> {
+    CLASSPATHLESS_STRING_EXTENSION_SIGNATURES
         .iter()
         .find_map(|&(candidate, params, ret)| {
             (candidate == name && params == arg_tys).then_some(ret)
         })
 }
 
-fn builtin_string_member_exists(name: &str) -> bool {
-    BUILTIN_STRING_MEMBER_SIGNATURES
+fn classpathless_string_extension_exists(name: &str) -> bool {
+    CLASSPATHLESS_STRING_EXTENSION_SIGNATURES
         .iter()
         .any(|(candidate, _, _)| *candidate == name)
 }
@@ -22875,15 +22875,16 @@ impl<'a> Checker<'a> {
                 .collect();
             // The classpath-less `String` member fallback, tried LAST — after every classpath, source,
             // and module origin AND after the source-extension fallback above. `substring`/`indexOf`/
-            // `concat`/`trimIndent`/`trimMargin` are stdlib EXTENSIONS on `kotlin.String`, not members
-            // of it, so a user's own `fun String.concat(o: String): Int` must win over this table; it
-            // only stands in when there is no stdlib on the classpath to resolve against.
+            // `trimIndent`/`trimMargin` are stdlib EXTENSIONS on `kotlin.String`, not members of it, so
+            // a user's own extension with the same spelling must win over this table; it only stands in
+            // when there is no stdlib on the classpath to resolve against. `concat` is deliberately
+            // absent: it is a Java-only member that Kotlin does not expose.
             let result = if result == Ty::Error
                 && args.is_some()
                 && rt.non_null() == Ty::String
                 && !self.file.call_arg_names.contains_key(&e.0)
             {
-                builtin_string_member_ret(&name, &member_arg_tys).unwrap_or(Ty::Error)
+                classpathless_string_extension_ret(&name, &member_arg_tys).unwrap_or(Ty::Error)
             } else {
                 result
             };
@@ -28044,7 +28045,7 @@ impl<'a> Checker<'a> {
             // Existence deliberately ignores applicability. Keep the fallback's names and selectable
             // shapes in one table, but do not call an existing `substring` "unresolved" merely because
             // this invocation has the wrong arity/type and the no-classpath checker cannot select it.
-            || (recv == Ty::String && builtin_string_member_exists(name))
+            || (recv == Ty::String && classpathless_string_extension_exists(name))
             || (name == CALLABLE_INVOKE_OPERATOR && matches!(recv, Ty::Fun(_)))
             // Kotlin's universal names exist independently of the invocation shape. Primitive and
             // `Nothing` receivers still inherit these semantic names even when this checker arm cannot
@@ -30729,9 +30730,6 @@ impl<'a> Checker<'a> {
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
                         return ret;
                     }
-                    if let Some(ret) = builtin_string_member_ret(&name, &arg_tys) {
-                        return ret;
-                    }
                 }
                 if matches!(
                     (rt, name.as_str(), arg_tys.as_slice()),
@@ -30913,6 +30911,19 @@ impl<'a> Checker<'a> {
                         ("toString", 0) => return Ty::String,
                         ("equals", 1) if !rt.is_nullable() => return Ty::Boolean,
                         _ => {}
+                    }
+                }
+                // The `kotlin.text` extensions that ARE the Kotlin API for these names — typed, but not
+                // resolved, for a CLASSPATH-FREE check (no stdlib jar, so no `StringsKt` to bind and no
+                // `java.lang.String` classfile either). The shared table must stay BELOW the extension
+                // section: its entries type an expression WITHOUT recording a call target, so reaching it ahead of a
+                // real resolution leaves the IR lowerer with nothing to emit ("unrecorded qualified call
+                // target"). That is precisely what `kotlin/String` taking its scope from the builtins
+                // exposed — the Java member set had been covering them, and above the extensions this
+                // arm silently took over and the front end accepted what the backend then bailed on.
+                if rt == Ty::String && !unknown_named_arg {
+                    if let Some(ret) = classpathless_string_extension_ret(&name, &arg_tys) {
+                        return ret;
                     }
                 }
                 // `a.contentEquals(b)` / `a.contentHashCode()` / `a.isEmpty()` on arrays.
@@ -39551,7 +39562,9 @@ fun box(): String {
         ok("fun f(s: String): String = s.substring(1)");
         ok("fun f(s: String): String = s.substring(1, 3)");
         ok("fun f(s: String): Int = s.indexOf(\"x\")");
-        ok("fun f(s: String): String = s.concat(\"y\")");
+        // (`concat` is a `java.lang.String` method with no Kotlin counterpart — kotlinc reports it as
+        // unresolved, so the classpath-free fallback must not invent it either. Covered with the rest of
+        // the Java-only member set in `mapped_string_scope_e2e`, which checks against a real stdlib.)
         err_contains(
             "fun f(s: String): String = s.substring(\"x\")",
             "unresolved reference 'substring'.",
