@@ -380,6 +380,8 @@ fun box(): String {\n\
 
 #[test]
 fn nullable_arithmetic_and_bang_bang() {
+    // `a < b` on two `Int?`s is PROHIBITED in Kotlin ("operator call is prohibited on a nullable
+    // receiver of type 'Int?'"), so the ordering comparison goes through the non-null values.
     const SRC: &str = "fun box(): String {\n\
     val a: Int? = 3\n\
     val b: Int? = 4\n\
@@ -390,7 +392,7 @@ fn nullable_arithmetic_and_bang_bang() {
     if (s2 != null) return \"s2=$s2\"\n\
     val forced: Int = a!! + b!!\n\
     if (forced != 7) return \"forced=$forced\"\n\
-    if ((a < b)) return \"OK\"\n\
+    if (a!! < b!!) return \"OK\"\n\
     return \"cmp\"\n\
 }\n";
     let Some(out) = run(SRC, "NullableArith") else {

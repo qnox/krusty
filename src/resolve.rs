@@ -22854,6 +22854,31 @@ impl<'a> Checker<'a> {
                     return self.set(e, Ty::Boolean);
                 }
             }
+            // A comparison whose left operand isn't a source/classpath `Obj` handled above still
+            // desugars to `a.compareTo(b) < 0`. Two shapes reach here: `String` (a `Ty` of its own,
+            // never `Ty::Obj`, though `java.lang.String` implements `Comparable`), and a source
+            // `enum class`, whose `compareTo` is INHERITED from `java.lang.Enum` rather than declared
+            // (so `method_of_name` finds nothing). Resolve the member through the library set and
+            // record it, exactly as the classpath-`Comparable` path above does.
+            //
+            // Reference right operand only: an erased `Comparable<T>.compareTo` takes `Object`, so a
+            // primitive argument would need a box this path doesn't apply.
+            if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                && rt != Ty::Error
+                && rt.is_reference()
+            {
+                if let Some(member) = self.resolve_instance_member(lt, "compareTo", &[rt]) {
+                    if member.ret == Ty::Int {
+                        crate::trace_compiler!(
+                            "resolve",
+                            "compareTo drives comparison on {:?}",
+                            lt
+                        );
+                        self.resolved_calls.insert(e, ResolvedCall::Member(member));
+                        return self.set(e, Ty::Boolean);
+                    }
+                }
+            }
             self.check_binary(op, lt, rt, self.span(e))
         };
         self.set(e, t)

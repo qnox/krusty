@@ -21511,36 +21511,41 @@ impl<'a> Lower<'a> {
                             return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                         }
                     }
-                    // A CLASSPATH `Comparable` type (`class Money : Comparable<Money>` compiled
-                    // separately): `compareTo` is a classpath member, not user IR. The checker records
-                    // the selected member on the binary expression; lowering only emits that target.
-                    let lt = self.recv_ty(lhs);
-                    let rt = self.info.ty(rhs);
-                    // Reference right operand only — matches the checker guard (a primitive arg to an
-                    // erased generic `Comparable.compareTo(Object)` would need a box not applied here).
-                    if rt.is_reference() {
-                        if let Some(resolved) =
-                            self.info.resolved_member(e).cloned().filter(|resolved| {
-                                resolved.member.name == "compareTo" && resolved.ret == Ty::Int
-                            })
-                        {
-                            let l = self.expr(lhs)?;
-                            let param = resolved.member.params.first().copied().unwrap_or(rt);
-                            let r = self.lower_arg(rhs, &ty_to_ir(param))?;
-                            let owner_fallback = lt
-                                .kotlin_class_internal()
-                                .unwrap_or_else(crate::types::wk::any);
-                            let cmp = self.emit_library_member_call(
-                                l,
-                                owner_fallback,
-                                resolved.member,
-                                resolved.ret,
-                                resolved.suspend,
-                                vec![r],
-                            );
-                            let zero = self.emit_const(IrConst::Int(0));
-                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                        }
+                }
+                // A `compareTo` that lives on the CLASSPATH rather than in user IR: a separately
+                // compiled `class Money : Comparable<Money>`, a `String`, or a source `enum class`
+                // (whose `compareTo` is inherited from `java.lang.Enum`). The checker records the
+                // selected member on the binary expression; lowering only emits that target.
+                //
+                // NOT nested under the `obj_internal` lookup above: `String` is a `Ty` of its own and
+                // has no object internal name, so gating on one skipped the emit and fell through to
+                // the primitive comparison — a `VerifyError` on a reference operand.
+                let lt = self.recv_ty(lhs);
+                let rt = self.info.ty(rhs);
+                // Reference right operand only — matches the checker guard (a primitive arg to an
+                // erased generic `Comparable.compareTo(Object)` would need a box not applied here).
+                if rt.is_reference() {
+                    if let Some(resolved) =
+                        self.info.resolved_member(e).cloned().filter(|resolved| {
+                            resolved.member.name == "compareTo" && resolved.ret == Ty::Int
+                        })
+                    {
+                        let l = self.expr(lhs)?;
+                        let param = resolved.member.params.first().copied().unwrap_or(rt);
+                        let r = self.lower_arg(rhs, &ty_to_ir(param))?;
+                        let owner_fallback = lt
+                            .kotlin_class_internal()
+                            .unwrap_or_else(crate::types::wk::any);
+                        let cmp = self.emit_library_member_call(
+                            l,
+                            owner_fallback,
+                            resolved.member,
+                            resolved.ret,
+                            resolved.suspend,
+                            vec![r],
+                        );
+                        let zero = self.emit_const(IrConst::Int(0));
+                        return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                     }
                 }
             }

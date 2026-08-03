@@ -2216,6 +2216,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   walking only the body's top-level statements; a `Lambda` body is a separate state machine and is
   never descended into. Test:
   `tests/feature_coverage_s_e2e.rs::suspend_when_returns_from_multiple_arms`.
+- **Relational operators on a `Comparable` whose `compareTo` is not a declared source member.**
+  `a < b` desugars to `a.compareTo(b) < 0`. A source class declaring `operator fun compareTo` already
+  drove this; a type whose `compareTo` comes from the CLASSPATH did not, because both the checker's
+  and the lowering's classpath path sat under an `Obj`-internal-name lookup. `String` is a `Ty` of its
+  own with no object internal name, so `"apple" < "banana"` fell through to the primitive comparison —
+  the checker reported `operator cannot be applied to 'String' and 'String'`, and forcing it past the
+  checker produced a `VerifyError` on a reference operand. Both sides now resolve `compareTo` through
+  the library set for any left operand type and emit that member, comparing its `Int` result with 0.
+  The right operand must be a reference: an erased `Comparable<T>.compareTo` takes `Object`, so a
+  primitive argument would need a box this path doesn't apply. Test:
+  `tests/feature_coverage_v_e2e.rs::string_chunked_and_compare`.
+
+  Still open: a source `enum class`, whose `compareTo` is inherited from `java.lang.Enum` rather than
+  declared or reachable through the library set. kotlinc emits `checkcast java/lang/Enum` then
+  `invokevirtual <E>.compareTo(Ljava/lang/Enum;)I`.
 
 ## 8. Success criteria for the PoC
 
