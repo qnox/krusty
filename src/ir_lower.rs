@@ -463,30 +463,16 @@ fn lower_file_at_reporting_impl(
         })
         .collect();
     if !top_suspend.is_empty() || !member_suspend.is_empty() {
-        // A top-level `suspend` EXTENSION is modeled: its receiver is an ordinary leading static
-        // parameter, so the coroutine pass appends the CPS `Continuation` after it and threads call
-        // sites like any other static suspend call (registered in `suspend_funs` in pass 1b).
-        // EXCEPT one shape: an extension body that suspends on a MEMBER of its receiver
-        // (`suspend fun Controller.test() { … foo() … }` reaching `Controller.foo()` through the implicit
-        // receiver). A member suspension resumes against the machine's `this`, which an extension has
-        // not got — its receiver is a parameter slot — so the resumed call would target the wrong
-        // instance. Skip the file (never miscompile) until member suspension points are threaded.
+        // A top-level `suspend` EXTENSION is modeled — `inline` or not, and whether it is called from
+        // this file or a sibling one: its receiver is an ordinary leading static parameter, so the
+        // coroutine pass appends the CPS `Continuation` after it and threads call sites like any other
+        // static suspend call (registered in `suspend_funs` in pass 1b for a same-file callee, in
+        // `ir.suspend_calls` for a sibling-file one). One shape around it still isn't:
         for &d in &file.decls {
             if let Decl::Fun(f) = file.decl(d) {
                 if !f.is_suspend() || f.receiver.is_none() {
                     continue;
                 }
-                // An INLINE suspend extension is spliced at its call sites, where the splice and the CPS
-                // rewrite do not compose: the caller's machine inlines the pre-CPS body and drops the
-                // assignment it performs (`suspend { r = 1.plusOne() }` leaves `r` at 0). Keep skipping.
-                if f.is_inline() {
-                    return lo.bail("gate:extension-suspend-fn");
-                }
-                let body = match &f.body {
-                    FunBody::Expr(e) | FunBody::Block(e) => Some(*e),
-                    FunBody::None => None,
-                };
-                let _ = body;
                 // A suspend lambda flowing into a MEMBER function's `suspend`-function-typed parameter
                 // (`Controller.run(c: suspend Controller.() -> Unit)`) is not routed to
                 // `lower_suspend_lambda`, so the lambda class is a plain `FunctionN` whose body never
@@ -9397,6 +9383,11 @@ impl<'a> Lower<'a> {
                     .info
                     .resolved_extension(call)
                     .is_some_and(|c| c.suspend)
+                // A SIBLING-FILE source `suspend` extension: the name scan above only knows this
+                // file's declarations, and the target is a `ModuleExtension` rather than a classpath
+                // `Extension`, so without this the body is misclassified as leaf and its call emitted
+                // with no `Continuation`.
+                || self.info.resolved_module_extension_suspends(call)
             {
                 return true;
             }
@@ -13386,6 +13377,7 @@ impl<'a> Lower<'a> {
                 owner,
                 source,
                 vararg,
+                suspend,
             } => {
                 // The recorded receiver matches the call site directly, or in its NON-NULL form
                 // (a safe call records the non-null receiver — and a nullable PRIMITIVE keys
@@ -13498,6 +13490,13 @@ impl<'a> Lower<'a> {
                     .method_descriptor(&physical_params, selected_ret)?;
                 let call =
                     self.emit_static_call(owner, target, descriptor, InlineKind::None, lowered);
+                // A SIBLING-FILE `suspend` extension is reached through its real CPS entry point — the
+                // descriptor built above is the LOGICAL one, which the coroutine pass rewrites (appending
+                // the `Continuation` and erasing the result) once the node is registered as a suspension
+                // point. The same-file branch above needs no registration: its callee is a local `FunId`
+                // the pass already knows from `suspend_funs`. `inline` changes nothing here — a cross-file
+                // inline extension is never spliced, so both forms take this path (see `docs/SPEC.md`).
+                let call = self.record_suspend_call(call, suspend, selected_ret);
                 Some((self.wrap_arg_prelude(call, prelude), selected_ret))
             }
             ResolvedCall::Extension(callable) => {

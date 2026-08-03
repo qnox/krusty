@@ -9468,6 +9468,10 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
+        /// Whether the callee is `suspend`. `params`/`ret` stay LOGICAL (the source signature); the
+        /// coroutine pass derives the CPS shape from this flag, so the lowerer must record the call in
+        /// `ir.suspend_calls` rather than emit it as an ordinary static call.
+        suspend: bool,
     },
     /// A same-module receiver-less top-level call selected by the checker. The lowerer maps this
     /// semantic target to the current file's lifted IR function or sibling facade; it must not
@@ -9967,6 +9971,16 @@ impl TypeInfo {
             Some(ResolvedCall::Extension(c)) => Some(c),
             _ => None,
         }
+    }
+    /// Whether the SAME-MODULE (source) extension selected at `e` is `suspend`.
+    /// [`Self::resolved_extension`] answers this only for the classpath (`LibraryCallable`) form; a
+    /// source extension is recorded as [`ResolvedCall::ModuleExtension`], and its call site must thread
+    /// a `Continuation` exactly the same way.
+    pub fn resolved_module_extension_suspends(&self, e: ExprId) -> bool {
+        matches!(
+            self.resolved_calls.get(&e),
+            Some(ResolvedCall::ModuleExtension { suspend: true, .. })
+        )
     }
     /// The resolved local function declaration selected at call `e`, if any.
     pub fn resolved_local_function(&self, e: ExprId) -> Option<&ResolvedLocalFunctionCall> {
@@ -15474,6 +15488,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
+                    suspend: selected.flags.suspend,
                 },
             ));
         }
@@ -21988,6 +22003,7 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
+                        suspend: selected.flags.suspend,
                     },
                 );
                 return self.set(e, sig.ret);
@@ -23217,6 +23233,7 @@ impl<'a> Checker<'a> {
                             owner,
                             source: selected.source_key,
                             vararg: selected.call_sig.vararg,
+                            suspend: selected.flags.suspend,
                         },
                     );
                     return self.set(e, Ty::Boolean);
@@ -24550,6 +24567,7 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
+                suspend: selected.flags.suspend,
             },
         );
         // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
@@ -25925,6 +25943,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
+                    suspend: fi.flags.suspend,
                 },
             );
             self.resolved_call_arg_slots.insert(call, slots);

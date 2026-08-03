@@ -435,33 +435,55 @@ fn reified_inline_extension_cross_file_still_rejects() {
     );
 }
 
-/// Guard: a SUSPEND inline extension CPS-lowers per call — it stays splice-only and the
-/// cross-file call still rejects.
+/// A cross-file `suspend` extension is called through its real CPS entry point, never spliced:
+/// `inline` on the declaration does not change the sibling-file ABI (kotlinc emits the same
+/// `plusOne(int, Continuation)` method for both, plus a private `$$forInline` copy it splices only
+/// within the declaring compilation). The call site must therefore thread the caller's continuation
+/// and take the erased result — the shape a non-extension cross-file suspend call already had.
 #[test]
-fn suspend_inline_extension_cross_file_still_rejects() {
+fn suspend_inline_extension_cross_file_executes() {
     const LIB: &str = "inline suspend fun Int.plusOne(): Int = this + 1\n";
-    const MAIN: &str = "import kotlin.coroutines.*\n\
-                        class EC : Continuation<Unit> {\n\
-                        \x20   override val context: CoroutineContext = EmptyCoroutineContext\n\
-                        \x20   override fun resumeWith(result: Result<Unit>) {}\n\
-                        }\n\
-                        fun box(): String {\n\
-                        \x20   var r = 0\n\
-                        \x20   suspend { r = 1.plusOne() }.startCoroutine(EC())\n\
-                        \x20   return if (r == 2) \"OK\" else \"fail\"\n\
-                        }\n";
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    assert!(
-        common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
-            &[stdlib],
-            Some(jdk.as_path())
-        )
-        .is_none(),
-        "cross-file call to a suspend inline extension must be rejected, never emitted"
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", SUSPEND_EXT_MAIN)],
+        "suspend_inline_extension_cross_file",
     );
 }
+
+/// The non-`inline` sibling of the case above: same call-site threading, same answer. Both shapes
+/// share the `ResolvedCall::ModuleExtension` lowering path, so they are guarded together.
+#[test]
+fn suspend_extension_cross_file_executes() {
+    const LIB: &str = "suspend fun Int.plusOne(): Int = this + 1\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", SUSPEND_EXT_MAIN)],
+        "suspend_extension_cross_file",
+    );
+}
+
+/// A cross-file suspend extension that really SUSPENDS (its body awaits another suspend call)
+/// resumes into the caller's state machine — the resumed value must still reach the assignment.
+#[test]
+fn suspend_extension_cross_file_with_suspension_point_executes() {
+    const LIB: &str = "suspend fun twice(x: Int): Int = x * 2\n\
+                       suspend fun Int.plusOne(): Int = twice(this) - this + 1\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", SUSPEND_EXT_MAIN)],
+        "suspend_extension_cross_file_suspension_point",
+    );
+}
+
+/// Drives `Int.plusOne()` from a `suspend { … }` lambda: the assignment it performs is observable
+/// only if the call threaded a continuation, since `EC` swallows a failed resume.
+const SUSPEND_EXT_MAIN: &str = "import kotlin.coroutines.*\n\
+                                class EC : Continuation<Unit> {\n\
+                                \x20   override val context: CoroutineContext = EmptyCoroutineContext\n\
+                                \x20   override fun resumeWith(result: Result<Unit>) {}\n\
+                                }\n\
+                                fun box(): String {\n\
+                                \x20   var r = 0\n\
+                                \x20   suspend { r = 1.plusOne() }.startCoroutine(EC())\n\
+                                \x20   return if (r == 2) \"OK\" else \"fail\"\n\
+                                }\n";
 
 /// A `::ref` to a sibling-file inline fn that is NOT emitted (reified — it specializes per call
 /// site) used to decline silently: the reference fell through to unrelated overloads or the file

@@ -369,10 +369,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   still skip. (1) An extension body that suspends on a MEMBER of its receiver: a member suspension
   resumes against the machine's `this`, which an extension has not got — its receiver is a parameter
   slot — so the resumed call would target the wrong instance. Fixed: see the next entry. (2) An
-  `inline suspend` extension, spliced at its call sites where the splice and the CPS rewrite do not
-  compose — the caller's machine inlines the pre-CPS body and drops the assignment it performs
-  (`suspend { r = 1.plusOne() }` leaves `r` at 0):
-  `tests/cross_file_inline_call_e2e.rs::suspend_inline_extension_cross_file_still_rejects`.
+  `inline suspend` extension. Fixed: see the entry below — `gate:extension-suspend-fn` is now retired
+  outright.
+- **`suspend fun` — a SIBLING-FILE `suspend` extension call is a suspension point, and `inline` does
+  not change that.** `inline suspend fun Int.plusOne()` was gated on the assumption that the body is
+  SPLICED at its call sites, where the splice and the CPS rewrite would not compose. It is not: krusty
+  never splices a cross-file inline extension (`lower_inline_fn_call` accepts only a SAME-file
+  declaration), so the call site always emitted a real call — just the wrong one. The defect is not
+  about `inline` at all; the identical silent wrong answer reproduces with `inline` removed.
+  `ResolvedCall::ModuleExtension` carried no `suspend` flag, so two things went wrong at once: the call
+  kept its LOGICAL descriptor (`LibKt.plusOne(I)I` against an emitted `plusOne(I, Continuation) Object`),
+  and `ast_body_suspends` — whose extension scan knows only THIS file's declarations — classified the
+  driving `suspend { … }` lambda as leaf, so it got no state machine. The resulting `NoSuchMethodError`
+  is swallowed by the driving `Continuation`, so `suspend { r = 1.plusOne() }.startCoroutine(EC())`
+  answered `"fail"` instead of failing loudly. `ModuleExtension` now carries `suspend`; the cross-file
+  branch registers the node in `ir.suspend_calls` so the coroutine pass rewrites the descriptor and
+  threads the continuation (the same-file branch needs nothing — its callee is a local `FunId` already
+  in `suspend_funs`), and `ast_body_suspends` consults the flag through
+  `resolved_module_extension_suspends`. kotlinc is the oracle: for this repro it emits the CPS
+  `plusOne(int, Continuation)` PLUS a private `plusOne$$forInline` copy, and splices only WITHIN the
+  declaring compilation — so a sibling-file caller going through the real CPS entry point matches its
+  ABI, and an `inline` declaration needs no separate emitted form. A SAME-file `inline suspend`
+  extension is still declined loudly by the generic suspend-shape bail, never silently. Proven:
+  `tests/cross_file_inline_call_e2e.rs::suspend_inline_extension_cross_file_executes`,
+  `::suspend_extension_cross_file_executes` (the non-`inline` sibling — the latent miscompile the gate
+  never covered), and `::suspend_extension_cross_file_with_suspension_point_executes` (the callee body
+  itself suspends, so the resumed value must still reach the caller's assignment).
 - **`suspend fun` returning a `@JvmInline value class` — the result crosses the CPS boundary BOXED.**
   A CPS return is `Object`, so a non-null value-class result cannot ride in its erased underlying form:
   kotlinc emits `X.box-impl` before the `areturn` and `checkcast X` + `X.unbox-impl()` on the resume
