@@ -61,6 +61,8 @@ fn parse_with_features_and_script(
         is_script,
         script_stmts: Vec::new(),
         expr_depth: 0,
+        type_depth: 0,
+        stmt_depth: 0,
     };
     p.file.is_script = is_script;
     // Run the parse with the recursion-bound stack reserve already in place (like the checker's
@@ -260,6 +262,47 @@ fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
         sealed || modifiers.iter().any(|modifier| modifier == "abstract"),
         sealed,
     )
+}
+
+/// The degraded result of a tripped declaration-nesting guard: an empty final class named
+/// `<error>`. That source-impossible synthetic name cannot collide with a declared class, and the
+/// empty body gives the later passes nothing to recurse over.
+fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
+    ClassDecl {
+        name: "<error>".to_string(),
+        visibility: Visibility::Public,
+        annotations: Vec::new(),
+        annotation_args: Vec::new(),
+        type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        props: Vec::new(),
+        methods: Vec::new(),
+        companion_methods: Vec::new(),
+        companion_props: Vec::new(),
+        companion_base: None,
+        companion_base_args: Vec::new(),
+        companion_supertypes: Vec::new(),
+        companion_decl_line: 0,
+        body_props: Vec::new(),
+        init_order: Vec::new(),
+        is_data: false,
+        is_value: false,
+        kind: ClassKind::Class,
+        enum_entries: Vec::new(),
+        is_fun_interface: false,
+        modality: crate::ast::Modality::Final,
+        inner_of: None,
+        supertypes: Vec::new(),
+        delegations: Vec::new(),
+        delegation_exprs: Vec::new(),
+        base_class: None,
+        base_type_args: Vec::new(),
+        base_args: Vec::new(),
+        has_primary_ctor: true,
+        secondary_ctors: Vec::new(),
+        span,
+        decl_line: 0,
+    }
 }
 
 /// A non-nullable, non-generic type reference.
@@ -770,6 +813,55 @@ struct Parser<'a> {
     /// error expression instead of overflowing the stack — the same "degrade, never crash"
     /// contract as the checker's and lowering's `expr_depth` guards.
     expr_depth: u32,
+    /// Current TYPE-recursion depth (see [`Parser::parse_type`]). Types recurse outside `parse_bp`
+    /// (declaration position: `val x: ((((Int))))`, `List<List<…>>`), so they need their own
+    /// bounded, stack-grown funnel with the same degrade-never-crash contract.
+    type_depth: u32,
+    /// Current statement/declaration structural-recursion depth (see [`Parser::parse_stmt`] and
+    /// the class-like declaration parsers). Nested blocks (`while { while { … } }`) and nested
+    /// type declarations (`class A { class B { … } }`) recurse outside `parse_bp` too; one shared
+    /// counter bounds any interleaving of the two shapes.
+    stmt_depth: u32,
+}
+
+/// Semantic parser-recursion funnels governed by one depth/recovery mechanism.
+///
+/// Statement and declaration entries intentionally select the same counter: a local class inside
+/// a loop, or a loop inside an initializer of a local class, must not evade the bound by alternating
+/// declaration origins. Type recovery alone treats angle brackets as delimiters because only type
+/// grammar gives `<`/`>` that unconditional structural meaning.
+#[derive(Clone, Copy)]
+enum ParserNesting {
+    Expression,
+    Type,
+    Statement,
+    Declaration,
+}
+
+impl ParserNesting {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Expression => "expression",
+            Self::Type => "type",
+            Self::Statement => "statement",
+            Self::Declaration => "declaration",
+        }
+    }
+
+    fn counter_mut<'parser, 'source>(
+        self,
+        parser: &'parser mut Parser<'source>,
+    ) -> &'parser mut u32 {
+        match self {
+            Self::Expression => &mut parser.expr_depth,
+            Self::Type => &mut parser.type_depth,
+            Self::Statement | Self::Declaration => &mut parser.stmt_depth,
+        }
+    }
+
+    fn angle_brackets(self) -> bool {
+        matches!(self, Self::Type)
+    }
 }
 
 /// Maximum expression-parse recursion depth, counted in `parse_bp` ENTRIES — not semantic nesting
@@ -781,6 +873,12 @@ struct Parser<'a> {
 /// doubled parens spends entries faster and trips sooner), while still bounding the parser's
 /// recursion (degrade with a diagnostic, never crash). Derive this value rather than copying 1000
 /// so parser/checker/lowering cannot silently drift to incompatible limits.
+///
+/// The type and statement/declaration funnels (`parse_type`, `parse_stmt`, the class-like
+/// declaration parsers) reuse this limit as a conservative shared bound: their shapes cost one
+/// entry per nesting level, so 1000 admits strictly deeper nesting there than any later pass
+/// admits for expressions — the guard exists to bound the stack, not to define type/statement
+/// acceptance.
 const EXPR_DEPTH_LIMIT: u32 = crate::wide_stack::MAX_SEMANTIC_EXPR_DEPTH * 2;
 
 impl<'a> Parser<'a> {
@@ -919,23 +1017,28 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Kotlin class headers allow `NL*` before the supertype-list colon. The lexer also represents an
-    /// explicit `;` as `Newline`, so only advance when plain line breaks are followed by `:`; a semicolon
-    /// must continue to terminate the declaration.
-    fn skip_plain_newlines_before_supertype_colon(&mut self) {
-        let mut next = self.i;
+    /// Return the first token after physical line breaks at `index`, stopping at an explicit `;`.
+    ///
+    /// The lexer deliberately represents both forms as `Newline`, so grammar lookahead must use this
+    /// helper instead of open-coding a token-kind loop whenever a construct permits `NL*` but not a
+    /// semicolon. Keeping that distinction here prevents declaration callers from gradually acquiring
+    /// different continuation rules.
+    fn after_plain_newlines(&self, mut index: usize) -> usize {
         while self
             .t
-            .get(next)
+            .get(index)
             .is_some_and(|token| token.kind == TokenKind::Newline && token.text(self.src) != ";")
         {
-            next += 1;
+            index += 1;
         }
-        if self
-            .t
-            .get(next)
-            .is_some_and(|token| token.kind == TokenKind::Colon)
-        {
+        index
+    }
+
+    /// Consume physical line breaks only when `expected` follows them. A failed lookahead leaves the
+    /// parser at the original newline so the enclosing declaration can terminate normally.
+    fn skip_plain_newlines_before(&mut self, expected: TokenKind) {
+        let next = self.after_plain_newlines(self.i);
+        if self.t.get(next).is_some_and(|token| token.kind == expected) {
             self.i = next;
         }
     }
@@ -1644,6 +1747,18 @@ impl<'a> Parser<'a> {
     /// or an ordinary expression (incl. `Foo::class`). Returns the expr for the ordinary case (kept for
     /// const-folding by extensions); array/nested values return `None`.
     fn parse_annotation_value(&mut self) -> Option<ExprId> {
+        // Annotation arrays, nested annotations, and spreads recurse while a declaration prefix is
+        // still being consumed, before `parse_bp` or a class-like parser is necessarily entered.
+        // They are expression syntax, so join the shared expression lane instead of owning another
+        // origin-specific counter/recovery policy.
+        self.with_nesting_guard(
+            ParserNesting::Expression,
+            |_parser, _span| None,
+            Self::parse_annotation_value_inner,
+        )
+    }
+
+    fn parse_annotation_value_inner(&mut self) -> Option<ExprId> {
         if self.at(TokenKind::LBracket) {
             self.bump(); // '['
             self.skip_newlines();
@@ -1976,11 +2091,7 @@ impl<'a> Parser<'a> {
     fn primary_constructor_header_follows(&self) -> bool {
         let mut i = self.i;
         loop {
-            while self.t.get(i).is_some_and(|token| {
-                token.kind == TokenKind::Newline && token.text(self.src) != ";"
-            }) {
-                i += 1;
-            }
+            i = self.after_plain_newlines(i);
             let Some(token) = self.t.get(i) else {
                 return false;
             };
@@ -2145,7 +2256,7 @@ impl<'a> Parser<'a> {
     }
 
     /// `enum class Name { A, B, C }` — v0: simple entries (no constructor args, no class body).
-    fn parse_enum(&mut self) -> ClassDecl {
+    fn parse_enum_inner(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
@@ -2211,12 +2322,10 @@ impl<'a> Parser<'a> {
         // Optional supertype list (`enum class E : I1, I2`): an enum may implement interfaces; the
         // abstract members are satisfied by the enum's own methods or per-entry overrides. (An enum can't
         // extend a class, so only the interface supertypes are kept.)
-        let enum_supertypes = if self.at(TokenKind::Colon) {
-            let (supertypes, _base, _base_targs, _args, _del, _del_e) = self.parse_supertypes();
-            supertypes
-        } else {
-            Vec::new()
-        };
+        // Always enter the shared optional parser. Besides avoiding a declaration-specific colon
+        // branch, this lets enum headers honor the same `NL* ':'` grammar as class, interface, object,
+        // companion-object, and anonymous-object headers.
+        let (enum_supertypes, _base, _base_targs, _args, _del, _del_e) = self.parse_supertypes();
         let mut entries: Vec<AstEnumEntry> = Vec::new();
         let mut methods = Vec::new();
         // Enum body member properties (`enum class C { A; val x = … }`) and their initializer order.
@@ -2689,11 +2798,7 @@ impl<'a> Parser<'a> {
         let mut i = self.i;
         let mut saw_context = false;
         loop {
-            while self.t.get(i).is_some_and(|token| {
-                token.kind == TokenKind::Newline && token.text(self.src) != ";"
-            }) {
-                i += 1;
-            }
+            i = self.after_plain_newlines(i);
             let token = self.t.get(i)?;
             if token.kind == TokenKind::At {
                 i = self.annotation_end_at(i)?;
@@ -2883,7 +2988,44 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Depth-guarded entries for the class-like declaration parsers. Nested type declarations
+    /// (`class A { class B { … } }`, nested interfaces/objects/enums, and mixed chains) recurse
+    /// through these without ever passing through `parse_bp` or `parse_stmt`, so they share their
+    /// own bounded, stack-grown funnel (one counter with `parse_stmt`, bounding any interleaving).
+    /// Past [`EXPR_DEPTH_LIMIT`] the declaration degrades to an error declaration with a
+    /// diagnostic and a balanced skip — degrade, never crash.
     fn parse_class(&mut self) -> ClassDecl {
+        self.guarded_class_like(Self::parse_class_inner)
+    }
+
+    fn parse_object(&mut self) -> ClassDecl {
+        self.guarded_class_like(Self::parse_object_inner)
+    }
+
+    fn parse_interface(&mut self) -> ClassDecl {
+        self.guarded_class_like(Self::parse_interface_inner)
+    }
+
+    fn parse_enum(&mut self) -> ClassDecl {
+        self.guarded_class_like(Self::parse_enum_inner)
+    }
+
+    fn guarded_class_like(&mut self, inner: fn(&mut Self) -> ClassDecl) -> ClassDecl {
+        self.with_nesting_guard(
+            ParserNesting::Declaration,
+            |parser, span| {
+                // The rejected declaration's pending prefix (annotations, context params) dies
+                // with it — otherwise it would attach to the next declaration after recovery.
+                parser.pending_annotations.clear();
+                parser.pending_annotation_args.clear();
+                parser.pending_context_params.clear();
+                error_class_decl(span)
+            },
+            inner,
+        )
+    }
+
+    fn parse_class_inner(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
@@ -3315,7 +3457,10 @@ impl<'a> Parser<'a> {
         let mut base_args = Vec::new();
         let mut delegations = Vec::new();
         let mut delegation_exprs = Vec::new();
-        self.skip_plain_newlines_before_supertype_colon();
+        // Kotlin declaration headers permit physical line breaks before the supertype-list colon.
+        // The shared lookahead deliberately stops at `;`, which terminates the declaration even though
+        // the lexer represents it with the same token kind as a line break.
+        self.skip_plain_newlines_before(TokenKind::Colon);
         if self.eat(TokenKind::Colon) {
             loop {
                 self.skip_newlines();
@@ -3492,7 +3637,7 @@ impl<'a> Parser<'a> {
     }
 
     /// `interface Name { fun sig(): T }` — abstract member functions only (v0).
-    fn parse_interface(&mut self) -> ClassDecl {
+    fn parse_interface_inner(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
@@ -3792,7 +3937,7 @@ impl<'a> Parser<'a> {
         construction
     }
 
-    fn parse_object(&mut self) -> ClassDecl {
+    fn parse_object_inner(&mut self) -> ClassDecl {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
@@ -3976,12 +4121,26 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Depth-guarded entry for the type parser. Every type recursion funnels through here —
+    /// nested parens (`((((Int))))`), generic arguments (`parse_type_args`), function-type
+    /// parameters/returns, and `Array<…>` elements all re-enter via `parse_type` — so this single
+    /// guard bounds all of it. Type recursion runs OUTSIDE `parse_bp` in declaration position, so
+    /// the expression guard never sees it. Past [`EXPR_DEPTH_LIMIT`] the type degrades to an error
+    /// type with a diagnostic and an angle-aware balanced skip — degrade, never crash.
+    fn parse_type(&mut self) -> TypeRef {
+        self.with_nesting_guard(
+            ParserNesting::Type,
+            |_parser, span| simple_type_ref("<error>", span),
+            Self::parse_type_inner,
+        )
+    }
+
     /// Parse a type, folding a trailing definitely-non-null intersection `T & Any` (the only legal
     /// intersection in Kotlin source) into the left operand with `nullable = false`. `T & Any` erases
     /// identically to `T`; its only observable effect is that a value of it is non-null, which the
     /// `as` cast enforces at runtime (a null assertion). The checker verifies that the left side denotes
     /// a type parameter; the parser validates and consumes the required bare `Any` right side.
-    fn parse_type(&mut self) -> TypeRef {
+    fn parse_type_inner(&mut self) -> TypeRef {
         let mut ty = self.parse_type_atom();
         while self.at(TokenKind::Amp) {
             self.bump(); // '&'
@@ -5006,7 +5165,26 @@ impl<'a> Parser<'a> {
         stmt
     }
 
+    /// Depth-guarded entry for the statement parser. Nested statement structures — block bodies
+    /// (`while (…) { while (…) { … } }`), local declarations — recurse `parse_stmt` →
+    /// `parse_block_expr` → `parse_stmt` without ever passing through `parse_bp`, so they need
+    /// their own bounded, stack-grown funnel. Past [`EXPR_DEPTH_LIMIT`] the statement degrades to
+    /// an error statement with a diagnostic and a balanced skip — degrade, never crash — leaving
+    /// one closer for each enclosing block frame.
     fn parse_stmt(&mut self) -> StmtId {
+        self.with_nesting_guard(
+            ParserNesting::Statement,
+            |parser, span| {
+                let expression = parser
+                    .file
+                    .add_expr(Expr::Name("<error>".to_string()), span);
+                parser.finish_stmt(Stmt::Expr(expression), span)
+            },
+            Self::parse_stmt_inner,
+        )
+    }
+
+    fn parse_stmt_inner(&mut self) -> StmtId {
         // Labeled loop: `l1@ while(…)` / `l1@ for(…)` / `l1@ do {…}`. Capture the label and thread it
         // onto the loop so `break@l1`/`continue@l1` can target it.
         let mut loop_label: Option<String> = None;
@@ -6126,57 +6304,100 @@ impl<'a> Parser<'a> {
         lhs
     }
 
-    /// Depth-guarded entry for the binary-expression parser. Every expression recursion funnels
+    /// Depth-guarded entry for the binary-expression parser. Ordinary expression recursion funnels
     /// through here — `parse_expr` → `parse_elvis` → `parse_bp`, and nested operands
     /// (parenthesized/bracketed expressions, call arguments, prefix operands, branch bodies)
-    /// re-enter via `parse_expr` — so this single guard bounds all of it. A left-leaning binary
-    /// chain (`a && b && c`) iterates in `parse_bp_inner`'s loop and does not grow the depth;
-    /// only genuinely nested expressions (`((((x))))`, `f(f(f(x)))`) do. Past
-    /// [`EXPR_DEPTH_LIMIT`] the expression degrades to an error expression with a diagnostic —
-    /// degrade, never crash — mirroring the checker's and lowering's `expr_depth` guards.
+    /// re-enter via `parse_expr`. Annotation-value structures recurse outside `parse_bp`, so their
+    /// entry explicitly selects the same [`ParserNesting::Expression`] lane. A left-leaning binary
+    /// chain (`a && b && c`) iterates in `parse_bp_inner`'s loop and does not grow the depth; only
+    /// genuinely nested expressions (`((((x))))`, `f(f(f(x)))`) do. Past [`EXPR_DEPTH_LIMIT`] the
+    /// expression degrades to an error expression with a diagnostic — degrade, never crash —
+    /// mirroring the checker's and lowering's `expr_depth` guards.
     fn parse_bp(&mut self, min_bp: u8) -> ExprId {
-        if self.expr_depth >= EXPR_DEPTH_LIMIT {
+        self.with_nesting_guard(
+            ParserNesting::Expression,
+            |parser, span| {
+                parser
+                    .file
+                    .add_expr(Expr::Name("<error>".to_string()), span)
+            },
+            |parser| parser.parse_bp_inner(min_bp),
+        )
+    }
+
+    /// Apply the parser's depth, recovery, and stack-growth contract to every recursive funnel.
+    ///
+    /// Keeping the counter lane, diagnostic label, delimiter policy, and per-level stack growth in
+    /// one operation prevents a new syntax origin from silently receiving a different safety
+    /// policy. Callers provide only their typed degraded node; that is the one aspect which cannot
+    /// be shared between an expression, type, statement, and declaration AST.
+    fn with_nesting_guard<T>(
+        &mut self,
+        nesting: ParserNesting,
+        degraded: impl FnOnce(&mut Self, crate::diag::Span) -> T,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if *nesting.counter_mut(self) >= EXPR_DEPTH_LIMIT {
             let span = self.tok().span;
-            self.diags.error(span, "expression nesting too deep");
-            // Skip the REST of the over-deep expression, bracket-balanced: without this, the
-            // leftover tokens (`((((…` ) re-parse as postfix call nesting on the error
-            // expression, rebuilding a ~500-deep AST that the downstream passes then recurse
-            // over — and a closer-per-frame unwind would emit an `expected ')'` cascade. Stop at
-            // a closer or newline at relative depth 0 (they belong to the enclosing construct,
-            // whose frame consumes them on the way out) or at EOF.
-            let mut depth = 0i32;
-            loop {
-                match self.kind() {
-                    TokenKind::Eof => break,
-                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
-                        depth += 1;
-                        self.bump();
+            self.diags
+                .error(span, format!("{} nesting too deep", nesting.label()));
+            self.skip_over_deep_rest(nesting.angle_brackets());
+            return degraded(self, span);
+        }
+
+        *nesting.counter_mut(self) += 1;
+        // Check/grow at EVERY recursive level. A single grown segment was measured to fail before
+        // the bound because each semantic level stacks several large unoptimized parser frames.
+        // `maybe_grow` is cheap while enough stack remains and chains a segment only near its
+        // low-water mark.
+        let result = crate::wide_stack::on_wide_stack(|| parse(self));
+        *nesting.counter_mut(self) -= 1;
+        result
+    }
+
+    /// Recovery for a tripped nesting guard: skip the REST of the over-deep construct,
+    /// bracket-balanced. Without this, the leftover tokens (`((((…`) re-parse as nesting on the
+    /// error node, rebuilding a deep tree that the downstream passes then recurse over — and a
+    /// closer-per-frame unwind would emit an `expected ')'`/`'}'` cascade. Stop at a closer or
+    /// newline at relative depth 0 (they belong to the enclosing construct, whose frame consumes
+    /// them on the way out) or at EOF. With `angle_brackets`, `<`/`>` count as brackets too — in
+    /// TYPE position they always are, so each enclosing `parse_type_args` frame finds exactly the
+    /// one `>` it expects. A fused `>=` token (`List<Int>= e`, no space) is skipped as "other",
+    /// losing a closer — exact parity with the normal-depth parser, whose `parse_type_args` also
+    /// fails to see a `>` inside `GtEq`.
+    fn skip_over_deep_rest(&mut self, angle_brackets: bool) {
+        let mut depth = 0i32;
+        loop {
+            match self.kind() {
+                TokenKind::Eof => break,
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                    depth += 1;
+                    self.bump();
+                }
+                TokenKind::Lt if angle_brackets => {
+                    depth += 1;
+                    self.bump();
+                }
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    if depth == 0 {
+                        break;
                     }
-                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
-                        if depth == 0 {
-                            break;
-                        }
-                        depth -= 1;
-                        self.bump();
+                    depth -= 1;
+                    self.bump();
+                }
+                TokenKind::Gt if angle_brackets => {
+                    if depth == 0 {
+                        break;
                     }
-                    TokenKind::Newline if depth == 0 => break,
-                    _ => {
-                        self.bump();
-                    }
+                    depth -= 1;
+                    self.bump();
+                }
+                TokenKind::Newline if depth == 0 => break,
+                _ => {
+                    self.bump();
                 }
             }
-            return self.file.add_expr(Expr::Name("<error>".to_string()), span);
         }
-        self.expr_depth += 1;
-        // Grow the stack HERE, per level, not once at the parse entry: one nesting level stacks
-        // 5–6 unoptimized parser frames (`parse_bp_inner` → `parse_prefix` → `parse_primary` →
-        // `parse_expr` → `parse_elvis` → back here), so the depth bound needs more than one grown
-        // segment — a single entry-point reserve was measured to SIGBUS between 400 and 500 paren
-        // levels. The per-call check is a stack-pointer read; `stacker` chains further segments
-        // only when the current one runs low (see [`crate::wide_stack`]).
-        let e = crate::wide_stack::on_wide_stack(|| self.parse_bp_inner(min_bp));
-        self.expr_depth -= 1;
-        e
     }
 
     fn parse_bp_inner(&mut self, min_bp: u8) -> ExprId {
@@ -8741,6 +8962,66 @@ mod tests {
             "constructor after semicolon was attached to First"
         );
         assert!(find_class("Second").annotations.is_empty());
+    }
+
+    #[test]
+    fn every_declared_type_header_shares_newline_before_supertype_colon() {
+        let mut diagnostics = DiagSink::new();
+        let source = r#"
+interface HeaderBase
+class HeaderClass
+    : HeaderBase
+interface HeaderInterface
+    : HeaderBase
+object HeaderObject
+    : HeaderBase
+enum class HeaderEnum
+    : HeaderBase { Entry }
+class HeaderHost {
+    companion object
+        : HeaderBase
+}
+"#;
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("test.kt", source)
+        );
+        let find_class = |name: &str| {
+            file.decls
+                .iter()
+                .find_map(|&declaration| match file.decl(declaration) {
+                    Decl::Class(class) if class.name == name => Some(class),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} declaration"))
+        };
+
+        // All declared-type entry points delegate to `parse_supertypes`; this assertion set guards
+        // against a caller reintroducing its own same-line-only colon check (the enum parser did so
+        // previously) and bypassing the common continuation rule.
+        for name in [
+            "HeaderClass",
+            "HeaderInterface",
+            "HeaderObject",
+            "HeaderEnum",
+        ] {
+            assert_eq!(
+                find_class(name)
+                    .supertypes
+                    .iter()
+                    .map(|supertype| supertype.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["HeaderBase"],
+                "{name} did not retain the continued supertype header"
+            );
+        }
+        assert_eq!(
+            find_class("HeaderHost").companion_supertypes,
+            ["HeaderBase"]
+        );
     }
 
     #[test]

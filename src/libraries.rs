@@ -115,10 +115,28 @@ pub struct StaticFieldRef {
     pub constant: Option<LibraryConst>,
 }
 
-/// A runtime-valued public instance field exposed as a source-level property by a compiled platform.
+/// One field declaration retained on a classifier shape. Keeping inaccessible and static declarations
+/// is intentional: either declaration hides an equally named inherited instance field even though it
+/// cannot itself realize a Kotlin instance-property read.
 #[derive(Clone, Debug)]
+pub struct LibraryField {
+    pub name: String,
+    /// Logical source type before receiver type arguments are substituted.
+    pub ty: Ty,
+    /// Erased type recovered from the physical descriptor. This is the safe result for a raw receiver
+    /// whose declaration type still contains an unbound type parameter.
+    pub erased_ty: Ty,
+    /// Opaque backend token consumed only by the platform emitter.
+    pub descriptor: String,
+    pub visibility: Visibility,
+    pub is_static: bool,
+}
+
+/// An exact readable instance-field declaration selected by the shared hierarchy walk.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstanceFieldRef {
     pub owner: TypeName,
+    pub name: String,
     pub ty: Ty,
     pub descriptor: String,
 }
@@ -148,11 +166,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     }
 
     fn static_field_name(&self, _internal: TypeName, _name: &str) -> Option<StaticFieldRef> {
-        None
-    }
-
-    /// A public, non-static field selected through `receiver`'s class hierarchy.
-    fn instance_field(&self, _receiver: Ty, _name: &str) -> Option<InstanceFieldRef> {
         None
     }
 
@@ -402,6 +415,7 @@ impl LibraryCallable {
             context_count: 0,
             contract: None,
             generic_sig: None,
+            singleton_dispatch: None,
         }
     }
 
@@ -521,6 +535,21 @@ pub struct LibraryCallable {
     /// in [`Self::signature`] is absent on krusty-emitted classes. Boxed: this struct rides the
     /// `ResolvedCall` enum, whose variant size must stay flat.
     pub generic_sig: Option<Box<GenericSig>>,
+    /// The static field holding this callable's dispatch receiver, for a member declared inside an
+    /// `object` / `companion object` and brought into scope by `import Owner.name`.
+    ///
+    /// Kotlin's rule is that importing an object's member carries the object along as the implicit
+    /// dispatch receiver; for a member EXTENSION the use site supplies the extension receiver and the
+    /// singleton is the dispatch. The JVM realization is not a facade `invokestatic` but a load of the
+    /// singleton followed by an INSTANCE invoke — and where that singleton lives differs by shape: a
+    /// plain `object` owns `INSTANCE`, while a companion's singleton is a field on the OUTER class whose
+    /// name is the companion's (`Companion` unless it was named). Resolution already had to find that
+    /// field to recognize the owner as an object, so it travels here rather than being re-derived from a
+    /// name at emit. `None` for every other callable.
+    ///
+    /// Boxed for the same reason as [`Self::generic_sig`]: this struct rides the `ResolvedCall` enum,
+    /// whose variant size must stay flat, and only a vanishing fraction of callables carry one.
+    pub singleton_dispatch: Option<Box<StaticFieldRef>>,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member
@@ -1330,6 +1359,10 @@ pub struct LibraryType {
     /// Internal names of the superclass + implemented interfaces (for the inherited-member walk).
     pub supertypes: TypeNameList,
     pub constructors: Vec<LibraryMember>,
+    /// Field declarations owned by this classifier. Selection is deliberately not performed by the
+    /// provider: the resolver walks these together with properties and supertypes, so source, module,
+    /// and compiled classifiers obey one hiding and precedence rule.
+    pub fields: Vec<LibraryField>,
     /// Instance members (member functions and property accessors).
     pub members: Vec<LibraryMember>,
     /// Companion-object members — accessed as `Type.member(…)` (the JVM realizes these as statics).
@@ -1370,6 +1403,11 @@ pub struct LibraryType {
     /// The enum entry names this type declares (`Kind` → `["PENDING", "DONE"]`); empty for a non-enum.
     /// Lets `EnumName.ENTRY` resolve for a classpath enum as it does for a source enum.
     pub enum_entries: Vec<String>,
+    /// Exact physical realization of Kotlin's synthetic `EnumType.entries` property, when this symbol
+    /// provider exposes a direct accessor. This is deliberately separate from [`Self::companion`]:
+    /// the accessor is not a source-callable `getEntries()` function, and keeping a dedicated fact
+    /// prevents consumers from rediscovering it by provider-specific names or descriptors.
+    pub enum_entries_accessor: Option<LibraryMember>,
     /// Whether a `@JvmInline value class`'s primary constructor is defaulted — kotlinc emits a
     /// `constructor-impl$default` synthetic exactly then, which realizes an all-defaulted `Id()`.
     pub value_ctor_has_default: bool,
@@ -1580,6 +1618,7 @@ mod tests {
             kind: super::TypeKind::Class,
             supertypes: crate::types::TypeNameList::new(),
             constructors: vec![],
+            fields: vec![],
             members: vec![],
             companion: vec![],
             companion_consts: std::collections::HashMap::new(),
@@ -1591,6 +1630,7 @@ mod tests {
             type_params: vec![],
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: vec![],
+            enum_entries_accessor: None,
             value_ctor_has_default: false,
             ctor_named_params: vec![],
             value_class_properties: vec![],

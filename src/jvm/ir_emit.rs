@@ -6597,7 +6597,7 @@ struct PropertyOperation<'a> {
     name: &'a str,
     ty: &'a Ty,
     interface: bool,
-    instance_field: Option<&'a str>,
+    field: Option<&'a crate::libraries::InstanceFieldRef>,
 }
 
 struct Emitter<'a> {
@@ -7316,7 +7316,11 @@ impl<'a> Emitter<'a> {
         // placeholders (`Object`), while the body's own calls demand the DECLARED parameter
         // types — a VerifyError (`multiModuleDefaultArgsCleanup`). The real call is
         // verifier-correct (null is assignable to the declared type), so decline outright.
-        if name.ends_with("$default") {
+        // A REIFIED inline has no such fallback: its compiled `$default` body carries a
+        // `reifiedOperationMarker` and throws when invoked, so declining here is a miscompile, not a
+        // safe retreat. Splice it — the omitted parameters' placeholders are typed from the DECLARED
+        // descriptor (see `splice_unified`), which is what made the general case unsound.
+        if name.ends_with("$default") && reified.is_empty() {
             return false;
         }
         let Some(body) = self.bodies.body(owner, name, descriptor) else {
@@ -7789,11 +7793,11 @@ impl<'a> Emitter<'a> {
     /// to ask, so it falls back to the JVM convention kotlinc itself follows: `get<Name>()`.
     fn emit_property_read(&mut self, operation: PropertyOperation<'_>, code: &mut CodeBuilder) {
         use crate::jvm::inline::PropertyAccess;
-        if let Some(descriptor) = operation.instance_field {
+        if let Some(field) = operation.field {
             let access = PropertyAccess::Field {
-                owner: operation.owner.to_string(),
-                name: operation.name.to_string(),
-                descriptor: descriptor.to_string(),
+                owner: field.owner.render(),
+                name: field.name.clone(),
+                descriptor: field.descriptor.clone(),
                 is_static: false,
             };
             return self.emit_realized_property_read(
@@ -8496,16 +8500,16 @@ impl<'a> Emitter<'a> {
                 name,
                 ty,
                 interface,
-                instance_field,
+                field,
                 operation,
             } => {
-                let (receiver, owner, name, ty, interface, instance_field, operation) = (
+                let (receiver, owner, name, ty, interface, field, operation) = (
                     *receiver,
                     owner.render(),
                     name.clone(),
                     *ty,
                     *interface,
-                    instance_field.as_deref(),
+                    field.as_deref(),
                     operation.unwrap_or(e),
                 );
                 self.emit_property_read(
@@ -8516,7 +8520,7 @@ impl<'a> Emitter<'a> {
                         name: &name,
                         ty: &ty,
                         interface,
-                        instance_field,
+                        field,
                     },
                     code,
                 );
@@ -8547,7 +8551,7 @@ impl<'a> Emitter<'a> {
                         name: &name,
                         ty: &ty,
                         interface,
-                        instance_field: None,
+                        field: None,
                     },
                     value,
                     code,

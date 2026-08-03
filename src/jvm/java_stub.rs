@@ -739,9 +739,12 @@ mod tests {
             ci.method("y", "()Ljava/lang/String;").is_some(),
             "component accessor y()"
         );
+        let constructor = ci
+            .method("<init>", "(ILjava/lang/String;)V")
+            .expect("canonical ctor");
         assert!(
-            ci.method("<init>", "(ILjava/lang/String;)V").is_some(),
-            "canonical ctor"
+            !constructor.is_vararg(),
+            "an ordinary final record component must not gain ACC_VARARGS"
         );
     }
 
@@ -923,6 +926,11 @@ mod tests {
         assert!(stubs(
             "public class Broken { void call(String... values, int count) {} }",
             &["java/lang/String", "java/lang/Object"],
+        )
+        .is_none());
+        assert!(stubs(
+            "public record Broken(String... values, int count) {}",
+            &["java/lang/Record", "java/lang/String", "java/lang/Object"],
         )
         .is_none());
     }
