@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::metadata::protobuf::Pb;
+use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::Ty;
 
 /// One top-level function to describe in the package metadata.
@@ -400,9 +400,12 @@ pub struct PropMeta {
     pub setter: Option<(String, String)>,
 }
 
-/// `Package` property flags kotlinc emits for top-level `val`/`var` (public, with accessors).
-const PKG_VAL_FLAGS: u64 = 8710;
-const PKG_VAR_FLAGS: u64 = 1798;
+/// Package properties use the same schema word as class properties. A top-level `val` has a backing
+/// constant entry, while `var` adds mutability and a setter; spell those facts symbolically so this
+/// writer cannot silently diverge from the reader when the shared layout is corrected.
+const PKG_VAL_FLAGS: u64 = property_flags::DEFAULT | property_flags::HAS_CONSTANT;
+const PKG_VAR_FLAGS: u64 =
+    property_flags::DEFAULT | property_flags::IS_VAR | property_flags::HAS_SETTER;
 
 fn jvm_method_sig(st: &mut StringTable, name: &str, desc: &str) -> Pb {
     let mut p = Pb::new();

@@ -1454,6 +1454,59 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   This proto reader replaced a `d2` `$annotations` heuristic that a facade's annotated top-level property
   would have tripped. Resolves the alias as a constructor and in a type position. Test:
   `tests/classpath_typealias_e2e.rs`.
+- **A classpath TOP-LEVEL property is a value (`import kotlin.math.E; import pkg.plugin`).** A package's
+  namespace record carried its top-level FUNCTIONS and its EXTENSION properties but never its receiver-less
+  top-level properties, so every use site — explicit import, star import, same package — reported
+  "unresolved reference". The facade property scan now classifies by the accessors' receiver parameter
+  (`PropKind::TopLevel` when the getter takes none, `Extension` when it takes one), the resolver's
+  `resolve_top_level_property` selects it over the import scope (ambiguity across two in-scope packages is
+  no resolution), and a read lowers to the declaring facade's static getter (`ExprLowering::
+  TopLevelPropertyGet`). It is the LAST value rung: every enclosing scope shadows an imported property.
+  READS only so far: a `const val` top-level (no getter — its value inlines from a static field) and a
+  WRITE to a top-level `var` (the setter is decoded and carried, but assignment does not reach this rung)
+  are both still reported unresolved. Test: `tests/classpath_top_level_property_e2e.rs`.
+- **A RECEIVER function type survives the classpath decode (`configure: Cfg.() -> Unit`).** `Cfg.() -> Unit`
+  and `(Cfg) -> Unit` share one `Function1` erasure, so the distinction lives ONLY in `@Metadata`'s
+  `@kotlin.ExtensionFunctionType` type annotation. Two decoders dropped it: the metadata signature reader
+  (`parse_type_gsig_node` built `Ty::Fun` from the `kotlin/FunctionN` classifier alone) and every MEMBER,
+  whose signature comes from the JVM `Signature` attribute — which cannot spell it — and whose metadata call
+  facts omitted the per-parameter marks. Both now carry it: the metadata reader honors the annotation, and a
+  member's decoded signature is re-marked from metadata (`mark_receiver_fun_params`) and reused rather than
+  re-parsed. A lambda argument to such a parameter is shaped from the parameter itself
+  (one `LambdaCallShape`, the same vocabulary the module and extension shape providers speak, so a call
+  site types its lambda from ONE shape whatever the callable's origin) — for members and top-level alike,
+  and the
+  receiver comes from the generic signature (with its type ARGUMENTS bound by the call) in preference to
+  metadata's receiver CLASS. A `suspend` callable's physical signature appends a `Continuation` its source
+  parameter list does not have, so both alignments (the marks, and lambda specialization) drop it first.
+  A classpath CONSTRUCTOR with a receiver-lambda parameter (`Builder { … }`) is still not shaped — the
+  constructor query takes plain argument types and never sees the lambda literal. Tests:
+  `tests/classpath_member_receiver_lambda_e2e.rs`, `tests/classpath_receiver_lambda_overload_e2e.rs`.
+- **Omitting a defaulted argument does not change what an argument may be.** A classpath call that omits a
+  trailing default measured applicability with the platform-only "same erased shape" check, so any SUBTYPE
+  argument was rejected — `host(sub)` reported unresolved while `host(sub, 5)` resolved. The defaulted path
+  now asks the same assignability question the spelled-out path asks — and then RANKS: applicability admits
+  both `pick(b: Base, n: Int = 3)` and `pick(s: Sub, n: Int = 4)` for `pick(Sub())`, so the most specific
+  parameter shape is tried first (declaration order breaks ties). Test:
+  `tests/classpath_default_arg_subtype_e2e.rs`.
+- **An omitted default is recorded the same way however the receiver is spelled.** A classpath EXTENSION
+  call omitting a defaulted argument resolves to the `$default` synthetic, whose emit needs the call's
+  argument→parameter mapping. Only the explicit-receiver spelling recorded one, so the same call on an
+  IMPLICIT receiver (`build { tag("a") }`) skipped the whole file with "not yet supported by the IR
+  backend". The record exists to carry a mapping the call's own shape does not give (labels, reordering);
+  unlabelled, the shape gives it — positional arguments fill parameters left to right and a TRAILING
+  LAMBDA binds the LAST parameter, so an omitted default may sit BETWEEN them — and the emit derives it
+  instead of treating its absence as "unknown". Derived at the emit rather than recorded by the checker so the
+  paths that never reach it — an `inline` extension is SPLICED, never emitted as a `$default` call — keep
+  behaving as they did. A vararg call is excluded: its trailing slot is an array the emit builds, not an
+  omitted parameter, and so is a callable past 32 parameters, whose `$default` ABI takes several mask
+  ints the emit does not yet build. Test: `tests/classpath_extension_default_implicit_receiver_e2e.rs`.
+- **A failed constructor probe leaves the call's arguments as it found them.** For `Name(args)` where
+  `Name` is both a classpath class and a top-level function, the constructor is probed first; it re-checked
+  every argument with no expected type, overwriting a trailing lambda already shaped against the function's
+  receiver parameter with a bare `() -> Unit` — after which neither candidate accepted the call. The probe
+  now types only arguments the call has not typed yet. Test:
+  `tests/classpath_ctor_vs_same_named_function_e2e.rs`.
 - **A `suspend` member's return type is recovered from its `Continuation<T>` generic argument.** The
   generic argument carries a PRIMITIVE return BOXED (generics erase primitives to wrappers), so a non-null
   primitive return unboxes to its Kotlin primitive (`java/lang/Long` → `Ty::Long` via

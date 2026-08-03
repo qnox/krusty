@@ -11,6 +11,13 @@ const LIB: &str = "package lib\n\
      \x20 val b = FmtBuilder()\n\
      \x20 b.builderAction()\n\
      \x20 return Fmt(Cfg(b.pretty), from.tag)\n\
+     }\n\
+     class Engine(val name: String)\n\
+     class Client(val engine: Engine, val configuration: Cfg)\n\
+     fun Client(engine: Engine, builderAction: FmtBuilder.() -> Unit = {}): Client {\n\
+     \x20 val b = FmtBuilder()\n\
+     \x20 b.builderAction()\n\
+     \x20 return Client(engine, Cfg(b.pretty))\n\
      }\n";
 
 #[test]
@@ -66,4 +73,21 @@ fn a_call_matching_neither_candidate_is_still_reported() {
             "a call matching neither the constructor nor the function must be reported"
         );
     }
+}
+
+/// The constructor and the function take the SAME argument count, so the constructor is probed first and
+/// fails. That probe must not re-type the trailing lambda: typed without an expected type it becomes
+/// `() -> Unit`, and the function — whose parameter is `FmtBuilder.() -> Unit` — no longer accepts it,
+/// leaving `Client(engine) { … }` reported unresolved with its lambda body unresolved too.
+#[test]
+fn a_failed_constructor_probe_keeps_the_trailing_lambda_shaped_for_the_function() {
+    let main = "import lib.Client\n\
+        import lib.Engine\n\
+        fun box(): String {\n\
+        \x20 val c = Client(Engine(\"e\")) { pretty = true }\n\
+        \x20 if (c.engine.name != \"e\") return \"fail engine\"\n\
+        \x20 if (!c.configuration.pretty) return \"fail cfg\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    common::expect_box_ok_against("cpctorfnsamearity", LIB, main);
 }

@@ -27,3 +27,20 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC).expect("Comparable bridge compiles + runs"), "OK");
 }
+
+/// A functional-interface PARAMETER with no arguments (`Executor.execute(Runnable)`) is a real lambda
+/// shape whose parameter list is empty — which is not the same as having no shape at all. A provider
+/// that conflates the two drops the slot, and the lambda argument no longer matches the parameter.
+#[test]
+fn zero_argument_functional_interface_parameter_of_a_member_accepts_a_lambda() {
+    let src = "import java.util.concurrent.Executors\n\
+        fun box(): String {\n\
+        \x20 val pool = Executors.newSingleThreadExecutor()\n\
+        \x20 pool.execute { }\n\
+        \x20 pool.shutdown()\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    if let Some(output) = common::compile_and_run_with_stdlib(src, "Main") {
+        assert_eq!(output.trim(), "OK");
+    }
+}

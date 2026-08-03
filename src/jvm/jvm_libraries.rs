@@ -1138,6 +1138,22 @@ impl JvmLibraries {
                 // The member's parsed generic signature — carries type-variable binding facts so a caller can
                 // infer a generic return from the receiver's type arguments (`Repo<Config>.load(): Config`).
                 member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                // The JVM `Signature` attribute cannot spell a RECEIVER function type — `Cfg.() -> Unit`
+                // and `(Cfg) -> Unit` share the `Function1` erasure — so restore the distinction from
+                // `@Metadata`'s per-parameter `@ExtensionFunctionType` mark. Without it a member's
+                // receiver-lambda parameter reads as an ordinary function type and no lambda matches it.
+                if let (Some(gsig), Some(metadata)) = (member.generic_sig.as_mut(), member_metadata)
+                {
+                    mark_receiver_fun_params(
+                        gsig,
+                        &metadata
+                            .value_params
+                            .iter()
+                            .map(metadata::MetaValueParam::recv_fun)
+                            .collect::<Vec<_>>(),
+                        metadata.is_suspend(),
+                    );
+                }
                 member.set_suspend(member_metadata.is_some_and(metadata::MetaFn::is_suspend));
                 let value_arity = member
                     .params
@@ -1187,9 +1203,9 @@ impl JvmLibraries {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
                 if m.name == "<init>" {
-                    // Parse the ctor's generic signature so the resolver can infer a construction's type
-                    // arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend signature strings.
-                    member.generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                    // The ctor's generic signature (decoded above, marks restored) lets the resolver infer a
+                    // construction's type arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend
+                    // signature strings. Re-parsing the raw attribute here would drop the receiver marks.
                     constructors.push(member);
                 } else if m.is_static() {
                     // A Kotlin companion member compiles to a JVM static on the class.
@@ -1861,6 +1877,31 @@ fn canonicalize_jvm_collections(ty: Ty) -> Ty {
         }
         Ty::Nullable(inner) => Ty::nullable(canonicalize_jvm_collections(*inner)),
         other => other,
+    }
+}
+
+/// Restore the RECEIVER function-type marks a JVM `Signature` attribute cannot carry: for each value
+/// parameter `@Metadata` marks `@kotlin.ExtensionFunctionType`, turn the decoded `(R, …) -> T` into
+/// `R.(…) -> T`. A `suspend` callable's physical signature appends a `Continuation` the source parameter
+/// list does not have, so it is dropped before aligning. Applied positionally, and skipped unless the two
+/// lists then align 1:1 — a mismatch means they describe different parameters.
+fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool], suspend: bool) {
+    let source_params = gsig.params.len().saturating_sub(usize::from(suspend));
+    if source_params != recv_fun.len() {
+        return;
+    }
+    for (param, &receiver_fun) in gsig.params.iter_mut().take(source_params).zip(recv_fun) {
+        let Ty::Fun(sig) = *param else { continue };
+        if !receiver_fun || sig.has_receiver || sig.params.is_empty() {
+            continue;
+        }
+        *param = Ty::fun_with_shape(
+            sig.params.clone(),
+            sig.ret,
+            sig.context_count,
+            true,
+            sig.suspend,
+        );
     }
 }
 
@@ -2627,15 +2668,19 @@ impl SymbolSource for JvmLibraries {
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
             }
-            // Extension PROPERTIES declared by the facade — `arr.lastIndex`, `list.indices`. Metadata
-            // records the property with its REAL accessor names (`JvmPropertySignature`), so the getter
-            // name is authoritative, never a `getX` guess. Facade parts are merged in the shared cached
-            // decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
+            // PROPERTIES declared by the facade — receiver-less TOP-LEVEL ones (`val plugin: Plugin`)
+            // and EXTENSION ones (`arr.lastIndex`, `list.indices`). Both are the callable namespace's
+            // property half, and both differ only by whether the accessors take a receiver parameter.
+            // Metadata records the property with its REAL accessor names (`JvmPropertySignature`), so the
+            // getter name is authoritative, never a `getX` guess. Facade parts are merged in the shared
+            // cached decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
             let mprops = self.cp.meta_properties_name(facade);
             for mp in mprops.iter() {
-                if mp.name != name || !mp.is_extension {
-                    continue; // this property name, extension only
+                if mp.name != name {
+                    continue; // this property name
                 }
+                // The accessors' receiver parameter: present iff the property is an extension.
+                let receiver_params = usize::from(mp.is_extension);
                 let mp = mp.clone();
                 let property_gsig = mp.generic_sig.clone();
                 let Some(getter_sig) = mp.getter else {
@@ -2655,7 +2700,7 @@ impl SymbolSource for JvmLibraries {
                 let Some((gparams, gret)) = parse_method_desc(&getter_sig.desc) else {
                     continue;
                 };
-                if gparams.len() != 1 {
+                if gparams.len() != receiver_params {
                     continue;
                 }
                 let generic_receiver = property_gsig.as_ref().and_then(|gsig| gsig.receiver);
@@ -2680,7 +2725,7 @@ impl SymbolSource for JvmLibraries {
                 );
                 let setter = mp.setter.and_then(|setter_sig| {
                     let (sparams, sret) = parse_method_desc(&setter_sig.desc)?;
-                    if sparams.len() != 2 || sret != Ty::Unit {
+                    if sparams.len() != receiver_params + 1 || sret != Ty::Unit {
                         return None;
                     }
                     if !facade_class.methods.iter().any(|method| {
@@ -2701,12 +2746,16 @@ impl SymbolSource for JvmLibraries {
                     ))
                 });
                 props.push(PropertyInfo {
-                    kind: PropKind::Extension,
-                    receiver: generic_receiver.or_else(|| {
-                        Some(
+                    kind: if mp.is_extension {
+                        PropKind::Extension
+                    } else {
+                        PropKind::TopLevel
+                    },
+                    receiver: mp.is_extension.then(|| {
+                        generic_receiver.unwrap_or_else(|| {
                             mp.receiver_class
-                                .map_or(Ty::obj("kotlin/Any"), Ty::obj_name),
-                        )
+                                .map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
+                        })
                     }),
                     formals: property_gsig
                         .as_ref()
@@ -2775,7 +2824,10 @@ impl SymbolSource for JvmLibraries {
                             m.descriptor,
                             m.signature
                         );
-                        let generic_sig = m.signature.as_deref().and_then(parse_method_gsig);
+                        // The member's own decoded signature — NOT a re-parse of the raw attribute: the
+                        // decode also restores the receiver function-type marks the attribute cannot
+                        // spell, and re-parsing here would silently drop them again.
+                        let generic_sig = m.generic_sig.clone();
                         // A `suspend fun` member's physical method appends a `Continuation` parameter
                         // and erases its return to `Object`; present the LOGICAL signature (drop the
                         // continuation, recover the real return from the `Continuation<T>` type

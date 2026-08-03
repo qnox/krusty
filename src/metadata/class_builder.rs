@@ -11,7 +11,7 @@
 //! String table: a class id uses operation `DESC_TO_CLASS_ID` (Record.f3=2) over `Lpkg/Name;`;
 //! builtin types use `predefined_index` (Record.f2); everything else is a verbatim d2 entry.
 
-use crate::metadata::protobuf::Pb;
+use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::{Ty, Visibility};
 
 /// Property descriptor for class metadata: name, type, mutability, and JVM accessor signatures.
@@ -122,20 +122,6 @@ const ANY_PREDEFINED: u64 = 0;
 /// `kotlin/Enum`'s slot in kotlinc's predefined-strings table — an enum's supertype.
 const ENUM_PREDEFINED: u64 = 16;
 
-/// `Property.flags` (f11) for a plain public `val` with a default getter — kotlinc's DEFAULT, so the
-/// field is OMITTED at this value. One bitfield like `Class`/`Function`: bits1-3 visibility (PUBLIC=3
-/// → 6), bit8 isVar, bit9 hasGetter, bit10 hasSetter, bit13 hasConstant. It self-checks: the `var`
-/// value kotlinc emits (1798) is exactly 518 + isVar(256) + hasSetter(1024).
-const DEFAULT_PROPERTY_FLAGS: u64 = 518;
-const PROP_VISIBILITY_MASK: u64 = 0b1110;
-const PROP_IS_VAR: u64 = 256;
-const PROP_HAS_SETTER: u64 = 1024;
-const PROP_HAS_CONSTANT: u64 = 8192;
-/// `Property.flags` bit 11 — `IS_CONST` (`const val`). Set alongside `hasConstant`.
-const PROP_IS_CONST: u64 = 2048;
-/// `Property.flags` modality bits (4-5): ABSTRACT = 2.
-const PROP_MODALITY_ABSTRACT: u64 = 32;
-
 fn property_flags(prop: &PropMeta) -> u64 {
     let visibility = match prop.visibility {
         Visibility::Internal => 0,
@@ -143,21 +129,25 @@ fn property_flags(prop: &PropMeta) -> u64 {
         Visibility::Protected => 4,
         Visibility::Public => 6,
     };
-    (DEFAULT_PROPERTY_FLAGS & !PROP_VISIBILITY_MASK)
+    (property_flags::DEFAULT & !property_flags::VISIBILITY_MASK)
         | visibility
         | if prop.is_var {
-            PROP_IS_VAR | PROP_HAS_SETTER
+            property_flags::IS_VAR | property_flags::HAS_SETTER
         } else {
             0
         }
         | if prop.has_constant {
-            PROP_HAS_CONSTANT
+            property_flags::HAS_CONSTANT
         } else {
             0
         }
-        | if prop.is_const { PROP_IS_CONST } else { 0 }
+        | if prop.is_const {
+            property_flags::IS_CONST
+        } else {
+            0
+        }
         | if prop.is_abstract {
-            PROP_MODALITY_ABSTRACT
+            property_flags::MODALITY_ABSTRACT
         } else {
             0
         }
@@ -507,7 +497,7 @@ pub fn build_class(
             let ty = type_pb_tp(&mut st, p.ty, p.tparam);
             prop.field_message(3, &ty); // Property.return_type = 3
             let pflags = property_flags(p);
-            if pflags != DEFAULT_PROPERTY_FLAGS {
+            if pflags != property_flags::DEFAULT {
                 prop.field_varint(11, pflags); // Property.flags = 11
             }
             let mut jvm = Pb::new();
