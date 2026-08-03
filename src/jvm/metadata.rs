@@ -113,6 +113,104 @@ fn parse_receiver_type_gsig_bounded(
     })
 }
 
+/// The carrier-independent wire shape of Kotlin metadata's `Type` message. Both an annotation's
+/// `@Metadata` payload and a `.kotlin_builtins` fragment use these same fields; only the way their
+/// numeric class/string ids and type-table references are resolved differs. Keeping the protobuf walk
+/// here prevents the two decoders from acquiring subtly different nullability, type-parameter,
+/// annotation, or argument handling as either carrier evolves.
+struct ParsedTypeNode<'a> {
+    class_id: Option<u64>,
+    /// Strict schema field 7, used by the builtins decoder.
+    type_parameter_id: Option<u64>,
+    /// The ordinary `@Metadata` reader historically accepts field 8 as a parameter id too. Keep that
+    /// compatibility choice separate from the strict field so sharing the wire parser does not silently
+    /// broaden the builtins semantics.
+    metadata_type_parameter_id: Option<u64>,
+    type_parameter_name_id: Option<u64>,
+    nullable: bool,
+    arguments: Vec<ParsedTypeArgument<'a>>,
+    annotation_ids: Vec<u64>,
+}
+
+/// A type argument is either an inline `Type`, an id into the carrier's `TypeTable`, or a star
+/// projection with no type. `@Metadata` normally uses the inline form; builtins fragments commonly use
+/// the table form. Resolution deliberately stays with the caller because only that caller owns the
+/// corresponding table.
+enum ParsedTypeArgument<'a> {
+    Inline(&'a [u8]),
+    Table(u64),
+    Star,
+}
+
+fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut node = ParsedTypeNode {
+        class_id: None,
+        type_parameter_id: None,
+        metadata_type_parameter_id: None,
+        type_parameter_name_id: None,
+        nullable: false,
+        arguments: Vec::new(),
+        annotation_ids: Vec::new(),
+    };
+    while !pb.at_end() {
+        let tag = pb.varint()?;
+        match (tag >> 3, tag & 7) {
+            (3, 0) => node.nullable = pb.varint()? != 0,
+            (6, 0) => node.class_id = Some(pb.varint()?),
+            (7, 0) => {
+                let id = pb.varint()?;
+                node.type_parameter_id = Some(id);
+                node.metadata_type_parameter_id = Some(id);
+            }
+            // Field 8 is `flexible_upper_bound_id`, but the ordinary metadata decoder historically
+            // accepted it as a parameter id. Record that compatibility view without exposing it to the
+            // strict builtins resolver, whose old decoder accepted only the actual field 7.
+            (8, 0) => node.metadata_type_parameter_id = Some(pb.varint()?),
+            (9, 0) => node.type_parameter_name_id = Some(pb.varint()?),
+            (2, 2) => {
+                let n = pb.varint()? as usize;
+                let mut argument_pb = Pb {
+                    b: pb.bytes(n)?,
+                    i: 0,
+                };
+                let mut argument = ParsedTypeArgument::Star;
+                while !argument_pb.at_end() {
+                    let tag = argument_pb.varint()?;
+                    match (tag >> 3, tag & 7) {
+                        (2, 2) => {
+                            let n = argument_pb.varint()? as usize;
+                            argument = ParsedTypeArgument::Inline(argument_pb.bytes(n)?);
+                        }
+                        (3, 0) => argument = ParsedTypeArgument::Table(argument_pb.varint()?),
+                        (_, wire) => argument_pb.skip(wire)?,
+                    }
+                }
+                node.arguments.push(argument);
+            }
+            (100, 2) => {
+                // `Type.annotation` is an extension carrying an `Annotation` message whose field 1 is
+                // the annotation class id. Preserve every occurrence; semantic interpretation (for
+                // example `ExtensionFunctionType`) requires the caller's name resolver.
+                let n = pb.varint()? as usize;
+                let mut annotation_pb = Pb {
+                    b: pb.bytes(n)?,
+                    i: 0,
+                };
+                while !annotation_pb.at_end() {
+                    let tag = annotation_pb.varint()?;
+                    match (tag >> 3, tag & 7) {
+                        (1, 0) => node.annotation_ids.push(annotation_pb.varint()?),
+                        (_, wire) => annotation_pb.skip(wire)?,
+                    }
+                }
+            }
+            (_, wire) => pb.skip(wire)?,
+        }
+    }
+    Some(node)
+}
+
 fn parse_type_gsig_node(
     body: &[u8],
     records: &[Rec],
@@ -121,48 +219,30 @@ fn parse_type_gsig_node(
     bounds: &HashMap<String, Ty>,
     nested: bool,
 ) -> Option<Ty> {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut class_id = None;
-    let mut tp_id = None;
-    let mut tpn_id = None;
-    let mut nullable = false;
-    let mut args: Vec<Ty> = Vec::new();
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (3, 0) => nullable = pb.varint()? != 0,
-            (6, 0) => class_id = Some(pb.varint()?),
-            (8, 0) => tp_id = Some(pb.varint()?),
-            // `Type.type_parameter` = 7 per `metadata.proto` (the id of the type parameter);
-            // field 8 above is `flexible_upper_bound_id`, historically also treated as one.
-            (7, 0) => tp_id = Some(pb.varint()?),
-            (9, 0) => tpn_id = Some(pb.varint()?),
-            (2, 2) => {
-                // Type.argument — `Argument.type` = field 2 (an inline `Type`); a `*` projection has none.
-                let n = pb.varint()? as usize;
-                let abody = pb.bytes(n)?;
-                let mut ap = Pb { b: abody, i: 0 };
-                let mut arg = None;
-                while !ap.at_end() {
-                    let at = ap.varint()?;
-                    match (at >> 3, at & 7) {
-                        (2, 2) => {
-                            let tn = ap.varint()? as usize;
-                            let tb = ap.bytes(tn)?;
-                            arg = parse_type_gsig_node(tb, records, d2, tparams, bounds, true);
-                        }
-                        (_, w) => ap.skip(w)?,
-                    }
-                }
-                args.push(arg.unwrap_or_else(|| Ty::obj("kotlin/Any")));
+    let node = parse_type_node(body)?;
+    let args = node
+        .arguments
+        .into_iter()
+        .map(|argument| match argument {
+            ParsedTypeArgument::Inline(body) => {
+                parse_type_gsig_node(body, records, d2, tparams, bounds, true)
             }
-            (_, w) => pb.skip(w)?,
-        }
-    }
-    let ty = if let Some(id) = class_id {
+            // This carrier does not expose the containing TypeTable here. Treat a table-only or star
+            // argument as its erased `Any` stand-in, matching the previous inline-only decoder.
+            ParsedTypeArgument::Table(_) | ParsedTypeArgument::Star => None,
+        })
+        .map(|argument| argument.unwrap_or_else(|| Ty::obj("kotlin/Any")))
+        .collect();
+    // A receiver function type is a plain `FunctionN` plus an `ExtensionFunctionType` annotation.
+    // Annotations are repeated, so the semantic marker may appear anywhere in the shared wire node.
+    let receiver_fun = node.annotation_ids.iter().any(|&id| {
+        resolve_class_name(records, d2, id as usize)
+            .is_some_and(|name| name == "kotlin/ExtensionFunctionType")
+    });
+    let ty = if let Some(id) = node.class_id {
         let internal = resolve_class_name(records, d2, id as usize)?;
-        gsig_from_kotlin_class(&internal, args)
-    } else if let Some(id) = tp_id {
+        gsig_from_kotlin_class(&internal, args, receiver_fun)
+    } else if let Some(id) = node.metadata_type_parameter_id {
         tparams.get(&id).map(|n| {
             let bound = bounds
                 .get(n)
@@ -171,7 +251,7 @@ fn parse_type_gsig_node(
             Ty::ty_param(n, bound)
         })?
     } else {
-        let id = tpn_id?;
+        let id = node.type_parameter_name_id?;
         resolve_string(records, d2, id as usize).map(|s| {
             let bound = bounds
                 .get(&s)
@@ -180,21 +260,28 @@ fn parse_type_gsig_node(
             Ty::ty_param(&s, bound)
         })?
     };
-    Some(if nested && nullable && matches!(ty, Ty::TyParam(..)) {
-        Ty::nullable(ty)
-    } else {
-        ty
-    })
+    Some(
+        if nested && node.nullable && matches!(ty, Ty::TyParam(..)) {
+            Ty::nullable(ty)
+        } else {
+            ty
+        },
+    )
 }
 
 /// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
 /// [`Ty::Fun`] (args are `[P1..Pn, R]`), a Kotlin primitive collapses to its dedicated [`Ty`] variant (so
 /// it matches a JVM-descriptor primitive downstream), everything else stays a [`Ty::Obj`].
-fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>) -> Ty {
+///
+/// `receiver_fun` is the type's `@kotlin.ExtensionFunctionType` mark: a receiver function type carries
+/// its receiver as the FIRST type argument, which [`Ty::Fun`] models as the first parameter binding
+/// `this` (`has_receiver`).
+fn gsig_from_kotlin_class(internal: &str, mut args: Vec<Ty>, receiver_fun: bool) -> Ty {
     if let Some(arity) = internal.strip_prefix("kotlin/Function") {
         if arity.parse::<u8>().is_ok() {
             let ret = args.pop().unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            return Ty::fun(args, ret);
+            let has_receiver = receiver_fun && !args.is_empty();
+            return Ty::fun_with_shape(args, ret, 0, has_receiver, false);
         }
     }
     // Arrays are `Obj` types. A boxed `Array<T>` carries its element as a type argument — built directly
@@ -255,6 +342,9 @@ struct ParsedTypeParam {
     id: u64,
     name_id: u64,
     upper_bound_bodies: Vec<Vec<u8>>,
+    /// `TypeParameter.upper_bound_id` (field 6) — the type-table form a `.kotlin_builtins` fragment
+    /// uses instead of the inline `upper_bound`. Empty for the `@Metadata` carrier, which inlines.
+    upper_bound_ids: Vec<u64>,
 }
 
 fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
@@ -262,6 +352,7 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
     let mut id = None;
     let mut name = None;
     let mut upper_bound_bodies = Vec::new();
+    let mut upper_bound_ids = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -271,6 +362,11 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
                 let n = pb.varint()? as usize;
                 upper_bound_bodies.push(pb.bytes(n)?.to_vec());
             }
+            (6, 0) => upper_bound_ids.push(pb.varint()?),
+            (6, 2) => {
+                let n = pb.varint()? as usize;
+                upper_bound_ids.extend(packed_varints(pb.bytes(n)?));
+            }
             (_, w) => pb.skip(w)?,
         }
     }
@@ -278,6 +374,7 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
         id: id?,
         name_id: name?,
         upper_bound_bodies,
+        upper_bound_ids,
     })
 }
 
@@ -603,13 +700,13 @@ fn parse_type_class_name(body: &[u8]) -> Option<u64> {
 }
 
 /// For a function-type `Type` (`kotlin/FunctionN`), recover whether it is a RECEIVER function type
-/// (`Recv.(…) -> R`) and the receiver's class id: returns `(annotation_id, first_argument_class_id)`,
-/// where `annotation_id` is the `Type.annotation` (field 100) `Annotation.id` (which a caller checks
-/// resolves to `kotlin/ExtensionFunctionType`) and the first `Type.argument` (field 1) carries the
-/// receiver type. Either is `None` when absent.
-fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
+/// (`Recv.(…) -> R`) and the receiver's class id: returns `(annotation_ids, first_argument_class_id)`,
+/// where `annotation_ids` contains EVERY repeated `Type.annotation` (field 100) `Annotation.id` (a caller
+/// checks whether any resolves to `kotlin/ExtensionFunctionType`) and the first `Type.argument` (field 1)
+/// carries the receiver type. The receiver id is `None` when absent.
+fn parse_type_recv_fun(body: &[u8]) -> (Vec<u64>, Option<u64>) {
     let mut pb = Pb { b: body, i: 0 };
-    let mut anno_id = None;
+    let mut annotation_ids = Vec::new();
     let mut arg0_class = None;
     let mut seen_arg = false;
     while !pb.at_end() {
@@ -653,7 +750,14 @@ fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
                 while !ap.at_end() {
                     let Some(at) = ap.varint() else { break };
                     match (at >> 3, at & 7) {
-                        (1, 0) => anno_id = ap.varint(),
+                        (1, 0) => {
+                            if let Some(id) = ap.varint() {
+                                // `Type.annotation` is repeated. Preserve the whole semantic set so a
+                                // later, unrelated type-use annotation cannot overwrite an earlier
+                                // receiver-function marker in this lightweight parameter decoder.
+                                annotation_ids.push(id);
+                            }
+                        }
                         (_, w) => {
                             if ap.skip(w).is_none() {
                                 break;
@@ -669,7 +773,7 @@ fn parse_type_recv_fun(body: &[u8]) -> (Option<u64>, Option<u64>) {
             }
         }
     }
-    (anno_id, arg0_class)
+    (annotation_ids, arg0_class)
 }
 
 /// `Function.flags` bit for `suspend` (kotlin metadata `Flags.IS_SUSPEND`, function flag bit 13).
@@ -699,7 +803,7 @@ struct ParsedValueParam {
     name_id: u64,
     has_default: bool,
     materialized: bool,
-    recv_fun: (Option<u64>, Option<u64>),
+    recv_fun: (Vec<u64>, Option<u64>),
     /// The raw `ValueParameter.type` (field 3) `Type` message body — decoded to a signature [`Ty`] with the
     /// enclosing type-parameter table (needs `records`/`d2`, so it happens in `decode_functions`).
     type_body: Vec<u8>,
@@ -857,7 +961,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 let mut tid = None;
                 let mut nid = 0u64;
                 let mut vflags = 0u64;
-                let mut recv_ids = (None, None);
+                let mut recv_ids = (Vec::new(), None);
                 let mut type_body = Vec::new();
                 let mut vararg_elem_body = None;
                 while !vp.at_end() {
@@ -1937,13 +2041,10 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                         .value_params
                         .iter()
                         .map(|p| {
-                            let recv_fun_ty = p
-                                .recv_fun
-                                .0
-                                .and_then(|id| resolve_class_name(records, d2, id as usize))
-                                .map(|name| type_name(&name));
-                            let recv_fun = recv_fun_ty
-                                .is_some_and(|name| name.matches("kotlin/ExtensionFunctionType"));
+                            let recv_fun = p.recv_fun.0.iter().copied().any(|id| {
+                                resolve_class_name(records, d2, id as usize)
+                                    .is_some_and(|name| name == "kotlin/ExtensionFunctionType")
+                            });
                             MetaValueParam {
                                 ty: p
                                     .class_id
@@ -2370,17 +2471,22 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             .and_then(|table| type_table_entry(table, tid as usize))
             .is_some_and(|(body, table_nullable)| table_nullable || parse_type_nullable(body))
     };
-    // `Property.flags`: HAS_ANNOTATIONS(0) · VISIBILITY(1..3) · MODALITY(4..5) · IS_VAR(6) ·
-    // HAS_GETTER(7) · HAS_SETTER(8) · IS_CONST(9) · …
-    const IS_VAR_BIT: u64 = 1 << 6;
-    const IS_CONST_BIT: u64 = 1 << 9;
+    // Current `Property.flags` is field 11. Its shared declaration prefix is HAS_ANNOTATIONS(0) ·
+    // VISIBILITY(1..3) · MODALITY(4..5) · MEMBER_KIND(6..7), so property-specific IS_VAR and IS_CONST
+    // live at bits 8 and 11. Older metadata may instead carry `old_flags` in field 1, whose shorter
+    // layout puts those facts at bits 6 and 9. Decode the two words independently and prefer field 11
+    // regardless of wire order; collapsing them into one mutable word would let a reordered legacy
+    // field override the authoritative modern value. The shared modern constants also drive both writers.
+    const LEGACY_IS_VAR: u64 = 1 << 6;
+    const LEGACY_IS_CONST: u64 = 1 << 9;
     for prop in props {
         let mut p = Pb { b: prop, i: 0 };
         let mut name_id = None;
         let mut ret = None;
         let mut ret_nullable = false;
         let mut ret_body = None;
-        let mut flags = 6u64;
+        let mut legacy_flags = None;
+        let mut modern_flags = None;
         let mut sig = (None, None);
         let mut receiver_class = None;
         let mut receiver_body = None;
@@ -2389,7 +2495,8 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
         while !p.at_end() {
             let Some(tag) = p.varint() else { break };
             match (tag >> 3, tag & 7) {
-                (1, 0) => flags = p.varint().unwrap_or(6),
+                (1, 0) => legacy_flags = p.varint(),
+                (11, 0) => modern_flags = p.varint(),
                 (2, 0) => name_id = p.varint(),
                 (3, 2) => {
                     let Some(n) = p.varint() else { break };
@@ -2461,7 +2568,26 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
                 desc: resolve_string(records, d2, did as usize)?,
             })
         };
-        let is_var = setter.is_some() || flags & IS_VAR_BIT != 0;
+        let (flags, is_var_bit, is_const_bit) = modern_flags.map_or_else(
+            || {
+                legacy_flags.map_or(
+                    (
+                        crate::metadata::property_flags::DEFAULT,
+                        crate::metadata::property_flags::IS_VAR,
+                        crate::metadata::property_flags::IS_CONST,
+                    ),
+                    |flags| (flags, LEGACY_IS_VAR, LEGACY_IS_CONST),
+                )
+            },
+            |flags| {
+                (
+                    flags,
+                    crate::metadata::property_flags::IS_VAR,
+                    crate::metadata::property_flags::IS_CONST,
+                )
+            },
+        );
+        let is_var = setter.is_some() || flags & is_var_bit != 0;
         let generic_sig = build_property_generic_sig(
             &type_params,
             ret_body,
@@ -2479,7 +2605,7 @@ fn decode_properties(ctx: &MetaCtx, prop_field: u64) -> Vec<MetaProp> {
             getter: getter.and_then(resolve_sig),
             setter: setter.and_then(resolve_sig),
             visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
-            is_const: flags & IS_CONST_BIT != 0,
+            is_const: flags & is_const_bit != 0,
             is_var,
             receiver_class,
             is_extension: receiver_body.is_some(),
@@ -2768,16 +2894,92 @@ fn strip_builtins_header(data: &[u8]) -> Option<&[u8]> {
     data.get(4 + 4 * count..)
 }
 
-/// One member of a builtins `Class`: its Kotlin name, value-parameter type names, and return type name
-/// — all Kotlin internal names (`kotlin/Int`, `kotlin/String`, …) resolved from the fragment's tables.
+/// A type decoded from a `.kotlin_builtins` fragment. A bare internal name cannot express the two
+/// facets the fragment actually records — a class's type ARGUMENTS (`Set<Map.Entry<K, V>>`) and a
+/// reference to a declared type PARAMETER (`E` of `List<E>`) — so both are modelled here. Class names
+/// are Kotlin internal names (`kotlin/Int`, `kotlin/collections/Map.Entry`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuiltinTy {
+    Class {
+        internal: String,
+        args: Vec<BuiltinTy>,
+        nullable: bool,
+    },
+    Param {
+        name: String,
+        nullable: bool,
+    },
+}
+
+impl BuiltinTy {
+    pub fn class(internal: impl Into<String>) -> BuiltinTy {
+        BuiltinTy::Class {
+            internal: internal.into(),
+            args: Vec::new(),
+            nullable: false,
+        }
+    }
+
+    /// The declared internal name when this is a class type, `None` for a type parameter.
+    pub fn internal(&self) -> Option<&str> {
+        match self {
+            BuiltinTy::Class { internal, .. } => Some(internal),
+            BuiltinTy::Param { .. } => None,
+        }
+    }
+
+    pub fn nullable(&self) -> bool {
+        match self {
+            BuiltinTy::Class { nullable, .. } | BuiltinTy::Param { nullable, .. } => *nullable,
+        }
+    }
+
+    /// A readable source-shaped rendering (`kotlin/collections/Set<kotlin/collections/Map.Entry<K,V>>`).
+    pub fn render(&self) -> String {
+        let (base, args, nullable) = match self {
+            BuiltinTy::Class {
+                internal,
+                args,
+                nullable,
+            } => (internal.clone(), args.as_slice(), *nullable),
+            BuiltinTy::Param { name, nullable } => (name.clone(), &[][..], *nullable),
+        };
+        let mut out = base;
+        if !args.is_empty() {
+            let inner: Vec<String> = args.iter().map(BuiltinTy::render).collect();
+            out.push('<');
+            out.push_str(&inner.join(","));
+            out.push('>');
+        }
+        if nullable {
+            out.push('?');
+        }
+        out
+    }
+}
+
+/// One member of a builtins `Class`: its Kotlin name, value-parameter types, and return type, each
+/// decoded through the fragment's type table.
 pub struct BuiltinMember {
     pub name: String,
-    pub params: Vec<String>,
-    pub ret: String,
+    pub params: Vec<BuiltinTy>,
+    pub ret: BuiltinTy,
     pub is_property: bool,
+    /// The member's OWN type parameters (`<R>` of `fold`), with their declared upper bounds — kept
+    /// apart from the class's so a consumer can build a generic signature whose formals shadow
+    /// correctly.
+    pub formals: Vec<BuiltinTypeParam>,
     /// Whether the declared return type is nullable (`V?`) — the JVM descriptor erases it, only the
     /// `.kotlin_builtins` `Type.nullable` flag carries it (`Map.get(K): V?`, `firstOrNull(): T?`).
     pub ret_nullable: bool,
+}
+
+/// One declared type parameter of a builtin class or member: its source name and decoded upper bounds
+/// (`E` unbounded, `T : Comparable<T>`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltinTypeParam {
+    pub name: String,
+    pub bounds: Vec<BuiltinTy>,
 }
 
 /// A builtin `Class` decoded from a `.kotlin_builtins` fragment: its direct supertypes and declared
@@ -2785,17 +2987,145 @@ pub struct BuiltinMember {
 #[derive(Default)]
 pub struct BuiltinClass {
     pub supertypes: Vec<String>,
+    /// The supertypes WITH their type arguments (`MutableList<E> : List<E>`), which the name-only
+    /// `supertypes` list cannot carry — the chain a receiver's type argument travels up.
+    pub supertype_tys: Vec<BuiltinTy>,
     pub members: Vec<BuiltinMember>,
+    /// The class's own type parameters, in declaration order (`Map` → `[K, V]`).
+    pub type_params: Vec<BuiltinTypeParam>,
     /// Whether the builtin is an interface (`List`, `CharSequence`, `Comparable`) vs a class (`Number`,
     /// `Enum`) — from the `@Metadata` `CLASS_KIND` flag. Needed when reporting a classless builtin whose
     /// JVM class is absent (a no-JDK compile), so member calls emit the right invoke opcode.
     pub is_interface: bool,
-    /// Nullable returns for declared function members keyed by `(name, value-arity)`, INCLUDING
-    /// members `members` drops because their return is a bare type parameter (`Map.get(K): V?`,
-    /// `firstOrNull(): T?`). The resolved member for such a call is the erased classpath method (`java/util
-    /// /Map.get` returns `Object`) which carries no Kotlin nullability — this is the only surviving record
+    /// Nullable returns for declared function members keyed by `(name, value-arity)` (`Map.get(K): V?`,
+    /// `firstOrNull(): T?`). A call may still resolve to the ERASED classpath method (`java/util/Map.get`
+    /// returns `Object`), which carries no Kotlin nullability — this is then the only surviving record
     /// that the source return is `T?`. Consulted by the member walk to null-annotate that resolved return.
     pub nullable_member_returns: Vec<(String, usize)>,
+}
+
+/// The tables a `.kotlin_builtins` `Class` resolves its types against: the fragment's string and
+/// qualified-name tables plus the class's own `type_table` (`Class.type_table` = field 30).
+struct BuiltinTables<'a> {
+    strings: &'a [String],
+    qnames: &'a [QName],
+    types: &'a [&'a [u8]],
+}
+
+/// A `TypeParameter.id` → source name map. A builtins `Type` names a type parameter by that id
+/// (`Type.type_parameter` = field 7); without the map the type is undecodable and the whole member
+/// used to be dropped.
+type TypeParamNames = std::collections::HashMap<u64, String>;
+
+/// How deep a `.kotlin_builtins` type may nest before the decode gives up — a type-table entry
+/// references other entries by id, so a malformed (or cyclic) fragment must not recurse forever.
+const BUILTIN_TYPE_DEPTH_LIMIT: u32 = 16;
+
+impl BuiltinTables<'_> {
+    /// Resolve the shared [`parse_type_node`] wire shape through a builtins fragment's tables. A type is
+    /// `class_name` (field 6) with `argument`s, `type_parameter` (field 7, by id), or
+    /// `type_parameter_name` (field 9, by string). An argument may carry its type inline or by table id;
+    /// builtins commonly use the latter, so those edges consume the recursion budget as well.
+    fn ty(&self, body: &[u8], tparams: &TypeParamNames, depth: u32) -> Option<BuiltinTy> {
+        if depth > BUILTIN_TYPE_DEPTH_LIMIT {
+            return None;
+        }
+        let node = parse_type_node(body)?;
+        let args = node
+            .arguments
+            .into_iter()
+            .map(|argument| match argument {
+                ParsedTypeArgument::Inline(body) => self.ty(body, tparams, depth + 1),
+                ParsedTypeArgument::Table(id) => usize::try_from(id)
+                    .ok()
+                    .and_then(|id| self.ty_by_id(id, tparams, depth + 1)),
+                ParsedTypeArgument::Star => None,
+            })
+            // A star projection or an invalid table reference has `Any` as its erased stand-in,
+            // exactly like the ordinary metadata consumer of the shared wire parser.
+            .map(|argument| argument.unwrap_or_else(|| BuiltinTy::class("kotlin/Any")))
+            .collect();
+        if let Some(id) = node.class_id {
+            return Some(BuiltinTy::Class {
+                internal: resolve_qname(self.qnames, self.strings, id as i64),
+                args,
+                nullable: node.nullable,
+            });
+        }
+        let name = match (node.type_parameter_id, node.type_parameter_name_id) {
+            (Some(id), _) => tparams.get(&id).cloned()?,
+            (None, Some(sid)) => self.strings.get(sid as usize).cloned()?,
+            (None, None) => return None,
+        };
+        Some(BuiltinTy::Param {
+            name,
+            nullable: node.nullable,
+        })
+    }
+
+    fn ty_by_id(&self, id: usize, tparams: &TypeParamNames, depth: u32) -> Option<BuiltinTy> {
+        self.ty(self.types.get(id)?, tparams, depth)
+    }
+
+    /// Decode a run of `TypeParameter` messages: their names (added to `tparams` so a bound may refer
+    /// to a sibling) and their upper bounds. Bounds are decoded against the names alone — a recursive
+    /// bound (`T : Comparable<T>`) therefore terminates instead of chasing itself.
+    fn type_params(&self, bodies: &[&[u8]], tparams: &mut TypeParamNames) -> Vec<BuiltinTypeParam> {
+        let parsed: Vec<ParsedTypeParam> = bodies
+            .iter()
+            .filter_map(|b| parse_type_param(b))
+            .filter(|tp| self.strings.get(tp.name_id as usize).is_some())
+            .collect();
+        for tp in &parsed {
+            tparams.insert(tp.id, self.strings[tp.name_id as usize].clone());
+        }
+        parsed
+            .iter()
+            .map(|tp| BuiltinTypeParam {
+                name: self.strings[tp.name_id as usize].clone(),
+                bounds: tp
+                    .upper_bound_ids
+                    .iter()
+                    .filter_map(|&id| self.ty_by_id(id as usize, tparams, 0))
+                    .chain(
+                        tp.upper_bound_bodies
+                            .iter()
+                            .filter_map(|b| self.ty(b, tparams, 0)),
+                    )
+                    .collect(),
+            })
+            .collect()
+    }
+}
+
+/// `Class.type_parameter`. Field 5 on a `Class` — where a `Function`/`Property` instead carries its
+/// `receiver_type`, hence the two distinct constants.
+const CLASS_TYPE_PARAMETER_FIELD: u64 = 5;
+/// `Function.type_parameter` / `Property.type_parameter`. Both are field 4 (matching the decoders in
+/// [`class_functions`] and [`class_properties`]); field 5 on those messages is `receiver_type`.
+const MEMBER_TYPE_PARAMETER_FIELD: u64 = 4;
+
+/// Collect a message's repeated `type_parameter` sub-message bodies. The field number differs by
+/// carrier — see [`CLASS_TYPE_PARAMETER_FIELD`] / [`MEMBER_TYPE_PARAMETER_FIELD`].
+fn type_param_bodies(body: &[u8], field: u64) -> Vec<&[u8]> {
+    let mut pb = Pb { b: body, i: 0 };
+    let mut out = Vec::new();
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (f, 2) if f == field => {
+                let Some(n) = pb.varint() else { break };
+                let Some(b) = pb.bytes(n as usize) else { break };
+                out.push(b);
+            }
+            (_, w) => {
+                if pb.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Parse a `.kotlin_builtins` resource → every declared `Class` (qualified name → its supertypes +
@@ -2877,6 +3207,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
         let mut types: Vec<&[u8]> = Vec::new();
         let mut funcs: Vec<&[u8]> = Vec::new();
         let mut props: Vec<&[u8]> = Vec::new();
+        let mut class_tparam_bodies: Vec<&[u8]> = Vec::new();
         while !cp.at_end() {
             let Some(tag) = cp.varint() else { break };
             match (tag >> 3, tag & 7) {
@@ -2889,6 +3220,14 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                     if let Some(n) = cp.varint() {
                         if let Some(b) = cp.bytes(n as usize) {
                             supids.extend(packed_varints(b));
+                        }
+                    }
+                }
+                (f, 2) if f == CLASS_TYPE_PARAMETER_FIELD => {
+                    // The names behind every `Type.type_parameter` id a member of this class references.
+                    if let Some(n) = cp.varint() {
+                        if let Some(b) = cp.bytes(n as usize) {
+                            class_tparam_bodies.push(b);
                         }
                     }
                 }
@@ -2938,16 +3277,38 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
         }
         let Some(fq) = fq else { continue };
         let fqname = resolve_qname(&qnames, &strings, fq as i64);
-        // A `*_type_id` indexes the class `type_table`; resolve to the type's class_name → internal name.
-        let type_of_id = |tid: u64| -> Option<String> {
-            let tb = types.get(tid as usize)?;
-            let cn = parse_type_class_name(tb)?;
-            Some(resolve_qname(&qnames, &strings, cn as i64))
+        let tables = BuiltinTables {
+            strings: &strings,
+            qnames: &qnames,
+            types: &types,
         };
-        let supertypes: Vec<String> = supids.iter().filter_map(|&sid| type_of_id(sid)).collect();
+        // The class's own type parameters name every `Type.type_parameter` id its members reference.
+        let mut class_tparams = TypeParamNames::new();
+        let type_params = tables.type_params(&class_tparam_bodies, &mut class_tparams);
+        // A `*_type_id` indexes the class `type_table`; decode the entry in full (class + arguments,
+        // or a type-parameter reference) — a bare class name cannot express either.
+        let type_of_id = |tid: u64, tps: &TypeParamNames| -> Option<BuiltinTy> {
+            tables.ty_by_id(tid as usize, tps, 0)
+        };
+        let supertype_tys: Vec<BuiltinTy> = supids
+            .iter()
+            .filter_map(|&sid| type_of_id(sid, &class_tparams))
+            .collect();
+        let supertypes: Vec<String> = supertype_tys
+            .iter()
+            .filter_map(|t| t.internal().map(str::to_string))
+            .collect();
         let mut members = Vec::new();
         let mut nullable_member_returns = Vec::new();
         for fb in &funcs {
+            // A function may declare its OWN type parameters (`<R>` of `fold`); they shadow/extend the
+            // class's, so decode this function's types against the union.
+            let mut fn_tparams = class_tparams.clone();
+            let formals = tables.type_params(
+                &type_param_bodies(fb, MEMBER_TYPE_PARAMETER_FIELD),
+                &mut fn_tparams,
+            );
+            let type_of_id = |tid: u64| type_of_id(tid, &fn_tparams);
             let mut p = Pb { b: fb, i: 0 };
             let mut name_id = None;
             let mut ret_id = None;
@@ -2970,12 +3331,10 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                                         // builtins schema, 4 in some) → the parameter's type.
                                         (5, 0) | (4, 0) => pty = vp.varint().and_then(type_of_id),
                                         (3, 2) => {
-                                            // inline `type` Type → its class_name
+                                            // inline `type` Type
                                             if let Some(n) = vp.varint() {
                                                 if let Some(tb) = vp.bytes(n as usize) {
-                                                    pty = parse_type_class_name(tb).map(|cn| {
-                                                        resolve_qname(&qnames, &strings, cn as i64)
-                                                    });
+                                                    pty = tables.ty(tb, &fn_tparams, 0);
                                                 }
                                             }
                                         }
@@ -2986,7 +3345,9 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                                         }
                                     }
                                 }
-                                params.push(pty.unwrap_or_default());
+                                // An undecodable parameter type still keeps the member: `Any` is the
+                                // erased stand-in its descriptor would carry anyway.
+                                params.push(pty.unwrap_or_else(|| BuiltinTy::class("kotlin/Any")));
                             }
                         }
                     }
@@ -3003,8 +3364,9 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                 let ret_nullable = types
                     .get(ri as usize)
                     .is_some_and(|tb| parse_type_nullable(tb));
-                // Record nullable returns even for type-parameter-return functions the member list drops
-                // just below, so the erased classpath member can be null-annotated later.
+                // Record nullable returns separately too: a call may still resolve to the ERASED
+                // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
+                // nullability, and this is then the only surviving record that the source return is `T?`.
                 if let Some(name) = strings.get(ni as usize).filter(|_| ret_nullable) {
                     nullable_member_returns.push((name.clone(), params.len()));
                 }
@@ -3014,12 +3376,19 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                         params,
                         ret,
                         is_property: false,
+                        formals,
                         ret_nullable,
                     });
                 }
             }
         }
         for pb_ in &props {
+            let mut prop_tparams = class_tparams.clone();
+            let formals = tables.type_params(
+                &type_param_bodies(pb_, MEMBER_TYPE_PARAMETER_FIELD),
+                &mut prop_tparams,
+            );
+            let type_of_id = |tid: u64| type_of_id(tid, &prop_tparams);
             let mut p = Pb { b: pb_, i: 0 };
             let mut name_id = None;
             let mut ret_id = None;
@@ -3048,6 +3417,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                         params: vec![],
                         ret,
                         is_property: true,
+                        formals,
                         ret_nullable,
                     });
                 }
@@ -3057,7 +3427,9 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
             fqname,
             BuiltinClass {
                 supertypes,
+                supertype_tys,
                 members,
+                type_params,
                 nullable_member_returns,
                 is_interface: (flags >> 6) & 0x7 == 1,
             },
@@ -3185,7 +3557,8 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
 mod module_reader_tests {
     use super::{
         decode_properties, parse_function, parse_receiver_type_gsig, parse_type_alias,
-        parse_type_gsig, parse_type_gsig_node, primary_erasure_bounds, read_kotlin_module, MetaCtx,
+        parse_type_gsig, parse_type_gsig_node, parse_type_recv_fun, primary_erasure_bounds,
+        read_kotlin_module, MetaCtx,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
@@ -3301,6 +3674,47 @@ mod module_reader_tests {
     }
 
     #[test]
+    fn receiver_function_mark_is_independent_of_type_annotation_order() {
+        // Type.class_name = d2[0] (`Function1`), followed by its receiver and return type arguments.
+        // Type.annotation is extension field 100 (tag varint `a2 06`); each nested Annotation stores its
+        // class-name id in field 1. Two copies exercise the repeated-field contract in both orders: an
+        // unrelated annotation after `ExtensionFunctionType` must not overwrite the receiver marker.
+        let prefix = [
+            0x30, 0x00, // Function1
+            0x12, 0x04, 0x12, 0x02, 0x30, 0x01, // argument[0] = String receiver
+            0x12, 0x04, 0x12, 0x02, 0x30, 0x02, // argument[1] = Unit return
+        ];
+        let extension_annotation = [0xa2, 0x06, 0x02, 0x08, 0x03];
+        let unrelated_annotation = [0xa2, 0x06, 0x02, 0x08, 0x04];
+        let d2 = [
+            "kotlin/Function1".to_string(),
+            "kotlin/String".to_string(),
+            "kotlin/Unit".to_string(),
+            "kotlin/ExtensionFunctionType".to_string(),
+            "sample/TypeUseMarker".to_string(),
+        ];
+        let expected = Ty::fun_with_shape(vec![Ty::String], Ty::Unit, 0, true, false);
+        for (annotations, expected_ids) in [
+            ([extension_annotation, unrelated_annotation], vec![3, 4]),
+            ([unrelated_annotation, extension_annotation], vec![4, 3]),
+        ] {
+            let body = prefix
+                .into_iter()
+                .chain(annotations.into_iter().flatten())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parse_type_recv_fun(&body),
+                (expected_ids, Some(1)),
+                "the lightweight value-parameter decoder must preserve every annotation too"
+            );
+            assert_eq!(
+                parse_type_gsig(&body, &[], &d2, &HashMap::new()),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn extension_receiver_signature_preserves_top_level_nullability() {
         let nullable_string = [0x30, 0x00, 0x18, 0x01];
         assert_eq!(
@@ -3405,5 +3819,65 @@ mod module_reader_tests {
         );
         assert!(properties[0].ret_nullable);
         assert_eq!(properties[0].visibility, crate::types::Visibility::Public);
+    }
+
+    #[test]
+    fn property_flags_honor_modern_and_legacy_schema_layouts() {
+        // A Package containing five minimal Property messages. `ordinary` omits flags, which Kotlin's
+        // schema defines as 518 (public/final/default getter). `moduleOnly` writes field 11 as 512:
+        // the same default word with VISIBILITY bits 1..3 cleared to INTERNAL. The last two declarations
+        // isolate property-specific IS_VAR (bit 8) and IS_CONST (bit 11); both sit past MEMBER_KIND and
+        // therefore catch the former function-style offsets too. Keeping these assertions at the protobuf
+        // boundary prevents a JVM accessor—or a later resolver policy—from masking a layout regression.
+        // `legacy` exercises old_flags field 1 with that layout's earlier IS_VAR/IS_CONST positions.
+        let msg = [
+            0x22, 0x06, // Package.property, six-byte public property body
+            0x10, 0x00, // Property.name = d2[0]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+            0x22, 0x09, // Package.property, nine-byte internal property body
+            0x10, 0x01, // Property.name = d2[1]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+            0x58, 0x80, 0x04, // Property.flags (field 11) = 512
+            0x22, 0x09, // Package.property, nine-byte mutable property body
+            0x10, 0x02, // Property.name = d2[2]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+            0x58, 0x86, 0x0e, // Property.flags = 1798 (default + isVar + hasSetter)
+            0x22, 0x09, // Package.property, nine-byte const property body
+            0x10, 0x03, // Property.name = d2[3]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+            0x58, 0x86, 0x14, // Property.flags = 2566 (default + isConst)
+            0x22, 0x09, // Package.property, nine-byte legacy property body
+            0x08, 0xc0,
+            0x04, // Property.old_flags (field 1) = 576 (internal + isVar + isConst)
+            0x10, 0x04, // Property.name = d2[4]
+            0x1a, 0x02, 0x30, 0x05, // returnType.className = d2[5]
+        ];
+        let d2 = vec![
+            "ordinary".to_string(),
+            "moduleOnly".to_string(),
+            "mutable".to_string(),
+            "constant".to_string(),
+            "legacy".to_string(),
+            "kotlin/Int".to_string(),
+        ];
+        let ctx = MetaCtx {
+            msg: &msg,
+            records: &[],
+            d2: &d2,
+            methods: &[],
+        };
+
+        let properties = decode_properties(&ctx, 4);
+
+        assert_eq!(properties.len(), 5);
+        assert_eq!(properties[0].visibility, crate::types::Visibility::Public);
+        assert_eq!(properties[1].visibility, crate::types::Visibility::Internal);
+        assert!(properties[2].is_var);
+        assert!(!properties[2].is_const);
+        assert!(!properties[3].is_var);
+        assert!(properties[3].is_const);
+        assert_eq!(properties[4].visibility, crate::types::Visibility::Internal);
+        assert!(properties[4].is_var);
+        assert!(properties[4].is_const);
     }
 }

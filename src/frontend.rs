@@ -1734,6 +1734,23 @@ mod tests {
             .resolve_symbols_name(crate::types::type_name("fixture/Outer$Hidden$Context"))
             .classifier
             .is_none());
+        // Every classifier API must report the enclosing source restriction. Returning the public
+        // leaf visibility here would let the resolver's public fast path disagree with the type and
+        // package-access queries above.
+        assert_eq!(
+            analysis
+                .symbols
+                .libraries
+                .classifier_visibility(crate::types::type_name("fixture/Outer$Hidden$Context")),
+            Some(Visibility::Internal)
+        );
+        assert_eq!(
+            analysis
+                .symbols
+                .libraries
+                .classifier_access(crate::types::type_name("fixture/Outer$Hidden$Context")),
+            Some(crate::symbol_source::ClassifierAccess::Internal)
+        );
         assert!(!analysis
             .symbols
             .libraries
@@ -1781,6 +1798,17 @@ mod tests {
             .resolve_symbols_name(hidden)
             .classifier
             .is_none());
+        // Although the leaf exists only on the platform, its source-declared internal owner claims
+        // the path. The visibility/access APIs must carry that owner restriction instead of falling
+        // through to the platform leaf and describing the same rejected type as public.
+        assert_eq!(
+            analysis.symbols.libraries.classifier_visibility(hidden),
+            Some(Visibility::Internal)
+        );
+        assert_eq!(
+            analysis.symbols.libraries.classifier_access(hidden),
+            Some(crate::symbol_source::ClassifierAccess::Internal)
+        );
     }
 
     #[test]

@@ -579,7 +579,23 @@ pub(crate) fn specialized_lambda_member_params(
     args: &[CallArgKind],
     type_args: &[Ty],
 ) -> Vec<Ty> {
-    specialized_lambda_params(&member.params, member.generic_sig.as_ref(), args, type_args)
+    // A `suspend` member's generic signature carries the trailing `Continuation` that its LOGICAL
+    // parameter list drops. Trim it so the two align — otherwise specialization bails on the length
+    // check and every lambda argument of a suspend member loses its expected shape.
+    let trimmed;
+    let generic_sig = match member.generic_sig.as_ref() {
+        Some(signature)
+            if member.suspend() && signature.params.len() == member.params.len() + 1 =>
+        {
+            trimmed = GenericSig {
+                params: signature.params[..member.params.len()].to_vec(),
+                ..signature.clone()
+            };
+            Some(&trimmed)
+        }
+        signature => signature,
+    };
+    specialized_lambda_params(&member.params, generic_sig, args, type_args)
 }
 
 fn specialized_lambda_params(
@@ -655,6 +671,28 @@ fn specialize_property(mut property: PropertyInfo, receiver: Ty) -> PropertyInfo
     property.ty = ty_subst(property.ty, &binds);
     property.getter.ret = property.ty;
     property
+}
+
+/// Extract the property half of a namespace record. The namespace arrives behind a shared memo handle, so
+/// candidates are cloned into the selection's owned working set; both top-level and extension-property
+/// selection consume this exact helper, preventing their `Properties`/`Both` handling from drifting when
+/// [`crate::libraries::Callables`] gains another mixed shape.
+fn property_overloads(callables: &crate::libraries::Callables) -> Vec<PropertyInfo> {
+    match callables {
+        crate::libraries::Callables::Properties(properties)
+        | crate::libraries::Callables::Both { properties, .. } => properties.overloads.clone(),
+        crate::libraries::Callables::None | crate::libraries::Callables::Functions(_) => Vec::new(),
+    }
+}
+
+/// Source visibility for package-level properties, applied BEFORE ambiguity/receiver ranking. A JVM
+/// `internal`/private declaration may still have a public bytecode accessor, so accessor flags alone must
+/// never make it callable from another module. Module-origin facts remain governed by the module's
+/// file-aware [`SymbolSource`] overlay (which admits same-file private and hides sibling private); applying
+/// a second, file-blind filter here would incorrectly reject the former.
+fn source_property_visible(property: &PropertyInfo) -> bool {
+    property.visibility == Visibility::Public
+        || matches!(property.getter.origin, Origin::Module { .. })
 }
 
 fn bind_ext_ret(gsig: &GenericSig, receiver: Ty, args: &[Ty], targs: &[Ty]) -> Ty {
@@ -1676,6 +1714,24 @@ impl<'a> SymbolResolver<'a> {
             .unwrap_or_default()
     }
 
+    /// The receiver-less TOP-LEVEL property this unqualified name denotes, over the resolver's import
+    /// scope (`import pkg.plugin`, `import pkg.*`, or the file's own package). The property analogue of
+    /// the `SymRecv::TopLevel` callable query: a read of the name is a read of this property, realized
+    /// through its declaring facade's static getter. `None` when the name is not a top-level property, or
+    /// when two in-scope packages declare one (ambiguous — the caller reports the name unresolved rather
+    /// than picking arbitrarily).
+    pub fn resolve_top_level_property(&self, name: &str) -> Option<PropertyInfo> {
+        let mut candidates = self
+            .symbols_in_scope(name)
+            .into_iter()
+            .flat_map(|(_, symbols)| property_overloads(&symbols.callables))
+            .filter(|property| property.kind == PropKind::TopLevel)
+            .filter(|property| property.context_count == 0)
+            .filter(source_property_visible);
+        let selected = candidates.next()?;
+        candidates.next().is_none().then_some(selected)
+    }
+
     /// Select the nearest in-scope extension property, rejecting equal-rank candidates.
     pub fn resolve_extension_property(
         &self,
@@ -1686,15 +1742,10 @@ impl<'a> SymbolResolver<'a> {
         let mut candidates = self
             .symbols_in_scope(name)
             .into_iter()
-            .flat_map(|(_, symbols)| match &symbols.callables {
-                crate::libraries::Callables::Properties(properties) => properties.overloads.clone(),
-                crate::libraries::Callables::Both { properties, .. } => {
-                    properties.overloads.clone()
-                }
-                _ => Vec::new(),
-            })
+            .flat_map(|(_, symbols)| property_overloads(&symbols.callables))
             .filter(|property| property.kind == PropKind::Extension)
             .filter(|property| property.context_count == 0)
+            .filter(source_property_visible)
             .filter_map(|property| {
                 let declared = ty_subst(property.receiver?, &std::collections::HashMap::new());
                 if receiver.is_nullable() && !declared.is_nullable() {
@@ -2622,6 +2673,103 @@ impl<'a> SymbolResolver<'a> {
         arg_fits_source(self.lib, &self.src, param, arg)
     }
 
+    /// The argument→parameter mapping for a call whose arguments name their parameters
+    /// (`mockk(relaxed = true)`): `slots[i]` is the parameter position argument `i` labels.
+    ///
+    /// A LABEL, not a position, decides which parameter an argument is checked against. The
+    /// positional form below cannot express that: it compares the argument list against the LEADING
+    /// parameters, so a call that names a later parameter and omits an earlier one was checked
+    /// against the wrong declaration and reported "unresolved function". Every parameter no
+    /// argument names must carry a default — that is what makes the `$default` synthetic callable.
+    ///
+    /// `slots` are VALUE-parameter positions (the checker builds them against a signature stripped of
+    /// context parameters), while `params` is the full list, so the two only agree when there are no
+    /// context parameters. Rather than index across that mismatch, such a callable is declined here and
+    /// the positional path takes it — the same thing lowering does, which handles only `ctx_n == 0`.
+    fn named_default_arg_mapping(
+        &self,
+        info: &FunctionInfo,
+        params: &[Ty],
+        args: &[Ty],
+        slots: &[usize],
+    ) -> Option<Vec<(usize, usize)>> {
+        if slots.len() != args.len() || info.context_count != 0 {
+            return None;
+        }
+        let sig = &info.call_sig;
+        let mut mapping = Vec::with_capacity(args.len());
+        for (argument, (&parameter, argument_ty)) in slots.iter().zip(args).enumerate() {
+            let declared = params.get(parameter)?;
+            if !arg_fits_platform(self.lib, declared, argument_ty) {
+                return None;
+            }
+            mapping.push((parameter, argument));
+        }
+        // Every unfilled parameter must be defaulted (a vararg slot may always stay empty). An empty
+        // `param_defaults` means the provider recorded no default facts at all — the same "unknown, do
+        // not reject" reading `has_known_required_param` takes.
+        if !sig.param_defaults.is_empty()
+            && (0..params.len()).any(|parameter| {
+                !slots.contains(&parameter)
+                    && !sig.param_has_default(parameter)
+                    && sig.vararg_index != Some(parameter)
+            })
+        {
+            return None;
+        }
+        Some(mapping)
+    }
+
+    /// The parameter types a `$default` synthetic would actually receive `args` at, or `None` when it
+    /// cannot take the call. The measure a defaulted call is RANKED by: only the parameters the call
+    /// supplies distinguish two candidates, the omitted ones are filled identically either way. Reads the
+    /// mapping the same way the emit does — by LABEL when the arguments name their parameters, else
+    /// positionally — so ranking never disagrees with what it ranks.
+    fn default_call_shape(
+        &self,
+        info: &FunctionInfo,
+        args: &[Ty],
+        slots: Option<&[usize]>,
+    ) -> Option<Vec<Ty>> {
+        if !info.public() && !info.flags.inline.must_inline() {
+            return None;
+        }
+        let params = &info.callable.params;
+        let mapping = match slots {
+            Some(slots) => self.named_default_arg_mapping(info, params, args, slots)?,
+            None => self.default_arg_mapping(info, params, args)?,
+        };
+        Some(
+            mapping
+                .iter()
+                .filter_map(|(parameter, _)| params.get(*parameter).copied())
+                .collect(),
+        )
+    }
+
+    /// Select a `$default` candidate with the SAME strict-dominance primitive every other overload
+    /// family uses. Candidates with mutually assignable supplied shapes are semantically equivalent;
+    /// sorting by declared arity first makes the documented secondary rule (fill fewer defaults) choose
+    /// which equivalent fact survives de-duplication. Incomparable maximal shapes remain ambiguous rather
+    /// than falling through to classpath/declaration order.
+    fn select_default_candidate<'b>(
+        &self,
+        candidates: impl IntoIterator<Item = &'b FunctionInfo>,
+        args: &[Ty],
+        slots: Option<&[usize]>,
+    ) -> CandidateSelection<&'b FunctionInfo> {
+        let mut applicable = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                Some((self.default_call_shape(candidate, args, slots)?, candidate))
+            })
+            .collect::<Vec<_>>();
+        applicable.sort_by_key(|(_, candidate)| candidate.callable.params.len());
+        unique_most_specific(applicable, |_, sub, sup| {
+            resolution_subtype(self.lib, &self.src, sub, sup)
+        })
+    }
+
     fn default_arg_mapping(
         &self,
         info: &FunctionInfo,
@@ -2633,7 +2781,11 @@ impl<'a> SymbolResolver<'a> {
         if args.len() > real_count {
             return None;
         }
-        let fits = |p: &Ty, a: &Ty| arg_fits_platform(self.lib, p, a);
+        // Applicability is a SOURCE question: an argument fits a parameter when it is assignable to it,
+        // subtypes included (`plainDefault(sub)` for `plainDefault(base: Base, n: Int = 3)`). The
+        // platform-only check answers "same erased shape", which silently rejects every subtype argument
+        // — and only on the defaulted path, so the same call with all arguments spelled out resolved.
+        let fits = |p: &Ty, a: &Ty| self.arg_fits_or_subtype(p, a);
         let trailing_lambda = args.last().is_some_and(|a| matches!(a, Ty::Fun(_)));
         if trailing_lambda && args.len() < real_count {
             let last_param = real_count.checked_sub(1)?;
@@ -2668,10 +2820,40 @@ impl<'a> SymbolResolver<'a> {
         Some((0..args.len()).map(|i| (i, i)).collect())
     }
 
+    /// Resolve a call that names its parameters onto the `$default` synthetic, checking each argument
+    /// against the parameter its LABEL selects (`slots[i]`) rather than against parameter `i`.
+    pub(crate) fn resolve_top_level_named_default_callable(
+        &self,
+        name: &str,
+        args: &[Ty],
+        slots: &[usize],
+        type_args: &[Ty],
+        expected: Option<Ty>,
+    ) -> Option<LibraryCallable> {
+        self.resolve_top_level_default_callable_with_slots(
+            name,
+            args,
+            Some(slots),
+            type_args,
+            expected,
+        )
+    }
+
     fn resolve_top_level_default_callable(
         &self,
         name: &str,
         args: &[Ty],
+        type_args: &[Ty],
+        expected: Option<Ty>,
+    ) -> Option<LibraryCallable> {
+        self.resolve_top_level_default_callable_with_slots(name, args, None, type_args, expected)
+    }
+
+    fn resolve_top_level_default_callable_with_slots(
+        &self,
+        name: &str,
+        args: &[Ty],
+        slots: Option<&[usize]>,
         type_args: &[Ty],
         expected: Option<Ty>,
     ) -> Option<LibraryCallable> {
@@ -2683,30 +2865,35 @@ impl<'a> SymbolResolver<'a> {
                 return None;
             }
             let params = &c.params;
-            let mapping = self.default_arg_mapping(o, params, args)?;
+            let mapping = match slots {
+                Some(slots) => self.named_default_arg_mapping(o, params, args, slots)?,
+                None => self.default_arg_mapping(o, params, args)?,
+            };
             // A `$default` synthetic usually carries NO generic `Signature` (it isn't API), so binding the
             // return type parameter off it fails and the erased `Object` return leaks (`runBlocking { … }`
             // → `Any`, losing the block's result type). Fall back to the BASE function's gsig — its leading
             // real parameters (and their type-parameter positions) align with the `$default`'s, so unifying
             // the provided args against it recovers `T` (`runBlocking<T>(block: () -> T): T` → `T = Ch`).
+            // Resolve the base ONCE for every metadata facet the synthetic may lack. Arity alone is
+            // not identity: two overloads can have the same number of parameters but different JVM
+            // spellings and unrelated type variables. Borrowing either one's generic signature can
+            // bind a return or reified marker to the wrong formal while still producing valid bytecode.
+            //
+            // krusty models `$default` with only the real parameters, so exact JVM spelling plus the
+            // logical parameter vector identifies its base without reconstructing a descriptor from
+            // lossy `Ty` values (`Byte`/`Short` both appear as `Int`).
+            let base_spelling = c.name.strip_suffix("$default");
+            let base = base_spelling.and_then(|spelling| {
+                function_set_from_symbols(self.symbols_in_scope(name))
+                    .into_top_level()
+                    .find(|candidate| {
+                        candidate.callable.name == spelling
+                            && candidate.callable.params.as_slice() == params.as_slice()
+                    })
+            });
             let base_gsig = o.generic_sig.clone().or_else(|| {
-                // The `$default` (krusty models it with the REAL params, no mask/marker) shares its base
-                // function's parameter shape, so a SAME-ARITY base overload's generic signature applies.
-                // Among same-arity candidates, prefer one whose return is a bare type PARAMETER (the
-                // generic `fun <T> …(): T` form we need to bind), so a same-name/same-arity non-generic
-                // sibling doesn't cross-bind.
-                let bases: Vec<FunctionInfo> =
-                    function_set_from_symbols(self.symbols_in_scope(name))
-                        .into_top_level()
-                        .filter(|b| {
-                            b.generic_sig.is_some() && b.callable.params.len() == params.len()
-                        })
-                        .collect();
-                bases
-                    .iter()
-                    .find(|b| b.generic_sig.as_ref().is_some_and(|g| g.ret.is_ty_param()))
-                    .or_else(|| bases.first())
-                    .and_then(|b| b.generic_sig.clone())
+                base.as_ref()
+                    .and_then(|candidate| candidate.generic_sig.clone())
             });
             let ret_ty = base_gsig
                 .as_ref()
@@ -2728,14 +2915,28 @@ impl<'a> SymbolResolver<'a> {
             );
             let ret_ty = o.ret.apply(ret_ty);
             let mut callable = callable_with_return(c, ret_ty, true);
+            // Same reasoning as `base_gsig`, for the JVM `Signature`: the `$default` synthetic carries
+            // none, and a `<reified T>` splice reads its formal type-parameter NAMES from there to bind
+            // the call's type arguments. The base's formals ARE the synthetic's — the mask/marker
+            // parameters the synthetic appends introduce no type variables — so an omitted-default call
+            // to a reified inline can specialize its body instead of falling back to a direct
+            // (throwing) invoke.
+            //
+            // The base is identified by SPELLING, not by arity alone: the formal type-parameter names
+            // are what the splice substitutes by, so borrowing a same-arity SIBLING overload's
+            // signature would specialize the body against the wrong names. `sourceName-<hash>$default`
+            // belongs to `sourceName-<hash>`, and only that one.
+            if callable.signature.is_none() {
+                callable.signature = base.and_then(|candidate| candidate.callable.signature);
+            }
             record_default_vararg_slot(&mut callable, o.call_sig.vararg_index, params, args);
             Some(callable)
         };
         let fsd = function_set_from_symbols(self.symbols_in_scope(&format!("{name}$default")));
-        for o in fsd.top_level() {
-            if let Some(callable) = try_default(o) {
-                return Some(callable);
-            }
+        match self.select_default_candidate(fsd.top_level(), args, slots) {
+            CandidateSelection::Selected(candidate) => return try_default(candidate),
+            CandidateSelection::Ambiguous => return None,
+            CandidateSelection::None => {}
         }
         // A `@JvmName`/value-class-mangled base (`sourceName` → `sourceName-<hash>`) mangles its
         // `$default` synthetic too. The import scope only knows the SOURCE spelling (`{name}$default` maps through
@@ -2743,6 +2944,7 @@ impl<'a> SymbolResolver<'a> {
         // facade package. Probed LAST: an unmangled name never reaches this (the common case pays no
         // extra scope query).
         let mut seen_spellings = std::collections::HashSet::new();
+        let mut mangled_defaults = Vec::new();
         for base in function_set_from_symbols(self.symbols_in_scope(name)).into_top_level() {
             let spelling = base.callable.name.clone();
             if spelling == name || !seen_spellings.insert(spelling.clone()) {
@@ -2754,13 +2956,12 @@ impl<'a> SymbolResolver<'a> {
             let fqn = crate::types::type_name_child(pkg, &format!("{spelling}$default"));
             let record = self.src.resolve_symbols_name(fqn);
             let fs = function_set_from_symbols(std::iter::once((fqn, record)));
-            for o in fs.top_level() {
-                if let Some(callable) = try_default(o) {
-                    return Some(callable);
-                }
-            }
+            mangled_defaults.extend(fs.into_top_level());
         }
-        None
+        match self.select_default_candidate(mangled_defaults.iter(), args, slots) {
+            CandidateSelection::Selected(candidate) => try_default(candidate),
+            CandidateSelection::None | CandidateSelection::Ambiguous => None,
+        }
     }
 
     fn resolve_top_level_inline_only_callable(
@@ -5052,6 +5253,7 @@ mod tests {
             context_count: 0,
             contract: None,
             generic_sig: None,
+            singleton_dispatch: None,
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),

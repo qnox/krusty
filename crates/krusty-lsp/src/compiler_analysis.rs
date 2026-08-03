@@ -20,7 +20,9 @@ use krusty::types::Ty;
 use std::collections::HashMap;
 
 pub(crate) use completion::{CompletionDetails, CompletionKind, CompletionSymbols};
-pub(crate) use document_symbols::{document_symbol_occurrences, DocumentSymbolOccurrence};
+pub(crate) use document_symbols::{
+    document_symbol_occurrences, parsed_file_symbols, DocumentSymbolOccurrence,
+};
 #[cfg(test)]
 pub(crate) use folding_ranges::FoldingRangeText;
 pub(crate) use folding_ranges::{
