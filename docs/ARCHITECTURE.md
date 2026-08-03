@@ -90,7 +90,10 @@ boundary.
   old classpath cannot repopulate the session after reset. A completed failed materialization
   releases its in-flight marker and may be retried; failure never becomes a permanent negative
   cache. Raw per-jar class listings are a best-effort startup cache keyed by path, size, and mtime;
-  malformed or unavailable cache state always falls back to reading the classpath entry.
+  malformed or unavailable cache state always falls back to reading the classpath entry. They are
+  auxiliary entries under the same version root and global lock as rendered sources, so the same
+  age/size collector and both cache-clean modes cover them rather than leaving an unbounded side
+  directory.
 - Workspace diagnostics retain only bounded file URIs, text hashes, packed UTF-16 ranges/severity,
   and deduplicated display messages. Replaced entry slices are compacted and deleted file slots are
   reused; no source text, AST, semantic class identity, classpath entry, or compiler snapshot

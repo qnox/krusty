@@ -23,13 +23,16 @@
 //! What is cached is the jar's *raw* entry names, before anything is filtered or parsed out of
 //! them. That is what keeps the format version honest: deciding that some entry is not worth
 //! indexing changes the index, not the file, so a change of that kind cannot leave a stale cache
-//! behind it. The version guards the file layout alone, and it is carried in the directory name as
-//! well as the header — the directory so an older version's files are orphaned wholesale rather
-//! than checked one by one, the header so a hash collision cannot pass for a hit.
+//! behind it. The version guards the file layout alone, and it is carried in the managed entry's
+//! file name as well as its header, so an old layout misses and a hash collision cannot pass for a
+//! hit. Managed entries share the rendered-source cache's version root and access marker; its
+//! global age/size GC and `cache clean` operation therefore bound listings too.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use fs2::FileExt;
 
 use crate::project::fingerprint::Hasher;
 
@@ -57,15 +60,22 @@ fn cache_key(jar: &Path) -> Option<CacheKey> {
     })
 }
 
-fn cache_path(cache_root: &Path, jar: &Path, key: &CacheKey) -> PathBuf {
+fn cache_entry_dir(cache_root: &Path, jar: &Path, key: &CacheKey) -> PathBuf {
     let mut hasher = Hasher::default();
     hasher.write_str("dependency-classes");
     hasher.write_str(&jar.to_string_lossy());
     hasher.write(&key.bytes.to_le_bytes());
     hasher.write(&key.modified_nanos.to_le_bytes());
-    cache_root
-        .join(format!("v{DEPENDENCY_CACHE_FORMAT_VERSION}"))
-        .join(format!("{:016x}.classes", hasher.finish().as_u64()))
+    crate::deps_cache::managed_entry_dir(
+        cache_root,
+        &format!("classes-{:016x}", hasher.finish().as_u64()),
+    )
+}
+
+fn cache_path(cache_root: &Path, jar: &Path, key: &CacheKey) -> PathBuf {
+    cache_entry_dir(cache_root, jar, key).join(format!(
+        "listing-v{DEPENDENCY_CACHE_FORMAT_VERSION}.classes"
+    ))
 }
 
 /// The header a cached listing carries, so the key is verified rather than trusted.
@@ -85,6 +95,10 @@ fn header(jar: &Path, key: &CacheKey, names: usize) -> String {
 
 /// Class names cached for `jar`, or `None` when nothing valid is cached for it.
 pub fn load(cache_root: &Path, jar: &Path) -> Option<Vec<String>> {
+    // Share the dependency-source cache lock so age/size GC and `cache clean` cannot remove this
+    // managed entry while it is being read.
+    let global = crate::deps_cache::global_lock(cache_root).ok()?;
+    FileExt::lock_shared(&global).ok()?;
     let key = cache_key(jar)?;
     let text = fs::read_to_string(cache_path(cache_root, jar, &key)).ok()?;
     let mut lines = text.lines();
@@ -95,6 +109,7 @@ pub fn load(cache_root: &Path, jar: &Path) -> Option<Vec<String>> {
     if header_line != header(jar, &key, names.len()) {
         return None;
     }
+    let _ = crate::deps_cache::touch_entry(&cache_entry_dir(cache_root, jar, &key));
     Some(names)
 }
 
@@ -103,11 +118,19 @@ pub fn load(cache_root: &Path, jar: &Path) -> Option<Vec<String>> {
 /// Best effort: a cache that cannot be written is a slower start, not a failure, so the caller is
 /// told nothing it would have to handle.
 pub fn store(cache_root: &Path, jar: &Path, names: &[String]) {
+    let Ok(global) = crate::deps_cache::global_lock(cache_root) else {
+        return;
+    };
+    if FileExt::lock_shared(&global).is_err() {
+        return;
+    }
     let Some(key) = cache_key(jar) else {
         return;
     };
     let path = cache_path(cache_root, jar, &key);
-    let _ = write_atomically(&path, &header(jar, &key, names.len()), names);
+    if write_atomically(&path, &header(jar, &key, names.len()), names).is_ok() {
+        let _ = crate::deps_cache::touch_entry(&cache_entry_dir(cache_root, jar, &key));
+    }
 }
 
 fn write_atomically(path: &Path, header: &str, names: &[String]) -> io::Result<()> {
@@ -177,6 +200,27 @@ mod tests {
         store(&temp.0, &jar, &names);
 
         assert_eq!(load(&temp.0, &jar), Some(names));
+    }
+
+    #[test]
+    fn stored_listings_participate_in_shared_gc_and_ordinary_clean() {
+        let temp = TempDir::new("managed-lifecycle");
+        let cache = temp.0.join("cache");
+        let jar = jar_like(&temp.0, "library.jar", "jar bytes");
+        let names = vec!["demo/Managed".to_string()];
+        store(&cache, &jar, &names);
+        assert_eq!(load(&cache, &jar), Some(names.clone()));
+
+        // A far-future clock makes the just-touched entry old without sleeping or mutating its
+        // timestamp. The shared source-cache collector must see and evict the class listing.
+        let stats = crate::deps_cache::gc(&cache, 0, u64::MAX, u64::MAX).unwrap();
+        assert_eq!(stats.evicted, 1);
+        assert_eq!(load(&cache, &jar), None);
+
+        store(&cache, &jar, &names);
+        assert_eq!(load(&cache, &jar), Some(names));
+        crate::deps_cache::clean(&cache, false).unwrap();
+        assert_eq!(load(&cache, &jar), None);
     }
 
     #[test]

@@ -928,7 +928,9 @@ impl krusty_lsp::Analysis for WorkerHost {
         if entries.is_empty() {
             return krusty_lsp::DependencySymbolIndex::default();
         }
-        let cache_root = deps_cache_root(&self.options).join("classes");
+        // Raw class listings are auxiliary entries in the same managed cache as rendered sources,
+        // so age/size GC, locking, and ordinary `cache clean` cover both.
+        let cache_root = deps_cache_root(&self.options);
         krusty_lsp::DependencySymbolIndex::from_cached_classpath(&entries, &cache_root)
     }
 
