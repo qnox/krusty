@@ -366,22 +366,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   yet supported by the IR backend") while an empty body compiled. Proven against a kotlinc-built
   dependency, box-run: a receiver read, a capturing body, and a named argument ahead of the trailing
   lambda (`tests/classpath_suspend_receiver_lambda_e2e.rs`).
-- **A `Unit` tail in a suspending lambda body materializes the `Unit` singleton.** A tail that is a CALL
-  to a `Unit` function returns `void` and leaves nothing on the operand stack; binding it to the
-  machine's result temp emitted a store from an empty stack (`VerifyError: Operand stack underflow`).
-  Such a tail now runs for effect and yields `kotlin/Unit.INSTANCE` — the same coercion a `Unit` value
-  gets in argument position. Every other `Unit`-typed tail already yields a value (an assignment and a
-  `when` without `else` lower to an explicit `Unit`) and a SUSPENDING tail keeps its own value: that
-  value is the CPS result the machine propagates. This was the real cause of the corpus
-  `coroutines/intLikeVarSpilling` failures, which the sub-int/array spill bail had been skipping by
-  proxy (it keyed on a machine's leading `this` field, i.e. on the callee being a receiver lambda); that
-  bail is removed and those cases now compile and run. A tail that suspends keeps its own shape so the
-  flattener still sees it — for a call that means the call node itself (its arguments hoist ahead of it),
-  for a `try` anywhere inside (the suspension sits in control flow rewritten in place, and that machine
-  still SKIPS rather than compiling: corpus `coroutines/varSpilling/kt75926`).
-  **Known gap** (pre-existing, unchanged): two `Unit` tail spellings still underflow — a SAFE CALL
-  (`h?.act()`, whose checked type is `Unit?`, not `Unit`) and an inline-SPLICED tail (`run { sink(a) }`,
-  whose value sits in a nested block). Both are `VerifyError`s today, not skips.
+- **A `Unit` tail in a suspending lambda body runs for effect and yields the `Unit` singleton.** Several
+  `Unit` tails leave NOTHING on the operand stack — a call (to a function, a method, or a function VALUE)
+  returning `Unit` emits a `void` invocation; a `try`, a `when` and a safe call emit their branches for
+  effect; a block ends in one of those — so binding the tail to the machine's result temp stored from an
+  empty stack (`VerifyError: Operand stack underflow`). The tails that DO leave a value (an assignment, a
+  `when` without `else`) are popped in statement position, so running EVERY `Unit` tail for effect and
+  yielding `kotlin/Unit.INSTANCE` is uniformly correct — the same coercion a `Unit` value gets in
+  argument position, and what the leaf form already did. A SAFE CALL counts: its `Unit?` is a `Unit` tail
+  too (the value is discarded either way, and both arms of the null test leave the stack as they found
+  it). Both suspend-lambda lowering forms apply that same semantic test: the general state-machine path
+  and the leaf `invokeSuspend` path used when the body itself never suspends. The exception is a tail that
+  SUSPENDS, which keeps its own shape so the flattener still sees it —
+  for a CALL that means the call node itself (its arguments are evaluated unconditionally and hoist ahead
+  of it, so a suspending argument is no reason to leave the void call unwrapped), for anything else
+  anywhere inside (the suspension sits in control flow rewritten in place, and that machine still SKIPS
+  rather than compiling: corpus `coroutines/varSpilling/kt75926`). This was the real cause of the corpus
+  `coroutines/intLikeVarSpilling` failures, which the sub-int/array spill bail had been skipping by proxy
+  (it keyed on a machine's leading `this` field, i.e. on the callee being a receiver lambda); that bail is
+  removed and those cases now compile and run. Proven box-run for a void call, a function VALUE, a `try`,
+  a safe call on both a present and a null receiver in the leaf and general-machine forms, a void tail
+  whose argument suspends, and an inline-SPLICED tail
+  (`tests/suspend_receiver_lambda_e2e.rs`, `tests/suspend_lambda_unit_tail_e2e.rs`).
 - **A `suspend inline` callee inside a suspend lambda SKIPS (never miscompiles).** Its body must be
   spliced at the call site — the compiled method is not the one the source signature names — and the
   splicer does not reach into a state machine's states, so the machine would emit an ordinary call and
