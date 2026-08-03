@@ -631,6 +631,52 @@ impl JvmLibraries {
         self.cp.builtin_members_name(kotlin)
     }
 
+    /// Function renames declared by the mapped collection interfaces a concrete JVM class realizes.
+    /// This is the read-side counterpart of [`SymbolSource::mapped_interface_members`], which already
+    /// owns the source name, physical name, and erased callable shape used for bridge emission. Derive
+    /// Java member visibility from that semantic handoff instead of maintaining a second reverse table:
+    /// a raw `ArrayList.remove(I)Object` therefore appears as `removeAt`, while `remove(Object)Boolean`
+    /// remains `remove`, and a same-shaped method outside the `java.util.List` hierarchy is untouched.
+    fn mapped_collection_function_renames(
+        &self,
+        internal: TypeName,
+    ) -> Vec<crate::libraries::MappedInterfaceMember> {
+        let mut renames = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = std::collections::VecDeque::new();
+        pending.push_back(super::jvm_class_map::to_jvm_type_name(internal));
+        while let Some(owner) = pending.pop_front() {
+            if !seen.insert(owner) {
+                continue;
+            }
+            if let Some(kotlin) =
+                super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(owner)
+            {
+                for mapping in
+                    <Self as SemanticPlatform>::mapped_interface_members(self, Ty::obj_name(kotlin))
+                {
+                    if !mapping.is_property
+                        && mapping.source_name != mapping.physical_name
+                        && !renames.iter().any(
+                            |existing: &crate::libraries::MappedInterfaceMember| {
+                                existing.source_name == mapping.source_name
+                                    && existing.physical_name == mapping.physical_name
+                                    && existing.params == mapping.params
+                                    && existing.ret == mapping.ret
+                            },
+                        )
+                    {
+                        renames.push(mapping);
+                    }
+                }
+            }
+            if let Some(class) = self.cp.find_name(owner) {
+                pending.extend(class.interfaces.iter_ids().chain(class.super_class));
+            }
+        }
+        renames
+    }
+
     fn range_accessor(name: &str, descriptor: &str) -> PlatformAccessor {
         PlatformAccessor {
             name: name.to_string(),
@@ -1338,14 +1384,51 @@ impl JvmLibraries {
                     format!("({})V", type_descriptor(Ty::String)),
                 ));
             }
+            // A MAPPED Kotlin COLLECTION (`kotlin/collections/MutableList`, …) takes BOTH its members
+            // and its supertypes from the `.kotlin_builtins` declaration — that declaration IS its
+            // Kotlin API, and the JVM class it maps to is only its physical realization. Carrying the
+            // JVM class's own members or interfaces instead would put `java.util.List`'s surplus method
+            // set (`remove(int)`, `stream`, `toArray`, `getFirst` — none of them Kotlin members) into
+            // the Kotlin scope, directly or one rung up through `java/util/List` as a supertype. That
+            // is what let `list.remove(10)` bind remove-BY-INDEX. The builtins decode to the same
+            // erased descriptors and the same JVM owner, so nothing physical changes: names stay in
+            // source terms and the Kotlin → JVM rename happens at emit
+            // (`names::mapped_builtin_virtual_name`), as for every other mapped member.
+            //
+            // Only the collections, for now. Applying it to `kotlin/String` also removes
+            // `String.substring`/`indexOf`, which kotlinc reaches through `kotlin.text` EXTENSIONS (an
+            // `@InlineOnly` splice down to the Java member, and `StringsKt.indexOf$default`) — a path
+            // krusty does not yet cover, so today they resolve only because `java.lang.String`'s member
+            // set leaks in. Widening this is gated on closing that gap, not on anything here.
+            let rendered_internal = internal_name.render();
+            let is_mapped_builtin =
+                super::jvm_class_map::to_jvm_internal(&rendered_internal) != rendered_internal;
+            let builtin_supertypes = self.cp.builtin_supertypes_name(internal_name);
+            let mut builtin_members = if is_mapped_builtin {
+                self.builtin_members_for_type_name(internal_name)
+            } else {
+                Vec::new()
+            };
+            // Members and supertypes must switch provenance together. Presence of the decoded
+            // declaration, not a non-empty member vector, is the capability: an authoritative
+            // declaration is allowed to state an empty member or supertype set, and falling back to
+            // only half of the Java shape would recreate the very scope leak this branch prevents.
+            let kotlin_scope_is_authoritative = is_mapped_builtin
+                && self.cp.builtin_is_interface(&rendered_internal).is_some()
+                && super::jvm_class_map::jvm_collection_to_kotlin_type_name(
+                    super::jvm_class_map::to_jvm_type_name(internal_name),
+                )
+                .is_some();
             let mut supertypes = TypeNameList::new();
-            for s in ci.interfaces.iter_ids() {
-                supertypes.push_name(s);
+            if !kotlin_scope_is_authoritative {
+                for s in ci.interfaces.iter_ids() {
+                    supertypes.push_name(s);
+                }
+                if let Some(s) = ci.super_class {
+                    supertypes.push_name(s);
+                }
             }
-            if let Some(s) = ci.super_class {
-                supertypes.push_name(s);
-            }
-            for s in self.cp.builtin_supertypes_name(internal_name).iter_ids() {
+            for s in builtin_supertypes.iter_ids() {
                 if !supertypes.contains_name(s) {
                     supertypes.push_name(s);
                 }
@@ -1470,20 +1553,31 @@ impl JvmLibraries {
                 .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == self_desc)
                 .map(|f| f.name.clone())
                 .collect();
-            let rendered_internal = internal_name.render();
-            let mut builtin_members =
-                if super::jvm_class_map::to_jvm_internal(&rendered_internal) != rendered_internal {
-                    self.builtin_members_for_type_name(internal_name)
-                } else {
-                    Vec::new()
-                };
-            builtin_members.retain(|builtin| {
-                !members.iter().any(|member| {
-                    member.physical_name.is_some()
-                        && member.name == builtin.name
-                        && member.descriptor == builtin.descriptor
-                })
-            });
+            // A MAPPED Kotlin builtin (`kotlin/collections/MutableList`, `kotlin/CharSequence`, …) has
+            // no `.class` of its own; the members read above came from the JVM class it maps to
+            // (`java/util/List`). That class's method set is NOT its Kotlin API: `java.util.List`
+            // declares `remove(int)`, `stream`, `toArray`, `getFirst`, none of which Kotlin's
+            // `MutableList` has, and its `remove(int)` is reachable from Kotlin only under the renamed
+            // name `removeAt`. The `.kotlin_builtins` declaration IS the Kotlin API, and it decodes to
+            // the same erased descriptors and JVM owner — so for a mapped name it REPLACES the JVM
+            // class's members rather than being unioned with them. The class file still supplies the
+            // kind and constructors. Names stay in source terms; the Kotlin → JVM
+            // rename happens at emit (`names::mapped_builtin_virtual_name`), as it does for every
+            // other mapped member.
+            // The members half of the same decision (see the supertype block below): for a mapped
+            // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
+            // joins them, with anything the class file already states under a physical name dropped.
+            if kotlin_scope_is_authoritative {
+                members.clear();
+            } else {
+                builtin_members.retain(|builtin| {
+                    !members.iter().any(|member| {
+                        member.physical_name.is_some()
+                            && member.name == builtin.name
+                            && member.descriptor == builtin.descriptor
+                    })
+                });
+            }
             // A defaulted value-class primary constructor surfaces as the `constructor-impl$default` synthetic.
             let value_ctor_has_default = ci
                 .methods
@@ -2930,10 +3024,36 @@ impl SymbolSource for JvmLibraries {
                 let Some(t) = self.resolve_type_name(cn) else {
                     continue;
                 };
+                // Compute the provider-owned rename shapes once per hierarchy rung. A raw Java
+                // method is renamed only when its physical name AND full erased descriptor match a
+                // mapped interface obligation carried by this receiver's actual class hierarchy.
+                // This keeps overload identity precise without a classpath-only reverse-name table.
+                let function_renames = self.mapped_collection_function_renames(cn);
                 for m in &t.members {
-                    if m.name == name
+                    // The name this member is visible under in the receiver's SOURCE scope. Normally
+                    // its own; for a Java method that a renamed builtin covers, the KOTLIN name
+                    // INSTEAD of the JVM one — so `ArrayList.remove(int)` answers `removeAt` and is
+                    // invisible to `remove`, exactly as kotlinc's Java member scope resolves it. The
+                    // emitted callable is unaffected: it reads `m.physical_name`/`m.name` below, so the
+                    // call still goes to `remove(I)`. A member that already carries a `physical_name`
+                    // is a synthesized alias (a value-class mangled member, or a builtin whose Kotlin
+                    // name was recorded there), never a raw Java method — leave it alone.
+                    let scope_name = m.physical_name.as_ref().map_or_else(
+                        || {
+                            function_renames
+                                .iter()
+                                .find(|mapping| {
+                                    mapping.physical_name == m.name
+                                        && method_descriptor(&mapping.params, mapping.ret)
+                                            == m.descriptor
+                                })
+                                .map_or(m.name.as_str(), |mapping| mapping.source_name.as_str())
+                        },
+                        |_| m.name.as_str(),
+                    );
+                    if scope_name == name
                         || matches!(
-                            (m.name.as_str(), name),
+                            (scope_name, name),
                             ("keySet", "keys") | ("entrySet", "entries")
                         )
                     {

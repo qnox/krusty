@@ -2757,11 +2757,14 @@ impl SymbolTable {
             if !seen_owners.insert(owner) {
                 continue;
             }
+            // A CLASSPATH owner in the chain: its methods aren't source declarations, so it
+            // contributes nothing and its own supertypes aren't walked. Keep whatever the SOURCE
+            // classes below it already contributed rather than discarding the walk — a source class
+            // extending a library class (`class C : ArrayList<Int>() { override fun removeAt(…) }`)
+            // still has its own declaration matched, which is what a `super.` call and the mapped-
+            // interface bridge both need. Bailing out here made such an override invisible.
             let Some(class) = self.class_by_type_name(owner) else {
-                if include_interfaces {
-                    continue;
-                }
-                return None;
+                continue;
             };
             for signature in class.methods_named(name) {
                 // An override has the same JVM parameter signature as its parent. Keep the
@@ -9554,12 +9557,87 @@ struct MatchedCtorDelegation {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedSuperCall {
-    pub owner: TypeName,
-    pub interface: bool,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub descriptor: Option<String>,
+pub enum ResolvedSuperCall {
+    /// A SOURCE base-class method or interface-default method. Its JVM name IS the source name and its
+    /// signature is the one this module will emit, so there is nothing to carry beyond the shape.
+    Source {
+        owner: TypeName,
+        interface: bool,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
+    /// A CLASSPATH base-class method — the selected library member, exactly as
+    /// [`ResolvedCall::Member`] carries one for an ordinary member call. It already states every JVM
+    /// fact the lowerer needs (its own `name`, which is the physical one when the Kotlin name renames
+    /// it; its `descriptor`; and its erased `physical_ret`, which the logical `ret` may narrow after
+    /// binding the base's type arguments), so none of those are re-stated here as parallel fields.
+    Classpath(Box<crate::libraries::LibraryMember>),
+}
+
+impl ResolvedSuperCall {
+    /// The parameter types a call site's arguments are lowered against.
+    pub fn params(&self) -> &[Ty] {
+        match self {
+            ResolvedSuperCall::Source { params, .. } => params,
+            ResolvedSuperCall::Classpath(member) => &member.params,
+        }
+    }
+
+    /// The declaring type the call dispatches to, when it is known. `None` only for a classpath member
+    /// whose owner the library reader could not name.
+    pub fn owner(&self) -> Option<TypeName> {
+        match self {
+            ResolvedSuperCall::Source { owner, .. } => Some(*owner),
+            ResolvedSuperCall::Classpath(member) => member.owner,
+        }
+    }
+
+    /// The LOGICAL result type of the call — what the checker gave the expression.
+    pub fn ret(&self) -> Ty {
+        match self {
+            ResolvedSuperCall::Source { ret, .. } => *ret,
+            ResolvedSuperCall::Classpath(member) => member.ret,
+        }
+    }
+
+    /// The name to emit the call under. A source target uses the name written at the call site; a
+    /// classpath member states its own, which differs whenever its Kotlin name renames the JVM one
+    /// (`MutableList.removeAt` IS `java.util.List.remove(int)`).
+    pub fn emitted_name<'a>(&'a self, source_name: &'a str) -> &'a str {
+        match self {
+            ResolvedSuperCall::Source { .. } => source_name,
+            ResolvedSuperCall::Classpath(member) => &member.name,
+        }
+    }
+
+    /// The target's own descriptor, when it has one. `None` for a source target, whose descriptor the
+    /// backend derives from the signature it is about to emit.
+    pub fn descriptor(&self) -> Option<&str> {
+        match self {
+            ResolvedSuperCall::Source { .. } => None,
+            ResolvedSuperCall::Classpath(member) => Some(&member.descriptor),
+        }
+    }
+
+    /// Whether the target is an interface method (an interface-default `super` call).
+    pub fn interface(&self) -> bool {
+        match self {
+            ResolvedSuperCall::Source { interface, .. } => *interface,
+            ResolvedSuperCall::Classpath(_) => false,
+        }
+    }
+
+    /// The target's ERASED result type, when it differs from the logical [`Self::ret`] — a generic
+    /// classpath member returns `Object` physically while `ret` is the type recovered from the base's
+    /// bound arguments. `None` when nothing was erased and the result needs no coercion.
+    pub fn erased_ret(&self) -> Option<Ty> {
+        match self {
+            ResolvedSuperCall::Source { .. } => None,
+            ResolvedSuperCall::Classpath(member) => {
+                (member.physical_ret != member.ret).then_some(member.physical_ret)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -14796,13 +14874,13 @@ impl<'a> Checker<'a> {
             .and_then(Symbol::instance)
     }
 
-    fn resolve_super_instance_name(
+    fn resolve_super_instance_ty(
         &self,
-        internal: TypeName,
+        recv: Ty,
         name: &str,
         args: &[CallArgKind],
     ) -> Option<crate::libraries::LibraryMember> {
-        self.resolver().resolve_super_instance(internal, name, args)
+        self.resolver().resolve_super_instance(recv, name, args)
     }
     fn resolve_companion_with_literal_args(
         &self,
@@ -29552,10 +29630,21 @@ impl<'a> Checker<'a> {
                             .is_none_or(|t| internal.qualifier_matches(t))
                     };
                     if let Some(Ty::Obj(internal, _)) = self.this_ty {
-                        let sup = self
-                            .syms
-                            .class_by_type_name(internal)
-                            .and_then(|c| c.super_internal);
+                        let declared = self.syms.class_by_type_name(internal);
+                        let sup = declared.and_then(|c| c.super_internal);
+                        // The base spelled WITH its declared type arguments (`ArrayList<Int>`) — a
+                        // classpath member query is receiver-coupled, so these are what recover a
+                        // generic return (`removeAt(i): E` → `Int`) instead of erasing it to `Any`.
+                        let applied_sup = sup.map(|s| {
+                            let args = declared
+                                .map(|c| c.super_type_args.clone())
+                                .unwrap_or_default();
+                            if args.is_empty() {
+                                Ty::obj_name(s)
+                            } else {
+                                Ty::obj_args_name(s, &args)
+                            }
+                        });
                         if let Some(sup) = sup.filter(|s| matches_qual(*s)) {
                             // A user base-class method.
                             if let Some((owner, sig)) = self
@@ -29566,31 +29655,23 @@ impl<'a> Checker<'a> {
                                 self.expect_call_args(&sig.params, false, args, &arg_tys);
                                 self.resolved_super_calls.insert(
                                     call,
-                                    ResolvedSuperCall {
+                                    ResolvedSuperCall::Source {
                                         owner,
                                         interface: false,
                                         params: sig.params.clone(),
                                         ret: sig.ret,
-                                        descriptor: None,
                                     },
                                 );
                                 return sig.ret;
                             }
                             // A classpath base-class method (`class C : ArrayList<…>() { … super.add(x) }`).
-                            if let Some(m) =
-                                self.resolve_super_instance_name(sup, &name, &arg_kinds)
-                            {
-                                self.resolved_super_calls.insert(
-                                    call,
-                                    ResolvedSuperCall {
-                                        owner: sup,
-                                        interface: false,
-                                        params: m.params.clone(),
-                                        ret: m.ret,
-                                        descriptor: Some(m.descriptor.clone()),
-                                    },
-                                );
-                                return m.ret;
+                            if let Some(m) = applied_sup.and_then(|recv| {
+                                self.resolve_super_instance_ty(recv, &name, &arg_kinds)
+                            }) {
+                                let ret = m.ret;
+                                self.resolved_super_calls
+                                    .insert(call, ResolvedSuperCall::Classpath(Box::new(m)));
+                                return ret;
                             }
                         }
                         // An INTERFACE DEFAULT method: a class `C : I` with `super.foo()` dispatches to
@@ -29612,12 +29693,11 @@ impl<'a> Checker<'a> {
                             self.expect_call_args(&sig.params, false, args, &arg_tys);
                             self.resolved_super_calls.insert(
                                 call,
-                                ResolvedSuperCall {
+                                ResolvedSuperCall::Source {
                                     owner: *iface,
                                     interface: true,
                                     params: sig.params.clone(),
                                     ret: sig.ret,
-                                    descriptor: None,
                                 },
                             );
                             return sig.ret;
@@ -35243,7 +35323,7 @@ class Child : Base() {
         let mut targets = info
             .resolved_super_calls
             .values()
-            .map(|target| (target.owner.render(), target.params.clone()))
+            .filter_map(|target| Some((target.owner()?.render(), target.params().to_vec())))
             .collect::<Vec<_>>();
         targets.sort_by_key(|(_, params)| format!("{params:?}"));
         assert_eq!(
@@ -35569,8 +35649,8 @@ class Child : Middle() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Base");
-        assert_eq!(target.params, vec![Ty::Int]);
+        assert_eq!(target.owner().map(|o| o.render()).as_deref(), Some("Base"));
+        assert_eq!(target.params(), vec![Ty::Int]);
     }
 
     #[test]
@@ -35608,8 +35688,8 @@ class Child : Base() {
             .values()
             .next()
             .expect("checker must record the super-call target");
-        assert_eq!(target.owner.render(), "Grand");
-        assert_eq!(target.params, vec![Ty::Int]);
+        assert_eq!(target.owner().map(|o| o.render()).as_deref(), Some("Grand"));
+        assert_eq!(target.params(), vec![Ty::Int]);
     }
 
     #[test]
