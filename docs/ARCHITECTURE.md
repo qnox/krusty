@@ -201,6 +201,12 @@ boundary.
   host path must not act as a routing key. A language or JVM rule that genuinely names a declaration
   is represented once in the backend's documented semantic mapping, rather than by scattered
   conditionals at use sites.
+- **A call safety decision consumes the checker-selected target.** `TypeInfo::resolved_calls` carries
+  suspend and inline capability on every callable target, including same-module extensions and class-
+  body extensions. Lowering gates query that exact `ResolvedCall`; they must not scan declarations by
+  the callee's text, reconstruct overload selection, or maintain separate file/module/classpath tests.
+  This is both a consistency rule (the checked overload is the emitted overload) and a privacy rule
+  (a rejection reason need not expose the selected declaration's real name).
 - **Physical fields participate in the common declaration model.** A symbol provider records every
   field declared by a classifier, including static and inaccessible declarations that can hide an
   inherited field. Resolution walks those records together with properties and supertypes exactly
