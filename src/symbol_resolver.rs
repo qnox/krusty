@@ -2168,9 +2168,13 @@ impl<'a> SymbolResolver<'a> {
         )
     }
 
+    /// Resolve `super.f(…)` against a classpath base class. `recv` is the APPLIED supertype
+    /// (`ArrayList<Int>` for `class C : ArrayList<Int>()`), not the bare classifier: the member query is
+    /// receiver-coupled, so its type arguments are what recover a generic return (`E` → `Int`) instead of
+    /// erasing it to `Any`.
     pub(crate) fn resolve_super_instance(
         &self,
-        internal: TypeName,
+        recv: Ty,
         name: &str,
         args: &[CallArgKind],
     ) -> Option<LibraryMember> {
@@ -2180,7 +2184,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: &self.lexical_classes,
             receiver: None,
         };
-        resolve_instance_name(self.lib, internal, name, args, Some(&access))
+        resolve_instance_ty(self.lib, recv, name, args, Some(&access))
     }
 
     /// Overload-resolve a top-level call against an already-built [`FunctionSet`] (from the resolver's
@@ -3569,7 +3573,19 @@ fn resolve_instance_name(
     args: &[CallArgKind],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryMember> {
-    select_instance_info(lib, Ty::obj_name(internal), name, args, member_access).map(|o| {
+    resolve_instance_ty(lib, Ty::obj_name(internal), name, args, member_access)
+}
+
+/// [`resolve_instance_name`] against an APPLIED receiver type — the form that keeps type arguments, so a
+/// generic member's return is recovered from them rather than erased.
+fn resolve_instance_ty(
+    lib: &dyn SemanticPlatform,
+    recv: Ty,
+    name: &str,
+    args: &[CallArgKind],
+    member_access: Option<&MemberAccess<'_>>,
+) -> Option<LibraryMember> {
+    select_instance_info(lib, recv, name, args, member_access).map(|o| {
         let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })

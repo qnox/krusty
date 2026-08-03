@@ -23640,26 +23640,42 @@ impl<'a> Lower<'a> {
                 }
                 let this = self.emit_get_value(0);
                 let target = self.info.resolved_super_call(e).cloned()?;
-                let descriptor = target.descriptor.clone().map(Some).unwrap_or_else(|| {
-                    self.runtime.method_descriptor(&target.params, target.ret)
-                })?;
-                if target.params.len() != args.len() {
+                // Every JVM fact comes from the target the checker recorded — it states its own emitted
+                // name (which a Kotlin rename may differ from), descriptor, and erased result. Only a
+                // source target leaves the descriptor to be derived from the signature being emitted.
+                let owner = target.owner()?;
+                let jvm_name = target.emitted_name(&name).to_string();
+                let descriptor = match target.descriptor() {
+                    Some(descriptor) => descriptor.to_string(),
+                    None => self
+                        .runtime
+                        .method_descriptor(target.params(), target.ret())?,
+                };
+                let params = target.params().to_vec();
+                if params.len() != args.len() {
                     return None;
                 }
                 let mut a = Vec::new();
-                for (arg, pt) in args.iter().zip(&target.params) {
+                for (arg, pt) in args.iter().zip(&params) {
                     a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                 }
-                return Some(self.emit_call(
+                let call = self.emit_call(
                     Callee::Special {
-                        owner: target.owner,
-                        name: name.clone(),
+                        owner,
+                        name: jvm_name,
                         descriptor,
-                        interface: target.interface,
+                        interface: target.interface(),
                     },
                     Some(this),
                     a,
-                ));
+                );
+                // A generic classpath member's descriptor returns the erased `Object` while `ret` is the
+                // type recovered from the base's bound arguments (`ArrayList<Int>.get` ⇒ `Int`); narrow
+                // it, or the value's physical type contradicts its use.
+                return Some(match target.erased_ret() {
+                    Some(erased) => self.coerce_to_static(call, target.ret(), erased),
+                    None => call,
+                });
             }
             // Reified kotlinx.serialization round-trip: `fmt.encodeToString(x)` /
             // `fmt.decodeFromString<C>(s)` are `reified inline` (uncallable directly) — desugar to
