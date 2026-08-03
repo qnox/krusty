@@ -1,6 +1,6 @@
 use crate::libraries::{
-    CallSig, Callables, FunctionInfo, FunctionSet, InstanceFieldRef, LibraryMember, LibraryType,
-    PropKind, PropertyInfo, PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype,
+    CallSig, Callables, FunctionInfo, FunctionSet, LibraryMember, LibraryType, PropKind,
+    PropertyInfo, PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype,
     StaticFieldRef,
 };
 use crate::module_symbols::ModuleSymbols;
@@ -14,9 +14,29 @@ use super::SymbolTable;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceTypeAccess {
+    /// Neither the requested classifier nor a restrictive source owner claims this JVM path, so
+    /// the compiled platform remains authoritative.
     Absent,
-    Accessible(Visibility),
-    Inaccessible,
+    /// The source declares the classifier and every lexical owner is public. The declaration's
+    /// own visibility is retained because protected nested classifiers remain available through
+    /// inheritance even though ordinary dependency lookup must not expose them.
+    Declared(Visibility),
+    /// A non-public source owner claims the path before the requested classifier. This includes an
+    /// absent compiled descendant below that owner: falling through to an equally named platform
+    /// descendant would cross the source visibility boundary. Retaining the owner's visibility
+    /// also keeps `classifier_visibility`, `classifier_access`, and `resolve_type*` consistent.
+    HiddenByOwner(Visibility),
+}
+
+impl SourceTypeAccess {
+    /// Visibility claimed by the source side of the federation. For an owner-blocked path this is
+    /// deliberately the blocking owner's visibility, not a public platform leaf hidden behind it.
+    fn source_visibility(self) -> Option<Visibility> {
+        match self {
+            Self::Declared(visibility) | Self::HiddenByOwner(visibility) => Some(visibility),
+            Self::Absent => None,
+        }
+    }
 }
 
 pub(crate) struct SourceFallbackPlatform {
@@ -57,16 +77,21 @@ impl SourceFallbackPlatform {
             enclosing.truncate(outer.len());
             match source.classifier_visibility(crate::types::type_name(&enclosing)) {
                 Some(Visibility::Public) => {}
-                Some(_) => return SourceTypeAccess::Inaccessible,
-                None if leaf_visibility.is_some() => return SourceTypeAccess::Inaccessible,
+                Some(visibility) => return SourceTypeAccess::HiddenByOwner(visibility),
+                // A source-declared nested classifier must have a complete lexical owner chain.
+                // If a partial index ever violates that invariant, fail closed instead of exposing
+                // a same-named platform class through the gap.
+                None if leaf_visibility.is_some() => {
+                    return SourceTypeAccess::HiddenByOwner(Visibility::Private);
+                }
                 None => {}
             }
         }
-        leaf_visibility.map_or(SourceTypeAccess::Absent, SourceTypeAccess::Accessible)
+        leaf_visibility.map_or(SourceTypeAccess::Absent, SourceTypeAccess::Declared)
     }
 
     fn public_source_type_name(&self, internal: TypeName) -> Option<Rc<LibraryType>> {
-        if self.source_type_access(internal) != SourceTypeAccess::Accessible(Visibility::Public) {
+        if self.source_type_access(internal) != SourceTypeAccess::Declared(Visibility::Public) {
             return None;
         }
         self.source()
@@ -91,6 +116,24 @@ impl SourceFallbackPlatform {
             ty,
             constant: None,
         })
+    }
+
+    fn static_field_with_platform(
+        &self,
+        internal: TypeName,
+        name: &str,
+        platform_field: impl FnOnce() -> Option<StaticFieldRef>,
+    ) -> Option<StaticFieldRef> {
+        // `SemanticPlatform` retains both string- and id-backed field hooks for compatibility.
+        // Centralize their source visibility/precedence policy here so the two public entry points
+        // cannot disagree while still invoking the platform hook the caller selected.
+        match self.source_type_access(internal) {
+            SourceTypeAccess::Declared(Visibility::Public) => {
+                platform_field().or_else(|| self.public_source_static_field(internal, name))
+            }
+            SourceTypeAccess::Absent => platform_field(),
+            SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => None,
+        }
     }
 }
 
@@ -365,6 +408,9 @@ fn join_callables(functions: FunctionSet, properties: PropertySet) -> Callables 
 
 fn merge_type(mut primary: LibraryType, fallback: LibraryType) -> LibraryType {
     primary.is_public |= fallback.is_public;
+    if primary.enum_entries_accessor.is_none() {
+        primary.enum_entries_accessor = fallback.enum_entries_accessor.clone();
+    }
     for candidate in fallback.constructors {
         if !primary
             .constructors
@@ -437,29 +483,10 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn resolve_type(&self, internal: &str) -> Option<LibraryType> {
-        let internal_name = crate::types::type_name(internal);
-        let source_access = self.source_type_access(internal_name);
-        if matches!(
-            source_access,
-            SourceTypeAccess::Inaccessible
-                | SourceTypeAccess::Accessible(
-                    Visibility::Internal | Visibility::Private | Visibility::Protected
-                )
-        ) {
-            return None;
-        }
-        let fallback = if source_access == SourceTypeAccess::Accessible(Visibility::Public) {
-            self.public_source_type_name(internal_name)
-                .map(|shape| (*shape).clone())
-        } else {
-            None
-        };
-        match (self.platform.resolve_type(internal), fallback) {
-            (Some(primary), Some(fallback)) => Some(merge_type(primary, fallback)),
-            (Some(primary), None) => Some(primary),
-            (None, Some(fallback)) => Some(fallback),
-            (None, None) => None,
-        }
+        // Keep the legacy string API on the same memoized, access-checked path as the id-backed
+        // API. Maintaining two copies previously made visibility fixes easy to apply to only one.
+        self.resolve_type_name(crate::types::type_name(internal))
+            .map(|shape| (*shape).clone())
     }
 
     fn resolve_type_name(&self, internal: TypeName) -> Option<Rc<LibraryType>> {
@@ -467,20 +494,15 @@ impl SymbolSource for SourceFallbackPlatform {
             return merged.clone();
         }
         let source_access = self.source_type_access(internal);
-        if matches!(
-            source_access,
-            SourceTypeAccess::Inaccessible
-                | SourceTypeAccess::Accessible(
-                    Visibility::Internal | Visibility::Private | Visibility::Protected
-                )
-        ) {
-            self.types_memo.borrow_mut().insert(internal, None);
-            return None;
-        }
-        let fallback = if source_access == SourceTypeAccess::Accessible(Visibility::Public) {
-            self.public_source_type_name(internal)
-        } else {
-            None
+        let fallback = match source_access {
+            SourceTypeAccess::Declared(Visibility::Public) => {
+                self.public_source_type_name(internal)
+            }
+            SourceTypeAccess::Absent => None,
+            SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => {
+                self.types_memo.borrow_mut().insert(internal, None);
+                return None;
+            }
         };
         let merged = match (self.platform.resolve_type_name(internal), fallback) {
             (Some(primary), Some(fallback)) => {
@@ -497,8 +519,8 @@ impl SymbolSource for SourceFallbackPlatform {
     }
 
     fn classifier_visibility(&self, internal: TypeName) -> Option<Visibility> {
-        self.source()
-            .classifier_visibility(internal)
+        self.source_type_access(internal)
+            .source_visibility()
             .or_else(|| self.platform.classifier_visibility(internal))
     }
 
@@ -506,11 +528,10 @@ impl SymbolSource for SourceFallbackPlatform {
         &self,
         internal: TypeName,
     ) -> Option<crate::symbol_source::ClassifierAccess> {
-        if self.source().classifier_visibility(internal).is_some() {
-            self.source().classifier_access(internal)
-        } else {
-            self.platform.classifier_access(internal)
-        }
+        self.source_type_access(internal)
+            .source_visibility()
+            .map(Into::into)
+            .or_else(|| self.platform.classifier_access(internal))
     }
 
     fn classifier_accessible_from_package(
@@ -519,8 +540,8 @@ impl SymbolSource for SourceFallbackPlatform {
         accessor_package: TypeName,
     ) -> bool {
         match self.source_type_access(internal) {
-            SourceTypeAccess::Accessible(Visibility::Public) => return true,
-            SourceTypeAccess::Accessible(_) | SourceTypeAccess::Inaccessible => return false,
+            SourceTypeAccess::Declared(Visibility::Public) => return true,
+            SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => return false,
             SourceTypeAccess::Absent => {}
         }
         self.platform
@@ -533,10 +554,10 @@ impl SymbolSource for SourceFallbackPlatform {
         inheritor: TypeName,
     ) -> Option<Rc<LibraryType>> {
         match self.source_type_access(internal) {
-            SourceTypeAccess::Accessible(Visibility::Public | Visibility::Protected) => {
+            SourceTypeAccess::Declared(Visibility::Public | Visibility::Protected) => {
                 return self.source().resolve_type_name(internal);
             }
-            SourceTypeAccess::Accessible(_) | SourceTypeAccess::Inaccessible => return None,
+            SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => return None,
             SourceTypeAccess::Absent => {}
         }
         self.platform
@@ -554,17 +575,17 @@ impl SymbolSource for SourceFallbackPlatform {
         let primary = self.platform.resolve_symbols_name(fqn);
         let fallback = self.source().resolve_symbols_name(fqn);
         let source_access = self.source_type_access(fqn);
-        let fallback_classifier =
-            if source_access == SourceTypeAccess::Accessible(Visibility::Public) {
-                fallback
-                    .classifier
-                    .as_ref()
-                    .filter(|classifier| classifier.is_public)
-            } else {
-                None
-            };
+        let fallback_classifier = if source_access == SourceTypeAccess::Declared(Visibility::Public)
+        {
+            fallback
+                .classifier
+                .as_ref()
+                .filter(|classifier| classifier.is_public)
+        } else {
+            None
+        };
         let classifier = match source_access {
-            SourceTypeAccess::Accessible(Visibility::Public) | SourceTypeAccess::Absent => {
+            SourceTypeAccess::Declared(Visibility::Public) | SourceTypeAccess::Absent => {
                 match (&primary.classifier, fallback_classifier) {
                     (Some(primary), Some(fallback)) => Some(Rc::new(merge_type(
                         (**primary).clone(),
@@ -575,7 +596,7 @@ impl SymbolSource for SourceFallbackPlatform {
                     (None, None) => None,
                 }
             }
-            SourceTypeAccess::Accessible(_) | SourceTypeAccess::Inaccessible => None,
+            SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => None,
         };
         let (primary_functions, primary_properties) = split_callables(primary.callables.clone());
         let (fallback_functions, fallback_properties) = split_callables(fallback.callables.clone());
@@ -688,58 +709,15 @@ impl SemanticPlatform for SourceFallbackPlatform {
 
     fn static_field(&self, internal: &str, name: &str) -> Option<StaticFieldRef> {
         let internal_name = crate::types::type_name(internal);
-        match self.source_type_access(internal_name) {
-            SourceTypeAccess::Accessible(Visibility::Public) => self
-                .platform
-                .static_field(internal, name)
-                .or_else(|| self.public_source_static_field(internal_name, name)),
-            SourceTypeAccess::Absent => self.platform.static_field(internal, name),
-            SourceTypeAccess::Accessible(_) | SourceTypeAccess::Inaccessible => None,
-        }
+        self.static_field_with_platform(internal_name, name, || {
+            self.platform.static_field(internal, name)
+        })
     }
 
     fn static_field_name(&self, internal: TypeName, name: &str) -> Option<StaticFieldRef> {
-        match self.source_type_access(internal) {
-            SourceTypeAccess::Accessible(Visibility::Public) => self
-                .platform
-                .static_field_name(internal, name)
-                .or_else(|| self.public_source_static_field(internal, name)),
-            SourceTypeAccess::Absent => self.platform.static_field_name(internal, name),
-            SourceTypeAccess::Accessible(_) | SourceTypeAccess::Inaccessible => None,
-        }
-    }
-
-    fn instance_field(&self, receiver: Ty, name: &str) -> Option<InstanceFieldRef> {
-        let mut work = vec![receiver];
-        let mut seen = std::collections::HashSet::new();
-        while let Some(current) = work.pop() {
-            let Some(internal) = current.obj_internal() else {
-                continue;
-            };
-            if !seen.insert(internal) {
-                continue;
-            }
-            match self.source_type_access(internal) {
-                SourceTypeAccess::Absent => {
-                    if let Some(field) = self.platform.instance_field(current, name) {
-                        return Some(field);
-                    }
-                }
-                SourceTypeAccess::Accessible(_) => {
-                    if !self
-                        .source()
-                        .property_members(current, name)
-                        .overloads
-                        .is_empty()
-                    {
-                        return None;
-                    }
-                    work.extend(self.source().direct_supertypes(current));
-                }
-                SourceTypeAccess::Inaccessible => {}
-            }
-        }
-        None
+        self.static_field_with_platform(internal, name, || {
+            self.platform.static_field_name(internal, name)
+        })
     }
 
     fn library_value_form(&self, ty: Ty) -> Ty {
@@ -858,6 +836,7 @@ mod tests {
             kind: TypeKind::Class,
             supertypes: Default::default(),
             constructors: Vec::new(),
+            fields: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
             companion_consts: HashMap::new(),
@@ -869,6 +848,7 @@ mod tests {
             type_params: Vec::new(),
             sealed_subclasses: Default::default(),
             enum_entries: Vec::new(),
+            enum_entries_accessor: None,
             value_ctor_has_default: false,
             ctor_named_params: Vec::new(),
             value_class_properties: Vec::new(),

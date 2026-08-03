@@ -19,7 +19,7 @@ use crate::libraries::{
 use crate::names::{nested_internal_name_candidates, property_getter_name, property_setter_name};
 use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::SymbolSource;
-use crate::types::{existing_type_name, type_name, Ty, TypeName, Visibility};
+use crate::types::{existing_type_name, ty_mentions_param, type_name, Ty, TypeName, Visibility};
 
 mod source_fallback;
 pub(crate) use source_fallback::SourceFallbackPlatform;
@@ -512,6 +512,47 @@ pub struct MemberExtPropSig {
     type_param_bounds: Vec<Ty>,
     is_var: bool,
     visibility: Visibility,
+    /// Accessor visibility is independent from the property's visibility (`public var ... private
+    /// set`). Keep it on the semantic signature, as ordinary [`DeclaredPropertySig`] does, so every
+    /// implicit-dispatch use is checked before lowering and no backend/source-origin branch has to
+    /// reconstruct it from syntax.
+    setter_visibility: Option<Visibility>,
+}
+
+impl MemberExtPropSig {
+    /// The DECLARED extension receiver (`Int` in `val Int.x: T`).
+    pub(crate) fn receiver_ty(&self) -> Ty {
+        self.receiver
+    }
+
+    /// The property's type (with getter-body inference already applied).
+    pub(crate) fn ret(&self) -> Ty {
+        self.ret
+    }
+
+    /// The property's own type parameters (`val <T> T.x`); empty for the supported shape.
+    pub(crate) fn type_params(&self) -> &[String] {
+        &self.type_params
+    }
+}
+
+/// Visibility of the setter declared by any body property.
+///
+/// Ordinary and member-extension properties use the same Kotlin accessor rule. Centralizing it
+/// keeps the semantic signatures consistent and prevents the extension path from becoming a
+/// syntax-origin special case that forgets `private set` while the ordinary path remembers it.
+fn declared_setter_visibility(property: &crate::ast::PropDecl) -> Option<Visibility> {
+    property.is_var.then(|| {
+        if property
+            .setter
+            .as_ref()
+            .is_some_and(|setter| setter.is_private)
+        {
+            Visibility::Private
+        } else {
+            property.visibility
+        }
+    })
 }
 
 /// Everything a caller needs about a declared Kotlin class.
@@ -1519,7 +1560,21 @@ type GenericMemberValueOperandSlots =
 
 type MappedNamedArgs = (Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>);
 
-type MemberExtensionProperty = (Ty, bool, Visibility, TypeName, ImplicitReceiver);
+/// One member extension property selected for a concrete receiver and implicit dispatch scope.
+///
+/// This used to be a positional tuple. Naming the independently meaningful receiver, dispatch,
+/// property, and accessor fields prevents a later handoff from accidentally checking the public
+/// property visibility when it is the setter's narrower visibility that governs a write.
+#[derive(Clone, Copy)]
+struct MemberExtensionProperty {
+    ty: Ty,
+    is_var: bool,
+    visibility: Visibility,
+    setter_visibility: Option<Visibility>,
+    owner: TypeName,
+    dispatch_receiver: ImplicitReceiver,
+    declared_receiver: Ty,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnonymousObjectCapture {
@@ -3326,6 +3381,14 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
 /// `functions()` index). `inv` is unary; `shl`/`shr`/`ushr`/`and`/`or`/`xor` take one argument. The
 /// single source of truth shared by the checker and the signature-inference pre-pass.
 pub fn builtin_bitwise_ret(recv: Ty, name: &str, n_args: usize) -> Option<Ty> {
+    // `Boolean` bitwise (`b.and(x)`/`or`/`xor`) — the JVM `iand`/`ior`/`ixor` intrinsics, like
+    // the `Int`/`Long` forms below.
+    if recv == Ty::Boolean {
+        return match (name, n_args) {
+            ("and" | "or" | "xor", 1) => Some(Ty::Boolean),
+            _ => None,
+        };
+    }
     if !matches!(recv, Ty::Int | Ty::Long) {
         return None;
     }
@@ -5248,6 +5311,7 @@ fn collect_signatures_with_cp_impl(
                                         .collect::<Vec<_>>(),
                                     is_var: bp.is_var,
                                     visibility: bp.visibility,
+                                    setter_visibility: declared_setter_visibility(bp),
                                 });
                             continue;
                         }
@@ -5264,13 +5328,7 @@ fn collect_signatures_with_cp_impl(
                                 is_const: bp.is_const,
                                 getter_name: property_getter_name(&bp.name),
                                 setter_name: bp.is_var.then(|| property_setter_name(&bp.name)),
-                                setter_visibility: bp.is_var.then(|| {
-                                    if bp.setter.as_ref().is_some_and(|setter| setter.is_private) {
-                                        Visibility::Private
-                                    } else {
-                                        bp.visibility
-                                    }
-                                }),
+                                setter_visibility: declared_setter_visibility(bp),
                                 has_custom_getter: bp.getter.is_some() || bp.delegate.is_some(),
                                 // An abstract property is necessarily overridable even when its
                                 // source omitted the redundant `open` modifier.
@@ -6563,6 +6621,36 @@ fn call_requires_argument_slots(
             || trailing_lambda
             || (argument_count != signature.param_names.len()
                 && signature.required < signature.param_names.len()))
+}
+
+/// Map an already-selected, unlabelled call's source expressions to semantic parameter slots. Selection
+/// has already established which omissions are legal; this helper records only the syntax-independent
+/// positional rule plus Kotlin's trailing-lambda rule. It deliberately knows nothing about callable
+/// origin (module/classpath/file) or emission — every lowerer receives the same slot handoff.
+fn unlabelled_argument_slots(
+    args: &[ExprId],
+    parameter_count: usize,
+    trailing_lambda: bool,
+) -> Option<Vec<Option<ExprId>>> {
+    if args.len() > parameter_count || (trailing_lambda && args.is_empty()) {
+        return None;
+    }
+    let trailing = usize::from(trailing_lambda && args.len() < parameter_count);
+    let positional = args.len().checked_sub(trailing)?;
+    let last = parameter_count.checked_sub(trailing)?;
+    Some(
+        (0..parameter_count)
+            .map(|parameter| {
+                if trailing != 0 && parameter == last {
+                    args.last().copied()
+                } else if parameter < positional {
+                    Some(args[parameter])
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    )
 }
 
 /// The one mapping failure worth reporting, when every candidate failed for the SAME reason.
@@ -8511,24 +8599,6 @@ fn unify_ref(
     }
 }
 
-fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
-    match ty {
-        Ty::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
-        Ty::Obj(_, arguments) => arguments
-            .iter()
-            .any(|argument| ty_mentions_param(*argument, names)),
-        Ty::Fun(signature) => {
-            signature
-                .params
-                .iter()
-                .any(|parameter| ty_mentions_param(*parameter, names))
-                || ty_mentions_param(signature.ret, names)
-        }
-        Ty::Nullable(inner) => ty_mentions_param(*inner, names),
-        _ => false,
-    }
-}
-
 fn is_function_property_shape(ty: Ty) -> bool {
     matches!(ty, Ty::Fun(_)) || matches!(ty, Ty::Nullable(inner) if matches!(*inner, Ty::Fun(_)))
 }
@@ -9281,7 +9351,7 @@ pub enum ResolvedCall {
 }
 
 impl ResolvedCall {
-    fn is_extension(&self) -> bool {
+    pub(crate) fn is_extension(&self) -> bool {
         matches!(
             self,
             Self::Extension(_) | Self::ModuleExtension { .. } | Self::ModuleMemberExtension { .. }
@@ -10040,11 +10110,13 @@ pub enum ExprLowering {
         name: String,
         descriptor: Option<String>,
     },
-    /// Kotlin's synthetic `EnumType.entries` property. `physical_accessor` is true when the enum owns
-    /// `getEntries()`; Java enums need a separate cached mappings lowering and are safely declined.
+    /// Kotlin's synthetic `EnumType.entries` property. `accessor` is the exact physical realization
+    /// advertised by the selected enum shape. Keeping the target here makes source, module, and
+    /// dependency providers use one semantic handoff; `None` means the property is valid Kotlin but
+    /// this provider exposes no direct accessor that the current backend can emit.
     EnumEntriesRead {
         owner: TypeName,
-        physical_accessor: bool,
+        accessor: Option<Box<crate::libraries::LibraryMember>>,
     },
     /// A bare-name call `m(args)` resolved to a MEMBER function of a classpath `object` that was imported
     /// unqualified (`import Obj.m; m()`). Kotlin dispatches this on the singleton, so lowering reads
@@ -10071,13 +10143,29 @@ pub enum ExprLowering {
         /// Whether that declaring owner is an interface. This is target-neutral type shape; a backend
         /// that has no compiled declaration to inspect still needs it to realize virtual dispatch.
         interface: bool,
-        /// The selected declaration is a platform instance field, rather than a source property.
-        /// This lets lowering cross a source-defined receiver hierarchy without treating an
-        /// otherwise-unlowerable source property (notably a `const val`) as an accessor call.
-        instance_field: Option<String>,
+        /// Exact physical field selected by the same declaration walk that selected the property.
+        /// `None` leaves realization to the property declaration; `Some` prevents a backend from
+        /// replacing a Java field with a same-named synthetic accessor.
+        field: Option<Box<crate::libraries::InstanceFieldRef>>,
     },
     /// A property-read `recv.name` resolved to a classpath extension property getter.
     ExtensionPropertyGet {
+        getter: Box<crate::libraries::LibraryCallable>,
+    },
+    /// `recv.name` resolved to a MEMBER EXTENSION PROPERTY (`class C { val Int.x: T }`) — the
+    /// read lowers to a call of the owner's `getX(Recv)` accessor: the dispatch receiver comes
+    /// from the implicit-receiver scope (like a member extension function call), and `recv` is
+    /// passed as JVM argument 0. `owner` declares the property; `receiver` is the DECLARED
+    /// (substituted) extension receiver the accessor takes; `ty` is the property's type.
+    MemberExtensionPropertyRead {
+        owner: TypeName,
+        receiver: Ty,
+        ty: Ty,
+    },
+    /// A bare-name read of a TOP-LEVEL property (`import pkg.plugin; plugin.tag`), resolved to its
+    /// declaring facade's receiver-less static getter. The checker is the sole resolver; lowering emits
+    /// this callable instead of rediscovering the property.
+    TopLevelPropertyGet {
         getter: Box<crate::libraries::LibraryCallable>,
     },
     /// A Kotlin invoke-operator call (`a(args)`, equivalently `a.invoke(args)`) selected by the
@@ -10173,6 +10261,14 @@ pub enum StmtLowering {
         owner: TypeName,
         ty: Ty,
         interface: bool,
+    },
+    /// `recv.name = value` resolved to a `var` MEMBER EXTENSION PROPERTY — the write analogue of
+    /// [`ExprLowering::MemberExtensionPropertyRead`]. Lowering calls the owner's
+    /// `setX(Recv, T)` accessor with the dispatch receiver as `this`.
+    MemberExtensionPropertyWrite {
+        owner: TypeName,
+        receiver: Ty,
+        ty: Ty,
     },
     /// A `kotlin.contracts.contract { … }` statement: erased metadata, never executed and emits no
     /// bytecode (kotlinc drops it at codegen). The lowerer skips it entirely.
@@ -10454,8 +10550,8 @@ fn make_checker<'a>(
     }
 }
 
-fn class_declaration_label(name: &str) -> String {
-    name.rsplit('.').next().unwrap_or(name).to_string()
+fn class_declaration_label(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
 }
 
 fn class_receiver_labels(
@@ -10464,22 +10560,23 @@ fn class_receiver_labels(
     current: Option<Ty>,
 ) -> Vec<(String, Ty, bool)> {
     let mut labels = Vec::new();
-    let mut outer = class.inner_of.as_deref().and_then(|name| {
-        class
-            .name
-            .rsplit_once('.')
-            .and_then(|(owner, _)| symbols.classes.get(owner))
-            .or_else(|| symbols.classes.get(name))
-            .map(ClassSig::internal_name)
-            .or_else(|| existing_type_name(name))
-    });
+    // Start from the collected signature's semantic nesting edge. Reconstructing the owner from
+    // `ClassDecl::name` / `inner_of` would make receiver labels depend on whether this declaration was
+    // spelled as a dotted nested source name, and previously required a separate fallback for an
+    // already-interned type name. Every caller has already selected `current` from the same collected
+    // signature, so its normalized internal name gives source files and later module consumers one
+    // origin-independent path to the lexical outer chain.
+    let current_internal = current.and_then(Ty::obj_internal);
+    let mut outer = current_internal
+        .and_then(|internal| symbols.class_by_type_name(internal))
+        .and_then(ClassSig::inner_of_name);
     while let Some(internal) = outer {
         let Some(signature) = symbols.class_by_type_name(internal) else {
             break;
         };
         let declaration = symbols.class_simple_name(internal).unwrap_or("<anonymous>");
         labels.push((
-            class_declaration_label(declaration),
+            class_declaration_label(declaration).to_string(),
             Ty::obj_name(signature.internal_name()),
             true,
         ));
@@ -10487,7 +10584,10 @@ fn class_receiver_labels(
     }
     labels.reverse();
     if let Some(ty) = current {
-        labels.push((class_declaration_label(&class.name), ty, true));
+        // The current AST declaration is the authoritative source spelling for its explicit label;
+        // using a reverse symbol-table lookup here would be ambiguous in an already-diagnosed duplicate
+        // declaration, even though either entry may normalize to the same internal name.
+        labels.push((class_declaration_label(&class.name).to_string(), ty, true));
     }
     labels
 }
@@ -14004,8 +14104,10 @@ impl<'a> Checker<'a> {
         &self,
         name: &str,
         arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
-        self.top_level_lambda_shape_in_scope(name, arg_tys, None)
+        self.top_level_lambda_shape_in_scope(name, arg_tys, arg_names, trailing_lambda, None)
     }
 
     fn lambda_overload_partially_applicable(
@@ -14115,35 +14217,40 @@ impl<'a> Checker<'a> {
             .iter()
             .enumerate()
             .map(|(argument, &parameter)| {
+                // The receiver comes from the parameter's own function TYPE (already substituted into
+                // `param_types`), which carries the receiver's type ARGUMENTS (`Config<T>.() -> Unit` with
+                // `T` bound by this call). `call_sig.lambda_receivers` is the weaker fallback: a callable
+                // with no generic signature records only the receiver's CLASS, so preferring it would
+                // shape the lambda against a raw `Config` and lose the binding.
                 overload
                     .call_sig
-                    .lambda_receivers
+                    .lambda_receiver_params
                     .get(parameter)
                     .copied()
+                    .unwrap_or(false)
+                    .then(|| {
+                        let context_count = overload
+                            .call_sig
+                            .lambda_context_counts
+                            .get(parameter)
+                            .copied()
+                            .unwrap_or_default();
+                        shape
+                            .param_types
+                            .as_ref()
+                            .and_then(|types| types.get(argument))
+                            .and_then(|types| types.get(context_count))
+                            .copied()
+                    })
                     .flatten()
-                    .map(|receiver| crate::symbol_resolver::ty_subst(receiver, &binds))
                     .or_else(|| {
                         overload
                             .call_sig
-                            .lambda_receiver_params
+                            .lambda_receivers
                             .get(parameter)
                             .copied()
-                            .unwrap_or(false)
-                            .then(|| {
-                                let context_count = overload
-                                    .call_sig
-                                    .lambda_context_counts
-                                    .get(parameter)
-                                    .copied()
-                                    .unwrap_or_default();
-                                shape
-                                    .param_types
-                                    .as_ref()
-                                    .and_then(|types| types.get(argument))
-                                    .and_then(|types| types.get(context_count))
-                                    .copied()
-                            })
                             .flatten()
+                            .map(|receiver| crate::symbol_resolver::ty_subst(receiver, &binds))
                     })
             })
             .collect::<Vec<_>>();
@@ -14194,6 +14301,8 @@ impl<'a> Checker<'a> {
         &self,
         name: &str,
         arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
         scope: Option<&[TypeName]>,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let resolver = match scope {
@@ -14206,16 +14315,41 @@ impl<'a> Checker<'a> {
                 .map(crate::symbol_resolver::Symbol::overloads)
                 .unwrap_or_default(),
         };
-        let has_exact = fs.has_top_level_arity(arg_tys.len());
+        let labelled = arg_names.is_some_and(|names| names.iter().any(Option::is_some));
+        // A labelled call's arity says nothing about which parameters are filled — `f(budget = 3) { }`
+        // supplies two arguments to a three-parameter function — so the exact-arity narrowing below
+        // applies only to a purely positional call.
+        let has_exact = !labelled && fs.has_top_level_arity(arg_tys.len());
         for o in fs.top_level() {
             if has_exact && o.semantic_params().len() != arg_tys.len() {
                 continue;
             }
-            let Some(argument_map) = crate::symbol_resolver::trailing_default_arg_indices(
-                o.semantic_params().len(),
-                arg_tys,
-            ) else {
-                continue;
+            // A labelled argument binds by NAME, not by position: the positional map would align
+            // `f(budget = 3) { }`'s `Int` against parameter 0, find the overload inapplicable, and
+            // leave the trailing lambda unshaped — typed `() -> Unit` with no receiver, which then
+            // fails against the callee's block parameter. Mirrors `extension_lambda_shape`.
+            let argument_map = if labelled {
+                // The FULL Kotlin mapping — labels, defaults, vararg, and the trailing-lambda rule
+                // (an unlabelled `{ … }` binds the LAST parameter, not the next position). A label
+                // naming no parameter of THIS overload only rules out this overload.
+                let Some(map) = call_argument_parameter_indices(
+                    arg_tys.len(),
+                    o.semantic_params().len(),
+                    arg_names,
+                    trailing_lambda,
+                    &o.call_sig,
+                ) else {
+                    continue;
+                };
+                map
+            } else {
+                let Some(map) = crate::symbol_resolver::trailing_default_arg_indices(
+                    o.semantic_params().len(),
+                    arg_tys,
+                ) else {
+                    continue;
+                };
+                map
             };
             if !self.lambda_overload_partially_applicable(o, None, arg_tys, &argument_map) {
                 continue;
@@ -15252,7 +15386,9 @@ impl<'a> Checker<'a> {
     fn resolve_context_module_top_level(
         &self,
         name: &str,
-        arg_tys: &[Ty],
+        args: &[ExprId],
+        argument_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
     ) -> Option<(crate::libraries::FunctionInfo, Vec<String>)> {
         let mut best: Option<(usize, usize, crate::libraries::FunctionInfo, Vec<String>)> = None;
         for (idx, fi) in self
@@ -15266,26 +15402,37 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let value_params = &fi.callable.params[ctx_count..];
-            if arg_tys.len() > value_params.len() {
+            // Context parameters are PHYSICAL leading parameters but never source arguments. Use the
+            // same semantic argument mapper as every other call path against the context-stripped
+            // signature: it handles labels, reordered arguments, omissions, and a trailing lambda in
+            // one place. The former positional zip made `f(b = value)` test `value` against `a`, and
+            // separately reimplemented only the trailing-default subset of the mapper's rules.
+            let value_signature = call_sig_without_context(&fi.call_sig, ctx_count);
+            let Ok(slots) = map_call_sig_args_with_trailing(
+                args,
+                argument_names,
+                &value_signature,
+                trailing_lambda,
+            ) else {
                 continue;
-            }
-            let omitted_ok = (arg_tys.len()..value_params.len())
-                .all(|i| fi.call_sig.param_has_default(ctx_count + i));
-            if !omitted_ok {
-                continue;
-            }
+            };
             let Some(sources) = self.resolve_context_args(&fi.callable.params[..ctx_count]) else {
                 continue;
             };
             let mut score = 0;
-            for (&p, &a) in value_params.iter().zip(arg_tys) {
+            let mut applicable = true;
+            for (&p, argument) in value_params.iter().zip(&slots) {
+                let Some(argument) = argument else {
+                    continue;
+                };
+                let a = self.expr_types[argument.0 as usize];
                 if !arg_assignable_simple(p, a) {
-                    score = 0;
+                    applicable = false;
                     break;
                 }
                 score += if p == a { 2 } else { 1 };
             }
-            if score == 0 && !arg_tys.is_empty() {
+            if !applicable {
                 continue;
             }
             if best.as_ref().is_none_or(|(best_score, best_idx, ..)| {
@@ -16796,6 +16943,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The TOP-LEVEL property an unqualified name denotes, over this file's import scope — asked of the
+    /// federated symbol source, so where it was declared is not this rung's question. Only a property with
+    /// an accessible getter and a value-shaped type is a read; anything a nearer scope declares (a local, a
+    /// member, this module's own top-level properties) is resolved by an earlier rung and shadows it.
+    fn top_level_property(&self, name: &str) -> Option<crate::libraries::PropertyInfo> {
+        self.resolver()
+            .resolve_top_level_property(name)
+            .filter(|property| property.getter.ret.is_read_value_result())
+    }
+
     fn source_class_decl_by_internal(&self, internal: TypeName) -> Option<ClassDecl> {
         let find = |file: &File| {
             file.decls
@@ -17786,21 +17943,21 @@ impl<'a> Checker<'a> {
             .then_some(internal)
     }
 
-    fn enum_entries_owner(&self, receiver: ExprId) -> Option<(TypeName, bool)> {
-        let owner = self.classpath_type_receiver_internal(receiver)?;
+    fn enum_entries_target(
+        &self,
+        receiver: ExprId,
+    ) -> Option<(TypeName, Option<Box<crate::libraries::LibraryMember>>)> {
+        let owner = self.classifier_receiver_internal(receiver)?;
         let classifier = self.resolved_type_name(owner)?;
         if !classifier.is_enum() {
             return None;
         }
-        // Source shapes retain a hidden physical-accessor marker; compiled Kotlin enums expose the
-        // real static method. Java enums have neither: their source-level property is still valid, but
-        // lowering requires kotlinc's cached `$EntriesMappings` synthesis and must be declined for now.
-        let has_accessor = classifier.companion.iter().any(|member| {
-            (member.name == "getEntries" || member.physical_name.as_deref() == Some("getEntries"))
-                && member.params.is_empty()
-                && member.descriptor == "()Lkotlin/enums/EnumEntries;"
-        });
-        Some((owner, has_accessor))
+        // Consume the provider's dedicated semantic capability rather than rediscovering a callable
+        // by name. The opaque physical owner/name/descriptor is carried to lowering verbatim.
+        Some((
+            owner,
+            classifier.enum_entries_accessor.clone().map(Box::new),
+        ))
     }
 
     /// Source classes in lexical precedence order, including static enclosing classes.
@@ -21985,32 +22142,6 @@ impl<'a> Checker<'a> {
             if rt == Ty::Error {
                 return Ty::Error;
             }
-            // User-defined extension on a non-nullable primitive receiver: safe call is a no-op
-            // (primitives can never be null), so emit as a direct static call.
-            if !rt.is_reference() {
-                if let Some(fi) = self
-                    .resolver()
-                    .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), &name, &[], &[])
-                    .map(crate::symbol_resolver::Symbol::overloads)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|o| o.is_extension() && o.receiver_rank == 0)
-                {
-                    let logical = fi.extension_value_params().to_vec();
-                    let arg_tys = args.as_deref().map_or_else(Vec::new, |a| self.arg_tys(a));
-                    if logical.len() != arg_tys.len() {
-                        self.diags.error(
-                            self.span(e),
-                            format!(
-                                "extension '{name}' expects {} args, got {}",
-                                logical.len(),
-                                arg_tys.len()
-                            ),
-                        );
-                    }
-                    return self.set(e, fi.callable.ret);
-                }
-            }
             // A safe-call scope function (`s?.let { it… }`, `s?.run { … }`): the receiver is non-null
             // inside; type it like the non-safe form, then wrap the result nullable below.
             let result = if let Some(t) = self.safe_scope_call_result(rt, &name, &args) {
@@ -22059,10 +22190,25 @@ impl<'a> Checker<'a> {
                             self.resolved_call_type_args
                                 .insert(e, type_args.iter().copied().map(Some).collect());
                         }
-                        if let ("toString", []) = (name.as_str(), arg_tys.as_slice()) {
-                            Ty::String
-                        } else if let ("hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
-                            Ty::Int // Int (not a reference), so safe-call rejection fires below
+                        if let ("toString" | "hashCode", []) = (name.as_str(), arg_tys.as_slice()) {
+                            // Safe-call receiver normalization must preserve the qualified path's
+                            // function-value restriction. Lambda objects are not materialized with the
+                            // stable identity/structured string behavior these Any methods require;
+                            // admitting only the `?.` spelling would turn the generic safe-call handoff
+                            // into a representation-specific miscompile.
+                            if matches!(recv, Ty::Fun(_)) {
+                                self.diags.error(
+                                    self.span(e),
+                                    format!(
+                                        "krusty: {name}() on a function value is not supported"
+                                    ),
+                                );
+                                Ty::Error
+                            } else if name == "toString" {
+                                Ty::String
+                            } else {
+                                Ty::Int // wrapped to `Int?` with every other safe-call scalar result
+                            }
                         } else if recv == Ty::String {
                             let member = match self
                                 .record_classpath_member_call_with_slots(e, recv, &name, a, false)
@@ -22103,6 +22249,7 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                         } else if let Ty::Obj(internal, _) = recv {
                             // Source members take precedence over extensions and classpath members.
@@ -22193,9 +22340,24 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
                         } else {
-                            self.check_member_extension_function_call(e, recv, &name, a, &arg_tys)
+                            // Every non-`String`, non-`Obj` receiver reaches one semantic plan after
+                            // `?.` removes receiver nullability. That includes both a vacuous safe call
+                            // on `Int` and the unboxed branch of a call on `Int?`; keeping them together
+                            // is essential because boxing is a lowering representation, not a callable
+                            // origin. Resolve the builtin member first, then use the ordinary member and
+                            // library/source extension indexes. In particular, generic library
+                            // extensions such as `takeIf` must not disappear only for the non-null form.
+                            if let Some(ret) = self
+                                .check_builtin_operator_method(e, recv, &name, a, &arg_tys, false)
+                            {
+                                ret
+                            } else {
+                                self.check_member_extension_function_call(
+                                    e, recv, &name, a, &arg_tys,
+                                )
                                 .or_else(|| {
                                     self.record_extension_call_with_slots(
                                         e, &name, recv, a, &type_args,
@@ -22206,7 +22368,9 @@ impl<'a> Checker<'a> {
                                         e, &name, recv, a, &arg_tys, &type_args,
                                     )
                                 })
+                                .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error)
+                            }
                         }
                     }
                 }
@@ -22215,46 +22379,15 @@ impl<'a> Checker<'a> {
                 let arg_exprs = args.as_deref().unwrap_or_default();
                 let arg_tys = self.arg_tys(arg_exprs);
                 let arg_kinds = self.checked_call_arg_kinds(arg_exprs);
-                if let Some((selected, sig)) =
-                    self.selected_source_extension(rt.non_null(), &name, &arg_kinds)
-                {
-                    if !self.check_source_extension_call_args(
-                        e,
-                        &name,
-                        arg_exprs,
-                        &arg_tys,
-                        &selected,
-                        &sig.params,
-                    ) {
-                        Ty::Error
-                    } else {
-                        self.mark_source_call(e, selected.source_key);
-                        let owner =
-                            sig.source_file
-                                .zip(sig.source_decl)
-                                .and_then(|(file, declaration)| {
-                                    self.syms
-                                        .fn_facades_by_decl
-                                        .get(&(file, declaration.0))
-                                        .copied()
-                                });
-                        self.resolved_calls.insert(
-                            e,
-                            ResolvedCall::ModuleExtension {
-                                receiver: rt.non_null(),
-                                name: name.clone(),
-                                params: sig.params.clone(),
-                                ret: sig.ret,
-                                owner,
-                                source: selected.source_key,
-                                vararg: selected.call_sig.vararg,
-                            },
-                        );
-                        sig.ret
-                    }
-                } else {
-                    Ty::Error
-                }
+                self.record_source_extension_call(
+                    e,
+                    rt.non_null(),
+                    &name,
+                    arg_exprs,
+                    &arg_tys,
+                    &arg_kinds,
+                )
+                .unwrap_or(Ty::Error)
             } else {
                 result
             };
@@ -22295,6 +22428,17 @@ impl<'a> Checker<'a> {
             {
                 self.diags.error(self.span(e), "krusty: named arguments are only supported for top-level functions and methods with named parameters".to_string());
                 return Ty::Error;
+            }
+            // This compiler deliberately collapses an unnecessary safe call on a statically non-null
+            // scalar receiver to the qualified operation (`5?.compareTo(3)` has the same `Int` result as
+            // `5.compareTo(3)`). Make that one decision only after the complete non-null receiver plan
+            // has resolved, so builtin members, source/module extensions, and classpath extensions all
+            // retain identical ordering. The old early branch made the same collapse but recognized
+            // only builtin operators and source extensions, causing generic library calls such as
+            // `7?.takeIf { ... }` to disappear. A genuinely nullable primitive is a reference here and
+            // continues into the nullable-result wrapping below.
+            if !rt.is_reference() {
+                return self.set(e, result);
             }
             // The safe-call result is nullable: `T` becomes `T?`; scalar member values are boxed
             // (or `null`) in lowering. A non-boxable primitive (unsigned/value) stays unsupported.
@@ -22509,6 +22653,18 @@ impl<'a> Checker<'a> {
                     self.expr_lowers
                         .insert(e, ExprLowering::IntrinsicProperty(Box::new(member)));
                     ret
+                } else if let Some(property) = self.top_level_property(&n) {
+                    // A TOP-LEVEL property read (`import pkg.plugin; plugin`): its value is its declaring
+                    // facade's static getter call. Last among the value rungs — every enclosing scope
+                    // (locals, members, objects) shadows an imported top-level property.
+                    let ty = property.ty;
+                    self.expr_lowers.insert(
+                        e,
+                        ExprLowering::TopLevelPropertyGet {
+                            getter: Box::new(property.getter),
+                        },
+                    );
+                    ty
                 } else {
                     self.diags
                         .error(self.span(e), format!("unresolved reference '{n}'."));
@@ -22720,11 +22876,11 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // Kotlin exposes a synthetic `entries: EnumEntries<E>` property on enum classifiers,
-            // including Java enums. Recognize the classifier receiver directly; this also handles
-            // a nested chain (`Outer.Mode.entries`) without evaluating `Outer.Mode` as a value.
+            // Kotlin exposes a synthetic `entries: EnumEntries<E>` property on every enum classifier.
+            // Recognize the classifier receiver directly, even when its provider has no direct accessor;
+            // this also handles `Outer.Mode.entries` without evaluating `Outer.Mode` as a value.
             if name == "entries" {
-                if let Some((owner, physical_accessor)) = self.enum_entries_owner(receiver) {
+                if let Some((owner, accessor)) = self.enum_entries_target(receiver) {
                     if let Some(access) = self.resolver().inaccessible_classifier_access(owner) {
                         let reference = self.span(receiver);
                         let display = self
@@ -22740,13 +22896,8 @@ impl<'a> Checker<'a> {
                         );
                         return self.set(e, Ty::Error);
                     }
-                    self.expr_lowers.insert(
-                        e,
-                        ExprLowering::EnumEntriesRead {
-                            owner,
-                            physical_accessor,
-                        },
-                    );
+                    self.expr_lowers
+                        .insert(e, ExprLowering::EnumEntriesRead { owner, accessor });
                     return self.set(
                         e,
                         Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(owner)]),
@@ -22754,7 +22905,7 @@ impl<'a> Checker<'a> {
                 }
             }
             if let Some(field) = self
-                .classpath_type_receiver_internal(receiver)
+                .classifier_receiver_internal(receiver)
                 .and_then(|internal| self.resolver().static_field(internal, &name))
             {
                 let ty = self.record_external_static_field(Some(e), field);
@@ -23776,6 +23927,174 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The type of a builtin operator-method call on a primitive receiver (`5.plus(2)`,
+    /// `a.compareTo(b)`, `a shl b`) — or `None` when the name/args aren't a builtin operation.
+    /// A builtin member BEATS any same-named user extension (Kotlin: members always win); an
+    /// unmodelled builtin (`mod` floor-semantics, `rangeTo`, `inc`/`dec`) REJECTS before
+    /// extensions are consulted, so an invisible shadowed extension can never be selected. The
+    /// arithmetic/compare/unary forms map directly to the equivalent operator bytecode (see the
+    /// mirror in `emit_call`). Shared by the qualified-call path and the safe-call path (whose
+    /// member resolves against the non-null receiver type). `skip_operator_arm` is the
+    /// qualified path's user-`infix`-shadows-builtin case (a safe call is never infix).
+    fn check_builtin_operator_method(
+        &mut self,
+        e: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        skip_operator_arm: bool,
+    ) -> Option<Ty> {
+        // Bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`, `a.inv()`),
+        // resolved via the shared `builtin_bitwise_ret` (also used by signature inference): a
+        // shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type.
+        if let Some(ret) = builtin_bitwise_ret(rt, name, arg_tys.len()) {
+            if let Some(arg0) = arg_tys.first() {
+                let expected = if matches!(name, "shl" | "shr" | "ushr") {
+                    Ty::Int
+                } else {
+                    rt
+                };
+                self.expect_assignable(expected, *arg0, self.span(args[0]), "argument");
+            }
+            return Some(ret);
+        }
+        // The builtin only applies when every argument is itself a numeric/char primitive (the
+        // operand types a builtin operator accepts). A non-numeric argument (`2 * V(3)` with a
+        // user `operator fun Int.times(v: V)`) means this is an EXTENSION operator — fall
+        // through to extension resolution rather than forcing (and rejecting) the builtin.
+        if skip_operator_arm
+            || !rt.is_numeric_or_char()
+            || !is_builtin_operator_method(name)
+            || !arg_tys.iter().all(|a| a.is_numeric_or_char())
+        {
+            return None;
+        }
+        let span = self.span(e);
+        if rt.is_numeric() {
+            // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
+            let bin = BinOp::from_arith_operator_name(name);
+            if let (Some(op), [at]) = (bin, arg_tys) {
+                return Some(self.check_binary(op, rt, *at, span));
+            }
+            // `a.compareTo(b)` → `Int` (emitted via `{Integer,Long,Float,Double}.compare`).
+            if name == "compareTo" {
+                if let [at] = arg_tys {
+                    if Ty::promote(rt, *at).is_some() {
+                        return Some(Ty::Int);
+                    }
+                }
+            }
+            if matches!(name, "unaryMinus" | "unaryPlus") && arg_tys.is_empty() {
+                return Some(match rt {
+                    Ty::Byte | Ty::Short => Ty::Int,
+                    _ => rt,
+                });
+            }
+        }
+        // `Char` arithmetic methods: `c.plus(n): Char`, `c.minus(n): Char`, `c.minus(c2): Int`.
+        // `Char` isn't `is_numeric` (no promotion), but these map to the operator form, which
+        // `check_binary` types with the correct `Char`/`Int` operand rules.
+        if rt == Ty::Char {
+            // `Char` has only `plus`/`minus` operator overloads (no `times`/`div`/`rem`).
+            let bin = BinOp::from_arith_operator_name(name)
+                .filter(|o| matches!(o, BinOp::Add | BinOp::Sub));
+            if let (Some(op), [at]) = (bin, arg_tys) {
+                return Some(self.check_binary(op, rt, *at, span));
+            }
+        }
+        self.diags.error(
+            span,
+            format!("krusty: builtin operator method '{name}' on a primitive is not supported"),
+        );
+        Some(Ty::Error)
+    }
+
+    /// Record `e` as a call to the selected SOURCE extension (`ResolvedCall::ModuleExtension`)
+    /// so lowering emits the direct static call, and return its return type. `None` when no
+    /// source extension applies; an applicable selection whose arguments fail returns `Ty::Error` so
+    /// callers cannot fall through and silently rebind it to a different origin. This is the single
+    /// place recording and generic return substitution happens: both qualified and safe calls consume
+    /// the same semantic target instead of maintaining origin-specific module-extension handoffs.
+    fn record_source_extension_call(
+        &mut self,
+        e: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        arg_kinds: &[CallArgKind],
+    ) -> Option<Ty> {
+        let (selected, sig) = self.selected_source_extension(rt, name, arg_kinds)?;
+        // Validate against the resolver's instantiated value parameters, not the declaration's
+        // potentially generic signature. This is the contract the former qualified-call block used;
+        // retaining it here prevents helper reuse from accepting a safe call that selected a generic
+        // overload but whose concrete argument types do not fit that selection.
+        let logical_params = selected.extension_value_params().to_vec();
+        if !self.check_source_extension_call_args(
+            e,
+            name,
+            args,
+            arg_tys,
+            &selected,
+            &logical_params,
+        ) {
+            return Some(Ty::Error);
+        }
+        self.mark_source_call(e, selected.source_key);
+        let owner = sig
+            .source_file
+            .zip(sig.source_decl)
+            .and_then(|(file, declaration)| {
+                self.syms
+                    .fn_facades_by_decl
+                    .get(&(file, declaration.0))
+                    .copied()
+            });
+        self.resolved_calls.insert(
+            e,
+            ResolvedCall::ModuleExtension {
+                receiver: rt,
+                name: name.to_string(),
+                params: sig.params.clone(),
+                ret: sig.ret,
+                owner,
+                source: selected.source_key,
+                vararg: selected.call_sig.vararg,
+            },
+        );
+        // An inline source extension whose receiver is its own type parameter (`fun <T> T.id(): T`)
+        // returns the call-site receiver type, not the declaration's erased signature return. Keep
+        // this substitution beside target recording so `recv.id()` and `recv?.id()` cannot drift: the
+        // safe-call wrapper applies nullability only after this non-null member result is known.
+        if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
+            if let Some(decl) = self.source_function_decl(&selected).filter(|function| {
+                function.is_inline()
+                    && function.receiver.as_ref().is_some_and(|receiver| {
+                        function
+                            .type_params
+                            .iter()
+                            .any(|parameter| parameter == &receiver.name)
+                    })
+            }) {
+                let recv_tp = decl.receiver.as_ref().map(|receiver| receiver.name.clone());
+                return Some(match &decl.ret {
+                    Some(ret) if Some(&ret.name) == recv_tp.as_ref() => rt,
+                    Some(ret) => decl
+                        .params
+                        .iter()
+                        .zip(arg_tys)
+                        .find_map(|(parameter, actual)| {
+                            (parameter.ty.name == ret.name).then_some(*actual)
+                        })
+                        .unwrap_or(sig.ret),
+                    None => Ty::Unit,
+                });
+            }
+        }
+        Some(sig.ret)
+    }
+
     fn check_binary(&mut self, op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
         if lt == Ty::Error || rt == Ty::Error {
             return Ty::Error;
@@ -24272,8 +24591,7 @@ impl<'a> Checker<'a> {
         if let Some(ret) = self.record_extension_call_with_slots(call, name, rt, args, &[]) {
             return Some(ret);
         }
-        if let Some(ret) =
-            self.record_library_extension_call_with_arg_kinds(Some(call), name, rt, &arg_kinds, &[])
+        if let Some(ret) = self.record_extension_call_from_args(call, name, rt, args, arg_tys, &[])
         {
             return Some(ret);
         }
@@ -24758,6 +25076,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Emit the single argument diagnostic for a LABELLED call only after every callable origin has
+    /// declined it. Individual member/extension/top-level probes must remain read-only on a miss so a
+    /// later origin still gets its turn; these terminal receiver branches call this helper once their
+    /// generic resolution ladder is exhausted.
+    fn report_unmapped_labelled_call(&mut self, call: ExprId, args: &[ExprId]) -> Option<Ty> {
+        if !self.file.call_arg_names.contains_key(&call.0) {
+            return None;
+        }
+        if !self.report_pending_unknown_named_arg(call)
+            && !self.call_already_has_argument_diagnostic(call, args)
+        {
+            self.diags.error(
+                self.call_callee_name_span(call),
+                INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
+            );
+        }
+        Some(Ty::Error)
+    }
+
     fn record_extension_call_from_args(
         &mut self,
         call: ExprId,
@@ -24768,28 +25105,45 @@ impl<'a> Checker<'a> {
         type_args: &[Ty],
     ) -> Option<Ty> {
         if self.file.call_arg_names.contains_key(&call.0) {
-            return self
-                .record_extension_call_with_slots(call, name, receiver, args, type_args)
-                .or_else(|| {
-                    if !self.report_pending_unknown_named_arg(call)
-                        && !self.call_already_has_argument_diagnostic(call, args)
-                    {
-                        self.diags.error(
-                            self.call_callee_name_span(call),
-                            INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                        );
-                    }
-                    Some(Ty::Error)
-                });
+            // A labelled extension probe may legitimately find no extension: this same helper is used
+            // while walking implicit receivers, before a receiver-less top-level callable gets its turn.
+            // `record_extension_call_with_slots` already reports mapping/applicability errors when an
+            // extension family exists; preserve `None` when the family is absent so this generic probe
+            // cannot poison a later resolution rung with a fabricated overload diagnostic.
+            return self.record_extension_call_with_slots(call, name, receiver, args, type_args);
         }
         let arg_kinds = self.checked_call_arg_kinds(args);
-        self.record_library_extension_call_with_arg_kinds(
+        let resolved = self.record_library_extension_call_with_arg_kinds(
             Some(call),
             name,
             receiver,
             &arg_kinds,
             type_args,
-        )
+        );
+        if resolved.is_some() {
+            // The selected callable is the semantic authority for whether this is a `$default` call.
+            // Record its unlabelled omission/trailing-lambda mapping HERE, beside resolution, rather than
+            // asking only the classpath-extension emitter to reconstruct it from AST shape. The extension
+            // receiver occupies `params[0]`; `resolved_call_arg_slots` describes source VALUE parameters.
+            let parameter_count = match self.resolved_calls.get(&call) {
+                Some(ResolvedCall::Extension(callable))
+                    if callable.default_call && callable.vararg_elem.is_none() =>
+                {
+                    callable.params.len().checked_sub(1)
+                }
+                _ => None,
+            }
+            .filter(|&parameter_count| args.len() < parameter_count);
+            if let Some(parameter_count) = parameter_count {
+                let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+                if let Some(slots) =
+                    unlabelled_argument_slots(args, parameter_count, trailing_lambda)
+                {
+                    self.resolved_call_arg_slots.insert(call, slots);
+                }
+            }
+        }
+        resolved
     }
 
     /// Select a labelled extension call without recording a call or diagnostic.
@@ -26040,8 +26394,15 @@ impl<'a> Checker<'a> {
             &ctor_params,
             self.file.call_has_trailing_lambda.contains(&call.0),
         )?;
+        // Type only arguments this call has not typed yet. This constructor is one CANDIDATE for a
+        // `Name(args)` whose name may also be a top-level function; re-checking an argument that already
+        // has a type would overwrite it with the expected-type-free one — a trailing lambda already shaped
+        // against the function's receiver parameter (`Cfg.() -> Unit`) would fall back to `() -> Unit`,
+        // after which neither this constructor nor the function accepts the call.
         for &a in slots.iter().flatten() {
-            self.expr(a);
+            if self.expr_types[a.0 as usize] == Ty::Error {
+                self.expr(a);
+            }
         }
         if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
             let tys: Vec<Ty> = ordered
@@ -26420,7 +26781,15 @@ impl<'a> Checker<'a> {
                             declared_receiver,
                             generic_receiver,
                         },
-                        (ty, sig.is_var, sig.visibility, owner, dispatch_receiver),
+                        MemberExtensionProperty {
+                            ty,
+                            is_var: sig.is_var,
+                            visibility: sig.visibility,
+                            setter_visibility: sig.setter_visibility,
+                            owner,
+                            dispatch_receiver,
+                            declared_receiver,
+                        },
                     ));
                 }
             }
@@ -26978,7 +27347,7 @@ impl<'a> Checker<'a> {
                         ExprLowering::MemberPropertyRead {
                             owner,
                             interface: self.resolved_owner_is_interface(owner),
-                            instance_field: None,
+                            field: None,
                         },
                     );
                 }
@@ -26995,9 +27364,10 @@ impl<'a> Checker<'a> {
                         .applied_declared_member_prop_ty(rt, owner, name, ty),
                 );
             }
-            // A public Java field is a declaration in its own right and wins over a same-named
-            // synthetic JavaBean property. Preserve that selection before external getter lookup.
-            if let Some((owner, ty, interface, Some(descriptor))) =
+            // An actual field declaration outranks JavaBean accessor synthesis on the same receiver.
+            // Ask the shared declaration walk here, before the method-derived property path, and carry
+            // its exact target so later phases never repeat an origin-specific lookup.
+            if let Some((owner, ty, interface, Some(field))) =
                 self.resolver().member_property_type(rt, name)
             {
                 if let Some(expression) = mexpr {
@@ -27006,7 +27376,7 @@ impl<'a> Checker<'a> {
                         ExprLowering::MemberPropertyRead {
                             owner,
                             interface,
-                            instance_field: Some(descriptor),
+                            field: Some(Box::new(field)),
                         },
                     );
                 }
@@ -27022,7 +27392,7 @@ impl<'a> Checker<'a> {
                             owner,
                             interface: m.member.is_interface()
                                 || self.resolved_owner_is_interface(owner),
-                            instance_field: None,
+                            field: None,
                         },
                     );
                     self.resolved_calls.insert(me, ResolvedCall::Member(m));
@@ -27035,7 +27405,6 @@ impl<'a> Checker<'a> {
             // answered here and recorded. Lowering must not re-ask it: `recv.name` is then a property
             // read, and only how the target realizes it is left to decide.
             let is_property = self.syms.libraries.member_is_property(rt, name);
-            let declared_property = self.resolver().member_property_type(rt, name);
             if let Some(m) = self.resolve_property_member(rt, name) {
                 let ret = m.ret;
                 if let Some(me) = mexpr {
@@ -27050,7 +27419,7 @@ impl<'a> Checker<'a> {
                                 owner,
                                 interface: m.member.is_interface()
                                     || self.resolved_owner_is_interface(owner),
-                                instance_field: None,
+                                field: None,
                             },
                         );
                     }
@@ -27063,14 +27432,16 @@ impl<'a> Checker<'a> {
             // it need not go through any method — the backend realizes the read from the owner's own
             // declaration. Resolution owes the site only the property's type. It stays a MEMBER, so it is
             // decided here, ahead of any extension property of the same name.
-            if let Some((owner, ty, interface, instance_field)) = declared_property {
+            if let Some((owner, ty, interface, field)) =
+                self.resolver().member_property_type(rt, name)
+            {
                 if let Some(me) = mexpr {
                     self.expr_lowers.insert(
                         me,
                         ExprLowering::MemberPropertyRead {
                             owner,
                             interface,
-                            instance_field,
+                            field: field.map(Box::new),
                         },
                     );
                 }
@@ -27078,14 +27449,22 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner, dispatch_receiver))) => {
-                if visibility != Visibility::Public {
-                    self.reject_if_inaccessible(visibility, name, owner, span);
+            Ok(Some(property)) => {
+                if property.visibility != Visibility::Public {
+                    self.reject_if_inaccessible(property.visibility, name, property.owner, span);
                 }
                 if let Some(expression) = mexpr {
-                    self.mark_extension_receiver_used(expression, dispatch_receiver);
+                    self.mark_extension_receiver_used(expression, property.dispatch_receiver);
+                    self.expr_lowers.insert(
+                        expression,
+                        ExprLowering::MemberExtensionPropertyRead {
+                            owner: property.owner,
+                            receiver: property.declared_receiver,
+                            ty: property.ty,
+                        },
+                    );
                 }
-                return Some(ty);
+                return Some(property.ty);
             }
             Err(()) => {
                 self.diags.error(
@@ -27165,10 +27544,10 @@ impl<'a> Checker<'a> {
             }
         }
         match self.member_extension_property(rt, name) {
-            Ok(Some((ty, _, visibility, owner, _))) => {
+            Ok(Some(property)) => {
                 return Some(PropertyReadProbe::Found {
-                    ty,
-                    access: Some((visibility, owner)),
+                    ty: property.ty,
+                    access: Some((property.visibility, property.owner)),
                 });
             }
             Err(()) => return Some(PropertyReadProbe::Ambiguous),
@@ -27745,10 +28124,11 @@ impl<'a> Checker<'a> {
                 })
     }
 
-    /// The classpath internal name a bare class name resolves to — an explicit import first, then the
-    /// federated class-name seed (default/same-package/wildcard imports). Used to reach a classpath type's
-    /// `@Metadata` (e.g. constructor parameter names) from a simple-name constructor call.
-    fn classpath_class_internal_name(&self, name: &str) -> Option<TypeName> {
+    /// The semantic internal name a bare classifier resolves to — an explicit import first, then the
+    /// federated class-name seed (default/same-package/wildcard imports). Every caller consumes the
+    /// resulting classifier identity without branching on whether its shape came from this file, a
+    /// module source, or a dependency provider.
+    fn classifier_internal_name(&self, name: &str) -> Option<TypeName> {
         // Resolve through the same NESTED-type rewrite the positional-construction path uses: an
         // unqualified nested-type import (`import lib.Op.Apply`) stores the flat `lib/Op/Apply`, but the
         // class is `lib/Op$Apply`. `imported_type_internal` applies the `/`→`$` recovery (and wildcard
@@ -27763,10 +28143,10 @@ impl<'a> Checker<'a> {
             .or_else(|| self.syms.class_names.get(name))
     }
 
-    fn classpath_type_receiver_internal(&self, receiver: ExprId) -> Option<TypeName> {
+    fn classifier_receiver_internal(&self, receiver: ExprId) -> Option<TypeName> {
         match self.file.expr(receiver) {
             Expr::Name(name) if !self.value_root_shadows_classifier(name) => {
-                self.classpath_class_internal_name(name)
+                self.classifier_internal_name(name)
             }
             Expr::Member { .. } => {
                 let path = qualified_path(self.file, receiver)?;
@@ -28490,7 +28870,7 @@ impl<'a> Checker<'a> {
                     } else {
                         let qualified_top_level = if let Some(root) = self.dotted_root(*receiver) {
                             if !self.value_root_shadows_classifier(&root)
-                                && self.classpath_type_receiver_internal(*receiver).is_none()
+                                && self.classifier_receiver_internal(*receiver).is_none()
                             {
                                 if let Some(package) = qualified_path(self.file, *receiver) {
                                     let scope = [type_name(&package)];
@@ -28563,7 +28943,7 @@ impl<'a> Checker<'a> {
                 // top-level overloads and confirm the owning facade sits in the receiver's package.
                 if let Some(root) = self.dotted_root(receiver) {
                     if !self.value_root_shadows_classifier(&root)
-                        && self.classpath_type_receiver_internal(receiver).is_none()
+                        && self.classifier_receiver_internal(receiver).is_none()
                     {
                         if let Some(pkg) = qualified_path(self.file, receiver) {
                             let arg_tys = self.arg_tys(args);
@@ -28670,6 +29050,8 @@ impl<'a> Checker<'a> {
                                 let shape = self.top_level_lambda_shape_in_scope(
                                     &name,
                                     &partial,
+                                    arg_names.as_deref(),
+                                    true,
                                     Some(&pkg_scope),
                                 );
                                 if let Some(pt) = shape
@@ -29173,7 +29555,7 @@ impl<'a> Checker<'a> {
                     return Ty::Error;
                 }
                 if let Expr::Member { .. } = self.file.expr(receiver) {
-                    if let Some(internal) = self.classpath_type_receiver_internal(receiver) {
+                    if let Some(internal) = self.classifier_receiver_internal(receiver) {
                         let fq = internal.render();
                         let explicit_type_args = self.explicit_call_type_args(call);
                         let arg_kinds = self.provider_member_lambda_arg_kinds(
@@ -29845,76 +30227,19 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
-                // Builtin bitwise/shift operator methods on `Int`/`Long` (`a shl b`, `a and b`,
-                // `a.inv()`) — the named primitive operators (no symbol form), resolved via the shared
-                // `builtin_bitwise_ret` (also used by signature inference). The arg-type rule is the
-                // checker's: a shift takes an `Int` amount; `and`/`or`/`xor` take the receiver's type.
-                if let Some(ret) = builtin_bitwise_ret(rt, &name, arg_tys.len()) {
-                    if let Some(arg0) = arg_tys.first() {
-                        let expected = if matches!(name.as_str(), "shl" | "shr" | "ushr") {
-                            Ty::Int
-                        } else {
-                            rt
-                        };
-                        self.expect_assignable(expected, *arg0, self.span(args[0]), "argument");
-                    }
+                // Builtin bitwise/shift/operator methods on a primitive receiver — the named
+                // forms of Kotlin's primitive operators, which BEAT any same-named user
+                // extension (Kotlin: members always win). Shared with the safe-call path via
+                // `check_builtin_operator_method`; the arg-type rule is the checker's.
+                if let Some(ret) = self.check_builtin_operator_method(
+                    call,
+                    rt,
+                    &name,
+                    args,
+                    &arg_tys,
+                    infix_shadows_builtin,
+                ) {
                     return ret;
-                }
-                // A builtin operator-method on a primitive (`5.rem(2)`, `5.plus(2)`) binds to the
-                // primitive operator, which *beats* any same-named user extension (in Kotlin a
-                // member/builtin wins over an extension). The arithmetic/compare/unary forms map
-                // directly to the equivalent operator bytecode (see the mirror in `emit_call`); the
-                // rest (`mod` floor-semantics, `rangeTo`, `inc`/`dec`) aren't modeled → reject rather
-                // than dispatch to a user extension, which would miscompile.
-                // The builtin only applies when every argument is itself a numeric/char primitive (the
-                // operand types a builtin operator accepts). A non-numeric argument (`2 * V(3)` with a
-                // user `operator fun Int.times(v: V)`) means this is an EXTENSION operator — fall through
-                // to extension resolution rather than forcing (and rejecting) the builtin.
-                if rt.is_numeric_or_char()
-                    && is_builtin_operator_method(&name)
-                    && arg_tys.iter().all(|a| a.is_numeric_or_char())
-                {
-                    // A user `infix` extension shadows the builtin for the infix form (see
-                    // `infix_shadows_builtin` above): skip every arm here and let extension resolution
-                    // downstream take the call.
-                    let infix_user_ext = infix_shadows_builtin;
-                    if !infix_user_ext && rt.is_numeric() {
-                        // Binary arithmetic methods: `a.plus(b)` ≡ `a + b` (same numeric promotion).
-                        let bin = BinOp::from_arith_operator_name(&name);
-                        if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
-                            return self.check_binary(op, rt, *at, span);
-                        }
-                        // `a.compareTo(b)` → `Int` (emitted via `{Integer,Long,Float,Double}.compare`).
-                        if name == "compareTo" {
-                            if let [at] = arg_tys.as_slice() {
-                                if Ty::promote(rt, *at).is_some() {
-                                    return Ty::Int;
-                                }
-                            }
-                        }
-                        if matches!(name.as_str(), "unaryMinus" | "unaryPlus") && arg_tys.is_empty()
-                        {
-                            return match rt {
-                                Ty::Byte | Ty::Short => Ty::Int,
-                                _ => rt,
-                            };
-                        }
-                    }
-                    // `Char` arithmetic methods: `c.plus(n): Char`, `c.minus(n): Char`, `c.minus(c2): Int`.
-                    // `Char` isn't `is_numeric` (no promotion), but these map to the operator form, which
-                    // `check_binary` types with the correct `Char`/`Int` operand rules.
-                    if !infix_user_ext && rt == Ty::Char {
-                        // `Char` has only `plus`/`minus` operator overloads (no `times`/`div`/`rem`).
-                        let bin = BinOp::from_arith_operator_name(&name)
-                            .filter(|o| matches!(o, BinOp::Add | BinOp::Sub));
-                        if let (Some(op), [at]) = (bin, arg_tys.as_slice()) {
-                            return self.check_binary(op, rt, *at, span);
-                        }
-                    }
-                    if !infix_user_ext {
-                        self.diags.error(span, format!("krusty: builtin operator method '{name}' on a primitive is not supported"));
-                        return Ty::Error;
-                    }
                 }
                 // Extension / static method from any classpath library (e.g. Kotlin stdlib).
                 // Receiver type is passed as the first argument (invokestatic at the JVM level).
@@ -30026,59 +30351,10 @@ impl<'a> Checker<'a> {
                 // (`@InlineOnly` extensions — scope fns `takeIf`/`let`/… — are resolved and recorded by
                 // `record_library_extension_call_with_arg_kinds` above: one extension resolution admits
                 // inline, and the lowerer splices via the callable's `inline` flag. No separate inline path here.)
-                if let Some((fi, sig)) = self.selected_source_extension(rt, &name, &arg_kinds) {
-                    let logical = fi.extension_value_params().to_vec();
-                    if !self.check_source_extension_call_args(
-                        call, &name, args, &arg_tys, &fi, &logical,
-                    ) {
-                        return Ty::Error;
-                    }
-                    self.mark_source_call(call, fi.source_key);
-                    let owner =
-                        sig.source_file
-                            .zip(sig.source_decl)
-                            .and_then(|(file, declaration)| {
-                                self.syms
-                                    .fn_facades_by_decl
-                                    .get(&(file, declaration.0))
-                                    .copied()
-                            });
-                    self.resolved_calls.insert(
-                        call,
-                        ResolvedCall::ModuleExtension {
-                            receiver: rt,
-                            name: name.clone(),
-                            params: sig.params.clone(),
-                            ret: sig.ret,
-                            owner,
-                            source: fi.source_key,
-                            vararg: fi.call_sig.vararg,
-                        },
-                    );
-                    if erased_type_key(rt) != erased_type_key(Ty::obj("kotlin/Any")) {
-                        if let Some(decl) = self.source_function_decl(&fi).filter(|function| {
-                            function.is_inline()
-                                && function.receiver.as_ref().is_some_and(|receiver| {
-                                    function
-                                        .type_params
-                                        .iter()
-                                        .any(|parameter| parameter == &receiver.name)
-                                })
-                        }) {
-                            let recv_tp = decl.receiver.as_ref().map(|r| r.name.clone());
-                            return match &decl.ret {
-                                Some(r) if Some(&r.name) == recv_tp.as_ref() => rt,
-                                Some(r) => decl
-                                    .params
-                                    .iter()
-                                    .zip(&arg_tys)
-                                    .find_map(|(p, a)| (p.ty.name == r.name).then_some(*a))
-                                    .unwrap_or(sig.ret),
-                                None => Ty::Unit,
-                            };
-                        }
-                    }
-                    return sig.ret;
+                if let Some(ret) =
+                    self.record_source_extension_call(call, rt, &name, args, &arg_tys, &arg_kinds)
+                {
+                    return ret;
                 }
                 if let Some(sig) = self.unique_visible_source_extension(rt, &name) {
                     if sig.params.len() != arg_tys.len() {
@@ -30941,7 +31217,14 @@ impl<'a> Checker<'a> {
                     .filter(|_| has_lambda_argument)
                     // A library top-level function only when no user function shadows it.
                     .filter(|_| known_sig.is_none())
-                    .and_then(|partial| self.top_level_lambda_shape(&fname, partial));
+                    .and_then(|partial| {
+                        self.top_level_lambda_shape(
+                            &fname,
+                            partial,
+                            arg_names.as_deref(),
+                            self.file.call_has_trailing_lambda.contains(&call.0),
+                        )
+                    });
                 let mut known_generic_bindings = if let Some((_, bindings)) = adapted_outer {
                     bindings
                 } else if let Some(generic) =
@@ -31806,7 +32089,7 @@ impl<'a> Checker<'a> {
                     // Named classpath constructors use metadata names/defaults; lowering selects
                     // either the plain constructor or the default-argument synthetic.
                     if arg_names.is_some() || self.file.call_has_trailing_lambda.contains(&call.0) {
-                        if let Some(internal) = self.classpath_class_internal_name(&fname) {
+                        if let Some(internal) = self.classifier_internal_name(&fname) {
                             match self.record_named_library_constructor_name(
                                 call,
                                 internal,
@@ -32008,9 +32291,12 @@ impl<'a> Checker<'a> {
                         || self.resolve_instance_member(t, &fname, &arg_tys).is_some()
                 });
                 if module_top.is_none() && !shadowed_by_member {
-                    if let Some((fi, sources)) =
-                        self.resolve_context_module_top_level(&fname, &arg_tys)
-                    {
+                    if let Some((fi, sources)) = self.resolve_context_module_top_level(
+                        &fname,
+                        args,
+                        arg_names.as_deref(),
+                        self.file.call_has_trailing_lambda.contains(&call.0),
+                    ) {
                         let params = &fi.callable.params;
                         let ctx_count = fi.context_count;
                         let ret_ty = self.module_top_level_return(call, &fi, &arg_tys, expected);
@@ -32424,14 +32710,41 @@ impl<'a> Checker<'a> {
                         None => (args.to_vec(), arg_tys.clone(), None),
                     };
                     let arg_kinds = self.call_arg_kinds(&sel_args);
-                    let resolved = match expected {
-                        Some(expected) => self.resolver().resolve_top_level_with_expected(
+                    // A labelled call that OMITS a parameter (`mockk(relaxed = true)`) is not a
+                    // positional call: `sel_args` is compacted to the arguments actually written, so
+                    // matching it against the leading parameters checks each argument against the
+                    // wrong declaration. Selection gets the parameter slot each argument named, and
+                    // only the `$default` synthetic can take the call (the base needs every argument).
+                    let named_slots = resolved_slots.as_ref().and_then(|slots| {
+                        let filled: Vec<usize> = slots
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(parameter, argument)| argument.map(|_| parameter))
+                            .collect();
+                        (filled.len() < slots.len()).then_some(filled)
+                    });
+                    let named_resolved = named_slots.as_ref().and_then(|slots| {
+                        let arg_tys: Vec<Ty> = arg_kinds
+                            .iter()
+                            .map(|argument| crate::symbol_resolver::CallArgKind::ty(*argument))
+                            .collect();
+                        self.resolver().resolve_top_level_named_default_callable(
+                            &fname,
+                            &arg_tys,
+                            slots,
+                            &call_targs,
+                            expected,
+                        )
+                    });
+                    let resolved = match (named_resolved, expected) {
+                        (Some(c), _) => Some(c),
+                        (None, Some(expected)) => self.resolver().resolve_top_level_with_expected(
                             &fname,
                             &arg_kinds,
                             &call_targs,
                             expected,
                         ),
-                        None => self
+                        (None, None) => self
                             .resolver()
                             .resolve_symbol_with_literal_args(
                                 crate::symbol_resolver::SymRecv::TopLevel,
@@ -32464,6 +32777,14 @@ impl<'a> Checker<'a> {
                         // (see [`TypeInfo::resolved_top_level`]).
                         self.resolved_calls
                             .insert(call, ResolvedCall::TopLevel(c.clone()));
+                        // Stash the RESOLVED explicit type arguments, exactly as the extension arm
+                        // does: a TOP-LEVEL `inline fun <reified T>` (`nameOf<Svc>()`) is spliced,
+                        // and its `reifiedOperationMarker` body can only be specialized from them.
+                        // Imports/classpath types resolve here, not in the lowerer.
+                        if !call_targs.is_empty() {
+                            self.resolved_call_type_args
+                                .insert(call, call_targs.iter().copied().map(Some).collect());
+                        }
                         if let Some(slots) = resolved_slots {
                             self.resolved_call_arg_slots.insert(call, slots);
                         }
@@ -32472,7 +32793,26 @@ impl<'a> Checker<'a> {
                         let vararg = last_is_array
                             && (c.params.len() != arg_tys.len()
                                 || c.params.last().map_or(false, |p| arg_tys.last() != Some(p)));
-                        if vararg && !c.params.is_empty() {
+                        if let Some(slots) = named_slots.as_ref().filter(|_| c.default_call) {
+                            // The labelled, parameter-omitting form: each argument is checked against
+                            // the parameter its label named, not against the one at its position.
+                            for ((index, &parameter), &argument) in
+                                slots.iter().enumerate().zip(sel_args.iter())
+                            {
+                                if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                                    continue;
+                                }
+                                let Some(&declared) = c.params.get(parameter) else {
+                                    continue;
+                                };
+                                self.expect_library_call_arg(
+                                    declared,
+                                    arg_tys[index],
+                                    argument,
+                                    "argument",
+                                );
+                            }
+                        } else if vararg && !c.params.is_empty() {
                             let fixed = c.params.len() - 1;
                             let elem = c.vararg_elem.unwrap_or_else(|| {
                                 c.params[fixed].array_elem().unwrap_or(Ty::Error)
@@ -33448,7 +33788,7 @@ impl<'a> Checker<'a> {
                 member_extension
                     .as_ref()
                     .ok()
-                    .and_then(|property| property.as_ref().map(|(ty, ..)| *ty))
+                    .and_then(|property| property.as_ref().map(|property| property.ty))
             })
             .or_else(|| {
                 extension_property
@@ -33507,20 +33847,37 @@ impl<'a> Checker<'a> {
             return;
         }
         match member_extension {
-            Ok(Some((lty, is_var, visibility, owner, dispatch_receiver))) => {
-                if visibility != Visibility::Public {
-                    self.reject_if_inaccessible(visibility, &name, owner, span);
+            Ok(Some(property)) => {
+                // A write is governed by the setter, not merely by the visibility of the readable
+                // property. Resolve that semantic fact here for every implicit-dispatch origin;
+                // lowering receives only an already-authorized accessor plan.
+                let write_visibility = property.setter_visibility.unwrap_or(property.visibility);
+                if write_visibility != Visibility::Public {
+                    self.reject_if_inaccessible(
+                        write_visibility,
+                        &name,
+                        property.owner,
+                        target_span,
+                    );
                 }
-                self.mark_extension_receiver_stmt_used(s, dispatch_receiver);
-                if !is_var {
+                self.mark_extension_receiver_stmt_used(s, property.dispatch_receiver);
+                if !property.is_var {
                     self.diags
                         .error(target_span, "'val' cannot be reassigned.".to_string());
                 }
                 self.expect_assignable(
-                    lty,
+                    property.ty,
                     vt,
                     self.value_diagnostic_span(value, vt),
                     "assignment",
+                );
+                self.stmt_lowers.insert(
+                    s,
+                    StmtLowering::MemberExtensionPropertyWrite {
+                        owner: property.owner,
+                        receiver: property.declared_receiver,
+                        ty: property.ty,
+                    },
                 );
             }
             Err(()) => {
@@ -34321,6 +34678,7 @@ val result = object { fun value(): String = captured }
             kind: crate::libraries::TypeKind::Class,
             supertypes: crate::types::TypeNameList::new(),
             constructors: Vec::new(),
+            fields: Vec::new(),
             members: Vec::new(),
             companion: Vec::new(),
             companion_consts: HashMap::new(),
@@ -34332,6 +34690,7 @@ val result = object { fun value(): String = captured }
             type_params: Vec::new(),
             sealed_subclasses: crate::types::TypeNameList::new(),
             enum_entries: Vec::new(),
+            enum_entries_accessor: None,
             value_ctor_has_default: false,
             ctor_named_params: Vec::new(),
             value_class_properties: Vec::new(),
@@ -34452,9 +34811,9 @@ val result = object { fun value(): String = captured }
     fn nested_class_self_label_uses_the_simple_declaration_name() {
         let (errors, _) = check(
             "class Outer {\n\
-                 inner class FilterAction {\n\
+                 inner class NestedReceiver {\n\
                      init {\n\
-                         \"receiver\".apply { this@FilterAction }\n\
+                         \"receiver\".apply { this@NestedReceiver }\n\
                      }\n\
                  }\n\
              }",
@@ -35730,6 +36089,7 @@ fun box(): String {
                     },
                     supertypes: crate::types::TypeNameList::new(),
                     constructors: vec![],
+                    fields: vec![],
                     members: vec![],
                     companion,
                     companion_consts: HashMap::new(),
@@ -35745,6 +36105,7 @@ fun box(): String {
                     } else {
                         Vec::new()
                     },
+                    enum_entries_accessor: None,
                     value_ctor_has_default: false,
                     ctor_named_params: vec![],
                     value_class_properties: vec![],
@@ -36288,7 +36649,7 @@ fun box(): String {
     }
 
     #[test]
-    fn java_enum_entries_resolves_but_declines_kotlin_accessor_lowering() {
+    fn enum_without_a_direct_entries_accessor_records_the_unavailable_realization() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file(
             "import test.JavaState\nfun inspect() { JavaState.entries }",
@@ -36310,10 +36671,7 @@ fun box(): String {
         assert_no_diags(&diagnostics);
         assert!(matches!(
             info.expr_lowers.get(&entries),
-            Some(ExprLowering::EnumEntriesRead {
-                physical_accessor: false,
-                ..
-            })
+            Some(ExprLowering::EnumEntriesRead { accessor: None, .. })
         ));
     }
 
