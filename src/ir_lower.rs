@@ -21153,6 +21153,22 @@ impl<'a> Lower<'a> {
         name: String,
     ) -> Option<u32> {
         let t = {
+            // `::prop.isInitialized` — a null check on the `lateinit` backing field, the shape kotlinc
+            // emits (`getfield prop; ifnull`). No `KProperty` value is materialized.
+            if let Some(ExprLowering::LateinitInitialized { owner, property }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let (this_v, _) = self.lookup("this")?;
+                let receiver = self.emit_get_value(this_v);
+                let (class, index, _) = self.resolve_field_name(owner, &property)?;
+                let raw = self.ir.add_expr(IrExpr::LateinitInitialized {
+                    receiver,
+                    class,
+                    index,
+                });
+                let null = self.emit_const(IrConst::Null);
+                return Some(self.emit_primitive_bin_op(IrBinOp::Ne, raw, null));
+            }
             // `ClassName.Companion` — the companion singleton named explicitly. Same read as the
             // bare `ClassName` value form: `getstatic C.Companion:LC$Companion;`.
             if name == "Companion" {

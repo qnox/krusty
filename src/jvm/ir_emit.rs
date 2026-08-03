@@ -8602,6 +8602,24 @@ impl<'a> Emitter<'a> {
                     code.bind(lbl);
                 }
             }
+            IrExpr::LateinitInitialized {
+                receiver,
+                class,
+                index,
+            } => {
+                // The RAW field read — no throw-if-null guard, which is the whole point: this node
+                // exists so `::prop.isInitialized` can TEST the field a normal read would reject.
+                // The null comparison itself is built in lowering from the ordinary comparison node,
+                // so the branch/stackmap shape stays the one every other comparison uses.
+                let c = &self.ir.classes[*class as usize];
+                let name = c.fields[*index as usize].name.clone();
+                let fty = c.fields[*index as usize].ty;
+                let jt = ir_ty_to_jvm(&fty);
+                let owner = c.fq_name();
+                self.emit_value(*receiver, code);
+                let fref = self.cw.fieldref(&owner, &name, &type_descriptor(jt));
+                code.getfield(fref, slot_words(jt) as i32);
+            }
             IrExpr::GetStatic(i) => {
                 let s = &self.ir.statics[*i as usize];
                 let jt = ir_ty_to_jvm(&s.ty);

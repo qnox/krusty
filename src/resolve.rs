@@ -10030,6 +10030,10 @@ enum AdaptedSourceRefSelection {
 
 #[derive(Clone, Debug)]
 pub enum ExprLowering {
+    /// `::prop.isInitialized` on a `lateinit var` of the enclosing class. kotlinc compiles this to a
+    /// NULL CHECK on the backing field, not a reflective query — a `lateinit` field holds `null` until
+    /// it is assigned, which is exactly what the property's own getter tests before throwing.
+    LateinitInitialized { owner: TypeName, property: String },
     /// A call or function reference resolved to a local function declaration.
     LocalFunction { stmt_id: StmtId },
     /// A source-module function reference selected by the checker.
@@ -22910,6 +22914,59 @@ impl<'a> Checker<'a> {
 
     fn expr_inner_member(&mut self, e: ExprId, receiver: ExprId, name: String) -> Ty {
         let t = {
+            // `::prop.isInitialized` — the `lateinit` initialization test. It reads as a property of a
+            // property REFERENCE, but kotlinc compiles it to a null check on the backing field (a
+            // `lateinit` field is `null` until assigned), so it needs no reflection and no `KProperty`
+            // value at all.
+            if name == "isInitialized" {
+                if let Expr::CallableRef {
+                    receiver: None,
+                    name: property,
+                } = self.file.expr(receiver).clone()
+                {
+                    if let Some(owner) = self
+                        .this_ty
+                        .and_then(|receiver| receiver.obj_internal())
+                        .filter(|internal| {
+                            self.syms
+                                .class_by_type_name(*internal)
+                                .is_some_and(|class| class.lateinit_props.contains(&property))
+                        })
+                    {
+                        self.expr_lowers.insert(
+                            e,
+                            ExprLowering::LateinitInitialized {
+                                owner,
+                                property: property.clone(),
+                            },
+                        );
+                        return self.set(e, Ty::Boolean);
+                    }
+                }
+            }
+            // `EnumName.entries` — the Kotlin 2.x replacement for `values()`. The emitter already
+            // synthesizes the `$ENTRIES` field and its `getEntries()` accessor on every enum class;
+            // only the READ needed a type. kotlinc types it `EnumEntries<E>`, which IS-A `List<E>`;
+            // typing it as the list is what makes `size` / `[0]` / `for (x in …)` resolve, and the
+            // accessor's actual return value is assignable to it.
+            if name == "entries" {
+                if let Expr::Name(enum_name) = self.file.expr(receiver).clone() {
+                    if !self.value_root_shadows_classifier(&enum_name)
+                        && self.syms.enums.contains_key(&enum_name)
+                    {
+                        let internal = self
+                            .syms
+                            .classes
+                            .get(&enum_name)
+                            .map(ClassSig::internal)
+                            .unwrap_or(enum_name);
+                        return self.set(
+                            e,
+                            Ty::obj_args("kotlin/collections/List", &[Ty::obj(&internal)]),
+                        );
+                    }
+                }
+            }
             // Library companion constants: `Int.MAX_VALUE`, `Double.NaN`, etc.
             if let Expr::Name(type_name) = self.file.expr(receiver).clone() {
                 if !self.value_root_shadows_classifier(&type_name) {

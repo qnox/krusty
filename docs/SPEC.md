@@ -2312,6 +2312,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `IllegalAccessError`), and a static that declares an owner is written directly on that class rather
   than through the facade's accessor/bridge path. Test:
   `tests/resolve_parse_deep_coverage_e2e.rs::companion_member_from_instance`.
+- **`::prop.isInitialized`.** It reads as a property of a property REFERENCE, but kotlinc compiles it
+  to a NULL CHECK on the backing field — a `lateinit` field holds `null` until assigned — so it needs
+  no reflection and materializes no `KProperty` value. The obstacle is that every ordinary read of a
+  `lateinit` field carries the throw-if-null guard, which is the opposite of what this tests; a
+  dedicated IR node supplies the RAW read, and lowering builds the comparison from the ordinary
+  comparison node so the branch/stackmap shape stays the one every other comparison uses. Tests:
+  `tests/feature_coverage_v_e2e.rs::lateinit_and_isinitialized`,
+  `tests/implicit_this_callable_ref_e2e.rs::lateinit_is_initialized_runs` (the box-corpus case).
 
 ## 8. Success criteria for the PoC
 

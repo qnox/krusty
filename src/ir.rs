@@ -279,6 +279,15 @@ pub enum IrExpr {
         class: ClassId,
         index: u32,
     },
+    /// The RAW value of a `lateinit` backing field, WITHOUT the throw-if-null guard every ordinary
+    /// read of one carries. Exists so `::prop.isInitialized` can test the field a normal read would
+    /// reject; lowering compares it against null, which is what kotlinc emits (no reflection, no
+    /// `KProperty` value).
+    LateinitInitialized {
+        receiver: ExprId,
+        class: ClassId,
+        index: u32,
+    },
     /// Write an instance field (`IrSetField`): `receiver.<fields[index]> = value` (statement).
     SetField {
         receiver: ExprId,
@@ -1777,7 +1786,9 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             f(*value);
         }
         IrExpr::Variable { init, .. } => init.iter().for_each(|&i| f(i)),
-        IrExpr::GetField { receiver, .. } | IrExpr::PropertyRead { receiver, .. } => f(*receiver),
+        IrExpr::GetField { receiver, .. }
+        | IrExpr::LateinitInitialized { receiver, .. }
+        | IrExpr::PropertyRead { receiver, .. } => f(*receiver),
         IrExpr::Call {
             args,
             dispatch_receiver,
