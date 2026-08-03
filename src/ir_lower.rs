@@ -12935,7 +12935,13 @@ impl<'a> Lower<'a> {
                             .source_extension_function(file, ast::DeclId(declaration))
                             // A sibling facade's static descriptor is defined by the declaration,
                             // not by the possibly-more-specific call-site receiver.
-                            .map(|(declared, _)| declared.erased_recv())
+                            .map(|(declared, _)| {
+                                if declared.non_null().is_ty_param() {
+                                    declared.erased_recv()
+                                } else {
+                                    declared
+                                }
+                            })
                     })
                     .unwrap_or(receiver);
                 let receiver_value =
@@ -12957,8 +12963,11 @@ impl<'a> Lower<'a> {
                     }
                     None => return None,
                 };
-                let receiver_value =
-                    self.spill_receiver_before_args(receiver_value, recv_ty, &mut prelude);
+                let receiver_value = self.spill_receiver_before_args(
+                    receiver_value,
+                    physical_receiver,
+                    &mut prelude,
+                );
                 let mut lowered = vec![receiver_value];
                 lowered.extend(arguments);
                 let mut physical_params = Vec::with_capacity(selected_params.len() + 1);
