@@ -300,9 +300,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   INNER loop for an OUTER one lands on a state the assembler never reaches through the normal dispatch,
   so the target instruction gets no stackmap frame and the method fails verification ("Expecting a stack
   map frame"). Pre-existing and NOT receiver- or extension-specific — a plain `suspend fun test(c: Ctl)`
-  with `break@outer` reproduces it on an unmodified tree. `suspending_cross_loop_labeled_jump` skips the
-  file until the flattener models the cross-loop transfer
-  (`tests/suspend_e2e.rs::suspend_cross_loop_labeled_break_still_skips`; corpus
+  with `break@outer` reproduces it on an unmodified tree. Only the POST-TEST (`do … while`) lowering is
+  affected: its condition sits after the body, so the crossing jump targets a state the dispatch never
+  falls into. A cross-loop jump between PRE-TEST loops (`for`/`while`) assembles correctly and is left
+  alone — nested labeled loops are ordinary Kotlin. `suspending_cross_loop_labeled_jump` skips only the
+  post-test form (`tests/suspend_e2e.rs::suspend_cross_loop_labeled_break_still_skips` and
+  `::suspend_cross_loop_labeled_jump_between_pretest_loops_runs`; corpus
   `coroutines/controlFlow/doubleBreak`).
 - **`suspend fun` — a suspension whose own ARGUMENT writes a local is refused, not miscompiled.** The
   spill stores are emitted ahead of the call, so an argument's update to a spilled local (`foo(i++)`)
@@ -310,9 +313,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `bars(foo(i++), foo(i++))` silently answered `"1;1;"` instead of `"1;2;"`. kotlinc has its arguments
   on the operand stack before its `putfield`s, so its spill always sees the post-evaluation state;
   modelling that needs the receiver/arguments materialized into typed temps ahead of the spill. Until
-  then `suspension_operand_writes_local` skips the file. This was the actual cause of the corpus
-  `suspendCallsInArguments` divergence — a silent wrong answer in an otherwise-accepted shape, not a
-  spill-slot displacement (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_still_skips`).
+  then `suspension_operand_writes_local` skips the file. It covers both suspending call shapes — a
+  static `Call` and a same-file member `MethodCall`, whose RECEIVER (`cs[i++].foo()`) is as much an
+  operand as its arguments — and fires only when the written slot is SPILLED and read somewhere outside
+  the operand: a scratch whose every read is inside the operand itself (`foo(run { t = 2; t })`) is
+  re-assigned before each read, so its stale field is never observed. This was the actual cause of the
+  corpus `suspendCallsInArguments` divergence — a silent wrong answer in an otherwise-accepted shape,
+  not a spill-slot displacement
+  (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_still_skips`,
+  `::suspend_member_call_whose_operand_writes_a_local_still_skips`,
+  `::suspend_operand_write_to_a_locally_dead_scratch_runs`).
 - **`suspend fun` — a `Nothing?` local live across a suspension is REMATERIALIZED, not spilled.**
   `var x = null` has exactly one possible value, so kotlinc gives it no continuation field and re-emits
   `aconst_null; astore` in each resume arm. Spilling it instead is wrong twice over: the local's

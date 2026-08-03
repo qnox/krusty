@@ -1843,7 +1843,7 @@ fn build_state_machine(
     // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
     // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
     if spills_bottom_typed_local(&spilled)
-        || suspension_operand_writes_local(ir, b, &suspend_set)
+        || suspension_operand_writes_local(ir, b, &suspend_set, &spilled)
         || suspending_cross_loop_labeled_jump(ir, b, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
     {
@@ -2397,7 +2397,7 @@ fn build_lambda_state_machine(
     // (the corpus `suspendCallsInArguments` shape). The PLAIN lambda's temps are e2e-verified.
     if (receiver_lambda && spill_shape_unmodeled(&spilled))
         || spills_bottom_typed_local(&spilled)
-        || suspension_operand_writes_local(ir, b, &suspend_set)
+        || suspension_operand_writes_local(ir, b, &suspend_set, &spilled)
         || suspending_cross_loop_labeled_jump(ir, b, &suspend_set)
         || suspending_over_progression(ir, b, &suspend_set)
         || tail_suspending_loop(ir, &stmts, &suspend_set)
@@ -5409,20 +5409,27 @@ fn tail_suspending_loop(ir: &IrFile, stmts: &[ExprId], suspend_set: &HashSet<u32
 /// specific to any receiver shape — a plain `suspend fun test(c: Ctl)` with `break@outer` reproduces
 /// it. Bail (skip, never emit an unverifiable method).
 fn suspending_cross_loop_labeled_jump(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    fn walk(ir: &IrFile, e: ExprId, enclosing: &mut Vec<Option<String>>, found: &mut bool) {
+    fn walk(ir: &IrFile, e: ExprId, enclosing: &mut Vec<(Option<String>, bool)>, found: &mut bool) {
         match &ir.exprs[e as usize] {
-            IrExpr::While { label, .. } => {
-                enclosing.push(label.clone());
+            IrExpr::While {
+                label, post_test, ..
+            } => {
+                enclosing.push((label.clone(), *post_test));
                 for_each_child(&ir.exprs, e, &mut |c| walk(ir, c, enclosing, found));
                 enclosing.pop();
                 return;
             }
-            // Innermost-targeting is what the flattener models; anything above it is not.
+            // Innermost-targeting is what the flattener models; anything above it is not. Only the
+            // POST-TEST (`do … while`) lowering actually mis-frames: its condition sits after the body,
+            // so the crossing jump's target is a state the dispatch never falls into. A pre-test
+            // `for`/`while` cross-loop jump assembles correctly (verified against kotlinc), so it must
+            // NOT be refused — nested labeled loops are ordinary Kotlin.
             IrExpr::Break { label: Some(l) } | IrExpr::Continue { label: Some(l) }
                 if enclosing.len() > 1
                     && enclosing
                         .last()
-                        .is_none_or(|inner| inner.as_ref() != Some(l)) =>
+                        .is_none_or(|(inner, _)| inner.as_ref() != Some(l))
+                    && enclosing.iter().any(|(_, post_test)| *post_test) =>
             {
                 *found = true;
             }
@@ -5445,30 +5452,54 @@ fn suspending_cross_loop_labeled_jump(ir: &IrFile, b: ExprId, suspend_set: &Hash
 /// `"1;1;"`). kotlinc has its arguments on the operand stack before its `putfield`s, so its spill
 /// always sees the post-evaluation state. Modelling that needs the operands materialized into typed
 /// temps ahead of the spill; until then, bail (skip, never miscompile).
-fn suspension_operand_writes_local(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> bool {
-    fn writes_local(ir: &IrFile, e: ExprId) -> bool {
-        if matches!(ir.exprs[e as usize], IrExpr::SetValue { .. }) {
-            return true;
+fn suspension_operand_writes_local(
+    ir: &IrFile,
+    b: ExprId,
+    suspend_set: &HashSet<u32>,
+    spilled: &[(u32, Ty)],
+) -> bool {
+    // Only a SPILLED slot can lose the write — a slot the machine never stores keeps whatever the
+    // local holds — and only if something OUTSIDE the operand reads it: a scratch variable whose every
+    // read is inside the operand itself (`foo(run { t = 2; t })`) is re-assigned before each read, so
+    // the stale field is never observed. Reads are counted rather than located, since the operand
+    // subtree cannot be subtracted from the body's own walk.
+    fn count_reads(ir: &IrFile, e: ExprId, idx: u32) -> usize {
+        let mut n = usize::from(matches!(ir.exprs[e as usize], IrExpr::GetValue(i) if i == idx));
+        for_each_child(&ir.exprs, e, &mut |c| n += count_reads(ir, c, idx));
+        n
+    }
+    fn written_slots(ir: &IrFile, e: ExprId, out: &mut Vec<u32>) {
+        if let IrExpr::SetValue { var, .. } = ir.exprs[e as usize] {
+            out.push(var);
         }
-        let mut found = false;
-        for_each_child(&ir.exprs, e, &mut |c| found = found || writes_local(ir, c));
-        found
+        for_each_child(&ir.exprs, e, &mut |c| written_slots(ir, c, out));
     }
     let mut points: HashSet<ExprId> = HashSet::new();
     collect_suspension_points(ir, b, suspend_set, &mut points);
     points.iter().any(|&p| {
-        let IrExpr::Call {
-            dispatch_receiver,
-            args,
-            ..
-        } = &ir.exprs[p as usize]
-        else {
-            return false;
+        // Both call shapes suspend: `Call` is a static/top-level callee, `MethodCall` a same-file
+        // member (`c.foo(i++)`), whose receiver is just as much an operand as its arguments.
+        let (receiver, args): (Option<ExprId>, Vec<ExprId>) = match &ir.exprs[p as usize] {
+            IrExpr::Call {
+                dispatch_receiver,
+                args,
+                ..
+            } => (*dispatch_receiver, args.clone()),
+            IrExpr::MethodCall { receiver, args, .. } => {
+                (Some(*receiver), args.iter().flatten().copied().collect())
+            }
+            _ => return false,
         };
-        dispatch_receiver
-            .iter()
-            .chain(args.iter())
-            .any(|&o| writes_local(ir, o))
+        receiver.iter().chain(args.iter()).any(|&o| {
+            let mut written = Vec::new();
+            written_slots(ir, o, &mut written);
+            written.sort_unstable();
+            written.dedup();
+            written.iter().any(|&slot| {
+                spilled.iter().any(|&(s, _)| s == slot)
+                    && count_reads(ir, b, slot) > count_reads(ir, o, slot)
+            })
+        })
     })
 }
 
