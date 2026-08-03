@@ -188,6 +188,21 @@ fun box(): String {\n\
     run(src, "BoundedCmp");
 }
 
+/// A SINGLE `where` bound is the same constraint as the inline `<T : Named>` form, so its members
+/// resolve on a value of the parameter's type. (The two-bound form below needs the INTERSECTION of
+/// its bounds, which `Ty` cannot express yet.)
+#[test]
+fn where_clause_single_bound() {
+    let src = "interface Named { val name: String }\n\
+fun <T> label(x: T): String where T : Named = x.name\n\
+class Item(override val name: String) : Named\n\
+fun box(): String {\n\
+    if (label(Item(\"widget\")) != \"widget\") return \"f1\"\n\
+    return \"OK\"\n\
+}\n";
+    run(src, "WhereSingle");
+}
+
 #[test]
 fn where_clause_two_bounds() {
     let src = "interface Named { val name: String }\n\

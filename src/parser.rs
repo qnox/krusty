@@ -2603,16 +2603,25 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse an optional generic constraint clause `where T : Bound, U : Bound2` after a function or
-    /// class signature. Constraints are *erased* (krusty erases type parameters to `Object`), but a
-    /// primitive bound is rejected for the same reason as an inline bound — kotlinc specializes it
+    /// class signature, returning the `(type parameter, bound)` pairs it declares.
+    ///
+    /// A `where` bound is the SAME constraint as the inline `<T : Bound>` form — Kotlin offers both
+    /// spellings, and the second is required once a parameter has more than one bound. The pairs join
+    /// the declaration's `type_param_bounds` so every consumer (erasure, member resolution on a value
+    /// of the parameter's type) sees one list regardless of spelling; previously the clause was parsed
+    /// for its diagnostics and then discarded, so `where T : Named` resolved no members at all while
+    /// `<T : Named>` did.
+    ///
+    /// A primitive bound is rejected for the same reason as an inline bound — kotlinc specializes it
     /// (see `parse_type_params`). `where` may sit on a following line, so newlines are skipped only
     /// when the clause is actually present (otherwise the position is restored).
-    fn parse_where_clause(&mut self) {
+    fn parse_where_clause(&mut self) -> Vec<(String, TypeRef)> {
+        let mut bounds: Vec<(String, TypeRef)> = Vec::new();
         let save = self.i;
         self.skip_newlines();
         if !(self.at(TokenKind::Ident) && self.text() == "where") {
             self.i = save;
-            return;
+            return bounds;
         }
         self.bump(); // 'where'
                      // Track per-name FUNCTION-TYPE bounds: an intersection (`where T : () -> Unit,
@@ -2661,11 +2670,15 @@ impl<'a> Parser<'a> {
                             .to_string(),
                     );
                 }
+                if !tp_name.is_empty() {
+                    bounds.push((tp_name.clone(), bound));
+                }
             }
             if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
+        bounds
     }
 
     fn parse_qualified_name(&mut self) -> String {
@@ -2765,7 +2778,10 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        self.parse_where_clause();
+        // A `where` bound is the same constraint as the inline `<T : Bound>` form; join them so every
+        // consumer sees one list.
+        let mut type_param_bounds = type_param_bounds;
+        type_param_bounds.extend(self.parse_where_clause());
         let signature_end = self.t[self.i.saturating_sub(1)].span.hi;
         // A `=`-body or block body may sit on a following line (`fun f(): T\n{ … }`). Skip plain line
         // breaks to find it, restoring the position if what follows is neither — an abstract/no-body
@@ -3170,8 +3186,9 @@ impl<'a> Parser<'a> {
         let (supertypes, base_class, base_type_args, base_args, delegations, delegation_exprs) =
             self.parse_supertypes();
         // `class Derived<T> : Base<T>() where T : I1, T : I2` — generic constraints after the
-        // supertype list, before the body.
-        self.parse_where_clause();
+        // supertype list, before the body. Same constraint as the inline form; one joined list.
+        let mut type_param_bounds = type_param_bounds;
+        type_param_bounds.extend(self.parse_where_clause());
         // Optional class body: member `fun`s, body properties (`val`/`var`), and `init { }` blocks.
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
@@ -3672,7 +3689,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
-        let (type_params, _, _, _) = if self.at(TokenKind::Lt) {
+        let (type_params, _, _, type_param_bounds) = if self.at(TokenKind::Lt) {
             self.parse_type_params()
         } else {
             (
@@ -3683,8 +3700,10 @@ impl<'a> Parser<'a> {
             )
         };
         let (supertypes, _base, _base_type_args, _base_args, _, _) = self.parse_supertypes();
-        // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the body.
-        self.parse_where_clause();
+        // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the
+        // body. Same constraint as the inline form; one joined list.
+        let mut type_param_bounds = type_param_bounds;
+        type_param_bounds.extend(self.parse_where_clause());
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut companion_methods: Vec<FunDecl> = Vec::new();

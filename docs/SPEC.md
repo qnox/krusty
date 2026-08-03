@@ -2277,6 +2277,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in-class branch now ends there too, so a member inherited from a supertype (`name` / `ordinal` from
   `java.lang.Enum`, and any classpath supertype's) reads unqualified. Test:
   `tests/feature_coverage_x_e2e.rs::enum_rich_members`.
+- **A `where` generic-constraint clause.** `fun <T> label(x: T) where T : Named` declares the same
+  constraint as the inline `<T : Named>` form — Kotlin offers both spellings, and the second is
+  REQUIRED once a parameter has more than one bound. The clause was parsed for its diagnostics and
+  then discarded, so a `where` bound resolved no members at all while the inline form did. The pairs
+  now join the declaration's `type_param_bounds`, so erasure and member resolution see one list
+  regardless of spelling. Applies to functions, classes and interfaces alike. Test:
+  `tests/feature_coverage_n_e2e.rs::where_clause_single_bound`.
+
+  Still open: MULTIPLE bounds on one parameter (`where T : Comparable<T>, T : Named`). Kotlin gives
+  such a parameter the INTERSECTION of its bounds and resolves members from all of them, while the JVM
+  erasure takes the first; `Ty::TyParam` carries a single bound, so only the first one's members
+  resolve.
 
 ## 8. Success criteria for the PoC
 
