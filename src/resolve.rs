@@ -24864,17 +24864,12 @@ impl<'a> Checker<'a> {
         } else {
             None
         };
-        // Bounded non-inline returns need an erased-return coercion that is not modeled here.
-        let ret_tp = ret_tp.filter(|r| {
-            f.is_inline()
-                || declared_tparam_semantic_bound(
-                    r,
-                    &f.type_params,
-                    &f.type_param_bounds,
-                    &|name| self.syms.class_names.get(name),
-                )
-                .is_none_or(Ty::is_nullable)
-        });
+        // A BOUNDED type parameter's return used to be declined here: the erased return is the bound
+        // (`Number` for `<T : Number>`), and the call site left the boxed value on the stack where the
+        // substituted `Int` was expected — a VerifyError. The unbox is emitted now (`ir_lower`'s
+        // `coerce_erased_call_result` no longer requires the physical return to be erased-top), so a
+        // bounded return is inferred like an unbounded one. The soundness guards below — unambiguous
+        // binding, no conflicting witnesses — still apply to every non-inline call.
         let bound = match ret_tp.as_deref().and_then(|r| binds.get(r).copied()) {
             Some(bound) => bound,
             None => {

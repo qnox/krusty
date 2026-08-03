@@ -2235,6 +2235,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invokevirtual <E>.compareTo(Ljava/lang/Enum;)I`; both dispatch to the same method, and this matches
   what krusty already emitted for an EXPLICIT `a.compareTo(b)` on an enum. Test:
   `tests/feature_coverage_r_e2e.rs::enum_comparison_ordering`.
+- **A BOUNDED type parameter's return, inferred at the call site.** `fun <T : Number> id(x: T): T`
+  called as `id(3)` types as `Int`, not the erased bound `Number`. Two halves had to meet: the
+  checker declined a bounded return outright ("an erased-return coercion is not modeled"), and the
+  lowering's coercion of an erased call result required the PHYSICAL return to be erased-top — which a
+  bound is not — so the boxed value stayed on the stack where an `int` was expected (a `VerifyError`).
+  The unbox is now emitted whenever the erased return is a type parameter AND the physical return is a
+  REFERENCE; that last condition matters, because the same coercion hook is reached with a primitive
+  physical return (a defaulted `Char` parameter) where unboxing is wrong. Same shape as kotlinc:
+  `Integer.valueOf` per argument, then an unbox of the result. The existing soundness guards on
+  non-inline inference — unambiguous binding, no conflicting witnesses — are unchanged. Tests:
+  `tests/feature_coverage_n_e2e.rs::bounded_type_param_comparable`,
+  `tests/feature_coverage_x_e2e.rs::generic_fn_with_comparable_bound`,
+  `tests/bounded_type_param_e2e.rs::comparable_operator_bounded_generic_called_with_primitive_runs`.
 
 ## 8. Success criteria for the PoC
 

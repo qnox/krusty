@@ -8014,7 +8014,13 @@ impl<'a> Lower<'a> {
         if st != Ty::Error {
             self.ir.logical_types.insert(call, ty_to_ir(st));
         }
-        if self.has_scalar_value_repr(st) && phys.is_erased_top() {
+        // A scalar static type behind an erased return unboxes. This must NOT require the physical
+        // return to be erased-top: `fun <T : Number> id(x: T): T` returns `Number`, and kotlinc still
+        // emits the unbox (`invokevirtual Number.intValue`). Gating on erased-top left the boxed value
+        // on the stack where an `int` was expected — a VerifyError. The early return above already
+        // established that the erased return IS a type parameter (bounded or not), which is exactly
+        // when the checker's substituted type may refine it.
+        if self.has_scalar_value_repr(st) && phys.is_reference() {
             return self.emit_type_op(IrTypeOp::ImplicitCoercion, call, ty_to_ir(st));
         }
         if st.is_reference() && !st.is_erased_top() && st != Ty::Null && st.non_null() != phys {

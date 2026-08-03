@@ -80,22 +80,16 @@ fn number_bound_member_toint_resolves_and_runs() {
 }
 
 #[test]
-fn comparable_operator_bounded_generic_called_with_primitive_is_declined() {
+fn comparable_operator_bounded_generic_called_with_primitive_runs() {
     // `fun <T : Comparable<T>> maxOf2(a, b): T = if (a > b) a else b` called with `Int` literals
-    // (`maxOf2(3, 5)`) needs the type argument inferred as `Int` AND a primitive arg BOXED into the
-    // `Comparable`-erased parameter slot — krusty does not yet emit that box (a raw `int` reaching a
-    // `Comparable` parameter is a `VerifyError`). So it must DECLINE (skip), not miscompile. The bound
-    // itself IS recovered (descriptor/member resolution); only the primitive-into-bound call is unsupported.
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let src = "fun <T : Comparable<T>> maxOf2(a: T, b: T): T = if (a > b) a else b\nfun box(): String = if (maxOf2(3, 5) == 5) \"OK\" else \"no\"\n";
-    assert!(
-        common::compile_in_process(src, "P", &[stdlib], Some(&jdk)).is_none(),
-        "expected krusty to decline a Comparable-operator-bounded generic called with primitives"
+    // (`maxOf2(3, 5)`) needs the type argument inferred as `Int`, the primitive arguments BOXED into
+    // the `Comparable`-erased parameter slots, and the `Comparable` result UNBOXED back to `Int`. The
+    // boxes were already emitted; the missing return unbox (gated on the physical return being
+    // erased-top, which a BOUND is not) left the boxed value where an `int` was expected. Same
+    // bytecode shape as kotlinc: `Integer.valueOf` per argument, then an unbox of the result.
+    common::expect_box_ok_with_stdlib(
+        "fun <T : Comparable<T>> maxOf2(a: T, b: T): T = if (a > b) a else b\nfun box(): String = if (maxOf2(3, 5) == 5) \"OK\" else \"no\"\n",
+        "P",
     );
 }
 
