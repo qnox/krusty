@@ -12990,9 +12990,12 @@ fn check_file_at_impl_mode(
                 // `companion object` members are checked statically, with companion props/methods in
                 // scope unqualified.
                 if !cl.companion_methods.is_empty() || !cl.companion_props.is_empty() {
-                    // krusty emits companion members as statics on the same class, so a companion
-                    // member whose name collides with an instance member would duplicate a field/
-                    // method (kotlinc separates them via a nested Companion class). Reject (skip).
+                    // A plain companion property hoists to a static field on the outer class, so a
+                    // companion PROPERTY whose name collides with an instance member would duplicate
+                    // a field (kotlinc separates them via the nested Companion class). Reject (skip).
+                    // Companion METHODS are emitted on `C$Companion`, so they collide only with a
+                    // same-arity instance method (the shape a `@JvmStatic` forwarder could not
+                    // coexist with); a different-arity same-named pair is legal Kotlin and JVM.
                     let inst_names: std::collections::HashSet<&str> = cl
                         .props
                         .iter()
@@ -13007,7 +13010,11 @@ fn check_file_at_impl_mode(
                         }
                     }
                     for cm in &cl.companion_methods {
-                        if inst_names.contains(cm.name.as_str()) {
+                        let same_arity_instance = cl
+                            .methods
+                            .iter()
+                            .any(|m| m.name == cm.name && m.params.len() == cm.params.len());
+                        if same_arity_instance {
                             c.diags.error(cl.span, format!("krusty: companion member '{}' collides with an instance member (unsupported)", cm.name));
                         }
                     }
