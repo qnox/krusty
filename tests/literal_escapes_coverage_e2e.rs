@@ -1,8 +1,8 @@
 //! Character- and string-literal escape sequences the box corpus never spells out — `\r`, `\b`, `\\`,
-//! `\"`, `\'`, `\$`, and `\uXXXX`. The parser's `unquote_char`/`unescape_chunk` decode every escape
-//! whenever a literal is parsed, but the corpus only exercises the common `\n`/`\t`, leaving the rest
-//! of the match arms untouched. Each escape is checked against its `\uXXXX` equivalent so a wrong
-//! decode fails loudly.
+//! `\"`, `\'`, `\$`, and `\uXXXX`. Character tokens use the shared token-layer validator/decoder;
+//! strings use the parser's `unescape_chunk`. The corpus only exercises the common `\n`/`\t`, leaving
+//! the rest of those match arms untouched. Each escape is checked against its `\uXXXX` equivalent so
+//! a wrong decode fails loudly.
 
 use super::common;
 
