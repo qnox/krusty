@@ -5953,7 +5953,17 @@ impl<'a> Lower<'a> {
             }
             _ => recv,
         };
-        self.check_unsigned_boxes_fit_descriptor(&member.descriptor, &args)?;
+        // The receiver is checked with the arguments: a member of a value class is realized as a
+        // mangled `-impl` static whose descriptor spells it as the leading parameter, and the box
+        // above is the one thing that can put a reference in it.
+        self.check_unsigned_boxes_fit_descriptor(
+            self.runtime
+                .descriptor_method_layout(&member.descriptor)
+                .map(|layout| layout.reference_slots),
+            Some(recv),
+            &args,
+            None,
+        )?;
         let interface = member.is_interface() || self.library_type_is_interface(owner);
         // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
         // the pushed receiver into a continuation spill slot (an unnamed temp local in its
@@ -6082,7 +6092,37 @@ impl<'a> Lower<'a> {
         record_suspend: bool,
     ) -> Option<u32> {
         let logical_ret = callable.ret;
-        self.check_unsigned_boxes_fit_descriptor(&callable.descriptor, &args)?;
+        // A descriptor that spells a CPS `Continuation` the lowered arguments do not fill. For a
+        // SUSPEND callable that is the normal `$default` shape — the plain suspend descriptor has
+        // already had its trailing continuation stripped, but a `$default` one spells it BEFORE the
+        // mask/marker tail, so it survives and the backend appends the value at emit time.
+        let descriptor_layout = self.runtime.descriptor_method_layout(&callable.descriptor);
+        let continuation = descriptor_layout
+            .as_ref()
+            .filter(|layout| layout.reference_slots.len() == args.len() + 1)
+            .and_then(|layout| layout.continuation_slot);
+        // For a callable NOT marked suspend, nothing will thread it, so the emitted `invokestatic` is
+        // an argument SHORT: it links and fails verification. The record is wrong rather than the
+        // call — an unsigned value parameter mangles the JVM name (`libU` → `libU-OzbTU-A`) and the
+        // suspend lookup, keyed by that name, misses the `@Metadata` entry under the SOURCE name.
+        // Both call forms reach this: the `$default` synthetic and the plain mangled method, which is
+        // why the test is the UNFILLED slot rather than `$default`-ness. A non-suspend callee that
+        // takes a `Continuation` as an ordinary parameter fills every slot and is untouched.
+        // Declining keeps the wrong record out of a class file; recovering the lookup would let the
+        // shape emit again.
+        if continuation.is_some() && !callable.suspend {
+            return self.bail("gate:unthreaded-continuation-slot");
+        }
+        // The singleton receiver of an imported object member is a static field READ, so it is not a
+        // descriptor slot; the emitter decides a leading receiver by COUNT, and an unfilled slot here
+        // reaches `check_unsigned_boxes_fit_descriptor` as `None` — its conservative path — rather
+        // than as a wrong position.
+        self.check_unsigned_boxes_fit_descriptor(
+            descriptor_layout.map(|layout| layout.reference_slots),
+            None,
+            &args,
+            continuation,
+        )?;
         // A member of an `object` / `companion object` brought into scope by `import Owner.name`: its
         // realization is an INSTANCE invoke on the singleton, not a facade static. Resolution recorded
         // exactly which field holds it (a plain object's `INSTANCE`, or the outer class's field for a
@@ -6144,23 +6184,21 @@ impl<'a> Lower<'a> {
     }
 
     /// The unsigned value class a LOWERED expression already holds in its BOXED form, as the carrier
-    /// `Ty` that box wraps (`kotlin/UInt.box-impl(…)` → `Ty::UInt`).
+    /// `Ty` that box wraps (a node leaving a `kotlin/UInt` on the stack → `Ty::UInt`).
     ///
-    /// A question about REPRESENTATION, not about the declared type. krusty carries an unsigned value
-    /// in the JVM primitive slot of its carrier, and the inline-class factory `X."box-impl"` is the
-    /// only thing that puts the boxed class on the stack — so reading it back off the lowered node is
-    /// exact, where the checker's `Ty` (still `UInt` on both sides of a box) cannot tell them apart.
+    /// A question about REPRESENTATION, not about the declared type: krusty carries an unsigned value
+    /// in the JVM primitive slot of its carrier, and the checker's `Ty` is `UInt` on both sides of a
+    /// box, so only the lowered node can say which one is on the stack. It is answered from the CLASS
+    /// the node leaves there ([`lowered_reference_class`]) rather than from one node shape — a box is
+    /// still a box after being cast or produced as a block's value, and boxing a second time would
+    /// push a `kotlin/UInt` where the descriptor spells `I`.
     fn lowered_unsigned_box(&self, expr: u32) -> Option<Ty> {
-        let IrExpr::Call {
-            callee: Callee::Static { owner, name, .. },
-            ..
-        } = &self.ir.exprs[expr as usize]
-        else {
-            return None;
-        };
-        (name == "box-impl")
-            .then(|| self.runtime.unsigned_integer_carrier_for_box_type(*owner))
-            .flatten()
+        self.runtime
+            .unsigned_integer_carrier_for_box_type(lowered_reference_class(
+                &self.ir,
+                self.runtime,
+                expr,
+            )?)
     }
 
     /// Decline the file unless every BOXED unsigned argument lands in a descriptor slot that actually
@@ -6174,19 +6212,51 @@ impl<'a> Lower<'a> {
     /// disagreement from reaching a class file; it is a net, not the mechanism any supported shape
     /// relies on.
     ///
-    /// Positions are compared only when the counts line up: a `$default` mask, an appended
-    /// `Continuation`, and a packed vararg all shift them, and none of those shapes can put a box
-    /// where a carrier belongs. A descriptor the platform cannot read is left to its own gates —
-    /// lowering asks which slots are references rather than parsing a target spelling itself.
-    fn check_unsigned_boxes_fit_descriptor(&self, descriptor: &str, args: &[u32]) -> Option<()> {
-        let Some(reference_slot) = self.runtime.descriptor_reference_params(descriptor) else {
+    /// Positions come from [`align_call_values_to_slots`], which reconciles the two shapes whose
+    /// descriptor carries a slot the lowered arguments do not: a value class's mangled `-impl`
+    /// member (the receiver is the LEADING parameter) and a `suspend` `$default` synthetic (the CPS
+    /// `Continuation` sits before the mask/marker tail, and the backend appends it). Any shape it
+    /// cannot line up falls back to declining whenever a box is on the stack at all, so no call
+    /// skips the check. `slot_is_reference` is `None` for a descriptor the platform cannot read,
+    /// which is left to its own gates — lowering asks which slots are references rather than parsing
+    /// a target spelling itself, and takes the answer PARSED so a caller that already needed the
+    /// slots does not pay for a second read.
+    ///
+    /// The RECEIVER is checked alongside the arguments: it is a descriptor slot exactly for the
+    /// `-impl` shape, and `emit_library_member_call` boxes it for a value-class owner — the same
+    /// disagreement, one position to the left.
+    fn check_unsigned_boxes_fit_descriptor(
+        &self,
+        slot_is_reference: Option<Vec<bool>>,
+        receiver: Option<u32>,
+        args: &[u32],
+        continuation_slot: Option<usize>,
+    ) -> Option<()> {
+        let Some(slot_is_reference) = slot_is_reference else {
             return Some(());
         };
-        if reference_slot.len() != args.len() {
-            return Some(());
-        }
-        let fits = std::iter::zip(args, reference_slot)
-            .all(|(&a, is_ref)| is_ref || self.lowered_unsigned_box(a).is_none());
+        let boxed = |value: u32| self.lowered_unsigned_box(value).is_some();
+        let Some(slots) = align_call_values_to_slots(
+            slot_is_reference,
+            receiver.is_some(),
+            args.len(),
+            continuation_slot,
+        ) else {
+            // An alignment this function does not model: no position is trustworthy, so the only
+            // sound answer is to decline whenever a box is on the stack at all. A call that carries
+            // none is unaffected, which is why the fallback costs nothing on every shape observed —
+            // it exists so an unmodelled shape cannot silently skip the check.
+            return match receiver.into_iter().chain(args.iter().copied()).any(boxed) {
+                true => self.bail("gate:unsigned-box-in-erased-slot"),
+                false => Some(()),
+            };
+        };
+        let receiver_fits = match (slots.receiver, receiver) {
+            (Some(is_reference), Some(receiver)) => is_reference || !boxed(receiver),
+            _ => true,
+        };
+        let fits = receiver_fits
+            && std::iter::zip(args, slots.args).all(|(&a, is_reference)| is_reference || !boxed(a));
         if !fits {
             return self.bail("gate:unsigned-box-in-erased-slot");
         }
@@ -27718,6 +27788,109 @@ struct ResolvedSourceConstructorPlan<'a> {
     slot_prims: &'a [Option<Ty>],
 }
 
+/// The class a LOWERED node leaves on the stack, where the IR alone determines it.
+///
+/// This is lowering's representation query: it answers what is PHYSICALLY on the stack, which the
+/// checker's `Ty` cannot — a value class and its carrier share one `Ty` on both sides of a box. It
+/// is deliberately partial. `None` means "a primitive carrier, OR a shape this cannot derive", never
+/// "definitely not a reference", so every caller must treat `None` as the conservative answer and
+/// `Some` as a claim. That asymmetry is what lets the walk grow: a shape it does not know keeps
+/// exactly the behaviour it had before the shape was added.
+///
+/// Nothing here enumerates a value's PROVENANCE (which helper produced it). It reads the type off
+/// each node — the descriptor of a call, the type operand of a cast, a field's declared type — so a
+/// value stays recognisable after being cast or carried out of a block, which a match on the
+/// producing node's shape cannot do.
+///
+/// The `Some` is the class as LOWERING knows it, which is not always the class the emitted method
+/// signature ends up naming: the value-class pass rewrites an `IrFunction::ret` afterwards, so a
+/// `Callee::Local` returning a `@JvmInline` class answers with that class while the compiled method
+/// returns its erased underlying. The answer is exact only for classes those later passes leave
+/// alone, which is what the sole caller ([`Lower::lowered_unsigned_box`]) needs — it compares against
+/// the unsigned box names, and `ir_ty_to_jvm` keeps those as references. A future caller asking about
+/// any other class must check that assumption for itself.
+///
+/// A `GetValue` is deliberately NOT answered. Its type lives on the declaring `IrExpr::Variable`,
+/// which is reachable only through a value-index table, and value indices are per-declaration-body
+/// and re-used — they restart at ~25 sites, are saved/restored around three nested bodies, and one
+/// coroutine temp is declared under the enclosing body's numbering. A per-index table therefore
+/// cannot be made sound without first making those scopes explicit, and an entry surviving into the
+/// wrong scope would claim a box for a carrier — skipping a required box, which is precisely the
+/// `VerifyError` this query exists to prevent. Conservative beats clever here.
+fn lowered_reference_class(
+    ir: &IrFile,
+    runtime: &dyn TargetRuntime,
+    expr: ExprId,
+) -> Option<TypeName> {
+    let of = |e: ExprId| lowered_reference_class(ir, runtime, e);
+    match ir.expr(expr) {
+        // Nodes that pass a value THROUGH: what they leave on the stack is what produced it.
+        IrExpr::Block { value, .. } => of((*value)?),
+        // Only when every branch agrees — a `when` whose arms leave different classes has no single
+        // answer, and its stack type is the emitter's business rather than lowering's.
+        IrExpr::When { branches } => {
+            let mut classes = branches.iter().map(|&(_, body)| of(body));
+            let first = classes.next()??;
+            classes.all(|class| class == Some(first)).then_some(first)
+        }
+        // A cast RETYPES its operand and therefore proves the verifier-visible reference class.
+        // `is`/`!is` are excluded because they yield a boolean; so is `as?`, whose null-or-cast shape
+        // is built from a `when` over a plain `Cast` and is already covered by the arms above.
+        IrExpr::TypeOp {
+            op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
+            type_operand,
+            ..
+        } => type_operand.obj_internal(),
+        // A reference-to-reference coercion emits no representation change, so preserve a class that
+        // was already proved by the operand. Do NOT claim the target class for primitive-to-reference:
+        // the backend selects a wrapper from the SOURCE carrier (`UInt` boxes differently from `Int`),
+        // and the target may merely be `Any`. Target syntax alone is therefore not evidence of the
+        // physical class. A primitive target likewise unboxes and leaves no reference.
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } => type_operand.obj_internal().and_then(|_| of(*arg)),
+        IrExpr::GetStatic(index) => ir.statics.get(*index as usize)?.ty.obj_internal(),
+        IrExpr::GetField { class, index, .. } => ir
+            .classes
+            .get(*class as usize)?
+            .fields
+            .get(*index as usize)?
+            .ty
+            .obj_internal(),
+        IrExpr::New { internal, .. } => Some(*internal),
+        IrExpr::MethodCall { class, index, .. } => {
+            let function = *ir
+                .classes
+                .get(*class as usize)?
+                .methods
+                .get(*index as usize)?;
+            ir.functions.get(function as usize)?.ret.obj_internal()
+        }
+        IrExpr::Call { callee, .. } => match callee {
+            Callee::Local(function) | Callee::LocalDefault(function) => {
+                ir.functions.get(*function as usize)?.ret.obj_internal()
+            }
+            Callee::CrossFile { ret, .. } => ret.obj_internal(),
+            // A callee carrying `Ty`s answers from them; one carrying a verbatim platform descriptor
+            // is read by the platform, never parsed here.
+            Callee::Virtual {
+                params: Some((_, ret)),
+                ..
+            } => ret.obj_internal(),
+            Callee::Static { descriptor, .. }
+            | Callee::Special { descriptor, .. }
+            | Callee::Virtual { descriptor, .. } => runtime
+                .descriptor_method_layout(descriptor)
+                .and_then(|layout| layout.return_class),
+            // An intrinsic named by Kotlin FqName has no signature in the IR at all.
+            Callee::External(_) => None,
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn ty_to_ir(t: Ty) -> Ty {
     t
 }
@@ -27855,6 +28028,61 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
     })
 }
 
+/// Which descriptor slots a call's LOWERED values occupy, in the order those values are pushed.
+struct CallValueSlots {
+    /// Whether the RECEIVER's own descriptor slot holds a reference, when the descriptor spells one
+    /// at all. `None` for an ordinary instance call, whose receiver is off the descriptor.
+    receiver: Option<bool>,
+    /// Whether each value argument's slot holds a reference, in argument order.
+    args: Vec<bool>,
+}
+
+/// Line a call's lowered values up with the descriptor slots they land in.
+///
+/// A callee's descriptor is emitted VERBATIM, but the value list the lowerer builds is not always
+/// one-per-slot. Two shapes carry a descriptor slot no lowered value fills:
+///
+/// - a value class's members are realized as mangled `-impl` STATICS, whose descriptor spells the
+///   receiver as the LEADING parameter (`kotlin/Result.getOrNull-impl(Ljava/lang/Object;)…`) while
+///   the receiver travels beside the arguments, not in them;
+/// - a `suspend` `$default` synthetic spells the CPS `Continuation` BEFORE the mask/marker tail
+///   (`withLock$default(Mutex, Object, Function0, Continuation, int, Object)`), and the backend
+///   appends it — so `continuation_slot` names a position the caller never lowered.
+///
+/// A packed vararg and a non-suspend `$default` need no reconciliation: the vararg array is emitted
+/// before the values reach here, and the `$default` mask and marker are pushed as ordinary values.
+///
+/// Returns `None` when the counts still disagree — an unmodelled shape, or one whose synthetic tail
+/// is wider than a single mask word. Callers must treat that as "no position is known", never as
+/// "nothing to check".
+fn align_call_values_to_slots(
+    mut slot_is_reference: Vec<bool>,
+    has_receiver: bool,
+    arg_count: usize,
+    continuation_slot: Option<usize>,
+) -> Option<CallValueSlots> {
+    if let Some(slot) = continuation_slot {
+        if slot >= slot_is_reference.len() {
+            return None;
+        }
+        slot_is_reference.remove(slot);
+    }
+    if slot_is_reference.len() == arg_count {
+        return Some(CallValueSlots {
+            receiver: None,
+            args: slot_is_reference,
+        });
+    }
+    if has_receiver && slot_is_reference.len() == arg_count + 1 {
+        let receiver = slot_is_reference.remove(0);
+        return Some(CallValueSlots {
+            receiver: Some(receiver),
+            args: slot_is_reference,
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -27864,6 +28092,171 @@ mod tests {
     impl TargetRuntime for UnsignedBoxRuntime {
         fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
             ty.boxed_ref().filter(|_| ty.is_unsigned())
+        }
+
+        fn descriptor_method_layout(
+            &self,
+            descriptor: &str,
+        ) -> Option<crate::runtime::PlatformMethodLayout> {
+            let ret = descriptor.split_once(')')?.1;
+            Some(crate::runtime::PlatformMethodLayout {
+                reference_slots: Vec::new(),
+                continuation_slot: None,
+                return_class: ret
+                    .strip_prefix('L')
+                    .and_then(|ret| ret.strip_suffix(';'))
+                    .map(type_name),
+            })
+        }
+    }
+
+    /// A `Callee::Static` with a verbatim descriptor — the shape every classpath call has.
+    fn static_call(ir: &mut IrFile, name: &str, descriptor: &str) -> ExprId {
+        ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: type_name("kotlin/UInt"),
+                name: name.to_string(),
+                descriptor: descriptor.to_string(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![],
+        })
+    }
+
+    /// `kotlin/UInt.box-impl(I)` — the node the receiver-boxing branch must not box a second time.
+    fn unsigned_box(ir: &mut IrFile) -> ExprId {
+        static_call(ir, "box-impl", "(I)Lkotlin/UInt;")
+    }
+
+    /// The representation query behind that branch must recognise a box wherever it reaches the call,
+    /// not only when the box node IS the receiver. Every case below is the same `kotlin/UInt` value; a
+    /// query that saw only the producing node would answer `None` for all but the first and box it
+    /// again, pushing a `Lkotlin/UInt;` at a descriptor that spells `I`.
+    #[test]
+    fn an_unsigned_box_stays_recognisable_through_the_nodes_that_carry_it() {
+        let mut ir = IrFile::with_package(None);
+
+        let direct = unsigned_box(&mut ir);
+
+        let inner = unsigned_box(&mut ir);
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![],
+            value: Some(inner),
+        });
+
+        let operand = unsigned_box(&mut ir);
+        let cast = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: operand,
+            type_operand: Ty::obj("kotlin/UInt"),
+        });
+
+        // A reference-to-reference coercion changes only the logical view (`UInt` → `Any`), not the
+        // physical box. Following the operand is what preserves its more precise representation.
+        let coerced_operand = unsigned_box(&mut ir);
+        let coerced = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: coerced_operand,
+            type_operand: Ty::obj("kotlin/Any"),
+        });
+
+        let (left, right) = (unsigned_box(&mut ir), unsigned_box(&mut ir));
+        let when = ir.add_expr(IrExpr::When {
+            branches: vec![(Some(direct), left), (None, right)],
+        });
+
+        // The box reached through two carriers at once, which is what a real receiver looks like
+        // after a safe call spills it: `{ …; (kotlin/UInt) box-impl(x) }`.
+        let nested_operand = unsigned_box(&mut ir);
+        let nested_cast = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: nested_operand,
+            type_operand: Ty::obj("kotlin/UInt"),
+        });
+        let nested = ir.add_expr(IrExpr::Block {
+            stmts: vec![],
+            value: Some(nested_cast),
+        });
+
+        for (expr, what) in [
+            (direct, "the box itself"),
+            (block, "a block whose value is the box"),
+            (cast, "a cast of the box"),
+            (coerced, "a reference coercion carrying the box"),
+            (when, "a `when` whose every branch is the box"),
+            (nested, "a block whose value is a cast of the box"),
+        ] {
+            assert_eq!(
+                UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(
+                    lowered_reference_class(&ir, &UnsignedBoxRuntime, expr)
+                        .unwrap_or_else(|| panic!("{what} leaves a reference on the stack"))
+                ),
+                Some(Ty::UInt),
+                "{what}"
+            );
+        }
+    }
+
+    /// The other half of the contract: a CARRIER must never read as a box, or the receiver-boxing
+    /// branch would skip a box the `invokevirtual` requires. Anything the walk cannot derive answers
+    /// `None` too, which is the same conservative side.
+    #[test]
+    fn a_carrier_never_reads_as_an_unsigned_box() {
+        let mut ir = IrFile::with_package(None);
+
+        // `kotlin/UInt.constructor-impl(I)I` — an unsigned helper whose result is the raw carrier.
+        let carrier_call = static_call(&mut ir, "constructor-impl", "(I)I");
+        let literal = ir.add_expr(IrExpr::Const(IrConst::Int(5)));
+        // A `when` that mixes representations has no single answer.
+        let boxed = unsigned_box(&mut ir);
+        let mixed = ir.add_expr(IrExpr::When {
+            branches: vec![(Some(literal), boxed), (None, carrier_call)],
+        });
+        // An intrinsic named only by Kotlin FqName carries no signature at all.
+        let intrinsic = ir.add_expr(IrExpr::Call {
+            callee: Callee::External("kotlin/UInt.toString".to_string()),
+            dispatch_receiver: Some(carrier_call),
+            args: vec![],
+        });
+        // `is UInt` yields a BOOLEAN, however unsigned its type operand looks.
+        let instance_of = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg: boxed,
+            type_operand: Ty::obj("kotlin/UInt"),
+        });
+        // A READ of a local is deliberately unanswered, however the local was declared: value indices
+        // are scoped and re-used, so no per-index table can be trusted here (see the walk's docs).
+        let local_read = ir.add_expr(IrExpr::GetValue(7));
+        // A primitive-to-reference coercion does produce some box, but its TARGET is not proof of
+        // which one: the backend chooses from the source carrier. Hand-built `Int -> kotlin/UInt` IR,
+        // for example, would physically box `java/lang/Integer`, so the query must not echo the target.
+        let raw_int = ir.add_expr(IrExpr::Const(IrConst::Int(5)));
+        let unproved_coercion = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: raw_int,
+            type_operand: Ty::obj("kotlin/UInt"),
+        });
+
+        for (expr, what) in [
+            (carrier_call, "a carrier-returning call"),
+            (literal, "a constant"),
+            (mixed, "a `when` mixing a box and a carrier"),
+            (intrinsic, "an intrinsic with no signature in the IR"),
+            (instance_of, "an `is` test against the box"),
+            (local_read, "a read of a local"),
+            (
+                unproved_coercion,
+                "a primitive coercion whose target does not prove its wrapper",
+            ),
+        ] {
+            assert_eq!(
+                lowered_reference_class(&ir, &UnsignedBoxRuntime, expr).and_then(|class| {
+                    UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(class)
+                }),
+                None,
+                "{what}"
+            );
         }
     }
 
@@ -27898,5 +28291,65 @@ mod tests {
             )),
             None
         );
+    }
+
+    /// The ordinary shape: one lowered value per descriptor slot, receiver off the descriptor.
+    #[test]
+    fn positional_call_values_line_up_slot_for_slot() {
+        // `maxOf-J1ME1BU:(II)I` — both slots are erased unsigned carriers.
+        let slots = align_call_values_to_slots(vec![false, false], false, 2, None)
+            .expect("equal counts line up");
+        assert_eq!(slots.receiver, None);
+        assert_eq!(slots.args, vec![false, false]);
+    }
+
+    /// A value class's member is a mangled `-impl` STATIC: the receiver is the descriptor's LEADING
+    /// parameter, so it must be checked as a slot of its own and the arguments must shift past it.
+    /// Comparing only when the counts matched left `kotlin/Result.getOrNull-impl` — the shape the box
+    /// corpus hits over a hundred times — checking nothing at all.
+    #[test]
+    fn value_class_impl_receiver_takes_the_leading_slot() {
+        // `kotlin/Result.getOrNull-impl:(Ljava/lang/Object;)Ljava/lang/Object;` with no arguments.
+        let slots = align_call_values_to_slots(vec![true], true, 0, None)
+            .expect("the extra leading slot is the receiver");
+        assert_eq!(slots.receiver, Some(true));
+        assert!(slots.args.is_empty());
+        // A mangled `-impl` on an unsigned carrier spells that receiver slot as the PRIMITIVE it
+        // rides in; a boxed receiver there is exactly what the gate has to catch.
+        let slots = align_call_values_to_slots(vec![false, true], true, 1, None)
+            .expect("the extra leading slot is the receiver");
+        assert_eq!(slots.receiver, Some(false));
+        assert_eq!(slots.args, vec![true]);
+        // Without a receiver to spend it on, the extra slot stays unexplained.
+        assert!(align_call_values_to_slots(vec![true], false, 0, None).is_none());
+    }
+
+    /// A `suspend` `$default` synthetic spells the CPS `Continuation` between the value parameters
+    /// and the mask/marker tail, and the backend appends it — so the slot has no lowered value, and
+    /// every value after it sits one position to the right of where a naive zip would put it.
+    #[test]
+    fn suspend_default_continuation_is_not_an_argument_slot() {
+        // `MutexKt.withLock$default:(Mutex, Object, Function0, Continuation, int, Object)Object` —
+        // five lowered values (receiver, owner, action, mask, marker) over six slots.
+        let descriptor = vec![true, true, true, true, false, true];
+        let slots = align_call_values_to_slots(descriptor.clone(), false, 5, Some(3))
+            .expect("dropping the continuation slot lines the rest up");
+        assert_eq!(slots.receiver, None);
+        // The mask `int` is the one primitive slot, and it must land on the mask VALUE (index 3),
+        // not on the action lambda it would have been compared against unaligned.
+        assert_eq!(slots.args, vec![true, true, true, false, true]);
+        // The same descriptor without the continuation removed does not line up — which is what
+        // made this shape skip the check entirely.
+        assert!(align_call_values_to_slots(descriptor, false, 5, None).is_none());
+    }
+
+    /// A shape the alignment does not model reports NO alignment rather than a wrong one. The caller
+    /// turns that into "decline if any box is on the stack", so a skip is never silent.
+    #[test]
+    fn unmodelled_shapes_report_no_alignment() {
+        // Two unexplained slots: a wider `$default` mask, a synthetic tail, anything else.
+        assert!(align_call_values_to_slots(vec![true, false, true], true, 1, None).is_none());
+        // A continuation slot the descriptor does not have is a malformed record, not an alignment.
+        assert!(align_call_values_to_slots(vec![true, true], false, 1, Some(7)).is_none());
     }
 }
