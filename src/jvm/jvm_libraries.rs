@@ -3008,6 +3008,15 @@ impl SymbolSource for JvmLibraries {
                     continue;
                 };
                 let bytecode_public = cand.as_ref().map_or(mf.is_public(), |c| c.public);
+                // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
+                // return to `Object`; present the LOGICAL signature (drop the continuation) so a
+                // normal call resolves — the same rule the top-level and member paths apply. The
+                // coroutine pass re-threads the CPS `Continuation` at the emitted call.
+                let descriptor = if mf.is_suspend() {
+                    strip_continuation_param(&descriptor)
+                } else {
+                    descriptor
+                };
                 let Some((params, pret)) = parse_method_desc(&descriptor) else {
                     continue;
                 };
