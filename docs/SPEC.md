@@ -322,8 +322,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   extension reached that way is a `Member` callee, invisible to the bare-`Name` scan, and it is not an
   instance member of the receiver's type, so the resolved-member scan misses it too. The lambda then got
   no state machine and the call emitted without a `Continuation` ("call arity mismatch").
-  `collect_member_call_names` closes it, matched by name against the file's suspend EXTENSIONS only so
-  the (documented, safe) over-approximation stays narrow. An extension body may now suspend on a MEMBER
+  The shape-free `collect_call_sites` scan closes it — every call is inspected through the CHECKER's
+  selected target, so receiver syntax needs no name-matching heuristic of its own (the earlier
+  `collect_member_call_names` name scan it replaced was narrower and keyed to the AST shape). An
+  extension body may now suspend on a MEMBER
   of its receiver — the receiver is an ordinary parameter and the member call threads its own
   continuation, so `gate:extension-suspend-fn-member-suspension` is retired
   (`tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member`). One residual shape the
@@ -643,12 +645,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   krusty's own class output — now emits class metadata too, matching what ships; it is a net gain
   (3466 → 3471 cases compiled, still 0 miscompiles). Keeping it off would have left the gate blind to
   precisely the defects above: they surfaced only once that path wrote what the CLI writes.
+  One test had to be corrected before the default-on switch could pass, and the correction is the
+  interesting part: it asserted that a plain enum carries NO `RuntimeVisibleAnnotations` attribute at
+  all, which contradicts kotlinc — a kotlinc-compiled plain enum carries one, its own class-level
+  `@Metadata` among them. It now asserts on the annotation TYPE (`Ldemo/Mark;`), which is what "the
+  constants are not annotated" actually means
+  (`enum_constant_annotation_emit_e2e::unapplied_annotation_leaves_no_trace_on_a_plain_enum`).
   Tests: `tests/krusty_roundtrip_class_metadata_e2e.rs` (the write side pinned by decoding the emitted
   `Point.class`, plus `copy(y = …)`/destructuring and a plain class's member named arguments
-  round-tripping through krusty's own output). Still open, and NOT about class metadata: the generic
-  half of `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` — a facade record for
-  `fun <T : Comparable<T>> clampMax` keeps the ERASED bound, so the caller reports "operator '!='
-  cannot be applied to 'Comparable' and 'Int'".
+  round-tripping through krusty's own output), and the data-class half of
+  `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` — whose GENERIC half is a separate,
+  facade-side rule (see "A facade `@Metadata` record keeps a BOUNDED type parameter as a type
+  parameter").
 - **`suspend` function TYPE representation (`suspend (A..) -> R`).** kotlinc realizes it as
   `Function{n+1}<A.., Continuation<R>, Object>` — the arity is the logical parameter count PLUS one (a
   trailing continuation), the result erased to `Object`. krusty historically dropped the `suspend`
@@ -1424,7 +1432,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
   The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
   new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
-<<<<<<< HEAD
 - **Unsigned types `UByte`/`UShort`/`UInt`/`ULong`** — Kotlin inline classes over `Byte`/`Short`/`Int`/`Long`;
   unboxed they ARE that JVM primitive (descriptor `B`/`S`/`I`/`J`), with unsignedness driving
   operation/conversion choice (kotlinc hardcodes these intrinsic mappings, so krusty mirrors them). Literals
@@ -1445,17 +1452,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   DIVERGENCE, not a skip: the native unsigned types do not carry kotlinc's value-class NAME MANGLING on a
   function that takes one — krusty emits `f(byte)` where kotlinc emits `f-7apg3OU(byte)`, pre-existing and
   shared by `UInt`/`ULong`.
-=======
-- **Unsigned types `UInt`/`ULong`** — Kotlin inline classes over `Int`/`Long`; unboxed they ARE that JVM
-  primitive (descriptor `I`/`J`), with unsignedness driving operation/conversion choice (kotlinc hardcodes
-  these intrinsic mappings, so krusty mirrors them). Literals `1u`/`0xFFuL`; `+`/`-`/`*`/`==` use the signed
-  two's-complement opcodes; `/`/`%`/`<`/`>` use `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for
-  `ULong`); `toString`/templates use `Integer.toUnsignedString`; `UInt.toLong()` zero-extends via
-  `Integer.toUnsignedLong` (not the sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into
-  a reference context uses the inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and
-  `unbox-impl` on read, `is UInt` → `instanceof kotlin/UInt`) — never `Integer`, so identity and large
-  values are preserved. `tests/unsigned_e2e.rs`. (`UByte`/`UShort`, `UIntRange` value iteration, and unsigned
-  `when` subjects are not yet modeled — they cleanly skip.)
 - **Unsigned values at a CLASSPATH call boundary** — because an unsigned value has TWO representations
   (the carrier in a primitive slot, and the boxed inline class), every classpath call is a place where the
   representation the lowerer produced must agree with the descriptor the backend spells verbatim. Both
@@ -1487,7 +1483,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recovery, which turns the miscompile back into a clean skip.
   `tests/unsigned_classpath_call_e2e.rs` asserts the backend contract directly (a decline passes; an
   EMITTED class that does not verify and run fails), so it keeps holding whichever way a shape is handled.
->>>>>>> origin/master
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
@@ -2948,7 +2943,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   loop recursion) and `tests/deep_expression_nesting_check_e2e.rs`
   (450-level `0+(…)` right-nesting through the checker and lowering, end-to-end).
 
-<<<<<<< HEAD
 - **Vararg spread arguments mixed with plain ones (`f(x, *a, y)`).** A call that mixes spreads and
   plain arguments packs ONE array through the platform spread builder, exactly as kotlinc does:
   `kotlin/jvm/internal/SpreadBuilder` for a reference element, `<Prim>SpreadBuilder`
@@ -3397,7 +3391,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unresolved. The remaining bounds are kept beside the erasure and retried when the lookup fails; the
   erasure itself is untouched, so descriptors still match kotlinc. Test:
   `tests/feature_coverage_n_e2e.rs::where_clause_two_bounds`.
-=======
 - **A member called on an OBJECT or COMPANION receiver types its lambda arguments from the selected
   candidate, exactly as an instance receiver does.** `Wrap.apply2 { it * 2 }` on
   `object Wrap { fun apply2(f: (Int) -> Int): Int }` must bind `it` to `Int`. The instance-receiver
@@ -3453,7 +3446,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   scores every candidate equally, so declaration order decides
   (`fun ap(f: (Int) -> Int)` + `fun ap(s: String)` fails on object and instance receivers alike).
   Test: `tests/object_receiver_lambda_e2e.rs`.
->>>>>>> origin/master
 
 ## 8. Success criteria for the PoC
 
@@ -4465,15 +4457,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for exactly this purpose and already used for the record's receiver — falling back to the erased form
   only for a non-generic function, which has no `generic_sig`. This is the metadata-WRITE half of the
   same rule the call site applies when inferring a bounded type parameter's return from source. Test:
-  `tests/bounded_type_param_e2e.rs::bounded_type_param_roundtrips_through_krusty_metadata`.
-
-  Still open (a separate gap, not generics): krusty emits `@Metadata` on the file FACADE only, never
-  on a CLASS — every in-tree caller passes no class-metadata builder to `emit_all_with_class_meta`,
-  though `metadata::class_builder::build_class` exists for external consumers. A krusty-compiled
-  `data class` therefore round-trips without the records a reader needs for `copy`'s PARAMETER NAMES
-  (named arguments) or for `componentN`'s operator marks (destructuring), even though both methods are
-  emitted into the class file. Blocks the rest of
-  `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn`.
+  `tests/bounded_type_param_e2e.rs::bounded_type_param_roundtrips_through_krusty_metadata`, and the
+  generic half of `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` (whose data-class half
+  is the per-class record described under "`@Metadata` writer — the CLASS round-trip").
 
 - **A companion object's `private` members are in scope throughout the containing class.** Member
   access is decided on the LEXICAL enclosing chain, not the receiver chain — a nested (non-`inner`)
@@ -4605,24 +4591,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   never reaching a return instruction. Tests: `diverging_lambda_e2e`,
   `feature_coverage_n_e2e::result_is_success`; corpus `labels/infixCallLabelling.kt` and
   `coroutines/nonLocalReturn.kt` are the shapes still skipped.
-
-- **Class-level `@kotlin.Metadata` is emitted by default.** It used to be opt-in behind
-  `KRUSTY_EMIT_CLASS_METADATA` while the payload was being verified. Without it krusty cannot fully
-  read its OWN output: compiling a library and then compiling against those class files, `component1()`
-  resolves (it is a real JVM method) but `val (a, b) = p` does not, because the OPERATOR flag lives
-  only in metadata — as do `copy`'s parameter names, so `p.copy(y = 4)` reports "named arguments are
-  only supported for … methods with named parameters". Turning it on required finishing two shapes.
-  (1) A `data object` synthesizes NO `copy`/`copy$default` — it is a singleton — so neither the
-  metadata function list, the constant-pool seeding, the debug tables, nor the nullability annotations
-  may name one. An empty field list IS the test for that: a `data class` must declare at least one
-  primary-constructor property, so a fieldless data declaration can only be an object (`is_object` is
-  not set on a class hoisted out of an interface body, so it cannot be used here). (2) The plain-enum
-  test asserted that no `RuntimeVisibleAnnotations` attribute is emitted, which contradicts kotlinc —
-  a plain enum compiled by kotlinc carries one, its class-level `@Metadata` among them. It now asserts
-  on the annotation TYPE (`Ldemo/Mark;`), which is what "the constants are not annotated" actually
-  means. Tests: `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn`,
-  `sealed_interface_nested_e2e::data_object_has_no_copy`,
-  `enum_constant_annotation_emit_e2e::plain_enum_has_no_constant_annotation`.
 
 - **A CLASSPATH class's member extensions resolve like a source class's.** `ClassSig::member_ext_funs`
   is populated from source syntax alone, so a dependency's
