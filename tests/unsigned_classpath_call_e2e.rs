@@ -214,19 +214,19 @@ fun box(): String {\n\
 
 /// An unsigned VALUE PARAMETER mangles the `suspend` function's JVM name (`libU` → `libU-OzbTU-A`),
 /// and the `$default` synthetic is named from the mangled form. krusty looks suspend-ness up under
-/// that JVM name, `@Metadata` records the SOURCE name, and the callable comes back marked
-/// non-suspend — so the coroutine pass never threads the `Continuation` its descriptor still spells,
-/// and the emitted `invokestatic` is one argument short. That links and fails verification, which is
-/// the outcome this whole file exists to rule out.
+/// that JVM name; `@Metadata` records the mangled name beside the SOURCE one, so the lookup has to
+/// match the entry's JVM name the way the inline/contract lookups already do. Keyed on the source
+/// name alone it missed, the callable came back marked non-suspend, the coroutine pass never
+/// threaded the `Continuation` the descriptor still spells, and the emitted `invokestatic` was one
+/// argument short — a class that links and fails verification, which is the outcome this whole file
+/// exists to rule out.
 ///
-/// The unfilled continuation slot is visible at the call site, so the file is declined instead. BOTH
-/// call forms are covered: the `$default` synthetic (an argument omitted) and the plain mangled
-/// method (every argument supplied) fail the same way, so the decline cannot key on `$default`.
-///
-/// The underlying gap is the mangled-name suspend lookup, not the argument shape — recovering it
-/// would make these shapes EMIT, which the contract here already allows.
+/// BOTH call forms are covered: the `$default` synthetic (an argument omitted) and the plain mangled
+/// method (every argument supplied) missed the same way, so the fix cannot key on `$default`. Both
+/// must EMIT and produce the callee's real answer — a decline would hide a silent regression back to
+/// the name-keyed miss.
 #[test]
-fn suspend_call_with_an_unthreaded_continuation_declines() {
+fn mangled_suspend_classpath_call_threads_its_continuation() {
     let stdlib = common::stdlib_jar();
     let Some(lib) = common::compile_libs(
         "UMangledSuspendLib",
@@ -237,6 +237,8 @@ fun mark(): String = \"!\"\n\
 suspend fun libU(t: UInt, s: String = mark()): String = \"$t$s\"\n",
         )],
     ) else {
+        // kotlinc unavailable: the fixture cannot be built, and no stdlib declaration has this shape.
+        // A fixture kotlinc REJECTS panics inside the helper rather than skipping.
         return;
     };
     let cp = [lib, stdlib];
@@ -261,20 +263,18 @@ fun box(): String {{\n\
         ("UMangledSuspendPlain", "libU(7u, \"!\")"),
     ] {
         let src = body(call);
-        // Name the decline exhaustively: any OTHER outcome means this shape is being skipped by an
-        // unrelated gate and the unthreaded continuation is back to reaching the backend unnoticed.
-        match common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)) {
-            Some(BackendOutcome::LowerBail(reason)) => assert_eq!(
-                reason, "gate:unthreaded-continuation-slot",
-                "{stem}: the unfilled continuation slot is what must decline this call"
-            ),
-            // Recovering the mangled-name suspend lookup makes the call correct; then it must run.
-            Some(BackendOutcome::Emitted) => {}
-            other => {
-                panic!("{stem}: expected the continuation decline or a correct emit, got {other:?}")
-            }
-        }
-        expect_emitted_box_verifies_on(&src, stem, &cp);
+        assert_eq!(
+            common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)),
+            Some(BackendOutcome::Emitted),
+            "{stem}: the mangled JVM name names a suspend function; thread its continuation"
+        );
+        // Not just verifiable: the coroutine has to actually run and hand back the callee's string,
+        // which is what proves the continuation reached the callee rather than merely filling a slot.
+        assert_eq!(
+            common::compile_and_run_box(&src, stem, &cp, Some(&jdk)),
+            Some("OK".to_string()),
+            "{stem}"
+        );
     }
 }
 

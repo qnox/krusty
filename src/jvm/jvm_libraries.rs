@@ -128,9 +128,11 @@ impl JvmLibraries {
             }
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
-            // Suspend-ness lives on the SOURCE function's `@Metadata`; a `$default` synthetic is not in
-            // metadata, so detect it via the stripped `meta_name` — otherwise a suspend function's
+            // Suspend-ness lives on the declaration's `@Metadata`; a `$default` synthetic has no entry
+            // of its own, so detect it via the stripped `meta_name` — otherwise a suspend function's
             // `withLock$default` keeps its `Continuation` param and no normal call shape resolves.
+            // `meta_name` is a BYTECODE name and may be mangled (`libU-OzbTU-A` for a value-class
+            // value parameter); the lookup is keyed by both of the entry's names, so it still hits.
             let suspend = self.cp.is_suspend_method_name(c.owner, meta_name);
             // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
             // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal

@@ -932,6 +932,8 @@ struct ClassMeta {
     /// equality (hash collisions stay correct). Same-name entries keep declaration order (sort is
     /// by `(hash, index)`).
     by_jvm_name: Vec<(u64, u32)>,
+    /// The names under which a `suspend` function of this class can be looked up — BOTH its
+    /// `@Metadata` source name and its (possibly mangled) JVM name, per [`suspend_lookup_names`].
     suspend_names: HashSet<String>,
     /// The facade's decoded [`MetaFn`] slices, SHARED by refcount: the class's own `Package`
     /// functions, or one segment per multifile PART. The parts' decodes are already retained on
@@ -1360,6 +1362,26 @@ pub(super) fn aligned_member_metadata<'a>(
     compatible.next().is_none().then_some(selected)
 }
 
+/// Every name a `suspend` function answers to in [`ClassMeta::suspend_names`]: its `@Metadata` SOURCE
+/// name and the JVM name it was compiled under. The two differ whenever the signature is mangled — a
+/// value-class value parameter (`libU` → `libU-OzbTU-A`) or an explicit `@JvmName` — and a caller
+/// keys by whichever name it holds. The top-level overload scan holds a BYTECODE method name, so a
+/// source-only set left a mangled `suspend` function marked non-suspend: its descriptor kept the CPS
+/// `Continuation`, nothing threaded it, and the emitted `invokestatic` was one argument short. The
+/// sibling `jvm_name`-keyed lookups (inline-ness, the metadata call facts a contract rides on) match
+/// the entry's JVM name already; indexing both names is what puts this one on the same footing.
+///
+/// Empty for a non-`suspend` function.
+fn suspend_lookup_names(f: &super::metadata::MetaFn) -> impl Iterator<Item = String> + '_ {
+    f.is_suspend()
+        .then(|| {
+            std::iter::once(f.kotlin_name.clone())
+                .chain((f.jvm_name != f.kotlin_name).then(|| f.jvm_name.clone()))
+        })
+        .into_iter()
+        .flatten()
+}
+
 /// Pick the metadata function whose signature corresponds to the JVM method with `desc_params`, returning
 /// `(kept-param end, index into `meta.fns`)`. Disambiguates OVERLOADS sharing a JVM name
 /// (`any()` vs `any(predicate)`, `IntArray.any` vs `CharArray.any`) by receiver + value-parameter match,
@@ -1764,8 +1786,7 @@ impl Classpath {
             suspend_names.extend(
                 super::metadata::class_functions(ci)
                     .iter()
-                    .filter(|f| f.is_suspend())
-                    .map(|f| f.kotlin_name.clone()),
+                    .flat_map(suspend_lookup_names),
             );
             // A multifile FACADE has no function/property metadata of its own — its `d1` lists the
             // PART class names, which hold them; each part slice becomes a shared segment (the same
@@ -1784,8 +1805,7 @@ impl Classpath {
                     suspend_names.extend(
                         super::metadata::class_functions(&pci)
                             .iter()
-                            .filter(|f| f.is_suspend())
-                            .map(|f| f.kotlin_name.clone()),
+                            .flat_map(suspend_lookup_names),
                     );
                 }
             }
@@ -1794,8 +1814,7 @@ impl Classpath {
             fn_segments
                 .iter()
                 .flat_map(|s| s.iter())
-                .filter(|f| f.is_suspend())
-                .map(|f| f.kotlin_name.clone()),
+                .flat_map(suspend_lookup_names),
         );
         // Hash-sorted by-JVM-name lookup over the flat segment concatenation: no name copies, and
         // same-name overloads stay in declaration order (sort by `(hash, index)`), matching the old
@@ -2873,7 +2892,9 @@ impl Classpath {
 
     /// Whether `internal.name(...)` is a Kotlin `suspend` function, per the class's `@Metadata`
     /// `IS_SUSPEND` flag. A call to it is a coroutine suspension point. Includes the superclass walk
-    /// needed for facade part classes.
+    /// needed for facade part classes. `name` may be either the source name or the compiled JVM name
+    /// (see [`suspend_lookup_names`]); a caller holding a bytecode method name must still strip a
+    /// `$default` suffix, which is a synthetic with no `@Metadata` entry of its own.
     pub fn is_suspend_method_name(&self, internal: TypeName, name: &str) -> bool {
         let mut cur = Some(internal);
         while let Some(s) = cur.take() {
