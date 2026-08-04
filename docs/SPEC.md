@@ -1829,6 +1829,42 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   means a classpath read failed to recognize a `suspend` callee — so it is deliberately untestable
   without injecting that fault, and must not be deleted as dead code. What IS pinned is that it does
   not over-fire (`a_plain_continuation_parameter_is_not_an_unthreaded_continuation`).
+- **An unsigned value out of an ERASED GENERIC call result** — `fun <T> ident(t: T): T` erases to
+  `(Object)Object`, so `ident(5u)` pushes a boxed `kotlin/UInt` and the use site has to unbox it. The
+  unbox for an unsigned box is its own inline class's, `checkcast kotlin/UInt; invokevirtual
+  kotlin/UInt."unbox-impl":()I` — NOT the boxed-primitive `checkcast java/lang/Integer; intValue`,
+  which throws `ClassCastException` at run time because `kotlin/UInt` is not an `Integer`. krusty
+  emitted that `Integer` round trip and reported success. For THIS shape the defect was in the
+  erased-call-result coercion: the value-read coercion (`coerce_to_static`) had the unsigned branch
+  already, which is why the map-element path (`mapOf("k" to 5u)["k"]!!`) and an indexed read
+  (`listOf(5u, 7u)[0]`) were correct while a generic call result was not. All four carriers now
+  behave alike, each through its own class (`kotlin/UByte."unbox-impl":()B`, …); the checkcast/unbox
+  pair matches kotlinc instruction for instruction, while the surrounding code still diverges where
+  it already did (`Integer.toUnsignedString` on a masked carrier rather than
+  `UByte."toString-impl"`).
+
+  Two OTHER routes to the same wrong unbox remain open, and both are emitter-side rather than
+  coercion-side — the unsigned static type is already normalized to `Int` by the time the unbox is
+  chosen, so `unbox_prim`'s (correct) unsigned rows are never consulted:
+  `Pair(5u, 1).first` (a classpath generic PROPERTY read, through `emit_realized_property_read`) and
+  `listOf(5u).map { it }.first()` (an inline-splice loop element, through `try_inline_unified`). Both
+  emit `checkcast java/lang/Integer; intValue` and throw at run time while krusty reports success.
+  They predate this fix and are not addressed by it.
+
+  A BOUNDED type parameter erases to its BOUND rather than to `Object` (`<T : Comparable<T>>` →
+  `Comparable`), and kotlinc unboxes there identically. The two classpath call sites (an imported bare
+  name, a fully qualified call) each decide separately whether a substituted result needs coercing at
+  all, and both excluded unsigned deliberately — because the coercion they would have reached emitted
+  the wrong unbox. With the unbox corrected, excluding them only left the box on the stack where the
+  carrier belonged: a `VerifyError`, again with krusty reporting success. Both gates now admit
+  unsigned. No stdlib call reaches this erasure — every `<T : Comparable<T>>` helper has an unsigned
+  specialization (`maxOf(UShort, UShort)` selects `maxOf-5PvTz6A:(SS)S`) — so the test builds a
+  fixture jar. The three gates (the plain call, the packed-vararg call, and the imported bare name)
+  are now ONE predicate, `substituted_ret_needs_coercion`: spelling the same rule three ways is how
+  the unsigned exclusion came to differ between them in the first place.
+  `tests/unsigned_generic_erasure_e2e.rs` asserts a STRICTER contract than
+  `tests/unsigned_classpath_call_e2e.rs` — every shape there must EMIT and run, not merely avoid a
+  bad emit, because a decline would leave the unbox it exists to pin untested.
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`

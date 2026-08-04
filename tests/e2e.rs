@@ -1114,6 +1114,8 @@ mod unsigned_array_e2e;
 mod unsigned_classpath_call_e2e;
 #[path = "unsigned_ext_e2e.rs"]
 mod unsigned_ext_e2e;
+#[path = "unsigned_generic_erasure_e2e.rs"]
+mod unsigned_generic_erasure_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
 #[path = "use_site_variance_e2e.rs"]

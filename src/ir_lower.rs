@@ -8394,7 +8394,7 @@ impl<'a> Lower<'a> {
             let physical_ret = c.physical_ret;
             let logical_ret = c.ret;
             let call_inline = c.inline.can_inline();
-            let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
+            let erased_generic_ret = self.substituted_ret_needs_coercion(logical_ret, physical_ret);
             let suspend = c.suspend;
             let call = self.emit_library_static_call(c, a, suspend)?;
             return Some(if call_inline || erased_generic_ret {
@@ -8443,21 +8443,7 @@ impl<'a> Lower<'a> {
         let call_inline = c.inline.can_inline();
         let physical_ret = c.physical_ret;
         let logical_ret = c.ret;
-        // A BOUNDED type parameter's return erases to its BOUND, not to `Object`, so the erased-top
-        // test alone misses it (`fun <T : Comparable<T>> clampMax(…): T` erases to `Comparable`, and
-        // `clampMax(10, 7) != 7` left the boxed value on the stack where an `int` was expected — a
-        // VerifyError). A SCALAR logical result behind a REFERENCE physical one takes the same
-        // substituted-result coercion: the value on the stack is boxed and the use site wants the
-        // primitive. (This is the call-site half of the rule `coerce_erased_call_result` already
-        // applies once reached; the gate here was the narrower test.) UNSIGNED is excluded — its box
-        // is `kotlin/UInt`, not `Integer`, so the plain unbox `coerce_erased_call_result` emits would
-        // `checkcast` to the wrong wrapper (a live bug on the erased-top path already; not widened
-        // here). `coerce_erased_call_result` still decides what to emit.
-        let erased_generic_ret = logical_ret != physical_ret
-            && (physical_ret.is_erased_top()
-                || (self.has_scalar_value_repr(logical_ret)
-                    && !logical_ret.is_unsigned()
-                    && physical_ret.is_reference()));
+        let erased_generic_ret = self.substituted_ret_needs_coercion(logical_ret, physical_ret);
         let suspend = c.suspend;
         let call = self.emit_library_static_call(c, a, suspend)?;
         let call = if arg_prelude.is_empty() {
@@ -8760,6 +8746,26 @@ impl<'a> Lower<'a> {
         v
     }
 
+    /// Whether a CLASSPATH call's substituted result needs the erased-result coercion at all.
+    ///
+    /// The erased return is generic when it is the erased top (`Object`), or when a SCALAR logical
+    /// result sits behind a REFERENCE physical one — a BOUNDED type parameter erases to its BOUND
+    /// rather than to `Object` (`fun <T : Comparable<T>> clampMax(…): T` → `Comparable`), so the
+    /// erased-top test alone misses it and leaves the boxed value where the carrier belongs, a
+    /// `VerifyError`. UNSIGNED belongs here like any other carrier: it unboxes through its own inline
+    /// class, which [`coerce_erased_call_result`](Self::coerce_erased_call_result) emits.
+    ///
+    /// One predicate for every classpath call site on purpose. It lived as three separate copies —
+    /// the plain call, the packed-vararg call, and the imported bare name — which is how the same
+    /// rule came to be spelled three different ways and how an unsigned result reached the wrong
+    /// unbox. `coerce_erased_call_result` still decides WHAT to emit; this only decides whether it
+    /// is consulted. A concrete return whose logical and physical types agree keeps the raw call.
+    fn substituted_ret_needs_coercion(&self, logical: Ty, physical: Ty) -> bool {
+        logical != physical
+            && (physical.is_erased_top()
+                || (self.has_scalar_value_repr(logical) && physical.is_reference()))
+    }
+
     fn coerce_erased_call_result(
         &mut self,
         e: AstExprId,
@@ -8779,6 +8785,17 @@ impl<'a> Lower<'a> {
         // (`asSeq<String>(x): String` physically `CharSequence`), insert the `checkcast` kotlinc emits so
         // a member access on the result verifies.
         let st = self.info.ty(e);
+        // An UNSIGNED static type behind the erased return is an inline class, not a boxed primitive:
+        // the value on the stack is a `kotlin/UInt`, so the unbox is `checkcast kotlin/UInt` +
+        // `unbox-impl`, exactly as the value-read coercion (`coerce_to_static`) already emits. The
+        // boxed-primitive unbox below would `checkcast java/lang/Integer` and throw at run time.
+        // Emitted before the logical-type record so the value-class pass does not also treat the call
+        // as already carrying its unboxed underlying and strip this unbox.
+        if st.is_unsigned() && phys.is_reference() {
+            return self
+                .unbox_unsigned(call, st)
+                .expect("unsigned integer target must provide box/unbox shape");
+        }
         // Record the CALL's logical type keyed by its own id (the outer `fn expr` records only the wrapper
         // this returns). The value-class pass reads it so a library value-class return (`runCatching: Result`)
         // reprs as its UNBOXED underlying — letting the wrapping coercion strip as a redundant same-type cast.
@@ -24948,23 +24965,12 @@ impl<'a> Lower<'a> {
                 // null must stay a legal value until a primitive/non-null use site demands it.
                 if call_inline {
                     self.coerce_erased_call_result(e, call, &call_phys, true)
-                } else if call_log != call_phys
-                    && (call_phys.is_erased_top()
-                        || (self.has_scalar_value_repr(call_log)
-                            && !call_log.is_unsigned()
-                            && call_phys.is_reference()))
-                {
+                } else if self.substituted_ret_needs_coercion(call_log, call_phys) {
                     // A NON-inline classpath top-level fn with an ERASED generic return
                     // (`runBlocking<T> { … }`, whose `$default` returns `Object`): the checker
                     // substituted the concrete result type (`T = Ch`/`Int`), so `checkcast`/unbox
                     // the `Object` result to it — else it lands boxed in a stricter slot
-                    // (`VerifyError`). A BOUNDED type parameter erases to its BOUND rather than to
-                    // `Object` (`fun <T : Comparable<T>> clampMax(…): T` → `Comparable`), so the
-                    // erased-top test alone misses it; a SCALAR logical result behind a REFERENCE
-                    // physical one is the same situation — the value on the stack is boxed and the
-                    // use site wants the primitive. UNSIGNED is excluded: its box is `kotlin/UInt`,
-                    // not `Integer`, so the unbox would `checkcast` the wrong wrapper. A concrete
-                    // return whose logical and physical types agree keeps the raw call, unchanged.
+                    // (`VerifyError`).
                     self.coerce_erased_call_result(e, call, &call_phys, true)
                 } else {
                     call
