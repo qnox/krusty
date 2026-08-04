@@ -558,7 +558,10 @@ fn declared_setter_visibility(property: &crate::ast::PropDecl) -> Option<Visibil
 /// Everything a caller needs about a declared Kotlin class.
 #[derive(Clone, Debug)]
 pub struct MemberExtFunSig {
-    receiver: TypeRef,
+    /// The SOURCE spelling of the extension receiver, re-resolved per use site with the declaring
+    /// class's type-parameter bindings. `None` for an entry recovered from a dependency's `@Metadata`,
+    /// which has no source syntax — its receiver is already resolved in `receiver_ty`.
+    receiver: Option<TypeRef>,
     receiver_ty: Ty,
     params: Vec<TypeRef>,
     ret: Option<TypeRef>,
@@ -2924,12 +2927,17 @@ impl SymbolTable {
                                 &signature.type_param_bounds,
                                 &class_internal_resolver(self),
                             );
-                        let receiver = ty_of_ref(
-                            &signature.receiver,
-                            &self.class_names,
-                            &tparams,
-                            &mut scratch,
-                        );
+                        // A dependency-recovered entry has no source spelling: its receiver is already
+                        // resolved, and the enclosing class's bindings substitute into it directly.
+                        let receiver = match &signature.receiver {
+                            Some(reference) => {
+                                ty_of_ref(reference, &self.class_names, &tparams, &mut scratch)
+                            }
+                            None => crate::symbol_resolver::ty_subst(
+                                signature.receiver_ty,
+                                &parent_bindings,
+                            ),
+                        };
                         let mut params = signature
                             .params
                             .iter()
@@ -5615,7 +5623,7 @@ fn collect_signatures_with_cp_impl(
                                 .entry(method.name.clone())
                                 .or_default()
                                 .push(MemberExtFunSig {
-                                    receiver: receiver.clone(),
+                                    receiver: Some(receiver.clone()),
                                     receiver_ty: ty_of_ref(receiver, &class_names, &mtp, diags),
                                     params: method
                                         .params
@@ -27404,6 +27412,89 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// One member extension of a CLASSPATH class, rebuilt from the library member. On the JVM such a
+    /// member is an ordinary instance method whose FIRST parameter is the extension receiver
+    /// (`DslScope.invoke(String, Function0)` for `operator fun String.invoke(body: () -> Unit)`); only
+    /// `@Metadata` says that the first parameter is a receiver and not a value, which is why the member
+    /// carries the fact rather than the descriptor being re-read here.
+    fn classpath_member_ext_fun(
+        member: &crate::libraries::LibraryMember,
+    ) -> Option<MemberExtFunSig> {
+        let receiver_ty = member
+            .generic_sig
+            .as_ref()
+            .and_then(|generic| generic.receiver)
+            .or_else(|| member.params.first().copied())?;
+        let (_, value_params) = member.params.split_first()?;
+        // The call sig's names cover the source VALUE parameters. Use them only when they line up;
+        // a mismatch would silently misname a parameter for a named-argument call.
+        let param_names = if member.call_sig.param_names.len() == value_params.len() {
+            member.call_sig.param_names.clone()
+        } else {
+            Vec::new()
+        };
+        let signature = Signature {
+            params: value_params.to_vec(),
+            ret: member.ret,
+            generic_sig: None,
+            projected_return_hazard: false,
+            flags: SigFlags::default()
+                .with_is_operator(member.is_operator())
+                .with_is_suspend(member.suspend())
+                .with_is_final(true),
+            vararg_index: None,
+            required: value_params.len(),
+            param_defaults: vec![false; value_params.len()],
+            param_names,
+            param_default_values: vec![None; value_params.len()],
+            lambda_param_types: value_params
+                .iter()
+                .map(|parameter| match parameter.non_null() {
+                    Ty::Fun(signature) => signature.params.to_vec(),
+                    _ => Vec::new(),
+                })
+                .collect(),
+            lambda_recv: value_params
+                .iter()
+                .map(|parameter| {
+                    matches!(parameter.non_null(), Ty::Fun(signature) if signature.has_receiver)
+                })
+                .collect(),
+            visibility: member.visibility,
+            context_count: 0,
+            source_decl: None,
+            source_file: None,
+            source_receiver: Some(receiver_ty),
+            package: String::new(),
+            contract: None,
+        };
+        Some(MemberExtFunSig {
+            receiver: None,
+            receiver_ty,
+            params: Vec::new(),
+            ret: None,
+            signature,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+        })
+    }
+
+    /// The member extensions named `name` declared by a CLASSPATH class. `ClassSig::member_ext_funs`
+    /// is populated from source syntax alone, so without this a dependency's
+    /// `class DslScope { operator fun String.invoke(…) }` is invisible and `"x" { … }` inside its
+    /// receiver lambda reports "expression is not callable".
+    fn classpath_member_ext_funs(&self, owner: TypeName, name: &str) -> Vec<MemberExtFunSig> {
+        let Some(declaration) = self.syms.libraries.resolve_type_name(owner) else {
+            return Vec::new();
+        };
+        declaration
+            .members
+            .iter()
+            .filter(|member| member.name == name && member.is_member_extension())
+            .filter_map(Self::classpath_member_ext_fun)
+            .collect()
+    }
+
     fn member_extension_function_shapes(
         &self,
         extension_receiver: Ty,
@@ -27415,12 +27506,23 @@ impl<'a> Checker<'a> {
             for (owner, owner_ty, dispatch_depth) in
                 self.syms.applied_type_hierarchy(dispatch_receiver.ty)
             {
-                let Some(class) = self.syms.class_by_type_name(owner) else {
-                    continue;
-                };
-                let class_bindings = class.type_parameter_bindings(owner_ty);
-                let inherited_extensions = self.syms.supertype_member_ext_funs_name(owner);
-                for function in class.member_ext_funs(name) {
+                let from_classpath;
+                let (functions, class_bindings, inherited_extensions) =
+                    match self.syms.class_by_type_name(owner) {
+                        Some(class) => (
+                            class.member_ext_funs(name),
+                            class.type_parameter_bindings(owner_ty),
+                            self.syms.supertype_member_ext_funs_name(owner),
+                        ),
+                        None => {
+                            from_classpath = self.classpath_member_ext_funs(owner, name);
+                            if from_classpath.is_empty() {
+                                continue;
+                            }
+                            (from_classpath.as_slice(), HashMap::new(), Vec::new())
+                        }
+                    };
+                for function in functions {
                     let declaration_tparams = TParams::from_bindings(class_bindings.clone())
                         .extended_with(
                             &function.type_params,
@@ -27428,12 +27530,17 @@ impl<'a> Checker<'a> {
                             &class_internal_resolver(self.syms),
                         );
                     let mut scratch = DiagSink::new();
-                    let declared_receiver = ty_of_ref(
-                        &function.receiver,
-                        &self.syms.class_names,
-                        &declaration_tparams,
-                        &mut scratch,
-                    );
+                    let declared_receiver = match &function.receiver {
+                        Some(reference) => ty_of_ref(
+                            reference,
+                            &self.syms.class_names,
+                            &declaration_tparams,
+                            &mut scratch,
+                        ),
+                        None => {
+                            crate::symbol_resolver::ty_subst(function.receiver_ty, &class_bindings)
+                        }
+                    };
                     let receiver_applicable = declared_receiver == extension_receiver
                         || declared_receiver.is_erased_top()
                         || crate::assignable::is_assignable(
@@ -27555,16 +27662,22 @@ impl<'a> Checker<'a> {
         for (parameter, argument) in function.type_params.iter().zip(explicit_type_args) {
             bindings.insert(parameter.clone(), *argument);
         }
-        unify_ref(
-            &function.receiver,
-            extension_receiver,
-            &function.type_params,
-            &mut bindings,
-        );
+        // Inference from the receiver's SPELLING binds the declaration's type parameters; a
+        // dependency-recovered entry declares none, so there is nothing to unify.
+        if let Some(reference) = &function.receiver {
+            unify_ref(
+                reference,
+                extension_receiver,
+                &function.type_params,
+                &mut bindings,
+            );
+        }
         for &(parameter, source) in &argument_parameters {
             let Some(Some(actual)) = partial_arg_tys.get(source) else {
                 continue;
             };
+            // A dependency-recovered entry declares no type parameters and carries no parameter
+            // SPELLING, so there is nothing for an argument to unify against.
             let Some(reference) = function.params.get(parameter) else {
                 continue;
             };
@@ -27585,18 +27698,28 @@ impl<'a> Checker<'a> {
         }
         let concrete_tparams = TParams::from_bindings(bindings.clone());
         let mut scratch = DiagSink::new();
-        let logical_params = function
-            .params
-            .iter()
-            .map(|reference| {
-                ty_of_ref(
-                    reference,
-                    &self.syms.class_names,
-                    &concrete_tparams,
-                    &mut scratch,
-                )
-            })
-            .collect::<Vec<_>>();
+        let logical_params = match &function.receiver {
+            // A dependency-recovered entry has no source spelling for its parameters either: they are
+            // already resolved, and the enclosing class's bindings substitute into them directly.
+            None => function
+                .signature
+                .params
+                .iter()
+                .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &bindings))
+                .collect::<Vec<_>>(),
+            Some(_) => function
+                .params
+                .iter()
+                .map(|reference| {
+                    ty_of_ref(
+                        reference,
+                        &self.syms.class_names,
+                        &concrete_tparams,
+                        &mut scratch,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        };
         let mut applicability_params = logical_params.clone();
         if function.signature.vararg() {
             let last = applicability_params.last_mut()?;

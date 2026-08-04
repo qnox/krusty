@@ -151,6 +151,75 @@ fn classpath_super_ctor_receiver_lambda_uses_shared_resolution() {
     );
 }
 
+/// The direct form of the classpath case: a receiver lambda typed by an ordinary `val`, with no
+/// constructor involved. It failed identically to the super-constructor spelling, which is what showed
+/// the gap was the CLASSPATH member extension itself and not constructor resolution.
+#[test]
+fn classpath_member_extension_resolves_in_a_plain_receiver_lambda() {
+    const LIB: &str = r#"
+        package api
+
+        class DslScope {
+            val seen = mutableListOf<String>()
+            operator fun String.invoke(body: () -> Unit) {
+                seen.add(this)
+                body()
+            }
+        }
+    "#;
+    const MAIN: &str = r#"
+        import api.DslScope
+
+        fun box(): String {
+            val configure: DslScope.() -> Unit = { "direct" {} }
+            val scope = DslScope()
+            configure(scope)
+            return if (scope.seen == listOf("direct")) "OK" else "fail: ${scope.seen}"
+        }
+    "#;
+
+    let Some(output) = common::expect_box_run_against("invoke_classpath_direct", LIB, MAIN) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The `operator` modifier is not in the class file — only in `@Metadata` — so recovering a classpath
+/// member extension must recover that flag too, or call syntax would accept a plain member extension.
+#[test]
+fn non_operator_classpath_member_extension_is_not_used_by_call_syntax() {
+    const LIB: &str = r#"
+        package api
+
+        class SpecScope {
+            fun String.invoke(body: () -> Unit) {
+                body()
+            }
+        }
+    "#;
+    const MAIN: &str = r#"
+        import api.SpecScope
+
+        fun box(): String {
+            val configure: SpecScope.() -> Unit = { "direct" {} }
+            configure(SpecScope())
+            return "OK"
+        }
+    "#;
+
+    let Some(diagnostics) =
+        common::checker_diags_against("invoke_classpath_non_operator", LIB, MAIN)
+    else {
+        return; // toolchain not provisioned
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("expression is not callable")),
+        "expected 'expression is not callable', got: {diagnostics:?}"
+    );
+}
+
 #[test]
 fn secondary_super_delegation_receiver_lambda_uses_shared_resolution() {
     const SRC: &str = r#"

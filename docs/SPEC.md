@@ -4042,3 +4042,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   means. Tests: `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn`,
   `sealed_interface_nested_e2e::data_object_has_no_copy`,
   `enum_constant_annotation_emit_e2e::plain_enum_has_no_constant_annotation`.
+
+- **A CLASSPATH class's member extensions resolve like a source class's.** `ClassSig::member_ext_funs`
+  is populated from source syntax alone, so a dependency's
+  `class DslScope { operator fun String.invoke(body: () -> Unit) }` was invisible and `"x" { … }`
+  inside a `DslScope.() -> Unit` lambda reported "expression is not callable" — with or without a
+  constructor in the picture; the super-constructor spelling merely happened to be the reported one.
+  Three facts have to be recovered from the dependency's `@Metadata`, none of which the class file
+  carries. (1) That the member IS an extension: on the JVM it is an ordinary instance method whose
+  first parameter is the receiver (`DslScope.invoke(String, Function0)`), indistinguishable by
+  descriptor from an ordinary member taking a `String`. (2) That it is `operator`, without which call
+  syntax would accept a plain member extension. (3) Its value parameters' names and defaults — the
+  argument mapping takes its parameter COUNT from those names, so an empty list made a trailing lambda
+  look like an argument past the end. All three come from the member-extension `MetaFn`, matched by its
+  exact recorded descriptor: the shared member alignment deliberately excludes extensions, because
+  their metadata parameter list omits the receiver the JVM method leads with. The DISPATCH receiver
+  requirement is preserved by construction — the recovered signature is consulted only while walking
+  the implicit receivers in scope, exactly as a source one is, so `"x" { }` still does not resolve
+  where no `DslScope` is in scope. Tests:
+  `invoke_operator_extension_e2e::{classpath_member_extension_resolves_in_a_plain_receiver_lambda,
+  non_operator_classpath_member_extension_is_not_used_by_call_syntax,
+  classpath_super_ctor_receiver_lambda_uses_shared_resolution}`.

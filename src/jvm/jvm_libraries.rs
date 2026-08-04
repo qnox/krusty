@@ -1180,6 +1180,21 @@ impl JvmLibraries {
                     );
                 }
                 member.set_suspend(member_metadata.is_some_and(metadata::MetaFn::is_suspend));
+                // A member EXTENSION is deliberately excluded from `aligned_member_metadata`: its
+                // metadata parameter list omits the receiver the JVM method leads with, so the shared
+                // alignment cannot line the two up. Match it separately, by the exact descriptor it
+                // records. The two facts recovered are ones no descriptor can carry — that the first
+                // parameter is a RECEIVER rather than a value, and whether the member is `operator`.
+                let member_extension_metadata = meta_fns.iter().find(|function| {
+                    function.is_extension()
+                        && function.jvm_name == m.name
+                        && function.jvm_desc == Some(m.descriptor.as_str())
+                });
+                member.set_is_member_extension(member_extension_metadata.is_some());
+                member.set_is_operator(
+                    member_metadata.is_some_and(metadata::MetaFn::is_operator)
+                        || member_extension_metadata.is_some_and(metadata::MetaFn::is_operator),
+                );
                 let value_arity = member
                     .params
                     .len()
@@ -1216,6 +1231,7 @@ impl JvmLibraries {
                     member.set_ret_nullable(true);
                 }
                 member.call_sig = member_metadata
+                    .or(member_extension_metadata)
                     .map(metadata::MetaFn::member_call_sig)
                     .unwrap_or_else(|| {
                         let vararg_index = m
