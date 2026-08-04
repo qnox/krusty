@@ -2397,6 +2397,42 @@ fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<Ty>)> {
     Some((formals, supers))
 }
 
+/// The field descriptor of the CPS `Continuation` parameter kotlinc appends to a `suspend` method.
+const CONTINUATION_PARAM_DESCRIPTOR: &str = "Lkotlin/coroutines/Continuation;";
+
+/// Read a JVM method descriptor once into the complete call-boundary layout common lowering needs.
+///
+/// Exactly one position may be the synthetic CPS continuation. A descriptor spelling it more than
+/// once is not a shape kotlinc emits, and guessing between them would align a caller's arguments to
+/// the wrong slots. Its representation facts are still valid, so retain those while reporting no
+/// continuation position and let the caller stay conservative if its value count does not align.
+fn method_layout(descriptor: &str) -> Option<crate::runtime::PlatformMethodLayout> {
+    let (params, ret) = crate::jvm::names::parse_method_descriptor(descriptor)?;
+    let mut found = params
+        .iter()
+        .enumerate()
+        .filter(|&(_, &p)| p == CONTINUATION_PARAM_DESCRIPTOR);
+    let continuation_slot = found
+        .next()
+        .and_then(|(index, _)| found.next().is_none().then_some(index));
+    Some(crate::runtime::PlatformMethodLayout {
+        // A JVM parameter is a reference exactly when its field descriptor is an object (`L…;`) or
+        // an array (`[…`); everything else is a primitive carrier (`I`, `J`, `Z`, …).
+        reference_slots: params
+            .iter()
+            .map(|p| p.starts_with('L') || p.starts_with('['))
+            .collect(),
+        continuation_slot,
+        // Only an object return names a class. A primitive carrier (`I`, `J`, ...), array (`[...`),
+        // or `V` makes no reference-class claim, which keeps a carrier-returning call from reading as
+        // an already boxed value.
+        return_class: ret
+            .strip_prefix('L')
+            .and_then(|ret| ret.strip_suffix(';'))
+            .map(type_name),
+    })
+}
+
 /// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
 /// The LOGICAL descriptor of a `suspend fun`'s physical CPS method: drop the trailing
 /// `kotlin/coroutines/Continuation` parameter kotlinc appends (`(ILkotlin/coroutines/Continuation;)…`
@@ -2404,9 +2440,8 @@ fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<Ty>)> {
 /// suspend callee is resolved by this logical signature; the coroutine pass re-derives the CPS form for
 /// the emitted call. A no-op if the descriptor has no trailing continuation (not a CPS method).
 fn strip_continuation_param(desc: &str) -> String {
-    const CONT: &str = "Lkotlin/coroutines/Continuation;";
     if let Some(close) = desc.rfind(')') {
-        if let Some(stripped) = desc[1..close].strip_suffix(CONT) {
+        if let Some(stripped) = desc[1..close].strip_suffix(CONTINUATION_PARAM_DESCRIPTOR) {
             return format!("({}){}", stripped, &desc[close + 1..]);
         }
     }
@@ -3854,16 +3889,11 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         Some(method_descriptor(params, ret))
     }
 
-    fn descriptor_reference_params(&self, descriptor: &str) -> Option<Vec<bool>> {
-        // A JVM parameter is a reference exactly when its field descriptor is an object (`L…;`) or an
-        // array (`[…`); everything else is a primitive carrier (`I`, `J`, `Z`, …).
-        let (params, _) = super::names::parse_method_descriptor(descriptor)?;
-        Some(
-            params
-                .iter()
-                .map(|p| p.starts_with('L') || p.starts_with('['))
-                .collect(),
-        )
+    fn descriptor_method_layout(
+        &self,
+        descriptor: &str,
+    ) -> Option<crate::runtime::PlatformMethodLayout> {
+        method_layout(descriptor)
     }
 
     fn function_reference_impl_type(&self) -> Option<Ty> {
@@ -4307,13 +4337,51 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, parse_class_gsig, parse_concrete_field_gsig, parse_field_gsig,
+        desc_to_ty, method_layout, parse_class_gsig, parse_concrete_field_gsig, parse_field_gsig,
         parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::SemanticPlatform;
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
     use crate::types::Ty;
+
+    /// Common lowering aligns a `suspend` `$default` call by this position, so it has to name the
+    /// slot the backend fills and nothing else.
+    #[test]
+    fn descriptor_layout_reports_representation_and_one_continuation_from_one_parse() {
+        // `withLock$default` — the continuation sits BEFORE the mask/marker tail, not at the end.
+        let layout = method_layout(
+            "(Lkotlinx/coroutines/sync/Mutex;Ljava/lang/Object;Lkotlin/jvm/functions/Function0;\
+                 Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;",
+        )
+        .expect("valid descriptor");
+        assert_eq!(layout.continuation_slot, Some(3));
+        assert_eq!(layout.return_class, Some(type_name("java/lang/Object")));
+        assert_eq!(
+            layout.reference_slots,
+            vec![true, true, true, true, false, true]
+        );
+        // A plain suspend method's trailing continuation.
+        assert_eq!(
+            method_layout("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;")
+                .and_then(|layout| layout.continuation_slot),
+            Some(1)
+        );
+        assert_eq!(
+            method_layout("(ILjava/lang/String;)V")
+                .expect("valid descriptor")
+                .continuation_slot,
+            None
+        );
+        // Two of them: no position is derivable, so the caller must not be handed a guess.
+        assert_eq!(
+            method_layout("(Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)V")
+                .expect("the parameter representations remain readable")
+                .continuation_slot,
+            None
+        );
+        assert!(method_layout("not a descriptor").is_none());
+    }
 
     #[test]
     fn inherited_access_finds_self_entry_when_member_name_contains_dollar() {
@@ -4734,5 +4802,26 @@ mod tests {
             c.descriptor,
             "(Lkotlin/jvm/functions/Function2;Ljava/lang/Object;Lkotlin/coroutines/Continuation;)V"
         );
+    }
+
+    /// Lowering asks the provider what a call LEAVES on the stack so it never parses a JVM
+    /// descriptor itself. Only an object return names a class: `kotlin/UInt.box-impl` is how an
+    /// unsigned value becomes a reference, and its carrier-returning siblings (`constructor-impl`,
+    /// `unbox-impl`) must answer `None` or a value still in its primitive slot would read as boxed.
+    #[test]
+    fn descriptor_method_layout_names_only_an_object_return_class() {
+        assert_eq!(
+            method_layout("(I)Lkotlin/UInt;").and_then(|layout| layout.return_class),
+            Some(type_name("kotlin/UInt"))
+        );
+        for carrier in ["(I)I", "()I", "(Lkotlin/UInt;)V", "(I)[Ljava/lang/String;"] {
+            assert_eq!(
+                method_layout(carrier).and_then(|layout| layout.return_class),
+                None,
+                "{carrier}"
+            );
+        }
+        // A descriptor the platform cannot read is not a claim about anything.
+        assert!(method_layout("nonsense").is_none());
     }
 }

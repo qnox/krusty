@@ -155,6 +155,267 @@ fn compare_against_zero_is_single_operand_branch() {
     );
 }
 
+#[test]
+fn compare_against_zero_in_value_position_is_single_operand_branch() {
+    // Same fusion as above, but where the comparison PRODUCES a Boolean rather than driving a branch:
+    // `a != 0` is `iload_0; ifeq` (kotlinc), never `iload_0; iconst_0; if_icmpne`.
+    let Some(d) = facade_disasm(
+        "cmp0v",
+        "fun ne0(a: Int): Boolean = a != 0\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        n.contains("iload_0\nifeq"),
+        "value-position `a != 0` must fuse to a single-operand compare-to-zero branch:\n{n}"
+    );
+    assert!(
+        !n.contains("iconst_0\nif_icmp"),
+        "value-position comparison against 0 must not materialize iconst_0 then if_icmp:\n{n}"
+    );
+}
+
+#[test]
+fn long_compare_in_value_position_tests_lcmp_without_materialized_zero() {
+    // `lcmp` already leaves -1/0/1 on the stack, so the test against it is the single-operand
+    // `ifeq`/`ifne`/`ifge`/… family — NOT a materialized `iconst_0` plus a two-operand `if_icmp*`.
+    // kotlinc: `lcmp; ifne` for `==`, `lcmp; ifge` for `<`.
+    let Some(d) = facade_disasm(
+        "lcmpv",
+        "fun eq(a: Long, b: Long): Boolean = a == b\n\
+         fun ne(a: Long, b: Long): Boolean = a != b\n\
+         fun lt(a: Long, b: Long): Boolean = a < b\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        !n.contains("lcmp\niconst_0"),
+        "`lcmp` must not be followed by a materialized zero — it already compares against 0:\n{n}"
+    );
+    // Polarity matches kotlinc: branch on the NEGATED comparison to the `false` arm, fall through to
+    // `iconst_1`. So `==` tests `ifne`, `!=` tests `ifeq`, `<` tests `ifge`.
+    for want in ["lcmp\nifne", "lcmp\nifeq", "lcmp\nifge"] {
+        assert!(
+            n.contains(want),
+            "expected fused `{want}` (kotlinc's shape):\n{n}"
+        );
+    }
+}
+
+#[test]
+fn double_compare_in_value_position_tests_dcmp_without_materialized_zero() {
+    // Covers BOTH NaN variants: `==` uses `dcmpg`, `>` uses `dcmpl` (NaN → -1), so a NaN operand makes
+    // either comparison false. A regression that picked the wrong variant would still fuse, so assert
+    // the variant too, not just the absence of the zero.
+    let Some(d) = facade_disasm(
+        "dcmpv",
+        "fun eq(a: Double, b: Double): Boolean = a == b\n\
+         fun gt(a: Double, b: Double): Boolean = a > b\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        !n.contains("dcmpg\niconst_0") && !n.contains("dcmpl\niconst_0"),
+        "`dcmp*` must not be followed by a materialized zero:\n{n}"
+    );
+    assert!(
+        n.contains("dcmpg\nifne"),
+        "expected fused `dcmpg; ifne` for `==` (kotlinc's shape):\n{n}"
+    );
+    assert!(
+        n.contains("dcmpl\nifle"),
+        "expected fused `dcmpl; ifle` for `>` — the NaN-correct variant (kotlinc's shape):\n{n}"
+    );
+}
+
+#[test]
+fn float_compare_in_value_position_tests_fcmp_without_materialized_zero() {
+    let Some(d) = facade_disasm(
+        "fcmpv",
+        "fun eq(a: Float, b: Float): Boolean = a == b\n\
+         fun gt(a: Float, b: Float): Boolean = a > b\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        !n.contains("fcmpg\niconst_0") && !n.contains("fcmpl\niconst_0"),
+        "`fcmp*` must not be followed by a materialized zero:\n{n}"
+    );
+    assert!(
+        n.contains("fcmpg\nifne") && n.contains("fcmpl\nifle"),
+        "expected fused `fcmpg; ifne` for `==` and `fcmpl; ifle` for `>`:\n{n}"
+    );
+}
+
+#[test]
+fn zero_on_the_left_in_value_position_fuses_only_for_equality() {
+    // kotlinc fuses `0 == x` / `0 != x` (they are symmetric) but does NOT mirror the ORDERING operators:
+    // `0 < x` stays the two-operand `iconst_0; iload x; if_icmpge`. Mirroring it to `iload x; ifle` is
+    // shorter but diverges, so the fusion is deliberately restricted to `==`/`!=`.
+    let Some(d) = facade_disasm(
+        "zeroleft",
+        "fun zeq(a: Int): Boolean = 0 == a\n\
+         fun zlt(a: Int): Boolean = 0 < a\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        n.contains("iload_0\nifne"),
+        "`0 == a` must fuse to the single-operand `ifne`:\n{n}"
+    );
+    assert!(
+        n.contains("iconst_0\niload_0\nif_icmpge"),
+        "`0 < a` must keep kotlinc's two-operand form, NOT be mirrored to `ifle`:\n{n}"
+    );
+    assert!(
+        !n.contains("iload_0\nifle"),
+        "`0 < a` must not be mirrored — that fuses shorter than kotlinc and diverges:\n{n}"
+    );
+}
+
+#[test]
+fn zero_on_the_left_in_branch_position_fuses_only_for_equality() {
+    // Branch and value consumers share one comparison emitter. This branch-position regression is
+    // intentionally separate from the value-position check above: the old branch-only implementation
+    // mirrored `0 < a` to the shorter `a > 0`, producing `iload_0; ifle` even though kotlinc retains
+    // operand order and emits `iconst_0; iload_0; if_icmpge` for the false edge.
+    let Some(d) = facade_disasm(
+        "zeroleftbranch",
+        "fun zlt(a: Int): String {\n  if (0 < a) return \"t\"\n  return \"f\"\n}\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        n.contains("iconst_0\niload_0\nif_icmpge"),
+        "branch-position `0 < a` must retain kotlinc's two-operand, source-order form:\n{n}"
+    );
+    assert!(
+        !n.contains("iload_0\nifle"),
+        "branch-position `0 < a` must not select a positional mirror optimization:\n{n}"
+    );
+}
+
+#[test]
+fn referential_null_comparison_in_value_position_is_single_operand() {
+    // `a === null` is a NULL comparison, not a referential one: `ifnonnull`, not `aconst_null;
+    // if_acmpne`. The null-literal check must therefore run BEFORE the `===` reference arm.
+    let Some(d) = facade_disasm(
+        "refnullv",
+        "fun isNull(a: Any?): Boolean = a === null\n\
+         fun notNull(a: Any?): Boolean = a !== null\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        !n.contains("aconst_null"),
+        "`a === null` must not materialize a null to compare against:\n{n}"
+    );
+    assert!(
+        !n.contains("if_acmpeq") && !n.contains("if_acmpne"),
+        "`a === null` must use `ifnull`/`ifnonnull`, not a two-operand reference compare:\n{n}"
+    );
+}
+
+#[test]
+fn value_position_comparison_does_not_poison_a_later_inline_splice() {
+    // A value-position comparison used to leave the operand-height tracker over-reporting, so a LATER
+    // branchy inline splice in the same expression saw a non-empty baseline and refused — which
+    // escalated to a hard "inline splice failed" compile error. Fixing the merge-point accounting in
+    // `materialize_cmp_bool` also fixed that, so guard it: this must COMPILE at all. Needs the stdlib
+    // on the classpath for `takeIf` — the inline HOF whose splice was the victim.
+    let Some((dir, jh)) = krusty_compile_stdlib(
+        "splicepoison",
+        "fun two(b: Boolean, s: String): String = \"$b/$s\"\n\
+         fun t2(a: Any?, b: Any?, x: Int): String = two(a === b, x.takeIf { it > 0 }.toString())\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let d = javap(&jh, &dir.join("BKt.class"));
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        d.contains("t2"),
+        "the comparison-then-splice shape must compile:\n{d}"
+    );
+}
+
+#[test]
+fn unsigned_long_equality_tests_lcmp_without_materialized_zero() {
+    // The shape that surfaced this gap: `ULong ==` compares the carriers with `lcmp`, and must test
+    // that result directly. Needs the stdlib on the classpath for `ULong`.
+    let Some((dir, jh)) = krusty_compile_stdlib(
+        "ulcmpv",
+        "fun eq(a: ULong, b: ULong): Boolean = a == b\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let d = javap(&jh, &dir.join("BKt.class"));
+    let _ = fs::remove_dir_all(&dir);
+    let n = normalize(&d);
+    assert!(
+        !n.contains("lcmp\niconst_0"),
+        "ULong `==` must test the `lcmp` result directly, not against a materialized zero:\n{n}"
+    );
+    assert!(
+        n.contains("lcmp\nifne"),
+        "expected fused `lcmp; ifne` (kotlinc's shape):\n{n}"
+    );
+}
+
+#[test]
+fn value_position_comparison_polarity_matches_kotlinc() {
+    // kotlinc materializes a comparison's Boolean by branching on the NEGATED condition to the
+    // `false` arm and falling through to `iconst_1`; the taken branch pushes `iconst_0`. Holds for
+    // the null, referential and numeric arms alike, so one shape check covers all three.
+    let Some(d) = facade_disasm(
+        "polarity",
+        "fun isNull(a: Any?): Boolean = a == null\n\
+         fun refEq(a: Any, b: Any): Boolean = a === b\n\
+         fun intEq(a: Int, b: Int): Boolean = a == b\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    // `normalize` keeps each branch's target offset (`ifnonnull 8`), so match on the opcode followed by
+    // whatever operand, then the next line.
+    let followed_by = |opcode: &str, next: &str| {
+        n.lines()
+            .zip(n.lines().skip(1))
+            .any(|(a, b)| (a == opcode || a.starts_with(&format!("{opcode} "))) && b.trim() == next)
+    };
+    for (opcode, next) in [
+        ("ifnonnull", "iconst_1"), // `a == null` → jump away when NON-null
+        ("if_acmpne", "iconst_1"), // `a === b`   → jump away when NOT identical
+        ("if_icmpne", "iconst_1"), // `a == b`    → jump away when NOT equal
+    ] {
+        assert!(
+            followed_by(opcode, next),
+            "expected kotlinc's fall-through-to-true polarity `{opcode}; {next}`:\n{n}"
+        );
+    }
+    for opcode in ["ifnull", "if_acmpeq", "if_icmpeq"] {
+        assert!(
+            !followed_by(opcode, "iconst_0"),
+            "value-position comparisons must not use the inverted (jump-to-true) polarity \
+             (`{opcode}; iconst_0`):\n{n}"
+        );
+    }
+}
+
 // ---- Phase 399: dcmpl/fcmpl for > and >= -----------------------------------------------------
 
 #[test]
