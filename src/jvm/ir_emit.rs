@@ -116,10 +116,12 @@ pub struct EmitOptions {
     pub module_name: Option<String>,
     /// Emit a computed `@kotlin.Metadata` for supported class shapes ([`build_class_metadata`]).
     /// Byte-verified vs kotlinc for a plain `val`/`var`-property class and a `data class` (its IS_DATA
-    /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); other shapes are gated
-    /// out and emit no metadata. ON by default: without it krusty cannot fully read its OWN output —
-    /// `componentN` resolves (a real JVM method) but `val (a, b) = p` does not, because the OPERATOR
-    /// flag lives only in metadata, as do `copy`'s parameter names.
+    /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); a shape that is not
+    /// verified declines individually and emits no metadata, so this never writes an unverified
+    /// payload (one did break kotlin-reflect on a box-corpus case). The CLI backend turns this ON —
+    /// without it a krusty-compiled CLASS carries nothing a second krusty compilation can read. It
+    /// stays OFF in this `Default` so [`emit_all`]'s output is unchanged for callers that want the
+    /// pre-class-metadata bytes.
     pub emit_class_metadata: bool,
     pub inner_class_resolver: Option<InnerClassResolver>,
 }
@@ -337,6 +339,14 @@ fn init_body_constant_fields(ir: &IrFile, c: &IrClass) -> std::collections::Hash
     out
 }
 
+/// Does `data` on this class synthesize the `componentN`/`copy` family? A `data object` is a SINGLETON:
+/// kotlinc gives it `equals`/`hashCode`/`toString` ONLY — there is nothing to copy from and no
+/// primary-constructor property to destructure. Both the constant-pool seeder and the `@Metadata`
+/// builder ask this, so a data object cannot end up describing a `copy` its class file does not have.
+fn synthesizes_data_class_members(c: &crate::ir::IrClass) -> bool {
+    c.is_data && !c.is_singleton()
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -405,11 +415,21 @@ fn build_class_metadata(
     } else {
         std::collections::HashSet::new()
     };
+    let synthesizes_copy = synthesizes_data_class_members(c);
+    // `data` synthesizes over the PRIMARY-CONSTRUCTOR properties only — `c.fields` also holds the
+    // backing fields of body properties (`data class P(val x: Int) { val y = 1 }` has two fields but
+    // one component). Counting all of them advertised a `component2` the class file does not define,
+    // and a `copy(II)` where only `copy(I)` exists; real kotlinc reading that record accepts
+    // `val (a, b) = p` and binds a method that is not there.
+    let data_component_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
     let data_method_names: std::collections::HashSet<String> = if c.is_data {
-        let mut s: std::collections::HashSet<String> = (1..=c.fields.len())
+        let mut s: std::collections::HashSet<String> = (1..=data_component_fields.len())
             .map(|i| format!("component{i}"))
             .collect();
-        s.extend(["copy", "equals", "hashCode", "toString"].map(String::from));
+        s.extend(["equals", "hashCode", "toString"].map(String::from));
+        if synthesizes_copy {
+            s.insert("copy".to_string());
+        }
         s
     } else {
         std::collections::HashSet::new()
@@ -437,6 +457,52 @@ fn build_class_metadata(
                 && !value_method_names.contains(n)
         })
         .collect();
+    // VALUE-CLASS-INVOLVED MEMBERS: decline the whole class. The writer can produce kotlinc's exact
+    // payload for these (the byte-identity tests proved it) — what is missing is the READ half. The
+    // physical method already returns/takes the ERASED underlying, but a caller that learns the Kotlin
+    // return from `@Metadata` still emits kotlinc's boxed-form sequence — `invokevirtual I.f-XLNMDGE()
+    // Ljava/lang/String; checkcast K; invokevirtual K.unbox-impl()` — and the `String` on the stack is
+    // not a `K`: ClassCastException, or VerifyError once a fake override lands the receiver wrong.
+    // Reproduced for both shapes: a VALUE class with a declared member (`S("O").k`) and a PLAIN class
+    // whose member's signature mentions one (`I().f().v`, `C().foo("OK").s` inherited from `A`,
+    // `WhateverUseCase()(Result.failure(…))`). Withholding the record puts each caller back on the
+    // descriptor fallback, which is what it used before any class metadata was written. Reinstate this
+    // when the classpath value-class RETURN is modelled (`MetadataCallFacts` carries
+    // `value_class_params` but has no return counterpart). Pinned by the box corpus's
+    // `compileKotlinAgainstKotlin/inlineClasses/*` MODULE chains.
+    // The property signal is its stamped JVM REALIZATION, not `vc_declared_sigs`: that table holds
+    // non-synthesized FUNCTIONS only, so a value-class-typed CONSTRUCTOR PARAMETER
+    // (`class Holder(val id: ItemId)`, whose generated `getId-YyT5sjE` is synthesized) and a
+    // value-class-typed BODY PROPERTY both slip past it. The value-class pass has already resolved
+    // whether a property's getter/setter needs mangling and records the exact spelling on the
+    // declaration; consulting that stamp here keeps metadata admission tied to the same semantic fact
+    // that accessor emission consumes. Do not infer ownership from the global function table:
+    // synthesized property accessors are emitted directly from `IrProperty` and deliberately have no
+    // `IrFunction` entry, so a dispatch-receiver scan cannot see them.
+    //
+    // `Holder` is the constructor-property case that proves the wider net is needed: krusty described
+    // `id` as `String` (kotlinc: `LItemId;`), named the PRIVATE `<init>(Ljava/lang/String;)V` rather than
+    // kotlinc's `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`, and dropped the
+    // getter's mangled name — real kotlinc reading that record rejects `Holder(ItemId("OK"))` as a
+    // type mismatch, and a caller that satisfied it would `invokespecial` the private constructor.
+    // A stamp is present only when the ordinary property convention is not the physical ABI. Testing
+    // both sides keeps this admission rule correct for `var` even if a future realization needs only a
+    // setter override. The conservative decline is temporary until the metadata reader can preserve
+    // value-class property types and consume these exact JVM signatures end to end.
+    let has_value_class_property_realization = c
+        .properties
+        .iter()
+        .any(|p| p.getter_jvm_name.is_some() || p.setter_jvm_name.is_some());
+    let has_value_class_member = declared_fids
+        .iter()
+        .any(|fid| ir.vc_declared_sigs.contains_key(fid));
+    if has_value_class_member
+        || (!c.is_value
+            && (has_value_class_property_realization || ir.has_value_param_ctor(&c.fq_name())))
+        || (c.is_value && !declared_fids.is_empty())
+    {
+        return None;
+    }
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let const_fields = init_body_constant_fields(ir, c);
     let mut props: Vec<PropMeta> = c
@@ -563,13 +629,8 @@ fn build_class_metadata(
     };
     let methods: Vec<FnMeta> = if c.is_data {
         let class_ty = Ty::obj(&c.fq_name());
-        // `componentN`/`copy` are synthesized over the PRIMARY-CONSTRUCTOR properties only — a body
-        // property (`data class P(val a: Int) { val b = "x" }`) is a field like any other and takes no
-        // component or `copy` parameter. `c.fields` holds both, so slice it the way the constructor
-        // record above already does.
-        let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
-        let field_tys: Vec<Ty> = data_fields.iter().map(|f| f.ty).collect();
-        let mut m: Vec<FnMeta> = data_fields
+        let field_tys: Vec<Ty> = data_component_fields.iter().map(|f| f.ty).collect();
+        let mut m: Vec<FnMeta> = data_component_fields
             .iter()
             .enumerate()
             .map(|(i, f)| FnMeta {
@@ -582,15 +643,13 @@ fn build_class_metadata(
                 jvm_sig_name: None,
             })
             .collect();
-        // A `data object` is a singleton: kotlinc synthesizes `equals`/`hashCode`/`toString` for it but
-        // NO `copy` (and no `componentN` — the loop above is then empty). No PRIMARY-CONSTRUCTOR
-        // property IS the test: a `data class` must declare at least one, so a data declaration with
-        // none can only be an object. (`is_object` is not set on a class hoisted out of an interface
-        // body, and a data object may still have body properties, so neither is usable here.)
-        if !data_fields.is_empty() {
+        if synthesizes_copy {
             m.push(FnMeta {
                 name: "copy".into(),
-                params: data_fields.iter().map(|f| (f.name.clone(), f.ty)).collect(),
+                params: data_component_fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty))
+                    .collect(),
                 ret: class_ty,
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
@@ -927,19 +986,18 @@ fn seed_plain_class_pool(
             fields: if c.is_data { &[] } else { &field_sigs },
         },
     );
-    if c.is_data {
+    if synthesizes_data_class_members(c) {
         let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
-        // The synthesized `componentN`/`copy` cover the PRIMARY-CONSTRUCTOR properties only — a body
-        // property is a field but takes no component or `copy` parameter.
-        let data_fields: Vec<(String, String)> = c
-            .fields
+        // The synthesized members cover the PRIMARY-CONSTRUCTOR properties only; a body property has a
+        // backing field in `c.fields` but no `componentN` and no `copy` parameter (see
+        // `build_class_metadata`, which takes the same prefix).
+        let component_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
+        let data_fields: Vec<(String, String)> = component_fields
             .iter()
-            .take(c.ctor_param_count as usize)
             .map(|f| (f.name.clone(), desc(f.ty)))
             .collect();
         // Per-field `hashCode` owner (interface field → `java/lang/Object`), recorded by `field_hash`.
-        let hashcode_owners: Vec<Option<String>> = c
-            .fields
+        let hashcode_owners: Vec<Option<String>> = component_fields
             .iter()
             .map(|f| ir.data_hashcode_owner(fq_name, &f.name).map(str::to_string))
             .collect();
@@ -8557,6 +8615,13 @@ impl<'a> Emitter<'a> {
         if !self.is_real_nothing_call(node) {
             return false;
         }
+        // The invoke was emitted with ZERO result words — `slot_words(Nothing)` is 0 because a
+        // `Nothing` call yields no VALUE — yet it physically leaves one `Void` word. Re-declare that
+        // word before discarding it: otherwise the tracked height sits one below the real stack from
+        // the invoke onwards, `max_stack` is undercounted by whatever this path pushes on top
+        // (`println(boom())` needs the `PrintStream` receiver underneath), and the JVM rejects the
+        // method with "Operand stack overflow".
+        code.set_stack((code.stack_height().max(0) + 1) as u16);
         code.pop();
         let cls = self.cw.class_ref("kotlin/KotlinNothingValueException");
         code.new_obj(cls);
@@ -11278,7 +11343,10 @@ impl<'a> Emitter<'a> {
         let mut fin_ranges: Vec<(Label, Label)> = vec![(start, end)];
         for c in catches {
             let handler = code.new_label();
-            code.bind(handler);
+            // A handler is entered over the exception edge, not by a branch — and a diverging `try`
+            // body leaves the stream dead exactly here, so binding must revive on the range it guards
+            // rather than on an incoming branch.
+            code.bind_handler(handler, &[(start, end)]);
             let exc_internal = c.exc_internal.render();
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
@@ -11336,7 +11404,9 @@ impl<'a> Emitter<'a> {
         // inlined finally code — which lies past those ranges, so it doesn't re-catch itself.
         if let Some(f) = finally {
             let fin_handler = code.new_label();
-            code.bind(fin_handler);
+            // Exception edge — see the `catch` handler above; this one guards the body and every
+            // catch body (`fin_ranges`), which are complete by now.
+            code.bind_handler(fin_handler, &fin_ranges);
             let thr_ci = self.cw.class_ref("java/lang/Throwable");
             self.frame(fin_handler, vec![VerifType::Object(thr_ci)], code);
             let thr_ty = Ty::obj("java/lang/Throwable");

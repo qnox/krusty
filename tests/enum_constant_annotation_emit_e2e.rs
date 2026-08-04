@@ -27,39 +27,40 @@ const ANNOTATED: &str = "package demo\n\
          @Mark(\"usr\") USER(\"user\"),\n\
      }\n";
 
-const PLAIN: &str = "package demo\n\
+/// The same enum with `Mark` DECLARED but never applied — the subject of the negative test.
+const DECLARED_UNAPPLIED: &str = "package demo\n\
+     @Retention(AnnotationRetention.RUNTIME)\n\
+     annotation class Mark(val v: String)\n\
      enum class Role(val v: String) { SYSTEM(\"system\"), USER(\"user\") }\n";
 
 #[test]
 fn runtime_annotation_on_enum_constant_is_emitted() {
     let annotated = role_bytes(ANNOTATED);
-    let plain = role_bytes(PLAIN);
     // Assert on what only the CONSTANTS can put there: the annotation type and BOTH of its argument
     // values — one per constant, so a single stamped annotation would not satisfy it. The attribute
     // NAME is no evidence at all: it is interned once per class file, and every class krusty emits
-    // carries a class-level `@kotlin.Metadata` (as kotlinc's plain enum does), so the same enum
-    // WITHOUT the annotations holds exactly the same name — which is what `plain` pins here.
+    // carries a class-level `@kotlin.Metadata` (as kotlinc's plain enum does).
     for needle in ["Ldemo/Mark;", "sys", "usr"] {
         assert!(
             contains(&annotated, needle),
             "annotated enum constants are missing {needle:?}"
         );
     }
-    assert!(
-        !contains(&plain, "Ldemo/Mark;"),
-        "plain enum unexpectedly carries the annotation type"
-    );
 }
 
+/// The negative half: an annotation that is DECLARED but never applied leaves no trace on the enum.
+/// The check is the annotation TYPE's descriptor, not the `RuntimeVisibleAnnotations` attribute name —
+/// every emitted class carries that attribute for its own `@kotlin.Metadata` (kotlinc's plain `Role`
+/// has it too), so its mere presence says nothing about the enum CONSTANTS.
 #[test]
-fn plain_enum_has_no_constant_annotation() {
-    let bytes = role_bytes(PLAIN);
-    // Asserted on the annotation TYPE, not the attribute NAME: a plain enum compiled by kotlinc DOES
-    // carry `RuntimeVisibleAnnotations` — its class-level `@kotlin.Metadata` is one — so the attribute
-    // name says nothing about whether the CONSTANTS were annotated, which is what this test is about.
-    // The positive test above pins the same bytes from the other side.
+fn unapplied_annotation_leaves_no_trace_on_a_plain_enum() {
+    let bytes = role_bytes(DECLARED_UNAPPLIED);
     assert!(
         !contains(&bytes, "Ldemo/Mark;"),
         "unexpected annotation on a plain enum's constants",
+    );
+    assert!(
+        contains(&bytes, "Lkotlin/Metadata;"),
+        "the enum still carries its own class @Metadata",
     );
 }

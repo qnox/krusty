@@ -1531,7 +1531,7 @@ impl<'a> SemanticClassifier<'a> {
             modifiers = match target {
                 CompoundAssignmentTarget::Member { .. } => 0,
                 CompoundAssignmentTarget::SourceExtension { .. } => HighlightModifiers::STATIC,
-                CompoundAssignmentTarget::LibraryExtension(_) => {
+                CompoundAssignmentTarget::LibraryExtension { .. } => {
                     HighlightModifiers::DEFAULT_LIBRARY
                 }
             };
@@ -2396,10 +2396,10 @@ impl<'a> SemanticClassifier<'a> {
                 .and_then(|types| types.resolved_super_call(expression))
                 .and_then(|resolved| {
                     self.definition_symbols.member_target(
-                        &resolved.owner.render(),
+                        &resolved.owner()?.render(),
                         name,
                         MemberKind::InstanceFunction,
-                        &resolved.params,
+                        resolved.params(),
                     )
                 })
             {

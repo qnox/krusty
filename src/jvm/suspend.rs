@@ -1642,6 +1642,17 @@ fn build_state_machine(
         );
         return false; // a suspending trailing-value body isn't modeled (desugar to a `return` first)
     }
+    // A SUSPENSION reached through `invokespecial` (`super.suspendHere(x)`): the machine would have to
+    // thread the continuation through a non-virtual dispatch AND resume back into it, which the
+    // resume path does not model — the resumed frame read back `null`
+    // (`coroutines/suspendFunctionAsCoroutine/superCall*`). Skip the file, never miscompile.
+    if suspends_through_super(ir, b, &suspend_set) {
+        crate::trace_compiler!(
+            "suspend",
+            "build_state_machine fid={fid} BAIL: super suspension"
+        );
+        return false;
+    }
     if binds_value_class_suspension(ir, b, &suspend_set) {
         crate::trace_compiler!(
             "suspend",
@@ -2381,16 +2392,15 @@ fn build_lambda_state_machine(
             spilled.push((idx, spill_field_ty(ty)));
         }
     }
-    // The spill-shape bail applies only to a RECEIVER lambda's machine (leading `this` field): the
-    // plain lambda's restore handles sub-int spills (a `Boolean` across try/catch, e2e-verified),
-    // while the receiver form's restore mis-slots them (the corpus intLikeVarSpilling shapes).
+    // A RECEIVER lambda's restore mis-slots a NARROW int-like or array spill (the corpus
+    // `intLikeVarSpilling` and `suspendFunctionAsCoroutine/superCall*` shapes), so those still bail.
+    // `Boolean` is NOT among them: `runBlocking { … }` binds `CoroutineScope` as its receiver, so a
+    // `Boolean` live across a suspension inside one reaches this path routinely and the restore
+    // handles it (`suspend_try_finally_body_e2e`, `suspend_receiver_lambda_unit_try_tail`).
     let receiver_lambda = ir.classes[class_id as usize]
         .fields
         .first()
         .is_some_and(|f| f.name == "this");
-    // A RECEIVER lambda additionally keeps the hoisted-temp bail: its restore reloads the leading
-    // `this`/capture fields on every entry, and a temp spilled beside them lands in the wrong slot
-    // (the corpus `suspendCallsInArguments` shape). The PLAIN lambda's temps are e2e-verified.
     if (receiver_lambda && spill_shape_unmodeled(&spilled))
         || spills_bottom_typed_local(&spilled)
         || suspending_over_progression(ir, b, &suspend_set)
@@ -5365,10 +5375,33 @@ fn spill_field_ty(ty: Ty) -> Ty {
 /// restores an array-typed local with its exact frame type, and null-checks a NULLABLE reference
 /// restore; krusty's restore emits none of these, so such a machine would fail verification (or
 /// corrupt a frame type) — bail (skip, never miscompile).
+/// Whether any SUSPENSION under `b` dispatches through `invokespecial` — a `super.f()` whose callee is
+/// a `suspend` function. See the bail site for why the machine cannot resume into one.
+fn suspends_through_super(ir: &IrFile, b: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    if matches!(
+        &ir.exprs[b as usize],
+        IrExpr::Call {
+            callee: crate::ir::Callee::Special { .. },
+            ..
+        }
+    ) && is_suspension_point(ir, b, suspend_set)
+    {
+        return true;
+    }
+    let mut found = false;
+    for_each_child(&ir.exprs, b, &mut |c| {
+        if suspends_through_super(ir, c, suspend_set) {
+            found = true;
+        }
+    });
+    found
+}
+
 fn spill_shape_unmodeled(spilled: &[(u32, Ty)]) -> bool {
     spilled.iter().any(|(_, t)| {
-        matches!(t, Ty::Byte | Ty::Short | Ty::Char | Ty::Boolean)
-            || t.non_null().array_elem().is_some()
+        // `Boolean` is excluded: it is the one narrow kind the restore does handle, and it occurs in
+        // every `runBlocking { … }` that keeps a flag across a suspension.
+        matches!(t, Ty::Byte | Ty::Short | Ty::Char) || t.non_null().array_elem().is_some()
     })
 }
 

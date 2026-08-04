@@ -608,6 +608,31 @@ fn subclass_resolves_protected_nested_classifier_from_java_base() {
 }
 
 #[test]
+fn override_uses_inherited_java_nested_enum_in_signature_and_body() {
+    run_mixed(
+        &[(
+            "fixtures/Parent.java",
+            r#"
+                package fixtures;
+                public class Parent {
+                    public enum DialogStyle { NO_STYLE, COMPACT }
+                    protected DialogStyle getStyle() { return DialogStyle.NO_STYLE; }
+                }
+            "#,
+        )],
+        r#"
+            package consumer
+            import fixtures.Parent
+            class Child : Parent() {
+                override fun getStyle(): DialogStyle = DialogStyle.COMPACT
+                fun value(): String = getStyle().name
+            }
+            fun box(): String = if (Child().value() == "COMPACT") "OK" else "FAIL"
+        "#,
+    );
+}
+
+#[test]
 fn inherited_classifier_does_not_expose_its_protected_member() {
     let Some(diagnostics) = mixed_diagnostics(
         &[(

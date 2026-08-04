@@ -58,7 +58,9 @@ pub fn global_declared_class_occurrences(
     let private_nested = file
         .declarations
         .iter()
-        .filter(|declared| declared.private && declared.internal.contains('$'))
+        // Java permits `private` only on a member type. Use the parser's syntactic relation to identify
+        // that member; `$` cannot classify one because it is legal in a top-level Java identifier.
+        .filter(|declared| declared.private && declared.outer_internal.is_some())
         .map(|declared| declared.internal.as_str())
         .collect::<std::collections::HashSet<_>>();
     declared_class_occurrences(source, file_index)

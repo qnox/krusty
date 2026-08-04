@@ -86,21 +86,26 @@ fun box(): String = "OK"
 }
 
 #[test]
-fn non_suspend_body_referencing_suspend_fn_reports_gate() {
-    // A NON-suspend body that textually uses a suspend fn's name: call-site continuation threading
-    // is only modeled inside a suspend body. The gate is a conservative TEXTUAL scan — here `sum`
-    // is a local variable shadowing the suspend fn, a false positive the gate still declines on
-    // (sound: it skips rather than risks a miscompile).
-    common::assert_inline_source_lower_bail(
-        r#"
+fn non_suspend_body_with_same_named_local_is_not_a_suspend_call() {
+    // Suspension classification follows the exact checker-selected CALL target. A local variable
+    // merely sharing a suspend declaration's name is neither a call nor evidence of continuation
+    // threading; retaining the former textual false positive would make unrelated user-chosen names
+    // affect backend support and could expose those names through a spurious lowering decision.
+    let source = r#"
 suspend fun sum(x: Int): Int = x
 fun box(): String {
     var sum = 1
     sum += 1
     return if (sum == 2) "OK" else "fail"
 }
-"#,
-        "gate:suspend-call-from-non-suspend",
+"#;
+    if !common::stdlib_toolchain_ready() {
+        return;
+    }
+    assert_eq!(
+        common::inline_source_backend_outcome(source),
+        Some(common::BackendOutcome::Emitted),
+        "a same-named local value must not be classified as a suspend call"
     );
 }
 

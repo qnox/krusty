@@ -91,6 +91,118 @@ fun box(): String {{ var res = \"FAIL\"; builder {{ val g = GetResult(); res = g
 }
 
 #[test]
+fn suspend_operator_get_convention_is_a_suspension_point() {
+    // `b[1]` is an `Expr::Index`, never an `Expr::Call` — the coroutine classification scan used to
+    // miss it, so a lambda whose ONLY suspension is a convention call was typed non-suspend and the
+    // whole file died at emit. The selected `get` operator is a suspension point like any other.
+    let src = format!(
+        "{BUILDER}\
+class Box(val v: Int) {{ suspend operator fun get(i: Int): Int = v + i }}\n\
+fun box(): String {{ var r = 0; builder {{ val b = Box(1); r = b[1] }}; return if (r == 2) \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(run(&src).expect("suspend operator get runs"), "OK");
+}
+
+/// The convention scan also feeds the stricter `suspend inline` safety gate. A generated suspend
+/// lambda state machine cannot splice an inline callee, so it must decline before emitting a direct
+/// call to a method whose physical ABI is not the source signature. This is the convention-spelling
+/// counterpart of the plain-call regression in `suspend_receiver_lambda_e2e`; value-returning `plus`
+/// deliberately selects its target through `resolved_operator_calls`, not `resolved_calls`.
+#[test]
+fn suspend_inline_operator_plus_in_suspend_lambda_reaches_the_inline_gate() {
+    let src = format!(
+        "{BUILDER}\
+class Box(val v: Int) {{ suspend inline operator fun plus(i: Int): Box = Box(v + i) }}\n\
+fun box(): String {{ var r = 0; builder {{ var b = Box(1); b += 2; r = b.v }}; return \"unreachable: $r\" }}\n"
+    );
+    common::assert_inline_source_lower_bail(&src, "gate:suspend-inline-call-in-suspend-lambda");
+}
+
+/// The statement-keyed half of the same safety rule. `plusAssign` is retained as a specialized
+/// `CompoundAssignmentTarget`, so that target must carry the exact selected suspend/inline
+/// capabilities instead of reducing them to the suspension bit used by state-machine discovery.
+#[test]
+fn suspend_inline_operator_plus_assign_in_suspend_lambda_reaches_the_inline_gate() {
+    let src = format!(
+        "{BUILDER}\
+class Box(var v: Int) {{ suspend inline operator fun plusAssign(i: Int) {{ v += i }} }}\n\
+fun box(): String {{ var r = 0; builder {{ val b = Box(1); b += 2; r = b.v }}; return \"unreachable: $r\" }}\n"
+    );
+    common::assert_inline_source_lower_bail(&src, "gate:suspend-inline-call-in-suspend-lambda");
+}
+
+/// Relational syntax must record the same exact selected target as every other operator. A former
+/// source-only hierarchy fallback could answer only “suspends”, losing the inline capability and
+/// bypassing the state-machine safety gate.
+#[test]
+fn suspend_inline_operator_compare_to_in_suspend_lambda_reaches_the_inline_gate() {
+    let src = format!(
+        "{BUILDER}\
+class Box(val v: Int) {{ suspend inline operator fun compareTo(other: Box): Int = v - other.v }}\n\
+fun box(): String {{ var r = false; builder {{ r = Box(1) < Box(2) }}; return \"unreachable: $r\" }}\n"
+    );
+    common::assert_inline_source_lower_bail(&src, "gate:suspend-inline-call-in-suspend-lambda");
+}
+
+#[test]
+fn suspend_operator_plus_convention_is_a_suspension_point() {
+    // `b += 2` against a value-returning `plus` desugars to `b = b.plus(2)` — a synthetic
+    // `Expr::Binary`, so the selected operator is recorded against that EXPRESSION.
+    let src = format!(
+        "{BUILDER}\
+class Box(val v: Int) {{ suspend operator fun plus(i: Int): Box = Box(v + i) }}\n\
+fun box(): String {{ var r = 0; builder {{ var b = Box(1); b += 2; r = b.v }}; return if (r == 3) \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(run(&src).expect("suspend operator plus runs"), "OK");
+}
+
+#[test]
+fn suspend_operator_plus_assign_convention_is_a_suspension_point() {
+    // The in-place spelling. A `Unit`-returning `plusAssign` mutates the receiver, so the checker
+    // records it as a `CompoundAssignmentTarget` against the STATEMENT — the one convention key
+    // neither the call scan nor the expression tables reach. Distinct from the `plus` case above:
+    // only this shape exercises the specialized target's retained callable capabilities.
+    let src = format!(
+        "{BUILDER}\
+class Box(var v: Int) {{ suspend operator fun plusAssign(i: Int) {{ v += i }} }}\n\
+fun box(): String {{ var r = 0; builder {{ val b = Box(1); b += 2; r = b.v }}; return if (r == 3) \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(run(&src).expect("suspend operator plusAssign runs"), "OK");
+}
+
+#[test]
+fn suspend_operator_compare_to_convention_is_a_suspension_point() {
+    // A SOURCE-class member `compareTo` driving `<` records the same exact operator target that
+    // lowering emits. The suspend classifier consumes its capabilities without a source-only
+    // hierarchy/name fallback.
+    let src = format!(
+        "{BUILDER}\
+class Box(val v: Int) {{ suspend operator fun compareTo(o: Box): Int = v - o.v }}\n\
+fun box(): String {{ var r = 0; builder {{ val less = Box(1) < Box(2); r = if (less) 7 else 9 }}; return if (r == 7) \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(run(&src).expect("suspend operator compareTo runs"), "OK");
+}
+
+/// `h?.get()` is an `Expr::SafeCall`, not an `Expr::Call` — the same "a call that is not spelled as
+/// one" blind spot as the operator conventions, and it reached the identical failure: the lambda was
+/// classified non-suspend and the file died at emit with NO labelled reason, while the `h!!.get()`
+/// spelling of the very same call compiled and ran.
+///
+/// The state-machine pass still declines a suspension on a safe-call's short-circuiting branch, so
+/// this shape does not run yet — but it must now decline at its own named boundary instead of
+/// silently falling off the end of emission. Pinning the reason is what distinguishes "we know we
+/// can't do this" from "we never noticed there was a suspension here".
+#[test]
+fn suspend_call_behind_a_safe_call_is_seen_as_a_suspension() {
+    let src = format!(
+        "{BUILDER}\
+class Holder {{ suspend fun get(): String = \"OK\" }}\n\
+fun box(): String {{ var r: String? = \"FAIL\"; val h: Holder? = Holder(); builder {{ r = h?.get() }}; return r ?: \"NULL\" }}\n"
+    );
+    common::assert_inline_source_backend_bail(&src, krusty::jvm::backend::SkipReason::Suspend);
+}
+
+#[test]
 fn suspend_coroutine_unintercepted_reads_its_continuation() {
     // `suspendCoroutineUninterceptedOrReturn { c -> c.resume(t); COROUTINE_SUSPENDED }` reads its
     // continuation `c` (bound via the `CurrentContinuation` placeholder, resolved by the CPS pass) and

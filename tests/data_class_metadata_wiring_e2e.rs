@@ -69,6 +69,49 @@ fn assert_byte_identical(src: &str, class_internal: &str, cp: &[PathBuf]) {
     );
 }
 
+/// For a class krusty deliberately emits NO `@Metadata` on — one whose declared member's signature
+/// mentions a value class. The record would be byte-correct (that is what these three cases proved
+/// before the decline landed), but nothing can READ it yet: a separate compilation that learns the
+/// Kotlin return still emits kotlinc's boxed sequence against a method that already returns the
+/// erased underlying (`checkcast K` on a `String` → ClassCastException). So the class must (a) carry
+/// no class metadata, and (b) otherwise match kotlinc's member shape exactly — the mangled names and
+/// erased descriptors the value-class pass produces. Assert both, so the decline cannot quietly widen
+/// into a codegen difference. Retire this for `assert_byte_identical` once the read half lands.
+fn assert_methods_match_kotlinc_but_metadata_is_withheld(src: &str, class_internal: &str) {
+    // `krusty_bytes` is strict: a declined source panics with the diagnostics rather than skipping.
+    let kr = krusty_bytes(src, class_internal, &[]);
+    let stem = class_internal.rsplit('/').next().unwrap();
+    let Some(ko) = kotlinc_bytes(src, stem, class_internal, &[]) else {
+        eprintln!("skip ({class_internal}: provisioned kotlinc unavailable)");
+        return;
+    };
+    let kr_info = parse_class(&kr).expect("krusty parses");
+    let ko_info = parse_class(&ko).expect("kotlinc parses");
+    let members = |info: &krusty::jvm::classreader::ClassInfo| {
+        info.methods
+            .iter()
+            .map(|m| (m.name.clone(), m.descriptor.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        members(&kr_info),
+        members(&ko_info),
+        "{class_internal}: mangled names + erased descriptors must match kotlinc",
+    );
+    // Parsing an absent annotation and parsing a present-but-empty annotation both yield empty
+    // metadata collections. Inspect the annotation descriptor itself so this test pins the actual
+    // admission contract: the class carries no record at all, rather than a misleading empty one.
+    assert!(
+        !kr.windows(b"Lkotlin/Metadata;".len())
+            .any(|window| window == b"Lkotlin/Metadata;"),
+        "{class_internal}: a value-class-involved member means the class @Metadata is withheld",
+    );
+    assert!(
+        !ko_info.meta.class_functions.is_empty() || !ko_info.meta.class_properties.is_empty(),
+        "{class_internal}: kotlinc DOES describe it — this is the gap the decline stands in for",
+    );
+}
+
 // ---- Byte-identity (the end-to-end goal) ----------------------------------------------------------
 
 /// A class whose only member is a declared method with a parameter — pins that the parameter's REAL
@@ -121,24 +164,35 @@ fn suspend_member_returning_a_value_is_byte_identical() {
 }
 
 /// A member taking a value-class parameter. The JVM method is mangled and takes the erased underlying
-/// type, but `@Metadata` names the Kotlin function and its DECLARED parameter type, recording the
-/// mangled name and erased descriptor as a `JvmMethodSignature`.
+/// type; krusty's codegen matches kotlinc, but the class `@Metadata` describing it is withheld until a
+/// reader can consume it.
 #[test]
-fn value_class_parameter_member_is_byte_identical() {
-    assert_byte_identical(
+fn value_class_parameter_member_matches_kotlinc_without_metadata() {
+    assert_methods_match_kotlinc_but_metadata_is_withheld(
         "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\ninterface I {\n    suspend fun f(a: K): String\n}\n",
         "demo/I",
-        &[],
     );
 }
 
 /// The same for a value-class RETURN, which mangles the name on its own.
 #[test]
-fn value_class_return_member_is_byte_identical() {
-    assert_byte_identical(
+fn value_class_return_member_matches_kotlinc_without_metadata() {
+    assert_methods_match_kotlinc_but_metadata_is_withheld(
         "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\ninterface I {\n    fun f(): K\n}\n",
         "demo/I",
-        &[],
+    );
+}
+
+/// A value-class-typed BODY property is not present in `IrClass::methods`: its accessor is synthesized
+/// directly from the property declaration. The value-class pass stamps the declaration with its exact
+/// mangled JVM realization, so class-metadata admission must consume that semantic property fact;
+/// otherwise it advertises plain `getK` while the class file defines `getK-<hash>`, and a downstream
+/// caller links a missing method.
+#[test]
+fn value_class_body_property_matches_kotlinc_without_metadata() {
+    assert_methods_match_kotlinc_but_metadata_is_withheld(
+        "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\nclass Holder {\n    val k: K = K(\"OK\")\n}\n",
+        "demo/Holder",
     );
 }
 
@@ -210,13 +264,12 @@ fn string_template_is_byte_identical() {
 /// OrgId?`. The value-class pass (which runs before the coroutine pass) erases the return to the
 /// underlying, but kotlinc keeps the value class in the continuation's generic type argument
 /// (`Continuation<? super OrgId>`, not `<? super String>`). The declared return is recovered from the
-/// value-class pass's record.
+/// value-class pass's record. Codegen matches kotlinc; the class `@Metadata` is withheld (below).
 #[test]
-fn suspend_returning_nullable_value_class_is_byte_identical() {
-    assert_byte_identical(
+fn suspend_returning_nullable_value_class_matches_kotlinc_without_metadata() {
+    assert_methods_match_kotlinc_but_metadata_is_withheld(
         "package demo\n@JvmInline\nvalue class Id(val v: String)\ninterface R {\n    suspend fun resolve(k: String): Id?\n}\n",
         "demo/R",
-        &[],
     );
 }
 

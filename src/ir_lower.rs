@@ -636,6 +636,30 @@ fn lower_file_at_reporting_impl(
                 Decl::Property(_) => {}
             }
         }
+        // A SUSPENSION reached through `super.f(…)`: the state machine would have to thread the
+        // continuation through a non-virtual dispatch and resume back into it, which the resume path
+        // does not model — the resumed frame read back `null`
+        // (`coroutines/suspendFunctionAsCoroutine/superCall*` answered with an NPE). Skip the file.
+        for (body, _) in &suspend_bodies {
+            let mut found = false;
+            for &e in &reachable(*body) {
+                let Expr::Call { callee, .. } = file.expr(e) else {
+                    continue;
+                };
+                let Expr::Member { receiver, name } = file.expr(*callee) else {
+                    continue;
+                };
+                if matches!(file.expr(*receiver), Expr::Name(n) if n.starts_with("super"))
+                    && (top_suspend.iter().any(|s| s == name)
+                        || member_suspend.iter().any(|s| s == name))
+                {
+                    found = true;
+                }
+            }
+            if found {
+                return lo.bail("gate:suspend-super-call");
+            }
+        }
         for (body, params) in &suspend_bodies {
             let body_exprs = reachable(*body);
             // Locals declared anywhere in this body — each is a candidate spill slot.
@@ -773,17 +797,14 @@ fn lower_file_at_reporting_impl(
         if suspend_member_needs_bridge {
             return lo.bail("gate:suspend-erasure-bridge");
         }
-        // A NON-suspend body may not call any suspend fn (top-level or member): call-site continuation
-        // threading is only modeled inside a suspend body (and calling a suspend fn from a non-suspend
-        // context is a Kotlin error). A suspend body may call both — the coroutine pass threads the
-        // continuation into a static (`Call`) or member (`MethodCall`) suspend call.
+        // A NON-suspend body may not directly call any suspend fn: call-site continuation threading is
+        // only modeled inside a suspend body (and Kotlin rejects such a call anyway). Read the exact
+        // checker-selected target and stop at nested lambda/local-function execution boundaries. A
+        // declaration-name scan used to reject an ordinary overload merely because some unrelated
+        // member in the file shared its name; descending into a suspend lambda would also incorrectly
+        // attribute that lambda's legal call to its non-suspend enclosing function.
         for (e, owner_suspend) in bodies {
-            if !owner_suspend
-                && top_suspend
-                    .iter()
-                    .chain(member_suspend.iter())
-                    .any(|n| file.expr_uses_name(e, n))
-            {
+            if !owner_suspend && lo.ast_execution_scope_suspends(e) {
                 return lo.bail("gate:suspend-call-from-non-suspend");
             }
         }
@@ -4949,7 +4970,7 @@ fn library_const_ir(lc: &crate::libraries::LibraryConst) -> crate::ir::IrConst {
     use crate::libraries::LibConst;
     match lc.value {
         LibConst::Int(v) => match lc.ty.non_null() {
-            Ty::Char => IrConst::Char(char::from_u32(v as u32).unwrap_or('\0')),
+            Ty::Char => IrConst::Char(v as u16),
             Ty::Byte | Ty::UByte => IrConst::Byte(v as i8),
             Ty::Short | Ty::UShort => IrConst::Short(v as i16),
             _ => IrConst::Int(v),
@@ -4968,7 +4989,7 @@ fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir
         Expr::IntLit(v) => match ty {
             Ty::Byte => IrConst::Byte(*v as i8),
             Ty::Short => IrConst::Short(*v as i16),
-            Ty::Char => IrConst::Char(char::from_u32(*v as u32)?),
+            Ty::Char => IrConst::Char(*v as u16),
             _ => IrConst::Int(*v as i32),
         },
         Expr::LongLit(v) => IrConst::Long(*v),
@@ -5919,8 +5940,20 @@ impl<'a> Lower<'a> {
         logical_ret: Ty,
         suspend: bool,
         args: Vec<u32>,
-    ) -> u32 {
+    ) -> Option<u32> {
         let owner = member.owner_type_or(owner_fallback);
+        // An `invokevirtual` on an unsigned value class needs the BOXED receiver (`kotlin/UInt`) on
+        // the stack, but krusty carries an unsigned value in the primitive slot of its carrier —
+        // push it raw and the verifier rejects the call. Box it here, with the same `box-impl` an
+        // unsigned ARGUMENT flowing into a reference parameter already gets. A receiver that is
+        // ALREADY boxed (it came from a reference context) is left alone.
+        let recv = match self.runtime.unsigned_integer_carrier_for_box_type(owner) {
+            Some(carrier) if self.lowered_unsigned_box(recv).is_none() => {
+                self.box_unsigned(recv, carrier)?
+            }
+            _ => recv,
+        };
+        self.check_unsigned_boxes_fit_descriptor(&member.descriptor, &args)?;
         let interface = member.is_interface() || self.library_type_is_interface(owner);
         // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
         // the pushed receiver into a continuation spill slot (an unnamed temp local in its
@@ -5940,14 +5973,14 @@ impl<'a> Lower<'a> {
             if suspend {
                 self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
             }
-            return self.emit_block(vec![decl], Some(call));
+            return Some(self.emit_block(vec![decl], Some(call)));
         }
         let call =
             self.emit_virtual_call(owner, member.name, member.descriptor, interface, recv, args);
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
-        call
+        Some(call)
     }
 
     /// Pack expanded member arguments into the physical trailing array.
@@ -6047,8 +6080,9 @@ impl<'a> Lower<'a> {
         callable: crate::libraries::LibraryCallable,
         args: Vec<u32>,
         record_suspend: bool,
-    ) -> u32 {
+    ) -> Option<u32> {
         let logical_ret = callable.ret;
+        self.check_unsigned_boxes_fit_descriptor(&callable.descriptor, &args)?;
         // A member of an `object` / `companion object` brought into scope by `import Owner.name`: its
         // realization is an INSTANCE invoke on the singleton, not a facade static. Resolution recorded
         // exactly which field holds it (a plain object's `INSTANCE`, or the outer class's field for a
@@ -6106,7 +6140,57 @@ impl<'a> Lower<'a> {
         if record_suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
-        call
+        Some(call)
+    }
+
+    /// The unsigned value class a LOWERED expression already holds in its BOXED form, as the carrier
+    /// `Ty` that box wraps (`kotlin/UInt.box-impl(…)` → `Ty::UInt`).
+    ///
+    /// A question about REPRESENTATION, not about the declared type. krusty carries an unsigned value
+    /// in the JVM primitive slot of its carrier, and the inline-class factory `X."box-impl"` is the
+    /// only thing that puts the boxed class on the stack — so reading it back off the lowered node is
+    /// exact, where the checker's `Ty` (still `UInt` on both sides of a box) cannot tell them apart.
+    fn lowered_unsigned_box(&self, expr: u32) -> Option<Ty> {
+        let IrExpr::Call {
+            callee: Callee::Static { owner, name, .. },
+            ..
+        } = &self.ir.exprs[expr as usize]
+        else {
+            return None;
+        };
+        (name == "box-impl")
+            .then(|| self.runtime.unsigned_integer_carrier_for_box_type(*owner))
+            .flatten()
+    }
+
+    /// Decline the file unless every BOXED unsigned argument lands in a descriptor slot that actually
+    /// takes a reference.
+    ///
+    /// krusty emits a classpath callee's descriptor VERBATIM while the lowerer coerces arguments to
+    /// the callable's `params`, so the two sides can disagree about whether an unsigned value is
+    /// boxed. A `kotlin/UInt` pushed into an `I` slot compiles and links, and fails only when the JVM
+    /// verifies the class — output strictly worse than declining the file, and invisible to a
+    /// differential harness that checks compilation success. This is the invariant that keeps the
+    /// disagreement from reaching a class file; it is a net, not the mechanism any supported shape
+    /// relies on.
+    ///
+    /// Positions are compared only when the counts line up: a `$default` mask, an appended
+    /// `Continuation`, and a packed vararg all shift them, and none of those shapes can put a box
+    /// where a carrier belongs. A descriptor the platform cannot read is left to its own gates —
+    /// lowering asks which slots are references rather than parsing a target spelling itself.
+    fn check_unsigned_boxes_fit_descriptor(&self, descriptor: &str, args: &[u32]) -> Option<()> {
+        let Some(reference_slot) = self.runtime.descriptor_reference_params(descriptor) else {
+            return Some(());
+        };
+        if reference_slot.len() != args.len() {
+            return Some(());
+        }
+        let fits = std::iter::zip(args, reference_slot)
+            .all(|(&a, is_ref)| is_ref || self.lowered_unsigned_box(a).is_none());
+        if !fits {
+            return self.bail("gate:unsigned-box-in-erased-slot");
+        }
+        Some(())
     }
 
     fn emit_static_call(
@@ -6898,7 +6982,7 @@ impl<'a> Lower<'a> {
                 getter.ret,
                 getter.suspend,
                 vec![],
-            )
+            )?
         };
         let updated = self.lower_incdec_updated_value(
             IncDecSite::Statement(stmt),
@@ -7111,7 +7195,7 @@ impl<'a> Lower<'a> {
 
     fn runtime_call(&mut self, op: RuntimeOp, ty: Ty, args: Vec<u32>) -> Option<u32> {
         let c = self.runtime.runtime_callable(op, ty)?;
-        Some(self.emit_library_static_call(c, args, false))
+        self.emit_library_static_call(c, args, false)
     }
 
     fn platform_static_field(&mut self, field: PlatformField) -> u32 {
@@ -7311,12 +7395,20 @@ impl<'a> Lower<'a> {
             physical_params,
             ret,
             physical_ret,
+            inline,
+            suspend,
             interface,
             ..
         } = target
         else {
             return None;
         };
+        // A selected `MustInline` target has no legal virtual-call fallback. Member extensions obey
+        // the same capability contract as every other `ResolvedCall`; the fact that their dispatch
+        // receiver is implicit does not make an erased/reified body callable.
+        if inline.must_inline() {
+            return None;
+        }
         let dispatch = self.member_extension_dispatch_value(*owner)?;
         let extension_value = self.emit_type_op(
             IrTypeOp::ImplicitCoercion,
@@ -7338,11 +7430,13 @@ impl<'a> Lower<'a> {
         let mut method_params = Vec::with_capacity(physical_params.len() + 1);
         method_params.push(*physical_receiver);
         method_params.extend(physical_params.iter().copied());
-        let call = if let Some((class, index, _, linked_ret)) =
+        let (call, emitted_ret) = if let Some((class, index, _, linked_ret)) =
             self.link_local_method(&owner.render(), name, &method_params)
         {
-            let call = self.emit_method_call(class, index, dispatch, lowered);
-            self.coerce_to_static(call, *ret, linked_ret)
+            (
+                self.emit_method_call(class, index, dispatch, lowered),
+                linked_ret,
+            )
         } else {
             let lowered = lowered.into_iter().collect::<Option<Vec<_>>>()?;
             let call = self.emit_call(
@@ -7356,9 +7450,13 @@ impl<'a> Lower<'a> {
                 Some(dispatch),
                 lowered,
             );
-            self.coerce_to_static(call, *ret, *physical_ret)
+            (call, *physical_ret)
         };
-        Some(call)
+        // Record the direct operation before any logical-return coercion wraps it, so the coroutine
+        // pass appends the continuation to the actual call node for local and sibling-module targets
+        // alike.
+        let call = self.record_suspend_call(call, *suspend, *ret);
+        Some(self.coerce_to_static(call, *ret, emitted_ret))
     }
 
     /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
@@ -7554,7 +7652,7 @@ impl<'a> Lower<'a> {
         let ret = resolved.ret;
         let suspend = resolved.suspend;
         let physical_ret = m.physical_ret;
-        let call = self.emit_library_member_call(recv, internal, m, ret, suspend, a);
+        let call = self.emit_library_member_call(recv, internal, m, ret, suspend, a)?;
         let call = self.coerce_to_static(call, ret, physical_ret);
         Some(self.coerce_generic_read(call, call_expr, ret))
     }
@@ -8140,7 +8238,7 @@ impl<'a> Lower<'a> {
             let call_inline = c.inline.can_inline();
             let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
             let suspend = c.suspend;
-            let call = self.emit_library_static_call(c, a, suspend);
+            let call = self.emit_library_static_call(c, a, suspend)?;
             return Some(if call_inline || erased_generic_ret {
                 self.coerce_erased_call_result(e, call, &physical_ret, true)
             } else {
@@ -8203,7 +8301,7 @@ impl<'a> Lower<'a> {
                     && !logical_ret.is_unsigned()
                     && physical_ret.is_reference()));
         let suspend = c.suspend;
-        let call = self.emit_library_static_call(c, a, suspend);
+        let call = self.emit_library_static_call(c, a, suspend)?;
         let call = if arg_prelude.is_empty() {
             call
         } else {
@@ -8549,10 +8647,10 @@ impl<'a> Lower<'a> {
         e: AstExprId,
         getter: crate::libraries::LibraryCallable,
         receiver: u32,
-    ) -> u32 {
+    ) -> Option<u32> {
         let physical_ret = getter.physical_ret;
-        let call = self.emit_library_static_call(getter, vec![receiver], false);
-        self.coerce_erased_call_result(e, call, &physical_ret, true)
+        let call = self.emit_library_static_call(getter, vec![receiver], false)?;
+        Some(self.coerce_erased_call_result(e, call, &physical_ret, true))
     }
 
     /// Lower a lambda literal `{ a, b -> body }` to an `IrExpr::Lambda` (emitted as `invokedynamic` +
@@ -8874,14 +8972,20 @@ impl<'a> Lower<'a> {
             DestructureComponentTarget::LibraryMember(m) => {
                 let physical_ret = m.member.physical_ret;
                 let ret = m.ret;
-                let c =
-                    self.emit_library_member_call(recv, internal, m.member, ret, m.suspend, vec![]);
+                let c = self.emit_library_member_call(
+                    recv,
+                    internal,
+                    m.member,
+                    ret,
+                    m.suspend,
+                    vec![],
+                )?;
                 Some((self.coerce_to_static(c, ret, physical_ret), ret))
             }
             DestructureComponentTarget::LibraryExtension(c) => {
                 let ret = c.ret;
                 let physical_ret = c.physical_ret;
-                let call = self.emit_library_static_call(c, vec![recv], false);
+                let call = self.emit_library_static_call(c, vec![recv], false)?;
                 Some((self.coerce_to_static(call, ret, physical_ret), ret))
             }
             DestructureComponentTarget::ModuleExtension {
@@ -8950,7 +9054,7 @@ impl<'a> Lower<'a> {
                     ret,
                     m.suspend,
                     vec![i],
-                );
+                )?;
                 Some((self.coerce_to_static(c, ret, physical_ret), ret))
             }
         }
@@ -9479,89 +9583,39 @@ impl<'a> Lower<'a> {
     /// suspend gate. Used both to classify a suspend lambda literal and to guard the non-inlined
     /// suspend-inline-HOF path (a plain `Function0` argument cannot legally call a suspend function).
     fn ast_body_suspends(&self, body: AstExprId) -> bool {
-        // Top-level suspend functions PLUS same-file class suspend METHODS: a method called with an
-        // IMPLICIT receiver (`suspendWithResult(x)` inside a receiver lambda) is a bare `Name` call,
-        // invisible to the explicit-`Member` checks below. Matching by name over-approximates (a
-        // same-named non-suspend call would classify the body as suspending), which is SAFE: the
-        // general machine over a body with no real suspension is a single state.
-        let susp_names: std::collections::HashSet<String> = self
-            .afile
-            .decls
-            .iter()
-            .flat_map(|&d| -> Vec<String> {
-                match self.afile.decl(d) {
-                    ast::Decl::Fun(f) if f.is_suspend() => vec![f.name.clone()],
-                    ast::Decl::Class(c) => c
-                        .methods
-                        .iter()
-                        .filter(|m| m.is_suspend())
-                        .map(|m| m.name.clone())
-                        .collect(),
-                    _ => Vec::new(),
-                }
-            })
-            .collect();
-        let call_names_cell = std::cell::RefCell::new(Vec::new());
-        collect_call_names(self.afile, body, &call_names_cell);
-        if call_names_cell
-            .into_inner()
-            .iter()
-            .any(|n| susp_names.contains(n))
-        {
-            return true;
-        }
-        // Top-level suspend EXTENSIONS reached through an explicit receiver (`Ctl(40).run2()`). Such a
-        // call is a `Member` callee, so the bare-`Name` scan above misses it, and it is not an instance
-        // member of the receiver's type, so the resolved-member scan below misses it too — leaving the
-        // body classified as leaf and its call emitted without a `Continuation` ("call arity mismatch").
-        // Matched by name against the EXTENSIONS only, keeping the over-approximation narrow.
-        let susp_ext_names: std::collections::HashSet<&str> = self
-            .afile
-            .decls
-            .iter()
-            .filter_map(|&d| match self.afile.decl(d) {
-                ast::Decl::Fun(f) if f.is_suspend() && f.receiver.is_some() => {
-                    Some(f.name.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        if !susp_ext_names.is_empty() {
-            let member_names = std::cell::RefCell::new(Vec::new());
-            collect_member_call_names(self.afile, body, &member_names);
-            if member_names
-                .into_inner()
-                .iter()
-                .any(|n| susp_ext_names.contains(n.as_str()))
-            {
-                return true;
-            }
-        }
-        // An OPERATOR CONVENTION (`b[i]`, `b[i] = v`, `b + 1`, `b += 1`, `a < b`) whose selected target
-        // is a `suspend` function. Every scan around this one keys on a call SHAPE — a bare `Name`
-        // callee, a `Member` callee, an `Expr::Call` node — and a convention has none of those: the
-        // checker records its target against the `Expr::Index`/binary node, or against the assignment
-        // STATEMENT. Without this the driving lambda is classified as leaf, gets no state machine, and
-        // its call is emitted with the pre-CPS descriptor and no `Continuation`.
-        // An indexed READ additionally records its target in `resolved_calls` (against the `Expr::Index`
-        // node) rather than in the operator map, so both lookups are shape-free over the same walk.
-        let operator_exprs = self.info.suspending_operator_exprs();
-        let operator_stmts = self.info.suspending_operator_stmts();
-        let nodes = std::cell::RefCell::new((Vec::new(), Vec::new()));
-        collect_nodes(self.afile, body, &nodes);
-        let (body_exprs, body_stmts) = nodes.into_inner();
-        if body_exprs
-            .iter()
-            .any(|e| operator_exprs.contains(e) || self.info.resolved_call_suspends(*e))
-            || body_stmts.iter().any(|s| operator_stmts.contains(s))
-        {
-            return true;
-        }
-        // A MEMBER / invoke-operator suspend call (`getResult()` = `GetResult.suspend operator fun
-        // invoke()`, `x.m()` where `m` is `suspend`) is invisible to the top-level-name check above —
-        // resolve each callee's type + method `is_suspend` so the body isn't misclassified as leaf.
+        self.ast_body_suspends_with_nested_bodies(body, true)
+    }
+
+    /// Whether the expressions executed directly by `body` suspend. Nested lambda and local-function
+    /// bodies own a different suspend context, so the file-level non-suspend-function gate must not
+    /// charge their calls to the enclosing declaration.
+    fn ast_execution_scope_suspends(&self, body: AstExprId) -> bool {
+        self.ast_body_suspends_with_nested_bodies(body, false)
+    }
+
+    fn ast_body_suspends_with_nested_bodies(
+        &self,
+        body: AstExprId,
+        descend_nested_bodies: bool,
+    ) -> bool {
+        // Inspect every call through the checker-selected target. This covers top-level, local, member,
+        // extension, implicit-receiver, sibling-module, and classpath calls through one semantic table;
+        // a declaration-wide name scan would both conflate overloads and miss receiver syntax.
+        // Function-value/operator invokes additionally use their dedicated checked lowering below.
         let callees = std::cell::RefCell::new(Vec::new());
-        collect_calls(self.afile, body, &callees);
+        let stmts = std::cell::RefCell::new(Vec::new());
+        collect_call_sites(self.afile, body, &callees, &stmts, descend_nested_bodies);
+        // A CONVENTION call (`b[i]`, `b += x`, `a < b`) desugars to a call the AST never spells as
+        // one. Its selected target is recorded against the index/operator expression — or, for a
+        // compound assignment, against the statement — so ask those tables before the call scan
+        // below, which only understands `Expr::Call` shapes.
+        if stmts
+            .borrow()
+            .iter()
+            .any(|&s| self.info.convention_stmt_suspends(s))
+        {
+            return true;
+        }
         let module_symbols = crate::module_symbols::ModuleSymbols::new(self.syms);
         callees.into_inner().into_iter().any(|call| {
             // Resolved call metadata below is provider-neutral and is the primary source of truth.
@@ -9576,6 +9630,11 @@ impl<'a> Lower<'a> {
                     .iter()
                     .any(|member| member.suspend())
             };
+            // Covers the ordinary `Expr::Call` target AND the convention forms, whose selected
+            // operator is recorded against the index/operator expression instead.
+            if self.info.convention_call_suspends(call) {
+                return true;
+            }
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
             // type may be `Error` at the call site): a suspend function VALUE, or a suspend `invoke`
             // operator on a class receiver.
@@ -9605,38 +9664,6 @@ impl<'a> Lower<'a> {
             {
                 return true;
             }
-            // A resolved top-level `suspend fun` called by name: the checker records the same semantic
-            // suspend flag regardless of which symbol provider supplied the callable.
-            if self
-                .info
-                .resolved_top_level(call)
-                .is_some_and(|c| c.suspend)
-                || self
-                    .info
-                    .resolved_module_top_level(call)
-                    .is_some_and(|c| c.suspend)
-            {
-                return true;
-            }
-            // A member / extension call to a suspend method, resolved by the CHECKER — with an
-            // EXPLICIT receiver (`recv.m(args)`) or an IMPLICIT one (`suspendWithResult(x)` inside a
-            // receiver lambda, whose callee is a bare `Name`, not a `Member`). The lowerer only reads.
-            if self
-                .info
-                .resolved_member(call)
-                .is_some_and(|m| m.member.suspend())
-                || self
-                    .info
-                    .resolved_extension(call)
-                    .is_some_and(|c| c.suspend)
-                // A SIBLING-FILE source `suspend` extension: the name scan above only knows this
-                // file's declarations, and the target is a `ModuleExtension` rather than a classpath
-                // `Extension`, so without this the body is misclassified as leaf and its call emitted
-                // with no `Continuation`.
-                || self.info.resolved_module_extension_suspends(call)
-            {
-                return true;
-            }
             // Fallback for a plain source member call whose resolved target was not recorded above.
             // Query the canonical module hierarchy rather than the receiver class's own method table:
             // delegation/inheritance can expose a suspend method declared only on an interface.
@@ -9661,6 +9688,82 @@ impl<'a> Lower<'a> {
     /// `Function{n+1}`, captures the free variables as fields (set in `<init>`, copied into the fresh
     /// instance `invoke` builds), and carries `invokeSuspend(Object)` (the body, result boxed) plus the
     /// erased `invoke(Object)` (`new This(captures.., (Continuation)arg).invokeSuspend(Unit)`).
+    /// The names bound to a `SuspendLambda`'s `slots` parameter slots: each leading CONTEXT and
+    /// EXTENSION-RECEIVER slot binds as the implicit `this`, and the remaining slots take the lambda's
+    /// declared names (or the implicit `it`). `None` when the lambda's own parameter list can't fill
+    /// the value slots.
+    ///
+    /// One rule for both spellings of a suspend function type — the source `suspend R.() -> T` and a
+    /// classpath parameter's erased `FunctionN` + trailing `Continuation` — so a receiver lambda binds
+    /// its receiver as `this` whatever the callee's origin.
+    fn suspend_lambda_bind_names(
+        &self,
+        arg: AstExprId,
+        lparams: &[String],
+        slots: usize,
+        context_count: usize,
+    ) -> Option<Vec<String>> {
+        let context_count = context_count.min(slots);
+        let receiver_count = usize::from(lambda_info(self.info, arg).receiver.is_some())
+            .min(slots.saturating_sub(context_count));
+        let implicit_count = context_count + receiver_count;
+        let mut names = vec!["this".to_string(); implicit_count];
+        names.extend(ast::lambda_params_or_implicit(
+            lparams,
+            slots - implicit_count,
+        )?);
+        (names.len() == slots).then_some(names)
+    }
+
+    /// Whether a `Unit`-typed tail value should be replaced by "run it, then yield the `Unit` singleton".
+    ///
+    /// Several `Unit` tails leave NOTHING on the operand stack — a call (to a function, a method, or a
+    /// function VALUE) returning `Unit` emits a `void` invocation; a `try`, a `when` and a safe call emit
+    /// their branches for effect; a block ends in one of those. Binding such a tail to the machine's
+    /// result temp stores from an empty stack. The ones that DO leave a value (an assignment, a `when`
+    /// without `else`) are popped in statement position, so running every `Unit` tail for effect and
+    /// yielding the singleton is uniformly correct — and it is what the leaf form already does.
+    ///
+    /// The exception is a tail that SUSPENDS: it keeps its own shape so the coroutine flattener still
+    /// sees it. For a CALL that means the call node itself — its arguments are evaluated unconditionally
+    /// and hoist ahead of it, so a suspending argument is no reason to leave the void call unwrapped. For
+    /// anything else it means anywhere inside, because the suspension sits in control flow the flattener
+    /// rewrites in place (corpus `coroutines/varSpilling/kt75926`).
+    fn unit_tail_needs_unit_value(&self, e: u32) -> bool {
+        match self.ir.exprs[e as usize] {
+            IrExpr::Call { .. } | IrExpr::MethodCall { .. } | IrExpr::InvokeFunction { .. } => {
+                !self.ir_expr_suspends(e)
+            }
+            _ => !self.ir_subtree_suspends(e),
+        }
+    }
+
+    /// Whether `body` contains a checker-selected `suspend inline` call. Such a call must be spliced,
+    /// but the current splicer does not enter a suspend lambda's generated state-machine states.
+    ///
+    /// This deliberately reads the same provider-neutral [`ResolvedCall`] that ordinary lowering will
+    /// emit. Looking up a bare name here is not conservative enough semantically: it can reject an
+    /// ordinary selected overload because an unrelated class happens to declare a suspend-inline method
+    /// with the same name, and it misses receiver syntax. Exact selection makes the safety gate agree
+    /// for local, module, member, extension, and classpath targets without exposing any target name.
+    fn body_calls_suspend_inline(&self, body: AstExprId) -> bool {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let stmts = std::cell::RefCell::new(Vec::new());
+        collect_call_sites(self.afile, body, &calls, &stmts, true);
+        // Ask the same centralized convention-target query as suspension discovery. Looking only in
+        // `resolved_calls` handles plain/index/safe calls but misses arithmetic/unary targets stored in
+        // `resolved_operator_calls` and statement forms such as `plusAssign`; that mismatch promoted
+        // the lambda to a state machine, then let it emit an unspliceable direct call from a state.
+        stmts
+            .into_inner()
+            .into_iter()
+            .any(|stmt| self.info.convention_stmt_is_suspend_inline(stmt))
+            || calls
+                .into_inner()
+                .into_iter()
+                .any(|call| self.info.convention_call_is_suspend_inline(call))
+    }
+
     fn lower_suspend_lambda(
         &mut self,
         body: AstExprId,
@@ -9702,11 +9805,6 @@ impl<'a> Lower<'a> {
         }
         captures.reverse();
         let n_cap = captures.len() as u32;
-        // Own parameters are modeled only for a LEAF lambda (no captures, no internal suspension) for
-        // now — a param + capture/suspension combination needs the general lambda-mode machine.
-        if arity > 0 && n_cap > 0 {
-            return None;
-        }
         // A NULLABLE value-class parameter stays unmodeled (its boxed/null spill interplay isn't
         // covered by the value-class pass's SetField boundary); a plain value-class parameter is —
         // the erased `invoke`'s boxed argument unboxes at the param spill store.
@@ -9721,6 +9819,13 @@ impl<'a> Lower<'a> {
         // for now only a single TAIL suspend call (`{ foo() }`) with no captures is modeled; anything
         // else bails (skip the file) rather than miscompile the continuation threading.
         let body_suspends = self.ast_body_suspends(body);
+        // A `suspend inline` callee must be SPLICED at the call site — its compiled method is not the
+        // one the source signature names. The splicer does not reach into a state machine's states, so
+        // the machine would emit an ordinary call and fail at runtime (`NoSuchMethodError`). Skip the
+        // file rather than miscompile.
+        if self.body_calls_suspend_inline(body) {
+            return self.bail("gate:suspend-inline-call-in-suspend-lambda");
+        }
         let jvm_arity = arity + 1; // + the trailing continuation
         let function_iface = self
             .syms
@@ -9846,6 +9951,11 @@ impl<'a> Lower<'a> {
         // Set when the body needs the general (multi-suspension / control-flow) lambda-mode machine,
         // built by the coroutine pass from the plain `invokeSuspend` body.
         let mut needs_pass_sm = false;
+        // One checked semantic body type drives BOTH invokeSuspend forms. In particular, `Unit?`
+        // denotes the same effect-only tail whether an internal suspension selects the general state
+        // machine or the body stays on the leaf path; reconstructing that classification separately
+        // is what previously left the leaf safe-call case behind.
+        let body_ty = self.info.ty(body);
         let inv_susp_body = if body_suspends {
             // Single-suspension lambda (`{ foo() }` or `{ val a = foo(); <tail> }`), no captures (gated
             // above). The continuation is `this`: thread it into the call, dispatch on `this.label`.
@@ -9891,7 +10001,7 @@ impl<'a> Lower<'a> {
             // `tmp` goes ABOVE the body's locals (next_value still points past them here).
             let tmp_idx = self.next_value;
             self.next_value = saved_next_sm;
-            let body_ty = ty_to_ir(self.info.ty(body));
+            let body_ir_ty = ty_to_ir(body_ty);
             let (mut b_stmts, b_val) = match &self.ir.exprs[body_val as usize] {
                 IrExpr::Block {
                     stmts,
@@ -9899,10 +10009,23 @@ impl<'a> Lower<'a> {
                 } => (stmts.clone(), *v),
                 _ => (Vec::new(), body_val),
             };
+            // A `Unit` tail that leaves NOTHING on the operand stack (a call to a `Unit` function or a
+            // `Unit` `try`) would make the temp below store from an empty stack (`VerifyError: Operand
+            // stack underflow`). Materialize the `Unit` singleton after the effect — the same coercion a
+            // `Unit` value gets in argument position. A SUSPENDING tail keeps its own shape (see
+            // `unit_tail_needs_unit_value`): its value is the CPS result the machine propagates.
+            // A safe call's `Unit?` is a `Unit` tail too — the value is discarded either way, and both
+            // arms of the null test leave the stack as they found it.
+            let b_val = if body_ty.non_null() == Ty::Unit && self.unit_tail_needs_unit_value(b_val)
+            {
+                self.unit_value_after_effect(b_val)
+            } else {
+                b_val
+            };
             // Bind the body value to a temp (`val tmp = <value>; return box(tmp)`) so a CONDITIONAL
             // suspension in the value (`if (c) foo() else 7`) surfaces as a `Variable{init: When}`
             // the flattener's `stmt_cond_suspension` handles — not a raw `return box(When)`.
-            b_stmts.push(self.emit_variable(tmp_idx, body_ty, Some(b_val)));
+            b_stmts.push(self.emit_variable(tmp_idx, body_ir_ty, Some(b_val)));
             let tmpg = self.emit_get_value(tmp_idx);
             let boxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, tmpg, object_ir.clone());
             b_stmts.push(self.emit_return(Some(boxed)));
@@ -9933,10 +10056,13 @@ impl<'a> Lower<'a> {
             self.scope = saved_scope;
             self.next_value = saved_next;
             let body_val = body_val?;
-            let body_ty = self.info.ty(body);
-            if body_ty == Ty::Unit {
-                // A `suspend () -> Unit` lambda: run the body for effect, then return the `Unit`
-                // singleton — boxing a Unit-typed (no-value) body would `areturn` an empty stack.
+            if body_ty.non_null() == Ty::Unit {
+                // A leaf `suspend () -> Unit` lambda follows the same semantic rule as the general
+                // state-machine branch above. Include `Unit?`: a safe call on a void member has that
+                // checked type, but this IR lowers both its present and null arms for effect and leaves
+                // no value to box. Run the body, then return the singleton; recognizing only exact
+                // `Unit` here would still `areturn` an empty stack whenever the lambda had no internal
+                // suspension and therefore never entered the general-machine path.
                 stmts.push(body_val);
                 let unit = self.emit_unit();
                 stmts.push(self.emit_return(Some(unit)));
@@ -11007,7 +11133,7 @@ impl<'a> Lower<'a> {
         let recv = self.expr(receiver)?;
         let (logical, physical) = (c.ret, c.physical_ret);
         let source_receiver = c.source_receiver;
-        let call = self.emit_library_static_call(c, vec![recv, lam], false);
+        let call = self.emit_library_static_call(c, vec![recv, lam], false)?;
         // Record the declared source receiver so the value-class pass keeps a REFERENCE-underlying
         // value-class receiver (`Result.getOrElse`) unboxed: the spliced `-impl` body reads it as the raw
         // underlying, so boxing it to the `Object` receiver parameter (which the descriptor otherwise
@@ -13560,7 +13686,8 @@ impl<'a> Lower<'a> {
                 };
                 let ret = resolved.ret;
                 let suspend = resolved.suspend;
-                let call = self.emit_library_member_call(recv_v, internal, member, ret, suspend, a);
+                let call =
+                    self.emit_library_member_call(recv_v, internal, member, ret, suspend, a)?;
                 Some((self.coerce_to_static(call, ret, physical_ret), ret))
             }
             ResolvedCall::ModuleMember {
@@ -13623,8 +13750,16 @@ impl<'a> Lower<'a> {
                 owner,
                 source,
                 vararg,
+                inline,
                 suspend,
             } => {
+                // The checker forwards the resolved callable's generic `MustInline` capability.
+                // Do not infer call legality here from whether a facade happens to be emitted: a
+                // reified method can exist to publish inline code while its erased body remains an
+                // illegal direct target. After the splicer has had its opportunity, this path bails.
+                if inline.must_inline() {
+                    return None;
+                }
                 // The recorded receiver matches the call site directly, or in its NON-NULL form
                 // (a safe call records the non-null receiver — and a nullable PRIMITIVE keys
                 // apart from the unboxed one under `erased_recv`, so compare both ways). The
@@ -13690,6 +13825,7 @@ impl<'a> Lower<'a> {
                     let mut lowered = vec![receiver_value];
                     lowered.extend(arguments);
                     let call = self.emit_local_call(fid, lowered);
+                    let call = self.record_suspend_call(call, suspend, selected_ret);
                     return Some((self.wrap_arg_prelude(call, prelude), ret));
                 }
                 let owner = owner?;
@@ -13697,11 +13833,14 @@ impl<'a> Lower<'a> {
                     .and_then(|(file, declaration)| {
                         self.syms
                             .source_extension_function(file, ast::DeclId(declaration))
-                            .and_then(|(declared, _)| {
-                                declared
-                                    .non_null()
-                                    .is_ty_param()
-                                    .then(|| declared.erased_recv())
+                            // A sibling facade's static descriptor is defined by the declaration,
+                            // not by the possibly-more-specific call-site receiver.
+                            .map(|(declared, _)| {
+                                if declared.non_null().is_ty_param() {
+                                    declared.erased_recv()
+                                } else {
+                                    declared
+                                }
                             })
                     })
                     .unwrap_or(receiver);
@@ -13724,8 +13863,11 @@ impl<'a> Lower<'a> {
                     }
                     None => return None,
                 };
-                let receiver_value =
-                    self.spill_receiver_before_args(receiver_value, recv_ty, &mut prelude);
+                let receiver_value = self.spill_receiver_before_args(
+                    receiver_value,
+                    physical_receiver,
+                    &mut prelude,
+                );
                 let mut lowered = vec![receiver_value];
                 lowered.extend(arguments);
                 let mut physical_params = Vec::with_capacity(selected_params.len() + 1);
@@ -13736,12 +13878,6 @@ impl<'a> Lower<'a> {
                     .method_descriptor(&physical_params, selected_ret)?;
                 let call =
                     self.emit_static_call(owner, target, descriptor, InlineKind::None, lowered);
-                // A SIBLING-FILE `suspend` extension is reached through its real CPS entry point — the
-                // descriptor built above is the LOGICAL one, which the coroutine pass rewrites (appending
-                // the `Continuation` and erasing the result) once the node is registered as a suspension
-                // point. The same-file branch above needs no registration: its callee is a local `FunId`
-                // the pass already knows from `suspend_funs`. `inline` changes nothing here — a cross-file
-                // inline extension is never spliced, so both forms take this path (see `docs/SPEC.md`).
                 let call = self.record_suspend_call(call, suspend, selected_ret);
                 Some((self.wrap_arg_prelude(call, prelude), selected_ret))
             }
@@ -13768,7 +13904,7 @@ impl<'a> Lower<'a> {
                 let receiver = self.spill_receiver_before_args(receiver, recv_ty, &mut prelude);
                 let mut lowered = vec![receiver];
                 lowered.extend(arguments);
-                let call = self.emit_library_static_call(callable, lowered, false);
+                let call = self.emit_library_static_call(callable, lowered, false)?;
                 Some((self.wrap_arg_prelude(call, prelude), selected_ret))
             }
             _ => None,
@@ -14152,7 +14288,7 @@ impl<'a> Lower<'a> {
         } else {
             (recv, None)
         };
-        let iter_call = self.lower_iterator_call(recv, iter_dispatch);
+        let iter_call = self.lower_iterator_call(recv, iter_dispatch)?;
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
@@ -14167,7 +14303,7 @@ impl<'a> Lower<'a> {
             hasnext_ret,
             hasnext_suspend,
             vec![],
-        );
+        )?;
 
         // x = (elem) it.next()  — unbox a primitive element, checkcast a specific reference.
         let it_g2 = self.emit_get_value(it_v);
@@ -14180,7 +14316,7 @@ impl<'a> Lower<'a> {
             next_ret,
             next_suspend,
             vec![],
-        );
+        )?;
         let x_init = if elem.is_unsigned() {
             // The element is a boxed `kotlin/UInt`/`ULong` — checkcast + `unbox-impl`, not the
             // `Integer` unbox a plain JVM-scalar coercion would emit.
@@ -14247,7 +14383,11 @@ impl<'a> Lower<'a> {
         Some(self.emit_block(stmts, None))
     }
 
-    fn lower_iterator_call(&mut self, receiver: u32, target: IteratorDispatchTarget) -> u32 {
+    fn lower_iterator_call(
+        &mut self,
+        receiver: u32,
+        target: IteratorDispatchTarget,
+    ) -> Option<u32> {
         match target {
             IteratorDispatchTarget::Member {
                 owner_fallback,
@@ -14420,19 +14560,24 @@ impl<'a> Lower<'a> {
                     .and_then(|p| p.obj_internal())
                     .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"));
                 if tail_continuation && !s.suspend {
-                    // Value parameters are everything before the trailing continuation (the receiver of a
-                    // `Recv.() -> R` builder lambda is modeled as the single value parameter `it`).
+                    // Parameter slots are everything before the trailing continuation. A leading
+                    // context/extension-receiver slot binds as the implicit `this`, exactly as it does
+                    // for the source-`suspend` spelling below — the erasure hides the `suspend` marker,
+                    // not the receiver (which survives as `@ExtensionFunctionType` in the callee's
+                    // `@Metadata`, so the checked type carries it).
                     let value_params: Vec<Ty> = s.params[..s.params.len() - 1].to_vec();
                     if let Expr::Lambda {
                         params: lparams,
                         body,
                     } = self.afile.expr(arg).clone()
                     {
-                        let bind_names =
-                            ast::lambda_params_or_implicit(&lparams, value_params.len())?;
-                        if bind_names.len() == value_params.len() {
-                            return self.lower_suspend_lambda(body, &value_params, bind_names);
-                        }
+                        let bind_names = self.suspend_lambda_bind_names(
+                            arg,
+                            &lparams,
+                            value_params.len(),
+                            s.context_count,
+                        )?;
+                        return self.lower_suspend_lambda(body, &value_params, bind_names);
                     }
                     return None;
                 }
@@ -14494,16 +14639,6 @@ impl<'a> Lower<'a> {
                     body,
                 } = self.afile.expr(arg).clone()
                 {
-                    let context_count = s.context_count.min(params.len());
-                    let receiver_count =
-                        usize::from(lambda_info(self.info, arg).receiver.is_some())
-                            .min(params.len().saturating_sub(context_count));
-                    let implicit_count = context_count + receiver_count;
-                    let mut bind_names = vec!["this".to_string(); implicit_count];
-                    bind_names.extend(ast::lambda_params_or_implicit(
-                        &lparams,
-                        params.len().saturating_sub(implicit_count),
-                    )?);
                     // Parameter `Ty`s come from the checked lambda type; absent metadata falls back to `Any`.
                     let ty_params: Vec<Ty> = self
                         .info
@@ -14512,7 +14647,9 @@ impl<'a> Lower<'a> {
                         .map(|p| p.to_vec())
                         .filter(|p| p.len() == params.len())
                         .unwrap_or_else(|| vec![Ty::obj("kotlin/Any"); params.len()]);
-                    if bind_names.len() == params.len() {
+                    if let Some(bind_names) =
+                        self.suspend_lambda_bind_names(arg, &lparams, params.len(), s.context_count)
+                    {
                         return self.lower_suspend_lambda(body, &ty_params, bind_names);
                     }
                 }
@@ -15497,7 +15634,7 @@ impl<'a> Lower<'a> {
         });
         if let Some((m, physical_ret)) = resolved {
             let read =
-                self.emit_library_member_call(recv, internal, m, physical_ret, false, vec![]);
+                self.emit_library_member_call(recv, internal, m, physical_ret, false, vec![])?;
             return Some(self.coerce_generic_read(read, e, physical_ret));
         }
         None
@@ -15962,13 +16099,13 @@ impl<'a> Lower<'a> {
         args: Vec<u32>,
         record_suspend: bool,
         recv_ty: Option<Ty>,
-    ) -> u32 {
+    ) -> Option<u32> {
         let reified_subst = self.reified_call_subst_for(ast_call, &callable, recv_ty);
-        let call = self.emit_library_static_call(callable, args, record_suspend);
+        let call = self.emit_library_static_call(callable, args, record_suspend)?;
         if !reified_subst.is_empty() {
             self.ir.reified_call_subst.insert(call, reified_subst);
         }
-        call
+        Some(call)
     }
 
     fn lower_ext_call_on(
@@ -16041,7 +16178,7 @@ impl<'a> Lower<'a> {
         // specializes the body.
         let physical_ret = c.physical_ret;
         let suspend_default = c.default_call && c.suspend;
-        let call = self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt));
+        let call = self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt))?;
         self.record_ext_source_receiver(call, source_receiver);
         let call = self.coerce_erased_call_result(e, call, &physical_ret, true);
         Some(self.wrap_arg_prelude(call, arg_prelude))
@@ -16442,7 +16579,7 @@ impl<'a> Lower<'a> {
                 .or_else(|| this_ty.obj_internal())
                 .unwrap_or_else(crate::types::wk::any);
             let physical_ret = member.physical_ret;
-            let call = self.emit_library_member_call(recv, owner, member, ret, false, a);
+            let call = self.emit_library_member_call(recv, owner, member, ret, false, a)?;
             return Some(self.coerce_generic_read(call, e, physical_ret));
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
@@ -17345,7 +17482,7 @@ impl<'a> Lower<'a> {
                 parameter,
                 owner,
                 source,
-                suspend,
+                capabilities,
             } => {
                 let recv_key = receiver.erased_recv();
                 let selected_params = vec![parameter];
@@ -17382,17 +17519,18 @@ impl<'a> Lower<'a> {
                     vec![r, a],
                 );
                 // A sibling-file `suspend operator fun` is reached through its CPS entry point, exactly
-                // like an ordinary cross-file suspend extension call — the descriptor above is the
-                // LOGICAL one and the coroutine pass rewrites it once the node is a suspension point.
-                // The same-file branch above returns early: its callee is a local `FunId` the pass
-                // already knows from `suspend_funs`.
-                Some(self.record_suspend_call(call, suspend, Ty::Unit))
+                // like an ordinary cross-file suspend extension call: the descriptor above is the
+                // LOGICAL one and the coroutine pass rewrites it once the node is registered as a
+                // suspension point. Without the registration the driving lambda's state machine finds
+                // "no suspend call in any stmt" and the file is refused. The same-file branch above
+                // returns early — its callee is a local `FunId` the pass already knows.
+                Some(self.record_suspend_call(call, capabilities.suspends(), Ty::Unit))
             }
             CompoundAssignmentTarget::Member {
                 owner,
                 parameter,
                 interface,
-                suspend,
+                capabilities,
             } => {
                 let r = self.expr(lhs)?;
                 let a = self.lower_arg(rhs, &parameter)?;
@@ -17413,15 +17551,16 @@ impl<'a> Lower<'a> {
                     Some(r),
                     vec![a],
                 );
-                Some(self.record_suspend_call(call, suspend, Ty::Unit))
+                Some(self.record_suspend_call(call, capabilities.suspends(), Ty::Unit))
             }
-            CompoundAssignmentTarget::LibraryExtension(c) => {
+            CompoundAssignmentTarget::LibraryExtension {
+                callable: c,
+                capabilities: _,
+            } => {
                 if c.params.len() == 2 {
-                    let suspend = c.suspend;
                     let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                     let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
-                    let call = self.emit_library_static_call(*c, vec![r, a], false);
-                    return Some(self.record_suspend_call(call, suspend, Ty::Unit));
+                    return self.emit_library_static_call(*c, vec![r, a], false);
                 }
                 None
             }
@@ -18782,7 +18921,7 @@ impl<'a> Lower<'a> {
         let recv_to_v = self.fresh_value();
         let var_recv_to = self.emit_named_variable(recv_to_v, ty_to_ir(it_ty), Some(recv_g0));
         let recv_g = self.emit_get_value(recv_to_v);
-        let iter_call = self.lower_iterator_call(recv_g, iter_dispatch);
+        let iter_call = self.lower_iterator_call(recv_g, iter_dispatch)?;
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
 
@@ -18797,7 +18936,7 @@ impl<'a> Lower<'a> {
             hasnext_ret,
             hasnext_suspend,
             vec![],
-        );
+        )?;
 
         // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
         let it_g2 = self.emit_get_value(it_v);
@@ -18810,7 +18949,7 @@ impl<'a> Lower<'a> {
             next_ret,
             next_suspend,
             vec![],
-        );
+        )?;
         // Coerce the `Object` iterator result to the element type — the SAME four-way split
         // `lower_foreach_iterator` uses: unbox an unsigned/scalar-value-class element (a `checkcast` +
         // `istore` would store a reference into a primitive slot → VerifyError), else `checkcast` a
@@ -20068,7 +20207,7 @@ impl<'a> Lower<'a> {
                         Some(n) if n.matches("kotlin/Float") => IrConst::Float(0.0),
                         Some(n) if n.matches("kotlin/Double") => IrConst::Double(0.0),
                         Some(n) if n.matches("kotlin/Boolean") => IrConst::Boolean(false),
-                        Some(n) if n.matches("kotlin/Char") => IrConst::Char('\0'),
+                        Some(n) if n.matches("kotlin/Char") => IrConst::Char(0),
                         _ => IrConst::Int(0), // Int/Short/Byte
                     }
                 };
@@ -20658,7 +20797,7 @@ impl<'a> Lower<'a> {
                 match kind {
                     RangeKind::Through => {
                         if let Some(c) = range.through_static {
-                            self.emit_library_static_call(c, vec![lo_v, hi_v], false)
+                            self.emit_library_static_call(c, vec![lo_v, hi_v], false)?
                         } else {
                             let mut args = vec![lo_v, hi_v];
                             for _ in 0..range.through.trailing_nulls {
@@ -20673,7 +20812,7 @@ impl<'a> Lower<'a> {
                     }
                     RangeKind::Until => {
                         let c = range.until?;
-                        self.emit_library_static_call(c, vec![lo_v, hi_v], false)
+                        self.emit_library_static_call(c, vec![lo_v, hi_v], false)?
                     }
                     // `downTo` never reaches here (it parses as an infix function call, not `RangeTo`).
                     RangeKind::DownTo => return None,
@@ -21047,10 +21186,18 @@ impl<'a> Lower<'a> {
                     _ => None,
                 })
                 .is_some_and(|body| self.info.ty(body) == Ty::Nothing);
-            // A statically-`null` receiver (`null?.toString()`): the receiver is always null, so the
-            // member is never invoked and the whole safe call is `null`. Run the receiver for any side
-            // effects (a bare `null` literal has none), then yield `null`.
-            if rty == Ty::Null {
+            // A receiver that can only ever be `null`: the `null` literal (`null?.toString()`) and
+            // `Nothing`/`Nothing?` (`val n: Nothing? = null; n?.toString()` — `Nothing` has no non-null
+            // value, and a non-nullable `Nothing` receiver diverges before the member could run). The
+            // member is never invoked, so the whole safe call is `null`. Run the receiver for any side
+            // effects (a bare `null` literal has none; a diverging receiver terminates here and the
+            // unreachable `null` is dropped by the emitter), then yield `null`.
+            //
+            // This fold bypasses the member lookup entirely, which is sound only because the CHECKER
+            // reports an unresolved member behind `?.` (see `resolve::expr_inner_safe_call`); before
+            // that, `Nothing?` was deliberately kept out of this arm so the backend bail would still
+            // reject `n?.thisDoesNotExist()`.
+            if rty == Ty::Null || rty.non_null() == Ty::Nothing {
                 let recv = self.expr(receiver)?;
                 let nullc = self.emit_const(IrConst::Null);
                 return Some(self.emit_block(vec![recv], Some(nullc)));
@@ -21736,7 +21883,7 @@ impl<'a> Lower<'a> {
                 let receiver = self.emit_get_value(this_v);
                 let target = getter.params.first().copied().unwrap_or(this_ty);
                 let receiver = self.coerce_argument_value(receiver, this_ty, target)?;
-                return Some(self.emit_extension_property_get(e, *getter, receiver));
+                return self.emit_extension_property_get(e, *getter, receiver);
             }
             // A resolved TOP-LEVEL property read: the selected facade's static getter, no receiver. The
             // callable carries its origin/owner, so this semantic handoff is identical for every provider.
@@ -21744,7 +21891,7 @@ impl<'a> Lower<'a> {
                 self.info.expr_lowers.get(&e).cloned()
             {
                 let physical_ret = getter.physical_ret;
-                let call = self.emit_library_static_call(*getter, Vec::new(), false);
+                let call = self.emit_library_static_call(*getter, Vec::new(), false)?;
                 return Some(self.coerce_erased_call_result(e, call, &physical_ret, true));
             }
             if let Some(ExprLowering::IntrinsicProperty(member)) =
@@ -21754,14 +21901,7 @@ impl<'a> Lower<'a> {
                 let recv = self.emit_get_value(this_v);
                 let fallback = this_ty.obj_internal().unwrap_or_else(crate::types::wk::any);
                 let ret = member.ret;
-                return Some(self.emit_library_member_call(
-                    recv,
-                    fallback,
-                    *member,
-                    ret,
-                    false,
-                    vec![],
-                ));
+                return self.emit_library_member_call(recv, fallback, *member, ret, false, vec![]);
             }
             if matches!(
                 self.info.expr_lowers.get(&e),
@@ -22042,7 +22182,7 @@ impl<'a> Lower<'a> {
                             ret,
                             resolved.suspend,
                             vec![],
-                        );
+                        )?;
                         return Some(self.coerce_to_static(call, ret, physical_ret));
                     }
                     let (fclass, idx, _) = self.resolve_field_name(bi, &n)?;
@@ -22223,14 +22363,7 @@ impl<'a> Lower<'a> {
                     .obj_internal()
                     .unwrap_or_else(crate::types::wk::any);
                 let ret = member.ret;
-                return Some(self.emit_library_member_call(
-                    recv,
-                    fallback,
-                    *member,
-                    ret,
-                    false,
-                    vec![],
-                ));
+                return self.emit_library_member_call(recv, fallback, *member, ret, false, vec![]);
             }
             if matches!(
                 self.info.expr_lowers.get(&e),
@@ -22254,7 +22387,7 @@ impl<'a> Lower<'a> {
                     .copied()
                     .unwrap_or_else(|| self.info.ty(receiver));
                 let receiver = self.lower_arg(receiver, &target)?;
-                return Some(self.emit_extension_property_get(e, *getter, receiver));
+                return self.emit_extension_property_get(e, *getter, receiver);
             }
             // A MEMBER EXTENSION PROPERTY read (`1.foo` where `class C { val Int.foo }`): the
             // checker selected the declaring owner — call its `getX(Recv)` accessor with dispatch
@@ -22330,6 +22463,10 @@ impl<'a> Lower<'a> {
             }
             // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / ... selected by the checker.
             if let Some(lc) = self.info.resolved_library_companion_const(e) {
+                // Through the SHARED helper, which narrows an integer `ConstantValue` to the constant's
+                // own Kotlin type. `Char.MAX_VALUE` must box as `Character`, and `Byte.MIN_VALUE` as
+                // `Byte` — read as an `Int` it compared unequal to the same value held in a `byte`
+                // field (corpus `evaluate/intrinsicConst/incDec.kt`).
                 let c = library_const_ir(&lc);
                 return Some(self.emit_const(c));
             }
@@ -22558,94 +22695,26 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // A class `compareTo(o): Int` drives relational operators.
+            // Every non-builtin relational convention is emitted from the checker's exact selected
+            // `compareTo` target. Source/classpath members and extensions therefore share argument
+            // adaptation, suspend marking, and inline capability handling; lowering never reselects by
+            // receiver class or declaration name.
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
-                // A user `compareTo` EXTENSION on a nullable primitive (`Long?.compareTo`): the
-                // checker typed the comparison Boolean through it (the builtin needs a non-null
-                // receiver). Call it and compare its Int result with 0. The boxed-wrapper key can
-                // never be produced by a non-null primitive operand, so this cannot shadow the
-                // builtin comparison. Nullable-primitive ONLY, matching the checker's gate (a
-                // nullable REFERENCE erases to the non-null form's key).
-                if lty.nullable_primitive().is_some() {
-                    if let Some(selected) =
-                        self.info.resolved_operator_call(e, "compareTo").cloned()
-                    {
-                        let l = self.expr(lhs)?;
-                        let (cmp, ret) = self.lower_selected_op_call(
-                            l,
-                            lty,
-                            "compareTo",
-                            &[rhs],
-                            selected,
-                            Some(e),
-                        )?;
-                        if ret != Ty::Int {
-                            return None;
-                        }
-                        let zero = self.emit_const(IrConst::Int(0));
-                        return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
+                if let Some(selected) = self.info.resolved_operator_call(e, "compareTo").cloned() {
+                    let l = self.expr(lhs)?;
+                    let (cmp, ret) = self.lower_selected_op_call(
+                        l,
+                        lty,
+                        "compareTo",
+                        &[rhs],
+                        selected,
+                        Some(e),
+                    )?;
+                    if ret != Ty::Int {
+                        return None;
                     }
-                    if let Some(fid) = self.unique_ext_fun_id_by_arity(lty, "compareTo", 1) {
-                        let params = self.ir.functions[fid as usize].params.clone();
-                        if params.len() == 2 {
-                            let l = self.lower_arg(lhs, &params[0])?;
-                            let r = self.lower_arg(rhs, &params[1])?;
-                            let cmp = self.emit_local_call(fid, vec![l, r]);
-                            let zero = self.emit_const(IrConst::Int(0));
-                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                        }
-                    }
-                }
-                if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string()) {
-                    if let Some((class, index, mfid, _)) =
-                        self.resolve_method(&internal, "compareTo")
-                    {
-                        let params = self.ir.functions[mfid as usize].params.clone();
-                        if let [param] = params.as_slice() {
-                            let l = self.expr(lhs)?;
-                            let r = self.lower_arg(rhs, param)?;
-                            let cmp = self.emit_method_call(class, index, l, vec![Some(r)]);
-                            let zero = self.emit_const(IrConst::Int(0));
-                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                        }
-                    }
-                }
-                // A `compareTo` that lives on the CLASSPATH rather than in user IR: a separately
-                // compiled `class Money : Comparable<Money>`, a `String`, or a source `enum class`
-                // (whose `compareTo` is inherited from `java.lang.Enum`). The checker records the
-                // selected member on the binary expression; lowering only emits that target.
-                //
-                // NOT nested under the `obj_internal` lookup above: `String` is a `Ty` of its own and
-                // has no object internal name, so gating on one skipped the emit and fell through to
-                // the primitive comparison — a `VerifyError` on a reference operand.
-                let lt = self.recv_ty(lhs);
-                let rt = self.info.ty(rhs);
-                // Non-null reference right operand only — matches the checker guard (a primitive arg
-                // to an erased generic `Comparable.compareTo(Object)` would need a box not applied
-                // here; a nullable one would NPE inside the callee).
-                if rt.is_reference() && !rt.is_nullable() {
-                    if let Some(resolved) =
-                        self.info.resolved_member(e).cloned().filter(|resolved| {
-                            resolved.member.name == "compareTo" && resolved.ret == Ty::Int
-                        })
-                    {
-                        let l = self.expr(lhs)?;
-                        let param = resolved.member.params.first().copied().unwrap_or(rt);
-                        let r = self.lower_arg(rhs, &ty_to_ir(param))?;
-                        let owner_fallback = lt
-                            .kotlin_class_internal()
-                            .unwrap_or_else(crate::types::wk::any);
-                        let cmp = self.emit_library_member_call(
-                            l,
-                            owner_fallback,
-                            resolved.member,
-                            resolved.ret,
-                            resolved.suspend,
-                            vec![r],
-                        );
-                        let zero = self.emit_const(IrConst::Int(0));
-                        return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                    }
+                    let zero = self.emit_const(IrConst::Int(0));
+                    return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                 }
             }
             // A library operator function on a reference receiver (`list + x` → `CollectionsKt.plus(list,
@@ -22659,7 +22728,7 @@ impl<'a> Lower<'a> {
                         if c.params.len() == 2 {
                             let l = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                             let r = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
-                            return Some(self.emit_library_static_call(c, vec![l, r], false));
+                            return self.emit_library_static_call(c, vec![l, r], false);
                         }
                     }
                 }
@@ -24469,7 +24538,7 @@ impl<'a> Lower<'a> {
                 // the callee's `reifiedOperationMarker` body and falls back to a direct call, which
                 // for a reified callee only ever throws. There is no receiver to infer `T` from, so
                 // the call's own type arguments are the whole binding.
-                let call = self.emit_reified_library_static_call(e, c, a, call_suspend, None);
+                let call = self.emit_reified_library_static_call(e, c, a, call_suspend, None)?;
                 let call = if arg_prelude.is_empty() {
                     call
                 } else {
@@ -24889,10 +24958,15 @@ impl<'a> Lower<'a> {
                 return self.lower_object_member_call(*internal, member, &args, e);
             }
             // `"""…""".trimIndent()` / `.trimMargin()` on a compile-time-constant string receiver:
-            // fold the stdlib transform to a string constant (kotlinc special-cases a constant
-            // receiver too). A non-constant receiver falls through and is skipped.
-            if args.is_empty() && matches!(name.as_str(), "trimIndent" | "trimMargin") {
-                if let Some(s) = const_string_value(self.afile, receiver) {
+            // fold only the classpath-less fallback, identified by the ABSENCE of a checker-selected
+            // call target. A real source/classpath extension with the same spelling is semantically
+            // authoritative and must be emitted; folding by name alone would silently replace a user's
+            // `fun String.trimIndent()` body. A non-constant receiver still falls through and is skipped.
+            if args.is_empty()
+                && matches!(name.as_str(), "trimIndent" | "trimMargin")
+                && !self.info.resolved_calls.contains_key(&e)
+            {
+                if let Some(s) = self.afile.const_string_value(receiver) {
                     let folded = if name == "trimIndent" {
                         trim_indent(&s)
                     } else {
@@ -25023,26 +25097,42 @@ impl<'a> Lower<'a> {
                 }
                 let this = self.emit_get_value(0);
                 let target = self.info.resolved_super_call(e).cloned()?;
-                let descriptor = target.descriptor.clone().map(Some).unwrap_or_else(|| {
-                    self.runtime.method_descriptor(&target.params, target.ret)
-                })?;
-                if target.params.len() != args.len() {
+                // Every JVM fact comes from the target the checker recorded — it states its own emitted
+                // name (which a Kotlin rename may differ from), descriptor, and erased result. Only a
+                // source target leaves the descriptor to be derived from the signature being emitted.
+                let owner = target.owner()?;
+                let jvm_name = target.emitted_name(&name).to_string();
+                let descriptor = match target.descriptor() {
+                    Some(descriptor) => descriptor.to_string(),
+                    None => self
+                        .runtime
+                        .method_descriptor(target.params(), target.ret())?,
+                };
+                let params = target.params().to_vec();
+                if params.len() != args.len() {
                     return None;
                 }
                 let mut a = Vec::new();
-                for (arg, pt) in args.iter().zip(&target.params) {
+                for (arg, pt) in args.iter().zip(&params) {
                     a.push(self.lower_arg(*arg, &ty_to_ir(*pt))?);
                 }
-                return Some(self.emit_call(
+                let call = self.emit_call(
                     Callee::Special {
-                        owner: target.owner,
-                        name: name.clone(),
+                        owner,
+                        name: jvm_name,
                         descriptor,
-                        interface: target.interface,
+                        interface: target.interface(),
                     },
                     Some(this),
                     a,
-                ));
+                );
+                // A generic classpath member's descriptor returns the erased `Object` while `ret` is the
+                // type recovered from the base's bound arguments (`ArrayList<Int>.get` ⇒ `Int`); narrow
+                // it, or the value's physical type contradicts its use.
+                return Some(match target.erased_ret() {
+                    Some(erased) => self.coerce_to_static(call, target.ret(), erased),
+                    None => call,
+                });
             }
             // Reified kotlinx.serialization round-trip: `fmt.encodeToString(x)` /
             // `fmt.decodeFromString<C>(s)` are `reified inline` (uncallable directly) — desugar to
@@ -25451,6 +25541,25 @@ impl<'a> Lower<'a> {
                     .lower_selected_op_call(receiver, receiver_ty, &name, &args, target, Some(e))
                     .map(|(value, _)| value);
             }
+            // `a.equals(b)` between two values of the SAME unsigned type is kotlinc's `equals`
+            // INTRINSIC: an unsigned value class wraps exactly one field, so its equality can only
+            // compare the two carriers — kotlinc folds the call away to the instructions `a == b`
+            // emits, with no box anywhere. Deliberately narrow to an argument of exactly the receiver's
+            // type: for any OTHER argument the answer is the value class's own, which is what makes a
+            // cross-carrier comparison `false` (a `UInt` is never a `ULong`, however the bits line up)
+            // and a nullable one null-safe. Those keep the ordinary member-call path.
+            {
+                let rty = self.info.ty(receiver);
+                if let [arg] = args[..] {
+                    // `Ty` equality here is exact, nullability included: `UInt?` is a different type
+                    // and must NOT fold (its equality is null-safe, a carrier compare is not).
+                    if rty.is_unsigned() && name == "equals" && self.info.ty(arg) == rty {
+                        let l = self.expr(receiver)?;
+                        let r = self.expr(arg)?;
+                        return Some(self.emit_primitive_bin_op(IrBinOp::Eq, l, r));
+                    }
+                }
+            }
             // Unsigned conversions. `UInt`/`Int` and `ULong`/`Long` share a JVM representation,
             // so a conversion that doesn't change the representation is a no-op reinterpret;
             // `UInt.toLong()`/`toULong()` zero-extend via the platform helper; `ULong.toInt()`
@@ -25676,7 +25785,7 @@ impl<'a> Lower<'a> {
                             ret,
                             resolved.suspend,
                             a,
-                        );
+                        )?;
                         let call = self.coerce_to_static(call, ret, physical_ret);
                         return Some(self.wrap_arg_prelude(call, prelude));
                     }
@@ -25688,7 +25797,7 @@ impl<'a> Lower<'a> {
                         ret,
                         resolved.suspend,
                         a,
-                    );
+                    )?;
                     return Some(self.coerce_to_static(call, ret, physical_ret));
                 }
                 // Fewer arguments than the resolved member has parameters means a DEFAULTED
@@ -25756,7 +25865,7 @@ impl<'a> Lower<'a> {
                     };
                 let recv = self.spill_receiver_before_args(recv, rt, &mut prelude);
                 let call =
-                    self.emit_library_member_call(recv, owner, member, ret, resolved.suspend, a);
+                    self.emit_library_member_call(recv, owner, member, ret, resolved.suspend, a)?;
                 // A generic member whose erased return is `Object` but whose substituted type is
                 // more specific (`List<Int>.get` → `Int`) gets the unbox/checkcast kotlinc emits.
                 let call = self.coerce_to_static(call, ret, physical_ret);
@@ -25878,7 +25987,7 @@ impl<'a> Lower<'a> {
                 // inferred from the receiver (`Collection<T>.toTypedArray()`) when none is explicit.
                 let source_receiver = c.source_receiver;
                 let call =
-                    self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt));
+                    self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt))?;
                 self.record_ext_source_receiver(call, source_receiver);
                 self.coerce_generic_read(call, e, physical_ret)
             } else if let Some(ResolvedCall::LambdaReturnMember(c)) =
@@ -26126,13 +26235,6 @@ fn is_when_test(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e), Expr::Is { .. } | Expr::InRange { .. })
 }
 
-/// Const-fold an annotation argument expression to a String: a string literal, a `const val` name, or a
-/// string template whose interpolations are themselves const-foldable (`"$prefix.bar"` with
-/// `const val prefix = "foo"` → `"foo.bar"`). `None` for anything not statically a string.
-fn const_string_value(file: &ast::File, e: AstExprId) -> Option<String> {
-    const_string_value_d(file, e, 0)
-}
-
 /// `String.trimIndent()`: split into lines, drop the common minimal indentation of the non-blank
 /// lines from every line, and omit a blank FIRST or LAST line — matching `kotlin.text.trimIndent`.
 fn trim_indent(s: &str) -> String {
@@ -26175,48 +26277,6 @@ fn trim_margin(s: &str, margin: &str) -> String {
         }
     }
     out.join("\n")
-}
-
-/// `depth` bounds the recursion through `const val` references so a cyclic chain
-/// (`const val a = b; const val b = a`) terminates with `None` instead of overflowing the stack.
-fn const_string_value_d(file: &ast::File, e: AstExprId, depth: u32) -> Option<String> {
-    if depth > 32 {
-        return None;
-    }
-    match file.expr(e) {
-        Expr::StringLit(s) => Some(s.clone()),
-        Expr::CharLit(c) => Some(c.to_string()),
-        Expr::Name(n) => top_level_const_string_d(file, n, depth + 1),
-        Expr::Template(parts) => {
-            let mut out = String::new();
-            for p in parts {
-                match p {
-                    TemplatePart::Str(s) => out.push_str(s),
-                    TemplatePart::Expr(x) => {
-                        out.push_str(&const_string_value_d(file, *x, depth + 1)?)
-                    }
-                }
-            }
-            Some(out)
-        }
-        _ => None,
-    }
-}
-
-/// The string value of a top-level property `name` whose initializer const-folds to a string
-/// (`const val prefix = "foo"`), or `None`. (krusty's parser doesn't currently retain the `const`
-/// modifier on a top-level `val`, so this matches any top-level property with a foldable string init —
-/// safe, since only literals/foldable templates fold.)
-fn top_level_const_string_d(file: &ast::File, name: &str, depth: u32) -> Option<String> {
-    if depth > 32 {
-        return None;
-    }
-    file.decls.iter().find_map(|&d| match file.decl(d) {
-        Decl::Property(p) if p.name == name => p
-            .init
-            .and_then(|i| const_string_value_d(file, i, depth + 1)),
-        _ => None,
-    })
 }
 
 /// `(property_name, serial_name)` for each primary-constructor property carrying `@SerialName("…")`
@@ -26893,103 +26953,58 @@ fn outer_local_access_stmt(
     }
 }
 
-/// Collect the simple (`Name`-callee) function-call names anywhere in `e`'s subtree — used to decide
-/// whether a lambda body calls a `suspend` function (same-file or classpath).
-/// Collect every `Call` expr in `e` (incl. nested) — to resolve a call's suspend-ness via its `Invoke`
-/// lowering (a suspend function VALUE / invoke operator) or its callee (a member suspend method), none of
-/// which `collect_call_names` (top-level `Call{Name}` only) can see.
-fn collect_calls(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<AstExprId>>) {
-    if matches!(file.expr(e), ast::Expr::Call { .. }) {
-        out.borrow_mut().push(e);
-    }
-    file.any_child_expr(
-        e,
-        &mut |c| {
-            collect_calls(file, c, out);
-            false
-        },
-        &mut |s| {
-            file.any_child_stmt(s, &mut |c| {
-                collect_calls(file, c, out);
-                false
-            });
-            false
-        },
-    );
-}
-
-/// Every expression AND statement id under `e`, shape-agnostically. An OPERATOR CONVENTION has no call
-/// node of its own — the checker keys its selected target to the `Expr::Index` / binary-operator node,
-/// or to the assignment STATEMENT — so [`Lowering::ast_body_suspends`] cannot find it by walking calls.
-fn collect_nodes(
+/// Every expression and statement in `e` (incl. nested) that MAY carry a checker-selected call
+/// target: the `Expr::Call` and `Expr::SafeCall` nodes, plus the CONVENTION forms that desugar to a
+/// call without ever being spelled as one (`b[i]`, `a + b`, `a < b`, `-a`, `a..b`, `x in r`, `a++`,
+/// and the compound assignment `b += x`, which is a STATEMENT).
+///
+/// Retaining expression identity, rather than only callee text, is what keeps overload selection
+/// exact. Both sinks are then looked up in the checker's resolved-target tables by id, so
+/// over-collecting is harmless — a node with no recorded target simply never matches.
+fn collect_call_sites(
     file: &ast::File,
     e: AstExprId,
-    out: &std::cell::RefCell<(Vec<AstExprId>, Vec<ast::StmtId>)>,
+    exprs: &std::cell::RefCell<Vec<AstExprId>>,
+    stmts: &std::cell::RefCell<Vec<ast::StmtId>>,
+    descend_nested_bodies: bool,
 ) {
-    out.borrow_mut().0.push(e);
-    file.any_child_expr(
-        e,
-        &mut |c| {
-            collect_nodes(file, c, out);
-            false
-        },
-        &mut |s| {
-            out.borrow_mut().1.push(s);
-            file.any_child_stmt(s, &mut |c| {
-                collect_nodes(file, c, out);
-                false
-            });
-            false
-        },
-    );
-}
-
-/// The NAME of each call made through an explicit receiver (`x.f()`). A top-level `suspend` EXTENSION
-/// reached that way is neither a bare `Name` call nor an instance member of the receiver's type, so it
-/// is invisible to both of [`Lowering::ast_body_suspends`]'s scans without this.
-fn collect_member_call_names(
-    file: &ast::File,
-    e: AstExprId,
-    out: &std::cell::RefCell<Vec<String>>,
-) {
-    if let ast::Expr::Call { callee, .. } = file.expr(e) {
-        if let ast::Expr::Member { name, .. } = file.expr(*callee) {
-            out.borrow_mut().push(name.clone());
-        }
+    // Enforce the execution boundary at the recursive entry, not only in the expression-child
+    // callback. A lambda can be reached directly from a statement (`val task = { pause() }`) or can
+    // itself be a function's expression body; both routes bypass the child callback that first tried
+    // to implement this rule. Treating every entry uniformly prevents a deferred lambda body from
+    // being charged to the ordinary function which merely allocates it. The full suspend-lambda scan
+    // opts in to descending; the file-level caller-context gate stops here.
+    if !descend_nested_bodies && matches!(file.expr(e), ast::Expr::Lambda { .. }) {
+        return;
+    }
+    if matches!(
+        file.expr(e),
+        ast::Expr::Call { .. }
+            | ast::Expr::SafeCall { .. }
+            | ast::Expr::Index { .. }
+            | ast::Expr::Binary { .. }
+            | ast::Expr::Unary { .. }
+            | ast::Expr::IncDec { .. }
+            | ast::Expr::InRange { .. }
+            | ast::Expr::RangeTo { .. }
+    ) {
+        exprs.borrow_mut().push(e);
     }
     file.any_child_expr(
         e,
         &mut |c| {
-            collect_member_call_names(file, c, out);
+            collect_call_sites(file, c, exprs, stmts, descend_nested_bodies);
             false
         },
         &mut |s| {
-            file.any_child_stmt(s, &mut |c| {
-                collect_member_call_names(file, c, out);
-                false
-            });
-            false
-        },
-    );
-}
-
-fn collect_call_names(file: &ast::File, e: AstExprId, out: &std::cell::RefCell<Vec<String>>) {
-    if let ast::Expr::Call { callee, .. } = file.expr(e) {
-        if let ast::Expr::Name(n) = file.expr(*callee) {
-            out.borrow_mut().push(n.clone());
-        }
-    }
-    file.any_child_expr(
-        e,
-        &mut |c| {
-            collect_call_names(file, c, out);
-            false
-        },
-        &mut |s| {
-            file.any_child_stmt(s, &mut |c| {
-                collect_call_names(file, c, out);
-                false
-            });
+            stmts.borrow_mut().push(s);
+            // A local function owns its own call context and is checked/lowered separately.
+            if descend_nested_bodies || !matches!(file.stmt(s), Stmt::LocalFun(_)) {
+                file.any_child_stmt(s, &mut |c| {
+                    collect_call_sites(file, c, exprs, stmts, descend_nested_bodies);
+                    false
+                });
+            }
             false
         },
     );
@@ -27818,4 +27833,50 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
         BinOp::And => IrBinOp::And,
         BinOp::Or => IrBinOp::Or,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnsignedBoxRuntime;
+
+    impl TargetRuntime for UnsignedBoxRuntime {
+        fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
+            ty.boxed_ref().filter(|_| ty.is_unsigned())
+        }
+    }
+
+    /// The gate that keeps a boxed unsigned out of an erased descriptor slot reads a value's
+    /// representation off its lowered node by recognising `<box>.box-impl`, so it is only as good as
+    /// this box→carrier mapping. The reverse lookup must consume the provider's forward mapping so
+    /// common lowering neither spells target class names nor maintains a second table.
+    #[test]
+    fn unsigned_box_types_map_back_to_their_carrier() {
+        for carrier in [Ty::UInt, Ty::ULong] {
+            let boxed = carrier
+                .boxed_ref()
+                .and_then(|b| b.obj_internal())
+                .expect("an unsigned carrier boxes to its own inline class");
+            assert_eq!(
+                UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(boxed),
+                Some(carrier)
+            );
+        }
+        // A SIGNED primitive boxes to `kotlin/Int`, whose values never ride in an unsigned carrier —
+        // recognising it here would box arguments that the descriptor wants as `Integer`.
+        let signed = Ty::Int.boxed_ref().and_then(|b| b.obj_internal()).unwrap();
+        assert_eq!(
+            UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(signed),
+            None
+        );
+        // A value class krusty has no carrier `Ty` for stays unmapped: it is a reference on both
+        // sides of the call and needs no box/carrier reconciliation.
+        assert_eq!(
+            UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(crate::types::type_name(
+                "kotlin/time/Duration"
+            )),
+            None
+        );
+    }
 }

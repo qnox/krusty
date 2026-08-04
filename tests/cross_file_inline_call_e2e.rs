@@ -435,6 +435,125 @@ fn reified_inline_extension_cross_file_still_rejects() {
     );
 }
 
+/// A reified parameter that appears only in a VALUE parameter cannot be inferred by the receiver
+/// splice path. The compiler still emits this extension's facade to publish its inline body, so this
+/// specifically guards the distinction between physical emission and a legal direct-call fallback:
+/// failed specialization must skip the file instead of invoking the erased reified body.
+#[test]
+fn reified_value_parameter_inline_extension_cross_file_still_rejects() {
+    const LIB: &str = "interface I\n\
+                       inline fun <reified T : Any> I.check(value: T?): Boolean {\n\
+                       \x20   T::class\n\
+                       \x20   return value != null\n\
+                       }\n";
+    const MAIN: &str = "class C : I\n\
+                        fun box(): String = if (C().check(1)) \"OK\" else \"fail\"\n";
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert!(
+        common::compile_and_run_box_files(
+            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+            &[stdlib],
+            Some(&jdk)
+        )
+        .is_none(),
+        "cross-file call to a reified value-parameter extension must be rejected, never emitted"
+    );
+}
+
+/// A sibling-file `suspend operator` EXTENSION, reached through each of the three convention forms
+/// (indexed access, compound assignment, comparison). None of these is an `Expr::Call`, so the
+/// coroutine classification cannot find them by call shape — the checker keys the selected target to
+/// the `Expr::Index`/binary node, or to the assignment STATEMENT, and lowering registers the
+/// suspension from there.
+///
+/// These asserted REFUSAL while the file declaring a `suspend` extension was refused whole by
+/// `gate:extension-suspend-fn`, and said so: "if this now compiles, assert the box() answer instead
+/// of deleting the check". That gate is retired and the shapes run, so they assert the ANSWER now.
+/// The stake is a wrong ANSWER, not a crash: were the call left linking against a stale pre-CPS
+/// descriptor while its callee gained the CPS signature, the `NoSuchMethodError` would be swallowed
+/// by the driving `Continuation` and `box()` would return "fail" instead of failing.
+fn assert_module_answers_ok(sources: &[(&str, &str)], what: &str) {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::compile_and_run_box_files(sources, &[stdlib], Some(&jdk)),
+        Some("OK".to_string()),
+        "{what}: a sibling-file suspend extension operator must run through its CPS entry point"
+    );
+}
+
+const SUSPEND_CONVENTION_MAIN: &str = "import kotlin.coroutines.*\n\
+                                       class EC : Continuation<Unit> {\n\
+                                       \x20   override val context: CoroutineContext = EmptyCoroutineContext\n\
+                                       \x20   override fun resumeWith(result: Result<Unit>) {}\n\
+                                       }\n";
+
+#[test]
+fn suspend_operator_get_convention_cross_file_executes() {
+    const LIB: &str = "class Box(var v: Int)\n\
+                       suspend operator fun Box.get(i: Int): Int = v + i\n";
+    let main = format!(
+        "{SUSPEND_CONVENTION_MAIN}fun box(): String {{\n\
+         \x20   var r = 0\n\
+         \x20   val b = Box(1)\n\
+         \x20   suspend {{ r = b[1] }}.startCoroutine(EC())\n\
+         \x20   return if (r == 2) \"OK\" else \"fail: $r\"\n\
+         }}\n"
+    );
+    assert_module_answers_ok(&[("Lib.kt", LIB), ("Main.kt", &main)], "indexed access");
+}
+
+#[test]
+fn suspend_operator_plus_assign_convention_cross_file_executes() {
+    const LIB: &str = "class Box(var v: Int)\n\
+                       suspend operator fun Box.plus(i: Int): Box = Box(v + i)\n";
+    let main = format!(
+        "{SUSPEND_CONVENTION_MAIN}fun box(): String {{\n\
+         \x20   var r = 0\n\
+         \x20   var b = Box(1)\n\
+         \x20   suspend {{ b += 2; r = b.v }}.startCoroutine(EC())\n\
+         \x20   return if (r == 3) \"OK\" else \"fail: $r\"\n\
+         }}\n"
+    );
+    assert_module_answers_ok(
+        &[("Lib.kt", LIB), ("Main.kt", &main)],
+        "compound assignment",
+    );
+}
+
+/// The comparison form still SKIPS, for a reason unrelated to the convention: its result lands in a
+/// captured `var`, so the state machine has to flatten a suspending `RefSet`, which the flattener does
+/// not model (`flatten BAIL: unhandled suspending stmt RefSet`). The two forms above prove the
+/// convention itself reaches its CPS entry point; this one is pinned as a skip so that whoever teaches
+/// the flattener that statement gets a failure here and asserts the answer instead.
+#[test]
+fn suspend_operator_compare_to_convention_cross_file_still_skips() {
+    const LIB: &str = "class Box(var v: Int)\n\
+                       suspend operator fun Box.compareTo(o: Box): Int = v - o.v\n";
+    let main = format!(
+        "{SUSPEND_CONVENTION_MAIN}fun box(): String {{\n\
+         \x20   var r = 0\n\
+         \x20   val a = Box(1)\n\
+         \x20   val b = Box(2)\n\
+         \x20   suspend {{ r = if (a < b) 7 else 9 }}.startCoroutine(EC())\n\
+         \x20   return if (r == 7) \"OK\" else \"fail: $r\"\n\
+         }}\n"
+    );
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::compile_and_run_box_files(
+            &[("Lib.kt", LIB), ("Main.kt", &main)],
+            &[stdlib],
+            Some(&jdk)
+        ),
+        None,
+        "comparison: skipped only because the flattener does not model a suspending `RefSet` — if \
+         this now compiles, assert the box() answer instead of deleting the check"
+    );
+}
+
 /// A cross-file `suspend` extension is called through its real CPS entry point, never spliced:
 /// `inline` on the declaration does not change the sibling-file ABI (kotlinc emits the same
 /// `plusOne(int, Continuation)` method for both, plus a private `$$forInline` copy it splices only

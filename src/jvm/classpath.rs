@@ -227,7 +227,22 @@ fn value_class_param_types(
             continue;
         };
         if underlying.non_null() == declared.non_null() {
-            out[position] = Some(Ty::obj_name(name));
+            // A value class krusty models as a SCALAR of its own is recovered as THAT scalar, never
+            // as the boxed class. `UInt`/`ULong` ride in the JVM primitive slot of their carrier, so
+            // a REFERENCE spelling here makes the lowerer box the argument (`kotlin/UInt.box-impl`)
+            // into the erased descriptor slot (`I`/`J`) that takes it unboxed — a class file that
+            // fails verification at load time. The scalar spelling is also the sharper one for the
+            // overload selection this recovery exists for: it is exactly the type the checker gives
+            // an unsigned argument. Every other value class (`Duration`, a user `Tag`) keeps the
+            // class name: it is a reference on both sides, and the value-classes pass erases it at
+            // the call.
+            out[position] = Some(
+                meta_ids()
+                    .prim
+                    .get(&name)
+                    .copied()
+                    .unwrap_or_else(|| Ty::obj_name(name)),
+            );
         }
     }
     out
@@ -954,6 +969,8 @@ struct BuiltinClass {
     formals: Vec<String>,
     members: Vec<BuiltinMember>,
     is_interface: bool,
+    /// The builtin's own JVM class access flags, as an `InnerClasses` entry records them.
+    access: u16,
     nullable_member_returns: Vec<(String, usize)>,
 }
 
@@ -1106,6 +1123,7 @@ impl BuiltinsFile {
                     formals,
                     members,
                     is_interface: class.is_interface,
+                    access: class.access,
                     nullable_member_returns: class.nullable_member_returns,
                 },
             );
@@ -2075,6 +2093,88 @@ impl Classpath {
         self.builtins_file_for_package(type_name("kotlin/collections"))
     }
 
+    /// The nesting relation behind a mapped JVM name, when the enclosing JVM class has no class file to
+    /// read its `InnerClasses` attribute off (no JDK on the classpath). Takes the nested JVM name
+    /// (`java/util/Map$Entry`) and answers with the enclosing JVM name, the nested simple name, and the
+    /// access flags an `InnerClasses` entry records — the same triple
+    /// [`super::backend::classpath_inner_class_resolver`] otherwise reads off `java/util/Map.class`.
+    ///
+    /// The relation is not invented: a `$`-separated JVM name decomposes structurally, the enclosing
+    /// half maps back to its Kotlin builtin, and the `.kotlin_builtins` fragment carries the nested
+    /// declaration (`kotlin/collections/Map.Entry`) with its own flags. Requiring that declaration to
+    /// exist is what keeps this from claiming a nesting relation for a `$` that is merely part of a
+    /// mangled name.
+    ///
+    /// `None` for a non-nested name, a non-builtin enclosing type, or a nested name no builtin declares.
+    pub fn builtin_nested_class(&self, jvm_internal: &str) -> Option<(String, String, u16)> {
+        let (jvm_outer, simple) = jvm_internal.rsplit_once('$')?;
+        let outer_id = type_name(jvm_outer);
+        let kotlin_outer = super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(outer_id)?;
+        // A `.kotlin_builtins` fragment names a nested class with a DOTTED tail on the slashed package
+        // (`kotlin/collections/Map.Entry`), so the package the fragment is looked up by stays the
+        // enclosing class's package.
+        let nested = type_name(&format!("{}.{simple}", kotlin_outer.render()));
+        let file = self.builtins_file_for_package(Self::builtins_package_for(kotlin_outer));
+        let class = file.get_name(nested)?;
+        Some((jvm_outer.to_string(), simple.to_string(), class.access))
+    }
+
+    /// How reading a builtin PROPERTY is realized on its mapped JVM owner, when that owner has no class
+    /// file to read the realization off (no JDK on the classpath). Takes the JVM owner
+    /// (`java/util/List`) and the Kotlin property name (`size`, `keys`, `key`), and answers with the
+    /// physical accessor the mapped `java.util`/`java.lang` type actually declares — the same
+    /// name/descriptor/interface facts [`Self::builtin_members_name`] puts on the member, so the two
+    /// cannot disagree. Walks the builtins supertype closure, because a property is often declared on a
+    /// supertype (`List.size` on `Collection`).
+    ///
+    /// `None` for a non-builtin owner or a property no builtin declares — the caller then keeps its
+    /// existing behaviour.
+    fn builtin_property_read_access(
+        &self,
+        owner: &str,
+        property: &str,
+    ) -> Option<super::inline::PropertyAccess> {
+        // Normalize to the JVM owner exactly as `inherited_property_access` does, so a read resolved
+        // against the KOTLIN name (`kotlin/collections/List`) still dispatches on the mapped type and
+        // never emits a reference to a class that does not exist at runtime.
+        let jvm_owner_id = super::jvm_class_map::to_jvm_type_name(type_name(owner));
+        let jvm_owner = jvm_owner_id.render();
+        let kotlin = super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(jvm_owner_id)
+            .unwrap_or(jvm_owner_id);
+        let mut queue = std::collections::VecDeque::from([kotlin]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = queue.pop_front() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let file = self.builtins_file_for_package(Self::builtins_package_for(current));
+            let Some(class) = file.get_name(current) else {
+                continue;
+            };
+            if let Some(member) = class
+                .members
+                .iter()
+                .find(|m| m.is_property && m.name == property)
+            {
+                return Some(super::inline::PropertyAccess::Accessor {
+                    // The dispatch owner stays the one the read was resolved against (mapped to its
+                    // JVM name); only the accessor spelling and descriptor come from the declaring
+                    // builtin, exactly as an inherited class-file accessor keeps the receiver's owner.
+                    owner: jvm_owner.clone(),
+                    name: builtin_property_jvm_name(&member.name),
+                    // The member's OWN descriptor, which is already erased (`Map.Entry.key: K` is
+                    // `()Ljava/lang/Object;`). Rebuilding it from the use-site logical type would emit
+                    // `getKey:()Ljava/lang/String;`, a method no class declares.
+                    descriptor: builtin_descriptor(&member.generic_sig),
+                    is_static: false,
+                    is_interface: class.is_interface,
+                });
+            }
+            queue.extend(class.supertypes.iter_ids());
+        }
+        None
+    }
+
     /// Kotlin BUILTIN members (`String.length`, `List.get`, `Number.toInt`, …) as regular
     /// `LibraryMember` facts. The source name stays in `name`; JVM realization details stay in the JVM
     /// backend/provider and descriptor data.
@@ -2127,20 +2227,8 @@ impl Classpath {
                         .find_name(owner)
                         .map(|ci| ci.is_interface())
                         .unwrap_or(class.is_interface);
-                    // The READ direction of the property-accessor mapping (the WRITE direction is the
-                    // bridge synthesis in `names::collection_property_stub_name`, reused here): a special
-                    // `JavaToKotlinClassMap` collection stub (`keys` → `keySet`), the `CharSequence.length`
-                    // plain method, else the JavaBean getter (`is`-prefix kept, otherwise `get<Name>`).
                     let member_name = if m.is_property {
-                        if let Some(stub) =
-                            crate::jvm::names::collection_property_stub_name(&m.name)
-                        {
-                            stub.to_string()
-                        } else if m.name == "length" {
-                            m.name.clone()
-                        } else {
-                            crate::jvm::names::property_getter_name(&m.name)
-                        }
+                        builtin_property_jvm_name(&m.name)
                     } else {
                         m.name.clone()
                     };
@@ -3593,6 +3681,16 @@ pub struct PackageTree {
 }
 
 impl PackageTree {
+    /// Every class the classpath declares, as its slashed internal name and the jar that owns it.
+    ///
+    /// Sorted by name and classpath order, which is the order the catalog was composed in: the
+    /// first jar to declare a name is the one that wins resolution, and iteration preserves that.
+    pub fn classes(&self) -> impl Iterator<Item = (String, JarId)> + '_ {
+        self.classes
+            .iter()
+            .map(|(name, jar)| (self.names.render(*name), *jar))
+    }
+
     /// The node for a slashed package path (`""` = this root), or `None` if no jar declares it. The
     /// resolution seam (wired in a later rollout step); exercised now by the compose unit tests.
     #[allow(dead_code)]
@@ -3837,9 +3935,20 @@ impl super::inline::MethodBodies for Classpath {
         self.method_code(owner, name, descriptor)
     }
     fn owner_is_interface(&self, owner: &str) -> bool {
+        // Prefer the real class flag; otherwise the mapped builtin's own `.kotlin_builtins`
+        // `CLASS_KIND`. A Kotlin builtin and the JVM class it maps to always agree on interface-ness
+        // (`List`/`java.util.List`, `Number`/`java.lang.Number`), so no curated per-name table is
+        // needed — the one this replaced omitted every `java/util/*` and answered "class" for them,
+        // which emitted `invokevirtual` on an interface whenever no JDK supplied the class file.
         self.find(owner)
             .map(|ci| ci.is_interface())
-            .or_else(|| crate::jvm::jvm_class_map::jvm_mapped_builtin_is_interface(owner))
+            .or_else(|| {
+                let owner_id = type_name(owner);
+                let kotlin =
+                    crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(owner_id)
+                        .unwrap_or(owner_id);
+                self.builtin_is_interface_name(kotlin)
+            })
             .unwrap_or(false)
     }
     fn method_is_static(&self, owner: &str, name: &str, descriptor: &str) -> bool {
@@ -3865,14 +3974,41 @@ impl super::inline::MethodBodies for Classpath {
         owner: &str,
         property: &str,
     ) -> Option<super::inline::PropertyAccess> {
+        // The class file first — it is authoritative whenever the owner has one. A mapped builtin
+        // whose JVM owner is absent (no JDK on the classpath) still has a `.kotlin_builtins`
+        // declaration carrying the same accessor name, erased descriptor and interface flag; without
+        // this fallback the caller invents a JavaBean getter (`getSize`) off the LOGICAL type.
         inherited_property_access(self, owner, property, class_property_read_access)
+            .or_else(|| self.builtin_property_read_access(owner, property))
     }
+    /// No builtins fallback, deliberately: `.kotlin_builtins` declares no `var` on a mapped type, so
+    /// there is no setter for one to answer with (`MutableMap.MutableEntry` exposes `setValue` as a
+    /// FUNCTION, which resolves as an ordinary member call, not a property write).
     fn property_write_access(
         &self,
         owner: &str,
         property: &str,
     ) -> Option<super::inline::PropertyAccess> {
         inherited_property_access(self, owner, property, class_property_write_access)
+    }
+}
+
+/// The physical method a Kotlin BUILTIN property is realized as on its mapped JVM type — the READ
+/// direction of the property-accessor mapping (the WRITE direction is the bridge synthesis in
+/// `names::collection_property_stub_name`, reused here): a special `JavaToKotlinClassMap` collection
+/// stub (`keys` → `keySet`), the `CharSequence.length` plain method, else the JavaBean getter
+/// (`is`-prefix kept, otherwise `get<Name>`).
+///
+/// One definition shared by the member table (`Classpath::builtin_members_name`) and the realization
+/// seam (`Classpath::builtin_property_read_access`), so a call and a property read of the same builtin
+/// can never disagree about which method they name.
+fn builtin_property_jvm_name(property: &str) -> String {
+    if let Some(stub) = crate::jvm::names::collection_property_stub_name(property) {
+        stub.to_string()
+    } else if property == "length" {
+        property.to_string()
+    } else {
+        crate::jvm::names::property_getter_name(property)
     }
 }
 
