@@ -3436,7 +3436,27 @@ impl SymbolSource for JvmLibraries {
                                 m.ret,
                                 generic_sig.is_some()
                             );
-                            recovered.unwrap_or(m.ret)
+                            // The JVM signature erases read-only vs mutable (`List`/`MutableList`
+                            // both spell `java/util/List`); the member's `@Metadata` return
+                            // classifier preserves it. Same guarded rule as the suspend arm: only a
+                            // same-JVM-internal `kotlin/collections/…` sibling overrides the outer
+                            // name, keeping the signature's type arguments.
+                            let base = recovered.unwrap_or(m.ret);
+                            match (
+                                base,
+                                member_facts.as_ref().and_then(|facts| facts.ret.class),
+                            ) {
+                                (Ty::Obj(base_name, args), Some(Ty::Obj(meta_cls, _)))
+                                    if meta_cls.starts_with("kotlin/collections/")
+                                        && super::jvm_class_map::type_names_map_to_same_jvm_internal(
+                                            meta_cls,
+                                            base_name,
+                                        ) =>
+                                {
+                                    Ty::obj_args_name(meta_cls, args)
+                                }
+                                (b, _) => b,
+                            }
                         };
                         let call_sig = member_facts
                             .as_ref()
