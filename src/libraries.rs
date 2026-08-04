@@ -121,6 +121,17 @@ pub struct LibraryMember {
     /// call and lambda-parameter typing without the removed receiver-indexed `functions()` seam. Default
     /// (empty) for a provider that records no source parameter metadata.
     pub call_sig: CallSig,
+    /// The member's DECLARED (un-erased, pre-substitution) return type, straight from `@Metadata` —
+    /// the return analogue of [`LibraryCallable::source_receiver`], and recorded with no value-class
+    /// reasoning of its own.
+    ///
+    /// [`Self::ret`] cannot serve: it is the SUBSTITUTED type, so `List<TokenBox>.get` and
+    /// `A.create(): A<String>` both present as "returns a value class, physically `Object`" even though
+    /// the first hands back a BOX out of a generic slot and the second the erased carrier. Only the
+    /// DECLARATION separates them — `get` declares the type parameter `E`, `create` declares `A`. The
+    /// value-class pass reads this to decide the result's representation. `None` when the provider
+    /// records no metadata return classifier.
+    pub declared_ret: Option<Ty>,
 }
 
 /// A public static field and its optional compile-time constant.
@@ -363,6 +374,7 @@ impl LibraryMember {
             inline: InlineKind::None,
             visibility: Visibility::Public,
             call_sig: CallSig::default(),
+            declared_ret: None,
         }
     }
 
@@ -460,6 +472,7 @@ impl LibraryCallable {
             contract: None,
             generic_sig: None,
             singleton_dispatch: None,
+            declared_ret: None,
         }
     }
 
@@ -574,6 +587,12 @@ pub struct LibraryCallable {
     /// extension receiver must unbox to the value class's underlying; `params[0]` is already erased and
     /// cannot make that distinction. This is the un-erased-source-type down payment on task B.
     pub source_receiver: Option<Ty>,
+    /// The callee's DECLARED (un-erased, pre-substitution) return type — the return analogue of
+    /// [`Self::source_receiver`], carried for the same reason and read by the same pass. See
+    /// [`LibraryMember::declared_ret`]: [`Self::ret`] is the SUBSTITUTED type, which cannot say whether
+    /// a value-class result is the erased CARRIER (declared to return it) or a BOX out of a generic
+    /// slot. Only non-null declared returns are recorded; a nullable value class really is boxed.
+    pub declared_ret: Option<Ty>,
     /// Number of LEADING context parameters (`context(a: A) fun f()`) in `params` — supplied
     /// implicitly by the caller, not positionally, so arity checks and argument mapping skip them.
     pub context_count: usize,
