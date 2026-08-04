@@ -212,8 +212,12 @@ mod classpath_runblocking_e2e;
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]
 mod classpath_subtype_ctor_arg_e2e;
+#[path = "classpath_super_call_e2e.rs"]
+mod classpath_super_call_e2e;
 #[path = "classpath_super_ctor_args_e2e.rs"]
 mod classpath_super_ctor_args_e2e;
+#[path = "classpath_suspend_receiver_lambda_e2e.rs"]
+mod classpath_suspend_receiver_lambda_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
 #[path = "classpath_top_level_property_e2e.rs"]
@@ -354,6 +358,10 @@ mod diagnostic_markers_e2e;
 mod diagnostics_match_kotlinc;
 #[path = "diverging_init_e2e.rs"]
 mod diverging_init_e2e;
+#[path = "diverging_lambda_e2e.rs"]
+mod diverging_lambda_e2e;
+#[path = "diverging_value_position_e2e.rs"]
+mod diverging_value_position_e2e;
 #[path = "do_while_e2e.rs"]
 mod do_while_e2e;
 #[path = "dotted_extension_receiver_e2e.rs"]
@@ -490,6 +498,8 @@ mod front_end_errors_e2e;
 mod front_end_errors_more_e2e;
 #[path = "full_form_destructuring_e2e.rs"]
 mod full_form_destructuring_e2e;
+#[path = "fun_interface_value_class_e2e.rs"]
+mod fun_interface_value_class_e2e;
 #[path = "function_type_is_e2e.rs"]
 mod function_type_is_e2e;
 #[path = "function_type_supertype_e2e.rs"]
@@ -616,6 +626,8 @@ mod jvm_name_toplevel_e2e;
 mod kclass_type_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
+#[path = "krusty_roundtrip_class_metadata_e2e.rs"]
+mod krusty_roundtrip_class_metadata_e2e;
 #[path = "ksp_apt_loop_e2e.rs"]
 mod ksp_apt_loop_e2e;
 #[path = "ksp_provision_e2e.rs"]
@@ -634,6 +646,8 @@ mod lambda_vs_block_fun_type_e2e;
 mod lateinit_local_e2e;
 #[path = "lib_fixture_parallel_e2e.rs"]
 mod lib_fixture_parallel_e2e;
+#[path = "library_fun_type_lambda_param_e2e.rs"]
+mod library_fun_type_lambda_param_e2e;
 #[path = "list_fold_e2e.rs"]
 mod list_fold_e2e;
 #[path = "literal_escapes_coverage_e2e.rs"]
@@ -666,6 +680,10 @@ mod mangled_member_null_arg_e2e;
 mod map_entry_destructure_e2e;
 #[path = "map_get_nullable_elvis_e2e.rs"]
 mod map_get_nullable_elvis_e2e;
+#[path = "mapped_collection_scope_e2e.rs"]
+mod mapped_collection_scope_e2e;
+#[path = "mapped_string_scope_e2e.rs"]
+mod mapped_string_scope_e2e;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
@@ -746,6 +764,8 @@ mod nested_type_scope_e2e;
 mod nested_type_shadowing_e2e;
 #[path = "newline_method_chain_e2e.rs"]
 mod newline_method_chain_e2e;
+#[path = "no_jdk_builtin_emit_e2e.rs"]
+mod no_jdk_builtin_emit_e2e;
 #[path = "non_field_ctor_metadata_e2e.rs"]
 mod non_field_ctor_metadata_e2e;
 #[path = "not_null_assert_e2e.rs"]
@@ -790,6 +810,8 @@ mod object_member_overload_e2e;
 mod object_member_ref_import_e2e;
 #[path = "object_method_ref_e2e.rs"]
 mod object_method_ref_e2e;
+#[path = "object_receiver_lambda_e2e.rs"]
+mod object_receiver_lambda_e2e;
 #[path = "object_value_inference_e2e.rs"]
 mod object_value_inference_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
@@ -886,6 +908,8 @@ mod safe_call_member_on_generic_result_e2e;
 mod safe_call_prim_intrinsic_e2e;
 #[path = "safe_call_primitive_e2e.rs"]
 mod safe_call_primitive_e2e;
+#[path = "safe_call_unresolved_member_e2e.rs"]
+mod safe_call_unresolved_member_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
 mod safe_cast_elvis_e2e;
 #[path = "sam_classpath_e2e.rs"]
@@ -972,12 +996,16 @@ mod suspend_inline_hof_suspending_lambda_reject_e2e;
 mod suspend_inline_statementless_block_e2e;
 #[path = "suspend_interface_delegation_e2e.rs"]
 mod suspend_interface_delegation_e2e;
+#[path = "suspend_lambda_unit_tail_e2e.rs"]
+mod suspend_lambda_unit_tail_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]
 mod suspend_loop_compound_assign_e2e;
 #[path = "suspend_loop_continue_break_e2e.rs"]
 mod suspend_loop_continue_break_e2e;
 #[path = "suspend_member_after_call_e2e.rs"]
 mod suspend_member_after_call_e2e;
+#[path = "suspend_operator_convention_cross_file_e2e.rs"]
+mod suspend_operator_convention_cross_file_e2e;
 #[path = "suspend_receiver_lambda_e2e.rs"]
 mod suspend_receiver_lambda_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
@@ -1064,6 +1092,8 @@ mod unit_vararg_e2e;
 mod unqualified_enum_entry_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
+#[path = "unsigned_classpath_call_e2e.rs"]
+mod unsigned_classpath_call_e2e;
 #[path = "unsigned_ext_e2e.rs"]
 mod unsigned_ext_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]

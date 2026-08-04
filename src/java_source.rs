@@ -127,6 +127,11 @@ pub(crate) enum DeclKind {
 pub(crate) struct RawDecl {
     /// Internal name (`pkg/Outer$Inner`).
     pub(crate) internal: String,
+    /// Syntactic enclosing declaration, independent of `$` characters in Java identifiers.
+    pub(crate) outer_internal: Option<String>,
+    /// Declared identifier, retained because it cannot be recovered by splitting the JVM name: `$`
+    /// is legal inside a Java identifier and therefore is not evidence of a nesting boundary.
+    pub(crate) simple_name: String,
     pub(crate) name_span: Span,
     pub(crate) access: u16,
     pub(crate) kind: DeclKind,
@@ -141,6 +146,9 @@ pub(crate) struct RawDecl {
     pub(crate) methods: Vec<Member>,
     pub(crate) fields: Vec<(String, SrcType, u16)>,
     pub(crate) enum_constants: Vec<String>,
+    /// Whether any enum constant declares an anonymous class body. Such an enum is not `final` even
+    /// when it has no abstract member; the classfile and `InnerClasses` flags must agree on that fact.
+    pub(crate) enum_has_constant_body: bool,
     pub(crate) record_components: Vec<(String, SrcType)>,
     pub(crate) record_is_varargs: bool,
 }
@@ -162,6 +170,9 @@ pub struct JavaImport {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JavaDeclaration {
     pub internal: String,
+    /// Syntactic enclosing declaration. Consumers must use this relation instead of treating `$` in
+    /// `internal` as a separator because `$` is also a legal character in a top-level identifier.
+    pub outer_internal: Option<String>,
     pub name_span: Span,
     pub private: bool,
 }
@@ -193,16 +204,17 @@ impl JavaSourceFile {
     ) -> Option<String> {
         if let Some(owner) = &reference.owner {
             let nested = reference.path.replace('.', "$");
-            let mut scope = owner.as_str();
-            loop {
-                let candidate = format!("{scope}${nested}");
+            let mut scope = Some(owner.as_str());
+            while let Some(current) = scope {
+                let candidate = format!("{current}${nested}");
                 if exists(&candidate) {
                     return Some(candidate);
                 }
-                let Some((enclosing, _)) = scope.rsplit_once('$') else {
-                    break;
-                };
-                scope = enclosing;
+                scope = self
+                    .declarations
+                    .iter()
+                    .find(|declaration| declaration.internal == current)
+                    .and_then(|declaration| declaration.outer_internal.as_deref());
             }
         }
         self.resolve_type(&reference.path, exists)
@@ -228,18 +240,17 @@ pub fn parse_source_file(source: &str) -> Option<JavaSourceFile> {
             .iter()
             .map(|(name, _)| name.as_str())
             .collect::<HashSet<_>>();
-        let mut outer = declaration
-            .internal
-            .rsplit_once('$')
-            .map(|(outer, _)| outer);
+        let mut outer = declaration.outer_internal.as_deref();
         while let Some(owner) = outer {
             if let Some(enclosing) = declarations
                 .iter()
                 .find(|candidate| candidate.internal == owner)
             {
                 scope.extend(enclosing.tparams.iter().map(|(name, _)| name.as_str()));
+                outer = enclosing.outer_internal.as_deref();
+            } else {
+                outer = None;
             }
-            outer = owner.rsplit_once('$').map(|(next, _)| next);
         }
         for (_, bound) in &declaration.tparams {
             if let Some(bound) = bound {
@@ -315,6 +326,7 @@ pub fn parse_source_file(source: &str) -> Option<JavaSourceFile> {
             .into_iter()
             .map(|declaration| JavaDeclaration {
                 internal: declaration.internal,
+                outer_internal: declaration.outer_internal,
                 name_span: declaration.name_span,
                 private: declaration.access & ACC_PRIVATE != 0,
             })
@@ -742,6 +754,8 @@ fn type_decl_with_access(
 
     let mut decl = RawDecl {
         internal: internal.clone(),
+        outer_internal: outer.map(str::to_string),
+        simple_name: simple.clone(),
         name_span,
         access: acc,
         kind,
@@ -754,6 +768,7 @@ fn type_decl_with_access(
         methods: Vec::new(),
         fields: Vec::new(),
         enum_constants: Vec::new(),
+        enum_has_constant_body: false,
         record_components,
         record_is_varargs,
     };
@@ -779,6 +794,7 @@ fn type_decl_with_access(
                 }
             }
             if p.eat_punct('{') {
+                decl.enum_has_constant_body = true;
                 p.skip_braces();
             }
             decl.enum_constants.push(cname);
@@ -808,10 +824,10 @@ fn type_decl_with_access(
             || (p.peek() == Some(&Tok::Punct('@'))
                 && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
         {
-            // A type nested in an interface/annotation is implicitly public (JLS §9.5), like
-            // interface methods and fields.
+            // A type nested in an interface/annotation is implicitly public and static (JLS
+            // §9.5), like interface methods and fields.
             let nested_access = if matches!(kind, DeclKind::Interface | DeclKind::Annotation) {
-                macc | ACC_PUBLIC
+                macc | ACC_PUBLIC | ACC_STATIC
             } else {
                 macc
             };
@@ -900,6 +916,14 @@ fn type_decl_with_access(
             }
         }
     }
+    if kind == DeclKind::Enum
+        && decl
+            .methods
+            .iter()
+            .any(|method| method.access & ACC_ABSTRACT != 0)
+    {
+        decl.is_abstract = true;
+    }
     out.push(decl);
     Some(())
 }
@@ -922,6 +946,8 @@ fn annotation_type_decl(
 
     let mut decl = RawDecl {
         internal: internal.clone(),
+        outer_internal: outer.map(str::to_string),
+        simple_name: simple,
         name_span,
         access: acc,
         kind: DeclKind::Annotation,
@@ -934,6 +960,7 @@ fn annotation_type_decl(
         methods: Vec::new(),
         fields: Vec::new(),
         enum_constants: Vec::new(),
+        enum_has_constant_body: false,
         record_components: Vec::new(),
         record_is_varargs: false,
     };
@@ -950,8 +977,14 @@ fn annotation_type_decl(
             || (p.peek() == Some(&Tok::Punct('@'))
                 && matches!(p.t.get(p.i + 1), Some(Tok::Ident(s)) if s == "interface"))
         {
-            // Nested types of an annotation type are implicitly public (JLS §9.5).
-            type_decl_with_access(p, package, Some(&internal), out, macc | ACC_PUBLIC)?;
+            // Nested types of an annotation type are implicitly public and static (JLS §9.5).
+            type_decl_with_access(
+                p,
+                package,
+                Some(&internal),
+                out,
+                macc | ACC_PUBLIC | ACC_STATIC,
+            )?;
             continue;
         }
         let ty = src_type(p)?;

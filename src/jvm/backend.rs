@@ -261,20 +261,65 @@ impl JvmBackend {
     }
 }
 
+/// The per-file emit configuration krusty SHIPS with — ONE definition, so an in-process caller (the
+/// test harness, an embedder) emits exactly what `krusty -d …` does. It carries the class version
+/// (`-jvm-target`), the `SourceFile` name (the origin `.kt`; kotlinc uses the simple name,
+/// reconstructed from the stem — directories are already stripped), the `-module-name`, and the
+/// per-class `@Metadata` switch. Threaded explicitly into emission so every class (incl. synthetics)
+/// inherits it. A caller that wants the pre-class-metadata bytes uses `EmitOptions::default()`.
+pub fn shipping_emit_options(
+    stem: &str,
+    module_name: &str,
+    class_major: Option<u16>,
+    cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
+) -> crate::jvm::ir_emit::EmitOptions {
+    // Module/conformance inputs may retain a source-relative prefix (`helpers/Foo`) even though the
+    // CLI has already reduced its input to `Foo`. `SourceFile` is a simple filename on every JVM
+    // class, so normalize at this shared boundary instead of making each non-CLI caller grow its own
+    // path branch. Accept both separators because Kotlin testdata names are logical source paths and
+    // are not guaranteed to use the host platform's separator.
+    let source_stem = stem.rsplit(['/', '\\']).next().unwrap_or(stem);
+    crate::jvm::ir_emit::EmitOptions {
+        class_major,
+        source_file: Some(format!("{source_stem}.kt")),
+        // kotlinc records `classModuleName` in @Metadata unless the module is the default `main`.
+        module_name: (module_name != "main").then(|| module_name.to_string()),
+        // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
+        // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
+        // second compilation sees no constructor/member parameter names (named arguments) and no
+        // `operator` marks (destructuring). A shape `build_class_metadata` has not verified against
+        // kotlinc declines individually and emits nothing, so this cannot write an unverified
+        // payload. `KRUSTY_NO_CLASS_METADATA` restores the facade-only output for bisecting.
+        emit_class_metadata: std::env::var_os("KRUSTY_NO_CLASS_METADATA").is_none(),
+        inner_class_resolver: Some(classpath_inner_class_resolver(cp)),
+    }
+}
+
 pub fn classpath_inner_class_resolver(
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
 ) -> crate::jvm::classfile::InnerClassResolver {
     std::rc::Rc::new(move |internal: &str| {
-        let class = cp.find(internal)?;
-        let entry = class
-            .inner_classes
-            .iter()
-            .find(|entry| entry.inner == internal)?;
-        Some(crate::jvm::classfile::InnerClassDetails {
-            outer: entry.outer.clone(),
-            name: entry.name.clone(),
-            access: entry.access,
-        })
+        // The class file first — it is authoritative whenever the nested class has one. A mapped
+        // builtin whose JVM class is absent (no JDK on the classpath) still declares the same nesting
+        // in its `.kotlin_builtins` entry; without this fallback the reference emits no `InnerClasses`
+        // attribute at all, so the JDK-less class file diverges from the JDK-present one.
+        cp.find(internal)
+            .and_then(|class| {
+                let entry = class.inner_class_self()?;
+                Some(crate::jvm::classfile::InnerClassDetails {
+                    outer: entry.outer.clone(),
+                    name: entry.name.clone(),
+                    access: entry.access,
+                })
+            })
+            .or_else(|| {
+                let (outer, name, access) = cp.builtin_nested_class(internal)?;
+                Some(crate::jvm::classfile::InnerClassDetails {
+                    outer: Some(outer),
+                    name: Some(name),
+                    access,
+                })
+            })
     })
 }
 
@@ -366,19 +411,7 @@ impl Backend for JvmBackend {
         let syms = checked.symbols;
         let module_name = checked.module_name;
 
-        // Per-file emit config: the class version (`-jvm-target`) and the `SourceFile` name (the origin
-        // `.kt`; kotlinc uses the simple name, reconstructed from the stem — directories already
-        // stripped). Threaded explicitly into emission so every class (incl. synthetics) carries it.
-        let emit_opts = crate::jvm::ir_emit::EmitOptions {
-            class_major: self.class_major,
-            source_file: Some(format!("{stem}.kt")),
-            // kotlinc records `classModuleName` in @Metadata unless the module is the default `main`.
-            module_name: (module_name != "main").then(|| module_name.to_string()),
-            // Opt-in (WIP): compute + emit `@Metadata` for supported shapes. Off unless requested, so
-            // the default emit is unchanged (an unverified payload breaks kotlin-reflect).
-            emit_class_metadata: std::env::var_os("KRUSTY_EMIT_CLASS_METADATA").is_some(),
-            inner_class_resolver: Some(classpath_inner_class_resolver(self.cp.clone())),
-        };
+        let emit_opts = shipping_emit_options(stem, module_name, self.class_major, self.cp.clone());
 
         // Lower the checked file to the backend-agnostic IR, then emit JVM bytecode from it.
         // (The legacy direct AST emitter has been removed — IR is the sole JVM codegen path.)
@@ -571,7 +604,15 @@ pub fn facade_package_metadata(
         // fn needs the handle too: its erased descriptor (receiver + erased params + erased return)
         // maps the metadata function to its bytecode method. A normal fn's method is name +
         // logical descriptor — recoverable without a recorded handle.
-        let jvm_desc = (f.is_suspend() || f.is_inline()).then(|| {
+        // A declared TYPE PARAMETER in the signature needs the handle too: the descriptor is not
+        // derivable from the proto types (`T` erases to its bound, which the record does not name), so
+        // without it kotlin-reflect cannot tell which bytecode method the record describes and reports
+        // "several matching members found" for a function that has exactly one.
+        let mentions_type_parameter = matches!(declared_ret, Ty::TyParam(..))
+            || declared_params
+                .iter()
+                .any(|parameter| matches!(parameter, Ty::TyParam(..)));
+        let jvm_desc = (f.is_suspend() || f.is_inline() || mentions_type_parameter).then(|| {
             let mut p = String::new();
             if let Some(r) = receiver {
                 p.push_str(&crate::jvm::names::type_descriptor(r));
@@ -691,6 +732,41 @@ mod tests {
     use super::*;
     use crate::diag::DiagSink;
     use crate::frontend::{collect_signatures, parse_source_with_detected_features};
+
+    /// Every caller supplies a logical source stem, but module/corpus callers can retain directories
+    /// that the CLI has already stripped. The shared constructor must own that normalization so all
+    /// emitted `SourceFile` attributes contain the JVM-required simple filename on either path style.
+    #[test]
+    fn shipping_emit_options_normalize_logical_source_paths() {
+        let cp = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
+        let unix = shipping_emit_options("suite/nested/Foo", "main", None, cp.clone());
+        let windows = shipping_emit_options("suite\\nested\\Bar", "main", None, cp);
+
+        assert_eq!(unix.source_file.as_deref(), Some("Foo.kt"));
+        assert_eq!(windows.source_file.as_deref(), Some("Bar.kt"));
+    }
+
+    /// These are not arbitrary emitter unit tests: each claims to compile or survey the bytes that
+    /// krusty ships. Pin that architectural boundary so adding a new `EmitOptions` field cannot leave
+    /// one of those pipelines on a subtly different artifact shape. A focused differential helper may
+    /// mutate the returned options afterward (for example, force metadata despite a bisect env var),
+    /// but it must still begin with the complete shared configuration.
+    #[test]
+    fn shipping_pipelines_do_not_reimplement_emit_options() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in [
+            "src/bin/survey.rs",
+            "tests/common/mod.rs",
+            "tests/kotlin_box_ir_jvm_conformance.rs",
+        ] {
+            let text =
+                std::fs::read_to_string(root.join(relative)).expect("read shipping pipeline");
+            assert!(
+                !text.contains("EmitOptions {"),
+                "{relative} must start from jvm::backend::shipping_emit_options instead of duplicating the shipping configuration",
+            );
+        }
+    }
 
     #[test]
     fn prepare_module_symbols_records_cross_file_facades() {

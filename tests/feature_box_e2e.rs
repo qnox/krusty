@@ -3846,6 +3846,77 @@ fun box(): String {
 }
 "#,
     ),
+    // A Kotlin `Char` is a UTF-16 code UNIT, so the surrogate range D800..DFFF holds legal `Char`
+    // values. The `Char` companion's surrogate constants are inlined from the classpath, and each
+    // must keep its code unit — a Rust-`char` round-trip rejects lone surrogates and used to fold
+    // them to NUL.
+    (
+        "CharSurrogateConst",
+        r#"
+fun box(): String {
+    val minHigh = Char.MIN_HIGH_SURROGATE.code
+    if (minHigh != 55296) return "f0: $minHigh"
+    val maxHigh = Char.MAX_HIGH_SURROGATE.code
+    if (maxHigh != 56319) return "f1: $maxHigh"
+    val minLow = Char.MIN_LOW_SURROGATE.code
+    if (minLow != 56320) return "f2: $minLow"
+    val maxLow = Char.MAX_LOW_SURROGATE.code
+    if (maxLow != 57343) return "f3: $maxLow"
+    val minSur = Char.MIN_SURROGATE.code
+    if (minSur != 55296) return "f4: $minSur"
+    val maxSur = Char.MAX_SURROGATE.code
+    if (maxSur != 57343) return "f5: $maxSur"
+    return "OK"
+}
+"#,
+    ),
+    // The same UTF-16 code-unit rule for a SOURCE literal: `'\uD800'` is a lone surrogate, which is a
+    // legal `Char` but not a legal code point, so it survives neither a Rust `char` nor a Rust `String`.
+    // Covers a local, a `const val` (which lands in a `ConstantValue` attribute), and equality against
+    // the inlined classpath constant.
+    (
+        "CharSurrogateLiteral",
+        r#"
+const val HIGH_SUR = '\uD800'
+
+fun box(): String {
+    val hi = '\uD800'
+    if (hi.code != 55296) return "f0: ${hi.code}"
+    if (hi != Char.MIN_HIGH_SURROGATE) return "f1"
+    val lo = '\uDFFF'
+    if (lo.code != 57343) return "f2: ${lo.code}"
+    if (lo != Char.MAX_LOW_SURROGATE) return "f3"
+    if (HIGH_SUR.code != 55296) return "f4: ${HIGH_SUR.code}"
+    if (HIGH_SUR != hi) return "f5"
+    return "OK"
+}
+"#,
+    ),
+    // A `Char` constant folded into a `trimIndent`/`trimMargin` template must render as the CHARACTER.
+    // `${'$'}` is the idiomatic way to write a literal `$` in a Kotlin template, and it goes through the
+    // constant-string fold, so a `Char` mis-rendered there (e.g. as its decimal code unit) silently
+    // corrupts the folded string. A code unit with no `char` form (a lone surrogate) has no Rust
+    // `String` spelling at all, so a constant-string evaluator must return "not representable"
+    // rather than substitute U+FFFD. The currently unsupported trim call then takes the compiler's
+    // documented diagnostic-bail path; this case exercises the representable-Char success path.
+    (
+        "ConstCharTemplateFold",
+        r#"
+const val DOLLAR = '$'
+
+fun box(): String {
+    val a = """
+        |price: ${'$'}100
+    """.trimMargin()
+    if (a != "price: \$100") return "f0: $a"
+    val b = """
+        |k=${DOLLAR}v
+    """.trimMargin()
+    if (b != "k=\$v") return "f1: $b"
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]

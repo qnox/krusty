@@ -2221,9 +2221,13 @@ impl<'a> SymbolResolver<'a> {
         )
     }
 
+    /// Resolve `super.f(…)` against a classpath base class. `recv` is the APPLIED supertype
+    /// (`ArrayList<Int>` for `class C : ArrayList<Int>()`), not the bare classifier: the member query is
+    /// receiver-coupled, so its type arguments are what recover a generic return (`E` → `Int`) instead of
+    /// erasing it to `Any`.
     pub(crate) fn resolve_super_instance(
         &self,
-        internal: TypeName,
+        recv: Ty,
         name: &str,
         args: &[CallArgKind],
     ) -> Option<LibraryMember> {
@@ -2233,7 +2237,7 @@ impl<'a> SymbolResolver<'a> {
             lexical_classes: &self.lexical_classes,
             receiver: None,
         };
-        resolve_instance_name(self.lib, internal, name, args, Some(&access))
+        resolve_instance_ty(self.lib, recv, name, args, Some(&access))
     }
 
     /// Overload-resolve a top-level call against an already-built [`FunctionSet`] (from the resolver's
@@ -3630,7 +3634,19 @@ fn resolve_instance_name(
     args: &[CallArgKind],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<LibraryMember> {
-    select_instance_info(lib, Ty::obj_name(internal), name, args, member_access).map(|o| {
+    resolve_instance_ty(lib, Ty::obj_name(internal), name, args, member_access)
+}
+
+/// [`resolve_instance_name`] against an APPLIED receiver type — the form that keeps type arguments, so a
+/// generic member's return is recovered from them rather than erased.
+fn resolve_instance_ty(
+    lib: &dyn SemanticPlatform,
+    recv: Ty,
+    name: &str,
+    args: &[CallArgKind],
+    member_access: Option<&MemberAccess<'_>>,
+) -> Option<LibraryMember> {
+    select_instance_info(lib, recv, name, args, member_access).map(|o| {
         let ret = o.ret.apply(o.callable.ret);
         o.member_with_return(ret)
     })
@@ -3833,9 +3849,6 @@ fn property_getter_via_query(
     property: &str,
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
-    // A value-class-typed property's getter is `@JvmName`-mangled (`getId-<hash>`) and erases its return
-    // to the underlying type; resolving it as a plain member would type the read as the underlying, not
-    // the value class. Leave those to the value-class fallback, which recovers the logical type.
     let getter = lib
         .property_members(recv, property)
         .overloads
@@ -3845,8 +3858,22 @@ fn property_getter_via_query(
                 && member_visible(member_access, property.visibility, property.owner)
         })
         .min_by_key(|p| p.receiver_rank)
-        .map(|p| p.getter.name)
-        .filter(|getter| !getter.contains('-'))?;
+        .map(|p| p.getter.name)?;
+    // A value-class-TYPED property's getter is `@JvmName`-mangled (`getId-<hash>`) AND erases its
+    // return to the underlying type; resolving it as a plain member would type the read as the
+    // underlying, not the value class. Leave those to the value-class fallback, which recovers the
+    // logical type.
+    //
+    // A mangled getter on a value-class RECEIVER is a different thing: `Result<T>.isSuccess` is the
+    // static `isSuccess-impl(Object)Z`, whose return is not erased at all. Rejecting every mangled
+    // spelling left those properties unresolved outright.
+    let value_class_typed = recv
+        .kotlin_class_internal()
+        .and_then(|internal| lib.resolve_type_name(internal))
+        .is_some_and(|declaration| declaration.value_class_property(property).is_some());
+    if getter.contains('-') && value_class_typed {
+        return None;
+    }
     resolve_instance_member(lib, recv, &getter, &[], member_access)
         .filter(|m| m.ret.is_read_value_result())
 }
@@ -5306,6 +5333,7 @@ mod tests {
             physical_ret: Ty::Int,
             descriptor: "(I)I".to_string(),
             suspend: false,
+            owner_is_interface: false,
             inline: InlineKind::None,
             default_call: true,
             vararg_elem: None,

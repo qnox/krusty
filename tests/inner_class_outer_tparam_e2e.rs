@@ -41,3 +41,42 @@ fun box(): String {
 "#;
     common::expect_box_ok_with_stdlib(src, "InnerOuterCtorTParam");
 }
+
+#[test]
+fn inner_class_ctor_param_resolves_a_sibling_inner_class() {
+    let src = r#"
+class Outer {
+    inner class First(val value: String)
+
+    inner class Second(val first: First) {
+        fun read(): String = first.value
+    }
+
+    fun make(): String = Second(First("OK")).read()
+}
+
+fun box(): String = Outer().make()
+"#;
+
+    common::expect_box_ok_with_stdlib(src, "InnerSiblingCtorType");
+}
+
+#[test]
+fn nearest_lexical_owner_wins_for_a_sibling_ctor_type() {
+    let src = r#"
+class Outer {
+    class Value(val text: String)
+
+    class Middle {
+        class Value(val text: String)
+        class Use(val value: Value)
+
+        fun make(): String = Use(Value("OK")).value.text
+    }
+}
+
+fun box(): String = Outer.Middle().make()
+"#;
+
+    common::expect_box_ok_with_stdlib(src, "NearestSiblingCtorType");
+}

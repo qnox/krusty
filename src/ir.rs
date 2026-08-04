@@ -100,7 +100,10 @@ pub enum IrConst {
     Long(i64),
     Float(f32),
     Double(f64),
-    Char(char),
+    /// A Kotlin `Char` — one UTF-16 code UNIT, not a code point. Lone surrogates (D800..DFFF) are
+    /// legal `Char` values (`Char.MIN_HIGH_SURROGATE`), so this cannot be a Rust `char`: converting
+    /// through `char::from_u32` rejects them and silently folds them to NUL.
+    Char(u16),
     String(String),
     Null,
 }
@@ -115,7 +118,7 @@ impl IrConst {
             Ty::Long | Ty::ULong => IrConst::Long(0),
             Ty::Float => IrConst::Float(0.0),
             Ty::Double => IrConst::Double(0.0),
-            Ty::Char => IrConst::Char('\0'),
+            Ty::Char => IrConst::Char(0),
             _ => IrConst::Null,
         }
     }
@@ -1431,6 +1434,14 @@ pub struct IrFile {
     /// BOXED there — the value-class pass reads this to type such a slot as the boxed value class (so
     /// `it.getOrThrow()` unboxes it), without the lowerer probing value-class-ness itself.
     pub lambda_own_params_from: std::collections::HashMap<u32, u32>,
+    /// Lifted-lambda function id → the DECLARED parameter types and return type of the user
+    /// `fun interface` method the lambda was SAM-converted to. Absent for a plain `FunctionN` lambda,
+    /// whose `invoke` slots are all generic. The distinction only matters to a target that erases
+    /// some declared types away (the JVM's value classes): a generic slot carries a value class
+    /// BOXED, while a slot the SAM method spells as the value class itself carries the erased
+    /// underlying — so the lambda's impl method must match whichever the interface actually declares.
+    /// The lowerer records the declaration; deciding what erases is the backend pass's job.
+    pub lambda_sam_signature: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future

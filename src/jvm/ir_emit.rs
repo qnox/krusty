@@ -103,9 +103,9 @@ fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
 
 /// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
 /// `ClassWriter` (via [`new_writer`]) so synthetic serializer/companion/DefaultImpls classes inherit
-/// it too. The `Default` (v52, no `SourceFile`) keeps [`emit_all`]'s output byte-identical to before —
-/// only the CLI-driven backend path overrides it (`-jvm-target`, the source `.kt` name).
-#[derive(Clone, Default)]
+/// it too. The `Default` is v52 with no `SourceFile`; only the CLI-driven backend path overrides those
+/// (`-jvm-target`, the source `.kt` name).
+#[derive(Clone)]
 pub struct EmitOptions {
     /// Class-file major version to emit (default v52; `-jvm-target 25` ⇒ v69).
     pub class_major: Option<u16>,
@@ -114,13 +114,28 @@ pub struct EmitOptions {
     /// `-module-name` value, recorded in each class's `@Metadata` (`classModuleName`). kotlinc omits it
     /// for the default module `main`; `None` here matches that.
     pub module_name: Option<String>,
-    /// Emit a computed `@kotlin.Metadata` for supported class shapes (WIP — [`build_class_metadata`]).
+    /// Emit a computed `@kotlin.Metadata` for supported class shapes ([`build_class_metadata`]).
     /// Byte-verified vs kotlinc for a plain `val`/`var`-property class and a `data class` (its IS_DATA
-    /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); other shapes are gated
-    /// out and emit no metadata. OFF by default: an unverified payload breaks kotlin-reflect (a
-    /// box-corpus case caught this), so the default emit stays unchanged until a shape is verified.
+    /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); a shape that is not
+    /// verified declines individually and emits no metadata, so this never writes an unverified
+    /// payload (one did break kotlin-reflect on a box-corpus case). The CLI backend turns this ON —
+    /// without it a krusty-compiled CLASS carries nothing a second krusty compilation can read. It
+    /// stays OFF in this `Default` so [`emit_all`]'s output is unchanged for callers that want the
+    /// pre-class-metadata bytes.
     pub emit_class_metadata: bool,
     pub inner_class_resolver: Option<InnerClassResolver>,
+}
+
+impl Default for EmitOptions {
+    fn default() -> Self {
+        Self {
+            class_major: None,
+            source_file: None,
+            module_name: None,
+            emit_class_metadata: true,
+            inner_class_resolver: None,
+        }
+    }
 }
 
 /// `Class.flags` (proto field 1) for any Kotlin class kind — ONE bitfield, not a per-kind constant.
@@ -130,6 +145,70 @@ pub struct EmitOptions {
 ///   SEALED3) | bits6-8 classKind (CLASS0/INTERFACE1/ENUM2/ENUM_ENTRY3/ANNOTATION4/OBJECT5/COMPANION6)
 ///   | bit10 isData | bit13 isValue | bit15 hasEnumEntries.
 /// The writer omits the field at [`DEFAULT_CLASS_FLAGS`] (a public final class).
+/// Whether a realized property accessor consumes the receiver as an OPERAND. An instance accessor
+/// always does. A STATIC one does not — a `@JvmStatic` object property's `setX(V)` takes the VALUE,
+/// not a receiver — except on a `@JvmInline value class`, where every member is realized as a static
+/// `-impl` whose FIRST parameter is the receiver's carrier (`kotlin/Result.isSuccess` is
+/// `isSuccess-impl(Ljava/lang/Object;)Z`). Reading `!is_static` alone evaluated that receiver only for
+/// effect and then invoked the static with an empty stack.
+fn accessor_takes_receiver(access: &crate::jvm::inline::PropertyAccess) -> bool {
+    use crate::jvm::inline::PropertyAccess;
+    match access {
+        PropertyAccess::Field { is_static, .. } => !is_static,
+        PropertyAccess::Accessor {
+            is_static,
+            name,
+            descriptor,
+            ..
+        } => {
+            !is_static
+                || crate::jvm::names::parse_method_descriptor(descriptor).is_some_and(
+                    |(params, ret)| is_value_class_impl_accessor(name, params.len(), ret != "V"),
+                )
+        }
+        // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
+        PropertyAccess::AccessBridge { .. } => true,
+    }
+}
+
+/// kotlinc's spelling for a `@JvmInline value class` member realized as a static over the carrier: the
+/// Kotlin name with an `-impl` suffix (`isSuccess-impl`, `getLabel-impl`). It is the only static
+/// accessor shape whose leading parameter is a receiver rather than a value.
+///
+/// `is_read` distinguishes the two sites, because the parameter COUNT is what separates a carrier from
+/// a value: such a getter takes exactly the carrier, and such a setter the carrier AND the new value. A
+/// `@JvmStatic` property whose name merely ends in `-impl` (reachable through `@JvmName`) therefore
+/// cannot be mistaken for one — its static setter takes a single VALUE parameter.
+fn is_value_class_impl_accessor(name: &str, params: usize, is_read: bool) -> bool {
+    name.ends_with("-impl") && params == if is_read { 1 } else { 2 }
+}
+
+/// The type the receiver must hold ON THE STACK for `access`, given the property's `owner`.
+///
+/// Normally the owner itself. On a value class's static `-impl` accessor it is the accessor's first
+/// DECLARED parameter — the carrier (`isSuccess-impl(Ljava/lang/Object;)Z` consumes the erased
+/// underlying, never a `kotlin/Result` box). Narrowing an erased operand to the owner there emits a
+/// `checkcast` no unboxed carrier can pass.
+fn accessor_receiver_ty(access: &crate::jvm::inline::PropertyAccess, owner: &str) -> Ty {
+    use crate::jvm::inline::PropertyAccess;
+    if let PropertyAccess::Accessor {
+        is_static: true,
+        name,
+        descriptor,
+        ..
+    } = access
+    {
+        if let Some((params, ret)) = crate::jvm::names::parse_method_descriptor(descriptor) {
+            if is_value_class_impl_accessor(name, params.len(), ret != "V") {
+                if let Some(carrier) = params.first() {
+                    return crate::jvm::jvm_libraries::desc_to_ty(carrier);
+                }
+            }
+        }
+    }
+    Ty::obj(owner)
+}
+
 fn class_metadata_flags(c: &crate::ir::IrClass) -> u64 {
     const VIS_PUBLIC: u64 = 3;
     let modality: u64 = if c.is_sealed {
@@ -260,6 +339,14 @@ fn init_body_constant_fields(ir: &IrFile, c: &IrClass) -> std::collections::Hash
     out
 }
 
+/// Does `data` on this class synthesize the `componentN`/`copy` family? A `data object` is a SINGLETON:
+/// kotlinc gives it `equals`/`hashCode`/`toString` ONLY — there is nothing to copy from and no
+/// primary-constructor property to destructure. Both the constant-pool seeder and the `@Metadata`
+/// builder ask this, so a data object cannot end up describing a `copy` its class file does not have.
+fn synthesizes_data_class_members(c: &crate::ir::IrClass) -> bool {
+    c.is_data && !c.is_singleton()
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -328,11 +415,21 @@ fn build_class_metadata(
     } else {
         std::collections::HashSet::new()
     };
+    let synthesizes_copy = synthesizes_data_class_members(c);
+    // `data` synthesizes over the PRIMARY-CONSTRUCTOR properties only — `c.fields` also holds the
+    // backing fields of body properties (`data class P(val x: Int) { val y = 1 }` has two fields but
+    // one component). Counting all of them advertised a `component2` the class file does not define,
+    // and a `copy(II)` where only `copy(I)` exists; real kotlinc reading that record accepts
+    // `val (a, b) = p` and binds a method that is not there.
+    let data_component_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
     let data_method_names: std::collections::HashSet<String> = if c.is_data {
-        let mut s: std::collections::HashSet<String> = (1..=c.fields.len())
+        let mut s: std::collections::HashSet<String> = (1..=data_component_fields.len())
             .map(|i| format!("component{i}"))
             .collect();
-        s.extend(["copy", "equals", "hashCode", "toString"].map(String::from));
+        s.extend(["equals", "hashCode", "toString"].map(String::from));
+        if synthesizes_copy {
+            s.insert("copy".to_string());
+        }
         s
     } else {
         std::collections::HashSet::new()
@@ -360,6 +457,52 @@ fn build_class_metadata(
                 && !value_method_names.contains(n)
         })
         .collect();
+    // VALUE-CLASS-INVOLVED MEMBERS: decline the whole class. The writer can produce kotlinc's exact
+    // payload for these (the byte-identity tests proved it) — what is missing is the READ half. The
+    // physical method already returns/takes the ERASED underlying, but a caller that learns the Kotlin
+    // return from `@Metadata` still emits kotlinc's boxed-form sequence — `invokevirtual I.f-XLNMDGE()
+    // Ljava/lang/String; checkcast K; invokevirtual K.unbox-impl()` — and the `String` on the stack is
+    // not a `K`: ClassCastException, or VerifyError once a fake override lands the receiver wrong.
+    // Reproduced for both shapes: a VALUE class with a declared member (`S("O").k`) and a PLAIN class
+    // whose member's signature mentions one (`I().f().v`, `C().foo("OK").s` inherited from `A`,
+    // `WhateverUseCase()(Result.failure(…))`). Withholding the record puts each caller back on the
+    // descriptor fallback, which is what it used before any class metadata was written. Reinstate this
+    // when the classpath value-class RETURN is modelled (`MetadataCallFacts` carries
+    // `value_class_params` but has no return counterpart). Pinned by the box corpus's
+    // `compileKotlinAgainstKotlin/inlineClasses/*` MODULE chains.
+    // The property signal is its stamped JVM REALIZATION, not `vc_declared_sigs`: that table holds
+    // non-synthesized FUNCTIONS only, so a value-class-typed CONSTRUCTOR PARAMETER
+    // (`class Holder(val id: ItemId)`, whose generated `getId-YyT5sjE` is synthesized) and a
+    // value-class-typed BODY PROPERTY both slip past it. The value-class pass has already resolved
+    // whether a property's getter/setter needs mangling and records the exact spelling on the
+    // declaration; consulting that stamp here keeps metadata admission tied to the same semantic fact
+    // that accessor emission consumes. Do not infer ownership from the global function table:
+    // synthesized property accessors are emitted directly from `IrProperty` and deliberately have no
+    // `IrFunction` entry, so a dispatch-receiver scan cannot see them.
+    //
+    // `Holder` is the constructor-property case that proves the wider net is needed: krusty described
+    // `id` as `String` (kotlinc: `LItemId;`), named the PRIVATE `<init>(Ljava/lang/String;)V` rather than
+    // kotlinc's `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`, and dropped the
+    // getter's mangled name — real kotlinc reading that record rejects `Holder(ItemId("OK"))` as a
+    // type mismatch, and a caller that satisfied it would `invokespecial` the private constructor.
+    // A stamp is present only when the ordinary property convention is not the physical ABI. Testing
+    // both sides keeps this admission rule correct for `var` even if a future realization needs only a
+    // setter override. The conservative decline is temporary until the metadata reader can preserve
+    // value-class property types and consume these exact JVM signatures end to end.
+    let has_value_class_property_realization = c
+        .properties
+        .iter()
+        .any(|p| p.getter_jvm_name.is_some() || p.setter_jvm_name.is_some());
+    let has_value_class_member = declared_fids
+        .iter()
+        .any(|fid| ir.vc_declared_sigs.contains_key(fid));
+    if has_value_class_member
+        || (!c.is_value
+            && (has_value_class_property_realization || ir.has_value_param_ctor(&c.fq_name())))
+        || (c.is_value && !declared_fids.is_empty())
+    {
+        return None;
+    }
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let const_fields = init_body_constant_fields(ir, c);
     let mut props: Vec<PropMeta> = c
@@ -486,9 +629,8 @@ fn build_class_metadata(
     };
     let methods: Vec<FnMeta> = if c.is_data {
         let class_ty = Ty::obj(&c.fq_name());
-        let field_tys: Vec<Ty> = c.fields.iter().map(|f| f.ty).collect();
-        let mut m: Vec<FnMeta> = c
-            .fields
+        let field_tys: Vec<Ty> = data_component_fields.iter().map(|f| f.ty).collect();
+        let mut m: Vec<FnMeta> = data_component_fields
             .iter()
             .enumerate()
             .map(|(i, f)| FnMeta {
@@ -501,15 +643,20 @@ fn build_class_metadata(
                 jvm_sig_name: None,
             })
             .collect();
-        m.push(FnMeta {
-            name: "copy".into(),
-            params: c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect(),
-            ret: class_ty,
-            flags: COPY_FN_FLAGS,
-            params_have_defaults: true,
-            jvm_sig: boxed_fn_sig(&field_tys, class_ty),
-            jvm_sig_name: None,
-        });
+        if synthesizes_copy {
+            m.push(FnMeta {
+                name: "copy".into(),
+                params: data_component_fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty))
+                    .collect(),
+                ret: class_ty,
+                flags: COPY_FN_FLAGS,
+                params_have_defaults: true,
+                jvm_sig: boxed_fn_sig(&field_tys, class_ty),
+                jvm_sig_name: None,
+            });
+        }
         m.push(FnMeta {
             name: "equals".into(),
             params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
@@ -839,16 +986,18 @@ fn seed_plain_class_pool(
             fields: if c.is_data { &[] } else { &field_sigs },
         },
     );
-    if c.is_data {
+    if synthesizes_data_class_members(c) {
         let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
-        let data_fields: Vec<(String, String)> = c
-            .fields
+        // The synthesized members cover the PRIMARY-CONSTRUCTOR properties only; a body property has a
+        // backing field in `c.fields` but no `componentN` and no `copy` parameter (see
+        // `build_class_metadata`, which takes the same prefix).
+        let component_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
+        let data_fields: Vec<(String, String)> = component_fields
             .iter()
             .map(|f| (f.name.clone(), desc(f.ty)))
             .collect();
         // Per-field `hashCode` owner (interface field → `java/lang/Object`), recorded by `field_hash`.
-        let hashcode_owners: Vec<Option<String>> = c
-            .fields
+        let hashcode_owners: Vec<Option<String>> = component_fields
             .iter()
             .map(|f| ir.data_hashcode_owner(fq_name, &f.name).map(str::to_string))
             .collect();
@@ -1155,7 +1304,8 @@ fn attach_synth_debug_tables(
     // (equals also `other`); `copy` has the ctor parameters.
     if c.is_data {
         let self_ref = format!("L{};", c.fq_name());
-        for (i, f) in c.fields.iter().enumerate() {
+        let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
+        for (i, f) in data_fields.iter().enumerate() {
             cw.set_method_debug(
                 &format!("component{}", i + 1),
                 &format!("(){}", desc(f.ty)),
@@ -1163,21 +1313,24 @@ fn attach_synth_debug_tables(
                 &this_only,
             );
         }
-        let mut copy_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
-        let mut slot = 1u16;
-        for f in &c.fields {
-            copy_locals.push((f.name.clone(), desc(f.ty), slot));
-            slot += slot_size(f.ty);
+        // A `data object` synthesizes no `copy` (see the metadata assembly), so it has no table either.
+        if !data_fields.is_empty() {
+            let mut copy_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
+            let mut slot = 1u16;
+            for f in data_fields {
+                copy_locals.push((f.name.clone(), desc(f.ty), slot));
+                slot += slot_size(f.ty);
+            }
+            cw.set_method_debug(
+                "copy",
+                &format!(
+                    "{ctor_desc_no_v}{self_ref}",
+                    ctor_desc_no_v = &ctor_desc[..ctor_desc.len() - 1]
+                ),
+                None,
+                &copy_locals,
+            );
         }
-        cw.set_method_debug(
-            "copy",
-            &format!(
-                "{ctor_desc_no_v}{self_ref}",
-                ctor_desc_no_v = &ctor_desc[..ctor_desc.len() - 1]
-            ),
-            None,
-            &copy_locals,
-        );
         cw.set_method_debug(
             "equals",
             "(Ljava/lang/Object;)Z",
@@ -1273,11 +1426,16 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     if c.is_data {
         let not_null = "Lorg/jetbrains/annotations/NotNull;";
         let self_ref = format!("L{};", c.fq_name());
-        let copy_desc = format!("({}){self_ref}", ctor_field_descs(c));
-        // `copy`'s parameters mirror the primary-constructor properties, so each reference param takes
-        // the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
-        let copy_params: Vec<Option<&str>> = c.fields.iter().map(|f| ann(&f.name, f.ty)).collect();
-        cw.set_method_nullability("copy", &copy_desc, Some(not_null), &copy_params);
+        let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
+        // A `data object` synthesizes no `copy` (see the metadata assembly), so it takes no annotations.
+        if !data_fields.is_empty() {
+            let copy_desc = format!("({}){self_ref}", ctor_field_descs(c));
+            // `copy`'s parameters mirror the primary-constructor properties, so each reference param
+            // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
+            let copy_params: Vec<Option<&str>> =
+                data_fields.iter().map(|f| ann(&f.name, f.ty)).collect();
+            cw.set_method_nullability("copy", &copy_desc, Some(not_null), &copy_params);
+        }
         cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(not_null), &[]);
         cw.set_method_nullability(
             "equals",
@@ -1285,7 +1443,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
             None,
             &[Some("Lorg/jetbrains/annotations/Nullable;")],
         );
-        for (i, f) in c.fields.iter().enumerate() {
+        for (i, f) in data_fields.iter().enumerate() {
             if let Some(a) = ann(&f.name, f.ty) {
                 cw.set_method_nullability(
                     &format!("component{}", i + 1),
@@ -3496,7 +3654,7 @@ fn emit_object_as(cw: &mut ClassWriter, code: &mut CodeBuilder, ty: Ty) {
     }
 }
 
-fn parse_physical_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
+pub(crate) fn parse_physical_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
         params.into_iter().map(ty_from_field_descriptor).collect(),
@@ -7704,9 +7862,13 @@ impl<'a> Emitter<'a> {
                 code.bind(start);
                 // A pre-test loop checks the condition before the body; a `do…while` skips this and
                 // tests at the bottom (`cont`), so the body always runs once.
-                if !post_test {
-                    // Jump out of the loop when the condition is false (fused comparison branch).
-                    self.emit_cond_branch(cond, end, false, code);
+                if !post_test && self.emit_cond_branch(cond, end, false, code) {
+                    // `while (false)`: the jump-out is unconditional, so the body/update/back-edge
+                    // that would follow are unreachable — emitting them leaves frameless dead code
+                    // the verifier rejects. kotlinc emits no body for a never-entered loop either.
+                    self.frame(end, vec![], code);
+                    code.bind(end);
+                    return;
                 }
                 // `continue` targets `cont` (run the update / bottom test); `break` targets `end`.
                 self.loop_stack.push((cont, end, label.clone()));
@@ -7724,7 +7886,11 @@ impl<'a> Emitter<'a> {
                 self.loop_stack.pop();
                 if post_test {
                     // `do…while`: loop back while the condition holds, then fall through to `end`.
-                    self.emit_cond_branch(cond, start, true, code);
+                    // A `while (true)` back-edge IS unconditional, and the only thing after it is the
+                    // `frame(end)`/`bind(end)` below — which is exactly what a dead-but-framed `end`
+                    // needs, so the flag is deliberately ignored here. Anything emitted after this
+                    // point in future would have to honour it.
+                    let _ = self.emit_cond_branch(cond, start, true, code);
                 } else {
                     self.frame(start, vec![], code);
                     code.goto(start);
@@ -7910,16 +8076,12 @@ impl<'a> Emitter<'a> {
                 is_interface: operation.interface
                     || self.bodies.owner_is_interface(operation.owner),
             });
-        let (access_owner, takes_receiver) = match &access {
-            PropertyAccess::Field {
-                owner, is_static, ..
-            }
-            | PropertyAccess::Accessor {
-                owner, is_static, ..
-            } => (owner.clone(), !is_static),
-            // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
-            PropertyAccess::AccessBridge { owner, .. } => (owner.clone(), true),
+        let access_owner = match &access {
+            PropertyAccess::Field { owner, .. }
+            | PropertyAccess::Accessor { owner, .. }
+            | PropertyAccess::AccessBridge { owner, .. } => owner.clone(),
         };
+        let takes_receiver = accessor_takes_receiver(&access);
         // A branchy assigned value emits merge frames. It cannot do so with an instance receiver already
         // on the operand stack because those frames describe an empty baseline. Spill BOTH operands in
         // source evaluation order (receiver, then value), then reload them; spilling only the value would
@@ -7934,7 +8096,14 @@ impl<'a> Emitter<'a> {
             load(receiver_ty, slot, code);
             self.narrow_on_stack(receiver_ty, &Ty::obj(&access_owner), code);
         } else {
-            self.emit_property_receiver(operation.receiver, &access_owner, takes_receiver, code);
+            let receiver_ty = accessor_receiver_ty(&access, &access_owner);
+            self.emit_property_receiver(
+                operation.receiver,
+                &access_owner,
+                takes_receiver,
+                &receiver_ty,
+                code,
+            );
         }
         // The assigned value is bridged to what the realization stores, the mirror of the read's bridge.
         let target = match &access {
@@ -8038,11 +8207,12 @@ impl<'a> Emitter<'a> {
         receiver: crate::ir::ExprId,
         access_owner: &str,
         takes_receiver: bool,
+        expected: &Ty,
         code: &mut CodeBuilder,
     ) {
         if takes_receiver {
             self.emit_value(receiver, code);
-            self.narrow_on_stack(self.value_ty(receiver), &Ty::obj(access_owner), code);
+            self.narrow_on_stack(self.value_ty(receiver), expected, code);
             return;
         }
         // A receiverless realization does not make the receiver expression disappear. Elide only an
@@ -8286,17 +8456,14 @@ impl<'a> Emitter<'a> {
         code: &mut CodeBuilder,
     ) {
         use crate::jvm::inline::PropertyAccess;
-        let (access_owner, takes_receiver) = match &access {
-            PropertyAccess::Field {
-                owner, is_static, ..
-            }
-            | PropertyAccess::Accessor {
-                owner, is_static, ..
-            } => (owner.clone(), !is_static),
-            // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
-            PropertyAccess::AccessBridge { owner, .. } => (owner.clone(), true),
+        let access_owner = match &access {
+            PropertyAccess::Field { owner, .. }
+            | PropertyAccess::Accessor { owner, .. }
+            | PropertyAccess::AccessBridge { owner, .. } => owner.clone(),
         };
-        self.emit_property_receiver(receiver, &access_owner, takes_receiver, code);
+        let takes_receiver = accessor_takes_receiver(&access);
+        let receiver_ty = accessor_receiver_ty(&access, &access_owner);
+        self.emit_property_receiver(receiver, &access_owner, takes_receiver, &receiver_ty, code);
         let physical = match access {
             PropertyAccess::Field {
                 owner,
@@ -8448,6 +8615,13 @@ impl<'a> Emitter<'a> {
         if !self.is_real_nothing_call(node) {
             return false;
         }
+        // The invoke was emitted with ZERO result words — `slot_words(Nothing)` is 0 because a
+        // `Nothing` call yields no VALUE — yet it physically leaves one `Void` word. Re-declare that
+        // word before discarding it: otherwise the tracked height sits one below the real stack from
+        // the invoke onwards, `max_stack` is undercounted by whatever this path pushes on top
+        // (`println(boom())` needs the `PrintStream` receiver underneath), and the JVM rejects the
+        // method with "Operand stack overflow".
+        code.set_stack((code.stack_height().max(0) + 1) as u16);
         code.pop();
         let cls = self.cw.class_ref("kotlin/KotlinNothingValueException");
         code.new_obj(cls);
@@ -10796,13 +10970,21 @@ impl<'a> Emitter<'a> {
     /// When `cond` is a primitive/reference comparison it is FUSED into the branch (`if_icmpge`,
     /// `ifnull`, `if_acmpeq`, `lcmp;ifge`, …) instead of materializing a 0/1 boolean and testing it
     /// with `ifeq`/`ifne` — the bytecode kotlinc emits for every `if`/`while`/`for` over a comparison.
+    ///
+    /// Returns `true` when the jump was emitted UNCONDITIONALLY (a constant condition that always
+    /// takes it): the caller's fall-through path is then statically unreachable, and whatever it would
+    /// emit next lands after a `goto` with nothing branching to it — dead code with no stack-map frame,
+    /// which the verifier rejects outright ("Expecting a stack map frame"). Such a caller must emit
+    /// nothing on that path. kotlinc likewise emits no body for a never-entered branch.
+    #[must_use = "an unconditionally-taken jump makes the fall-through path dead — emitting there \
+                  leaves frameless code the verifier rejects"]
     fn emit_cond_branch(
         &mut self,
         cond: u32,
         target: Label,
         jump_when_true: bool,
         code: &mut CodeBuilder,
-    ) {
+    ) -> bool {
         // A constant condition folds: `while (true)` (a `Boolean(true)` pre-test, jump-out-when-false)
         // emits NO branch — a spurious `ifeq end` to the method end leaves a branch target with no
         // stack-map frame. An always-taken branch becomes an unconditional `goto`.
@@ -10812,14 +10994,15 @@ impl<'a> Emitter<'a> {
             self.frame(target, vec![], code);
             if b == jump_when_true {
                 code.goto(target);
+                return true;
             }
-            return;
+            return false;
         }
         if let IrExpr::PrimitiveBinOp { op, lhs, rhs } = *self.ir.expr(cond) {
             use IrBinOp::*;
             if matches!(op, Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe) {
                 self.emit_compare_branch(op, lhs, rhs, target, jump_when_true, code);
-                return;
+                return false;
             }
         }
         // Fuse `x is T` / `x !is T` (a reference target) into `instanceof; if{ne,eq}` — no 0/1 boolean is
@@ -10856,7 +11039,7 @@ impl<'a> Emitter<'a> {
             } else {
                 code.ifeq(target);
             }
-            return;
+            return false;
         }
         self.emit_value(cond, code);
         self.frame(target, vec![], code);
@@ -10865,6 +11048,7 @@ impl<'a> Emitter<'a> {
         } else {
             code.ifeq(target);
         }
+        false
     }
 
     /// Emit the comparison `lhs <op> rhs` directly as a single conditional jump to `target`, taken when
@@ -11043,7 +11227,26 @@ impl<'a> Emitter<'a> {
                 Some(c) => {
                     // Skip to the next branch when this condition is false (fused comparison branch).
                     let next = code.new_label();
-                    self.emit_cond_branch(*c, next, false, code);
+                    // A condition that folds to a constant `false` never selects this branch, and the
+                    // skip above is then an unconditional `goto next` — so the body would be laid down
+                    // after it, unreachable and unframed ("Expecting a stack map frame"). The suspend
+                    // flattener builds exactly that shape: a `do … while (false)` loop dragged into the
+                    // state machine (by a labeled jump crossing out of it) becomes a header state whose
+                    // `when` tests the literal `false` (see docs/SPEC.md). Emit nothing for it.
+                    if self.emit_cond_branch(*c, next, false, code) {
+                        // Skipping the CODE must not skip the merge-point accounting: `diverges` does
+                        // not fold constant conditions, so a `when` whose only falling-through branch is
+                        // this dead one still reports as falling through, and the caller keeps emitting
+                        // at `end`. Leaving `end` unframed just moves the same VerifyError there —
+                        // `if (FALSE_CONST) "a" else return "b"` failed at the merge instead of at the
+                        // dead body. Mirror what the emitted path does, minus the code.
+                        if !self.diverges(*body) {
+                            end_reachable = true;
+                        }
+                        code.bind(next);
+                        code.set_stack(entry_height);
+                        continue;
+                    }
                     self.emit_value(*body, code);
                     if !self.diverges(*body) {
                         // A diverging branch (e.g. an inlined `error(...)`) left nothing and ended in
@@ -11140,7 +11343,10 @@ impl<'a> Emitter<'a> {
         let mut fin_ranges: Vec<(Label, Label)> = vec![(start, end)];
         for c in catches {
             let handler = code.new_label();
-            code.bind(handler);
+            // A handler is entered over the exception edge, not by a branch — and a diverging `try`
+            // body leaves the stream dead exactly here, so binding must revive on the range it guards
+            // rather than on an incoming branch.
+            code.bind_handler(handler, &[(start, end)]);
             let exc_internal = c.exc_internal.render();
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
@@ -11198,7 +11404,9 @@ impl<'a> Emitter<'a> {
         // inlined finally code — which lies past those ranges, so it doesn't re-catch itself.
         if let Some(f) = finally {
             let fin_handler = code.new_label();
-            code.bind(fin_handler);
+            // Exception edge — see the `catch` handler above; this one guards the body and every
+            // catch body (`fin_ranges`), which are complete by now.
+            code.bind_handler(fin_handler, &fin_ranges);
             let thr_ci = self.cw.class_ref("java/lang/Throwable");
             self.frame(fin_handler, vec![VerifType::Object(thr_ci)], code);
             let thr_ty = Ty::obj("java/lang/Throwable");

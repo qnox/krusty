@@ -1122,7 +1122,8 @@ public class M {\n\
 
 /// Compile a suspend snippet with krusty (stdlib + coroutines + JDK modules) and run its
 /// `fun box(): String = runBlocking { … }` on the shared box runner — the same harness the other
-/// `suspend … runBlocking { }` behavioural tests use. `None` if the toolchain isn't provisioned.
+/// `suspend … runBlocking { }` behavioural tests use. Toolchain access is fail-fast; `None` therefore
+/// means the compiler declined the source, which each behavioral caller treats as a failure.
 fn run_suspend_box(src: &str, tag: &str) -> Option<String> {
     let sl = common::stdlib_jar();
     let coro = common::coroutines_jar();
@@ -1137,13 +1138,6 @@ fn suspend_unit_fn_bare_early_return() {
     // must `areturn Unit.INSTANCE` — emitting a void `return` (as the bare `Return(None)` did) yields
     // "Method expects a return value" at load. Production hit: an invitation-accepting service method
     // (`… ?: return`, `if (status != PENDING) return`). proc(b,true) leaves v=0; proc(b,false) sets v=1.
-    if false /* toolchain gate panics */
-        || false /* toolchain gate panics */
-        || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
         class B { var v: Int = 0 }\n\
         suspend fun leaf(): Int = 1\n\
@@ -1172,13 +1166,6 @@ fn suspend_in_catch_body_spills_exception() {
     // field and restored per-state, exactly like any local live across a suspension. compute(sb,false) =
     // risky(7) + "cfg".length(3) = 10 with sb "R"; compute(sb,true) rethrows the original
     // IllegalStateException("boom") after running the catch's suspend, with sb "R[boomC]".
-    if false /* toolchain gate panics */
-        || false /* toolchain gate panics */
-        || false
-    /* toolchain gate panics */
-    {
-        return; // toolchain not provisioned
-    }
     const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
         suspend fun setup(): String = \"cfg\"\n\
         suspend fun tick(sb: StringBuilder, t: String): Int { sb.append(t); return t.length }\n\
@@ -1219,13 +1206,6 @@ fn suspend_return_when_with_suspending_branches() {
     // including an `else -> throw` divergent arm. Desugars to `val tmp; when (k) { … tmp = v }; return
     // tmp`, each branch flattened as a suspending `when`-statement arm. handle(0) = "a5" with sb "A!";
     // handle(1) = null with sb "B"; handle(2) = "c" with sb "C".
-    if false /* toolchain gate panics */
-        || false /* toolchain gate panics */
-        || false
-    /* toolchain gate panics */
-    {
-        return; // toolchain not provisioned
-    }
     const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
         suspend fun leafA(sb: StringBuilder, n: Int): String { sb.append(\"A\"); return \"a\" + n }\n\
         suspend fun leafB(sb: StringBuilder): String? { sb.append(\"B\"); return null }\n\
@@ -2136,14 +2116,19 @@ fun box(): String {\n\
     );
 }
 
-/// A labeled `break` that leaves an INNER loop for an OUTER one, inside a suspending body, is skipped.
+/// A labeled `break` that leaves an INNER `do … while` for an OUTER one, inside a suspending body.
 ///
-/// The flattener gives each loop its own states; a jump crossing a loop boundary lands on a state the
-/// assembler never reaches through the normal dispatch, so the target gets no stackmap frame. This is
-/// not receiver- or extension-specific — the plain `suspend fun` below reproduced an unverifiable
-/// method (`VerifyError: Expecting a stack map frame`) before the bail.
+/// The crossing jump is what drags the inner `do … while (false)` into the state machine — its own
+/// body never suspends — and the flattener then gives that loop a header state holding
+/// `when (false) { … }`. The emitter folds the always-false test to an unconditional `goto <else>`,
+/// but used to lay the never-taken branch down after it: unreachable, unframed, and rejected outright
+/// (`VerifyError: Expecting a stack map frame`). Nothing about the jump's target state was ever wrong
+/// — the dead branch was. See `emit_cond_branch`/`emit_when` in `src/jvm/ir_emit.rs`, docs/SPEC.md.
+///
+/// This is the corpus `codegen/box/coroutines/controlFlow/doubleBreak.kt` shape; the result matches
+/// kotlinc's.
 #[test]
-fn suspend_cross_loop_labeled_break_still_skips() {
+fn suspend_cross_loop_labeled_break_runs() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let src = "import kotlin.coroutines.*\n\
@@ -2169,10 +2154,82 @@ fun box(): String {\n\
     val r = runBlocking { test(Ctl()) }\n\
     return if (r == 2) \"OK\" else \"FAIL:$r\"\n\
 }\n";
-    assert!(
-        common::compile_and_run_box(src, "SuspendCrossLoopBreak", &[stdlib], Some(jdk.as_path()))
-            .is_none(),
-        "a cross-loop labeled jump in a suspending body must be skipped, never emitted"
+    let out = common::expect_box_run(src, "SuspendCrossLoopBreak", &[stdlib], Some(jdk.as_path()));
+    assert_eq!(
+        out.trim(),
+        "OK",
+        "a labeled break out of a post-test inner loop must run, not skip"
+    );
+}
+
+/// The `continue@outer` counterpart of [`suspend_cross_loop_labeled_break_runs`], plus a third nesting
+/// level: the crossing jump skips BOTH inner `do … while (false)` headers, each of which the flattener
+/// gives an always-false `when`. Both results are kotlinc's.
+#[test]
+fn suspend_cross_loop_labeled_continue_and_three_levels_run() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let prelude = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+class Ctl { var count = 0; var log = \"\" }\n\
+suspend fun bump(c: Ctl) { c.count++ }\n";
+    let cont = format!(
+        "{prelude}\
+suspend fun test(c: Ctl): String {{\n\
+    outer@do {{\n\
+        bump(c)\n\
+        inner@do {{\n\
+            if (c.count > 3) break@outer\n\
+            continue@outer\n\
+        }} while (false)\n\
+    }} while (true)\n\
+    return \"n=${{c.count}}\"\n\
+}}\n\
+fun box(): String = runBlocking {{ test(Ctl()) }}\n"
+    );
+    assert_eq!(
+        common::expect_box_run(
+            &cont,
+            "SuspendCrossLoopContinue",
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path())
+        )
+        .trim(),
+        "n=4",
+        "a labeled continue out of a post-test inner loop must run"
+    );
+    let three = format!(
+        "{prelude}\
+suspend fun test(c: Ctl): String {{\n\
+    a@do {{\n\
+        bump(c)\n\
+        b@do {{\n\
+            d@do {{\n\
+                if (c.count > 2) break@a\n\
+                break@b\n\
+            }} while (false)\n\
+            c.log += \"b\"\n\
+        }} while (false)\n\
+    }} while (true)\n\
+    return \"n=${{c.count}},${{c.log}}\"\n\
+}}\n\
+fun box(): String = runBlocking {{ test(Ctl()) }}\n"
+    );
+    assert_eq!(
+        common::expect_box_run(
+            &three,
+            "SuspendCrossLoopThree",
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path())
+        )
+        .trim(),
+        "n=3,",
+        "a labeled break crossing TWO post-test loops must run"
     );
 }
 
@@ -2228,7 +2285,7 @@ fun box(): String = runBlocking { baz() }\n";
 ///
 /// The leading `this`/capture fields were suspected of displacing a temp's positional spill slot; they
 /// do not — the corpus failure this shape used to show was the argument-evaluation ordering covered by
-/// `suspend_call_whose_argument_writes_a_local_still_skips`.
+/// `suspend_call_whose_argument_writes_a_local_runs`.
 #[test]
 fn suspend_receiver_lambda_spills_hoisted_temps() {
     let stdlib = common::stdlib_jar();
@@ -2262,14 +2319,15 @@ fun box(): String = builder { result = bars(foo(1), foo(2)) }\n";
     );
 }
 
-/// A suspension whose own ARGUMENT writes a local (`foo(i++)`) is still skipped.
+/// A suspension whose own ARGUMENT writes a local (`foo(i++)`) observes the write in its spill.
 ///
-/// The spill stores are emitted ahead of the call, so the argument's update to `i` lands in the local
-/// but never in the field, and the resume restores the pre-increment value — `bars(foo(i++), foo(i++))`
-/// silently yielded `"1;1;"` instead of `"1;2;"`. Until the operands are materialized into typed temps
-/// ahead of the spill, the file must be REFUSED rather than answer wrongly.
+/// The spill stores used to be emitted ahead of the call, so the argument's update to `i` landed in the
+/// local but never in the field, and the resume restored the pre-increment value — `bars(foo(i++),
+/// foo(i++))` silently yielded `"1;1;"`. The operands are now materialized into typed temps AHEAD of the
+/// spill (kotlinc has its arguments on the operand stack before its `putfield`s), so both increments are
+/// spilled and the answer matches kotlinc's `"1;2;"`.
 #[test]
-fn suspend_call_whose_argument_writes_a_local_still_skips() {
+fn suspend_call_whose_argument_writes_a_local_runs() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let src = "import kotlin.coroutines.*\n\
@@ -2287,17 +2345,23 @@ fun box(): String = runBlocking {\n\
     val b = foo(i++)\n\
     bars(a, b)\n\
 }\n";
-    assert!(
+    let Some(out) =
         common::compile_and_run_box(src, "SuspendArgWrites", &[stdlib], Some(jdk.as_path()))
-            .is_none(),
-        "a suspension whose argument writes a live local must be skipped, never miscompiled"
+    else {
+        panic!("SuspendArgWrites: the front end accepted the source, so lowering/emit bailed");
+    };
+    assert_eq!(
+        out.trim(),
+        "1;2;",
+        "a suspension's argument write must be spilled, not lost to the resume restore"
     );
 }
 
 /// The same ordering hazard through a MEMBER suspend call (`c.foo(i++)`, an `IrExpr::MethodCall`) and
 /// through its RECEIVER (`cs[i++].foo()`), which the top-level-callee form above does not exercise.
+/// The receiver is bound to its temp BEFORE the arguments, so source evaluation order is preserved.
 #[test]
-fn suspend_member_call_whose_operand_writes_a_local_still_skips() {
+fn suspend_member_call_whose_operand_writes_a_local_runs() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let preamble = "import kotlin.coroutines.*\n\
@@ -2339,17 +2403,153 @@ fun box(): String = runBlocking {{ go() }}\n"
         ("SuspendMemberArgWrites", &argument),
         ("SuspendMemberRecvWrites", &receiver),
     ] {
-        assert!(
-            common::compile_and_run_box(
-                src,
-                tag,
-                std::slice::from_ref(&stdlib),
-                Some(jdk.as_path())
-            )
-            .is_none(),
-            "{tag}: a member suspension whose operand writes a live local must be skipped"
+        let Some(out) = common::compile_and_run_box(
+            src,
+            tag,
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path()),
+        ) else {
+            panic!("{tag}: the front end accepted the source, so lowering/emit bailed");
+        };
+        assert_eq!(
+            out.trim(),
+            "1;2;",
+            "{tag}: a member suspension's operand write must be spilled"
         );
     }
+}
+
+/// A `$default` suspend callee whose operand writes a spilled local is REFUSED, not re-bound.
+///
+/// Operand temps are typed by zipping arguments against the callee's parameters BY INDEX, which is only
+/// sound while the surplus parameter is the trailing one. A suspend `$default` synthetic breaks that: its
+/// descriptor spells the `Continuation` BEFORE the `int mask` + `Object marker` (`append_continuation`
+/// inserts the continuation VALUE two before the end for exactly that reason), so zipping would type the
+/// mask as a `Continuation` and the marker as an `int` — an `astore` of an int, a class that fails
+/// verification. Refusing keeps the shape a skip, as it was before operand temps existed. The SAME callee
+/// without the trigger (`libFoo(i)`) must still compile and run, so the refusal stays narrow.
+#[test]
+fn suspend_default_callee_whose_argument_writes_a_local_still_skips() {
+    let stdlib = stdlib_jar();
+    let jdk = common::jdk_modules();
+    let Some(_kotlinc) = kotlinc_bin() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("krusty_susp_default_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("Lib.kt"),
+        "package lib\n\
+fun mk(): String = \"!\"\n\
+suspend fun libFoo(t: Int, s: String = mk()): String = \"$t$s;\"\n",
+    )
+    .unwrap();
+    let libjar = dir.join("lib.jar");
+    let kc_args = vec![
+        "-d".to_string(),
+        libjar.to_string_lossy().into_owned(),
+        dir.join("Lib.kt").to_string_lossy().into_owned(),
+    ];
+    match common::kotlinc_compile(&kc_args) {
+        Some((0, _)) => {}
+        // kotlinc unavailable/incompatible in this env — skip rather than fail spuriously.
+        Some((_, e)) => {
+            eprintln!("skipping: kotlinc failed:\n{e}");
+            return;
+        }
+        None => return,
+    }
+    let jars = [libjar, PathBuf::from(&stdlib)];
+    let body = |call: &str| {
+        format!(
+            "import kotlin.coroutines.*\n\
+import lib.libFoo\n\
+\n\
+class Controller {{ var result = \"\" }}\n\
+fun builder(c: suspend Controller.() -> Unit): String {{\n\
+    val cc = Controller()\n\
+    c.startCoroutine(cc, Continuation(EmptyCoroutineContext) {{ it.getOrThrow() }})\n\
+    return cc.result\n\
+}}\n\
+suspend fun bars(p1: String, p2: String): String = p1 + p2\n\
+fun box(): String = builder {{\n\
+    var i = 1\n\
+    result = {call}\n\
+}}\n"
+        )
+    };
+    assert!(
+        common::compile_and_run_box(
+            &body("bars(libFoo(i++), libFoo(i++))"),
+            "SuspendDefaultArgWrites",
+            &jars,
+            Some(jdk.as_path())
+        )
+        .is_none(),
+        "a $default suspension whose argument writes a spilled local must be skipped, never emitted \
+         with its mask typed as a Continuation"
+    );
+    let Some(out) = common::compile_and_run_box(
+        &body("bars(libFoo(i), libFoo(i + 1))"),
+        "SuspendDefaultNoWrites",
+        &jars,
+        Some(jdk.as_path()),
+    ) else {
+        panic!("SuspendDefaultNoWrites: an untriggered $default suspend call must still compile");
+    };
+    assert_eq!(
+        out.trim(),
+        "1!;2!;",
+        "the refusal must be narrow: no operand write, no re-binding, unchanged emit"
+    );
+}
+
+/// The corpus `coroutines/suspendCallsInArguments` shape, in the default gate: a RECEIVER lambda
+/// (`suspend Controller.() -> Unit`) whose nested suspend calls each write the same counter from their
+/// own argument (`bars(foo(i++), foo(i++), …)`). The hoister lifts each inner suspension to its own
+/// bound temp, and each of those is a suspension whose argument writes the spilled `i` — sixteen
+/// operand-temp bindings whose order must hold end to end. The corpus test that owns this case is
+/// filtered out of `./run-tests.sh`, so keep the regression here too.
+#[test]
+fn suspend_calls_in_arguments_increment_left_to_right() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+class Controller { var result = \"\" }\n\
+\n\
+fun builder(c: suspend Controller.() -> Unit): String {\n\
+    val cc = Controller()\n\
+    c.startCoroutine(cc, Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    return cc.result\n\
+}\n\
+suspend fun foo(i: Int): String = \"$i;\"\n\
+suspend fun bars(p1: String, p2: String, p3: String, p4: String): String = p1 + p2 + p3 + p4\n\
+fun box(): String = builder {\n\
+    var i = 1\n\
+    result = bars(\n\
+        bars(foo(i++), foo(i++), foo(i++), foo(i++)),\n\
+        bars(foo(i++), foo(i++), foo(i++), foo(i++)),\n\
+        bars(foo(i++), foo(i++), foo(i++), foo(i++)),\n\
+        bars(foo(i++), foo(i++), foo(i++), foo(i++))\n\
+    )\n\
+}\n";
+    let Some(out) = common::compile_and_run_box(
+        src,
+        "SuspendCallsInArguments",
+        &[stdlib],
+        Some(jdk.as_path()),
+    ) else {
+        panic!(
+            "SuspendCallsInArguments: the front end accepted the source, so lowering/emit bailed"
+        );
+    };
+    assert_eq!(
+        out.trim(),
+        "1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;",
+        "nested suspend-call arguments must increment left to right across every resume"
+    );
 }
 
 /// A cross-loop labeled jump between PRE-TEST loops (`for`/`while`) is NOT refused — only the
@@ -2426,5 +2626,130 @@ fun box(): String = runBlocking { go() }\n";
         out.trim(),
         "1;2;",
         "a write to a locally dead scratch must not bail the file"
+    );
+}
+
+/// A suspend LAMBDA flowing into a MEMBER function's `suspend`-function-typed parameter is ordinary.
+///
+/// `gate:suspend-lambda-into-member-parameter` claimed the argument was not routed to
+/// `lower_suspend_lambda`, leaving a plain `FunctionN` whose body never threads a `Continuation`. It is
+/// routed: a member call's parameter types come from the IR signature (`ir.functions[mfid].params`) and
+/// `ty_to_ir` is the IDENTITY on `Ty::Fun`, so `suspend` survives into `lower_arg`'s
+/// `Ty::Fun(s) if s.suspend` route exactly as it does for a top-level builder. `Holder.accept` below
+/// gets a real `SuspendLambda` (`box$suspend$0`) that suspends and resumes to `"s!"`, matching kotlinc.
+///
+/// The RECEIVER form (`suspend Controller.() -> Unit`) is deliberately not used here: a receiver lambda
+/// that both suspends and calls a member of its receiver fails to verify — but identically through a
+/// TOP-LEVEL builder, so that is a separate pre-existing defect in suspend receiver lambdas, not a
+/// member-parameter routing divergence.
+#[test]
+fn suspend_lambda_into_member_parameter_runs() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+class Holder {\n\
+    fun accept(block: suspend () -> String): String = runBlocking(block)\n\
+}\n\
+suspend fun step(): String = suspendCoroutineUninterceptedOrReturn { x ->\n\
+    x.resume(\"s\")\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+fun box(): String = Holder().accept { val a = step(); a + \"!\" }\n";
+    let Some(out) = common::compile_and_run_box(
+        src,
+        "SuspendLambdaMemberParam",
+        &[stdlib],
+        Some(jdk.as_path()),
+    ) else {
+        panic!(
+            "SuspendLambdaMemberParam: the front end accepted the source, so lowering/emit bailed"
+        );
+    };
+    assert_eq!(
+        out.trim(),
+        "s!",
+        "a suspend lambda into a MEMBER function's suspend parameter must run its state machine"
+    );
+}
+
+/// A `try` that CATCHES over a suspension point, with a value live across it, is skipped.
+///
+/// The coroutine pass wraps the whole `label`-dispatch loop in ONE `catch Throwable` that routes on the
+/// in-flight `label` and re-enters the loop WITHOUT restoring the locals its predecessor spilled. A
+/// resumed machine re-enters the static body as `f(null, …)`, so `a` here read back `null` and `box()`
+/// threw an NPE where kotlinc answers `"A-end"`. `f` has no parameters and no receiver — an ordinary
+/// spilled LOCAL is enough, which is why the bail keys on "a value is live across the try" rather than
+/// on the enclosing function being an extension or a member.
+#[test]
+fn suspend_try_catch_over_a_suspension_still_skips() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun boom(): Int = suspendCoroutineUninterceptedOrReturn { x ->\n\
+    x.resumeWithException(IllegalStateException(\"boom\"))\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+suspend fun ok(s: String): String = suspendCoroutineUninterceptedOrReturn { x ->\n\
+    x.resume(s)\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+suspend fun f(): String {\n\
+    val a = ok(\"A\")\n\
+    try { boom() } catch (e: Exception) { }\n\
+    return a + \"-end\"\n\
+}\n\
+fun box(): String = runBlocking { f() }\n";
+    assert!(
+        common::compile_and_run_box(src, "SuspendTryCatch", &[stdlib], Some(jdk.as_path()))
+            .is_none(),
+        "a catching try over a suspension with a live local must be skipped, never emitted"
+    );
+}
+
+/// The `try`/`catch` bail stays NARROW: a `try` with no suspension point in any of its regions still
+/// compiles, even inside a suspend function that suspends elsewhere. Without this the gate would
+/// swallow every suspend body that merely mentions a `try`.
+#[test]
+fn suspend_try_catch_without_a_suspension_runs() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+suspend fun step(): String = \"s\"\n\
+fun boom(): String = throw RuntimeException(\"x\")\n\
+suspend fun go(): String {\n\
+    val a = step()\n\
+    val b = try { boom() } catch (e: RuntimeException) { \"caught\" }\n\
+    return a + b\n\
+}\n\
+fun box(): String = runBlocking { go() }\n";
+    let Some(out) =
+        common::compile_and_run_box(src, "SuspendTryCatchNoSusp", &[stdlib], Some(jdk.as_path()))
+    else {
+        panic!("SuspendTryCatchNoSusp: the front end accepted the source, so lowering/emit bailed");
+    };
+    assert_eq!(
+        out.trim(),
+        "scaught",
+        "a try/catch with no suspension in it must not bail the file"
     );
 }

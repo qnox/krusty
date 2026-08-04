@@ -949,6 +949,97 @@ fn stdio_server_finds_workspace_symbols_in_files_nothing_opened() {
 }
 
 #[test]
+fn stdio_server_locates_a_dependency_workspace_symbol_through_the_real_worker() {
+    let project = TempProject::new("dependency-workspace-symbol");
+    project.write(
+        ".idea/modules.xml",
+        r#"<project><component name="ProjectModuleManager"><modules>
+             <module filepath="$PROJECT_DIR$/app/app.iml" />
+           </modules></component></project>"#,
+    );
+    project.write(
+        "app/app.iml",
+        r#"<module><component name="NewModuleRootManager">
+             <content url="file://$MODULE_DIR$">
+               <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+             </content>
+             <orderEntry type="library" name="dependency" level="project" />
+           </component></module>"#,
+    );
+    project.write(
+        ".idea/libraries/dependency.xml",
+        r#"<component name="libraryTable"><library name="dependency"><CLASSES>
+             <root url="file://$PROJECT_DIR$/dependencies/classes" />
+           </CLASSES></library></component>"#,
+    );
+    let class = project
+        .path()
+        .join("dependencies/classes/vendor/DependencyMarker.class");
+    std::fs::create_dir_all(class.parent().unwrap()).expect("create dependency package");
+    std::fs::write(
+        &class,
+        ClassWriter::new("vendor/DependencyMarker", "java/lang/Object").finish(),
+    )
+    .expect("write dependency class");
+    let open_uri = project.uri("app/src/Open.kt");
+    let root_uri: String = url::Url::from_directory_path(project.path())
+        .expect("temporary project root is a file URI")
+        .into();
+    let cache = project.path().join("dependency-cache");
+    let cache = cache.to_string_lossy().into_owned();
+
+    let mut server = ServerProcess::start(&["-deps-cache-dir", &cache]);
+    server.request(1, "initialize", json!({"rootUri": root_uri}));
+    server.notify("initialized", json!({}));
+    server.receive_until(|message| message["method"] == "client/registerCapability");
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": open_uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": "package app\nfun opened(): Int = 1\n"
+            }
+        }),
+    );
+    assert!(server.await_diagnostics(&open_uri).is_empty());
+
+    // The first matching query schedules worker materialization and answers without blocking. Poll
+    // exactly as a picker does so this covers the production WorkerHost transport, engine event,
+    // content-addressed write, and the next-query convergence rather than injecting an index or a
+    // located result into the service.
+    let mut found = Value::Null;
+    for attempt in 0..200 {
+        let response = server.request(
+            300 + attempt,
+            "workspace/symbol",
+            json!({"query": "DependencyMarker"}),
+        );
+        if response["result"][0].is_object() {
+            found = response["result"][0].clone();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(found["name"], "DependencyMarker");
+    assert_eq!(found["containerName"], "vendor");
+    let rendered_uri = found["location"]["uri"]
+        .as_str()
+        .expect("dependency symbol has a URI");
+    let rendered_path = url::Url::parse(rendered_uri)
+        .unwrap()
+        .to_file_path()
+        .expect("dependency URI is a local cache file");
+    let rendered = std::fs::read_to_string(rendered_path).expect("rendered dependency source");
+    assert!(rendered.contains("class DependencyMarker"));
+    assert_eq!(found["location"]["range"]["start"]["line"], 2);
+
+    server.shutdown_and_exit();
+}
+
+#[test]
 fn stdio_server_reports_official_cross_file_conflicting_overloads() {
     let project = TempProject::new("conflicting-overloads");
     project.write(

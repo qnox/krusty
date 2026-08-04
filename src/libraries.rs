@@ -28,8 +28,9 @@ pub struct GenericSig {
 }
 
 /// Bit-packed boolean flags for a [`LibraryMember`], collapsing `ret_nullable`/`is_interface`/
-/// `suspend` into one byte. Read through the `LibraryMember` accessors of the same names; mutated
-/// through the matching `set_*` methods; built with the `with_*` chain. Headroom for five more flags.
+/// `suspend`/`is_operator`/`is_extension` into one byte. Read through the `LibraryMember` accessors of the same
+/// names; mutated through the matching `set_*` methods; built with the `with_*` chain. Headroom for
+/// three more flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LmFlags(u8);
 
@@ -37,6 +38,15 @@ impl LmFlags {
     const RET_NULLABLE: u8 = 1 << 0;
     const IS_INTERFACE: u8 = 1 << 1;
     const SUSPEND: u8 = 1 << 2;
+    /// The member is declared `operator`. Only `@Metadata` records it — the JVM has no such flag — and
+    /// only a convention call site (`"x" { … }` for `operator fun String.invoke`) needs it, so it
+    /// travels with the member rather than being re-derived from a name.
+    const IS_OPERATOR: u8 = 1 << 3;
+    /// The member is a member EXTENSION (`class DslScope { fun String.f() }`): its declaring class is
+    /// the dispatch receiver and its FIRST JVM parameter is the extension receiver. Nothing in the
+    /// descriptor distinguishes that from an ordinary member taking a parameter of the same type, and
+    /// a call site must know which, since only a member extension needs its dispatch receiver in scope.
+    const IS_EXTENSION: u8 = 1 << 4;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -63,6 +73,14 @@ impl LmFlags {
     #[inline]
     pub const fn with_suspend(self, on: bool) -> Self {
         self.with(Self::SUSPEND, on)
+    }
+    #[inline]
+    pub const fn with_is_operator(self, on: bool) -> Self {
+        self.with(Self::IS_OPERATOR, on)
+    }
+    #[inline]
+    pub const fn with_is_extension(self, on: bool) -> Self {
+        self.with(Self::IS_EXTENSION, on)
     }
 }
 
@@ -361,6 +379,14 @@ impl LibraryMember {
         self.flags.has(LmFlags::SUSPEND)
     }
     #[inline]
+    pub fn is_operator(&self) -> bool {
+        self.flags.has(LmFlags::IS_OPERATOR)
+    }
+    #[inline]
+    pub fn is_member_extension(&self) -> bool {
+        self.flags.has(LmFlags::IS_EXTENSION)
+    }
+    #[inline]
     pub fn set_ret_nullable(&mut self, on: bool) {
         self.flags = self.flags.with_ret_nullable(on);
     }
@@ -371,6 +397,12 @@ impl LibraryMember {
     #[inline]
     pub fn set_suspend(&mut self, on: bool) {
         self.flags = self.flags.with_suspend(on);
+    }
+    pub fn set_is_operator(&mut self, on: bool) {
+        self.flags = self.flags.with_is_operator(on);
+    }
+    pub fn set_is_member_extension(&mut self, on: bool) {
+        self.flags = self.flags.with_is_extension(on);
     }
 
     pub fn owner_name(&self) -> Option<String> {
@@ -416,6 +448,7 @@ impl LibraryCallable {
             physical_ret,
             descriptor: descriptor.into(),
             suspend: false,
+            owner_is_interface: false,
             inline: InlineKind::None,
             default_call: false,
             vararg_elem: None,
@@ -498,6 +531,13 @@ pub struct LibraryCallable {
     /// `Continuation` (and a lambda whose body calls one becomes a coroutine state machine). The checker
     /// records this on the resolved callable so the lowerer never re-queries the library for it.
     pub suspend: bool,
+    /// [`owner`](Self::owner) is an INTERFACE, so the call dispatches with `invokeinterface`. Carried on
+    /// the selected callable because the owner's own declaration may not be re-readable at the call
+    /// site: a mapped builtin's JVM owner (`java/util/List`) has no class file when no JDK is on the
+    /// classpath, and the fact then exists only on the `.kotlin_builtins` member this callable was
+    /// selected from. Dropping it emitted `invokevirtual` on an interface — an
+    /// `IncompatibleClassChangeError` at class-load time.
+    pub owner_is_interface: bool,
     /// The callee's inline-ness in one field (was `is_inline` + `must_inline`): [`InlineKind::CanInline`]
     /// for a Kotlin `inline` function the backend MAY splice instead of emitting an `invokestatic`,
     /// [`InlineKind::MustInline`] for a non-public `@InlineOnly` callee the backend MUST splice (no legal
@@ -1156,6 +1196,11 @@ impl FunctionInfo {
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
         member.set_suspend(self.flags.suspend);
+        // Interface-ness travels with the selected overload for the same reason `suspend` does: it is a
+        // fact about the DECLARATION, and the emit site may have no way to re-derive it (a mapped
+        // builtin's JVM owner has no class file on a JDK-less classpath). Round-tripping the member
+        // through `FunctionInfo` must not lose it, or the call emits `invokevirtual` on an interface.
+        member.set_is_interface(self.callable.owner_is_interface);
         // Keep source call shape coupled to the selected overload.
         member.call_sig = self.call_sig.clone();
         member
@@ -1174,9 +1219,11 @@ pub enum InlineKind {
     /// A Kotlin `inline` function (per its `@Metadata`): the JVM backend MAY splice its compiled body
     /// at the call site, but a real call is a legal fallback (the callee is a public method).
     CanInline,
-    /// A NON-PUBLIC `@InlineOnly` function (`require`/`check`/`error`/`let`/…): there is no callable
-    /// method to invoke, so the backend MUST splice the body — a failed splice skips the whole file
-    /// (never an `invokestatic` on the private method → never an `IllegalAccessError`).
+    /// No legal direct-call fallback. This includes a NON-PUBLIC `@InlineOnly` function
+    /// (`require`/`check`/`error`/`let`/…) whose method is inaccessible and a reified source body
+    /// whose erased method may exist only to publish inline code. The backend MUST splice the body;
+    /// a failed splice skips the whole file rather than emitting an inaccessible or unspecialized
+    /// `invokestatic`.
     MustInline,
 }
 

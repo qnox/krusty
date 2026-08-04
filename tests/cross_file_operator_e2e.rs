@@ -9,11 +9,6 @@ fn run_two(operator_source: &str, use_source: &str) -> Option<String> {
 
 #[test]
 fn cross_file_source_extension_unary_and_increment_operators_run() {
-    if false /* toolchain gate panics */ || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     let operators = r#"
 class Counter(val value: Int)
 operator fun Counter.unaryMinus(): Counter = Counter(-value)
@@ -33,11 +28,6 @@ fun box(): String {
 
 #[test]
 fn cross_file_inline_extension_operators_keep_callable_bodies() {
-    if false /* toolchain gate panics */ || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     let operators = r#"
 class InlineCounter(val value: Int)
 inline operator fun InlineCounter.unaryMinus(): InlineCounter = InlineCounter(-value)

@@ -80,11 +80,6 @@ fn cross_file_ctor_default_does_not_panic() {
     // without panicking. (Cross-file class *construction* is itself not yet modeled, so the file then
     // cleanly skips — `None` — rather than producing bytecode; the point of THIS test is the absence of
     // a crash, which `run_two` returning at all proves.)
-    if false /* toolchain gate panics */ || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     let a = "open class Base(val n: Int = 7)\n";
     let b = "fun box(): String = if (Base().n == 7) \"OK\" else \"no\"\n";
     let _ = run_two(a, b); // must return (skip or run), never panic
@@ -99,11 +94,6 @@ open class Base(val ctx: CoroutineContext = EmptyCoroutineContext)\n";
 
 #[test]
 fn cross_file_top_level_default_uses_selected_decl() {
-    if false /* toolchain gate panics */ || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     let a = "fun choose(x: Int = 1): String = \"int:$x\"\n\
              fun choose(s: String, suffix: String = \"K\"): String = s + suffix\n";
     let b = "fun box(): String = choose(s = \"O\")\n";
@@ -112,11 +102,6 @@ fn cross_file_top_level_default_uses_selected_decl() {
 
 #[test]
 fn cross_file_top_level_default_before_trailing_lambda() {
-    if false /* toolchain gate panics */ || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     let a = "fun host(prefix: String = \"O\", block: () -> String): String = prefix + block()\n";
     let b = "fun box(): String = host { \"K\" }\n";
     assert_eq!(run_two(a, b).as_deref(), Some("OK"));
@@ -124,11 +109,6 @@ fn cross_file_top_level_default_before_trailing_lambda() {
 
 #[test]
 fn cross_file_base_class_resolves_as_module_symbol() {
-    if false /* toolchain gate panics */ || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     let a = "open class Base { fun ok(): String = \"O\" }\n";
     let b = "class Child : Base()\n\
              fun box(): String = Child().ok() + \"K\"\n";
@@ -137,11 +117,6 @@ fn cross_file_base_class_resolves_as_module_symbol() {
 
 #[test]
 fn cross_file_interface_resolves_as_module_symbol() {
-    if false /* toolchain gate panics */ || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     let a = "interface Marker\n";
     let b = "class Impl : Marker\n\
              fun box(): String = if (Impl() is Marker) \"OK\" else \"fail\"\n";

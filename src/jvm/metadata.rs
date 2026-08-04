@@ -7,6 +7,10 @@
 //!   Function extension method_signature = 100 → JvmMethodSignature { name = 1, desc = 2 }.
 //! String ids index the `d2` table.
 
+use super::classfile::{
+    ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED,
+    ACC_PUBLIC, ACC_STATIC,
+};
 use super::classreader::ClassInfo;
 use crate::libraries::{CallSig, GenericSig, ParamList};
 use crate::types::{intern, type_name, Ty, TypeName};
@@ -1399,8 +1403,8 @@ fn type_parameter_context(
     })
 }
 
-/// Build the metadata-primary [`GenericSig`] for a function: `formals` = the function's + enclosing
-/// class's type-parameter names; `receiver` = the EXTENSION's `receiver_type`, or — for a member — the
+/// Build the metadata-primary [`GenericSig`] for a function: `formals` = the function's own declared
+/// type-parameter names; `receiver` = the EXTENSION's `receiver_type`, or — for a member — the
 /// declaring class parameterized by its own type parameters (`Box<T>`), or `None` for a top-level
 /// function; `params` = the source VALUE parameters (no receiver, no synthetic `suspend` Continuation);
 /// `ret` = the return type. Receiver is an ATTRIBUTE, uniform for member and extension: at the
@@ -1412,9 +1416,9 @@ fn build_generic_sig(
     pf: &ParsedFunction,
     records: &[Rec],
     d2: &[String],
+    class_tparams: &[(u64, String)],
     class_receiver: Option<(&str, &[(u64, String)])>,
 ) -> Option<GenericSig> {
-    let class_tparams = class_receiver.map(|(_, tps)| tps).unwrap_or(&[]);
     let context = type_parameter_context(class_tparams, &pf.type_params, records, d2)?;
     let receiver = if let Some(rb) = &pf.receiver_body {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
@@ -1467,9 +1471,15 @@ fn build_generic_sig(
             parse_type_gsig_bounded(rb, records, d2, &context.names, &context.erasure_bounds)
         })
         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+    // Enclosing class parameters belong in the DECODING context because a member extension may use
+    // one in its receiver/value/return shape. They do not become function formals: consumers render
+    // `formals` after `fun`, accept explicit method type arguments from it, and bind owner parameters
+    // from the applied dispatch type. Keeping the inherited prefix here would turn every method of
+    // `Class<E>` into a fictitious `fun <E>` and allow call inference to overwrite the owner's `E`.
+    let inherited = class_tparams.len();
     Some(GenericSig {
-        formals: context.formals,
-        formal_bounds: context.formal_bounds,
+        formals: context.formals[inherited..].to_vec(),
+        formal_bounds: context.formal_bounds[inherited..].to_vec(),
         receiver,
         params,
         ret,
@@ -1920,10 +1930,29 @@ pub fn decode_metadata(
         d2,
         methods,
     };
+    // A class-body extension may use an ENCLOSING class parameter as its extension receiver
+    // (`class Scope<T> { fun T.f() }`). Function metadata stores only the parameter id; decoding it
+    // without the containing Class.type_parameter table silently widens the receiver to `Any` and
+    // turns its physical leading parameter into an apparent value parameter. Recover the names once
+    // at the metadata boundary and give every class function the complete semantic context.
+    let class_tparams = if k == Some(1) {
+        type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
+            .into_iter()
+            .filter_map(parse_type_param)
+            .filter_map(|parameter| {
+                Some((
+                    parameter.id,
+                    resolve_string(ctx.records, ctx.d2, parameter.name_id as usize)?,
+                ))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     KotlinMeta {
         class_visibility: (k == Some(1)).then(|| class_visibility(&ctx)),
-        class_functions: decode_functions(&ctx, 9).into(),
-        package_functions: decode_functions(&ctx, 3).into(),
+        class_functions: decode_functions(&ctx, 9, &class_tparams).into(),
+        package_functions: decode_functions(&ctx, 3, &[]).into(),
         class_properties: decode_properties(&ctx, 10).into(),
         package_properties: decode_properties(&ctx, 4).into(),
         type_aliases: type_aliases(&ctx, this_class),
@@ -1956,7 +1985,7 @@ fn class_visibility(ctx: &MetaCtx<'_>) -> crate::types::Visibility {
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
 /// `@Metadata` message into [`MetaFn`]s. The single metadata-primary function reader.
-fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
+fn decode_functions(ctx: &MetaCtx, fn_field: u64, class_tparams: &[(u64, String)]) -> Vec<MetaFn> {
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
@@ -2074,7 +2103,7 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                     // `Signature`-derived gsig (extension: receiver at `params[0]`; member/top-level: value
                     // params only) so it is a drop-in replacement; the uniform member-receiver synthesis is
                     // a later step (`class_receiver = None` here keeps a member's params value-only).
-                    let generic_sig = build_generic_sig(&pf, records, d2, None);
+                    let generic_sig = build_generic_sig(&pf, records, d2, class_tparams, None);
                     let contract = pf.contract_body.as_deref().and_then(|body| {
                         let tparams = type_parameter_context(&[], &pf.type_params, records, d2)
                             .map(|c| c.names)
@@ -3017,6 +3046,10 @@ pub struct BuiltinClass {
     /// `Enum`) — from the `@Metadata` `CLASS_KIND` flag. Needed when reporting a classless builtin whose
     /// JVM class is absent (a no-JDK compile), so member calls emit the right invoke opcode.
     pub is_interface: bool,
+    /// The JVM class access flags the same `Class.flags` word describes (`public static interface
+    /// abstract` for `kotlin/collections/Map.Entry`) — what an `InnerClasses` entry naming this builtin
+    /// has to carry when the mapped JVM owner has no class file to read it off.
+    pub access: u16,
     /// Nullable returns for declared function members keyed by `(name, value-arity)` (`Map.get(K): V?`,
     /// `firstOrNull(): T?`). A call may still resolve to the ERASED classpath method (`java/util/Map.get`
     /// returns `Object`), which carries no Kotlin nullability — this is then the only surviving record
@@ -3222,7 +3255,11 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
     for cb in &classes {
         let mut cp = Pb { b: cb, i: 0 };
         let mut fq = None;
-        let mut flags = 0u64;
+        // `Class.flags` has the protobuf default PUBLIC FINAL (`6`). Keep wire-format defaulting at
+        // the decode boundary, as the ordinary `@Metadata` class reader does, so every consumer sees
+        // the semantic flag word. Treating omission as zero conflates it with an explicitly INTERNAL
+        // declaration and forces downstream JVM-specific code to guess which input it received.
+        let mut flags = 6u64;
         let mut supids: Vec<u64> = Vec::new();
         let mut types: Vec<&[u8]> = Vec::new();
         let mut funcs: Vec<&[u8]> = Vec::new();
@@ -3233,7 +3270,7 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
             match (tag >> 3, tag & 7) {
                 // Class.flags = 1 (varint). `CLASS_KIND` occupies bits 6..8 (after HAS_ANNOTATIONS,
                 // VISIBILITY[3], MODALITY[2]); 1 = INTERFACE.
-                (1, 0) => flags = cp.varint().unwrap_or(0),
+                (1, 0) => flags = cp.varint().unwrap_or(6),
                 (3, 0) => fq = cp.varint(),
                 (2, 2) => {
                     // supertype_id (packed) — indexes the class's type_table.
@@ -3452,10 +3489,57 @@ pub fn parse_builtins(data: &[u8]) -> std::collections::HashMap<String, BuiltinC
                 type_params,
                 nullable_member_returns,
                 is_interface: (flags >> 6) & 0x7 == 1,
+                access: builtin_class_access(flags),
             },
         );
     }
     out
+}
+
+/// The JVM class access flags a `.kotlin_builtins` `Class.flags` word describes.
+///
+/// The word packs `HAS_ANNOTATIONS` (bit 0), `VISIBILITY` (bits 1..4), `MODALITY` (bits 4..6),
+/// `CLASS_KIND` (bits 6..9 — the field [`BuiltinClass::is_interface`] already reads) and `IS_INNER`
+/// (bit 9). Each maps onto the JVM flag the compiler that produced the mapped `java.*` class file
+/// emitted, so a nesting fact recovered from the builtin agrees byte-for-byte with the one read off
+/// that class file: `kotlin/collections/Map.Entry` is a public, non-inner (hence `ACC_STATIC`) nested
+/// interface, exactly the `0x0609` `java/util/Map$Entry` carries.
+fn builtin_class_access(flags: u64) -> u16 {
+    // VISIBILITY: 0 INTERNAL, 1 PRIVATE, 2 PROTECTED, 3 PUBLIC, 4 PRIVATE_TO_THIS, 5 LOCAL. `internal`
+    // is PUBLIC on the JVM — kotlinc mangles the NAME rather than narrowing the flag. An omitted field
+    // has already become the protobuf default `6` at the parse boundary; zero here therefore means an
+    // explicit INTERNAL declaration, not a second encoding of omission. `local` has no enclosing-
+    // declaration visibility to record, so it stays package-private.
+    let visibility = match (flags >> 1) & 0x7 {
+        0 | 3 => ACC_PUBLIC,
+        2 => ACC_PROTECTED,
+        1 | 4 => ACC_PRIVATE,
+        _ => 0,
+    };
+    // MODALITY: 0 FINAL, 1 OPEN, 2 ABSTRACT, 3 SEALED. `sealed` is abstract on the JVM.
+    let modality = match (flags >> 4) & 0x3 {
+        0 => ACC_FINAL,
+        2 | 3 => ACC_ABSTRACT,
+        _ => 0,
+    };
+    // CLASS_KIND: 0 CLASS, 1 INTERFACE, 2 ENUM_CLASS, 3 ENUM_ENTRY, 4 ANNOTATION_CLASS, 5 OBJECT,
+    // 6 COMPANION_OBJECT. An interface is always `ACC_ABSTRACT` regardless of its declared modality.
+    let kind = match (flags >> 6) & 0x7 {
+        1 => ACC_INTERFACE | ACC_ABSTRACT,
+        2 => ACC_ENUM,
+        4 => ACC_ANNOTATION | ACC_INTERFACE | ACC_ABSTRACT,
+        _ => 0,
+    };
+    // A nested class that is not `inner` is `static`; a top-level class is never nested, so the flag is
+    // simply ignored by a caller that is not building an `InnerClasses` entry.
+    let inner = if (flags >> 9) & 1 == 1 { 0 } else { ACC_STATIC };
+    // An interface has no meaningful modality bit of its own (`ACC_FINAL` on an interface is illegal).
+    let modality = if kind & ACC_INTERFACE != 0 {
+        0
+    } else {
+        modality
+    };
+    visibility | modality | kind | inner
 }
 
 /// The Kotlin names of every `suspend` function in a class's `@Metadata` (from the `IS_SUSPEND` flag
@@ -3571,6 +3655,68 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
         facades.push(join(loc, short));
     }
     Some((pkg, facades))
+}
+
+#[cfg(test)]
+mod builtin_class_access_tests {
+    use super::builtin_class_access;
+
+    /// A `.kotlin_builtins` `Class.flags` word, assembled from the field positions the decoder reads.
+    fn flags(visibility: u64, modality: u64, kind: u64, is_inner: bool) -> u64 {
+        visibility << 1 | modality << 4 | kind << 6 | u64::from(is_inner) << 9
+    }
+
+    /// Every arm has to land on the flags the compiler that produced the mapped `java.*` class file
+    /// emitted, since the recovered `InnerClasses` entry is compared byte-for-byte against that one.
+    /// The nested INTERFACE case is the one a JDK-less compile actually hits today
+    /// (`kotlin/collections/Map.Entry` ⇒ the `0x0609` `java/util/Map$Entry` carries); the rest pin the
+    /// mapping so a later builtin of another shape cannot silently pick up wrong flags.
+    #[test]
+    fn builtin_class_flags_map_to_jvm_access() {
+        // public abstract interface, nested (not `inner`) — public static interface abstract.
+        assert_eq!(builtin_class_access(flags(3, 2, 1, false)), 0x0609);
+        // public final class, nested — public static final (what `MethodHandles$Lookup` carries).
+        assert_eq!(builtin_class_access(flags(3, 0, 0, false)), 0x0019);
+        // The same class declared `inner`: an inner class is not static.
+        assert_eq!(builtin_class_access(flags(3, 0, 0, true)), 0x0011);
+        // public abstract class — abstract survives, final does not appear.
+        assert_eq!(builtin_class_access(flags(3, 2, 0, false)), 0x0409);
+        // `sealed` is abstract on the JVM.
+        assert_eq!(builtin_class_access(flags(3, 3, 0, false)), 0x0409);
+        // public enum class — public static final enum.
+        assert_eq!(builtin_class_access(flags(3, 0, 2, false)), 0x4019);
+        // public annotation class — an annotation interface.
+        assert_eq!(builtin_class_access(flags(3, 2, 4, false)), 0x2609);
+        // private and protected keep their own bit; `internal` is PUBLIC on the JVM (kotlinc mangles
+        // the NAME instead of narrowing the flag), so it must not come out package-private.
+        assert_eq!(builtin_class_access(flags(1, 0, 0, false)), 0x001a);
+        assert_eq!(builtin_class_access(flags(2, 0, 0, false)), 0x001c);
+        assert_eq!(builtin_class_access(flags(0, 0, 0, false)), 0x0019);
+        // `open` is neither final nor abstract.
+        assert_eq!(builtin_class_access(flags(3, 1, 0, false)), 0x0009);
+    }
+
+    /// The arm assertions above assemble the flag word with the very shifts the decoder reads back, so
+    /// they pin the MAPPING but say nothing about the OFFSETS — moving `IS_INNER` a bit over would keep
+    /// them all green. These are `Class.flags` words as they actually appear in the stdlib's shipped
+    /// `.kotlin_builtins` fragments, so they pin the layout itself.
+    #[test]
+    fn real_builtins_flag_words_decode_to_jvm_access() {
+        // `kotlin/collections/Map.Entry` — public abstract interface, not `inner`. Anchors VISIBILITY
+        // and CLASS_KIND, and is the one word a JDK-less compile actually decodes today; the entry it
+        // produces is compared byte-for-byte against `java/util/Map$Entry`'s in
+        // `tests/no_jdk_builtin_emit_e2e.rs`.
+        assert_eq!(builtin_class_access(0x0066), 0x0609);
+        // `kotlin/Any` — public OPEN class. Its modality is the one that pins MODALITY at bits 4..6:
+        // read one bit over and it would decode as ABSTRACT or FINAL.
+        assert_eq!(builtin_class_access(0x0016), 0x0009);
+        // The protobuf default for an omitted `Class.flags` field is PUBLIC FINAL (`6`). The parser
+        // supplies that word before this decoder runs; it must land on public static final.
+        assert_eq!(builtin_class_access(6), 0x0019);
+        // An EXPLICIT zero is INTERNAL FINAL. Internal classes are public in JVM bytecode because
+        // Kotlin enforces the visibility through metadata/name mangling rather than the ACC bits.
+        assert_eq!(builtin_class_access(0), 0x0019);
+    }
 }
 
 #[cfg(test)]

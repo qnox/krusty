@@ -1321,6 +1321,40 @@ pub fn builtin_receiver_property_ty(receiver: Ty, name: &str) -> Option<Ty> {
     }
 }
 
+/// The arity-less reflection function interface every synthesized `KFunction{N}` erases to. The
+/// `KFunction{N}` names themselves are compiler-synthesized (no jar declares them), so the two live
+/// together with the `Ty` they describe rather than in a platform module.
+pub const KFUNCTION_INTERNAL: &str = "kotlin/reflect/KFunction";
+
+/// The highest `KFunction{N}` kotlinc synthesizes — matching `Function0` … `Function22`. A larger
+/// spelling is an unresolved reference, not a type.
+const MAX_KFUNCTION_ARITY: usize = 22;
+
+/// The arity of a synthesized `kotlin.reflect.KFunction{N}`; `None` for the arity-less `KFunction`
+/// itself, for an arity kotlinc does not synthesize, and for every other name.
+pub fn kfunction_arity(internal: TypeName) -> Option<usize> {
+    internal
+        .unsigned_suffix_after_prefix(KFUNCTION_INTERNAL)
+        .filter(|arity| *arity <= MAX_KFUNCTION_ARITY)
+}
+
+/// The function type a callable reference's reflection type stands for — `KFunction2<A, B, R>` →
+/// `(A, B) -> R`. A backend realizes the reference from that function shape; the `KFunction{N}`
+/// spelling only adds the `KCallable` identity on top of it. Any other type passes through unchanged.
+pub fn callable_reference_function_type(ty: Ty) -> Ty {
+    let Some(internal) = ty.non_null().obj_internal() else {
+        return ty;
+    };
+    let Some(arity) = internal.unsigned_suffix_after_prefix(KFUNCTION_INTERNAL) else {
+        return ty;
+    };
+    let args = ty.type_args();
+    if args.len() != arity + 1 {
+        return ty;
+    }
+    Ty::fun(args[..arity].to_vec(), args[arity])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

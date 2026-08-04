@@ -4037,3 +4037,39 @@ per-jar/multi-module setups are just more sources.
 - Fixed the workspace-extraction coverage regression at the same gate: coverage now builds
   `krusty-cli` once and injects `KRUSTY_BIN`, instead of each instrumented e2e process attempting a
   nested Cargo build under coverage flags.
+
+## Follow-up — realize EVERY callable reference as a reference class
+
+krusty realizes most callable references as a `kotlin.jvm.internal.FunctionReferenceImpl` subclass (a
+real Kotlin reference, hence a `KCallable`), but some — a BOUND reference on a value receiver such as
+`E.A::foo` — still lower to an `invokedynamic` lambda, which implements `Function{N}` and nothing else.
+
+Two consequences follow from that divergence:
+
+- Reference EQUALITY (`E.A::foo == E.B::foo`) is object identity on an indy lambda rather than
+  kotlinc's owner/name/signature comparison.
+- The reflection typing of an unannotated binding (`val f = X::y` is a `KFunction{N}`, see SPEC) has to
+  be restricted to UNBOUND references, because typing a binding whose value is an indy lambda as a
+  `KFunction` `ClassCastException`s on the first store. That restriction costs 3 box-corpus files,
+  which now skip instead of compiling: an unannotated `val` bound to an unbound reference is typed
+  `KFunction{N}`, and lowering a use of that binding is not modelled for every shape yet. Removing the
+  restriction (once every reference is a reference class) should recover them and more.
+
+## Phase — `kotlin.reflect.KFunctionN` and a callable reference's reflect type  ✅
+
+`classpath_unbound_callable_ref_e2e::classpath_callable_references_resolve_reflection_targets` passes.
+The runtime side already worked (krusty emits `FunctionReferenceImpl` subclasses and reflect-compatible
+property references, and the harness does supply `kotlin-reflect.jar`); what was missing was front-end.
+
+- `kotlin.reflect.KFunction0` … `KFunction22` are now synthesized classifiers. They are in no jar — not
+  `kotlin-stdlib`, not `kotlin-reflect`, and the `kotlin/reflect` builtins declare only the arity-less
+  `KFunction` — so kotlinc generates them, and a declaration typed with one erases to
+  `Lkotlin/reflect/KFunction;`. The shape is `KFunction<R>` (for `returnType`, `name`, …) plus
+  `Function{N}` (so the value is invocable).
+- A callable reference takes that reflection type where one is expected, and an unannotated local bound
+  to an unbound reference takes it as its inferred type — see `docs/SPEC.md` for the exact rule and why
+  it is not applied everywhere.
+- Two emit bugs surfaced once kotlin-reflect actually read what krusty records: a reference to a
+  CLASSPATH target had its value-class mangle applied twice (`decode-X4E9McA-X4E9McA` — a method that
+  exists nowhere), and a generic function's `@Metadata` recorded an INFERRED type-parameter return as
+  `Any` with no JVM signature handle, which left reflection unable to identify the method.

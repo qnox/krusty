@@ -25,24 +25,9 @@ use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
     class
-        .inner_classes
-        .iter()
-        .find(|entry| type_name(&entry.inner) == class.this_class)
+        .inner_class_self()
         .map(|entry| entry.access)
         .unwrap_or(class.access)
-}
-
-fn inherited_class_access(
-    class: &super::classreader::ClassInfo,
-    internal_name: TypeName,
-) -> Option<u16> {
-    let nested = super::jvm_class_map::to_jvm_type_name(internal_name).render();
-    let (outer, _) = nested.rsplit_once('$')?;
-    class
-        .inner_classes
-        .iter()
-        .find(|entry| entry.inner == nested && entry.outer.as_deref() == Some(outer))
-        .map(|entry| entry.access)
 }
 
 fn internal_package(internal: TypeName) -> String {
@@ -631,6 +616,52 @@ impl JvmLibraries {
         self.cp.builtin_members_name(kotlin)
     }
 
+    /// Function renames declared by the mapped collection interfaces a concrete JVM class realizes.
+    /// This is the read-side counterpart of [`SymbolSource::mapped_interface_members`], which already
+    /// owns the source name, physical name, and erased callable shape used for bridge emission. Derive
+    /// Java member visibility from that semantic handoff instead of maintaining a second reverse table:
+    /// a raw `ArrayList.remove(I)Object` therefore appears as `removeAt`, while `remove(Object)Boolean`
+    /// remains `remove`, and a same-shaped method outside the `java.util.List` hierarchy is untouched.
+    fn mapped_collection_function_renames(
+        &self,
+        internal: TypeName,
+    ) -> Vec<crate::libraries::MappedInterfaceMember> {
+        let mut renames = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = std::collections::VecDeque::new();
+        pending.push_back(super::jvm_class_map::to_jvm_type_name(internal));
+        while let Some(owner) = pending.pop_front() {
+            if !seen.insert(owner) {
+                continue;
+            }
+            if let Some(kotlin) =
+                super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(owner)
+            {
+                for mapping in
+                    <Self as SemanticPlatform>::mapped_interface_members(self, Ty::obj_name(kotlin))
+                {
+                    if !mapping.is_property
+                        && mapping.source_name != mapping.physical_name
+                        && !renames.iter().any(
+                            |existing: &crate::libraries::MappedInterfaceMember| {
+                                existing.source_name == mapping.source_name
+                                    && existing.physical_name == mapping.physical_name
+                                    && existing.params == mapping.params
+                                    && existing.ret == mapping.ret
+                            },
+                        )
+                    {
+                        renames.push(mapping);
+                    }
+                }
+            }
+            if let Some(class) = self.cp.find_name(owner) {
+                pending.extend(class.interfaces.iter_ids().chain(class.super_class));
+            }
+        }
+        renames
+    }
+
     fn range_accessor(name: &str, descriptor: &str) -> PlatformAccessor {
         PlatformAccessor {
             name: name.to_string(),
@@ -1051,6 +1082,25 @@ impl JvmLibraries {
     /// mapping (`to_jvm_internal`) the emitter uses for the call owner, so resolution and codegen stay
     /// byte-consistent. Members/return types erase to the JVM forms (`get(int)Object`, etc.).
     fn build_library_type(&self, internal_name: TypeName) -> Option<LibraryType> {
+        // `kotlin.reflect.KFunction0` … `KFunction22` are COMPILER-SYNTHESIZED, exactly like
+        // `kotlin.FunctionN`: they exist in no jar, and the `kotlin/reflect` builtins declare only the
+        // arity-less `KFunction`. Build the shape kotlinc gives them — `KFunction<R>` for the reflection
+        // members (`returnType`, `name`, …) plus `FunctionN` so the value is invocable — instead of
+        // reporting `import kotlin.reflect.KFunction0` as an unresolved reference. A declaration typed
+        // with one erases to `Lkotlin/reflect/KFunction;` (see `jvm_class_map::to_jvm_internal`).
+        if let Some(arity) = crate::types::kfunction_arity(internal_name) {
+            let mut shape =
+                (*self.resolve_type_name(type_name(crate::types::KFUNCTION_INTERNAL))?).clone();
+            let mut supertypes = crate::types::TypeNameList::new();
+            supertypes.push(crate::types::KFUNCTION_INTERNAL);
+            supertypes.push(&format!("kotlin/Function{arity}"));
+            shape.supertypes = supertypes;
+            shape.type_params = (0..arity)
+                .map(|index| format!("P{}", index + 1))
+                .chain(std::iter::once("R".to_string()))
+                .collect();
+            return Some(shape);
+        }
         {
             let internal = &internal_name.render();
             let ci = match self.cp.find(internal) {
@@ -1179,12 +1229,44 @@ impl JvmLibraries {
                         metadata.is_suspend(),
                     );
                 }
-                member.set_suspend(member_metadata.is_some_and(metadata::MetaFn::is_suspend));
+                // A member EXTENSION is deliberately excluded from `aligned_member_metadata`: its
+                // metadata parameter list omits the receiver the JVM method leads with, so the shared
+                // alignment cannot line the two up. Match it separately, by the exact descriptor it
+                // records. The two facts recovered are ones no descriptor can carry — that the first
+                // parameter is a RECEIVER rather than a value, and whether the member is `operator`.
+                let member_extension_metadata = meta_fns.iter().find(|function| {
+                    function.is_extension()
+                        && function.jvm_name == m.name
+                        && function.jvm_desc == Some(m.descriptor.as_str())
+                });
+                let semantic_metadata = member_metadata.or(member_extension_metadata);
+                if let Some(metadata) = member_extension_metadata {
+                    // Normalize the callable's SOURCE identity at the provider boundary. A value-class
+                    // parameter may mangle the JVM method name, but downstream overload selection must
+                    // see the Kotlin declaration name and must not grow a classpath-only name branch.
+                    // The physical spelling remains on the opaque member handle for emission.
+                    if metadata.jvm_name != metadata.kotlin_name {
+                        member.physical_name = Some(metadata.jvm_name.clone());
+                        member.name = metadata.kotlin_name.clone();
+                    }
+                    // JVM `Signature` sees the extension receiver as an ordinary leading parameter;
+                    // Kotlin metadata represents it as the receiver attribute. Prefer that normalized
+                    // semantic shape so generic inference is identical to a module declaration.
+                    if metadata.generic_sig.is_some() {
+                        member.generic_sig = metadata.generic_sig.clone();
+                    }
+                }
+                member.set_suspend(semantic_metadata.is_some_and(metadata::MetaFn::is_suspend));
+                member.set_is_member_extension(member_extension_metadata.is_some());
+                member.set_is_operator(
+                    member_metadata.is_some_and(metadata::MetaFn::is_operator)
+                        || member_extension_metadata.is_some_and(metadata::MetaFn::is_operator),
+                );
                 let value_arity = member
                     .params
                     .len()
                     .saturating_sub(usize::from(member.suspend()));
-                if let Some(metadata) = member_metadata {
+                if let Some(metadata) = semantic_metadata {
                     member.visibility = metadata.visibility;
                     member.set_ret_nullable(metadata.ret_nullable());
                 }
@@ -1192,7 +1274,7 @@ impl JvmLibraries {
                 // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
                 // result — keeping the erased type as `physical_ret` for the emitter.
                 if member.suspend() {
-                    if let Some(f) = member_metadata {
+                    if let Some(f) = semantic_metadata {
                         member.physical_ret = member.ret;
                         let logical = metadata_return_info(f.ret_class, f.ret_nullable())
                             .apply(member.physical_ret);
@@ -1216,6 +1298,7 @@ impl JvmLibraries {
                     member.set_ret_nullable(true);
                 }
                 member.call_sig = member_metadata
+                    .or(member_extension_metadata)
                     .map(metadata::MetaFn::member_call_sig)
                     .unwrap_or_else(|| {
                         let vararg_index = m
@@ -1393,14 +1476,75 @@ impl JvmLibraries {
                     format!("({})V", type_descriptor(Ty::String)),
                 ));
             }
+            // A MAPPED Kotlin COLLECTION (`kotlin/collections/MutableList`, …) or `kotlin/String` takes
+            // BOTH its members and its supertypes from the `.kotlin_builtins` declaration — that
+            // declaration IS its Kotlin API, and the JVM class it maps to is only its physical
+            // realization. Carrying the JVM class's own members or interfaces instead would put
+            // `java.util.List`'s surplus method set (`remove(int)`, `stream`, `toArray`, `getFirst` —
+            // none of them Kotlin members) into the Kotlin scope, directly or one rung up through
+            // `java/util/List` as a supertype. That is what let `list.remove(10)` bind remove-BY-INDEX,
+            // and what let `"abcdef".split("c")` bind `java.lang.String.split`, which splits on a REGEX
+            // and returns an array. The builtins decode to the same erased descriptors and the same JVM
+            // owner, so nothing physical changes: names stay in source terms and the Kotlin → JVM rename
+            // happens at emit (`names::mapped_builtin_virtual_name`), as for every other mapped member.
+            //
+            // NOT the remaining mapped builtins, and not for want of anything here: kotlinc does not
+            // hide every Java method on a mapped type either. `JvmBuiltInsCustomizer` re-admits an
+            // explicit whitelist (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) over the builtins
+            // scope, and krusty has no equivalent — so widening to `kotlin/CharSequence` would wrongly
+            // drop `chars`/`codePoints`, to `kotlin/Enum` `name`/`ordinal`, and to `kotlin/Throwable`
+            // `getStackTrace`/`initCause`/`fillInStackTrace`/… , every one of which kotlinc keeps.
+            // Leaving `kotlin/CharSequence` joined is also why whatever `java.lang.CharSequence` declares
+            // still reaches `String` one rung up — `charAt` on every JDK, plus `getChars` as of JDK 25,
+            // which added it as a `default` method. That is the price of keeping `chars`/`codePoints`,
+            // and it makes the residual leak JDK-DEPENDENT. See docs/SPEC.md.
+            let rendered_internal = internal_name.render();
+            let is_mapped_builtin =
+                super::jvm_class_map::to_jvm_internal(&rendered_internal) != rendered_internal;
+            let builtin_supertypes = self.cp.builtin_supertypes_name(internal_name);
+            let mut builtin_members = if is_mapped_builtin {
+                self.builtin_members_for_type_name(internal_name)
+            } else {
+                Vec::new()
+            };
+            // Members and supertypes must switch provenance together. Presence of the decoded
+            // declaration, not a non-empty member vector, is the capability: an authoritative
+            // declaration is allowed to state an empty member or supertype set, and falling back to
+            // only half of the Java shape would recreate the very scope leak this branch prevents.
+            // That same presence test is what keeps a classpath carrying a JDK but NO kotlin-stdlib
+            // correct: nothing decodes there, so `kotlin/String` keeps the JVM class's supertypes
+            // rather than being left with none (it would otherwise lose `CharSequence`, `Comparable`
+            // and `Any`, and every subtype test against them would start failing).
+            let kotlin_scope_is_authoritative = is_mapped_builtin
+                && self.cp.builtin_is_interface(&rendered_internal).is_some()
+                // Scope provenance belongs to the central Kotlin↔JVM mapping. Keeping the policy
+                // there avoids a classpath-origin branch (and a second collection/String name list)
+                // in this loader; this site only combines that semantic policy with the runtime
+                // capability that the corresponding builtins declaration was actually decoded.
+                && super::jvm_class_map::mapped_builtin_has_authoritative_kotlin_scope(internal_name);
             let mut supertypes = TypeNameList::new();
-            for s in ci.interfaces.iter_ids() {
-                supertypes.push_name(s);
+            if kotlin_scope_is_authoritative {
+                // `java/io/Serializable` survives the replacement. It is not a Kotlin type and so is
+                // absent from every `.kotlin_builtins` declaration, but kotlinc still reports a mapped
+                // builtin as implementing it whenever the Java class does — `JvmBuiltInsCustomizer`
+                // adds it back in `getSupertypes` (`isSerializableInJava`). Dropping it made
+                // `val v: java.io.Serializable = "abc"` an error against a kotlinc that accepts it.
+                // The mapped COLLECTIONS never noticed: `java/util/List` does not implement it, and a
+                // concrete `java.util` class that does (`ArrayList`) is not an authoritative name.
+                for s in ci.interfaces.iter_ids() {
+                    if s.matches("java/io/Serializable") {
+                        supertypes.push_name(s);
+                    }
+                }
+            } else {
+                for s in ci.interfaces.iter_ids() {
+                    supertypes.push_name(s);
+                }
+                if let Some(s) = ci.super_class {
+                    supertypes.push_name(s);
+                }
             }
-            if let Some(s) = ci.super_class {
-                supertypes.push_name(s);
-            }
-            for s in self.cp.builtin_supertypes_name(internal_name).iter_ids() {
+            for s in builtin_supertypes.iter_ids() {
                 if !supertypes.contains_name(s) {
                     supertypes.push_name(s);
                 }
@@ -1525,20 +1669,31 @@ impl JvmLibraries {
                 .filter(|f| f.access & ACC_STATIC != 0 && f.descriptor == self_desc)
                 .map(|f| f.name.clone())
                 .collect();
-            let rendered_internal = internal_name.render();
-            let mut builtin_members =
-                if super::jvm_class_map::to_jvm_internal(&rendered_internal) != rendered_internal {
-                    self.builtin_members_for_type_name(internal_name)
-                } else {
-                    Vec::new()
-                };
-            builtin_members.retain(|builtin| {
-                !members.iter().any(|member| {
-                    member.physical_name.is_some()
-                        && member.name == builtin.name
-                        && member.descriptor == builtin.descriptor
-                })
-            });
+            // A MAPPED Kotlin builtin (`kotlin/collections/MutableList`, `kotlin/CharSequence`, …) has
+            // no `.class` of its own; the members read above came from the JVM class it maps to
+            // (`java/util/List`). That class's method set is NOT its Kotlin API: `java.util.List`
+            // declares `remove(int)`, `stream`, `toArray`, `getFirst`, none of which Kotlin's
+            // `MutableList` has, and its `remove(int)` is reachable from Kotlin only under the renamed
+            // name `removeAt`. The `.kotlin_builtins` declaration IS the Kotlin API, and it decodes to
+            // the same erased descriptors and JVM owner — so for a mapped name it REPLACES the JVM
+            // class's members rather than being unioned with them. The class file still supplies the
+            // kind and constructors. Names stay in source terms; the Kotlin → JVM
+            // rename happens at emit (`names::mapped_builtin_virtual_name`), as it does for every
+            // other mapped member.
+            // The members half of the same decision (see the supertype block below): for a mapped
+            // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
+            // joins them, with anything the class file already states under a physical name dropped.
+            if kotlin_scope_is_authoritative {
+                members.clear();
+            } else {
+                builtin_members.retain(|builtin| {
+                    !members.iter().any(|member| {
+                        member.physical_name.is_some()
+                            && member.name == builtin.name
+                            && member.descriptor == builtin.descriptor
+                    })
+                });
+            }
             // A defaulted value-class primary constructor surfaces as the `constructor-impl$default` synthetic.
             let value_ctor_has_default = ci
                 .methods
@@ -2424,10 +2579,37 @@ impl SymbolSource for JvmLibraries {
                     let ret_ty = mp
                         .ret_class
                         .map_or(Ty::obj("kotlin/Any"), kotlin_type_name_to_ty);
-                    let ty = mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name);
-                    let Some((getter_params, getter_ret)) = parse_method_desc(&getter.desc) else {
+                    // `Ty::obj_name` is deliberate for a value-class-typed property (the logical class,
+                    // not its collapsed underlying). It is wrong only for a Kotlin PRIMITIVE, which it
+                    // keeps as the boxed class while the getter returns the unboxed form — the property's
+                    // declared type and its getter's return then disagreed ("return type mismatch:
+                    // expected 'Boolean', actual 'Boolean'").
+                    let ty = if ret_ty.is_jvm_scalar() {
+                        ret_ty
+                    } else {
+                        mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
+                    };
+                    let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter.desc)
+                    else {
                         continue;
                     };
+                    // On a `@JvmInline value class` every member is realized as a STATIC `-impl` whose
+                    // FIRST parameter is the CARRIER — the receiver, not a value parameter
+                    // (`kotlin/Result.isSuccess` is `isSuccess-impl(Ljava/lang/Object;)Z`). Dropping it
+                    // presents the same zero-parameter accessor an ordinary class exposes; the
+                    // value-class pass already routes such a member's `dispatch_receiver` through the
+                    // unboxed carrier. Without this the accessor was rejected as "takes an argument"
+                    // and the property read reported as an unresolved reference.
+                    // NOT the value class's own sole property: that one IS the carrier (`Result.value`),
+                    // reached as the underlying value itself rather than through a computed `-impl`
+                    // accessor, and rerouting it breaks the box/unbox boundary.
+                    let carrier_receiver = getter_params.len() == 1
+                        && metadata::class_inline(&ci).is_some_and(|inline| {
+                            inline.property_name.as_deref() != Some(mp.name.as_str())
+                        });
+                    if carrier_receiver {
+                        getter_params.clear();
+                    }
                     if !getter_params.is_empty() {
                         continue;
                     }
@@ -2630,7 +2812,9 @@ impl SymbolSource for JvmLibraries {
     ) -> Option<std::rc::Rc<LibraryType>> {
         let jvm_name = super::jvm_class_map::to_jvm_type_name(internal_name);
         let class = self.cp.find_name(jvm_name)?;
-        let access = inherited_class_access(&class, internal_name)?;
+        // Inherited lookup applies only to a genuine member classifier. Requiring a structural self
+        // entry avoids treating a top-level class whose legal name contains `$` as inheritable.
+        let access = class.inner_class_self()?.access;
         let accessible = if let Some(visibility) = class.meta.class_visibility {
             matches!(visibility, Visibility::Public | Visibility::Protected)
         } else {
@@ -2985,10 +3169,46 @@ impl SymbolSource for JvmLibraries {
                 let Some(t) = self.resolve_type_name(cn) else {
                     continue;
                 };
+                // Compute the provider-owned rename shapes once per hierarchy rung. A raw Java
+                // method is renamed only when its physical name AND full erased descriptor match a
+                // mapped interface obligation carried by this receiver's actual class hierarchy.
+                // This keeps overload identity precise without a classpath-only reverse-name table.
+                let function_renames = self.mapped_collection_function_renames(cn);
                 for m in &t.members {
-                    if m.name == name
+                    // A member extension has TWO receivers: the declaring class supplies the implicit
+                    // dispatch receiver and the method's first JVM parameter is the extension receiver.
+                    // It is therefore not an ordinary member of `receiver`, even though both shapes are
+                    // encoded as instance methods in the class file. The dedicated semantic
+                    // member-extension query consumes this declaration; exposing it here as well would
+                    // incorrectly accept `scope.invoke("x", body)` and create two resolution paths for
+                    // the same declaration.
+                    if m.is_member_extension() {
+                        continue;
+                    }
+                    // The name this member is visible under in the receiver's SOURCE scope. Normally
+                    // its own; for a Java method that a renamed builtin covers, the KOTLIN name
+                    // INSTEAD of the JVM one — so `ArrayList.remove(int)` answers `removeAt` and is
+                    // invisible to `remove`, exactly as kotlinc's Java member scope resolves it. The
+                    // emitted callable is unaffected: it reads `m.physical_name`/`m.name` below, so the
+                    // call still goes to `remove(I)`. A member that already carries a `physical_name`
+                    // is a synthesized alias (a value-class mangled member, or a builtin whose Kotlin
+                    // name was recorded there), never a raw Java method — leave it alone.
+                    let scope_name = m.physical_name.as_ref().map_or_else(
+                        || {
+                            function_renames
+                                .iter()
+                                .find(|mapping| {
+                                    mapping.physical_name == m.name
+                                        && method_descriptor(&mapping.params, mapping.ret)
+                                            == m.descriptor
+                                })
+                                .map_or(m.name.as_str(), |mapping| mapping.source_name.as_str())
+                        },
+                        |_| m.name.as_str(),
+                    );
+                    if scope_name == name
                         || matches!(
-                            (m.name.as_str(), name),
+                            (scope_name, name),
                             ("keySet", "keys") | ("entrySet", "entries")
                         )
                     {
@@ -3153,6 +3373,11 @@ impl SymbolSource for JvmLibraries {
                             inline: m.inline,
                             suspend,
                             signature: m.signature.clone(),
+                            // Whether the dispatch owner is an interface is the MEMBER's fact here.
+                            // For a mapped builtin resolved with no JDK on the classpath the JVM
+                            // owner (`java/util/List`) has no class file, so the call site cannot
+                            // recover it later — carry it on the selected callable.
+                            owner_is_interface: m.is_interface(),
                             ..LibraryCallable::library(
                                 m.owner.as_ref().cloned().unwrap_or(cn),
                                 m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
@@ -3394,10 +3619,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
+        // One identity table owns every Kotlin builtin and its mapped JVM face. This capability used
+        // to be inferred from three partial maps (Kotlin spelling, collection inverse, and a curated
+        // interface-name subset), so adding a mapped class could change the answer depending on which
+        // unrelated facet happened to list it.
         internal.starts_with("kotlin/")
-            || super::jvm_class_map::jvm_to_kotlin_builtin_with_members_name(internal).is_some()
-            || super::jvm_class_map::jvm_collection_to_kotlin_type_name(internal).is_some()
-            || super::jvm_class_map::jvm_mapped_builtin_is_interface_name(internal).is_some()
+            || super::jvm_class_map::type_name_to_jvm_builtin_internal(internal).is_some()
     }
 
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {
@@ -3616,6 +3843,18 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 
     fn method_descriptor(&self, params: &[Ty], ret: Ty) -> Option<String> {
         Some(method_descriptor(params, ret))
+    }
+
+    fn descriptor_reference_params(&self, descriptor: &str) -> Option<Vec<bool>> {
+        // A JVM parameter is a reference exactly when its field descriptor is an object (`L…;`) or an
+        // array (`[…`); everything else is a primitive carrier (`I`, `J`, `Z`, …).
+        let (params, _) = super::names::parse_method_descriptor(descriptor)?;
+        Some(
+            params
+                .iter()
+                .map(|p| p.starts_with('L') || p.starts_with('['))
+                .collect(),
+        )
     }
 
     fn function_reference_impl_type(&self) -> Option<Ty> {
@@ -4066,6 +4305,31 @@ mod tests {
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
     use crate::types::Ty;
+
+    #[test]
+    fn inherited_access_finds_self_entry_when_member_name_contains_dollar() {
+        let stubs = crate::jvm::java_stub::stub_classes(
+            &[(
+                String::new(),
+                "class Outer { public static class Inner$Part {} }".into(),
+            )],
+            crate::jvm::java_stub::StubMode::Strict,
+            &|candidate| candidate == "java/lang/Object",
+        )
+        .expect("stubs");
+        let class = stubs
+            .iter()
+            .find(|(name, _)| name == "Outer$Inner$Part")
+            .and_then(|(_, bytes)| crate::jvm::classreader::parse_class(bytes).ok())
+            .expect("member class");
+
+        assert_eq!(
+            class
+                .inner_class_self()
+                .map(|entry| entry.access & crate::jvm::classfile::ACC_PUBLIC),
+            Some(crate::jvm::classfile::ACC_PUBLIC)
+        );
+    }
 
     #[test]
     fn descriptor_void_reference_normalizes_before_core() {
