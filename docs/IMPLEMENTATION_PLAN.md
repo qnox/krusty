@@ -4037,3 +4037,32 @@ per-jar/multi-module setups are just more sources.
 - Fixed the workspace-extraction coverage regression at the same gate: coverage now builds
   `krusty-cli` once and injects `KRUSTY_BIN`, instead of each instrumented e2e process attempting a
   nested Cargo build under coverage flags.
+
+## Known gap — `kotlin.reflect.KFunctionN` and a callable reference's reflect type
+
+`classpath_unbound_callable_ref_e2e::classpath_callable_references_resolve_reflection_targets` is the
+one remaining gate failure. The gap is entirely in the FRONT END; the runtime side already works:
+
+- The harness does put `kotlin-reflect.jar` on the classpath (`expect_box_run_against_with_reflect`).
+- krusty already realizes a function reference as a `kotlin.jvm.internal.FunctionReferenceImpl`
+  subclass and a property reference as a reflect-compatible reference class, so
+  `Sample::isTagged.getter.returnType.toString()` compiles AND runs, returning `"kotlin.Boolean"`.
+- `KFunction<R>.returnType` on an explicitly `KFunction`-typed value already resolves.
+- A reference to a PRIVATE member function already compiles and runs.
+
+Two front-end pieces are missing.
+
+1. `kotlin.reflect.KFunction0` … `KFunction22` are not types. kotlinc synthesizes them (they are in no
+   jar — not in `kotlin-stdlib`, not in `kotlin-reflect`, and not in the `kotlin/reflect` builtins,
+   which declare only `KFunction`), erasing `KFunction0<String>` to `Lkotlin/reflect/KFunction;`. They
+   must be synthesized as classifiers whose supertypes are `kotlin.FunctionN` and
+   `kotlin.reflect.KFunction`, so that a value of one is both invocable and a `KCallable`. That also
+   needs `Ty::Fun` to be assignable to them and the emit to use the `KFunction` erasure.
+
+2. A callable reference is typed as a plain function type (`Sample::decode` is
+   `(Sample, Marker) -> String`), where kotlinc types it `KFunction2<Sample, Marker, String>`. That is
+   why `.returnType` does not resolve on one. Resolving `KCallable` members on any `Ty::Fun` receiver
+   would be unsound — a lambda is a `Function1` but not a `KFunction`, so it would compile and then
+   `ClassCastException` — so the reference's own type has to carry the `KFunction` identity while
+   keeping every function-type behaviour (invocation, assignment to a `(A) -> B` parameter, SAM
+   conversion, the lowerer's reference dispatch). That is the substantial part of this work item.
