@@ -815,8 +815,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Expr::CharLit` is a `u16` and `unquote_char` takes a `\uXXXX` escape verbatim, so a *source* literal
   `'\uD800'` keeps its code unit too (it used to fold to NUL by the same round-trip). A `char` that
   reaches either from a code POINT truncates with the JVM's own `i2c`, since a well-formed `Char`
-  literal is always in the BMP. Tests: `CharSurrogateConst` and `CharSurrogateLiteral` in
-  `tests/feature_box_e2e.rs`.
+  literal is always in the BMP. The code unit survives every encoding a `Char` constant reaches: a
+  primary-constructor DEFAULT keeps it through both fill paths (the same-class path lowers the
+  default's AST `Expr::CharLit`; a subclass's `: B()` fills the base's `super(…)` args from the
+  file-independent `resolve::CtorDefaultValue::Char`, which is a `u16` for the same reason), and an
+  ANNOTATION ARGUMENT is written as an `element_value` tagged `'C'` over a `CONSTANT_Integer` holding
+  the raw code unit. Tests: `CharSurrogateConst`, `CharSurrogateLiteral`, `CharSurrogateCtorDefault`,
+  `CharSurrogateWhen`, and `CharSurrogateAnnotationArg` in `tests/feature_box_e2e.rs`.
 - **A `Char` constant folded into a string renders as the CHARACTER, not its code unit.** The constant
   string evaluator behind the `trimIndent`/`trimMargin` fold accepts a `Char` (`${'$'}` is the idiomatic
   way to write a literal `$` in a template), so it must spell the character out. A code unit that is not
