@@ -15,8 +15,10 @@ use super::common;
 /// Single-compilation box run: everything lives in one source, cross-referencing declarations (which
 /// still drives the checker/`types` resolution heavily).
 ///
-/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
-/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
+/// The `Option` is vestigial, matching [`common::expect_box_run_with_stdlib`]: toolchain lookup is
+/// fail-fast and a rejected source panics with its diagnostics, so the `let Some(..) else` branches
+/// below cannot silently turn either condition into a passing skip. Collapsing those mechanical
+/// call-site shapes is separate from the two-round-trip contract hardened in this file.
 fn run(src: &str, stem: &str) -> Option<String> {
     common::expect_box_run_with_stdlib(src, stem)
 }
