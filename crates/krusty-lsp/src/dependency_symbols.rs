@@ -590,7 +590,8 @@ impl DependencySymbolIndex {
             .unwrap_or(false)
     }
 
-    /// Whether a qualified query's qualifier names this class's package or its outer classes.
+    /// Whether a qualified query's qualifier names this class's package, its outer classes, or the
+    /// source-visible combination of both.
     ///
     /// A qualified query matches a complete package suffix on a segment boundary, so
     /// `collections.AbstractList` finds `kotlin.collections` without admitting `kotlin.collectionsx`.
@@ -598,6 +599,11 @@ impl DependencySymbolIndex {
     /// The qualifier is also matched against the enclosing classes, because a nested class is
     /// spelled with the same separator: `Map.Entry` parses as the qualifier `map` and the name
     /// `Entry`, and a reader who typed it means `java.util.Map.Entry`, not a package called `map`.
+    /// Package and enclosing names must additionally be checked as one visible path:
+    /// `java.util.Map.Entry` parses the qualifier `java.util.map`, which is neither the package
+    /// `java.util` nor the outer name `Map` in isolation. Building that visible qualifier here keeps
+    /// the rule shared by prefix and wildcard ranking and never exposes the lookup-only JVM
+    /// internal name used later for materialization.
     fn qualifier_matches(&self, index: u32, qualifier: Option<&str>) -> bool {
         let Some(qualifier) = qualifier else {
             return true;
@@ -612,16 +618,21 @@ impl DependencySymbolIndex {
                     .strip_suffix(qualifier)
                     .is_some_and(|prefix| prefix.ends_with('.'))
         };
-        let package_matches = self
-            .packages
-            .get(entry[1] as usize)
-            .is_some_and(|declared| suffix_on_a_boundary(declared));
-        package_matches
-            || self
-                .names
-                .get(entry[0] as usize)
-                .and_then(|name| name.rsplit_once('.'))
-                .is_some_and(|(outer, _)| suffix_on_a_boundary(outer))
+        let package = self.packages.get(entry[1] as usize);
+        let outer = self
+            .names
+            .get(entry[0] as usize)
+            .and_then(|name| name.rsplit_once('.').map(|(outer, _)| outer));
+        package.is_some_and(|declared| suffix_on_a_boundary(declared))
+            || outer.is_some_and(suffix_on_a_boundary)
+            || package.zip(outer).is_some_and(|(package, outer)| {
+                let visible = if package.is_empty() {
+                    outer.to_string()
+                } else {
+                    format!("{package}.{outer}")
+                };
+                suffix_on_a_boundary(&visible)
+            })
     }
 
     /// The segment a qualified query actually names: `Map.Entry` matches the entry whose simple
@@ -1166,6 +1177,20 @@ mod tests {
         let nested = index.candidates("map.Ent*", 8);
         assert_eq!(nested.len(), 1);
         assert_eq!(nested[0].internal, "java/util/Map$Entry");
+    }
+
+    #[test]
+    fn a_fully_qualified_nested_name_combines_package_and_outer() {
+        let index = index(&["java/util/Map$Entry", "other/Map$Entry"]);
+
+        // The qualifier before the final segment is one source-visible path. It must not be tested
+        // as two unrelated alternatives (`java.util` package OR `Map` outer), because the complete
+        // spelling contains both. Prefix and wildcard queries share the same qualifier predicate.
+        for query in ["java.util.Map.Ent", "java.util.Map.Ent*"] {
+            let found = index.candidates(query, 8);
+            assert_eq!(found.len(), 1, "{query}");
+            assert_eq!(found[0].internal, "java/util/Map$Entry", "{query}");
+        }
     }
 
     #[test]
