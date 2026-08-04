@@ -77,6 +77,23 @@ pub struct JvmLibraries {
     cp: std::rc::Rc<Classpath>,
 }
 
+/// The declaration-level return fact shared by both classpath member construction loops. Keep this
+/// normalization at the metadata boundary: ordinary descriptor members and source-name aliases for
+/// mangled members must not disagree about whether the later value-class representation pass may see
+/// a declared return.
+///
+/// Nullable returns are genuine boxes, and suspend descriptors return the CPS `Object` regardless of
+/// the declared type (including primitive-underlying value classes, which the callee boxes). In both
+/// cases recording the classifier as an erased carrier would be unsound, so neither is handed off.
+/// Value-class identification itself intentionally remains downstream; probing it while a classpath
+/// type is being built can recursively re-enter type resolution on cyclic class graphs.
+fn metadata_declared_nonnull_nonsuspend_return(function: &super::metadata::MetaFn) -> Option<Ty> {
+    function
+        .ret_class
+        .filter(|_| !function.ret_nullable() && !function.is_suspend())
+        .map(Ty::obj_name)
+}
+
 impl JvmLibraries {
     /// The TOP-LEVEL (receiver-less) function overloads of `name` declared in package `pkg` —
     /// `listOf`/`run`/`println`/… each with its inline/`@InlineOnly` flags and logical
@@ -1221,10 +1238,8 @@ impl JvmLibraries {
                 // `make-<hash>(Continuation)Ljava/lang/Object;` hands back `M.box-impl(I)LM;`, a BOX).
                 // Claiming the fact there would repr a boxed value as unboxed. Without it the member
                 // falls back to the descriptor comparison, which classifies this case correctly.
-                member.declared_ret = member_metadata
-                    .filter(|metadata| !metadata.is_suspend())
-                    .and_then(|metadata| metadata.ret_class.filter(|_| !metadata.ret_nullable()))
-                    .map(Ty::obj_name);
+                member.declared_ret =
+                    member_metadata.and_then(metadata_declared_nonnull_nonsuspend_return);
                 if let Some(java_nullable) = platform_nullable_params.clone() {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
@@ -1481,10 +1496,7 @@ impl JvmLibraries {
                 // ordinary boxed handling. The value-class pass decides what the classifier means.
                 // `suspend` excluded for the reason given at the descriptor-loop site above: CPS
                 // erases the descriptor return to `Object`, which stops witnessing the carrier.
-                member.declared_ret = mf
-                    .ret_class
-                    .filter(|_| !mf.ret_nullable() && !mf.is_suspend())
-                    .map(Ty::obj_name);
+                member.declared_ret = metadata_declared_nonnull_nonsuspend_return(mf);
                 crate::trace_compiler!(
                     "resolve",
                     "mangled member {}.{} jvm={} logical_params={:?}",

@@ -3432,7 +3432,7 @@ fn operand_nonnull(
 /// together, and neither alone can classify a value-class result: `logical` says WHICH value class a
 /// coerced read has after substitution, `declared` says whether the callee RETURNS one by declaration
 /// (so the physical result is its erased carrier) rather than merely producing one out of a generic
-/// slot (where it is a box). `ArrayList<NullableInt>.get` and `A.create(): A<String>` agree on the
+/// slot (where it is a box). `List<TokenBox>.get` and `A.create(): A<String>` agree on the
 /// first and differ only on the second.
 #[derive(Clone, Copy)]
 struct CallTypes<'a> {
@@ -3660,7 +3660,7 @@ fn repr(
             // the whole classpath value-class RETURN ABI (`fun make(): K` → `make-<hash>()
             // Ljava/lang/String;`), and it holds whatever the underlying erases to — so it settles the
             // `Object`-underlying cases the descriptor comparison below cannot. Checked FIRST for
-            // exactly that reason: `A.create(): A<String>` and `ArrayList<NullableInt>.get` both spell
+            // exactly that reason: `A.create(): A<String>` and `List<TokenBox>.get` both spell
             // `()Ljava/lang/Object;`, and only the declaration says the first is a carrier and the
             // second a box. Nullable declared returns are never recorded (they really are boxed).
             if let Some(declared) = types.declared_value_class(id, under) {

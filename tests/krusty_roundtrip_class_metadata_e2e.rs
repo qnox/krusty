@@ -184,6 +184,26 @@ class Holder {\n\
     expect_roundtrip_ok("valueclass", LIB, MAIN);
 }
 
+/// A declared value-class return and a generic-slot read can have the SAME substituted Kotlin type
+/// while requiring opposite representations. The declared member returns the erased carrier, whereas
+/// `List<T>.get` returns a real box from its `Object` slot. Pin both in one consumer: this prevents the
+/// checker-to-IR `declared_ret` handoff from being replaced by a broad "logical type is a value class"
+/// rule that would make either the direct call over-unbox or the generic read skip its required unbox.
+#[test]
+fn declared_value_class_return_does_not_reclassify_generic_slot() {
+    const LIB: &str = "@JvmInline\nvalue class Token(val value: String)\n\
+object Factory {\n\
+    fun direct(): Token = Token(\"OK\")\n\
+}\n";
+    const MAIN: &str = "fun box(): String {\n\
+    val direct: Token = Factory.direct()\n\
+    val values: List<Token> = listOf(direct)\n\
+    val fromSlot: Token = values[0]\n\
+    return if (direct.value == \"OK\" && fromSlot.value == \"OK\") \"OK\" else \"FAIL\"\n\
+}\n";
+    expect_roundtrip_ok("vc_generic_slot", LIB, MAIN);
+}
+
 /// The same read half for a member whose value class rides in a PARAMETER: the JVM method takes the
 /// erased underlying, so the argument must be handed over unboxed.
 #[test]

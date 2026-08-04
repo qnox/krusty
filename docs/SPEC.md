@@ -643,7 +643,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   **`LibraryMember::declared_ret` / `LibraryCallable::declared_ret` → `IrFile::call_declared_ret`** is
   the return analogue of `source_receiver`: the callee's DECLARED, un-erased, pre-substitution return,
   forwarded verbatim by `ir_lower` (which does no value-class reasoning) and read by the value-class
-  pass. The SUBSTITUTED type cannot serve. `ArrayList<NullableInt>.get` and `A.create(): A<String>`
+  pass. The SUBSTITUTED type cannot serve. `List<TokenBox>.get` and `A.create(): A<String>`
   both present as "returns a value class, physically `Object`", yet the first hands back a BOX out of
   a generic slot and the second the erased carrier; only the DECLARATION separates them — `get`
   declares the type parameter `E`, `create` declares `A`. `value_classes::repr` consults it FIRST, and
@@ -652,7 +652,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Cast` to the value class strips as redundant instead of reading as "an erased value narrowed to
   `K`". Scoped to a value-class static type AND a non-erased-top physical type: at `Object` the pair
   cannot classify the result, and recording it there unboxed real boxes
-  (`NullableInt cannot be cast to java.lang.Integer`, four corpus cases).
+  (`TokenBox cannot be cast to java.lang.Integer`, four corpus cases).
   **What still declines, and why none of it is the return model.** Each is a WRITE-side divergence
   from kotlinc, invisible while the record was withheld, and each is proven by a differential
   comparison for the same source. (1) A VALUE-CLASS-typed CONSTRUCTOR PARAMETER, unchanged — see the

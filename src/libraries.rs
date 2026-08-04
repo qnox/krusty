@@ -125,7 +125,7 @@ pub struct LibraryMember {
     /// the return analogue of [`LibraryCallable::source_receiver`], and recorded with no value-class
     /// reasoning of its own.
     ///
-    /// [`Self::ret`] cannot serve: it is the SUBSTITUTED type, so `ArrayList<NullableInt>.get` and
+    /// [`Self::ret`] cannot serve: it is the SUBSTITUTED type, so `List<TokenBox>.get` and
     /// `A.create(): A<String>` both present as "returns a value class, physically `Object`" even though
     /// the first hands back a BOX out of a generic slot and the second the erased carrier. Only the
     /// DECLARATION separates them — `get` declares the type parameter `E`, `create` declares `A`. The

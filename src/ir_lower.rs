@@ -15233,9 +15233,9 @@ impl<'a> Lower<'a> {
         //
         // And to a CONCRETE physical type, because the SUBSTITUTED type alone cannot classify an
         // erased-top result. A value class whose underlying itself erases to `Object`
-        // (`NullableInt(val holder: Any?)`) reads identically whether it is the carrier or a BOX out of
-        // a generic slot: `ArrayList<NullableInt>.get` returns `Object` either way, and "physical
-        // return == the underlying → UNBOXED" then unboxes the box (`NullableInt cannot be cast to
+        // (`TokenBox(val holder: Any?)`) reads identically whether it is the carrier or a BOX out of
+        // a generic slot: `List<TokenBox>.get` returns `Object` either way, and "physical
+        // return == the underlying → UNBOXED" then unboxes the box (`TokenBox cannot be cast to
         // java.lang.Integer`, four corpus cases). Where the physical type IS erased-top the decision
         // belongs to `call_declared_ret`, which knows whether the callee returns the value class BY
         // DECLARATION — the one fact that separates the two.

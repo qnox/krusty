@@ -1422,7 +1422,7 @@ pub struct IrFile {
     ///
     /// The distinction it carries cannot be recovered from the descriptor: a value class returned by
     /// declaration (`A.create(): A<String>`, whose mangled method hands back the erased carrier) and
-    /// the same value class arriving BOXED out of a generic slot (`ArrayList<NullableInt>.get`) both
+    /// the same value class arriving BOXED out of a generic slot (`List<TokenBox>.get`) both
     /// spell `()Ljava/lang/Object;`. The declaration separates them — `create` declares `A`, `get`
     /// declares the type parameter `E` (never recorded, since it is not a class). Only NON-NULL
     /// declared returns are recorded: a nullable value class really is boxed.

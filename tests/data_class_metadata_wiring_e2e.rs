@@ -263,9 +263,9 @@ fn string_template_is_byte_identical() {
 }
 
 /// A `suspend` function returning a NULLABLE value class — the port shape `suspend fun resolve(k):
-/// OrgId?`. The value-class pass (which runs before the coroutine pass) erases the return to the
+/// Token?`. The value-class pass (which runs before the coroutine pass) erases the return to the
 /// underlying, but kotlinc keeps the value class in the continuation's generic type argument
-/// (`Continuation<? super OrgId>`, not `<? super String>`). The declared return is recovered from the
+/// (`Continuation<? super Token>`, not `<? super String>`). The declared return is recovered from the
 /// value-class pass's record. The record is now written too, so this pins the whole class file.
 #[test]
 fn suspend_returning_nullable_value_class_is_byte_identical() {
