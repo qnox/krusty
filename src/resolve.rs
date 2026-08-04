@@ -272,7 +272,46 @@ pub fn adapted_ref_arity(vararg: bool, required: usize, param_count: usize) -> u
     }
 }
 
+/// Whether a callable whose source-level arity is described by `minimum`/`param_count` can accept
+/// `supplied` arguments. The result is intentionally type- and receiver-neutral: overload scoring,
+/// lexical-scope fallback, and declaration safety gates all need the same answer before they inspect
+/// argument types or choose a physical owner.
+///
+/// `minimum` is the number of non-default, non-vararg values a call must supply. Defaults make every
+/// arity through `param_count` potentially callable (named-argument mapping performs the finer
+/// per-position validation later), and a vararg removes the upper bound. Carrying the normalized
+/// minimum explicitly matters for `f(prefix: Int = 0, vararg rest: String)`: a required-count that
+/// includes the vararg is one, but the true minimum is zero.
+fn callable_accepts_arity(
+    vararg: bool,
+    minimum: usize,
+    param_count: usize,
+    supplied: usize,
+) -> bool {
+    supplied >= minimum && (vararg || supplied <= param_count)
+}
+
 impl Signature {
+    /// Whether this signature can accept an argument COUNT, before argument mapping and type scoring.
+    ///
+    /// Prefer the complete per-parameter default map when available: it handles a non-trailing
+    /// default without pretending that a later required parameter vanished. Older/provider
+    /// signatures may only carry the precomputed `required` count, which remains the conservative
+    /// fallback used before the default map was added.
+    fn accepts_arity(&self, supplied: usize) -> bool {
+        let minimum = if self.param_defaults.len() == self.params.len() {
+            let required = required_arity(self.params.len(), &self.param_defaults);
+            required.saturating_sub(usize::from(
+                self.vararg_index
+                    .and_then(|index| self.param_defaults.get(index))
+                    .is_some_and(|default| !*default),
+            ))
+        } else {
+            adapted_ref_arity(self.vararg(), self.required, self.params.len())
+        };
+        callable_accepts_arity(self.vararg(), minimum, self.params.len(), supplied)
+    }
+
     fn set_inferred_return(&mut self, ret: Ty) -> bool {
         let changed = self.ret != ret
             || self
@@ -3442,14 +3481,9 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
     if sigs.len() == 1 {
         return Some(0);
     }
-    let arity_ok = |s: &Signature| {
-        if s.vararg() {
-            arg_tys.len() + 1 >= s.params.len()
-        } else {
-            arg_tys.len() >= s.required && arg_tys.len() <= s.params.len()
-        }
-    };
-    let cands: Vec<usize> = (0..sigs.len()).filter(|&i| arity_ok(&sigs[i])).collect();
+    let cands: Vec<usize> = (0..sigs.len())
+        .filter(|&i| sigs[i].accepts_arity(arg_tys.len()))
+        .collect();
     if cands.len() <= 1 {
         return cands.first().copied();
     }
@@ -12161,6 +12195,30 @@ fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &
     diags.set_file(saved);
 }
 
+/// Whether two source callables accept at least one common argument COUNT.
+///
+/// This is the declaration-side companion of [`Signature::accepts_arity`]. It deliberately asks
+/// about source call shape, not JVM owner/name or raw parameter-vector equality: defaults and varargs
+/// can make declarations of different lengths overlap. Per-parameter named mapping and type scoring
+/// happen only after lexical scope has selected a callable family, so an overlap must remain guarded
+/// wherever that scope selection cannot yet distinguish two families.
+fn source_callable_arities_overlap(left: &FunDecl, right: &FunDecl) -> bool {
+    let shape = |function: &FunDecl| {
+        let vararg = function.params.iter().any(|parameter| parameter.is_vararg);
+        let minimum = function
+            .params
+            .iter()
+            .filter(|parameter| parameter.default.is_none() && !parameter.is_vararg)
+            .count();
+        (vararg, minimum, function.params.len())
+    };
+    let (left_vararg, left_minimum, left_count) = shape(left);
+    let (right_vararg, right_minimum, right_count) = shape(right);
+    let candidate = left_minimum.max(right_minimum);
+    callable_accepts_arity(left_vararg, left_minimum, left_count, candidate)
+        && callable_accepts_arity(right_vararg, right_minimum, right_count, candidate)
+}
+
 fn check_file_at_impl_mode(
     file: &File,
     file_index: u32,
@@ -12990,9 +13048,15 @@ fn check_file_at_impl_mode(
                 // `companion object` members are checked statically, with companion props/methods in
                 // scope unqualified.
                 if !cl.companion_methods.is_empty() || !cl.companion_props.is_empty() {
-                    // krusty emits companion members as statics on the same class, so a companion
-                    // member whose name collides with an instance member would duplicate a field/
-                    // method (kotlinc separates them via a nested Companion class). Reject (skip).
+                    // A plain companion property hoists to a static field on the outer class, so a
+                    // companion PROPERTY whose name collides with an instance member would duplicate
+                    // a field (kotlinc separates them via the nested Companion class). Reject (skip).
+                    // Companion METHODS are emitted on `C$Companion`, so a same-NAME method on the
+                    // outer instance is physically legal. The remaining guard is semantic: the
+                    // checker currently consults the unqualified companion fallback before its
+                    // implicit instance receiver, so the two families must not accept the same call
+                    // arity or it could bind the wrong owner. Compare the complete callable arity
+                    // RANGE (defaults/varargs included), not raw parameter-vector length.
                     let inst_names: std::collections::HashSet<&str> = cl
                         .props
                         .iter()
@@ -13007,7 +13071,11 @@ fn check_file_at_impl_mode(
                         }
                     }
                     for cm in &cl.companion_methods {
-                        if inst_names.contains(cm.name.as_str()) {
+                        let overlapping_instance = cl
+                            .methods
+                            .iter()
+                            .any(|m| m.name == cm.name && source_callable_arities_overlap(m, cm));
+                        if overlapping_instance {
                             c.diags.error(cl.span, format!("krusty: companion member '{}' collides with an instance member (unsupported)", cm.name));
                         }
                     }
@@ -33665,7 +33733,10 @@ impl<'a> Checker<'a> {
                     // and from an INSTANCE member of the companion's own class. A companion's members
                     // are in scope throughout the class body in Kotlin, so `fun describe() = tag()`
                     // binds the companion's `tag` exactly as a call from a companion member does; both
-                    // spellings reach the same static.
+                    // spellings reach the same static. Do not capture an argument count this signature
+                    // cannot accept: a different-arity instance member is legal, and the ordinary
+                    // implicit-receiver path below must get its chance. The same `Signature` arity
+                    // contract drives overload selection, so defaults/varargs cannot drift here.
                     let companion_owner = self.companion_of.clone().or_else(|| {
                         self.this_ty
                             .and_then(|receiver| receiver.obj_internal())
@@ -33680,8 +33751,10 @@ impl<'a> Checker<'a> {
                             .and_then(|c| c.static_methods.get(&fname))
                             .cloned()
                         {
-                            self.expect_call_args(&sig.params, false, args, &arg_tys);
-                            return sig.ret;
+                            if sig.accepts_arity(args.len()) {
+                                self.expect_call_args(&sig.params, sig.vararg(), args, &arg_tys);
+                                return sig.ret;
+                            }
                         }
                     }
                 }
@@ -36191,6 +36264,21 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
+
+    #[test]
+    fn callable_arity_contract_handles_defaults_and_varargs() {
+        // One shared count contract feeds overload filtering, the unqualified-companion fallback,
+        // and the declaration overlap gate. Pin both bounded defaults and the mixed
+        // default-before-vararg shape: the latter's true minimum is zero, not the one syntactic
+        // non-default parameter contributed by the vararg declaration itself.
+        assert!(!callable_accepts_arity(false, 1, 2, 0));
+        assert!(callable_accepts_arity(false, 1, 2, 1));
+        assert!(callable_accepts_arity(false, 1, 2, 2));
+        assert!(!callable_accepts_arity(false, 1, 2, 3));
+
+        assert!(callable_accepts_arity(true, 0, 2, 0));
+        assert!(callable_accepts_arity(true, 0, 2, 7));
+    }
 
     #[test]
     fn receiver_lambda_expectation_survives_an_erased_provider_parameter() {
