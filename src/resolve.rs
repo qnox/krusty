@@ -456,7 +456,8 @@ pub enum CtorDefaultValue {
     Double(f64),
     Float(f32),
     Bool(bool),
-    Char(char),
+    /// A UTF-16 code unit, matching `ast::Expr::CharLit` / `IrConst::Char`.
+    Char(u16),
     Str(String),
     Null,
     /// An `object` singleton default (`= EmptyCoroutineContext`) — read as `getstatic <internal>.INSTANCE`.
@@ -9444,6 +9445,32 @@ pub enum ResolvedCall {
     LambdaReturnMember(crate::libraries::LibraryCallable),
 }
 
+/// The two callable capabilities needed before IR emission: whether invoking the selected target is a
+/// coroutine suspension point, and whether its body may/must be spliced. Keep them together because
+/// the unsafe combination is specifically `suspend inline`: a generated suspend-lambda state machine
+/// cannot splice the call and must decline before it emits a direct invocation. This value is derived
+/// from the exact checker-selected target, independent of whether that target came from source,
+/// another module, or a classpath provider.
+#[derive(Clone, Copy, Debug)]
+pub struct SelectedCallCapabilities {
+    suspend: bool,
+    inline: InlineKind,
+}
+
+impl SelectedCallCapabilities {
+    fn new(suspend: bool, inline: InlineKind) -> Self {
+        Self { suspend, inline }
+    }
+
+    fn suspends(self) -> bool {
+        self.suspend
+    }
+
+    fn is_suspend_inline(self) -> bool {
+        self.suspend && self.inline.can_inline()
+    }
+}
+
 impl ResolvedCall {
     pub(crate) fn is_extension(&self) -> bool {
         matches!(
@@ -9467,49 +9494,39 @@ impl ResolvedCall {
         }
     }
 
-    /// Whether this exact checker-selected call suspends. This is the common classification consumed
-    /// by AST-level coroutine discovery before an IR suspension set exists.
-    pub(crate) fn is_suspend(&self) -> bool {
+    /// Complete callable capabilities for this exact checker-selected target. Computing both facts in
+    /// one origin switch prevents the suspend classifier and suspend-inline safety gate from drifting
+    /// when a new target provider or syntax path is added.
+    fn capabilities(&self) -> SelectedCallCapabilities {
         match self {
-            Self::Member(resolved) => resolved.suspend,
-            Self::TopLevel(callable)
-            | Self::Extension(callable)
-            | Self::LambdaReturnMember(callable) => callable.suspend,
-            Self::Companion(member) => member.suspend(),
-            Self::ModuleMember { suspend, .. }
-            | Self::ModuleMemberExtension { suspend, .. }
-            | Self::ModuleExtension { suspend, .. } => *suspend,
-            Self::ModuleTopLevel(callable) => callable.suspend,
-            Self::LocalFunction(callable) => callable.sig.is_suspend(),
-        }
-    }
-
-    /// Inline capability of the exact selected target. `None` means an ordinary callable, while the
-    /// stronger states preserve whether splicing is optional or mandatory.
-    fn inline_kind(&self) -> InlineKind {
-        match self {
-            Self::Member(resolved) => resolved.member.inline,
-            Self::TopLevel(callable)
-            | Self::Extension(callable)
-            | Self::LambdaReturnMember(callable) => callable.inline,
-            Self::Companion(member) => member.inline,
-            Self::ModuleMember { inline, .. }
-            | Self::ModuleMemberExtension { inline, .. }
-            | Self::ModuleExtension { inline, .. } => *inline,
-            Self::ModuleTopLevel(callable) => callable.inline,
-            Self::LocalFunction(callable) => {
-                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice())
+            Self::Member(resolved) => {
+                SelectedCallCapabilities::new(resolved.suspend, resolved.member.inline)
             }
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => {
+                SelectedCallCapabilities::new(callable.suspend, callable.inline)
+            }
+            Self::Companion(member) => {
+                SelectedCallCapabilities::new(member.suspend(), member.inline)
+            }
+            Self::ModuleMember {
+                suspend, inline, ..
+            }
+            | Self::ModuleMemberExtension {
+                suspend, inline, ..
+            }
+            | Self::ModuleExtension {
+                suspend, inline, ..
+            } => SelectedCallCapabilities::new(*suspend, *inline),
+            Self::ModuleTopLevel(callable) => {
+                SelectedCallCapabilities::new(callable.suspend, callable.inline)
+            }
+            Self::LocalFunction(callable) => SelectedCallCapabilities::new(
+                callable.sig.is_suspend(),
+                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice()),
+            ),
         }
-    }
-
-    /// Whether this EXACT checker-selected call is both suspending and inline. A suspend lambda's
-    /// state-machine body cannot currently splice such a callee, so lowering must decline it before
-    /// emitting a direct call. Keeping this classification on the resolved target is important: a
-    /// name-wide lookup would conflate overloads and unrelated members, while origin-specific probes
-    /// would make source, sibling-module, and classpath calls disagree.
-    pub(crate) fn is_suspend_inline(&self) -> bool {
-        self.is_suspend() && self.inline_kind().can_inline()
     }
 }
 
@@ -9835,6 +9852,26 @@ pub enum SyntheticOperatorCall {
 }
 
 impl SyntheticOperatorCall {
+    /// Every convention key, so a scan can ask "was ANY operator selected here?" without knowing
+    /// which spelling the source used. Keep in sync with the variants above.
+    pub(crate) const ALL: [Self; 15] = [
+        Self::RangeTo,
+        Self::Contains,
+        Self::Set,
+        Self::Put,
+        Self::Plus,
+        Self::Minus,
+        Self::Times,
+        Self::Div,
+        Self::Rem,
+        Self::UnaryMinus,
+        Self::UnaryPlus,
+        Self::Not,
+        Self::Inc,
+        Self::Dec,
+        Self::CompareTo,
+    ];
+
     fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "rangeTo" => Self::RangeTo,
@@ -10495,14 +10532,43 @@ pub enum CompoundAssignmentTarget {
         owner: TypeName,
         parameter: Ty,
         interface: bool,
+        capabilities: SelectedCallCapabilities,
     },
     SourceExtension {
         receiver: Ty,
         parameter: Ty,
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
+        capabilities: SelectedCallCapabilities,
     },
-    LibraryExtension(Box<crate::libraries::LibraryCallable>),
+    LibraryExtension {
+        callable: Box<crate::libraries::LibraryCallable>,
+        capabilities: SelectedCallCapabilities,
+    },
+}
+
+impl CompoundAssignmentTarget {
+    /// Whether the operator this compound assignment desugars to is a `suspend` function — i.e.
+    /// whether the statement is a SUSPENSION POINT. A compound assignment never appears as an
+    /// `Expr::Call`, so a call-shaped scan cannot see this; the coroutine classification asks here.
+    pub(crate) fn suspends(&self) -> bool {
+        match self {
+            Self::Member { capabilities, .. }
+            | Self::SourceExtension { capabilities, .. }
+            | Self::LibraryExtension { capabilities, .. } => capabilities.suspends(),
+        }
+    }
+
+    /// The stronger capability pair used by the suspend-lambda inline safety gate. Keeping it on the
+    /// selected target makes statement-form `plusAssign` agree with expression-form operators and
+    /// ordinary calls instead of growing another name/origin-specific lookup.
+    pub(crate) fn is_suspend_inline(&self) -> bool {
+        match self {
+            Self::Member { capabilities, .. }
+            | Self::SourceExtension { capabilities, .. }
+            | Self::LibraryExtension { capabilities, .. } => capabilities.is_suspend_inline(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -10533,6 +10599,75 @@ impl TypeInfo {
             StmtLowering::PlusAssign(target) => Some(target),
             _ => None,
         }
+    }
+
+    /// Apply one capability predicate to every exact target a convention-shaped EXPRESSION can select.
+    /// The checker keys indexed/safe/plain calls and synthetic operators separately; centralizing that
+    /// storage detail here keeps every later safety classifier syntax-independent.
+    fn convention_call_has(
+        &self,
+        expr_id: ExprId,
+        predicate: impl Fn(SelectedCallCapabilities) -> bool,
+    ) -> bool {
+        self.resolved_calls
+            .get(&expr_id)
+            .is_some_and(|call| predicate(call.capabilities()))
+            || SyntheticOperatorCall::ALL.iter().any(|&key| {
+                self.resolved_operator_calls
+                    .get(&(expr_id, key))
+                    .is_some_and(|call| predicate(call.capabilities()))
+            })
+    }
+
+    /// Statement counterpart of [`Self::convention_call_has`]. Statement-position operators use a
+    /// resolved-call table; an in-place compound assignment has a specialized emission target that
+    /// retains the same selected capabilities.
+    fn convention_stmt_has(
+        &self,
+        stmt_id: StmtId,
+        predicate: impl Fn(SelectedCallCapabilities) -> bool,
+        compound_predicate: impl Fn(&CompoundAssignmentTarget) -> bool,
+    ) -> bool {
+        SyntheticOperatorCall::ALL.iter().any(|&key| {
+            self.resolved_stmt_operator_calls
+                .get(&(stmt_id, key))
+                .is_some_and(|call| predicate(call.capabilities()))
+        }) || self
+            .compound_assignment_target(stmt_id)
+            .is_some_and(compound_predicate)
+    }
+
+    /// Whether a CONVENTION call selected at expression `expr_id` targets a `suspend` function —
+    /// indexed access (`b[i]`), an arithmetic/comparison operator (`a + b`, `a < b`), or a unary
+    /// operator. None of these is necessarily an `Expr::Call`, so coroutine classification asks the
+    /// exact selected capabilities instead of matching syntax.
+    pub(crate) fn convention_call_suspends(&self, expr_id: ExprId) -> bool {
+        self.convention_call_has(expr_id, SelectedCallCapabilities::suspends)
+    }
+
+    /// Statement form of [`Self::convention_call_suspends`].
+    pub(crate) fn convention_stmt_suspends(&self, stmt_id: StmtId) -> bool {
+        self.convention_stmt_has(
+            stmt_id,
+            SelectedCallCapabilities::suspends,
+            CompoundAssignmentTarget::suspends,
+        )
+    }
+
+    /// Whether an expression-form convention selected a `suspend inline` target. A suspend-lambda
+    /// state machine cannot splice it, so lowering must decline before emitting a direct call.
+    pub(crate) fn convention_call_is_suspend_inline(&self, expr_id: ExprId) -> bool {
+        self.convention_call_has(expr_id, SelectedCallCapabilities::is_suspend_inline)
+    }
+
+    /// Statement-form counterpart of [`Self::convention_call_is_suspend_inline`], including the
+    /// specialized in-place compound-assignment target.
+    pub(crate) fn convention_stmt_is_suspend_inline(&self, stmt_id: StmtId) -> bool {
+        self.convention_stmt_has(
+            stmt_id,
+            SelectedCallCapabilities::is_suspend_inline,
+            CompoundAssignmentTarget::is_suspend_inline,
+        )
     }
 
     /// Whether a lambda has an implicit receiver.
@@ -15187,6 +15322,28 @@ impl<'a> Checker<'a> {
             .into_iter()
             .map(|receiver| receiver.ty)
             .collect()
+    }
+
+    /// [`Self::implicit_receiver_types`] plus the enclosing `companion object`'s own type.
+    ///
+    /// A companion is not a `this` receiver unless it declares a supertype, so an unqualified call
+    /// to a sibling companion function (`apply2 { … }` from inside the companion) has no implicit
+    /// receiver carrying that member. Member-shape lookups still need one: without it a lambda
+    /// argument gets no expectation and `it` binds as `Any`.
+    fn implicit_member_receiver_types(&self) -> Vec<Ty> {
+        let mut receivers = self.implicit_receiver_types();
+        if let Some(companion) = self
+            .companion_of
+            .as_deref()
+            .and_then(|class| self.syms.classes.get(class))
+            .map(|class| type_name(&format!("{}$Companion", class.internal())))
+        {
+            let ty = Ty::obj_name(companion);
+            if !receivers.contains(&ty) {
+                receivers.push(ty);
+            }
+        }
+        receivers
     }
 
     fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
@@ -23238,7 +23395,7 @@ impl<'a> Checker<'a> {
                 }
             }
             // Resolve reference arithmetic through operator-call selection.
-            if let Ty::Obj(internal, _) = &lt {
+            if matches!(lt, Ty::Obj(..)) {
                 let op_name = op.arith_operator_name();
                 if let Some(fname) = op_name {
                     if let Some((ret, target)) =
@@ -23256,34 +23413,6 @@ impl<'a> Checker<'a> {
                     }
                     if self.report_required_operator_modifier(lt, fname, &[rt], operator_span) {
                         return self.set(e, Ty::Error);
-                    }
-                }
-                // A class `compareTo(o): Int` drives `<`/`<=`/`>`/`>=`.
-                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) && rt != Ty::Error {
-                    if let Some(sig) = self.syms.method_of_name(*internal, "compareTo") {
-                        if let Some(param) = sig.single_param().filter(|_| sig.ret == Ty::Int) {
-                            self.expect_assignable(param, rt, self.span(rhs), "operator argument");
-                            return self.set(e, Ty::Boolean);
-                        }
-                    }
-                    // A CLASSPATH `Comparable` type (`class Money : Comparable<Money>` compiled
-                    // separately): its `operator fun compareTo(o): Int` is on the classpath, not in
-                    // `method_of`. Resolve it through the library set and record the selected member
-                    // for lowering.
-                    // Only a REFERENCE right operand: an erased generic `Comparable<Double>.compareTo`
-                    // takes `Object`, so a PRIMITIVE argument would need a box the lowering path here
-                    // doesn't apply — leave that to the existing generic handling / a sound skip.
-                    if rt.is_reference() {
-                        if let Some(m) = self.resolve_instance_member(lt, "compareTo", &[rt]) {
-                            if m.ret == Ty::Int {
-                                crate::trace_compiler!(
-                                    "resolve",
-                                    "classpath compareTo drives comparison on {internal}"
-                                );
-                                self.resolved_calls.insert(e, ResolvedCall::Member(m));
-                                return self.set(e, Ty::Boolean);
-                            }
-                        }
                     }
                 }
                 // A library operator function on a reference receiver: `a + b` desugars to `a.plus(b)`,
@@ -23308,48 +23437,24 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // A user `compareTo(o): Int` EXTENSION on a nullable primitive (`Long?.compareTo`)
-            // drives `<`/`<=`/`>`/`>=` — the builtin comparison needs a non-null receiver, so the
-            // extension is the only applicable operator. Keyed under the boxed wrapper, which a
-            // non-null primitive comparison never looks up.
+            // One selected-target path for every non-builtin relational convention: a source/classpath
+            // member or extension `compareTo`. A nullable primitive is included because it has no
+            // builtin comparison; a non-null primitive is deliberately excluded because its builtin
+            // member wins over extensions. Recording the exact target removes the former source-only
+            // name/hierarchy fallback from coroutine classification and lets lowering use the same
+            // provider-neutral operator emitter for every origin.
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
-                && lt.nullable_primitive().is_some()
+                && (matches!(lt, Ty::Obj(..)) || lt.nullable_primitive().is_some())
                 && rt != Ty::Error
             {
-                let rhs_kind = self.checked_call_arg_kinds(&[rhs]);
-                if let Some((selected, signature)) = self
-                    .selected_source_extension(lt, "compareTo", &rhs_kind)
-                    .filter(|(_, signature)| signature.is_operator() && signature.ret == Ty::Int)
+                if let Some((ret, target)) =
+                    self.operator_call_ret(lt, "compareTo", &[rt], &[rhs], self.span(e))
                 {
-                    let inline = selected.flags.inline;
-                    let suspend = selected.flags.suspend;
-                    let Some(param) = signature.single_param() else {
-                        return self.check_binary(op, lt, rt, self.span(e));
-                    };
-                    self.expect_assignable(param, rt, self.span(rhs), "operator argument");
-                    let owner = signature.source_file.zip(signature.source_decl).and_then(
-                        |(file, declaration)| {
-                            self.syms
-                                .fn_facades_by_decl
-                                .get(&(file, declaration.0))
-                                .copied()
-                        },
-                    );
-                    self.resolved_operator_calls.insert(
-                        (e, SyntheticOperatorCall::CompareTo),
-                        ResolvedCall::ModuleExtension {
-                            receiver: lt,
-                            name: "compareTo".to_string(),
-                            params: signature.params.clone(),
-                            ret: signature.ret,
-                            owner,
-                            source: selected.source_key,
-                            vararg: selected.call_sig.vararg,
-                            inline,
-                            suspend,
-                        },
-                    );
-                    return self.set(e, Ty::Boolean);
+                    if ret == Ty::Int {
+                        self.resolved_operator_calls
+                            .insert((e, SyntheticOperatorCall::CompareTo), target);
+                        return self.set(e, Ty::Boolean);
+                    }
                 }
             }
             self.check_binary(op, lt, rt, self.span(e))
@@ -28988,6 +29093,59 @@ impl<'a> Checker<'a> {
             .map(|(_, member)| member)
     }
 
+    /// Select a module member and derive the generic/lambda plan shared by every VALUE-like receiver.
+    ///
+    /// A regular expression receiver, an `object` singleton, and a source companion differ in how
+    /// lowering materializes the receiver, but that physical origin must not change overload scoring
+    /// or contextual lambda typing. Keeping the select -> specialize -> map sequence here prevents
+    /// those call paths from acquiring subtly different named/default/trailing-lambda behavior.
+    fn module_member_lambda_plan(
+        &mut self,
+        call: ExprId,
+        receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+        partial_arg_tys: &[Option<Ty>],
+    ) -> (
+        Option<crate::libraries::LibraryMember>,
+        Option<GenericMemberPlan>,
+        Option<ModuleMemberLambdaShape>,
+    ) {
+        let argument_names = self.file.call_arg_names.get(&call.0).cloned();
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let member = self
+            .best_module_member_candidate(
+                &crate::module_symbols::ModuleSymbols::new(self.syms)
+                    .instance_members(receiver, name),
+                args,
+                partial_arg_tys,
+                argument_names.as_deref(),
+                trailing_lambda,
+            )
+            .cloned();
+        let generic = member.as_ref().and_then(|member| {
+            self.plan_generic_member(
+                receiver,
+                member.owner,
+                name,
+                Some(&member.params),
+                Some(partial_arg_tys),
+                argument_names.as_deref(),
+            )
+        });
+        let lambda = member.as_ref().and_then(|member| {
+            module_member_lambda_shape(
+                member,
+                generic.as_ref(),
+                args,
+                argument_names.as_deref(),
+                trailing_lambda,
+                self.member_inline_body_available(member),
+            )
+        });
+        (member, generic, lambda)
+    }
+
     fn check_applicable_module_member_call(
         &mut self,
         call: ExprId,
@@ -28999,13 +29157,126 @@ impl<'a> Checker<'a> {
         self.check_module_member_call_mode(call, rt, name, args, arg_tys, true)
     }
 
+    /// Argument types for a MODULE member call whose receiver is a *classifier* — an `object`
+    /// singleton (`Wrap.apply2 { … }`) or a companion (`Holder.apply2 { … }`).
+    ///
+    /// A classifier receiver reaches `check_module_member_call` with argument types computed up
+    /// front, so a lambda argument would otherwise be checked with no expectation and bind `it` as
+    /// `Any`. Type them the way the instance-receiver path in `check_call` does: select the
+    /// candidate from the receiver's members against the non-lambda arguments, then check each
+    /// lambda against that candidate's function-type parameter.
+    fn classifier_member_arg_tys(
+        &mut self,
+        call: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+    ) -> Vec<Ty> {
+        if !args
+            .iter()
+            .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+        {
+            return self.arg_tys(args);
+        }
+        // Lambda positions stay `None` until the candidate supplies their parameter types.
+        let partial: Vec<Option<Ty>> = args
+            .iter()
+            .map(|&a| {
+                if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                    None
+                } else {
+                    Some(self.expr(a))
+                }
+            })
+            .collect();
+        let (_, _, shape) = self.module_member_lambda_plan(call, rt, name, args, &partial);
+        // Non-lambda arguments keep the type from the pass above; re-typing them would duplicate
+        // whatever diagnostics that pass reported.
+        let Some(shape) = shape else {
+            return args
+                .iter()
+                .zip(&partial)
+                .map(|(&a, &typed)| typed.unwrap_or_else(|| self.expr(a)))
+                .collect::<Vec<_>>();
+        };
+        // A `Recv.() -> R` lambda argument binds `this@<name>` to the called member's name.
+        let call_fn_name = name.to_string();
+        self.with_lambda_mutation(shape.is_inline, |c| {
+            args.iter()
+                .enumerate()
+                .map(|(i, &a)| {
+                    if let Some(typed) = partial[i] {
+                        return typed;
+                    }
+                    if matches!(c.file.expr(a), Expr::Lambda { .. }) {
+                        if let Some(pt) = shape.param_types.get(i).and_then(Option::as_deref) {
+                            let receiver = shape.receivers.get(i).copied().flatten();
+                            if let Some(signature) = shape.signatures.get(i).copied().flatten() {
+                                return c.check_lambda_with_function_type_and_params_labeled(
+                                    a,
+                                    signature,
+                                    pt,
+                                    receiver.is_some(),
+                                    Some(&call_fn_name),
+                                );
+                            }
+                            if let Some(receiver) = receiver {
+                                return c.check_lambda_with_receiver_labeled(
+                                    a,
+                                    receiver,
+                                    pt.get(1..).unwrap_or_default(),
+                                    Some(&call_fn_name),
+                                );
+                            }
+                            return c.check_lambda_with_types(a, pt);
+                        }
+                    }
+                    c.expr(a)
+                })
+                .collect()
+        })
+    }
+
+    /// `Type(args)` resolved as the source companion's `operator fun invoke` — the factory kotlinc
+    /// selects when no constructor is applicable (an interface has none at all).
+    ///
+    /// The arguments were already typed for the construction, with no expectation for a lambda
+    /// argument; the operator re-types them against ITS parameters, so `first_arg_diag` (the
+    /// diagnostic count taken before that pass) marks complaints that never applied to the call
+    /// being made. Those are dropped once the operator is the selected candidate — but the
+    /// operator's OWN diagnostics are kept. Selection must not depend on whether the argument
+    /// bodies type-check: backing out because a lambda body has an unrelated error would report
+    /// the construction's failure (`cannot create an instance of an interface`) on top of it.
+    ///
+    /// The operator is the candidate when the call resolves to it. `Ty::Error` with nothing
+    /// reported is not a resolution — `check_module_member_call` suppresses its own inapplicable
+    /// -overload diagnostic when the call already carries an argument diagnostic, and here that
+    /// is precisely the provisional pass this would then erase, leaving the call silent.
+    fn take_source_companion_invoke(
+        &mut self,
+        call: ExprId,
+        class: &ClassSig,
+        args: &[ExprId],
+        first_arg_diag: usize,
+    ) -> Option<Ty> {
+        let before = self.diags.diags.len();
+        let ret =
+            self.check_source_companion_call(call, class, CALLABLE_INVOKE_OPERATOR, args, true);
+        let resolved = ret.filter(|ret| *ret != Ty::Error || self.diags.diags.len() != before);
+        let Some(ret) = resolved else {
+            self.diags.diags.truncate(before);
+            return None;
+        };
+        self.diags.diags.drain(first_arg_diag..before);
+        Some(ret)
+    }
+
     fn check_source_companion_call(
         &mut self,
         call: ExprId,
         class: &ClassSig,
         name: &str,
         args: &[ExprId],
-        arg_tys: &[Ty],
         require_operator: bool,
     ) -> Option<Ty> {
         let signature = class.static_methods.get(name)?;
@@ -29014,7 +29285,10 @@ impl<'a> Checker<'a> {
             return None;
         }
         let owner = type_name(&format!("{}$Companion", class.internal()));
-        let ret = self.check_module_member_call(call, Ty::obj_name(owner), name, args, arg_tys)?;
+        // Type the arguments against the COMPANION's signature, not the enclosing call's eager pass:
+        // a lambda argument to a companion function needs the companion member's parameter types.
+        let arg_tys = self.classifier_member_arg_tys(call, Ty::obj_name(owner), name, args);
+        let ret = self.check_module_member_call(call, Ty::obj_name(owner), name, args, &arg_tys)?;
         self.expr_lowers.insert(
             call,
             ExprLowering::ObjectMemberCall {
@@ -30143,12 +30417,13 @@ impl<'a> Checker<'a> {
                             source_class.as_ref().is_some_and(|class| class.is_object());
                         // Ordinary object members precede synthesized static fallbacks.
                         if is_object {
-                            let arg_tys = self.arg_tys(args);
                             let internal = source_class
                                 .as_ref()
                                 .map(ClassSig::internal_name)
                                 .expect("source object has a signature");
                             let receiver_ty = Ty::obj_name(internal);
+                            let arg_tys =
+                                self.classifier_member_arg_tys(call, receiver_ty, &name, args);
                             let arg_names = self.file.call_arg_names.get(&call.0).cloned();
                             let full_arg_tys =
                                 arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
@@ -30189,11 +30464,8 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .is_some_and(|class| class.companion_fun_names.contains(&name));
                         if source_companion {
-                            let arg_tys = self.arg_tys(args);
                             if let Some(ret) = source_class.as_ref().and_then(|class| {
-                                self.check_source_companion_call(
-                                    call, class, &name, args, &arg_tys, false,
-                                )
+                                self.check_source_companion_call(call, class, &name, args, false)
                             }) {
                                 return ret;
                             }
@@ -30209,11 +30481,16 @@ impl<'a> Checker<'a> {
                             return sig.ret;
                         }
                         if is_object {
-                            let arg_tys = self.arg_tys(args);
                             let internal = source_class
                                 .as_ref()
                                 .map(ClassSig::internal_name)
                                 .expect("source object has a signature");
+                            let arg_tys = self.classifier_member_arg_tys(
+                                call,
+                                Ty::obj_name(internal),
+                                &name,
+                                args,
+                            );
                             if let Some(ret) = self.check_module_member_call(
                                 call,
                                 Ty::obj_name(internal),
@@ -30359,38 +30636,11 @@ impl<'a> Checker<'a> {
                         }
                     })
                     .collect::<Vec<_>>();
-                let method_sig: Option<crate::libraries::LibraryMember> = self
-                    .best_module_member_candidate(
-                        &crate::module_symbols::ModuleSymbols::new(self.syms)
-                            .instance_members(rt, &name),
-                        args,
-                        &generic_member_partial,
-                        arg_names.as_deref(),
-                        self.file.call_has_trailing_lambda.contains(&call.0),
-                    )
-                    .cloned();
-                // Preserve generic receiver bindings while typing member lambda arguments.
-                let generic_member: Option<GenericMemberPlan> =
-                    method_sig.as_ref().and_then(|member| {
-                        self.plan_generic_member(
-                            rt,
-                            member.owner,
-                            &name,
-                            Some(&member.params),
-                            Some(&generic_member_partial),
-                            arg_names.as_deref(),
-                        )
-                    });
-                let module_lambda_shape = method_sig.as_ref().and_then(|member| {
-                    module_member_lambda_shape(
-                        member,
-                        generic_member.as_ref(),
-                        args,
-                        arg_names.as_deref(),
-                        self.file.call_has_trailing_lambda.contains(&call.0),
-                        self.member_inline_body_available(member),
-                    )
-                });
+                // Selection and contextual lambda typing depend on the receiver's semantic members,
+                // not on whether lowering later obtains that receiver from an expression, an object
+                // singleton, or a companion field. Classifier receivers use this same planner above.
+                let (method_sig, generic_member, module_lambda_shape) =
+                    self.module_member_lambda_plan(call, rt, &name, args, &generic_member_partial);
                 crate::trace_compiler!(
                     "resolve",
                     "MCALL name={name} rt={rt:?} nargs={} generic_member={}",
@@ -31852,7 +32102,7 @@ impl<'a> Checker<'a> {
                 let ordinary_this_member_lambda_shape: Option<ModuleMemberLambdaShape> =
                     if implicit_member_lambda_enabled {
                         let partial = this_member_partial.as_deref().unwrap_or_default();
-                        self.implicit_receiver_types()
+                        self.implicit_member_receiver_types()
                             .into_iter()
                             .find_map(|receiver| {
                                 let members = crate::module_symbols::ModuleSymbols::new(self.syms)
@@ -32038,6 +32288,10 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // Diagnostics from typing the arguments below are provisional while `fname` may name a
+                // class: if no constructor accepts them, a companion `operator fun invoke` re-types
+                // them against ITS signature and this pass's complaints never applied.
+                let pre_arg_diags = self.diags.diags.len();
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
@@ -32459,14 +32713,9 @@ impl<'a> Checker<'a> {
                     };
                     if let Some(cls) = ctor_cls {
                         if cls.is_interface() {
-                            if let Some(ret) = self.check_source_companion_call(
-                                call,
-                                &cls,
-                                CALLABLE_INVOKE_OPERATOR,
-                                args,
-                                &arg_tys,
-                                true,
-                            ) {
+                            if let Some(ret) =
+                                self.take_source_companion_invoke(call, &cls, args, pre_arg_diags)
+                            {
                                 return ret;
                             }
                         }
@@ -32485,6 +32734,14 @@ impl<'a> Checker<'a> {
                         let Some(selected) =
                             self.select_source_constructor(&arguments, &candidates)
                         else {
+                            // `Type { … }` / `Type(x)` where no constructor is applicable but the
+                            // COMPANION declares `operator fun invoke`: kotlinc picks the operator, so
+                            // the call is a factory, not a construction.
+                            if let Some(ret) =
+                                self.take_source_companion_invoke(call, &cls, args, pre_arg_diags)
+                            {
+                                return ret;
+                            }
                             if !self.report_source_constructor_mapping_error(
                                 call,
                                 args,
@@ -33724,6 +33981,10 @@ impl<'a> Checker<'a> {
         if ret != Ty::Unit {
             return false;
         }
+        // Preserve the complete capability pair before specializing the selected call into the
+        // statement emitter's target shape. Coroutine classification consumes the same facts as every
+        // other call form; it must not reconstruct them later from an operator name or provider.
+        let capabilities = call.capabilities();
         let target = match call {
             ResolvedCall::ModuleMember {
                 owner,
@@ -33738,6 +33999,7 @@ impl<'a> Checker<'a> {
                     owner,
                     parameter: *parameter,
                     interface,
+                    capabilities,
                 }
             }
             ResolvedCall::ModuleExtension {
@@ -33755,11 +34017,13 @@ impl<'a> Checker<'a> {
                     parameter: *parameter,
                     owner,
                     source,
+                    capabilities,
                 }
             }
-            ResolvedCall::Extension(callable) => {
-                CompoundAssignmentTarget::LibraryExtension(Box::new(callable))
-            }
+            ResolvedCall::Extension(callable) => CompoundAssignmentTarget::LibraryExtension {
+                callable: Box::new(callable),
+                capabilities,
+            },
             _ => return false,
         };
         self.stmt_lowers.insert(s, StmtLowering::PlusAssign(target));
@@ -37643,7 +37907,10 @@ fun box(): String {
                 _ => None,
             })
             .expect("source should contain a < b comparison");
-        let Some(ResolvedCall::Member(selected)) = info.resolved_calls.get(&comparison) else {
+        let Some(ResolvedCall::Member(selected)) = info
+            .resolved_operator_calls
+            .get(&(comparison, SyntheticOperatorCall::CompareTo))
+        else {
             panic!("checker must record classpath compareTo selected for relational lowering");
         };
         assert_eq!(selected.member.name, "compareTo");

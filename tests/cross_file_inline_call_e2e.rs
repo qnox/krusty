@@ -501,6 +501,99 @@ fn reified_value_parameter_inline_extension_cross_file_still_rejects() {
     );
 }
 
+/// A sibling-file `suspend operator` EXTENSION, reached through each of the three convention forms
+/// (indexed access, compound assignment, comparison). None of these is an `Expr::Call`, so the
+/// coroutine classification cannot find them by call shape — but that is not what decides these
+/// cases: the file DECLARING a `suspend` extension is refused whole by `gate:extension-suspend-fn`
+/// (pinned below), so the sibling-file call has no callee to link against and the module must not
+/// compile at all. Asserting the refusal directly — rather than tolerating it — is what keeps this
+/// honest: whoever retires that gate gets a failure here and has to prove the shape RUNS, instead of
+/// inheriting a green test that silently passes on a `None`.
+///
+/// The stake is a wrong ANSWER, not a crash: were the call left linking against a stale pre-CPS
+/// descriptor while its callee gained the CPS signature, the `NoSuchMethodError` would be swallowed
+/// by the driving `Continuation` and `box()` would return "fail" instead of failing.
+fn assert_module_refused(sources: &[(&str, &str)], what: &str) {
+    let Some(stdlib) = common::stdlib_jar() else {
+        return;
+    };
+    let Some(jdk) = common::jdk_modules() else {
+        return;
+    };
+    assert_eq!(
+        common::compile_and_run_box_files(sources, &[stdlib], Some(&jdk)),
+        None,
+        "{what}: a suspend extension operator is refused, never emitted — if this now compiles, \
+         assert the box() answer instead of deleting the check"
+    );
+}
+
+/// Why the three cases below are refused, named precisely so the reason cannot drift to some
+/// unrelated emit failure while the tests stay green.
+#[test]
+fn suspend_operator_extension_file_stops_at_the_extension_gate() {
+    common::assert_inline_source_lower_bail(
+        "class Box(var v: Int)\n\
+         suspend operator fun Box.get(i: Int): Int = v + i\n",
+        "gate:extension-suspend-fn",
+    );
+}
+
+const SUSPEND_CONVENTION_MAIN: &str = "import kotlin.coroutines.*\n\
+                                       class EC : Continuation<Unit> {\n\
+                                       \x20   override val context: CoroutineContext = EmptyCoroutineContext\n\
+                                       \x20   override fun resumeWith(result: Result<Unit>) {}\n\
+                                       }\n";
+
+#[test]
+fn suspend_operator_get_convention_cross_file_still_rejects() {
+    const LIB: &str = "class Box(var v: Int)\n\
+                       suspend operator fun Box.get(i: Int): Int = v + i\n";
+    let main = format!(
+        "{SUSPEND_CONVENTION_MAIN}fun box(): String {{\n\
+         \x20   var r = 0\n\
+         \x20   val b = Box(1)\n\
+         \x20   suspend {{ r = b[1] }}.startCoroutine(EC())\n\
+         \x20   return if (r == 2) \"OK\" else \"fail: $r\"\n\
+         }}\n"
+    );
+    assert_module_refused(&[("Lib.kt", LIB), ("Main.kt", &main)], "indexed access");
+}
+
+#[test]
+fn suspend_operator_plus_assign_convention_cross_file_still_rejects() {
+    const LIB: &str = "class Box(var v: Int)\n\
+                       suspend operator fun Box.plus(i: Int): Box = Box(v + i)\n";
+    let main = format!(
+        "{SUSPEND_CONVENTION_MAIN}fun box(): String {{\n\
+         \x20   var r = 0\n\
+         \x20   var b = Box(1)\n\
+         \x20   suspend {{ b += 2; r = b.v }}.startCoroutine(EC())\n\
+         \x20   return if (r == 3) \"OK\" else \"fail: $r\"\n\
+         }}\n"
+    );
+    assert_module_refused(
+        &[("Lib.kt", LIB), ("Main.kt", &main)],
+        "compound assignment",
+    );
+}
+
+#[test]
+fn suspend_operator_compare_to_convention_cross_file_still_rejects() {
+    const LIB: &str = "class Box(var v: Int)\n\
+                       suspend operator fun Box.compareTo(o: Box): Int = v - o.v\n";
+    let main = format!(
+        "{SUSPEND_CONVENTION_MAIN}fun box(): String {{\n\
+         \x20   var r = 0\n\
+         \x20   val a = Box(1)\n\
+         \x20   val b = Box(2)\n\
+         \x20   suspend {{ r = if (a < b) 7 else 9 }}.startCoroutine(EC())\n\
+         \x20   return if (r == 7) \"OK\" else \"fail: $r\"\n\
+         }}\n"
+    );
+    assert_module_refused(&[("Lib.kt", LIB), ("Main.kt", &main)], "comparison");
+}
+
 /// Guard: a SUSPEND inline extension CPS-lowers per call — it stays splice-only and the
 /// cross-file call still rejects.
 #[test]
