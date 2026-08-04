@@ -337,3 +337,28 @@ fn projected_generic_extension_receiver_with_concrete_inference_is_accepted() {
         Some("OK")
     );
 }
+
+#[test]
+fn suspend_ctor_arg_after_side_effect_rejected() {
+    // `S(g(), d())` with a suspending second constructor argument: hoisting `d()` would run it
+    // BEFORE the non-suspending `g()`, inverting Kotlin's left-to-right evaluation. The hoist
+    // declines the shape (a preceding argument that is not a constant/local read), so the
+    // flattener bails and the file skips rather than miscompiles.
+    assert!(rejects(
+        "class S(val a: Int, val b: Int)\n\
+         var log = 0\n\
+         fun g(): Int { log += 1; return log }\n\
+         suspend fun d(): Int = 1\n\
+         suspend fun f(): Int { val s = S(g(), d()); return s.a + s.b }\n"
+    ));
+}
+
+#[test]
+fn suspend_ctor_single_arg_accepted() {
+    // The production shape — one (suspending) constructor argument — stays hoistable.
+    assert!(!rejects(
+        "class S(val a: Int)\n\
+         suspend fun d(): Int = 1\n\
+         suspend fun f(): Int { val s = S(d()); return s.a }\n"
+    ));
+}

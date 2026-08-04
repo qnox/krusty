@@ -247,3 +247,52 @@ fn bound_val_try_runs_and_filters() {
         }\n";
     assert_eq!(run("Main", MAIN).expect("bound val try"), "11/10/ise");
 }
+
+#[test]
+fn multi_catch_subtype_ordering_first_match_wins() {
+    // Source order selects the FIRST matching clause: a `SubEx` thrown with `catch (e: SubEx)`
+    // BEFORE `catch (e: SupEx)` must take the first arm even though both match.
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        open class SupEx(msg: String) : RuntimeException(msg)\n\
+        class SubEx(msg: String) : SupEx(msg)\n\
+        suspend fun s(k: String): String = k\n\
+        suspend fun f(sub: Boolean): String {\n\
+        \x20 return try {\n\
+        \x20\x20 val v = s(\"v\")\n\
+        \x20\x20 if (sub) throw SubEx(\"s-\" + v) else throw SupEx(\"p-\" + v)\n\
+        \x20 } catch (e: SubEx) {\n\
+        \x20\x20 \"sub:\" + e.message\n\
+        \x20 } catch (e: SupEx) {\n\
+        \x20\x20 \"sup:\" + e.message\n\
+        \x20 }\n\
+        }\n\
+        fun box(): String = runBlocking { f(true) + \"/\" + f(false) }\n";
+    assert_eq!(
+        run("Main", MAIN).expect("subtype-ordered multi-catch"),
+        "sub:s-v/sup:p-v"
+    );
+}
+
+#[test]
+fn multi_catch_with_trailing_throwable_arm() {
+    // A guarded arm followed by a full-coverage `Throwable` arm: the trailing arm is unguarded
+    // (no re-throw else), and both selection directions must behave.
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        class A(msg: String) : RuntimeException(msg)\n\
+        suspend fun s(k: String): String = k\n\
+        suspend fun f(a: Boolean): String {\n\
+        \x20 return try {\n\
+        \x20\x20 val v = s(\"v\")\n\
+        \x20\x20 if (a) throw A(\"a-\" + v) else throw IllegalStateException(\"i-\" + v)\n\
+        \x20 } catch (e: A) {\n\
+        \x20\x20 \"A:\" + e.message\n\
+        \x20 } catch (e: Throwable) {\n\
+        \x20\x20 \"T:\" + e.message\n\
+        \x20 }\n\
+        }\n\
+        fun box(): String = runBlocking { f(true) + \"/\" + f(false) }\n";
+    assert_eq!(
+        run("Main", MAIN).expect("trailing Throwable arm"),
+        "A:a-v/T:i-v"
+    );
+}

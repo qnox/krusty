@@ -1277,13 +1277,30 @@ fn hoist_expr(
             e
         }
         // A construction whose argument suspends (`Sub(mk().tag)`): constructor arguments evaluate
-        // unconditionally left-to-right, so each suspension there hoists like any call argument.
+        // unconditionally left-to-right, so each suspension there hoists like any call argument —
+        // but ONLY when every argument BEFORE the last suspending one is effect-free. A preceding
+        // argument left inline would run AFTER the hoisted suspension (`Sub(f(), susp())` →
+        // `val t = susp(); Sub(f(), t)`), where Kotlin evaluates strictly left-to-right. Leave the
+        // risky shape unhoisted: the flattener then bails and the file SKIPS rather than
+        // miscompiles. (`Sub(mk().tag + "!")` — a single argument — is the production shape and
+        // stays hoistable.)
         IrExpr::New {
             internal,
             args,
             ctor_params,
             ctor_desc,
         } => {
+            let last_susp = args
+                .iter()
+                .rposition(|&a| expr_calls_suspend(ir, a, suspend_set));
+            if let Some(last) = last_susp {
+                let prefix_pure = args[..last].iter().all(|&a| {
+                    matches!(ir.exprs[a as usize], IrExpr::Const(_) | IrExpr::GetValue(_))
+                });
+                if !prefix_pure {
+                    return e;
+                }
+            }
             let na: Vec<ExprId> = args
                 .iter()
                 .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
