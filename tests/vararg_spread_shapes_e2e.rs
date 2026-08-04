@@ -4,13 +4,30 @@
 //!   s2  EXTENSION vararg with MIXED element + spread (`b.seg("a", *s)`): reported an arity error
 //!       ("expects 1 args, got 2") — the extension path never expanded the vararg slot for a mix.
 //!   s3  the same mix when the vararg is followed by a defaulted parameter
-//!       (`fun B.segd(vararg s: String, flag: Boolean = false)`), the ktor
-//!       `URLBuilder.appendPathSegments("admin", "realms", *segments)` shape.
+//!       (`fun B.segd(vararg s: String, flag: Boolean = false)`), the common builder API shape
+//!       that appends fixed path components followed by a caller-provided component array.
 //!   s4  a CLASSPATH extension with those shapes, plus `flag = true` NAMED after positional
 //!       vararg elements — the classpath candidate reported "none of the following candidates
 //!       is applicable".
 //! Each box() checks the RUNTIME packing (joined elements + flag), not just acceptance.
 use super::common;
+
+/// Multi-file fixtures in this module exercise the backend boundary, so a front-end-clean `None`
+/// is a failure, not an acceptable skip. Keeping that strict contract in one helper prevents a new
+/// source-origin case from accidentally weakening runtime coverage while still reporting useful
+/// diagnostics when the checker, rather than lowering, rejected the fixture.
+fn expect_files_run(sources: &[(&str, &str)], label: &str) -> String {
+    common::compile_and_run_files_with_stdlib(sources).unwrap_or_else(|| {
+        let stdlib = common::stdlib_jar();
+        let jdk = common::jdk_modules();
+        let texts: Vec<&str> = sources.iter().map(|(_, text)| *text).collect();
+        let diagnostics =
+            common::front_end_diagnostics_files(&texts, &[stdlib], Some(jdk.as_path()));
+        panic!(
+            "{label}: multi-file call must compile and run; diagnostics (empty means backend decline): {diagnostics:?}"
+        );
+    })
+}
 
 #[test]
 fn source_top_level_named_after_vararg_elements() {
@@ -85,6 +102,26 @@ fn source_extension_named_after_vararg_elements() {
 }
 
 #[test]
+fn source_extension_named_final_vararg_without_defaults_runs() {
+    // A named vararg call is slot-mapped even when the declaration has no defaults. Lowering must
+    // consume that semantic map directly: requiring an unrelated defaults table here made the
+    // checker accept `items = *values` and then silently drop the whole file during IR lowering.
+    const SRC: &str = "class Holder\n\
+        fun Holder.collect(vararg items: String): String = items.joinToString(\"\")\n\
+        fun box(): String {\n\
+        \x20 val values = arrayOf(\"O\", \"K\")\n\
+        \x20 val direct = Holder().collect(items = values)\n\
+        \x20 val spread = Holder().collect(items = *values)\n\
+        \x20 return if (direct == \"OK\" && spread == \"OK\") \"OK\" else \"F:\" + direct + \"/\" + spread\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SRC, "named_final_vararg_no_defaults")
+            .expect("strict helper always returns Some"),
+        "OK"
+    );
+}
+
+#[test]
 fn source_cross_file_extension_mixed_spread() {
     // The same-module SIBLING-FILE form: the vararg position must come from the checker's
     // record, not from a declaration this file does not contain.
@@ -103,21 +140,34 @@ fn source_cross_file_extension_mixed_spread() {
              }\n",
         ),
     ];
-    if let Some(out) = common::compile_and_run_files_with_stdlib(&sources) {
-        assert_eq!(out, "OK", "cross-file mixed spread");
-    } else {
-        // A lowering decline (file skip) is tolerated; a FRONTEND diagnostic is the false
-        // positive this suite exists to prevent.
-        let stdlib = common::stdlib_jar();
-        let jdk = common::jdk_modules();
-        let texts: Vec<&str> = sources.iter().map(|(_, text)| *text).collect();
-        let diagnostics =
-            common::front_end_diagnostics_files(&texts, &[stdlib], Some(jdk.as_path()));
-        assert!(
-            diagnostics.is_empty(),
-            "cross-file mixed spread must not produce diagnostics: {diagnostics:?}"
-        );
-    }
+    assert_eq!(expect_files_run(&sources, "cross-file mixed spread"), "OK");
+}
+
+#[test]
+fn source_cross_file_extension_uses_recorded_vararg_slots() {
+    // Same-module declarations must lower from the checker's selected identity and argument slots,
+    // regardless of which source file owns the declaration. This covers both a fully supplied named
+    // call and an omitted constant default; the old sibling-facade arm explicitly declined every
+    // slot-mapped vararg call even though the same-file arm emitted the identical semantic shape.
+    let sources = [
+        (
+            "Library.kt",
+            "class Holder\n\
+             fun Holder.collect(vararg items: String, marked: Boolean = false): String =\n\
+             \x20 items.joinToString(\"\") + marked\n",
+        ),
+        (
+            "Consumer.kt",
+            "fun box(): String {\n\
+             \x20 val values = arrayOf(\"O\", \"K\")\n\
+             \x20 val named = Holder().collect(items = *values, marked = true)\n\
+             \x20 val omitted = Holder().collect(*values)\n\
+             \x20 return if (named == \"OKtrue\" && omitted == \"OKfalse\") \"OK\" else \"F:\" + named + \"/\" + omitted\n\
+             }\n",
+        ),
+    ];
+    let output = expect_files_run(&sources, "cross-file selected vararg slots");
+    assert_eq!(output, "OK", "cross-file selected vararg slots");
 }
 
 #[test]
@@ -203,8 +253,9 @@ fn source_top_level_named_after_spread() {
         \x20 s.joinToString(\"\") + flag\n\
         fun box(): String {\n\
         \x20 val xs = arrayOf(\"O\", \"K\")\n\
-        \x20 val got = topd(*xs, flag = true)\n\
-        \x20 return if (got == \"OKtrue\") \"OK\" else \"F:\" + got\n\
+        \x20 val spread = topd(*xs, flag = true)\n\
+        \x20 val direct = topd(s = xs, flag = true)\n\
+        \x20 return if (spread == \"OKtrue\" && direct == \"OKtrue\") \"OK\" else \"F:\" + spread + \"/\" + direct\n\
         }\n";
     assert_eq!(
         common::expect_box_run_with_stdlib(SRC, "named_after_spread_top")
@@ -218,8 +269,8 @@ const LIB: &str = "package lib\n\
     fun B.segd(vararg s: String, flag: Boolean = false): String =\n\
     \x20 s.joinToString(\"\") + flag\n";
 
-// The ktor `URLBuilder.appendPathSegments` shape: the SAME name declares a vararg overload and a
-// `List` overload, both with a trailing defaulted parameter.
+// A dependency builder shape: the SAME name declares a vararg overload and a `List` overload,
+// both with a trailing defaulted parameter.
 const OVERLOAD_LIB: &str = "package lib\n\
     class U\n\
     fun U.seg(vararg components: String, encodeSlash: Boolean = false): String =\n\
@@ -311,5 +362,22 @@ fn classpath_extension_named_after_spread() {
         }\n";
     if let Some(out) = common::expect_box_run_against("cp_vararg_spread_named", LIB, MAIN) {
         assert_eq!(out, "OK", "classpath named after spread");
+    }
+}
+
+#[test]
+fn classpath_extension_named_whole_array_runs() {
+    // Classpath metadata and module signatures feed the same slot consumer. Pin the direct-array
+    // form separately from `*xs`: it must pass the selected array through, not store that array as
+    // one String element and fail later with `ArrayStoreException`.
+    const MAIN: &str = "import lib.B\n\
+        import lib.segd\n\
+        fun box(): String {\n\
+        \x20 val xs = arrayOf(\"O\", \"K\")\n\
+        \x20 val got = B().segd(s = xs, flag = true)\n\
+        \x20 return if (got == \"OKtrue\") \"OK\" else \"F:\" + got\n\
+        }\n";
+    if let Some(out) = common::expect_box_run_against("cp_vararg_named_array", LIB, MAIN) {
+        assert_eq!(out, "OK", "classpath named whole-array vararg");
     }
 }

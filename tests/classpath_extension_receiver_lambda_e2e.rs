@@ -3,7 +3,7 @@
 //! declared receiver, exactly like a module declaration. Before, the classpath extension path
 //! published its call shape without the receiver-lambda marks, so a bare member or extension call
 //! inside the block (`member("t")`, `ext("t")`) reported "unresolved function" — a false positive
-//! on any ktor-style builder DSL (`http.post(url) { bearerAuth(t) }`). The non-extension form
+//! on dependency-backed builder DSLs (`service.configure { enableFeature() }`). The non-extension form
 //! (`fun build(block: Builder.() -> Unit)`) already worked; plain, `inline`, and `suspend`
 //! extension variants all failed the same way.
 use super::common;
@@ -98,7 +98,7 @@ fn source_extension_lambda_binds_member_and_extension_calls() {
 
 #[test]
 fn classpath_suspend_extension_lambda_binds_calls() {
-    // The ktor `http.post(url) { bearerAuth(t) }` shape: a SUSPEND classpath extension with a
+    // A dependency-backed builder shape: a SUSPEND classpath extension with a
     // receiver-lambda parameter. The checker must accept the block's bare member/extension calls.
     const MAIN: &str = "import lib.Client\n\
         import lib.ext\n\

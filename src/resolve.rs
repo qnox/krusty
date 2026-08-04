@@ -9818,6 +9818,10 @@ pub enum ResolvedCall {
         /// (`fun B.segd(vararg s: String, flag: Boolean = false)`), and the lowerer must not
         /// re-derive the position from a declaration it may not have (a sibling file's).
         vararg_index: Option<usize>,
+        /// File-independent source defaults, parallel to `params`. The selected call carries these
+        /// beside its vararg slot so lowering consumes one semantic record for same-file and sibling-
+        /// file extensions; it must not recover defaults by probing a declaration's physical origin.
+        param_default_values: Vec<Option<CtorDefaultValue>>,
         /// Selected callable capabilities. Carrying the complete semantic facts, rather than only a
         /// derived `requires_splice` bit, lets safety gates distinguish `suspend inline` from ordinary
         /// inline calls and keeps those gates independent of declaration name and symbol origin.
@@ -14478,11 +14482,8 @@ impl<'a> Checker<'a> {
         params: &[Ty],
     ) -> bool {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
-        if arg_names.is_none() && selected.call_sig.vararg {
-            self.expect_call_args_at(params, selected.call_sig.vararg_index, args, arg_tys);
-            return true;
-        }
         if arg_names.is_some()
+            || selected.call_sig.vararg
             || (arg_tys.len() != params.len()
                 && selected.call_sig.can_map_omitted_args(params.len()))
         {
@@ -16423,6 +16424,7 @@ impl<'a> Checker<'a> {
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
                     vararg_index: selected.call_sig.vararg_index,
+                    param_default_values: sig.param_default_values.clone(),
                     inline,
                     suspend,
                 },
@@ -23133,6 +23135,7 @@ impl<'a> Checker<'a> {
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
                         vararg_index: selected.call_sig.vararg_index,
+                        param_default_values: sig.param_default_values.clone(),
                         inline,
                         suspend,
                     },
@@ -25735,6 +25738,7 @@ impl<'a> Checker<'a> {
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
                 vararg_index: selected.call_sig.vararg_index,
+                param_default_values: sig.param_default_values.clone(),
                 inline,
                 suspend,
             },
@@ -27143,6 +27147,7 @@ impl<'a> Checker<'a> {
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
                     vararg_index: fi.call_sig.vararg_index,
+                    param_default_values: signature.param_default_values,
                     inline,
                     suspend,
                 },
@@ -34918,6 +34923,14 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                             }
+                        }
+                        // A named/trailing-lambda vararg call already passed through the common
+                        // slot mapper above. Preserve that exact semantic handoff just as the
+                        // non-vararg arm does; formerly this vararg branch type-checked through a
+                        // separate per-argument map and then discarded `mapped_slots`, forcing the
+                        // backend to parse labels again to know which values to pack.
+                        if let Some(slots) = mapped_slots {
+                            self.resolved_call_arg_slots.insert(call, slots);
                         }
                     } else if let Some(slots) = mapped_slots {
                         for (i, slot) in slots.iter().enumerate() {

@@ -5610,6 +5610,33 @@ enum IncDecSite {
     Expression(AstExprId),
 }
 
+/// How the common checker-slot consumer fills a parameter that has no source argument. Keeping the
+/// policy explicit lets module/source/classpath call sites share argument evaluation and vararg
+/// packing without confusing three different ABI meanings of an empty slot: unsupported, a
+/// `$default` placeholder (except for its non-null vararg array), or a source constant default.
+#[derive(Clone, Copy)]
+enum OmittedSlotPolicy<'a> {
+    Reject,
+    DefaultPlaceholders {
+        vararg: Option<usize>,
+    },
+    SourceDefaults {
+        values: &'a [Option<CtorDefaultValue>],
+        semantic_params: &'a [Ty],
+    },
+}
+
+#[derive(Clone, Copy)]
+struct LoweredVarargContribution {
+    temp: u32,
+    /// An explicit `*array`: merge/copy it through the platform spread builder.
+    spread: bool,
+    /// A named whole-array value (`items = values`): pass the sole array through directly. This is
+    /// distinct from both a plain element and `*values`; storing the array as one element produces
+    /// an `ArrayStoreException`, while treating it as a spread changes the call's copy semantics.
+    whole_array: bool,
+}
+
 pub(crate) struct Lower<'a> {
     afile: &'a ast::File,
     file_index: u32,
@@ -11800,7 +11827,15 @@ impl<'a> Lower<'a> {
             }
             let named = self.afile.call_arg_names.contains_key(&call.0);
             let (lowered_args, prelude) = if named {
-                self.lower_module_vararg_named_args(call, args, target, &ir_params, vararg)?
+                let slots = self.info.resolved_call_arg_slots.get(&call)?.clone();
+                self.lower_source_slot_args(
+                    args,
+                    &slots,
+                    &ir_params,
+                    &target.params,
+                    Some(vararg),
+                    &target.param_default_values,
+                )?
             } else if vararg + 1 < ir_params.len() {
                 (
                     self.lower_non_last_vararg_args(call, args, &ir_params, vararg)?,
@@ -12022,89 +12057,6 @@ impl<'a> Lower<'a> {
         } else {
             Some((self.lower_args(args, params)?, Vec::new()))
         }
-    }
-
-    fn lower_source_extension_args(
-        &mut self,
-        function: u32,
-        call: AstExprId,
-        args: &[AstExprId],
-        params: &[Ty],
-        vararg_index: Option<usize>,
-    ) -> Option<(Vec<u32>, Vec<u32>)> {
-        let slots = self.info.resolved_call_arg_slots.get(&call)?.clone();
-        self.lower_source_extension_slot_args(function, args, &slots, params, vararg_index)
-    }
-
-    /// The slot map stores ONE expression per parameter, so a vararg's second and later elements
-    /// are not in it: every argument absent from `slots` belongs to the vararg slot (the checker
-    /// mapped all others), and the slot's value is the packed array — spread-aware, in source
-    /// order. Omitted defaulted parameters inline their (constant) default expressions.
-    fn lower_source_extension_slot_args(
-        &mut self,
-        function: u32,
-        args: &[AstExprId],
-        slots: &[Option<AstExprId>],
-        params: &[Ty],
-        vararg_index: Option<usize>,
-    ) -> Option<(Vec<u32>, Vec<u32>)> {
-        if slots.len() != params.len() {
-            return None;
-        }
-        let defaults = self.ir.fn_params.get(&function)?.defaults.as_ref()?.clone();
-        let mut slot_temp = vec![None; params.len()];
-        let mut vararg_temp: Vec<(u32, bool)> = Vec::new();
-        let mut prelude = Vec::new();
-        for &argument in args {
-            let index = slots.iter().position(|slot| *slot == Some(argument));
-            let packs = match (index, vararg_index) {
-                (Some(index), Some(vararg)) => index == vararg,
-                (None, Some(_)) => true,
-                (None, None) => return None,
-                _ => false,
-            };
-            if packs {
-                let array = *params.get(vararg_index?)?;
-                let element = array.array_elem().unwrap_or(array);
-                let is_spread = self.afile.is_spread_arg(argument);
-                let want = if is_spread { array } else { element };
-                let value = self.lower_arg(argument, &want)?;
-                let temp = self.fresh_value();
-                prelude.push(self.emit_variable(temp, want, Some(value)));
-                vararg_temp.push((temp, is_spread));
-                continue;
-            }
-            let index = index?;
-            let value = self.lower_arg(argument, &params[index])?;
-            let temp = self.fresh_value();
-            prelude.push(self.emit_variable(temp, params[index], Some(value)));
-            slot_temp[index] = Some(temp);
-        }
-        let mut lowered = Vec::with_capacity(params.len());
-        for (index, temp) in slot_temp.into_iter().enumerate() {
-            if let Some(temp) = temp {
-                lowered.push(self.emit_get_value(temp));
-                continue;
-            }
-            if vararg_index == Some(index) {
-                let (temps, spreads): (Vec<_>, Vec<_>) = vararg_temp.iter().copied().unzip();
-                let elements = temps
-                    .into_iter()
-                    .map(|temp| self.emit_get_value(temp))
-                    .collect();
-                lowered.push(self.emit_vararg_with_spreads(params[index], elements, spreads));
-                continue;
-            }
-            let default = defaults
-                .get(index + 1)
-                .and_then(|default| *default)
-                .map(|default| self.ir.exprs[default as usize].clone())?;
-            let IrExpr::Const(constant) = default else {
-                return None;
-            };
-            lowered.push(self.emit_const(constant));
-        }
-        Some((lowered, prelude))
     }
 
     /// The receiver's class type for member access. The checker types a bare `object` name as
@@ -13904,6 +13856,7 @@ impl<'a> Lower<'a> {
                 source,
                 vararg,
                 vararg_index,
+                param_default_values,
                 inline,
                 suspend,
             } => {
@@ -13946,69 +13899,29 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     let receiver_value = self.coerce_argument_value(recv_v, recv_ty, params[0])?;
-                    // The vararg's VALUE-parameter position, recorded by the checker — a vararg
-                    // need not be last (`fun B.segd(vararg s: String, flag: Boolean = false)`), and
-                    // a sibling file's declaration is not in this file's AST to re-derive it from.
-                    let vararg_value_index = vararg_index;
                     let (arguments, mut prelude) = match source_expr {
-                        // Any omission — or ANY vararg call — takes the slot path: a fully-mapped
-                        // named vararg call still stores only the FIRST element at the vararg slot,
-                        // and the plain slot-order lowering would pass that element where the
-                        // descriptor spells the array (a VerifyError, not a diagnostic).
-                        Some(call)
-                            if self.info.resolved_call_arg_slots.get(&call).is_some_and(
-                                |slots| vararg || slots.iter().any(Option::is_none),
-                            ) =>
-                        {
-                            self.lower_source_extension_args(
-                                fid,
-                                call,
-                                args,
-                                &params[1..],
-                                vararg.then_some(vararg_value_index).flatten(),
-                            )?
-                        }
-                        Some(call)
-                            if vararg && !self.info.resolved_call_arg_slots.contains_key(&call) =>
-                        {
-                            let value_params = &params[1..];
-                            let vararg_slot = vararg_value_index?;
-                            if vararg_slot + 1 == value_params.len() {
-                                (
-                                    self.lower_call_args_vararg(
-                                        args,
-                                        value_params,
-                                        true,
-                                        vararg_slot,
-                                    )?,
-                                    Vec::new(),
-                                )
-                            } else {
-                                // Non-final vararg, unnamed call: every argument from the vararg
-                                // slot on packs into it; the trailing (necessarily defaulted)
-                                // parameters are omitted. Synthesize the slot map the shared
-                                // slot lowering consumes.
-                                let mut slots: Vec<Option<AstExprId>> =
-                                    vec![None; value_params.len()];
-                                for (index, &argument) in args.iter().enumerate().take(vararg_slot)
-                                {
-                                    slots[index] = Some(argument);
-                                }
-                                if let Some(&first_vararg) = args.get(vararg_slot) {
-                                    slots[vararg_slot] = Some(first_vararg);
-                                }
-                                self.lower_source_extension_slot_args(
-                                    fid,
+                        Some(call) => match self.info.resolved_call_arg_slots.get(&call).cloned() {
+                            // A vararg or omission consumes the selected semantic slots through the
+                            // same core for local and sibling declarations. In particular, the value
+                            // stored at a vararg slot is an ELEMENT, never the descriptor's array.
+                            Some(slots) if vararg || slots.iter().any(Option::is_none) => self
+                                .lower_source_slot_args(
                                     args,
                                     &slots,
-                                    value_params,
-                                    Some(vararg_slot),
-                                )?
+                                    &params[1..],
+                                    &selected_params,
+                                    vararg.then_some(vararg_index).flatten(),
+                                    &param_default_values,
+                                )?,
+                            Some(_) => {
+                                self.lower_call_args_in_slot_order(call, args, &params[1..])?
                             }
-                        }
-                        Some(call) => {
-                            self.lower_call_args_in_slot_order(call, args, &params[1..])?
-                        }
+                            // The checker records slots for every source vararg call. A missing
+                            // record is stale/incomplete semantic input, so decline instead of
+                            // rebuilding a provider-specific positional map in the backend.
+                            None if vararg => return None,
+                            None => (self.lower_args(args, &params[1..])?, Vec::new()),
+                        },
                         None if args.len() == params.len() - 1 => {
                             (self.lower_args(args, &params[1..])?, Vec::new())
                         }
@@ -14042,29 +13955,20 @@ impl<'a> Lower<'a> {
                     self.coerce_argument_value(recv_v, recv_ty, physical_receiver)?;
                 let params = tys_to_ir(&selected_params);
                 let (arguments, mut prelude) = match source_expr {
-                    Some(call)
-                        if vararg && !self.info.resolved_call_arg_slots.contains_key(&call) =>
-                    {
-                        // The fixed prefix ends AT the recorded vararg position, which need not be
-                        // the last parameter. A NON-final vararg's trailing parameters are only
-                        // reachable by name and must default — that shape needs the `$default`
-                        // stub this sibling-facade arm does not emit, so decline (skip, never a
-                        // wrong-slot pack).
-                        let n_fixed = vararg_index?;
-                        if n_fixed + 1 != params.len() {
-                            return None;
-                        }
-                        (
-                            self.lower_call_args_vararg(args, &params, true, n_fixed)?,
-                            Vec::new(),
-                        )
-                    }
-                    // A slot-mapped vararg call: this sibling-facade arm's slot lowering is
-                    // vararg-unaware, so decline (skip, never a wrong-slot pack).
-                    Some(_) if vararg => {
-                        return None;
-                    }
-                    Some(call) => self.lower_call_args_in_slot_order(call, args, &params)?,
+                    Some(call) => match self.info.resolved_call_arg_slots.get(&call).cloned() {
+                        Some(slots) if vararg || slots.iter().any(Option::is_none) => self
+                            .lower_source_slot_args(
+                                args,
+                                &slots,
+                                &params,
+                                &selected_params,
+                                vararg.then_some(vararg_index).flatten(),
+                                &param_default_values,
+                            )?,
+                        Some(_) => self.lower_call_args_in_slot_order(call, args, &params)?,
+                        None if vararg => return None,
+                        None => (self.lower_args(args, &params)?, Vec::new()),
+                    },
                     None if args.len() == params.len() => {
                         (self.lower_args(args, &params)?, Vec::new())
                     }
@@ -15926,10 +15830,13 @@ impl<'a> Lower<'a> {
             source_args,
             slots,
             params,
-            fill_omitted,
             None,
             None,
-            None,
+            if fill_omitted {
+                OmittedSlotPolicy::DefaultPlaceholders { vararg: None }
+            } else {
+                OmittedSlotPolicy::Reject
+            },
         )
     }
 
@@ -15948,10 +15855,39 @@ impl<'a> Lower<'a> {
             source_args,
             slots,
             params,
-            fill_omitted,
-            None,
             None,
             vararg_index,
+            if fill_omitted {
+                OmittedSlotPolicy::DefaultPlaceholders { vararg: None }
+            } else {
+                OmittedSlotPolicy::Reject
+            },
+        )
+    }
+
+    /// Consume checker-owned slots for a source callable. The same operation handles local and
+    /// sibling-facade functions/extensions: arguments evaluate once in source order, a selected
+    /// vararg packs once, and only file-independent defaults from the selected signature may fill
+    /// omissions. No AST label or declaration-origin probe participates in binding here.
+    fn lower_source_slot_args(
+        &mut self,
+        source_args: &[AstExprId],
+        slots: &[Option<AstExprId>],
+        physical_params: &[Ty],
+        semantic_params: &[Ty],
+        vararg_index: Option<usize>,
+        defaults: &[Option<CtorDefaultValue>],
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        self.lower_call_slot_args_source_order_with_element(
+            source_args,
+            slots,
+            physical_params,
+            None,
+            vararg_index,
+            OmittedSlotPolicy::SourceDefaults {
+                values: defaults,
+                semantic_params,
+            },
         )
     }
 
@@ -15972,10 +15908,11 @@ impl<'a> Lower<'a> {
             source_args,
             slots,
             params,
-            true,
             None,
-            vararg_index,
             None,
+            OmittedSlotPolicy::DefaultPlaceholders {
+                vararg: vararg_index,
+            },
         )
     }
 
@@ -16018,22 +15955,20 @@ impl<'a> Lower<'a> {
             .filter_map(|(index, slot)| slot.is_none().then_some(index))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn lower_call_slot_args_source_order_with_element(
         &mut self,
         source_args: &[AstExprId],
         slots: &[Option<AstExprId>],
         params: &[Ty],
-        fill_omitted: bool,
         elem_prim: Option<Ty>,
-        omitted_vararg: Option<usize>,
         vararg_pack: Option<usize>,
+        omitted: OmittedSlotPolicy<'_>,
     ) -> Option<(Vec<u32>, Vec<u32>)> {
         if slots.len() != params.len() {
             return None;
         }
         let mut slot_temp: Vec<Option<u32>> = vec![None; params.len()];
-        let mut vararg_temp: Vec<(u32, bool)> = Vec::new();
+        let mut vararg_temp: Vec<LoweredVarargContribution> = Vec::new();
         let mut prelude = Vec::new();
         for &arg in source_args {
             let slot_idx = slots.iter().position(|slot| *slot == Some(arg));
@@ -16050,12 +15985,24 @@ impl<'a> Lower<'a> {
                 let array = *params.get(vararg_pack?)?;
                 let element = array.array_elem().unwrap_or(array);
                 let is_spread = self.afile.is_spread_arg(arg);
-                let want = if is_spread { array } else { element };
+                // A named vararg may bind the whole array without `*` (`items = values`). The
+                // checker accepts that array form and stores it at the vararg slot; distinguish it
+                // by semantic type here so every callable origin gets the same pass-through rule.
+                let whole_array = !is_spread && self.info.ty(arg) == array;
+                let want = if is_spread || whole_array {
+                    array
+                } else {
+                    element
+                };
                 let ir_ty = ty_to_ir(want);
                 let value = self.lower_arg(arg, &ir_ty)?;
                 let tmp = self.fresh_value();
                 prelude.push(self.emit_variable(tmp, ir_ty, Some(value)));
-                vararg_temp.push((tmp, is_spread));
+                vararg_temp.push(LoweredVarargContribution {
+                    temp: tmp,
+                    spread: is_spread,
+                    whole_array,
+                });
                 continue;
             }
             let slot_idx = slot_idx?;
@@ -16084,23 +16031,52 @@ impl<'a> Lower<'a> {
             match tmp {
                 Some(tmp) => lowered.push(self.emit_get_value(tmp)),
                 None if vararg_pack == Some(i) => {
-                    let (temps, spreads): (Vec<_>, Vec<_>) = vararg_temp.iter().copied().unzip();
-                    let elements = temps
-                        .into_iter()
-                        .map(|temp| self.emit_get_value(temp))
-                        .collect();
-                    lowered.push(self.emit_vararg_with_spreads(
-                        ty_to_ir(params[i]),
-                        elements,
-                        spreads,
-                    ));
+                    let whole_array = match vararg_temp.as_slice() {
+                        [contribution] if contribution.whole_array => Some(contribution.temp),
+                        _ => None,
+                    };
+                    if let Some(temp) = whole_array {
+                        lowered.push(self.emit_get_value(temp));
+                    } else {
+                        // A whole-array named binding is exclusive by the call-mapping rules. If
+                        // stale semantic input ever combines one with elements, decline rather than
+                        // storing an array inside its own element array.
+                        if vararg_temp.iter().any(|item| item.whole_array) {
+                            return None;
+                        }
+                        let elements = vararg_temp
+                            .iter()
+                            .map(|item| self.emit_get_value(item.temp))
+                            .collect();
+                        let spreads = vararg_temp.iter().map(|item| item.spread).collect();
+                        lowered.push(self.emit_vararg_with_spreads(
+                            ty_to_ir(params[i]),
+                            elements,
+                            spreads,
+                        ));
+                    }
                 }
-                None if omitted_vararg == Some(i) => {
-                    let array = self.emit_vararg(ty_to_ir(params[i]), Vec::new());
-                    lowered.push(array);
-                }
-                None if fill_omitted => lowered.push(self.zero_placeholder(params[i])),
-                None => return None,
+                None => match omitted {
+                    OmittedSlotPolicy::Reject => return None,
+                    OmittedSlotPolicy::DefaultPlaceholders { vararg } if vararg == Some(i) => {
+                        let array = self.emit_vararg(ty_to_ir(params[i]), Vec::new());
+                        lowered.push(array);
+                    }
+                    OmittedSlotPolicy::DefaultPlaceholders { .. } => {
+                        lowered.push(self.zero_placeholder(params[i]));
+                    }
+                    OmittedSlotPolicy::SourceDefaults {
+                        values,
+                        semantic_params,
+                    } => {
+                        let default = values.get(i).and_then(Option::as_ref)?;
+                        let semantic = *semantic_params.get(i)?;
+                        if !default.fills_param_ty(semantic) {
+                            return None;
+                        }
+                        lowered.push(ctor_default_to_ir(&mut self.ir, self.runtime, default)?);
+                    }
+                },
             }
         }
         Some((lowered, prelude))
@@ -16514,118 +16490,6 @@ impl<'a> Lower<'a> {
             out.push(self.emit_vararg_with_spreads(array_param, elements, spreads));
         }
         Some(out)
-    }
-
-    /// Lower a NAMED call to a module top-level `vararg` function (`topd("O", "K", flag = true)`):
-    /// positional arguments from the vararg slot on pack into its array (spread-aware), labels bind
-    /// their parameters, and an omitted trailing parameter inlines its recorded default value.
-    /// Arguments evaluate in SOURCE order into temps (the prelude) so reordering stays observable.
-    fn lower_module_vararg_named_args(
-        &mut self,
-        call: AstExprId,
-        args: &[AstExprId],
-        target: &ResolvedModuleTopLevelCall,
-        ir_params: &[Ty],
-        vararg: usize,
-    ) -> Option<(Vec<u32>, Vec<u32>)> {
-        let names = self.afile.call_arg_names.get(&call.0).cloned()?;
-        let n = ir_params.len();
-        let array_ir = ir_params[vararg];
-        let element_ir = ty_to_ir(target.params.get(vararg)?.array_elem()?);
-        let mut slot_temp: Vec<Option<u32>> = vec![None; n];
-        let mut vararg_temp: Vec<(u32, bool)> = Vec::new();
-        let mut prelude = Vec::new();
-        // A positional argument takes the next parameter NOT bound by name (`f(a = 1, "x")` is
-        // legal Kotlin), so pre-compute the name-bound slots and skip them.
-        let named_slot = |index: usize| {
-            names.get(index).and_then(Option::as_ref).map(|name| {
-                target
-                    .call_sig
-                    .param_names
-                    .iter()
-                    .position(|parameter| parameter == name)
-            })
-        };
-        let mut name_bound = vec![false; n];
-        for index in 0..args.len() {
-            if let Some(slot) = named_slot(index) {
-                let slot = slot?;
-                if slot >= n || name_bound[slot] {
-                    return None;
-                }
-                name_bound[slot] = true;
-            }
-        }
-        let mut positional = 0usize;
-        for (index, &argument) in args.iter().enumerate() {
-            let is_spread = self.afile.is_spread_arg(argument);
-            let (slot, want) = match named_slot(index) {
-                Some(slot) => {
-                    let slot = slot?;
-                    if slot == vararg {
-                        // A vararg can only be NAMED in spread form (`f(s = *arr)`).
-                        if !is_spread {
-                            return None;
-                        }
-                        (None, array_ir)
-                    } else {
-                        (Some(slot), ir_params[slot])
-                    }
-                }
-                None => {
-                    while positional < vararg && name_bound[positional] {
-                        positional += 1;
-                    }
-                    if positional < vararg {
-                        let slot = positional;
-                        positional += 1;
-                        (Some(slot), ir_params[slot])
-                    } else {
-                        (None, if is_spread { array_ir } else { element_ir })
-                    }
-                }
-            };
-            if let Some(slot) = slot {
-                if slot_temp[slot].is_some() {
-                    return None;
-                }
-            }
-            let value = self.lower_arg(argument, &want)?;
-            let temp = self.fresh_value();
-            prelude.push(self.emit_variable(temp, want, Some(value)));
-            match slot {
-                Some(slot) => slot_temp[slot] = Some(temp),
-                None => vararg_temp.push((temp, is_spread)),
-            }
-        }
-        let mut lowered = Vec::with_capacity(n);
-        for (slot, temp) in slot_temp.into_iter().enumerate() {
-            if slot == vararg {
-                let (temps, spreads): (Vec<_>, Vec<_>) = vararg_temp.iter().copied().unzip();
-                let elements = temps
-                    .into_iter()
-                    .map(|temp| self.emit_get_value(temp))
-                    .collect();
-                lowered.push(self.emit_vararg_with_spreads(array_ir, elements, spreads));
-                continue;
-            }
-            if let Some(temp) = temp {
-                lowered.push(self.emit_get_value(temp));
-                continue;
-            }
-            if !target.call_sig.param_has_default(slot) {
-                return None;
-            }
-            let default = target
-                .param_default_values
-                .get(slot)
-                .and_then(|value| value.as_ref())?;
-            if !default.fills_param_ty(target.params[slot]) {
-                return None;
-            }
-            lowered.push(ctor_default_to_ir(&mut self.ir, self.runtime, default)?);
-        }
-        Some((lowered, prelude))
     }
 
     fn lower_non_last_vararg_args(
@@ -24496,10 +24360,19 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     // A NAMED call (`topd("O", "K", flag = true)`): labels bind their parameters,
-                    // the positional run packs the vararg, omitted defaults inline.
+                    // the selected slots pack the vararg, and source constants fill omissions.
+                    // The lowerer never re-maps labels: the checker already selected this exact
+                    // callable and recorded how each source argument binds.
                     if self.afile.call_arg_names.contains_key(&e.0) {
-                        let (lowered, prelude) =
-                            self.lower_module_vararg_named_args(e, &args, &target, &params, fixed)?;
+                        let slots = self.info.resolved_call_arg_slots.get(&e)?.clone();
+                        let (lowered, prelude) = self.lower_source_slot_args(
+                            &args,
+                            &slots,
+                            &params,
+                            &target.params,
+                            Some(fixed),
+                            &target.param_default_values,
+                        )?;
                         let call = self.emit_local_call(fid, lowered);
                         return Some(self.wrap_arg_prelude(call, prelude));
                     }
@@ -26253,7 +26126,12 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         self.lower_call_slot_args_source_order_with_element(
-                            &args, &slots, &mparams, false, elem_prim, None, None,
+                            &args,
+                            &slots,
+                            &mparams,
+                            elem_prim,
+                            None,
+                            OmittedSlotPolicy::Reject,
                         )?
                     } else {
                         let mut lowered = Vec::new();
