@@ -130,6 +130,17 @@ fn errors_match_kotlinc_in_text_and_location() {
         // `jdk.internal.org.jline.reader.Widget` when the JDK is on the classpath, so it is a poor
         // choice for an "unresolved" probe).
         "fun f(p: UnresolvedWidgetType): Int = 0",
+        // An `is` whose TARGET type is unresolved reports the unresolved reference at the type's
+        // span — never a compiler-specific "not supported" rejection.
+        "fun f(p: Any) = p is UnresolvedWidgetType",
+        // … and a failing type ARGUMENT is named at its own span, not the outer generic's.
+        "fun f(p: Any) = p is Array<UnresolvedWidgetType>",
+        // When the OUTER name is the unresolvable one it is named first, not its type argument.
+        "fun f(p: Any) = p is UnresolvedWidgetType<String>",
+        // A nullable unresolved target resolves to the same reference diagnostic.
+        "fun f(p: Any) = p is UnresolvedWidgetType?",
+        // The `as` sibling reports identically.
+        "fun f(p: Any) = p as UnresolvedWidgetType",
     ];
 
     let root = std::env::temp_dir().join(format!("krusty_diag_{}", std::process::id()));
