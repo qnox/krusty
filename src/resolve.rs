@@ -33672,7 +33672,10 @@ impl<'a> Checker<'a> {
                     // and from an INSTANCE member of the companion's own class. A companion's members
                     // are in scope throughout the class body in Kotlin, so `fun describe() = tag()`
                     // binds the companion's `tag` exactly as a call from a companion member does; both
-                    // spellings reach the same static.
+                    // spellings reach the same static. The arm only binds when the signature's arity
+                    // accepts the call: a same-named instance method of a DIFFERENT arity (legal once
+                    // the collision gate narrowed) keeps priority on the dispatch receiver, exactly as
+                    // the lowerer's arity-aware instance-member attempt runs first.
                     let companion_owner = self.companion_of.clone().or_else(|| {
                         self.this_ty
                             .and_then(|receiver| receiver.obj_internal())
@@ -33687,8 +33690,14 @@ impl<'a> Checker<'a> {
                             .and_then(|c| c.static_methods.get(&fname))
                             .cloned()
                         {
-                            self.expect_call_args(&sig.params, false, args, &arg_tys);
-                            return sig.ret;
+                            let min_arity =
+                                adapted_ref_arity(sig.vararg(), sig.required, sig.params.len());
+                            let arity_accepts = args.len() >= min_arity
+                                && (sig.vararg() || args.len() <= sig.params.len());
+                            if arity_accepts {
+                                self.expect_call_args(&sig.params, false, args, &arg_tys);
+                                return sig.ret;
+                            }
                         }
                     }
                 }

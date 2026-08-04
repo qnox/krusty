@@ -81,15 +81,21 @@ fn companion_method_shares_name_with_instance_method_of_different_arity() {
     // instance member when no same-arity instance method exists — kotlinc accepts this (the
     // instance member wins on a dispatch receiver, the companion member on `C.`). Only a
     // same-arity collision stays rejected (see companion_member_collides_with_instance).
+    // Unqualified calls inside the class body bind by arity too: the companion arm must not
+    // capture a call whose argument count only fits the instance method.
     let src = "open class C {\n\
     open fun requestFocus(value: Boolean): String = \"inst\" + value\n\
+    fun describe(): String = requestFocus(true)\n\
     companion object {\n\
-        fun requestFocus(): String = \"comp\"\n\
+        fun requestFocus(): Int = 42\n\
+        fun describeStatic(): String = \"comp\" + requestFocus()\n\
     }\n\
 }\n\
 fun box(): String {\n\
     if (C().requestFocus(true) != \"insttrue\") return \"f1\"\n\
-    if (C.requestFocus() != \"comp\") return \"f2\"\n\
+    if (C().describe() != \"insttrue\") return \"f2\"\n\
+    if (C.requestFocus() != 42) return \"f3\"\n\
+    if (C.describeStatic() != \"comp42\") return \"f4\"\n\
     return \"OK\"\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "C");
