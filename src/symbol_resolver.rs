@@ -3961,8 +3961,11 @@ fn resolve_property_setter(
     // No `@Metadata` property: a JAVA accessor pair (`isX`/`getX` + `setX(v)`) IS a synthetic
     // property (spec § Java synthetic properties). Kotlin only synthesizes a property when the
     // GETTER exists, so require the read to resolve; then take the single-argument `void` member
-    // setter — preferring the overload whose parameter matches the getter's type, and refusing an
-    // ambiguous remainder (conservative: kotlinc pairs accessors per matching type).
+    // setter — preferring the overload whose parameter matches the getter's type, then the
+    // MOST-DERIVED override (a setter overridden at several hierarchy rungs — `Component.setFont`
+    // redeclared by `Container` and `JComponent` — is ONE Kotlin setter, not an ambiguity), and
+    // refusing a genuinely ambiguous remainder (conservative: kotlinc pairs accessors per matching
+    // type).
     let getter = resolve_property_member(lib, recv, property, member_access)?;
     let setter_name = crate::names::property_setter_name(property);
     let mut setters = lib
@@ -3970,14 +3973,23 @@ fn resolve_property_setter(
         .overloads
         .into_iter()
         .filter(|o| o.kind == FnKind::Member)
-        .map(|o| o.callable)
-        .filter(|c| c.params.len() == 1 && c.ret == Ty::Unit && !c.name.contains('-'))
+        .filter(|o| {
+            o.callable.params.len() == 1
+                && o.callable.ret == Ty::Unit
+                && !o.callable.name.contains('-')
+        })
         .collect::<Vec<_>>();
     if setters.len() > 1 {
-        setters.retain(|c| c.params[0] == getter.ret.non_null());
+        setters.retain(|o| o.callable.params[0] == getter.ret.non_null());
+    }
+    if setters.len() > 1 {
+        let nearest = setters.iter().map(|o| o.receiver_rank).min();
+        if let Some(nearest) = nearest {
+            setters.retain(|o| o.receiver_rank == nearest);
+        }
     }
     match setters.as_slice() {
-        [_] => setters.pop(),
+        [setter] => Some(setter.callable.clone()),
         _ => None,
     }
 }
