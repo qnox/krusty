@@ -26234,10 +26234,24 @@ fn is_when_test(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e), Expr::Is { .. } | Expr::InRange { .. })
 }
 
-/// Whether a UTF-16 code unit is `Char.isWhitespace()`. A surrogate half is not a whitespace
-/// character, and it has no scalar form, so it answers `false` without a lossy conversion.
+/// Whether a UTF-16 code unit is `Char.isWhitespace()` — Kotlin's predicate, which on the JVM is
+/// `Character.isWhitespace(c) || Character.isSpaceChar(c)`.
+///
+/// That is NOT Rust's `char::is_whitespace` (the Unicode `White_Space` property). Compared against
+/// JBR 21 over the whole BMP, the two sets differ in exactly five code points: Kotlin also counts
+/// the separators `U+001C..U+001F`, and does not count `U+0085` (NEL — a `Cc` control that is
+/// neither `isWhitespace` nor `isSpaceChar`). The rest — including `U+00A0`, `U+2007` and `U+202F`,
+/// which `Character.isWhitespace` alone excludes — agree, because `isSpaceChar` re-admits every
+/// `Zs`/`Zl`/`Zp` character. This decides where an indent ends, so the difference is observable:
+/// `"\u{85}a".trimIndent()` keeps its leading NEL under kotlinc.
+///
+/// A surrogate half is not whitespace and has no scalar form, so it answers `false` without a lossy
+/// conversion.
 fn is_unit_whitespace(unit: u16) -> bool {
-    char::from_u32(unit as u32).is_some_and(char::is_whitespace)
+    if (0x1c..=0x1f).contains(&unit) {
+        return true;
+    }
+    unit != 0x85 && char::from_u32(unit as u32).is_some_and(char::is_whitespace)
 }
 
 /// `String.isBlank()` over code units.
@@ -27869,6 +27883,38 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Char.isWhitespace()` is `Character.isWhitespace(c) || Character.isSpaceChar(c)`, which is not
+    /// Rust's `char::is_whitespace`. The two sets differ in exactly these five code points (checked
+    /// against JBR 21 over the whole BMP), and the predicate decides where a `trimIndent` indent ends.
+    #[test]
+    fn unit_whitespace_matches_kotlins_predicate_not_rusts() {
+        // Kotlin-only: the file/group/record/unit separators are `Character.isWhitespace`.
+        for unit in 0x1c..=0x1f {
+            assert!(
+                is_unit_whitespace(unit),
+                "U+{unit:04X} is Kotlin whitespace"
+            );
+        }
+        // Rust-only: NEL is a `Cc` control — neither `isWhitespace` nor `isSpaceChar`.
+        assert!(!is_unit_whitespace(0x85));
+        // Agreeing cases, including the `Zs` characters `Character.isWhitespace` alone excludes and
+        // `isSpaceChar` re-admits.
+        for unit in [b' ' as u16, b'\t' as u16, 0x00a0, 0x2007, 0x202f, 0x3000] {
+            assert!(is_unit_whitespace(unit), "U+{unit:04X} is whitespace");
+        }
+        for unit in [b'a' as u16, 0x00, 0xd800, 0xdfff] {
+            assert!(!is_unit_whitespace(unit), "U+{unit:04X} is not whitespace");
+        }
+    }
+
+    /// A blank line and the common indent are both measured with that predicate, so a leading NEL is
+    /// ordinary content: kotlinc leaves it in place rather than stripping it as indentation.
+    #[test]
+    fn trim_indent_does_not_treat_nel_as_indentation() {
+        let source = KtString::from("\u{85}a\n\u{85}b");
+        assert_eq!(trim_indent(&source), source);
+    }
 
     struct UnsignedBoxRuntime;
 

@@ -877,6 +877,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   completed surrogate pair comes back out as text), which is what lets the constant pool keep deduping
   on value equality. `trimIndent`/`trimMargin` fold in code units too, matching how Kotlin measures an
   indent. Tests: `tests/utf16_string_constant_e2e.rs`, `kt_string::tests`.
+  - Where that indent ENDS is `Char.isWhitespace()`, which on the JVM is
+    `Character.isWhitespace(c) || Character.isSpaceChar(c)` — **not** Rust's `char::is_whitespace`
+    (the Unicode `White_Space` property). Checked against JBR 21 over the whole BMP, the two sets
+    differ in exactly five code points: Kotlin also counts the separators `U+001C..U+001F`, and does
+    not count `U+0085` (NEL, a `Cc` control that is neither predicate). `U+00A0`/`U+2007`/`U+202F`
+    agree — `Character.isWhitespace` alone excludes them, but `isSpaceChar` re-admits every
+    `Zs`/`Zl`/`Zp` character. Test: `ir_lower::tests::unit_whitespace_matches_kotlins_predicate_not_rusts`.
   - `CONSTANT_Utf8` is **modified UTF-8**, whose units are UTF-16 code units: a supplementary character
     is written as its surrogate PAIR (two 3-byte sequences) and an unpaired surrogate encodes exactly
     the same way, so the class-file format carries these values unchanged (`modified_utf8_units`,

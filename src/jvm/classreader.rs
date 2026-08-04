@@ -842,6 +842,13 @@ impl<'a> Reader<'a> {
 /// admits, and which no Rust `String` can hold) becomes U+FFFD. That last case is lossy: a library
 /// `const val` whose value contains one reads back changed. See `docs/SPEC.md`.
 fn decode_modified_utf8(bytes: &[u8]) -> String {
+    // Almost every pool entry is a name, descriptor or signature — pure ASCII. Modified UTF-8 writes
+    // U+0000 as `C0 80`, so a byte below 0x80 can only be the character it spells: an all-ASCII
+    // payload IS the answer, and the general path's `Vec<u16>` round-trip would be pure overhead.
+    // (`is_ascii` guarantees valid UTF-8, so nothing is replaced here.)
+    if bytes.is_ascii() {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
     let mut units: Vec<u16> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -871,6 +878,25 @@ fn decode_modified_utf8(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::jvm::classfile::*;
+
+    /// The ASCII fast path must agree with the general decoder byte for byte. `C0 80` (NUL) and every
+    /// multi-byte form are non-ASCII, so they never reach it — this pins the boundary.
+    #[test]
+    fn the_ascii_fast_path_agrees_with_the_general_decoder() {
+        for name in [
+            "",
+            "java/lang/String",
+            "(Ljava/lang/Object;)V",
+            "<init>",
+            "a$b",
+        ] {
+            assert!(name.is_ascii());
+            assert_eq!(decode_modified_utf8(name.as_bytes()), name);
+        }
+        // Modified UTF-8 NUL is `C0 80`, not `00`, so a NUL-bearing string is not ASCII and decodes
+        // through the general path.
+        assert_eq!(decode_modified_utf8(&[0xc0, 0x80, b'x']), "\u{0}x");
+    }
 
     #[test]
     fn decodes_a_supplementary_character_from_its_surrogate_pair() {
