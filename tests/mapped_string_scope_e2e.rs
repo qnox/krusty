@@ -78,12 +78,8 @@ fn java_only_members_are_not_in_the_kotlin_string_scope() {
     // and whether it does is JDK-DEPENDENT. `getChars` is the trap: `String`-only through JDK 24, but a
     // `CharSequence` default method as of JDK 25, so probing it passes on a JDK 21 developer machine
     // and fails on a JDK 25 CI runner. See the residual-leak note in docs/SPEC.md.
-    let Some(stdlib) = common::stdlib_jar() else {
-        panic!("no kotlin-stdlib jar");
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        panic!("no jdk modules");
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     for (member, source) in [
         ("concat", "fun f(s: String) { s.concat(\"z\") }"),
         (
@@ -152,12 +148,8 @@ fn string_keeps_java_io_serializable() {
     // kotlinc still reports a mapped builtin as implementing it when the Java class does
     // (`JvmBuiltInsCustomizer.getSupertypes`, `isSerializableInJava`). Replacing the JVM supertypes
     // wholesale dropped it and made this an error against a kotlinc that accepts it.
-    let Some(stdlib) = common::stdlib_jar() else {
-        panic!("no kotlin-stdlib jar");
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        panic!("no jdk modules");
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     for source in [
         "fun f(s: String): java.io.Serializable = s",
         "val v: java.io.Serializable = \"abc\"",
@@ -179,12 +171,8 @@ fn charsequence_members_kotlinc_keeps_stay_in_scope() {
     // `java.lang.CharSequence.chars`/`codePoints`, which kotlinc resolves and emits as
     // `invokevirtual java/lang/String.chars()`. `kotlin/CharSequence` therefore keeps its JOINED scope —
     // this pins that the widening stopped at `kotlin/String` and did not take these with it.
-    let Some(stdlib) = common::stdlib_jar() else {
-        panic!("no kotlin-stdlib jar");
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        panic!("no jdk modules");
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     for source in [
         "fun f(s: String) { s.chars() }",
         "fun f(s: String) { s.codePoints() }",

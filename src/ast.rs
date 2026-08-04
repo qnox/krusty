@@ -27,6 +27,35 @@ pub fn lambda_params_or_implicit(params: &[String], arity: usize) -> Option<Vec<
     }
 }
 
+/// A FIELD-LESS `companion object` property (`companion object { val ZERO: T get() = … }`): it IS
+/// its accessors, so there is no static to hoist onto the outer class — kotlinc emits only `getX`
+/// (plus `setX` for a `var`) on `C$Companion`, and that is what the companion synthesis builds.
+///
+/// A `var` requires a BODIED setter for the same reason a `val` requires a getter: with no backing
+/// field a default setter would have nothing to write. A getter that reads `field`, an initializer,
+/// an explicit backing field, a delegate, or `const` all mean a real static exists, so those keep
+/// the plain companion-property path.
+pub fn is_computed_companion_prop(p: &PropDecl) -> bool {
+    p.receiver.is_none()
+        && !p.is_lateinit
+        && !p.is_const
+        && p.init.is_none()
+        && p.delegate.is_none()
+        && p.explicit_backing_field.is_none()
+        && p.getter.is_some()
+        && !p.getter_reads_field
+        && if p.is_var {
+            // A `private set` narrows only the SETTER, and the accessor synthesis emits an
+            // unconditionally public `setX` — accepting one would let a write through that kotlinc
+            // rejects, so those keep the rejection path until the narrowed visibility is modeled.
+            p.setter
+                .as_ref()
+                .is_some_and(|setter| setter.body.is_some() && !setter.is_private)
+        } else {
+            p.setter.is_none()
+        }
+}
+
 pub fn setter_param_or_value(param: Option<&String>) -> String {
     param.cloned().unwrap_or_else(|| "value".to_string())
 }
@@ -660,9 +689,30 @@ pub struct FunDecl {
     /// mirroring `ClassDecl.annotations`. Used by the compiler-extension surface (`crate::plugins`) to
     /// find annotated functions.
     pub annotations: Vec<String>,
+    /// The argument expressions of each annotation in [`Self::annotations`] (same order/length),
+    /// mirroring `ClassDecl::annotation_args`. `@JvmName("gNullable")` reads its bytecode name here.
+    pub annotation_args: Vec<Vec<ExprId>>,
 }
 
 impl FunDecl {
+    /// The bytecode method name this function is emitted under: the `@JvmName("…")` spelling when the
+    /// annotation is present with a constant string argument, otherwise the source name.
+    ///
+    /// The JVM name — not the source name — is the identity that decides a platform declaration
+    /// clash, so two overloads erasing to the same descriptor (`g(String)` / `g(String?)`) are legal
+    /// exactly when `@JvmName` separates them, as in kotlinc.
+    pub fn jvm_name(&self, file: &File) -> String {
+        self.annotations
+            .iter()
+            .position(|a| a.rsplit(['/', '.']).next().unwrap_or(a) == "JvmName")
+            .and_then(|i| self.annotation_args.get(i)?.first())
+            .and_then(|&arg| match file.expr(arg) {
+                Expr::StringLit(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| self.name.clone())
+    }
+
     pub(crate) fn has_callable_inline_extension_body(&self) -> bool {
         // Emit the inline fn as a REAL (static) method too, like kotlinc does — a separate
         // compilation can then resolve and splice it. Type parameters (incl. `reified`) are fine:
@@ -1203,6 +1253,11 @@ pub struct File {
     /// checker types it as a `suspend (…) -> …` function type; the lowerer builds a
     /// `SuspendLambda` state machine for it instead of a plain `FunctionN` closure.
     pub suspend_lambdas: std::collections::HashSet<u32>,
+    /// The EXPLICIT label a lambda literal was written with (`list.forEach outer@{ … }`), keyed by the
+    /// lambda's `ExprId.0`. A labelled lambda REPLACES the implicit label (the callee's name) a
+    /// `return@name` inside it targets, so the splicer must register `outer`, not `forEach`. Absent ⇒
+    /// the lambda is unlabelled and keeps the implicit callee-name label.
+    pub lambda_labels: std::collections::HashMap<u32, String>,
     /// NAME-BASED destructuring: for a `Stmt::Destructure` whose entries bind by property NAME
     /// (`val (number = pCProp, text = pCVarProp) = src`), maps the statement's id to the source
     /// property each entry reads (parallel to `entries`); `None` for a positional (`componentN`) entry.
@@ -1328,6 +1383,7 @@ impl File {
         self.lambda_param_types = Default::default();
         self.anon_fun_lambdas = Default::default();
         self.suspend_lambdas = Default::default();
+        self.lambda_labels = Default::default();
         self.destructure_source_props = Default::default();
         self.base_arg_names = Default::default();
         self.anon_fun_ret = Default::default();

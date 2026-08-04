@@ -11,14 +11,8 @@ use std::path::PathBuf;
 /// Compile `src` (must define `fun box(): String`) and run it on the persistent JVM, asserting the
 /// result is "OK". Returns silently (skip) when the toolchain isn't provisioned.
 fn check(src: &str, stem: &str) {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping feature_coverage_l_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping feature_coverage_l_e2e: no kotlin-stdlib jar found");
-        return;
-    };
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
     let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
     let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
         panic!("compile_and_run_box returned None for {stem}");

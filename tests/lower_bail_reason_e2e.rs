@@ -22,10 +22,11 @@ const GATED_CORPUS_CASES: &[(&str, &str)] = &[
         "coroutines/bridges/mapSuspendClear.kt",
         "gate:suspend-erasure-bridge",
     ),
-    // An extension `suspend fun` isn't modeled.
+    // A plain extension `suspend fun` IS modeled now, so this case runs past the coroutine gate and
+    // stops at the next unsupported statement shape in its lambda body.
     (
         "coroutines/inlineClasses/direct/createOverride.kt",
-        "gate:extension-suspend-fn",
+        "stmt Assign",
     ),
     // Member delegated-property shapes the inline accessor doesn't model: a value-class delegate,
     // and an EXTENSION `getValue` (no member `getValue` on the delegate class).

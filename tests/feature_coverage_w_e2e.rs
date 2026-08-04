@@ -20,8 +20,8 @@ use super::common;
 
 /// (stdlib jar, jdk `lib/modules` jimage) for the `box()` harness, or `None` → skip.
 fn env() -> Option<(PathBuf, PathBuf)> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     Some((stdlib, jdk))
 }
 
@@ -32,7 +32,7 @@ fn run_box(src: &str, stem: &str) {
         return;
     };
     assert_eq!(
-        common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)).as_deref(),
+        common::compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path())).as_deref(),
         Some("OK"),
         "{stem}"
     );
@@ -422,18 +422,13 @@ fun box(): String {
 /// then drive `SKt.run(k)` with a trivial synchronously-completing `Continuation` and assert the boxed
 /// result equals `expect`. Skips if the JDK/stdlib toolchain is unavailable. Mirrors `suspend_e2e.rs`.
 fn run_suspend(name: &str, src: &str, expect: i32) {
-    let jh = match common::java_home() {
-        Some(j) if std::path::Path::new(&format!("{j}/bin/javac")).exists() => j,
-        _ => {
-            eprintln!("skipping {name}: no javac");
-            return;
-        }
-    };
+    let jh = common::java_home();
+    assert!(
+        std::path::Path::new(&format!("{jh}/bin/javac")).exists(),
+        "JAVA_HOME is not a usable JDK home (no bin/javac)"
+    );
     let _ = &jh;
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping {name}: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let stdlib = stdlib_path.to_string_lossy().into_owned();
     let jdk = common::jdk_modules();
     let dir = std::env::temp_dir().join(format!("krusty_covw_{name}_{}", std::process::id()));
@@ -445,7 +440,7 @@ fn run_suspend(name: &str, src: &str, expect: i32) {
             src,
             "S",
             std::slice::from_ref(&stdlib_path),
-            jdk.as_deref(),
+            Some(jdk.as_path()),
             &dir
         )
         .is_some(),

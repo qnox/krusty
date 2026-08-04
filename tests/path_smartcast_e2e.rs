@@ -13,9 +13,9 @@ fn run(src: &str) -> Option<String> {
 }
 
 fn assert_ok(src: &str) {
-    let stdlib = common::stdlib_jar().expect("stdlib jar");
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(src, &[stdlib], jdk.as_deref());
+    let diagnostics = common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()));
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(run(src), Some("OK".to_string()));
 }

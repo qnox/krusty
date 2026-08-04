@@ -8,11 +8,9 @@
 use super::common;
 
 fn diags(src: &str) -> Vec<String> {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return vec!["<skip: no stdlib>".into()];
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    common::front_end_diagnostics(src, &[stdlib], jdk.as_deref())
+    common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
 }
 
 fn assert_missing_return(src: &str) {

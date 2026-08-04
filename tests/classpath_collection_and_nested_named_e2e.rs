@@ -76,9 +76,10 @@ fn classpath_collection_param_and_nested_named_ctor() {
         \x20 if (n.x != 1 || n.y != 3) return \"fail i2-deepnested\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("coll_nested", LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    let Some(out) = common::expect_box_run_against("coll_nested", LIB, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
 
     // A collection nested inside an ARRAY parameter (`Array<Set<String>>` → `[Ljava/util/Set;`) exercises
     // the recursive arm of the descriptor-form normalization: `arrayOf(setOf(...))` types as
@@ -110,7 +111,8 @@ fn classpath_collection_ctor_overload_prefers_exact() {
         \x20 if (Ov(setOf(\"a\")).tag != \"coll1\") return \"fail subtype-set: ${Ov(setOf(\"a\")).tag}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("coll_ov", LIB_OV, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    let Some(out) = common::expect_box_run_against("coll_ov", LIB_OV, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
 }

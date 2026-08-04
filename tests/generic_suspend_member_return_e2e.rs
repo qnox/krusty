@@ -55,15 +55,9 @@ fn generic_suspend_nonnull_return_binds_receiver_type_argument() {
 fn generic_suspend_return_runs_via_runblocking() {
     // Full end-to-end: build the impl with kotlinc, call `byId` inside `runBlocking`, dereference the
     // recovered `Cfg` after `?: error(…)`.
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(corou) = common::coroutines_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let corou = common::coroutines_jar();
     let Some(libout) = common::compile_lib("aa1_run", LIB) else {
         return;
     };
@@ -76,7 +70,7 @@ fn generic_suspend_return_runs_via_runblocking() {
         \x20 c.at\n\
         }\n";
     assert_eq!(
-        common::compile_and_run_box(MAIN, "Main", &cp, Some(&jdk))
+        common::compile_and_run_box(MAIN, "Main", &cp, Some(jdk.as_path()))
             .expect("generic suspend return runs"),
         "OK"
     );

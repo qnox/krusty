@@ -16,7 +16,7 @@ val t = \"O\" + try { throw Exception(\"boom\") } catch (e: Exception) { \"K\" }
 if (t != \"OK\") return \"f3\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "T");
+    common::expect_box_ok_with_stdlib(src, "T");
 }
 
 /// A `try/catch` as the RHS of arithmetic whose LHS is already on the stack: the exception handler
@@ -33,5 +33,5 @@ if (f(1, false) != 33) return \"f1\"\n\
 if (f(1, true) != 38) return \"f2\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "T");
+    common::expect_box_ok_with_stdlib(src, "T");
 }

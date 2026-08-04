@@ -19,7 +19,7 @@ if (c.greet(\"X\") != \"Hi X\") return \"f3\"\n\
 if (c.greet(\"Y\", greeting = \"Yo\") != \"Yo Y\") return \"f4\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "D");
+    common::expect_box_ok_with_stdlib(SRC, "D");
 }
 
 /// Default-argument INHERITANCE: an override declared without defaults reuses the base method's
@@ -39,5 +39,5 @@ if (C().foo(10) != 11) return \"f2\"\n\
 if (Derived().bar() != \"abc\") return \"f3\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "DI");
+    common::expect_box_ok_with_stdlib(SRC, "DI");
 }

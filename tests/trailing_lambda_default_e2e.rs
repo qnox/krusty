@@ -25,5 +25,5 @@ fun box(): String {\n\
   if (b != \"pXB\") return \"f2: \" + b\n\
   return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "D");
+    common::expect_box_ok_with_stdlib(SRC, "D");
 }

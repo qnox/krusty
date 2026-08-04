@@ -14,17 +14,24 @@ use super::common;
 
 /// Single-compilation box run: everything lives in one source, cross-referencing declarations (which
 /// still drives the checker/`types` resolution heavily).
+///
+/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
+/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
 fn run(src: &str, stem: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, stem)
+    common::expect_box_run_with_stdlib(src, stem)
 }
 
 /// Compile `lib_src` with krusty (emitting `@Metadata`), persist its classfiles to a fresh classpath
 /// dir, then compile+run `main` against that dir — a genuine krusty-emit → krusty-decode round-trip.
 fn roundtrip(tag: &str, lib_src: &str, main: &str) -> Option<String> {
-    let sl = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    let lib_classes =
-        common::compile_in_process(lib_src, "Lib", std::slice::from_ref(&sl), Some(&jdk))?;
+    let sl = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let lib_classes = common::expect_compile_in_process(
+        lib_src,
+        "Lib",
+        std::slice::from_ref(&sl),
+        Some(jdk.as_path()),
+    );
     let dir = std::env::temp_dir().join(format!("krusty_cov10_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for (name, bytes) in &lib_classes {
@@ -32,7 +39,12 @@ fn roundtrip(tag: &str, lib_src: &str, main: &str) -> Option<String> {
         std::fs::create_dir_all(p.parent()?).ok()?;
         std::fs::write(&p, bytes).ok()?;
     }
-    common::compile_and_run_box(main, "Main", &[dir, sl], Some(&jdk))
+    Some(common::expect_box_run(
+        main,
+        "Main",
+        &[dir, sl],
+        Some(jdk.as_path()),
+    ))
 }
 
 // ---------------------------------------------------------------------------

@@ -5,14 +5,11 @@
 use super::common;
 
 fn diags(src: &str) -> Vec<String> {
-    let stdlib = match common::stdlib_jar() {
-        Some(p) => p,
-        None => {
-            eprintln!("skipping resolve_reject_coverage_e2e: no kotlin-stdlib jar");
-            return vec![];
-        }
-    };
-    let jdk = common::java_home().map(|h| std::path::PathBuf::from(format!("{h}/lib/modules")));
+    let stdlib = common::stdlib_jar();
+    let jdk = Some({
+        let h = common::java_home();
+        std::path::PathBuf::from(format!("{h}/lib/modules"))
+    });
     common::front_end_diagnostics(src, &[stdlib], jdk.as_deref())
 }
 

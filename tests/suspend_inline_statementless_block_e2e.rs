@@ -6,15 +6,9 @@ use super::common;
 
 #[test]
 fn inline_wrapper_tail_suspend_call_runs() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(coro) = common::coroutines_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
     const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
         inline fun <T> wrap(block: () -> T): T = block()\n\
         suspend fun one(): Int = 41\n\
@@ -23,7 +17,8 @@ fn inline_wrapper_tail_suspend_call_runs() {
             val n = f()\n\
             if (n == 41) \"OK\" else \"F:$n\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(&jdk));
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

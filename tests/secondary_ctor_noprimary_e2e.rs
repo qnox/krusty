@@ -6,9 +6,11 @@
 use super::common;
 
 fn run_box(name: &str, src: &str) {
-    if let Some(out) = common::compile_and_run_with_stdlib(src, "B") {
-        assert_eq!(out, "OK", "{name}");
-    }
+    // The toolchain gate is the only legitimate skip; a source krusty rejects fails here.
+    let Some(out) = common::expect_box_run_with_stdlib(src, "B") else {
+        return;
+    };
+    assert_eq!(out, "OK", "{name}");
 }
 
 #[test]

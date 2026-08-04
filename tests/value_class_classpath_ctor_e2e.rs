@@ -19,10 +19,7 @@ fn classpath_value_class_constructed_by_name() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     // 1. A library with a reference-underlying @JvmInline value class, compiled by the real kotlinc so

@@ -4,8 +4,10 @@
 
 use super::common;
 
+/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
+/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
 fn run(src: &str, stem: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, stem)
+    common::expect_box_run_with_stdlib(src, stem)
 }
 
 #[test]
@@ -186,6 +188,149 @@ fn ubyte_and_ushort() {
     return \"OK\"\n\
 }\n";
     let Some(out) = run(src, "UByteShort") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// `UByte`/`UShort` have no arithmetic of their own — Kotlin defines each operator as `toInt()`
+/// (zero-extend) followed by the `UInt` one, so the result is a `UInt`, never the narrow type.
+#[test]
+fn ubyte_and_ushort_arithmetic_promotes_to_uint() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val b: UByte = 100u\n\
+    val s: UShort = 40000u\n\
+    val t: UShort = 1000u\n\
+    if (a + b != 300u) return \"add ${a + b}\"\n\
+    if (a - b != 100u) return \"sub ${a - b}\"\n\
+    if (a / b != 2u) return \"div ${a / b}\"\n\
+    if (a % b != 0u) return \"rem ${a % b}\"\n\
+    if (s + t != 41000u) return \"sadd ${s + t}\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteArith") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// Ordering is UNSIGNED: `200u` as a `UByte` is the byte `-56`, so a signed compare would invert it.
+#[test]
+fn ubyte_and_ushort_comparison_is_unsigned() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val b: UByte = 100u\n\
+    val s: UShort = 40000u\n\
+    val t: UShort = 1000u\n\
+    if (!(b < a)) return \"lt\"\n\
+    if (b > a) return \"gt\"\n\
+    if (!(a >= b)) return \"ge\"\n\
+    if (!(t < s)) return \"slt\"\n\
+    if (a == b) return \"eq\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteCmp") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// Widening out of the sign-extended `byte`/`short` zero-extends; narrowing to the signed primitive
+/// is the raw reinterpret (`200u.toByte()` is `-56`).
+#[test]
+fn ubyte_and_ushort_conversions() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val s: UShort = 40000u\n\
+    if (a.toLong() != 200L) return \"toLong ${a.toLong()}\"\n\
+    if (a.toUInt() != 200u) return \"toUInt ${a.toUInt()}\"\n\
+    if (a.toByte() != (-56).toByte()) return \"toByte ${a.toByte()}\"\n\
+    if (s.toInt() != 40000) return \"toInt ${s.toInt()}\"\n\
+    if (200.toUByte() != a) return \"toUByte\"\n\
+    if (40000.toUShort() != s) return \"toUShort\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteConv") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// An unsigned literal takes its EXPECTED type, exactly as a signed integer literal does.
+#[test]
+fn unsigned_literal_takes_the_expected_type() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val s: UShort = 40000u\n\
+    val i: UInt = 7u\n\
+    val l: ULong = 7u\n\
+    if (a.toInt() != 200) return \"ub\"\n\
+    if (s.toInt() != 40000) return \"us\"\n\
+    if (i != 7u) return \"ui\"\n\
+    if (l != 7uL) return \"ul\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UExpected") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// Interpolation prints the UNSIGNED decimal, not the signed `byte`/`short` the value is stored in.
+#[test]
+fn ubyte_and_ushort_interpolate_unsigned() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val s: UShort = 40000u\n\
+    if (\"$a\" != \"200\") return \"ub $a\"\n\
+    if (\"$s\" != \"40000\") return \"us $s\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteStr") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// A zero-extended `UByte`/`UShort` is an `Int` — boxing it at an erased generic boundary must reach
+/// `Integer.valueOf`. Typing the mask node from its narrow left operand picked `Byte.valueOf` (which
+/// throws above 127) and `Short.valueOf` (which silently wraps to a negative).
+#[test]
+fn widened_ubyte_and_ushort_box_as_int() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 200u\n\
+    val s: UShort = 40000u\n\
+    if (listOf(a.toInt()) != listOf(200)) return \"ub ${listOf(a.toInt())}\"\n\
+    if (listOf(s.toInt()) != listOf(40000)) return \"us ${listOf(s.toInt())}\"\n\
+    if (listOf((a + a).toInt()) != listOf(400)) return \"sum ${listOf((a + a).toInt())}\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteBox") else {
+        return;
+    };
+    assert_eq!(out, "OK");
+}
+
+/// `inc`/`dec` stay INSIDE the narrow representation: `UByte` wraps at 255, `UShort` at 65535. Without
+/// the `i2b`/`i2s` the sum leaves the byte/short and stops comparing equal to the same value written
+/// as a literal — `==` is bit equality on that representation.
+#[test]
+fn ubyte_and_ushort_inc_dec_wrap_in_representation() {
+    let src = "fun box(): String {\n\
+    val a: UByte = 127u\n\
+    if (a.inc() != 128u.toUByte()) return \"inc ${a.inc().toInt()}\"\n\
+    val b: UByte = 255u\n\
+    if (b.inc() != 0u.toUByte()) return \"wrap ${b.inc().toInt()}\"\n\
+    val c: UByte = 0u\n\
+    if (c.dec() != 255u.toUByte()) return \"dec ${c.dec().toInt()}\"\n\
+    val s: UShort = 32767u\n\
+    if (s.inc() != 32768u.toUShort()) return \"sinc ${s.inc().toInt()}\"\n\
+    val t: UShort = 65535u\n\
+    if (t.inc() != 0u.toUShort()) return \"swrap ${t.inc().toInt()}\"\n\
+    return \"OK\"\n\
+}\n";
+    let Some(out) = run(src, "UByteIncDec") else {
         return;
     };
     assert_eq!(out, "OK");

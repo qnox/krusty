@@ -41,12 +41,8 @@ fn member_extensions_imported_from_an_object_or_companion_resolve_and_run() {
     let Some(libout) = common::compile_lib("object_member_extension_import", LIB) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [libout, stdlib];
     // Both owners (plain `object` and `companion object`) and both member kinds (extension property,
     // extension function). The companion cases are the `Duration.Companion.minutes` shape.
@@ -65,10 +61,11 @@ fn member_extensions_imported_from_an_object_or_companion_resolve_and_run() {
         \x20 if (5.scaled(factor, offset) != 19) return \"sub-int params: ${5.scaled(factor, offset)}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(&jdk)) else {
+    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path()))
+    else {
         panic!(
             "compile/run returned None: {:?}",
-            common::front_end_diagnostics(main, &classpath, Some(&jdk))
+            common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()))
         );
     };
     assert_eq!(out, "OK");
@@ -81,12 +78,8 @@ fn a_stdlib_companion_extension_property_resolves_and_runs() {
     // AND `@InlineOnly` — `private` in the class file, so there is no call to emit and the body must be
     // SPLICED with the singleton bound as its receiver. Two different units are compared rather than
     // read through a `Duration` member: `Duration`'s own member properties are a separate gap.
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [stdlib];
     let main = "import kotlin.time.Duration\n\
         import kotlin.time.Duration.Companion.minutes\n\
@@ -98,10 +91,11 @@ fn a_stdlib_companion_extension_property_resolves_and_runs() {
         \x20 if (a.toString() != \"10m\") return \"rendered: $a\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(&jdk)) else {
+    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path()))
+    else {
         panic!(
             "compile/run returned None: {:?}",
-            common::front_end_diagnostics(main, &classpath, Some(&jdk))
+            common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()))
         );
     };
     assert_eq!(out, "OK");

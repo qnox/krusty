@@ -8,14 +8,8 @@ use super::common;
 
 #[test]
 fn safe_call_generic_field_coerces() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping safe_call_generic_field_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping safe_call_generic_field_e2e: no kotlin-stdlib jar found");
-        return;
-    };
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
     // `bs?.v` is a `String?` → `.length` after `?:` ; `bi?.v` is an `Int?` (boxed) → unboxed for `+`.
     let src = "class Box<T>(val v: T)\n\
 fun mk(b: Boolean): Box<String>? = if (b) Box(\"hello\") else null\n\

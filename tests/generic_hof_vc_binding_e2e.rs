@@ -10,9 +10,9 @@ use super::common;
 
 fn run(tag: &str, main: &str) -> Option<String> {
     let _ = tag;
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
-    common::compile_and_run_box(main, "Main", &[sl, jdk.clone()], Some(&jdk))
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    common::compile_and_run_box(main, "Main", &[sl, jdk.clone()], Some(jdk.as_path()))
 }
 
 #[test]

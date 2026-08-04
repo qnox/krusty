@@ -49,8 +49,8 @@ const LIB: &str = "package lib\n\
     \x20 fun cfgOrNull(): Cfg? = Cfg(\"ok\") }\n";
 
 fn run_with_lib(tag: &str, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let stdlib = common::stdlib_jar()?;
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let lib = common::compile_lib(tag, LIB)?;
     common::compile_and_run_box(main, "Main", &[lib, stdlib, jdk.clone()], Some(&jdk))
 }
@@ -92,12 +92,8 @@ fn trailing_lambda_reads_its_own_parameter_past_an_omitted_default() {
 
 #[test]
 fn wrong_parameter_shape_is_not_borrowed_for_a_trailing_lambda() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let Some(lib) = common::compile_lib("libfun_default_diag", LIB) else {
         return;
     };
@@ -169,12 +165,8 @@ fn safe_call_lambda_param_of_classpath_java_sam_member() {
         \x20 public static Box of(String v) { return new Box(v); }\n\
         \x20 public String mapped(Mapper m) { return m.map(v); }\n\
         }\n";
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some((java_classes, _)) =
         common::javac_compile(&[("jlib/Box.java".into(), JAVA.into())], &[])
     else {
@@ -198,12 +190,8 @@ fn safe_call_lambda_param_of_classpath_java_sam_member() {
 /// expectations are mapped through the callable's parameter slots rather than by position.
 #[test]
 fn safe_call_named_lambda_arguments_resolve_in_frontend() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(lib) = common::compile_lib("libfun_safe_named", LIB) else {
         return;
     };
@@ -218,12 +206,8 @@ fn safe_call_named_lambda_arguments_resolve_in_frontend() {
 
 #[test]
 fn safe_call_lambda_param_members_resolve_in_frontend() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     const SRC: &str = "fun f(re: Regex?, s: String): String? =\n\
         re?.replace(s) { m -> m.value }\n";
     let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], Some(&jdk));
@@ -235,12 +219,8 @@ fn safe_call_lambda_param_members_resolve_in_frontend() {
 
 #[test]
 fn lambda_param_members_resolve_in_frontend() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     const SRC: &str = "fun f(re: Regex, s: String): String =\n\
         re.replace(s) { m -> m.groupValues[0] }\n";
     let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], Some(&jdk));

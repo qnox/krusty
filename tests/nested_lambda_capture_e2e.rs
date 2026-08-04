@@ -17,7 +17,7 @@ fn nested_closure_capture_runs() {
         \x20 host { inner { x = outer } }\n\
         \x20 return x\n\
         }\n";
-    common::assert_box_ok_with_stdlib(SRC, "N");
+    common::expect_box_ok_with_stdlib(SRC, "N");
 }
 
 /// An INNER lambda's implicit `it` SHADOWS the enclosing lambda's: `outer.forEach { inner.forEach
@@ -34,7 +34,7 @@ fn nested_lambda_implicit_it_shadows_outer() {
         \x20 outer.forEach { inner.forEach { s += it.toString() } }\n\
         \x20 return if (s == \"12\") \"OK\" else \"fail: $s\"\n\
         }\n";
-    common::assert_box_ok_with_stdlib(SRC, "N");
+    common::expect_box_ok_with_stdlib(SRC, "N");
 }
 
 /// A local named `it` follows the same lexical rule as an enclosing lambda parameter. The untyped
@@ -47,5 +47,5 @@ fn untyped_lambda_captures_local_named_it() {
         \x20 val read = { it }\n\
         \x20 return read()\n\
         }\n";
-    common::assert_box_ok_with_stdlib(SRC, "N");
+    common::expect_box_ok_with_stdlib(SRC, "N");
 }

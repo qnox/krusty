@@ -7,12 +7,15 @@
 use super::common;
 
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     // Toolchain present ⇒ compilation MUST succeed (a `None` here is a real failure, not a skip).
-    let cs = common::compile_in_process(src, "P", &[stdlib], Some(&jdk));
-    assert!(cs.is_some(), "krusty failed to compile:\n{src}");
-    cs
+    Some(common::expect_compile_in_process(
+        src,
+        "P",
+        &[stdlib],
+        Some(jdk.as_path()),
+    ))
 }
 
 fn method(
@@ -29,7 +32,7 @@ fn method(
 
 fn run_ok(cs: &[(String, Vec<u8>)]) {
     if let Some(box_class) = common::find_box_class(cs) {
-        let stdlib = common::stdlib_jar().unwrap();
+        let stdlib = common::stdlib_jar();
         assert_eq!(
             common::run_box(cs, &box_class, &[stdlib]).as_deref(),
             Some("OK")
@@ -77,22 +80,16 @@ fn number_bound_member_toint_resolves_and_runs() {
 }
 
 #[test]
-fn comparable_operator_bounded_generic_called_with_primitive_is_declined() {
+fn comparable_operator_bounded_generic_called_with_primitive_runs() {
     // `fun <T : Comparable<T>> maxOf2(a, b): T = if (a > b) a else b` called with `Int` literals
-    // (`maxOf2(3, 5)`) needs the type argument inferred as `Int` AND a primitive arg BOXED into the
-    // `Comparable`-erased parameter slot — krusty does not yet emit that box (a raw `int` reaching a
-    // `Comparable` parameter is a `VerifyError`). So it must DECLINE (skip), not miscompile. The bound
-    // itself IS recovered (descriptor/member resolution); only the primitive-into-bound call is unsupported.
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let src = "fun <T : Comparable<T>> maxOf2(a: T, b: T): T = if (a > b) a else b\nfun box(): String = if (maxOf2(3, 5) == 5) \"OK\" else \"no\"\n";
-    assert!(
-        common::compile_in_process(src, "P", &[stdlib], Some(&jdk)).is_none(),
-        "expected krusty to decline a Comparable-operator-bounded generic called with primitives"
+    // (`maxOf2(3, 5)`) needs the type argument inferred as `Int`, the primitive arguments BOXED into
+    // the `Comparable`-erased parameter slots, and the `Comparable` result UNBOXED back to `Int`. The
+    // boxes were already emitted; the missing return unbox (gated on the physical return being
+    // erased-top, which a BOUND is not) left the boxed value where an `int` was expected. Same
+    // bytecode shape as kotlinc: `Integer.valueOf` per argument, then an unbox of the result.
+    common::expect_box_ok_with_stdlib(
+        "fun <T : Comparable<T>> maxOf2(a: T, b: T): T = if (a > b) a else b\nfun box(): String = if (maxOf2(3, 5) == 5) \"OK\" else \"no\"\n",
+        "P",
     );
 }
 
@@ -121,5 +118,42 @@ fn comparable_bound_erases_descriptor_to_bound() {
     assert_eq!(
         m.descriptor,
         "(Ljava/lang/Comparable;Ljava/lang/Comparable;)Ljava/lang/Comparable;"
+    );
+}
+
+/// A BOUNDED type parameter must survive krusty's own `@Metadata`: a separate compilation reading the
+/// facade record has to see `T`, not the bound the JVM descriptor erases to. Recording the erased
+/// bound made `clampMax(10, 7)` read back as returning `Comparable`, so `!= 7` was rejected. The
+/// UNBOUNDED case erases to `Any` and survived by accident, so it is checked alongside as the control.
+#[test]
+fn bounded_type_param_roundtrips_through_krusty_metadata() {
+    const LIB: &str = "fun <T> id(v: T): T = v\n\
+fun <T : Comparable<T>> clampMax(v: T, hi: T): T = if (v >= hi) hi else v\n\
+fun <T : Number> asIs(v: T): T = v\n";
+    const MAIN: &str = "fun box(): String {\n\
+    if (id(5) != 5) return \"f1\"\n\
+    if (clampMax(10, 7) != 7) return \"f2\"\n\
+    if (clampMax(\"a\", \"z\") != \"a\") return \"f3\"\n\
+    if (asIs(3) != 3) return \"f4\"\n\
+    return \"OK\"\n\
+}\n";
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let lib_classes = common::expect_compile_in_process(
+        LIB,
+        "Lib",
+        std::slice::from_ref(&stdlib),
+        Some(jdk.as_path()),
+    );
+    let dir = std::env::temp_dir().join(format!("krusty_bounded_meta_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (name, bytes) in &lib_classes {
+        let path = dir.join(format!("{name}.class"));
+        std::fs::create_dir_all(path.parent().expect("class path has a parent")).expect("mkdir");
+        std::fs::write(&path, bytes).expect("write class");
+    }
+    assert_eq!(
+        common::expect_box_run(MAIN, "Main", &[dir, stdlib], Some(jdk.as_path())),
+        "OK"
     );
 }

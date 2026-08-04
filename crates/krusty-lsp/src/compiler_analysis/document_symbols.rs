@@ -364,8 +364,10 @@ fn type_alias_nodes(
                 .iter()
                 .map(|(alias, _, _)| alias.as_str()),
         )
-        .take(budget.remaining)
         .collect::<HashSet<_>>();
+    // Dedup BEFORE the budget: a class target with type arguments is listed in both tables now, and
+    // taking the budget off the chained iterator would let those duplicates crowd out other aliases.
+    let aliases: HashSet<&str> = aliases.into_iter().take(budget.remaining).collect();
     if aliases.is_empty() {
         return Vec::new();
     }

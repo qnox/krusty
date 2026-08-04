@@ -10,10 +10,7 @@ use krusty::jvm::inline::{assemble, disassemble, is_reified_inline, splice, Insn
 
 #[test]
 fn splices_real_empty_array_body() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let cp = Classpath::new(vec![stdlib]);
     // The @Metadata d1 protobuf (carrying inline flags) is captured for a real Kotlin facade.
     let collections = cp

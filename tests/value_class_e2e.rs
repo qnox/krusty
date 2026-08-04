@@ -126,12 +126,8 @@ fn value_class_is_property_uses_javabean_getter_name() {
 
 #[test]
 fn value_class_reference_underlying_eq_hash_to_string_runs() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let java_home = common::java_home();
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     let src = r#"
 @JvmInline
@@ -154,12 +150,8 @@ fun box(): String {
 
 #[test]
 fn nullable_reference_underlying_value_class_extension_to_string_is_null_safe() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let java_home = common::java_home();
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     let src = r#"
 @JvmInline
@@ -184,12 +176,8 @@ fun box(): String {
 
 #[test]
 fn assignment_to_nullable_value_class_var_boxes() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let java_home = common::java_home();
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     // `w = it` / `u = W(7)`: a non-null value class assigned into a nullable (boxed) slot must
     // `box-impl` at the ASSIGNMENT boundary (`SetValue`), not only at a declaration initializer.
@@ -222,12 +210,8 @@ fun box(): String {
 
 #[test]
 fn sized_array_of_value_class_uses_provider_value_underlying() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let java_home = common::java_home();
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     let src = r#"
 @JvmInline
@@ -250,12 +234,8 @@ fun box(): String {
 
 #[test]
 fn covariant_override_unboxed_return_is_check() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let java_home = common::java_home();
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     // `t.bar()` resolves to the MANGLED interface method (value-class return convention), so `tBar`
     // is the unboxed underlying; `tBar is X` must box before `instanceof X`.

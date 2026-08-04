@@ -10,9 +10,9 @@ use super::common;
 /// Lower `src`, emit JS, append `console.log(box())`, run on Node. Returns Node's stdout, or `None`
 /// to skip (toolchain/node missing or a front-end gap).
 fn run(src: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    let mut js = common::compile_js_in_process(src, "Main", &[stdlib], Some(&jdk))?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let mut js = common::compile_js_in_process(src, "Main", &[stdlib], Some(jdk.as_path()))?;
     js.push_str("\nconsole.log(box());\n");
     common::run_js(&js)
 }

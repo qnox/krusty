@@ -14,14 +14,8 @@ fn run(src: &str, stem: &str) -> Option<String> {
 fn class_ref_simple_name_and_identity() {
     // NOTE: `X::class.java` (the KClass->Class bridge) is NOT modeled by krusty and is dropped from this
     // suite; this covers `X::class`, `.simpleName`, and KClass identity (`==`) instead.
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     const SRC: &str = "class Foo\nclass Bar\n\
 fun box(): String {\n\
     if (Foo::class.simpleName != \"Foo\") return \"simpleName:${Foo::class.simpleName}\"\n\
@@ -34,14 +28,8 @@ fun box(): String {\n\
 
 #[test]
 fn bound_class_ref_on_instance() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     const SRC: &str = "class Foo\n\
 fun box(): String {\n\
     val x: Any = Foo()\n\
@@ -54,14 +42,8 @@ fun box(): String {\n\
 
 #[test]
 fn top_fun_reference_passed_as_lambda() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     const SRC: &str = "fun inc(n: Int): Int = n + 1\n\
 fun apply1(f: (Int) -> Int, x: Int): Int = f(x)\n\
 fun box(): String {\n\
@@ -78,14 +60,8 @@ fn unbound_member_reference_user_method() {
     // NOTE: an unbound member ref on a LIBRARY type (`String::length`) is not modeled by krusty and is
     // dropped; this covers the general unbound member reference (`Class::method`) on a user class, which
     // takes the receiver as its first argument.
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     const SRC: &str = "class Cell(val n: Int) { fun doubled(): Int = n * 2 }\n\
 fun box(): String {\n\
     val f: (Cell) -> Int = Cell::doubled\n\
@@ -99,14 +75,8 @@ fun box(): String {\n\
 
 #[test]
 fn bound_instance_method_reference() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     const SRC: &str = "class C(val base: Int) {\n\
     fun add(x: Int): Int = x + base\n\
 }\n\
@@ -121,14 +91,8 @@ fun box(): String {\n\
 
 #[test]
 fn property_reference_get_and_name() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     const SRC: &str = "class C(val n: Int)\n\
 fun box(): String {\n\
     val p = C::n\n\
@@ -143,14 +107,8 @@ fun box(): String {\n\
 
 #[test]
 fn function_type_variable_invoke_and_equality() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     // Invoke through a variable of function type, and check callable-reference equality (two `::inc`
     // references to the same top-level function compare equal, per kotlinc's FunctionReferenceImpl).
     // NOTE: `.hashCode()` on such a fn-typed variable is not modeled by krusty, so only `==` is checked.
@@ -167,14 +125,8 @@ fun box(): String {\n\
 
 #[test]
 fn constructor_reference_as_factory() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     const SRC: &str = "class Boxed(val v: Int)\n\
 fun box(): String {\n\
     val make: (Int) -> Boxed = ::Boxed\n\
@@ -188,14 +140,8 @@ fun box(): String {\n\
 
 #[test]
 fn user_annotation_declared_and_applied() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     // Declare an annotation with @Target/@Retention and apply it to a class, a function, and a property.
     // The annotated program must compile and run (retention/element target metadata is codegen, not
     // observed here — this exercises that the declaration + applications are accepted end to end).
@@ -220,14 +166,8 @@ fun box(): String {\n\
 
 #[test]
 fn jvm_static_and_jvm_name_on_companion_members() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     // @JvmStatic exposes a companion member as a real static; @JvmName renames the emitted method. Both
     // must compile and the program observe the expected results when called through Kotlin.
     const SRC: &str = "class C {\n\
@@ -247,14 +187,8 @@ fun box(): String {\n\
 
 #[test]
 fn anonymous_object_implementing_interface_captures_local() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     const SRC: &str = "interface Supplier { fun get(): String }\n\
 fun box(): String {\n\
     val captured = \"OK\"\n\
@@ -268,14 +202,8 @@ fun box(): String {\n\
 
 #[test]
 fn sam_conversion_lambda_to_fun_interface() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     const SRC: &str = "fun interface Transform { fun apply(x: String): String }\n\
 fun run2(t: Transform): String = t.apply(\"O\")\n\
 fun box(): String {\n\
@@ -287,14 +215,8 @@ fun box(): String {\n\
 
 #[test]
 fn sam_conversion_to_java_runnable() {
-    let Some(_jh) = common::java_home() else {
-        eprintln!("skip: no JAVA_HOME");
-        return;
-    };
-    let Some(_sl) = common::stdlib_jar() else {
-        eprintln!("skip: no stdlib");
-        return;
-    };
+    let _jh = common::java_home();
+    let _sl = common::stdlib_jar();
     // A lambda passed where a Java functional interface (java.lang.Runnable) is expected is SAM-converted.
     const SRC: &str = "fun box(): String {\n\
     var acc = \"fail\"\n\

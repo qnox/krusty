@@ -15,5 +15,5 @@ fun box(): String {\n\
     val r = build { set(42); put(8) }\n\
     return if (r.v == 50) \"OK\" else \"FAIL ${r.v}\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "B");
+    common::expect_box_ok_with_stdlib(SRC, "B");
 }

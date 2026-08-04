@@ -12,10 +12,7 @@ fn classpath_receiver_lambda_compiles_and_runs() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let sl = common::stdlib_jar();
     let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
     let Some(libout) = common::compile_lib(
         "crl",

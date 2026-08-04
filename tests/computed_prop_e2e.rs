@@ -20,7 +20,7 @@ if (c.viaThis() != 5) return \"f3\"\n\
 if (c.label != \"v5\") return \"f4\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "P");
+    common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
 /// A TOP-LEVEL computed property with NO type annotation infers from its expression getter body —
@@ -41,7 +41,7 @@ val forward get() = forwardAgain\n\
 val forwardAgain get() = laterHolder.value\n\
 val laterHolder = Holder(\"OK\")\n\
 fun box(): String = if (derived == \"OK\" && repeated == \"OK\" && forward == \"OK\") \"OK\" else \"fail: $derived\"\n";
-    common::assert_box_ok_with_stdlib(SRC, "G");
+    common::expect_box_ok_with_stdlib(SRC, "G");
 }
 
 #[test]

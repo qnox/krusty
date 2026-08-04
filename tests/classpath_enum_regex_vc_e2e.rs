@@ -6,14 +6,8 @@ use super::common;
 
 #[test]
 fn classpath_enum_regex_and_value_class_property() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib(
         "cervc",
         "package lib\n\
@@ -42,7 +36,7 @@ fn classpath_enum_regex_and_value_class_property() {
         \x20 if (h.id.v != \"x42\") return \"fail c6: ${h.id.v}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile enum/regex/value-class-property");
     match common::run_box(&classes, "MainKt", &[libout, sl]) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),

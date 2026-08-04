@@ -28,8 +28,9 @@ pub struct GenericSig {
 }
 
 /// Bit-packed boolean flags for a [`LibraryMember`], collapsing `ret_nullable`/`is_interface`/
-/// `suspend` into one byte. Read through the `LibraryMember` accessors of the same names; mutated
-/// through the matching `set_*` methods; built with the `with_*` chain. Headroom for five more flags.
+/// `suspend`/`is_operator`/`is_extension` into one byte. Read through the `LibraryMember` accessors of the same
+/// names; mutated through the matching `set_*` methods; built with the `with_*` chain. Headroom for
+/// three more flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LmFlags(u8);
 
@@ -37,6 +38,15 @@ impl LmFlags {
     const RET_NULLABLE: u8 = 1 << 0;
     const IS_INTERFACE: u8 = 1 << 1;
     const SUSPEND: u8 = 1 << 2;
+    /// The member is declared `operator`. Only `@Metadata` records it — the JVM has no such flag — and
+    /// only a convention call site (`"x" { … }` for `operator fun String.invoke`) needs it, so it
+    /// travels with the member rather than being re-derived from a name.
+    const IS_OPERATOR: u8 = 1 << 3;
+    /// The member is a member EXTENSION (`class DslScope { fun String.f() }`): its declaring class is
+    /// the dispatch receiver and its FIRST JVM parameter is the extension receiver. Nothing in the
+    /// descriptor distinguishes that from an ordinary member taking a parameter of the same type, and
+    /// a call site must know which, since only a member extension needs its dispatch receiver in scope.
+    const IS_EXTENSION: u8 = 1 << 4;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -63,6 +73,14 @@ impl LmFlags {
     #[inline]
     pub const fn with_suspend(self, on: bool) -> Self {
         self.with(Self::SUSPEND, on)
+    }
+    #[inline]
+    pub const fn with_is_operator(self, on: bool) -> Self {
+        self.with(Self::IS_OPERATOR, on)
+    }
+    #[inline]
+    pub const fn with_is_extension(self, on: bool) -> Self {
+        self.with(Self::IS_EXTENSION, on)
     }
 }
 
@@ -169,6 +187,14 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// The storage of a package-level `const val` (`kotlin.math.PI`). A `const` has no accessor — the
+    /// platform holds it in a field on whichever package artifact owns the declaration — so it cannot be
+    /// answered by the property namespace, which models properties by their accessors. Resolution of a
+    /// bare imported name needs the OWNER, which only the platform knows.
+    fn top_level_static_field(&self, _package: TypeName, _name: &str) -> Option<StaticFieldRef> {
+        None
+    }
+
     /// Normalize a semantic type to the identity used when comparing source call arguments against
     /// compiled-library signatures. This is not an emit descriptor; it is a semantic compatibility key.
     /// Implementations that do not need library-name normalization return the type unchanged.
@@ -232,7 +258,10 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// The platform/library type used for a property reference with the given arity and mutability.
     /// Resolver needs this type so direct property-reference APIs (`get`, `name`) keep working, but the
     /// actual class name is provider-owned.
-    fn property_reference_type(&self, _arity: usize, _mutable: bool) -> Option<Ty> {
+    /// `args` are the reference type's own type arguments in declaration order — `[V]` for a
+    /// `KProperty0<V>`, `[Recv, V]` for a `KProperty1<Recv, V>`. Passing them is what makes
+    /// `(::foo).get()` type as the property's own type instead of the erased upper bound.
+    fn property_reference_type(&self, _arity: usize, _mutable: bool, _args: &[Ty]) -> Option<Ty> {
         None
     }
 
@@ -350,6 +379,14 @@ impl LibraryMember {
         self.flags.has(LmFlags::SUSPEND)
     }
     #[inline]
+    pub fn is_operator(&self) -> bool {
+        self.flags.has(LmFlags::IS_OPERATOR)
+    }
+    #[inline]
+    pub fn is_member_extension(&self) -> bool {
+        self.flags.has(LmFlags::IS_EXTENSION)
+    }
+    #[inline]
     pub fn set_ret_nullable(&mut self, on: bool) {
         self.flags = self.flags.with_ret_nullable(on);
     }
@@ -360,6 +397,12 @@ impl LibraryMember {
     #[inline]
     pub fn set_suspend(&mut self, on: bool) {
         self.flags = self.flags.with_suspend(on);
+    }
+    pub fn set_is_operator(&mut self, on: bool) {
+        self.flags = self.flags.with_is_operator(on);
+    }
+    pub fn set_is_member_extension(&mut self, on: bool) {
+        self.flags = self.flags.with_is_extension(on);
     }
 
     pub fn owner_name(&self) -> Option<String> {
@@ -611,6 +654,11 @@ pub struct CallSig {
 pub struct ParamList {
     pub names: Vec<String>,
     pub defaults: Vec<bool>,
+    /// Per parameter: whether its declared type is a RECEIVER function type (`Recv.() -> R`). The JVM
+    /// descriptor and `Signature` both erase that to a plain `FunctionN`, so only the source-level
+    /// metadata carries it — and without it a lambda argument gets no implicit receiver, leaving a bare
+    /// member call inside unresolved. Empty when the origin records no per-parameter types.
+    pub recv_fun: Vec<bool>,
     pub vararg: Option<usize>,
 }
 
@@ -1669,6 +1717,7 @@ mod tests {
         let expected = ParamList {
             names: vec!["host".into(), "port".into()],
             defaults: vec![false, true],
+            recv_fun: vec![false, false],
             vararg: None,
         };
         let t = ty_with(|t| {
@@ -1681,6 +1730,7 @@ mod tests {
             t.ctor_named_params = vec![ParamList {
                 names: vec!["".into()],
                 defaults: vec![false],
+                recv_fun: vec![false],
                 vararg: None,
             }];
         });

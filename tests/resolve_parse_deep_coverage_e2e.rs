@@ -10,10 +10,11 @@
 
 use super::common;
 
-/// Single-compilation box run against kotlin-stdlib + JDK modules. Returns `None` (→ skip) when the
-/// toolchain isn't provisioned.
+/// Single-compilation box run against kotlin-stdlib + JDK modules.
+/// `None` means ONLY that they aren't provisioned. Once they are, a
+/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
 fn run(src: &str, stem: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, stem)
+    common::expect_box_run_with_stdlib(src, stem)
 }
 
 // ===========================================================================
@@ -62,7 +63,11 @@ fun box(): String {\n\
 
 #[test]
 fn overload_by_nullability() {
+    // `g(String)` and `g(String?)` erase to the SAME JVM signature, so kotlinc rejects the pair with a
+    // "platform declaration clash" unless one carries `@JvmName` — the overload set is still selected
+    // by nullability in Kotlin source, which is what this pins.
     const SRC: &str = "fun g(x: String): String = \"nn:\" + x\n\
+@JvmName(\"gNullable\")\n\
 fun g(x: String?): String = \"nl:\" + (x ?: \"null\")\n\
 fun box(): String {\n\
     val a: String = \"a\"\n\
@@ -236,12 +241,14 @@ fun box(): String {\n\
 
 #[test]
 fn import_object_member() {
-    const SRC: &str = "object Config {\n\
+    // Imports must precede every declaration (kotlinc: "imports are only allowed in the beginning of
+    // file"), including the object they name.
+    const SRC: &str = "import Config.greeting\n\
+import Config.NAME\n\
+object Config {\n\
     const val NAME: String = \"cfg\"\n\
     fun greeting(): String = \"hi \" + NAME\n\
 }\n\
-import Config.greeting\n\
-import Config.NAME\n\
 fun box(): String {\n\
     if (greeting() != \"hi cfg\") return \"f1|\" + greeting()\n\
     if (NAME != \"cfg\") return \"f2\"\n\

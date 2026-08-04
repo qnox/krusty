@@ -7,15 +7,9 @@
 use super::common;
 use std::path::PathBuf;
 
-fn overload_e2e_env(label: &str) -> Option<(PathBuf, PathBuf)> {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping {label}: set JAVA_HOME");
-        return None;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping {label}: no kotlin-stdlib jar found");
-        return None;
-    };
+fn overload_e2e_env(_label: &str) -> Option<(PathBuf, PathBuf)> {
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
     let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
     Some((stdlib, jdk))
 }

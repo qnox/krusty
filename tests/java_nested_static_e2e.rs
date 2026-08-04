@@ -28,16 +28,13 @@ fn write_fixture(cp: &std::path::Path, javac: &str) {
 }
 
 fn run_box(use_src: &str, tag: &str) {
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let java_home = common::java_home();
     let javac = format!("{java_home}/bin/javac");
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let (Some(jdk), Some(stdlib)) = (common::jdk_modules(), common::stdlib_jar()) else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let root = std::env::temp_dir().join(format!("krusty_jns_{tag}_{}", std::process::id()));
     let cp = root.join("cp");
     let _ = fs::remove_dir_all(&root);
@@ -45,8 +42,14 @@ fn run_box(use_src: &str, tag: &str) {
 
     let kr = root.join("kr");
     assert!(
-        common::compile_to_dir(use_src, "Use", std::slice::from_ref(&cp), Some(&jdk), &kr)
-            .is_some(),
+        common::compile_to_dir(
+            use_src,
+            "Use",
+            std::slice::from_ref(&cp),
+            Some(jdk.as_path()),
+            &kr
+        )
+        .is_some(),
         "krusty failed on nested Java static call ({tag})"
     );
 

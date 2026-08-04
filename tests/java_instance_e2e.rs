@@ -25,9 +25,8 @@ fn constructs_and_calls_java_instance_methods() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let (Some(jdk), Some(stdlib)) = (common::jdk_modules(), common::stdlib_jar()) else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let root = std::env::temp_dir().join(format!("krusty_ji_{}", std::process::id()));
     let cp = root.join("cp");
     let _ = fs::remove_dir_all(&root);
@@ -47,7 +46,14 @@ fn constructs_and_calls_java_instance_methods() {
     // krusty constructs it and calls instance methods — compiled in-process against the cp dir.
     let use_src = "import util.Calc\nfun box(): String {\n  val c = Calc(10)\n  if (c.add(5) != 15) return \"f1\"\n  if (c.tag() != \"calc\") return \"f2\"\n  return \"OK\"\n}\n";
     let kr = root.join("kr");
-    if common::compile_to_dir(use_src, "Use", std::slice::from_ref(&cp), Some(&jdk), &kr).is_none()
+    if common::compile_to_dir(
+        use_src,
+        "Use",
+        std::slice::from_ref(&cp),
+        Some(jdk.as_path()),
+        &kr,
+    )
+    .is_none()
     {
         eprintln!("skip (IR unsupported)");
         return;
@@ -75,16 +81,13 @@ fn constructs_and_calls_java_instance_methods() {
 /// picks the arity/type-appropriate overload, and emits `invokestatic`.
 #[test]
 fn calls_java_static_overloaded_methods() {
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let java_home = common::java_home();
     let javac = format!("{java_home}/bin/javac");
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let (Some(jdk), Some(stdlib)) = (common::jdk_modules(), common::stdlib_jar()) else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let root = std::env::temp_dir().join(format!("krusty_js_{}", std::process::id()));
     let cp = root.join("cp");
     let _ = fs::remove_dir_all(&root);
@@ -115,8 +118,14 @@ fn calls_java_static_overloaded_methods() {
          return \"OK\"\n}\n";
     let kr = root.join("kr");
     assert!(
-        common::compile_to_dir(use_src, "Use", std::slice::from_ref(&cp), Some(&jdk), &kr)
-            .is_some(),
+        common::compile_to_dir(
+            use_src,
+            "Use",
+            std::slice::from_ref(&cp),
+            Some(jdk.as_path()),
+            &kr
+        )
+        .is_some(),
         "krusty failed on Java static call"
     );
 

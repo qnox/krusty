@@ -6,8 +6,10 @@
 
 use super::common;
 
+/// `None` means ONLY that the toolchain isn't provisioned; a source the front end REJECTS panics
+/// with its diagnostics instead of skipping as a silent pass.
 fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "Nb")
+    common::expect_box_run_with_stdlib(src, "Nb")
 }
 
 const FOR_AND_VAL: &str = r#"
@@ -63,12 +65,12 @@ fn name_based_destructuring_rejected_without_flag() {
     // `None`), exactly as default-flags kotlinc does. A `Some` here would mean we wrongly accepted it.
     let src = FOR_AND_VAL.replace("// LANGUAGE: +NameBasedDestructuring\n", "");
     // Only meaningful when the toolchain is present (otherwise both branches skip).
-    if let (Some(stdlib), Some(jdk)) = (common::stdlib_jar(), common::jdk_modules()) {
-        assert!(
-            common::compile_in_process(&src, "Nb", &[stdlib], Some(&jdk),).is_none(),
-            "krusty accepted `[a, b]` destructuring without +NameBasedDestructuring"
-        );
-    }
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert!(
+        common::compile_in_process(&src, "Nb", &[stdlib], Some(jdk.as_path()),).is_none(),
+        "krusty accepted `[a, b]` destructuring without +NameBasedDestructuring"
+    );
 }
 
 // --- Short-form name-based renaming (`val (a = prop) = src`) → a by-name property read. ---

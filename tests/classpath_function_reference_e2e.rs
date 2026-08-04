@@ -12,10 +12,7 @@ fn classpath_function_reference_compiles_and_runs() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let sl = common::stdlib_jar();
     let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
     let Some(libout) =
         common::compile_lib("cfr", "package lib\nfun add(a: Int, b: Int): Int = a + b\n")
@@ -44,10 +41,7 @@ fn constructor_reference_wins_over_same_named_classpath_function() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let sl = common::stdlib_jar();
     let jdk = std::path::PathBuf::from(format!("{jh}/lib/modules"));
     let Some(libout) =
         common::compile_lib("ctor_cfr", "package lib\nfun Foo(s: String): String = s\n")

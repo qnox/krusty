@@ -11,7 +11,7 @@ use super::common;
 /// Compile `src` (entry `box()`), run it, and assert the result is `"OK"`. Skips (returns) when the
 /// JDK / stdlib toolchain isn't provisioned, matching the other `*_e2e` tests.
 fn run_ok(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]
@@ -62,6 +62,21 @@ fn arrays_arrayof_and_iteration() {
         return \"OK\"\n\
     }\n";
     run_ok(src, "ArraysArrayOf");
+}
+
+/// Two adjacent loops bind the first loop's `end` and the second's head at ONE bytecode offset, and
+/// the single frame emitted there must hold on every edge — the defect that made this shape emit an
+/// unverifiable class. Kept beside the 2-D array case because the array only reaches it through a fill
+/// loop; the two loops are the actual trigger.
+#[test]
+fn adjacent_loops_verify() {
+    let src = "fun box(): String {\n\
+        var t = 0\n\
+        for (v in 0 until 3) t += v\n\
+        while (t > 100) t -= 1\n\
+        return if (t == 3) \"OK\" else \"f$t\"\n\
+    }\n";
+    run_ok(src, "AdjacentLoops");
 }
 
 #[test]

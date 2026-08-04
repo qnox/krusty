@@ -7,7 +7,7 @@ use super::common;
 /// Compile `src` (with entry `box`) under class `stem` and run it, asserting the return is `"OK"`.
 /// Skips (returns) when the toolchain env is unavailable — matching the other e2e tests.
 fn run(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

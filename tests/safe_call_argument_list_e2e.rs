@@ -221,11 +221,9 @@ fn invalid_named_safe_extension_does_not_resolve_positionally() {
     \x20   val value: String? = \"x\"\n\
     \x20   return value?.pick(missing = 1) ?: \"none\"\n\
     }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let diagnostics =
-        common::front_end_diagnostics(SRC, &[stdlib], common::jdk_modules().as_deref());
+        common::front_end_diagnostics(SRC, &[stdlib], Some(common::jdk_modules().as_path()));
     assert!(
         diagnostics
             .iter()
@@ -245,11 +243,9 @@ fn equally_ranked_named_safe_extensions_are_ambiguous() {
     \x20   val value: C? = C()\n\
     \x20   return value?.pick(value = 1) ?: \"none\"\n\
     }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let diagnostics =
-        common::front_end_diagnostics(SRC, &[stdlib], common::jdk_modules().as_deref());
+        common::front_end_diagnostics(SRC, &[stdlib], Some(common::jdk_modules().as_path()));
     assert!(
         diagnostics
             .iter()

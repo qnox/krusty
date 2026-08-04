@@ -113,9 +113,6 @@ fn enum_entry_and_entries_property_from_another_source_file_use_the_declaring_ow
     // This crosses the module-symbol provider boundary rather than reading the enum's AST directly.
     // Both the entry field and synthetic property must retain the same semantic owner and exact
     // physical target, proving that cross-file lowering does not need a separate source-origin path.
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
-        return;
-    }
     let output = common::compile_and_run_files_with_stdlib(&[
         (
             "State",

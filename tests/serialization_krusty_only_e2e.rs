@@ -71,7 +71,7 @@ fn serialization_runtime_jars() -> Option<Vec<PathBuf>> {
     static JARS: OnceLock<Option<Vec<PathBuf>>> = OnceLock::new();
     JARS.get_or_init(|| {
         Some(vec![
-            common::stdlib_jar()?,
+            common::stdlib_jar(),
             find("kotlinx-serialization-core-jvm")?,
             find("kotlinx-serialization-json-jvm")?,
         ])
@@ -931,10 +931,7 @@ fn ambiguous_import_resolves_in_signature_phase() {
     // classpath, so the simple name is ambiguity-pruned from the global type seed. An EXPLICIT import
     // must still resolve it — in the SIGNATURE phase (function parameter types), not just the checker.
     // (Prerequisite for custom-serializer files, which declare `serialize(encoder: Encoder, …)`.)
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping: no stdlib");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let Some(core) = find("kotlinx-serialization-core-jvm") else {
         eprintln!("skipping: no serialization core jar");
         return;

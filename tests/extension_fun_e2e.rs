@@ -16,5 +16,5 @@ if (\"a\".dbl() != \"aa\") return \"f2\"\n\
 if (3.plusX(4) != 7) return \"f3\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "D");
+    common::expect_box_ok_with_stdlib(src, "D");
 }

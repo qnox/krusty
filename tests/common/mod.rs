@@ -719,7 +719,7 @@ where
 /// (→ skip) when the toolchain is absent.
 #[allow(dead_code)]
 pub fn module_front_end_diagnostics(sources: &[(&str, &str)]) -> Option<Vec<String>> {
-    let stdlib = stdlib_jar()?;
+    let stdlib = stdlib_jar();
     let jdk = jdk_modules();
     let source_texts = sources
         .iter()
@@ -732,7 +732,7 @@ pub fn module_front_end_diagnostics(sources: &[(&str, &str)]) -> Option<Vec<Stri
     Some(front_end_diagnostics_files_with_prepare(
         &source_texts,
         &[stdlib],
-        jdk.as_deref(),
+        Some(jdk.as_path()),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
     ))
 }
@@ -803,9 +803,39 @@ fn hash_str(s: &str) -> u64 {
 // tests do — one implementation, no drift. Re-exported here under the names the test files already use.
 #[allow(unused_imports)]
 pub use krusty::toolchain::{
-    box_corpus_dir, classpath_jars_for, coroutines_jar, dist_jar, ensure_maven, find_jar,
-    kotlin_test_jar, kotlin_version, kotlinc_lib_dir, stdlib_classpath, stdlib_jar,
+    box_corpus_dir, classpath_jars_for, dist_jar, ensure_maven, find_jar, kotlin_test_jar,
+    kotlin_version, kotlinc_lib_dir, stdlib_classpath,
 };
+
+// --- Toolchain accessors: a misconfigured environment is a FAILURE, never a skip ---
+//
+// The library forms report an unprovisioned toolchain as `None`, which is right for the `survey`
+// binary but wrong here. An `Option` invites `let Some(x) = … else { return }`, and a whole suite
+// then reports as PASSING because nothing ran. These wrappers panic with the reason and the fix, so
+// one missing environment variable stops the run instead of hiding it. See
+// `tests/box_harness_skip_semantics_e2e.rs` for the sibling rule about compile/run results.
+
+/// The kotlin-stdlib jar every JVM-backed test compiles against.
+pub fn stdlib_jar() -> PathBuf {
+    krusty::toolchain::stdlib_jar().unwrap_or_else(|| {
+        panic!(
+            "no kotlin-stdlib jar found, so no JVM-backed test in this suite can compile.\n\
+             Provision the reference toolchain (`just` fetches it) or put a kotlin-stdlib jar on the \
+             Gradle/Maven cache path."
+        )
+    })
+}
+
+/// `kotlinx-coroutines-core-jvm`, needed by the suspend/`runBlocking` suites.
+#[allow(dead_code)]
+pub fn coroutines_jar() -> PathBuf {
+    krusty::toolchain::coroutines_jar().unwrap_or_else(|| {
+        panic!(
+            "no kotlinx-coroutines-core jar found, so the coroutine tests cannot compile.\n\
+             Provision the reference toolchain (`just`) — it fetches the jar."
+        )
+    })
+}
 
 /// The JDK `lib/modules` jimage the front-end resolves `java.*` against.
 ///
@@ -813,12 +843,11 @@ pub use krusty::toolchain::{
 /// `survey` binary but wrong here: every JVM-backed test then skips or fails on its own
 /// `.expect`, so one missing environment variable surfaces as hundreds of identical
 /// panics with nothing naming the cause. Tests stop on the first one instead, with the
-/// reason and the fix. Callers keep the `Option` shape — this only ever returns `Some`
-/// or panics, so their skip arms are unreachable when the toolchain is misconfigured.
+/// reason and the fix.
 #[allow(dead_code)]
-pub fn jdk_modules() -> Option<PathBuf> {
+pub fn jdk_modules() -> PathBuf {
     if let Some(modules) = krusty::toolchain::jdk_modules() {
-        return Some(modules);
+        return modules;
     }
     if let Some(explicit) =
         std::env::var_os("KRUSTY_SURVEY_JDK_MODULES").filter(|path| !path.is_empty())
@@ -859,9 +888,9 @@ pub fn directive(src: &str, name: &str) -> bool {
 
 #[allow(dead_code)]
 pub fn stdlib_toolchain_ready() -> bool {
-    // A probe, so it asks the library form rather than the diagnosing wrapper above:
-    // reporting "not ready" is this function's whole job and must not panic.
-    stdlib_jar().is_some() && krusty::toolchain::jdk_modules().is_some()
+    // A probe, so it asks the LIBRARY forms rather than the diagnosing wrappers above: reporting
+    // "not ready" is this function's whole job and must not panic.
+    krusty::toolchain::stdlib_jar().is_some() && krusty::toolchain::jdk_modules().is_some()
 }
 
 /// Run one front-end-valid inline source through the checked-file → JVM-backend pipeline.
@@ -873,9 +902,9 @@ pub fn stdlib_toolchain_ready() -> bool {
 /// assertion rather than turning an environment limitation into a compiler failure.
 #[allow(dead_code)]
 pub fn inline_source_backend_outcome(src: &str) -> Option<BackendOutcome> {
-    let jdk = jdk_modules()?;
+    let jdk = jdk_modules();
     let cp = krusty::toolchain::classpath_jars_for(src);
-    backend_outcome_in_process(src, "P", &cp, Some(&jdk))
+    backend_outcome_in_process(src, "P", &cp, Some(jdk.as_path()))
 }
 
 /// The file must be declined by a BACKEND PASS, naming which one — the counterpart of
@@ -1011,11 +1040,17 @@ class TestClassLoader extends ClassLoader {
 
 /// Locate `JAVA_HOME` for the runner JVM (`KRUSTY_REF_JAVA_HOME` overrides). `None` ⇒ skip.
 #[allow(dead_code)]
-pub fn java_home() -> Option<String> {
+pub fn java_home() -> String {
     std::env::var("KRUSTY_REF_JAVA_HOME")
         .or_else(|_| std::env::var("JAVA_HOME"))
         .ok()
         .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "JAVA_HOME is not set, so no JVM-backed test in this suite can run.\n\
+                 There is no fallback to /usr/libexec/java_home — set it explicitly to a JDK 21+ home."
+            )
+        })
 }
 
 /// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.
@@ -1348,7 +1383,7 @@ pub fn run_box(
 ) -> Option<String> {
     static POOL: OnceLock<Mutex<RunnerPool>> = OnceLock::new();
     let _pg = ProfGuard::new("box");
-    let java_home = java_home()?;
+    let java_home = java_home();
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
         return None;
@@ -1429,69 +1464,124 @@ pub fn compile_and_run_box_files(
 /// Compile `src` with kotlin-stdlib plus the provisioned JDK modules, then run `box()`.
 #[allow(dead_code)]
 pub fn compile_and_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
-    let stdlib = stdlib_jar()?;
-    let jdk = jdk_modules()?;
-    compile_and_run_box(src, stem, &[stdlib], Some(&jdk))
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path()))
 }
 
 /// Multi-file form of [`compile_and_run_with_stdlib`].
 #[allow(dead_code)]
 pub fn compile_and_run_files_with_stdlib(sources: &[(&str, &str)]) -> Option<String> {
-    let stdlib = stdlib_jar()?;
-    let jdk = jdk_modules()?;
-    compile_and_run_box_files(sources, &[stdlib], Some(&jdk))
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    compile_and_run_box_files(sources, &[stdlib], Some(jdk.as_path()))
 }
 
-/// Compile `src` with kotlin-stdlib + JDK modules, run `box()`, and assert it returns `OK`.
-#[allow(dead_code)]
-pub fn assert_box_ok_with_stdlib(src: &str, stem: &str) {
-    if let Some(out) = compile_and_run_with_stdlib(src, stem) {
-        assert_eq!(out, "OK", "box() for {stem} returned {out:?}");
+/// Render the front-end diagnostics behind a `None` from the compile helpers. Empty means the front
+/// end ACCEPTED the source, so the `None` came from a lowering/emit bail instead.
+fn why(diagnostics: &[String]) -> String {
+    if diagnostics.is_empty() {
+        "the front end accepted it, so lowering/emit bailed".to_string()
+    } else {
+        format!("front-end diagnostics: {diagnostics:?}")
     }
 }
 
-/// Like [`assert_box_ok_with_stdlib`], but treats a compile/run `None` as a regression once
-/// stdlib + JDK modules are provisioned.
+/// Compile `src` and run `box()`, treating a `None` as a REGRESSION rather than a skip.
+///
+/// [`compile_and_run_box`] returns `None` for two unrelated reasons — the JVM toolchain isn't
+/// provisioned, or the front end/backend REJECTED the source. A caller that has already resolved the
+/// toolchain (stdlib jar, JDK modules, JVM runner) has ruled the first out, so the remaining causes
+/// are a compile failure or a lowering/emit bail: a real failure that must not report as a pass.
+/// Panics with the front-end diagnostics (empty ⇒ the front end accepted it and lowering/emit bailed).
+#[allow(dead_code)]
+pub fn expect_box_run(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+) -> String {
+    compile_and_run_box(src, stem, cp_jars, jdk_modules).unwrap_or_else(|| {
+        let diagnostics = front_end_diagnostics(src, cp_jars, jdk_modules);
+        panic!("{stem}: compile/run returned None; {}", why(&diagnostics))
+    })
+}
+
+/// [`expect_box_run`] against kotlin-stdlib + the JDK modules.
+///
+/// The `Option` is VESTIGIAL: both accessors panic when the toolchain is unprovisioned and a rejected
+/// source panics with its diagnostics, so this only ever returns `Some`. Callers keep a `let Some(..)
+/// else { return }` that can no longer fire; collapsing the signature is a mechanical follow-up.
+#[allow(dead_code)]
+pub fn expect_box_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    Some(expect_box_run(src, stem, &[stdlib], Some(jdk.as_path())))
+}
+
+/// [`expect_box_run`] for a compile-only consumer: the emitted classes, or a panic naming why the
+/// source was rejected. Same contract — the caller must have resolved the toolchain first.
+#[allow(dead_code)]
+pub fn expect_compile_in_process(
+    src: &str,
+    stem: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&Path>,
+) -> Vec<(String, Vec<u8>)> {
+    compile_in_process(src, stem, cp_jars, jdk_modules).unwrap_or_else(|| {
+        let diagnostics = front_end_diagnostics(src, cp_jars, jdk_modules);
+        panic!("{stem}: compile returned None; {}", why(&diagnostics))
+    })
+}
+
+/// [`expect_compile_in_process`] against kotlin-stdlib + the JDK modules. The `Option` is vestigial,
+/// as above.
+#[allow(dead_code)]
+pub fn expect_classes_with_stdlib(src: &str, stem: &str) -> Option<Vec<(String, Vec<u8>)>> {
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    Some(expect_compile_in_process(
+        src,
+        stem,
+        &[stdlib],
+        Some(jdk.as_path()),
+    ))
+}
+
+/// Compile `src` with kotlin-stdlib + JDK modules, run `box()`, and assert it returns `OK`. Once
+/// stdlib + JDK modules are provisioned a compile/run `None` is a regression, not a skip.
 #[allow(dead_code)]
 pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = jdk_modules() else {
-        return;
-    };
-    let Some(out) = compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        panic!("{stem}: compile/run returned None");
-    };
-    assert_eq!(out, "OK", "{stem}");
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    assert_eq!(
+        expect_box_run(src, stem, &[stdlib], Some(jdk.as_path())),
+        "OK",
+        "{stem}"
+    );
 }
 
 /// Multi-file form of [`expect_box_ok_with_stdlib`].
 #[allow(dead_code)]
 pub fn expect_box_ok_files_with_stdlib(sources: &[(&str, &str)], stem: &str) {
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = jdk_modules() else {
-        return;
-    };
-    let Some(out) = compile_and_run_box_files(sources, &[stdlib], Some(&jdk)) else {
-        panic!("{stem}: compile/run returned None");
-    };
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    let cp = [stdlib];
+    let out = compile_and_run_box_files(sources, &cp, Some(jdk.as_path())).unwrap_or_else(|| {
+        let files: Vec<&str> = sources.iter().map(|(_, src)| *src).collect();
+        let diagnostics = front_end_diagnostics_files(&files, &cp, Some(jdk.as_path()));
+        panic!("{stem}: compile/run returned None; {}", why(&diagnostics))
+    });
     assert_eq!(out, "OK", "{stem}");
 }
 
 /// Assert that a multi-file source set is accepted by the shared frontend with stdlib/JDK symbols.
 #[allow(dead_code)]
 pub fn expect_front_end_ok_files_with_stdlib(sources: &[&str], stem: &str) {
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = jdk_modules() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
     let diagnostics =
-        front_end_diagnostics_files(sources, std::slice::from_ref(&stdlib), Some(&jdk));
+        front_end_diagnostics_files(sources, std::slice::from_ref(&stdlib), Some(jdk.as_path()));
     assert!(
         diagnostics.is_empty(),
         "{stem}: unexpected diagnostics: {diagnostics:?}"
@@ -1508,7 +1598,7 @@ pub fn compile_lib(tag: &str, lib_src: &str) -> Option<PathBuf> {
 /// Compile Kotlin files into a temporary classpath directory.
 #[allow(dead_code)]
 pub fn compile_libs(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
-    let stdlib = stdlib_jar()?;
+    let stdlib = stdlib_jar();
     let work = scratch_dir()?;
     let out = work.join("libout");
     std::fs::create_dir_all(&out).ok()?;
@@ -1536,17 +1626,58 @@ pub fn compile_libs(_tag: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
 #[allow(dead_code)]
 pub fn run_box_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
     let libout = compile_lib(tag, lib_src)?;
-    let stdlib = stdlib_jar()?;
-    compile_and_run_box(main, "Main", &[libout, stdlib], jdk_modules().as_deref())
+    let stdlib = stdlib_jar();
+    compile_and_run_box(
+        main,
+        "Main",
+        &[libout, stdlib],
+        Some(jdk_modules().as_path()),
+    )
+}
+
+/// [`run_box_against`] with the strict contract: `None` means ONLY that the kotlinc/JVM toolchain
+/// isn't provisioned. A `main` the front end REJECTS panics with its diagnostics instead of
+/// collapsing into the same `None` and reporting as a passing skip.
+#[allow(dead_code)]
+pub fn expect_box_run_against(tag: &str, lib_src: &str, main: &str) -> Option<String> {
+    let libout = compile_lib(tag, lib_src)?;
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    Some(expect_box_run(
+        main,
+        "Main",
+        &[libout, stdlib],
+        Some(jdk.as_path()),
+    ))
+}
+
+/// [`expect_box_run_against`] with `kotlin-reflect` on the classpath.
+#[allow(dead_code)]
+pub fn expect_box_run_against_with_reflect(tag: &str, lib_src: &str, main: &str) -> Option<String> {
+    let libout = compile_lib(tag, lib_src)?;
+    let stdlib = stdlib_jar();
+    let reflect =
+        dist_jar("kotlin-reflect.jar").or_else(|| find_jar("kotlin-reflect-", &["sources"]))?;
+    let jdk = jdk_modules();
+    Some(expect_box_run(
+        main,
+        "Main",
+        &[libout, stdlib, reflect],
+        Some(jdk.as_path()),
+    ))
 }
 
 /// Frontend diagnostics for `main` against a kotlinc-built source dependency.
 #[allow(dead_code)]
 pub fn diagnostics_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
     let libout = compile_lib(tag, lib_src)?;
-    let stdlib = stdlib_jar()?;
-    let jdk = jdk_modules()?;
-    Some(front_end_diagnostics(main, &[libout, stdlib], Some(&jdk)))
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    Some(front_end_diagnostics(
+        main,
+        &[libout, stdlib],
+        Some(jdk.as_path()),
+    ))
 }
 
 /// Run a classpath fixture, skipping only when the external toolchain is unavailable.
@@ -1555,33 +1686,15 @@ pub fn expect_box_ok_against(tag: &str, lib_src: &str, main: &str) {
     let Some(libout) = compile_lib(tag, lib_src) else {
         return;
     };
-    let Some(stdlib) = stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = jdk_modules() else {
-        return;
-    };
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
     let classpath = [libout, stdlib];
-    let output = compile_and_run_box(main, "Main", &classpath, Some(&jdk)).unwrap_or_else(|| {
-        let diagnostics = front_end_diagnostics(main, &classpath, Some(&jdk));
-        panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
-    });
+    let output =
+        compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path())).unwrap_or_else(|| {
+            let diagnostics = front_end_diagnostics(main, &classpath, Some(jdk.as_path()));
+            panic!("{tag}: compile/run returned None; diagnostics: {diagnostics:?}")
+        });
     assert_eq!(output, "OK", "{tag}");
-}
-
-/// [`run_box_against`] with `kotlin-reflect` on the classpath.
-#[allow(dead_code)]
-pub fn run_box_against_with_reflect(tag: &str, lib_src: &str, main: &str) -> Option<String> {
-    let libout = compile_lib(tag, lib_src)?;
-    let stdlib = stdlib_jar()?;
-    let reflect =
-        dist_jar("kotlin-reflect.jar").or_else(|| find_jar("kotlin-reflect-", &["sources"]))?;
-    compile_and_run_box(
-        main,
-        "Main",
-        &[libout, stdlib, reflect],
-        jdk_modules().as_deref(),
-    )
 }
 
 /// Compile `main` against a kotlinc-built `lib_src` up to the CHECKER only (no lowering/emit), returning
@@ -1590,22 +1703,18 @@ pub fn run_box_against_with_reflect(tag: &str, lib_src: &str, main: &str) -> Opt
 #[allow(dead_code)]
 pub fn checker_diags_against(tag: &str, lib_src: &str, main: &str) -> Option<Vec<String>> {
     let libout = compile_lib(tag, lib_src)?;
-    let stdlib = stdlib_jar()?;
+    let stdlib = stdlib_jar();
     let mut classpath = vec![libout, stdlib];
-    if let Some(jdk) = jdk_modules() {
-        classpath.push(jdk);
-    }
+    classpath.push(jdk_modules());
     Some(checker_diags_with_classpath(main, classpath))
 }
 
 /// Check `main` against the Kotlin stdlib without lowering or emitting.
 #[allow(dead_code)]
 pub fn checker_diags_with_stdlib(main: &str) -> Option<Vec<String>> {
-    let stdlib = stdlib_jar()?;
+    let stdlib = stdlib_jar();
     let mut classpath = vec![stdlib];
-    if let Some(jdk) = jdk_modules() {
-        classpath.push(jdk);
-    }
+    classpath.push(jdk_modules());
     Some(checker_diags_with_classpath(main, classpath))
 }
 
@@ -1629,7 +1738,15 @@ fn checker_diags_with_classpath(main: &str, classpath: Vec<PathBuf>) -> Vec<Stri
 /// needs both). `false` ⇒ the test should skip.
 #[allow(dead_code)]
 pub fn corpus_ready() -> bool {
-    java_home().is_some() && stdlib_jar().is_some() && box_corpus_dir().is_some()
+    // Library forms again — a probe must report, not panic. JAVA_HOME is checked SEPARATELY from the
+    // jimage: `KRUSTY_SURVEY_JDK_MODULES` can supply the latter while the former is unset, and the box
+    // runner needs a `java` binary, so reporting "ready" on the jimage alone would panic downstream.
+    std::env::var("KRUSTY_REF_JAVA_HOME")
+        .or_else(|_| std::env::var("JAVA_HOME"))
+        .is_ok_and(|home| !home.is_empty())
+        && krusty::toolchain::stdlib_jar().is_some()
+        && krusty::toolchain::jdk_modules().is_some()
+        && box_corpus_dir().is_some()
 }
 
 /// Compile + run a SINGLE box-corpus case by its path relative to the corpus root (e.g.
@@ -1653,9 +1770,9 @@ pub fn run_box_corpus_case(rel: &str) -> Option<String> {
     if src.contains("// FILE:") || src.contains("// MODULE:") {
         return None;
     }
-    let jdk = jdk_modules()?;
+    let jdk = jdk_modules();
     let cp = classpath_jars_for(&src);
-    let classes = compile_in_process(&src, "P", &cp, Some(&jdk))?;
+    let classes = compile_in_process(&src, "P", &cp, Some(jdk.as_path()))?;
     let box_class = find_box_class(&classes)?;
     run_box(&classes, &box_class, &cp)
 }
@@ -1668,9 +1785,9 @@ pub fn box_corpus_case_backend_outcome(rel: &str) -> Option<BackendOutcome> {
     if src.contains("// FILE:") || src.contains("// MODULE:") {
         return None;
     }
-    let jdk = jdk_modules()?;
+    let jdk = jdk_modules();
     let cp = classpath_jars_for(&src);
-    backend_outcome_in_process(&src, "P", &cp, Some(&jdk))
+    backend_outcome_in_process(&src, "P", &cp, Some(jdk.as_path()))
 }
 
 // --- Persistent kotlinc compiler server -----------------------------------
@@ -1877,7 +1994,7 @@ type ServerPool<S> = Mutex<HashMap<String, Vec<Arc<Mutex<S>>>>>;
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     static POOL: OnceLock<ServerPool<KotlincServer>> = OnceLock::new();
     let _pg = ProfGuard::new("kotlinc");
-    let java_home = java_home()?;
+    let java_home = java_home();
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
         return None;
@@ -2129,7 +2246,7 @@ pub fn javac_run_proc(
     // A POOL of runner JVMs (not one global), so Java-driver tests run N-wide instead of serializing
     // on a single mutex held across the whole javac+run. The pool lock is released before the run.
     static POOL: OnceLock<Mutex<Vec<Arc<Mutex<JavaRunner>>>>> = OnceLock::new();
-    let java_home = java_home()?;
+    let java_home = java_home();
     let java = format!("{java_home}/bin/java");
     if !Path::new(&java).exists() {
         return None;

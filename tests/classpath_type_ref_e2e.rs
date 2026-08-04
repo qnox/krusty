@@ -7,14 +7,8 @@ use super::common;
 
 #[test]
 fn classpath_type_ref_and_operator_resolution() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib(
         "ctr",
         "package lib\n\
@@ -48,7 +42,7 @@ fn classpath_type_ref_and_operator_resolution() {
         \x20 if (a >= d) return \"fail b5-ge\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile classpath type-ref/operator resolution");
     match common::run_box(&classes, "MainKt", &[libout, sl]) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),

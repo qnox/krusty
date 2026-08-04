@@ -18,10 +18,10 @@ class Refinement<T, R> {\n\
 }\n";
 
 fn run(tag: &str, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let lo = common::compile_lib(tag, LIB)?;
-    common::compile_and_run_box(main, "Main", &[lo, sl, jdk.clone()], Some(&jdk))
+    common::compile_and_run_box(main, "Main", &[lo, sl, jdk.clone()], Some(jdk.as_path()))
 }
 
 #[test]
@@ -75,10 +75,11 @@ fn context_parameter_contract_round_trip_cross_module() {
             this\n\
         } + \"K\"\n\
     }\n";
-    let jdk = common::jdk_modules().expect("jdk");
-    let sl = common::stdlib_jar().expect("stdlib");
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let lo = common::compile_lib("ctx_p", CONTEXT_LIB).expect("lib compiles");
-    let out = common::compile_and_run_box(MAIN, "Main", &[lo, sl, jdk.clone()], Some(&jdk));
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[lo, sl, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.expect("context contract smart cast compiles + runs"),
         "OK"

@@ -9,11 +9,11 @@ use super::common::{compile_and_run_box, compile_to_dir, jdk_modules, stdlib_jar
 /// Compile `lib` (krusty, in-process) into a fresh temp dir and return it. `None` ⇒ toolchain
 /// absent ⇒ caller skips.
 fn dep_dir(tag: &str, lib: &str) -> Option<std::path::PathBuf> {
-    let stdlib = stdlib_jar()?;
+    let stdlib = stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_depdir_{}_{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).ok()?;
-    compile_to_dir(lib, "lib1", &[stdlib], jdk_modules().as_deref(), &dir)
+    compile_to_dir(lib, "lib1", &[stdlib], Some(jdk_modules().as_path()), &dir)
         .expect("dep lib must compile");
     Some(dir)
 }
@@ -23,9 +23,9 @@ fn top_level_fn_from_dep_dir() {
     let Some(dir) = dep_dir("toplevel", "package dep\n\nfun greet(): String = \"OK\"\n") else {
         return;
     };
-    let Some(stdlib) = stdlib_jar() else { return };
+    let stdlib = stdlib_jar();
     let main = "import dep.greet\n\nfun box(): String = greet()\n";
-    let out = compile_and_run_box(main, "Main", &[dir, stdlib], jdk_modules().as_deref())
+    let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
         .expect("top-level fn from a krusty-built dep dir must compile and run");
     assert_eq!(out, "OK");
 }
@@ -38,9 +38,9 @@ fn extension_fn_from_dep_dir() {
     ) else {
         return;
     };
-    let Some(stdlib) = stdlib_jar() else { return };
+    let stdlib = stdlib_jar();
     let main = "import dep.shout\n\nfun box(): String {\n    return if (\"OK\".shout() == \"OK!\") \"OK\" else \"fail\"\n}\n";
-    let out = compile_and_run_box(main, "Main", &[dir, stdlib], jdk_modules().as_deref())
+    let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
         .expect("extension fn from a krusty-built dep dir must compile and run");
     assert_eq!(out, "OK");
 }
@@ -55,9 +55,9 @@ fn same_name_extension_properties_from_dep_dir() {
     ) else {
         return;
     };
-    let Some(stdlib) = stdlib_jar() else { return };
+    let stdlib = stdlib_jar();
     let main = "import dep.tagged\n\nfun box(): String {\n    if (\"x\".tagged != \"s:x\") return \"fail string\"\n    if (7.tagged != \"i:7\") return \"fail int\"\n    return \"OK\"\n}\n";
-    let out = compile_and_run_box(main, "Main", &[dir, stdlib], jdk_modules().as_deref())
+    let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
         .expect("same-name extension properties from a krusty-built dep dir must compile and run");
     assert_eq!(out, "OK");
 }
@@ -70,9 +70,9 @@ fn extension_property_from_dep_dir() {
     ) else {
         return;
     };
-    let Some(stdlib) = stdlib_jar() else { return };
+    let stdlib = stdlib_jar();
     let main = "import dep.doubled\n\nfun box(): String {\n    return if (\"ab\".doubled == \"abab\") \"OK\" else \"fail\"\n}\n";
-    let out = compile_and_run_box(main, "Main", &[dir, stdlib], jdk_modules().as_deref())
+    let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
         .expect("extension property from a krusty-built dep dir must compile and run");
     assert_eq!(out, "OK");
 }
@@ -88,9 +88,9 @@ fn inline_fn_with_defaults_named_calls_from_dep_dir() {
     ) else {
         return;
     };
-    let Some(stdlib) = stdlib_jar() else { return };
+    let stdlib = stdlib_jar();
     let main = "import dep.foo\n\nfun box(): String {\n    val r = foo() + \";\" + foo(x = \"X\") + \";\" + foo(y = \"Y\") + \";\" + foo(x = \"X\", y = \"Y\")\n    return if (r == \"xy;Xy;xY;XY\") \"OK\" else \"fail: $r\"\n}\n";
-    let out = compile_and_run_box(main, "Main", &[dir, stdlib], jdk_modules().as_deref())
+    let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
         .expect("inline fn with defaults from a krusty-built dep dir must compile and run");
     assert_eq!(out, "OK");
 }

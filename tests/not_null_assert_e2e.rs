@@ -13,5 +13,5 @@ if (x!! != \"hi\") return \"f1\"\n\
 if (len(pick(true)!!) != 2) return \"f2\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "N");
+    common::expect_box_ok_with_stdlib(src, "N");
 }

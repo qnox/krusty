@@ -17,12 +17,8 @@ fun box(): String {\n\
 
 #[test]
 fn base_extension_on_classpath_subtype() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     const LIB: &str = "package q\n\
         sealed class V {\n\
         \x20 abstract val id: String\n\
@@ -40,7 +36,7 @@ fn base_extension_on_classpath_subtype() {
         \x20 if (Make.ok(\"a\", \"x\").render() == \"[a]\" && Make.err(\"b\", \"y\").render() == \"[b]\") \"OK\"\n\
         \x20 else \"fail\"\n";
     assert_eq!(
-        common::compile_and_run_box(MAIN, "Main", &[libout, sl], Some(&jdk))
+        common::compile_and_run_box(MAIN, "Main", &[libout, sl], Some(jdk.as_path()))
             .expect("base ext on classpath subtype"),
         "OK"
     );

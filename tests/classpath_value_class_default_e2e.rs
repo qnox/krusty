@@ -17,12 +17,8 @@ const LIB: &str = "package lib\n\
 
 #[test]
 fn value_class_ctor_default_and_data_copy() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib("vcdef", LIB) else {
         return;
     };
@@ -44,7 +40,7 @@ fn value_class_ctor_default_and_data_copy() {
         \x20 if (c3.id.v != \"q\" || c3.name != \"a\") return \"fail f2b: ${c3.id.v},${c3.name}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile value-class ctor-default / data-copy");
     match common::run_box(&classes, "MainKt", &[libout, sl]) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
@@ -57,12 +53,8 @@ fn suspend_value_class_param_member_resolves_and_emits_cps() {
     // f4: a suspend interface method with a value-class parameter (`get-<hash>(String, Continuation)`).
     // Running needs a coroutine driver; assert instead that it COMPILES (resolution was the bug) and emits
     // the mangled CPS call with the unboxed value-class argument — the exact shape kotlinc produces.
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib("vcsusp", LIB) else {
         return;
     };
@@ -71,7 +63,7 @@ fn suspend_value_class_param_member_resolves_and_emits_cps() {
         import lib.Vid\n\
         suspend fun use(p: Port): String = p.get(Vid(\"7\"))\n\
         fun box(): String = \"OK\"\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile suspend value-class-param member call");
     // The `use` facade method must call the mangled CPS member on the interface with the unboxed value.
     let facade = classes

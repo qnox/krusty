@@ -16,15 +16,9 @@ const LIB: &str = "package lib\n\
 
 #[test]
 fn suspend_lambda_in_collection_hof_runs() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(coro) = common::coroutines_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
     let Some(lo) = common::compile_lib("susp_hof_lambda", LIB) else {
         return;
     };
@@ -45,7 +39,12 @@ fn suspend_lambda_in_collection_hof_runs() {
             if (f == listOf(1, 2, 3) && m == listOf(2, 1) && a == listOf(1, 2, 3) && p == listOf(11, 21)) \"OK\"\n\
             else \"F f=$f m=$m a=$a p=$p\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[lo, sl, coro, jdk.clone()], Some(&jdk));
+    let out = common::compile_and_run_box(
+        MAIN,
+        "Main",
+        &[lo, sl, coro, jdk.clone()],
+        Some(jdk.as_path()),
+    );
     assert_eq!(
         out.as_deref(),
         Some("OK"),

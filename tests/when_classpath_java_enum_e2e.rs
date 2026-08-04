@@ -5,7 +5,7 @@ use std::path::PathBuf;
 const JAVA_ENUM: &str = "package p;\npublic enum Color { RED, GREEN }\n";
 
 fn compile_java_enum() -> Option<(PathBuf, Vec<PathBuf>, common::JavacOutput)> {
-    let jdk = common::jdk_modules()?;
+    let jdk = common::jdk_modules();
     let jars = common::classpath_jars_for("");
     let output =
         common::javac_compile(&[("Color.java".to_string(), JAVA_ENUM.to_string())], &jars)?;

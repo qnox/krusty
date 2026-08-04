@@ -119,10 +119,7 @@ fn kotlin_calls_apt_generated_class() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    let Some(jdk) = common::jdk_modules() else {
-        cleanup(&procdir);
-        return;
-    };
+    let jdk = common::jdk_modules();
     let out = common::javac_compile_proc(
         &[(
             "Src.java".to_string(),

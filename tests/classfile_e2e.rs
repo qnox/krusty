@@ -9,11 +9,6 @@ use super::common;
 
 #[test]
 fn emitted_add_class_verifies_and_runs() {
-    if common::java_home().is_none() {
-        eprintln!("skipping: javac/java not available");
-        return;
-    }
-
     // FooKt.add(int,int):int = a + b
     let mut cw = ClassWriter::new("FooKt", "java/lang/Object");
     let mut code = CodeBuilder::new(2);

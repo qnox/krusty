@@ -42,5 +42,5 @@ val ulr = 1uL..<3uL\n\
 if (!ulr.contains(1uL) || ulr.contains(3uL)) return \"ulr\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "R");
+    common::expect_box_ok_with_stdlib(SRC, "R");
 }

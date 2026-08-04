@@ -27,7 +27,7 @@ use std::process::Command;
 use super::common;
 
 fn tooldir() -> Option<PathBuf> {
-    let b = PathBuf::from(common::java_home()?).join("bin");
+    let b = PathBuf::from(common::java_home()).join("bin");
     b.join("javac").exists().then_some(b)
 }
 

@@ -18,5 +18,5 @@ for (a in 0 until 5) { for (b in 0 until 5) { if (b == 2) break; u += 1 } }\n\
 if (u != 10) return \"fnest\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "D");
+    common::expect_box_ok_with_stdlib(SRC, "D");
 }

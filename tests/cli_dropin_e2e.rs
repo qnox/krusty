@@ -88,25 +88,25 @@ fn compiles_directory_to_jar_consumable_by_kotlinc() {
         return;
     }
 
-    if let (Some(java_home), Some(stdlib)) = (common::java_home(), common::stdlib_jar()) {
-        let cp = format!(
-            "{}:{}:{}",
-            root.join("cout").to_str().unwrap(),
-            jar.to_str().unwrap(),
-            stdlib.to_string_lossy()
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
+    let cp = format!(
+        "{}:{}:{}",
+        root.join("cout").to_str().unwrap(),
+        jar.to_str().unwrap(),
+        stdlib.to_string_lossy()
+    );
+    let run = Command::new(format!("{java_home}/bin/java"))
+        .args(["-cp", &cp, "ConsumerKt"])
+        .output()
+        .expect("java");
+    if run.status.success() {
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            "8\n",
+            "stderr={}",
+            String::from_utf8_lossy(&run.stderr)
         );
-        let run = Command::new(format!("{java_home}/bin/java"))
-            .args(["-cp", &cp, "ConsumerKt"])
-            .output()
-            .expect("java");
-        if run.status.success() {
-            assert_eq!(
-                String::from_utf8_lossy(&run.stdout),
-                "8\n",
-                "stderr={}",
-                String::from_utf8_lossy(&run.stderr)
-            );
-        }
     }
 
     let _ = fs::remove_dir_all(&root);
@@ -126,10 +126,7 @@ fn cross_file_top_level_function_and_property() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping cross_file: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xfile_{}", std::process::id()));
@@ -192,9 +189,7 @@ fn cross_file_nullable_generic_return_remains_null_safe() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xgeneric_null_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -283,9 +278,7 @@ fn cross_file_class_construct_and_property_read() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xcls_{}", std::process::id()));
@@ -494,9 +487,7 @@ fn cross_file_destructuring() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xdestr_{}", std::process::id()));
@@ -606,9 +597,7 @@ fn cross_file_object_member_call_lowers() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xobj_{}", std::process::id()));
@@ -675,9 +664,7 @@ fn cross_module_object_as_value() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_objval_{}", std::process::id()));
@@ -745,9 +732,7 @@ fn ctor_omitted_non_const_default_uses_init_default() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_ctordef_{}", std::process::id()));
@@ -813,9 +798,7 @@ fn cross_file_value_class_property_read_uses_mangled_getter() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let krusty = common::krusty_binary();
     let dir = std::env::temp_dir().join(format!("krusty_xfilevc_{}", std::process::id()));

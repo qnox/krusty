@@ -8,7 +8,7 @@ use super::common;
 /// Compile+run `src`'s `box()` under a fresh stem; assert it returns "OK". Skips (returns) when the
 /// toolchain isn't present, matching the other e2e tests.
 fn run(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

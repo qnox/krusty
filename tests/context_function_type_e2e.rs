@@ -264,14 +264,12 @@ fun consume(module: Module): String = inspect(module) { token }\n";
     let Some(dependency) = common::compile_lib("context_shape_duplicate", HELPERS) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let classpath = [dependency, stdlib];
     let diagnostics = common::front_end_diagnostics_files(
         &[HELPERS, CALLER],
         &classpath,
-        common::jdk_modules().as_deref(),
+        Some(common::jdk_modules().as_path()),
     );
     assert!(
         diagnostics.is_empty(),

@@ -105,10 +105,15 @@ mod tests {
 
     #[test]
     fn js_backend_reports_unsupported_ir_lowering() {
+        // A `tailrec` MEMBER function is a whole-file lowering gate (`gate:tailrec-member`), so
+        // `lower_file` returns `None` and the backend must report it rather than emit. The fixture uses
+        // no library symbols — this harness has no stdlib on its classpath, so a stdlib-dependent
+        // fixture would fail in the FRONT END and never reach lowering. Mixed vararg spreads used to
+        // sit here too; they lower now.
         let (outputs, diags) = compile_js_sources(&[(
             "Main",
-            "fun f(vararg xs: Int): Int = 1\n\
-             fun box(): Int { val a = intArrayOf(1, 2); return f(0, *a, 3) }",
+            "class C { tailrec fun f(n: Int): Int = if (n == 0) 0 else f(n - 1) }\n\
+             fun box(): Int = C().f(3)",
         )]);
 
         assert!(outputs.is_empty());

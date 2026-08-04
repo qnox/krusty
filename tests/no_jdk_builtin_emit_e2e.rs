@@ -24,9 +24,9 @@ use super::common;
 /// when the compiler REJECTS the source, so an early return would turn a resolution regression into a
 /// silent pass. The only legitimate skip is a missing toolchain, which is checked first.
 fn run_no_jdk_box(src: &str, stem: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar()?;
+    let stdlib = common::stdlib_jar();
     // A runtime JVM is still required to LOAD the emitted class; only the COMPILE is JDK-less.
-    common::java_home()?;
+    let _ = common::java_home();
     let jars = [stdlib];
     let classes = common::compile_in_process(src, stem, &jars, None)
         .unwrap_or_else(|| panic!("{stem} must compile with no JDK on the classpath"));
@@ -144,10 +144,7 @@ fun box(): String {
 /// branch even when each isolated call would still load and return the expected value.
 #[test]
 fn no_jdk_emit_matches_jdk_emit_for_builtin_members() {
-    let (Some(stdlib), Some(jdk)) = (common::stdlib_jar(), common::jdk_modules()) else {
-        eprintln!("skip: no kotlin-stdlib jar / JDK modules");
-        return;
-    };
+    let (stdlib, jdk) = (common::stdlib_jar(), common::jdk_modules());
     let src = r#"
 fun s(l: List<String>): Int = l.size
 fun k(m: Map<String, Int>): Set<String> = m.keys
@@ -216,10 +213,7 @@ fun ia(a: IntArray): Int = a.size
 /// `java/util/Map`, and it is not negotiable.
 #[test]
 fn recovered_inner_class_entry_carries_the_jdk_flags() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let src = "fun n(m: Map<String, Int>): String = m.entries.first().key\n";
     let classes = common::compile_in_process(src, "innercls", &[stdlib], None)
         .expect("must compile with no JDK on the classpath");
@@ -250,10 +244,7 @@ fn recovered_inner_class_entry_carries_the_jdk_flags() {
 /// merely part of a mangled name, a lambda class, or a non-builtin owner cannot be reported as nesting.
 #[test]
 fn builtin_nested_class_only_answers_for_declared_nestings() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let cp = krusty::jvm::classpath::Classpath::new(vec![stdlib]);
     assert_eq!(
         cp.builtin_nested_class("java/util/Map$Entry"),

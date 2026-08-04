@@ -78,23 +78,31 @@ fun box(): String = C().ref().get()
 
 /// Known boundaries of THIS feature (promote these to box-OK pins when the machinery lands):
 /// delegation BY a callable reference (`val b by ::a`) isn't modeled even for the pre-existing
-/// `this::a`/`A()::a` forms (the delegate's `getValue` operator on `KProperty0` isn't resolved),
-/// and `.isInitialized` isn't resolved on any property reference (even `this::s`).
+/// `this::a`/`A()::a` forms (the delegate's `getValue` operator on `KProperty0` isn't resolved).
 #[test]
-fn delegate_and_lateinit_boundaries_stay_skipped() {
+fn delegate_boundary_stays_skipped() {
     if !common::corpus_ready() {
         return;
     }
-    for case in [
-        "delegatedProperty/delegatedByExtensionMemberProperty.kt",
-        "lateinit/isInitialized.kt",
-    ] {
-        assert_eq!(
-            common::run_box_corpus_case(case),
-            None,
-            "{case} needs machinery outside this feature — must stay skipped"
-        );
+    let case = "delegatedProperty/delegatedByExtensionMemberProperty.kt";
+    assert_eq!(
+        common::run_box_corpus_case(case),
+        None,
+        "{case} needs machinery outside this feature — must stay skipped"
+    );
+}
+
+/// `::prop.isInitialized` IS resolved now — on a property reference to a `lateinit var` of the
+/// enclosing class it is a null check on the backing field, which needs no `KProperty` value.
+#[test]
+fn lateinit_is_initialized_runs() {
+    if !common::corpus_ready() {
+        return;
     }
+    assert_eq!(
+        common::run_box_corpus_case("lateinit/isInitialized.kt").as_deref(),
+        Some("OK")
+    );
 }
 
 /// REJECTION GUARDS for the shadow/visibility/access holes around this feature — each of these

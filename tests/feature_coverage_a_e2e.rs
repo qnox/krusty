@@ -8,7 +8,7 @@ use super::common;
 
 /// Compile `src` (containing `fun box(): String`) with krusty, run on the JVM, expect "OK".
 fn run_ok(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

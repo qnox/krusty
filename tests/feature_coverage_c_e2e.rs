@@ -7,7 +7,7 @@ use super::common;
 /// Compile `src`'s `box()` under `stem` and assert it returns "OK". Skips (returns) when the
 /// JDK / stdlib toolchain isn't provisioned.
 fn check(stem: &str, src: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

@@ -17,10 +17,10 @@
 use super::common;
 
 fn run(tag: &str, lib: &str, main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let libout = common::compile_lib(tag, lib)?;
-    common::compile_and_run_box(main, "Main", &[libout, sl], Some(&jdk))
+    common::compile_and_run_box(main, "Main", &[libout, sl], Some(jdk.as_path()))
 }
 
 #[test]

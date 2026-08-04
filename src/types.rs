@@ -316,6 +316,7 @@ pub mod wk {
         continuation => "kotlin/coroutines/Continuation",
         any => "kotlin/Any",
         java_object => "java/lang/Object",
+        java_enum => "java/lang/Enum",
     }
 }
 
@@ -467,6 +468,10 @@ pub enum Ty {
     Char,
     /// Unsigned integers — Kotlin inline-class types with unsigned operation semantics. Kept distinct
     /// from signed types so those operations and widening (`toLong` = zero-extend) are selected correctly.
+    /// `UByte`/`UShort` are represented by the SIGN-extended `byte`/`short` the JVM loads, so every
+    /// widening out of that representation masks first (see [`Ty::unsigned_widen_mask`]).
+    UByte,
+    UShort,
     UInt,
     ULong,
     String,
@@ -611,6 +616,8 @@ impl Ty {
             Ty::Char => Some(type_name("kotlin/Char")),
             Ty::Float => Some(type_name("kotlin/Float")),
             Ty::Double => Some(type_name("kotlin/Double")),
+            Ty::UByte => Some(type_name("kotlin/UByte")),
+            Ty::UShort => Some(type_name("kotlin/UShort")),
             Ty::UInt => Some(type_name("kotlin/UInt")),
             Ty::ULong => Some(type_name("kotlin/ULong")),
             Ty::Nullable(inner) => inner.kotlin_class_internal(),
@@ -733,6 +740,23 @@ impl Ty {
         matches!(self, Ty::TyParam(..))
     }
 
+    /// Whether a type parameter appears ANYWHERE in this type — as the type itself, a type argument,
+    /// an array element, a function parameter/return, or under a `?`. A type that mentions one is not
+    /// yet a concrete answer: it still needs the use site's substitution, so asserting it (as a
+    /// reference type's argument, say) records `T.() -> String` where `Int.() -> String` is meant.
+    pub fn mentions_ty_param(self) -> bool {
+        match self {
+            Ty::TyParam(..) => true,
+            Ty::Nullable(inner) => inner.mentions_ty_param(),
+            Ty::Obj(_, args) => args.iter().any(|a| a.mentions_ty_param()),
+            Ty::Fun(signature) => {
+                signature.ret.mentions_ty_param()
+                    || signature.params.iter().any(|p| p.mentions_ty_param())
+            }
+            _ => false,
+        }
+    }
+
     /// The name of a type-parameter type (`T`), else `None`.
     pub fn ty_param_name(self) -> Option<&'static str> {
         match self {
@@ -845,6 +869,8 @@ impl Ty {
             "Double" => Ty::Double,
             "Boolean" => Ty::Boolean,
             "Char" => Ty::Char,
+            "UByte" => Ty::UByte,
+            "UShort" => Ty::UShort,
             "UInt" => Ty::UInt,
             "ULong" => Ty::ULong,
             "String" => Ty::String,
@@ -892,6 +918,8 @@ impl Ty {
             Ty::Char => "kotlin/Char",
             // Unsigned types box to their OWN inline-class wrapper (`UInt` → `kotlin/UInt`), not a
             // `java/lang/*`; `kotlin_prim_to_wrapper` maps the wrapper to itself.
+            Ty::UByte => "kotlin/UByte",
+            Ty::UShort => "kotlin/UShort",
             Ty::UInt => "kotlin/UInt",
             Ty::ULong => "kotlin/ULong",
             _ => return None,
@@ -930,6 +958,8 @@ impl Ty {
             Ty::Double => "Double".to_string(),
             Ty::Boolean => "Boolean".to_string(),
             Ty::Char => "Char".to_string(),
+            Ty::UByte => "UByte".to_string(),
+            Ty::UShort => "UShort".to_string(),
             Ty::UInt => "UInt".to_string(),
             Ty::ULong => "ULong".to_string(),
             Ty::String => "String".to_string(),
@@ -987,6 +1017,8 @@ impl Ty {
             Ty::Double => "Double".to_string(),
             Ty::Boolean => "Boolean".to_string(),
             Ty::Char => "Char".to_string(),
+            Ty::UByte => "UByte".to_string(),
+            Ty::UShort => "UShort".to_string(),
             Ty::UInt => "UInt".to_string(),
             Ty::ULong => "ULong".to_string(),
             Ty::String => "String".to_string(),
@@ -1099,7 +1131,31 @@ impl Ty {
 
     /// True for the unsigned integer types (inline classes over a signed primitive).
     pub fn is_unsigned(self) -> bool {
-        matches!(self, Ty::UInt | Ty::ULong)
+        matches!(self, Ty::UByte | Ty::UShort | Ty::UInt | Ty::ULong)
+    }
+
+    /// The zero-extension mask an unsigned value needs when it leaves its own representation, or
+    /// `None` when the representation already spans the whole operation width (`UInt` = `int`,
+    /// `ULong` = `long`). `UByte`/`UShort` live in a `byte`/`short`, which the JVM SIGN-extends on
+    /// every load, so `UByte.toInt()` is `iload; sipush 255; iand` — exactly what kotlinc emits.
+    pub fn unsigned_widen_mask(self) -> Option<i32> {
+        match self {
+            Ty::UByte => Some(0xFF),
+            Ty::UShort => Some(0xFFFF),
+            _ => None,
+        }
+    }
+
+    /// The unsigned type an operator on `self` actually computes in. Kotlin gives `UByte`/`UShort` no
+    /// arithmetic of their own: each operator is defined as `toInt()` (zero-extend) followed by the
+    /// `UInt` operator, so both promote to `UInt` and an operation on them yields `UInt`. `UInt`/`ULong`
+    /// operate in themselves. `None` for a signed type.
+    pub fn unsigned_op_type(self) -> Option<Ty> {
+        match self {
+            Ty::UByte | Ty::UShort | Ty::UInt => Some(Ty::UInt),
+            Ty::ULong => Some(Ty::ULong),
+            _ => None,
+        }
     }
 
     /// True for Kotlin scalar values that the JVM backend carries in primitive slots.
@@ -1118,6 +1174,8 @@ impl Ty {
             | Ty::Double
             | Ty::Boolean
             | Ty::Char => self,
+            Ty::UByte => Ty::Byte,
+            Ty::UShort => Ty::Short,
             Ty::UInt => Ty::Int,
             Ty::ULong => Ty::Long,
             _ => return None,
@@ -1242,6 +1300,59 @@ impl Visibility {
     pub fn is_private(self) -> bool {
         self == Visibility::Private
     }
+}
+
+/// The type of a property that Kotlin defines on a BUILTIN receiver, where no class file answers the
+/// lookup: `Char.code` is an `inline` extension in the stdlib source, and `String.length` / an array's
+/// `size` are intrinsics on types that have no user-visible declaration to resolve against.
+///
+/// One table, because both phases need the same answer: the body checker types the READ, and the
+/// SIGNATURE phase types an unannotated top-level property's initializer (`const val code = a.code`)
+/// long before any body is checked. When only the checker knew them, the signature phase reported
+/// "cannot infer the type of property" for an expression the checker accepts.
+pub fn builtin_receiver_property_ty(receiver: Ty, name: &str) -> Option<Ty> {
+    match (receiver, name) {
+        (Ty::String, "length") => Some(Ty::Int),
+        // `c.code` — the Char's UTF-16 code unit as an `Int`.
+        (Ty::Char, "code") => Some(Ty::Int),
+        // `arr.size` — covers primitive arrays and a boxed `Array<T>` alike.
+        (_, "size") if receiver.array_elem().is_some() => Some(Ty::Int),
+        _ => None,
+    }
+}
+
+/// The arity-less reflection function interface every synthesized `KFunction{N}` erases to. The
+/// `KFunction{N}` names themselves are compiler-synthesized (no jar declares them), so the two live
+/// together with the `Ty` they describe rather than in a platform module.
+pub const KFUNCTION_INTERNAL: &str = "kotlin/reflect/KFunction";
+
+/// The highest `KFunction{N}` kotlinc synthesizes — matching `Function0` … `Function22`. A larger
+/// spelling is an unresolved reference, not a type.
+const MAX_KFUNCTION_ARITY: usize = 22;
+
+/// The arity of a synthesized `kotlin.reflect.KFunction{N}`; `None` for the arity-less `KFunction`
+/// itself, for an arity kotlinc does not synthesize, and for every other name.
+pub fn kfunction_arity(internal: TypeName) -> Option<usize> {
+    internal
+        .unsigned_suffix_after_prefix(KFUNCTION_INTERNAL)
+        .filter(|arity| *arity <= MAX_KFUNCTION_ARITY)
+}
+
+/// The function type a callable reference's reflection type stands for — `KFunction2<A, B, R>` →
+/// `(A, B) -> R`. A backend realizes the reference from that function shape; the `KFunction{N}`
+/// spelling only adds the `KCallable` identity on top of it. Any other type passes through unchanged.
+pub fn callable_reference_function_type(ty: Ty) -> Ty {
+    let Some(internal) = ty.non_null().obj_internal() else {
+        return ty;
+    };
+    let Some(arity) = internal.unsigned_suffix_after_prefix(KFUNCTION_INTERNAL) else {
+        return ty;
+    };
+    let args = ty.type_args();
+    if args.len() != arity + 1 {
+        return ty;
+    }
+    Ty::fun(args[..arity].to_vec(), args[arity])
 }
 
 #[cfg(test)]

@@ -8,14 +8,8 @@ use super::common;
 
 #[test]
 fn object_body_with_nested_decls() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping nested_decls_in_object_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping nested_decls_in_object_e2e: no kotlin-stdlib jar");
-        return;
-    };
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     let src = "object Reg {\n\
         \x20   class C\n\

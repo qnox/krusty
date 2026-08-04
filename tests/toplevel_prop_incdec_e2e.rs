@@ -5,6 +5,9 @@
 
 use super::common;
 
+/// Raw compile+run: `None` is AMBIGUOUS (unprovisioned toolchain OR a shape krusty conservatively
+/// declines). This suite needs that ambiguity — several cases below ASSERT the bail (`is_none`) or
+/// document a conservative skip as acceptable — so the positive cases pin it with `.expect(…)`.
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }

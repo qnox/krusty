@@ -53,17 +53,13 @@ fn non_local_return_in_cross_file_inline_lambda_still_rejects() {
                         \x20   untilDone(4) { hit = it; if (it == 4) return \"early\" }\n\
                         \x20   return if (hit == 4) \"OK\" else \"fail: $hit\"\n\
                         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file inline call with a non-local return must be rejected, never emitted"
@@ -80,17 +76,13 @@ fn value_class_signature_inline_fun_cross_file_still_rejects() {
                        value class Z(val value: Int)\n";
     const MAIN: &str = "fun box(): String =\n\
                         \x20   if (new(fun(z: Z) {}).value == 42) \"OK\" else \"Fail\"\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a value-class-signature inline fun must be rejected, never emitted"
@@ -132,17 +124,13 @@ fn mutable_capture_in_cross_file_inline_lambda_still_rejects() {
                         \x20   foo(x) { x++ }\n\
                         \x20   return if (x == 24) \"OK\" else \"fail: $x\"\n\
                         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file inline call with a mutating capture must be rejected, never emitted"
@@ -158,17 +146,13 @@ fn callable_ref_arg_in_cross_file_inline_call_still_rejects() {
                         \x20   val chars = listOf('a') + \"-\"\n\
                         \x20   return if (useRef('a', chars::contains)) \"OK\" else \"Fail\"\n\
                         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file inline call with a callable-ref argument must be rejected, never emitted"
@@ -183,17 +167,13 @@ fn try_body_inline_fun_cross_file_still_rejects() {
                        inline fun tryZap(string: String, fn: (String) -> String) =\n\
                        \x20   fn(try { zap(string) } finally { zap(string) })\n";
     const MAIN: &str = "fun box(): String = tryZap(\"OK\") { it }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a try-bodied inline fun must be rejected, never emitted"
@@ -373,17 +353,13 @@ fn stored_lambda_body_inline_fun_cross_file_still_rejects() {
                        \x20   return f()\n\
                        }\n";
     const MAIN: &str = "fun box(): String = makeAndCall()\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a stored-lambda-body inline fun must be rejected, never emitted"
@@ -403,17 +379,13 @@ fn return_in_lambda_arg_body_inline_fun_cross_file_still_rejects() {
                        \x20   return bar { return \"def\" }\n\
                        }\n";
     const MAIN: &str = "fun box(): String = bar2()\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a non-local-return-lambda inline fun must be rejected, never emitted"
@@ -430,17 +402,13 @@ fn value_class_receiver_inline_extension_cross_file_still_rejects() {
                        inline fun Z.transform(f: (Int) -> Int): Int = f(value)\n";
     const MAIN: &str =
         "fun box(): String = if (Z(21).transform { it * 2 } == 42) \"OK\" else \"fail\"\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a value-class-receiver inline extension must be rejected, never emitted"
@@ -454,17 +422,13 @@ fn value_class_receiver_inline_extension_cross_file_still_rejects() {
 fn reified_inline_extension_cross_file_still_rejects() {
     const LIB: &str = "inline fun <reified T> T.check(f: () -> Unit): Boolean = this is T\n";
     const MAIN: &str = "fun box(): String = if (1.check { }) \"OK\" else \"fail\"\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
             &[stdlib],
-            Some(&jdk)
+            Some(jdk.as_path())
         )
         .is_none(),
         "cross-file call to a reified inline extension must be rejected, never emitted"
@@ -484,12 +448,8 @@ fn reified_value_parameter_inline_extension_cross_file_still_rejects() {
                        }\n";
     const MAIN: &str = "class C : I\n\
                         fun box(): String = if (C().check(1)) \"OK\" else \"fail\"\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert!(
         common::compile_and_run_box_files(
             &[("Lib.kt", LIB), ("Main.kt", MAIN)],
@@ -503,39 +463,23 @@ fn reified_value_parameter_inline_extension_cross_file_still_rejects() {
 
 /// A sibling-file `suspend operator` EXTENSION, reached through each of the three convention forms
 /// (indexed access, compound assignment, comparison). None of these is an `Expr::Call`, so the
-/// coroutine classification cannot find them by call shape — but that is not what decides these
-/// cases: the file DECLARING a `suspend` extension is refused whole by `gate:extension-suspend-fn`
-/// (pinned below), so the sibling-file call has no callee to link against and the module must not
-/// compile at all. Asserting the refusal directly — rather than tolerating it — is what keeps this
-/// honest: whoever retires that gate gets a failure here and has to prove the shape RUNS, instead of
-/// inheriting a green test that silently passes on a `None`.
+/// coroutine classification cannot find them by call shape — the checker keys the selected target to
+/// the `Expr::Index`/binary node, or to the assignment STATEMENT, and lowering registers the
+/// suspension from there.
 ///
+/// These asserted REFUSAL while the file declaring a `suspend` extension was refused whole by
+/// `gate:extension-suspend-fn`, and said so: "if this now compiles, assert the box() answer instead
+/// of deleting the check". That gate is retired and the shapes run, so they assert the ANSWER now.
 /// The stake is a wrong ANSWER, not a crash: were the call left linking against a stale pre-CPS
 /// descriptor while its callee gained the CPS signature, the `NoSuchMethodError` would be swallowed
 /// by the driving `Continuation` and `box()` would return "fail" instead of failing.
-fn assert_module_refused(sources: &[(&str, &str)], what: &str) {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+fn assert_module_answers_ok(sources: &[(&str, &str)], what: &str) {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     assert_eq!(
         common::compile_and_run_box_files(sources, &[stdlib], Some(&jdk)),
-        None,
-        "{what}: a suspend extension operator is refused, never emitted — if this now compiles, \
-         assert the box() answer instead of deleting the check"
-    );
-}
-
-/// Why the three cases below are refused, named precisely so the reason cannot drift to some
-/// unrelated emit failure while the tests stay green.
-#[test]
-fn suspend_operator_extension_file_stops_at_the_extension_gate() {
-    common::assert_inline_source_lower_bail(
-        "class Box(var v: Int)\n\
-         suspend operator fun Box.get(i: Int): Int = v + i\n",
-        "gate:extension-suspend-fn",
+        Some("OK".to_string()),
+        "{what}: a sibling-file suspend extension operator must run through its CPS entry point"
     );
 }
 
@@ -546,7 +490,7 @@ const SUSPEND_CONVENTION_MAIN: &str = "import kotlin.coroutines.*\n\
                                        }\n";
 
 #[test]
-fn suspend_operator_get_convention_cross_file_still_rejects() {
+fn suspend_operator_get_convention_cross_file_executes() {
     const LIB: &str = "class Box(var v: Int)\n\
                        suspend operator fun Box.get(i: Int): Int = v + i\n";
     let main = format!(
@@ -557,11 +501,11 @@ fn suspend_operator_get_convention_cross_file_still_rejects() {
          \x20   return if (r == 2) \"OK\" else \"fail: $r\"\n\
          }}\n"
     );
-    assert_module_refused(&[("Lib.kt", LIB), ("Main.kt", &main)], "indexed access");
+    assert_module_answers_ok(&[("Lib.kt", LIB), ("Main.kt", &main)], "indexed access");
 }
 
 #[test]
-fn suspend_operator_plus_assign_convention_cross_file_still_rejects() {
+fn suspend_operator_plus_assign_convention_cross_file_executes() {
     const LIB: &str = "class Box(var v: Int)\n\
                        suspend operator fun Box.plus(i: Int): Box = Box(v + i)\n";
     let main = format!(
@@ -572,14 +516,19 @@ fn suspend_operator_plus_assign_convention_cross_file_still_rejects() {
          \x20   return if (r == 3) \"OK\" else \"fail: $r\"\n\
          }}\n"
     );
-    assert_module_refused(
+    assert_module_answers_ok(
         &[("Lib.kt", LIB), ("Main.kt", &main)],
         "compound assignment",
     );
 }
 
+/// The comparison form still SKIPS, for a reason unrelated to the convention: its result lands in a
+/// captured `var`, so the state machine has to flatten a suspending `RefSet`, which the flattener does
+/// not model (`flatten BAIL: unhandled suspending stmt RefSet`). The two forms above prove the
+/// convention itself reaches its CPS entry point; this one is pinned as a skip so that whoever teaches
+/// the flattener that statement gets a failure here and asserts the answer instead.
 #[test]
-fn suspend_operator_compare_to_convention_cross_file_still_rejects() {
+fn suspend_operator_compare_to_convention_cross_file_still_skips() {
     const LIB: &str = "class Box(var v: Int)\n\
                        suspend operator fun Box.compareTo(o: Box): Int = v - o.v\n";
     let main = format!(
@@ -591,40 +540,69 @@ fn suspend_operator_compare_to_convention_cross_file_still_rejects() {
          \x20   return if (r == 7) \"OK\" else \"fail: $r\"\n\
          }}\n"
     );
-    assert_module_refused(&[("Lib.kt", LIB), ("Main.kt", &main)], "comparison");
-}
-
-/// Guard: a SUSPEND inline extension CPS-lowers per call — it stays splice-only and the
-/// cross-file call still rejects.
-#[test]
-fn suspend_inline_extension_cross_file_still_rejects() {
-    const LIB: &str = "inline suspend fun Int.plusOne(): Int = this + 1\n";
-    const MAIN: &str = "import kotlin.coroutines.*\n\
-                        class EC : Continuation<Unit> {\n\
-                        \x20   override val context: CoroutineContext = EmptyCoroutineContext\n\
-                        \x20   override fun resumeWith(result: Result<Unit>) {}\n\
-                        }\n\
-                        fun box(): String {\n\
-                        \x20   var r = 0\n\
-                        \x20   suspend { r = 1.plusOne() }.startCoroutine(EC())\n\
-                        \x20   return if (r == 2) \"OK\" else \"fail\"\n\
-                        }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    assert!(
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
         common::compile_and_run_box_files(
-            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+            &[("Lib.kt", LIB), ("Main.kt", &main)],
             &[stdlib],
             Some(&jdk)
-        )
-        .is_none(),
-        "cross-file call to a suspend inline extension must be rejected, never emitted"
+        ),
+        None,
+        "comparison: skipped only because the flattener does not model a suspending `RefSet` — if \
+         this now compiles, assert the box() answer instead of deleting the check"
     );
 }
+
+/// A cross-file `suspend` extension is called through its real CPS entry point, never spliced:
+/// `inline` on the declaration does not change the sibling-file ABI (kotlinc emits the same
+/// `plusOne(int, Continuation)` method for both, plus a private `$$forInline` copy it splices only
+/// within the declaring compilation). The call site must therefore thread the caller's continuation
+/// and take the erased result — the shape a non-extension cross-file suspend call already had.
+#[test]
+fn suspend_inline_extension_cross_file_executes() {
+    const LIB: &str = "inline suspend fun Int.plusOne(): Int = this + 1\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", SUSPEND_EXT_MAIN)],
+        "suspend_inline_extension_cross_file",
+    );
+}
+
+/// The non-`inline` sibling of the case above: same call-site threading, same answer. Both shapes
+/// share the `ResolvedCall::ModuleExtension` lowering path, so they are guarded together.
+#[test]
+fn suspend_extension_cross_file_executes() {
+    const LIB: &str = "suspend fun Int.plusOne(): Int = this + 1\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", SUSPEND_EXT_MAIN)],
+        "suspend_extension_cross_file",
+    );
+}
+
+/// A cross-file suspend extension that really SUSPENDS (its body awaits another suspend call)
+/// resumes into the caller's state machine — the resumed value must still reach the assignment.
+#[test]
+fn suspend_extension_cross_file_with_suspension_point_executes() {
+    const LIB: &str = "suspend fun twice(x: Int): Int = x * 2\n\
+                       suspend fun Int.plusOne(): Int = twice(this) - this + 1\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Main.kt", SUSPEND_EXT_MAIN)],
+        "suspend_extension_cross_file_suspension_point",
+    );
+}
+
+/// Drives `Int.plusOne()` from a `suspend { … }` lambda: the assignment it performs is observable
+/// only if the call threaded a continuation, since `EC` swallows a failed resume.
+const SUSPEND_EXT_MAIN: &str = "import kotlin.coroutines.*\n\
+                                class EC : Continuation<Unit> {\n\
+                                \x20   override val context: CoroutineContext = EmptyCoroutineContext\n\
+                                \x20   override fun resumeWith(result: Result<Unit>) {}\n\
+                                }\n\
+                                fun box(): String {\n\
+                                \x20   var r = 0\n\
+                                \x20   suspend { r = 1.plusOne() }.startCoroutine(EC())\n\
+                                \x20   return if (r == 2) \"OK\" else \"fail\"\n\
+                                }\n";
 
 /// A `::ref` to a sibling-file inline fn that is NOT emitted (reified — it specializes per call
 /// site) used to decline silently: the reference fell through to unrelated overloads or the file
@@ -702,9 +680,7 @@ fn cross_file_ref_to_emitted_fns_stays_clean() {
 /// registration data the reference declines silently and types through the fallbacks, as before.
 #[test]
 fn checker_only_pipeline_cross_file_ref_to_plain_fn_stays_clean() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let diags = common::front_end_diagnostics_files(
         &[
@@ -715,7 +691,7 @@ fn checker_only_pipeline_cross_file_ref_to_plain_fn_stays_clean() {
              }\n",
         ],
         &[stdlib],
-        jdk.as_deref(),
+        Some(jdk.as_path()),
     );
     assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
 }

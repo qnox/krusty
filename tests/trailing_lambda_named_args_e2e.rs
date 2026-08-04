@@ -17,5 +17,5 @@ fn trailing_lambda_after_named_args_runs() {
         \x20 val r = host(mod = 5, ctl = 7, start = \"a\") { x = 1 }\n\
         \x20 return if (x == 1 && r == 12) \"OK\" else \"FAIL r=$r x=$x\"\n\
         }\n";
-    common::assert_box_ok_with_stdlib(SRC, "H");
+    common::expect_box_ok_with_stdlib(SRC, "H");
 }

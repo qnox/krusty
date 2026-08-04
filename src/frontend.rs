@@ -893,6 +893,52 @@ mod tests {
     }
 
     #[test]
+    fn jvm_name_decides_the_top_level_clash() {
+        // A platform declaration clash is keyed on the EMITTED name. `g(String)` and `g(String?)`
+        // erase to the same JVM descriptor, so they clash while both are spelled `g`…
+        let clash = |sources: &[&str]| {
+            let inputs = sources
+                .iter()
+                .map(|source| SourceInput::kotlin(source))
+                .collect::<Vec<_>>();
+            let mut diagnostics = DiagSink::new();
+            analyze_source_set_prefix_with_features(
+                &inputs,
+                inputs.len(),
+                inputs.len(),
+                Box::new(EmptySymbolSource),
+                &LangFeatures::new(),
+                &mut diagnostics,
+            );
+            diagnostics
+                .diags
+                .iter()
+                .filter(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:"))
+                .count()
+        };
+        assert_eq!(
+            clash(&["fun g(x: String): String = \"nn\"\nfun g(x: String?): String = \"nl\""]),
+            2,
+        );
+        // …and stop clashing once `@JvmName` gives one of them a different bytecode name.
+        assert_eq!(
+            clash(&["fun g(x: String): String = \"nn\"\n\
+                 @JvmName(\"gNullable\")\n\
+                 fun g(x: String?): String = \"nl\""]),
+            0,
+        );
+        // The same key catches the reverse: distinct SOURCE names collapsed onto one JVM name do
+        // clash, which the source-name key could never see.
+        assert_eq!(
+            clash(&["@JvmName(\"same\")\n\
+                 fun a(x: Int): String = \"a\"\n\
+                 @JvmName(\"same\")\n\
+                 fun b(x: Int): String = \"b\""]),
+            2,
+        );
+    }
+
+    #[test]
     fn inferred_conflict_displays_only_source_signature_types() {
         let inputs = [
             SourceInput::kotlin("package sample\nclass Result\nfun choose(value: Int) = Result()"),

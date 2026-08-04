@@ -11,5 +11,5 @@ if (check(false) != 7) return \"f1\"\n\
 val e = IllegalStateException(\"unused\")\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "T");
+    common::expect_box_ok_with_stdlib(src, "T");
 }

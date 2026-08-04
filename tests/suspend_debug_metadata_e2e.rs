@@ -35,12 +35,8 @@ fn disassemble(javap: &str, bytes: &[u8], class_file_name: &str, tag: &str) -> S
 
 #[test]
 fn continuation_emits_debug_and_enclosing_metadata() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -52,9 +48,12 @@ fn continuation_emits_debug_and_enclosing_metadata() {
         \x20 val resumed = leaf(value)\n\
         \x20 return saved + resumed\n\
         }\n";
-    let classes =
-        common::compile_in_process_files(&[("Debug", source)], &[stdlib, jdk.clone()], Some(&jdk))
-            .expect("compile suspend continuation");
+    let classes = common::compile_in_process_files(
+        &[("Debug", source)],
+        &[stdlib, jdk.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("compile suspend continuation");
     let bytes = classes
         .iter()
         .find_map(|(name, bytes)| (name == "demo/DebugKt$work$1").then_some(bytes))
@@ -111,12 +110,8 @@ fn continuation_emits_debug_and_enclosing_metadata() {
 
 #[test]
 fn continuation_metadata_repeats_spills_for_each_suspension() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -131,7 +126,7 @@ fn continuation_metadata_repeats_spills_for_each_suspension() {
     let classes = common::compile_in_process_files(
         &[("MultiState", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile multi-state continuation");
     let bytes = classes
@@ -158,12 +153,8 @@ fn continuation_metadata_repeats_spills_for_each_suspension() {
 
 #[test]
 fn continuation_metadata_preserves_elvis_subject_lines() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -177,7 +168,7 @@ fn continuation_metadata_preserves_elvis_subject_lines() {
     let classes = common::compile_in_process_files(
         &[("ElvisLine", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile elvis continuation");
     let bytes = classes
@@ -200,12 +191,8 @@ fn continuation_metadata_preserves_elvis_subject_lines() {
 
 #[test]
 fn continuation_metadata_orders_mixed_spills_and_terminal_resume() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -219,7 +206,7 @@ fn continuation_metadata_orders_mixed_spills_and_terminal_resume() {
     let classes = common::compile_in_process_files(
         &[("MixedSpills", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile mixed-spill continuation");
     let bytes = classes
@@ -248,12 +235,8 @@ fn continuation_metadata_orders_mixed_spills_and_terminal_resume() {
 
 #[test]
 fn continuation_metadata_uses_multiline_call_selector_line() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -270,7 +253,7 @@ fn continuation_metadata_uses_multiline_call_selector_line() {
     let classes = common::compile_in_process_files(
         &[("SelectorLine", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile multiline selector continuation");
     let bytes = classes
@@ -298,12 +281,8 @@ fn continuation_metadata_uses_multiline_call_selector_line() {
 
 #[test]
 fn continuation_metadata_uses_nested_branch_resume_line() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -320,7 +299,7 @@ fn continuation_metadata_uses_nested_branch_resume_line() {
     let classes = common::compile_in_process_files(
         &[("NestedResume", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile nested branch continuation");
     let bytes = classes
@@ -348,12 +327,8 @@ fn continuation_metadata_uses_nested_branch_resume_line() {
 
 #[test]
 fn continuation_metadata_uses_returned_expression_end_line() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -370,7 +345,7 @@ fn continuation_metadata_uses_returned_expression_end_line() {
     let classes = common::compile_in_process_files(
         &[("ReturnedExpression", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile returned expression continuation");
     let bytes = classes
@@ -398,12 +373,8 @@ fn continuation_metadata_uses_returned_expression_end_line() {
 
 #[test]
 fn continuation_metadata_keeps_names_with_each_scope_snapshot() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -419,7 +390,7 @@ fn continuation_metadata_keeps_names_with_each_scope_snapshot() {
     let classes = common::compile_in_process_files(
         &[("ScopeNames", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile scope-name continuation");
     let bytes = classes
@@ -446,12 +417,8 @@ fn continuation_metadata_keeps_names_with_each_scope_snapshot() {
 
 #[test]
 fn continuation_metadata_omits_unnamed_loop_spills() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -469,7 +436,7 @@ fn continuation_metadata_omits_unnamed_loop_spills() {
     let classes = common::compile_in_process_files(
         &[("LoopSpills", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile loop-spill continuation");
     let bytes = classes
@@ -506,12 +473,8 @@ fn continuation_metadata_omits_unnamed_loop_spills() {
 
 #[test]
 fn continuation_metadata_uses_later_value_branch_as_resume_line() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -527,7 +490,7 @@ fn continuation_metadata_uses_later_value_branch_as_resume_line() {
     let classes = common::compile_in_process_files(
         &[("ValueBranchLine", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile value-branch continuation");
     let bytes = classes
@@ -555,12 +518,8 @@ fn continuation_metadata_uses_later_value_branch_as_resume_line() {
 
 #[test]
 fn continuation_metadata_uses_try_end_and_catch_name() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -578,7 +537,7 @@ fn continuation_metadata_uses_try_end_and_catch_name() {
     let classes = common::compile_in_process_files(
         &[("TryResumeLine", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile try continuation");
     let bytes = classes
@@ -612,12 +571,8 @@ fn continuation_metadata_uses_try_end_and_catch_name() {
 
 #[test]
 fn continuation_metadata_uses_successor_initializer_line() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -633,7 +588,7 @@ fn continuation_metadata_uses_successor_initializer_line() {
     let classes = common::compile_in_process_files(
         &[("SuccessorLine", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile successor-line continuation");
     let bytes = classes
@@ -661,12 +616,8 @@ fn continuation_metadata_uses_successor_initializer_line() {
 
 #[test]
 fn continuation_metadata_marks_direct_tail_suspension() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -680,7 +631,7 @@ fn continuation_metadata_marks_direct_tail_suspension() {
     let classes = common::compile_in_process_files(
         &[("TailResume", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile tail-resume continuation");
     let bytes = classes
@@ -703,12 +654,8 @@ fn continuation_metadata_marks_direct_tail_suspension() {
 
 #[test]
 fn continuation_metadata_uses_inline_lambda_smap_line() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -720,7 +667,7 @@ fn continuation_metadata_uses_inline_lambda_smap_line() {
     let classes = common::compile_in_process_files(
         &[("InlineResume", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile inline-resume continuation");
     let bytes = classes
@@ -748,12 +695,8 @@ fn continuation_metadata_uses_inline_lambda_smap_line() {
 
 #[test]
 fn continuation_metadata_uses_trailing_lambda_selector_line() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -768,7 +711,7 @@ fn continuation_metadata_uses_trailing_lambda_selector_line() {
     let classes = common::compile_in_process_files(
         &[("TrailingLambdaLine", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile trailing-lambda continuation");
     let bytes = classes
@@ -796,12 +739,8 @@ fn continuation_metadata_uses_trailing_lambda_selector_line() {
 
 #[test]
 fn continuation_metadata_uses_named_member_call_selector_line() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };
@@ -820,7 +759,7 @@ fn continuation_metadata_uses_named_member_call_selector_line() {
     let classes = common::compile_in_process_files(
         &[("NamedMemberLine", source)],
         &[stdlib, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile named member call continuation");
     let bytes = classes
@@ -848,9 +787,7 @@ fn continuation_metadata_uses_named_member_call_selector_line() {
 
 #[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let Some(javap) = javap_path() else {
         return;
     };

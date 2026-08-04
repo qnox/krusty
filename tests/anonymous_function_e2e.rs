@@ -32,6 +32,53 @@ fn anon_fun_block_body_with_local_return() {
 }
 
 #[test]
+fn anon_fun_local_return_targets_its_own_declared_type() {
+    // The bare `return` binds to the ANONYMOUS FUNCTION, not the enclosing `box(): String` — so an
+    // `Int`-returning anonymous function inside a `String`-returning one is legal. (The existing
+    // block-body test only passes because both happen to return `String`.)
+    const SRC: &str = "fun box(): String {\n\
+    val f = fun(x: Int): Int { return x + 1 }\n\
+    if (f(9) != 10) return \"f1\"\n\
+    val g = fun(n: Int): Boolean { return n % 2 == 0 }\n\
+    if (!g(4)) return \"f2\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("anon fun local return"), "OK");
+}
+
+#[test]
+fn anon_fun_return_type_inferred_from_the_expected_function_type() {
+    // The parameter type comes from the expected `(Int) -> Int`; the `return` still targets the
+    // anonymous function's own declared `Int`.
+    const SRC: &str = "fun box(): String {\n\
+    val f: (Int) -> Int = fun(x): Int { return x + 1 }\n\
+    if (f(9) != 10) return \"f1\"\n\
+    val xs = listOf(1, 2, 3, 4).filter(fun(n: Int): Boolean { return n % 2 == 0 })\n\
+    if (xs != listOf(2, 4)) return \"f2\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(
+        run(SRC).expect("anon fun under an expected function type"),
+        "OK"
+    );
+}
+
+#[test]
+fn block_bodied_anon_fun_without_a_declared_type_returns_unit() {
+    // An undeclared block body returns `Unit`, so a bare `return` is legal there and does NOT bind
+    // to the enclosing function.
+    const SRC: &str = "fun box(): String {\n\
+    var seen = 0\n\
+    val f = fun(x: Int) { if (x < 0) return; seen += x }\n\
+    f(-1)\n\
+    f(5)\n\
+    if (seen != 5) return \"f1\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC).expect("undeclared block-bodied anon fun"), "OK");
+}
+
+#[test]
 fn anon_fun_passed_as_argument() {
     // `fun(x: Int) = x - 1` passed where a `(Int) -> Int` is expected (invoke.kt fail 8).
     const SRC: &str = "fun apply1(p: (Int) -> Int, i: Int) = p(i)\n\

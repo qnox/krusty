@@ -12,10 +12,7 @@ fn kotlinc_compiled_nullable_and_unbounded_generic_extensions_accept_nullable_va
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     let Some(libout) = common::compile_lib(
         "nullable_extension_receiver",
@@ -48,10 +45,7 @@ fn kotlinc_compiled_nullable_and_unbounded_generic_extensions_accept_nullable_va
 
 #[test]
 fn kotlinc_compiled_explicit_any_bound_rejects_nullable_receiver() {
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let Some(libout) = common::compile_lib(
         "non_null_generic_extension_receiver",
         "package fixture\nfun <T : Any> T.nonNullGeneric(): Int = 1\n",

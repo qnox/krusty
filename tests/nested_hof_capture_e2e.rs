@@ -14,12 +14,8 @@ use super::common;
 
 #[test]
 fn nested_hof_capture_and_boxed_var_no_leak() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     // members: users=[1,2,3]; bindings {1:[10,20], 2:[30]}; roles {10:a,20:b,30:c}
     //   u=1 -> "1:a,b"; u=2 -> "2:c"; u=3 -> bindings null -> empty -> dropped  => ["1:a,b","2:c"]
     // boxer: var s mutated twice by a closure => "start!!"
@@ -37,7 +33,7 @@ fn nested_hof_capture_and_boxed_var_no_leak() {
             val ok = m == listOf(\"1:a,b\", \"2:c\") && boxer() == \"start!!\" && plain(0) == 5\n\
             return if (ok) \"OK\" else \"F m=$m boxer=${boxer()} plain=${plain(0)}\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[sl, jdk.clone()], Some(&jdk));
+    let out = common::compile_and_run_box(MAIN, "Main", &[sl, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

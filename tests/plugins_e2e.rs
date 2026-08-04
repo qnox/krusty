@@ -22,7 +22,7 @@ use super::common;
 /// Lower a source through krusty's full front end to its parsed `File` + real `IrFile`, or `None` if
 /// it can't compile (or no stdlib is available).
 fn lower(src: &str) -> Option<(krusty::ast::File, krusty::ir::IrFile)> {
-    let jar = common::stdlib_jar()?;
+    let jar = common::stdlib_jar();
     let cp = Rc::new(krusty::jvm::classpath::Classpath::new(vec![jar]));
 
     let mut d = DiagSink::new();

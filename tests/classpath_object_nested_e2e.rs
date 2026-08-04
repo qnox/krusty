@@ -6,14 +6,8 @@ use super::common;
 
 #[test]
 fn classpath_object_and_nested_resolution() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     // A classpath library: a plain `object`, an object with a trailing-lambda member, and a sealed
     // hierarchy with nested subclasses.
     let Some(libout) = common::compile_lib(
@@ -48,7 +42,7 @@ fn classpath_object_and_nested_resolution() {
         \x20 if (tag != \"anon\") return \"fail when: $tag\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile classpath object/nested resolution");
     match common::run_box(&classes, "MainKt", &[libout, sl]) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
@@ -59,19 +53,14 @@ fn classpath_object_and_nested_resolution() {
 #[test]
 fn classpath_nested_type_static_member_via_outer_name() {
     // A nested classpath type used as a static receiver must resolve through its outer type.
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let main = "import java.util.Locale\n\
         fun box(): String =\n\
         \x20 if (Locale.Category.DISPLAY.name == \"DISPLAY\") \"OK\" else \"no\"\n";
-    let classes = common::compile_in_process(main, "Main", std::slice::from_ref(&sl), Some(&jdk))
-        .expect("krusty failed to compile nested-type static member access");
+    let classes =
+        common::compile_in_process(main, "Main", std::slice::from_ref(&sl), Some(jdk.as_path()))
+            .expect("krusty failed to compile nested-type static member access");
     match common::run_box(&classes, "MainKt", &[sl]) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
         None => eprintln!("skipping: box runner unavailable"),

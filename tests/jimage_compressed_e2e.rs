@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 /// The JDK jimage of the runner JVM, or `None` to skip (no `JAVA_HOME`/`lib/modules`).
 fn jimage() -> Option<PathBuf> {
-    let p = common::jdk_modules()?;
+    let p = common::jdk_modules();
     p.is_file().then_some(p)
 }
 

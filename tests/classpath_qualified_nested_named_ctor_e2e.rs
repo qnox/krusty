@@ -31,7 +31,8 @@ fn classpath_qualified_nested_ctor_named_and_defaults() {
         \x20 if (c.x != 1 || c.y != 9 || c.z != \"q\") return \"fail cfg-mid-omit: ${c.x},${c.y},${c.z}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("qual_nested", LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    let Some(out) = common::expect_box_run_against("qual_nested", LIB, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
 }

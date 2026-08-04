@@ -5,10 +5,10 @@ const LIB: &str = "package lib\n\
     object Make { fun str(): Holder<String> = Holder(\"hi\") }\n";
 
 fn run(main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let lo = common::compile_lib("computed_generic", LIB)?;
-    common::compile_and_run_box(main, "Main", &[lo, sl], Some(&jdk))
+    common::compile_and_run_box(main, "Main", &[lo, sl], Some(jdk.as_path()))
 }
 
 #[test]
@@ -24,9 +24,9 @@ fn run_source(src: &str) -> Option<String> {
 }
 
 fn assert_source_ok(src: &str) {
-    let stdlib = common::stdlib_jar().expect("stdlib jar");
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(src, &[stdlib], jdk.as_deref());
+    let diagnostics = common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()));
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(run_source(src), Some("OK".to_string()));
 }

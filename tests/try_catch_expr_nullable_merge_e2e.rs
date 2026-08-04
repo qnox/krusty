@@ -8,12 +8,12 @@
 use super::common;
 
 fn diagnostics(src: &str) -> Option<Vec<String>> {
-    let stdlib = common::stdlib_jar()?;
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     Some(common::front_end_diagnostics(
         src,
         &[stdlib],
-        jdk.as_deref(),
+        Some(jdk.as_path()),
     ))
 }
 

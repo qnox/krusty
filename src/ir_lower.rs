@@ -61,6 +61,8 @@ fn is_conversion_call_name(name: &str) -> bool {
             | "toFloat"
             | "toDouble"
             | "toChar"
+            | "toUByte"
+            | "toUShort"
             | "toUInt"
             | "toULong"
     )
@@ -197,6 +199,7 @@ fn lower_file_at_reporting_impl(
         ext_fun_id_by_sig: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
         companion_consts: HashMap::new(),
+        companion_computed_props: HashMap::new(),
         const_lits: HashMap::new(),
         object_const_lits: HashMap::new(),
         ext_prop_set_ids: HashMap::new(),
@@ -236,6 +239,8 @@ fn lower_file_at_reporting_impl(
         reified_subst: Vec::new(),
         inline_return: Vec::new(),
         inline_lambda_ret: Vec::new(),
+        closure_label: None,
+        foreach_splice: Vec::new(),
         fn_body_tail: None,
     };
     lo.ir.source_line_count = file.source_line_count;
@@ -388,6 +393,11 @@ fn lower_file_at_reporting_impl(
     // `yieldAll` suspension points — a state machine the pass doesn't model. Skip the whole file rather
     // than emit a `Sequence`/`Iterator` whose `iterator()`/`next()` has no body (an `AbstractMethodError`
     // at the for-loop / terminal operation). Detected by the builder's `yield`/`yieldAll` calls anywhere.
+    //
+    // The BUILDER's `yield`/`yieldAll` are members of `kotlin.sequences.SequenceScope`. A call the
+    // checker resolved to any OTHER owner is an ordinary user method that happens to share the name
+    // (`class Buildee<T> { fun yield(arg: T) }`), and gating on the spelling alone skipped those files
+    // for no reason. An unresolved call is gated too — nothing rules out the builder.
     let uses_yield_builder = file.decls.iter().any(|&d| {
         let body = match file.decl(d) {
             Decl::Fun(f) => match &f.body {
@@ -409,8 +419,13 @@ fn lower_file_at_reporting_impl(
                 .collect(),
             _ => Vec::new(),
         };
+        let builder_scope = |call: AstExprId| {
+            info.resolved_call_owner(call)
+                .is_none_or(|owner| owner.matches("kotlin/sequences/SequenceScope"))
+        };
         body.into_iter().chain(class_bodies).any(|e| {
-            expr_tree_calls_name(file, e, "yield") || expr_tree_calls_name(file, e, "yieldAll")
+            expr_tree_calls_name_where(file, e, "yield", &builder_scope)
+                || expr_tree_calls_name_where(file, e, "yieldAll", &builder_scope)
         })
     });
     if uses_yield_builder {
@@ -425,20 +440,270 @@ fn lower_file_at_reporting_impl(
     // to a suspend fn from a NON-suspend function (call-site continuation threading isn't modeled — and
     // calling a suspend fn from a non-suspend context is a Kotlin error anyway). The pass itself skips
     // any suspend *body* shape it can't yet restructure.
-    let has_top_suspend = file
+    let top_suspend: Vec<String> = file
         .decls
         .iter()
-        .any(|&d| matches!(file.decl(d), Decl::Fun(f) if f.is_suspend()));
-    let has_member_suspend = file.decls.iter().any(
-        |&d| matches!(file.decl(d), Decl::Class(c) if c.methods.iter().any(FunDecl::is_suspend)),
-    );
-    if has_top_suspend || has_member_suspend {
-        // Extension suspend fns aren't modeled. (A leaf member suspend fn IS — its CPS signature on the
-        // instance method; a member suspension point is skipped by the pass.)
+        .filter_map(|&d| match file.decl(d) {
+            Decl::Fun(f) if f.is_suspend() => Some(f.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let member_suspend: Vec<String> = file
+        .decls
+        .iter()
+        .filter_map(|&d| match file.decl(d) {
+            Decl::Class(c) => Some(c),
+            _ => None,
+        })
+        .flat_map(|c| {
+            c.methods
+                .iter()
+                .filter(|m| m.is_suspend())
+                .map(|m| m.name.clone())
+        })
+        .collect();
+    if !top_suspend.is_empty() || !member_suspend.is_empty() {
+        // A top-level `suspend` EXTENSION is modeled — `inline` or not, and whether it is called from
+        // this file or a sibling one: its receiver is an ordinary leading static parameter, so the
+        // coroutine pass appends the CPS `Continuation` after it and threads call sites like any other
+        // static suspend call (registered in `suspend_funs` in pass 1b for a same-file callee, in
+        // `ir.suspend_calls` for a sibling-file one).
+        // A `try` that CATCHES over a REAL suspension, in a body that has a value live across it.
+        //
+        // The coroutine pass flattens a suspend body into a `label`-dispatch loop and wraps the whole
+        // loop in ONE `catch Throwable` (`jvm::suspend::wrap_dispatch_for_handlers`). That handler
+        // routes purely on which `label` was in flight: it stores the exception into `result`, sets
+        // `label` to the handler's state and re-enters the loop — WITHOUT restoring the locals the
+        // predecessor state spilled into the continuation. A resumed machine re-enters the static body
+        // as `f(null, …)`, so a parameter, extension receiver or spilled local read at or after the
+        // `catch` reads back `null`: `suspend fun f(): String { val a = ok("A"); try { boom() } catch
+        // (e: Exception) {}; return a + "-end" }` threw an NPE where kotlinc answers `"A-end"`.
+        //
+        // Four conditions keep the bail off shapes that demonstrably round-trip today:
+        //   * The `try` must have a CATCH. A `finally`-only try's handler always re-throws, so it never
+        //     re-enters the dispatch loop (`tests/suspend_try_finally_body_e2e.rs` proves that shape).
+        //   * Its PROTECTED region must contain a REAL suspension — one whose callee chain reaches a
+        //     suspension INTRINSIC (see the fixpoint below). A `try` guarding ordinary code, or a leaf
+        //     suspend chain that returns synchronously, is flattened like any other branch.
+        //   * Some value must be live to lose: the owning suspend function has a value parameter, an
+        //     extension receiver, or declares a local. With nothing to restore the missing restore is
+        //     unobservable, so `suspend fun f(): Int { try { return d() } catch (e: Exception) { return
+        //     d() } }` stays ACCEPTED (`backend_rejection_coverage_e2e::suspend_try_catch_accepted`).
+        //   * The loss must be observable past the `try`: a catch body reads one of those names, or
+        //     itself suspends (resuming INSIDE the handler needs the same restores), or the `try` sits
+        //     in STATEMENT position so ordinary code can follow it.
+        //
+        // NOT covered, deliberately: the same handler never tests the DECLARED CATCH TYPE either, so
+        // `catch (e: RuntimeException)` also swallows a plain `Exception` that Kotlin requires to
+        // propagate. Whether that fires depends on what the callee throws, which no AST scan can decide,
+        // and paying for it would mean a blanket skip of every suspending `try`/`catch`. Left as a known
+        // gap — see docs/SPEC.md.
+        //
+        // "Suspension point" is the same file-local name approximation `gate:suspend-call-from-non-
+        // suspend` below uses, so a suspend callee from ANOTHER file is not seen here either.
+
+        // Every expression reachable from `root`. An explicit worklist rather than a recursive pair of
+        // closures: `any_child_expr` takes two callbacks and both would have to hold `&mut` on the same
+        // accumulator.
+        let reachable = |root: AstExprId| -> Vec<AstExprId> {
+            let stack = std::cell::RefCell::new(vec![root]);
+            let mut seen = Vec::new();
+            loop {
+                let next = stack.borrow_mut().pop();
+                let Some(e) = next else { break };
+                seen.push(e);
+                file.any_child_expr(
+                    e,
+                    &mut |c| {
+                        stack.borrow_mut().push(c);
+                        false
+                    },
+                    &mut |s| {
+                        file.any_child_stmt(s, &mut |c| {
+                            stack.borrow_mut().push(c);
+                            false
+                        })
+                    },
+                );
+            }
+            seen
+        };
+        // The bail's trigger is a REAL suspension — one that returns `COROUTINE_SUSPENDED` and resumes
+        // the machine later. Merely CALLING a suspend function is a suspension *point* in the state
+        // machine, but if the whole callee chain returns synchronously the frame is never re-entered and
+        // the missing restore cannot be observed: `suspend fun tick(sb: StringBuilder, t: String): Int`
+        // that only appends is a leaf, and a `try`/`catch` around it round-trips today
+        // (`suspend_in_catch_body_spills_exception`). So count only this file's suspend functions whose
+        // body reaches a suspension INTRINSIC, directly or through another such function (a least
+        // fixpoint over the file's suspend declarations). A callee from another file is invisible to
+        // this name scan either way, so it is not counted — the same file-local approximation
+        // `gate:suspend-call-from-non-suspend` makes.
+        const SUSPENSION_INTRINSICS: [&str; 3] = [
+            "suspendCoroutineUninterceptedOrReturn",
+            "suspendCoroutine",
+            "suspendCancellableCoroutine",
+        ];
+        let suspend_decl_bodies: Vec<(String, AstExprId)> = {
+            let mut out = Vec::new();
+            let mut note = |f: &FunDecl| {
+                if let (true, FunBody::Expr(b) | FunBody::Block(b)) = (f.is_suspend(), &f.body) {
+                    out.push((f.name.clone(), *b));
+                }
+            };
+            for &d in &file.decls {
+                match file.decl(d) {
+                    Decl::Fun(f) => note(f),
+                    Decl::Class(c) => c.methods.iter().for_each(&mut note),
+                    Decl::Property(_) => {}
+                }
+            }
+            out
+        };
+        // Scan each body ONCE into (reaches an intrinsic directly, which sibling declarations it calls),
+        // then take the fixpoint over that call graph. Re-walking every body for every candidate name on
+        // every round instead would be quadratic in the file's suspend declarations.
+        let really_suspends: Vec<String> = {
+            let mut seeded: Vec<bool> = Vec::with_capacity(suspend_decl_bodies.len());
+            let mut calls: Vec<Vec<usize>> = Vec::with_capacity(suspend_decl_bodies.len());
+            for (_, body) in &suspend_decl_bodies {
+                seeded.push(
+                    SUSPENSION_INTRINSICS
+                        .iter()
+                        .any(|i| file.expr_uses_name_deep(*body, i)),
+                );
+                calls.push(
+                    suspend_decl_bodies
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (name, _))| file.expr_uses_name_deep(*body, name))
+                        .map(|(i, _)| i)
+                        .collect(),
+                );
+            }
+            loop {
+                let mut changed = false;
+                for i in 0..seeded.len() {
+                    if !seeded[i] && calls[i].iter().any(|&c| seeded[c]) {
+                        seeded[i] = true;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            suspend_decl_bodies
+                .iter()
+                .zip(&seeded)
+                .filter(|(_, &s)| s)
+                .map(|((name, _), _)| name.clone())
+                .collect()
+        };
+        let has_suspension = |e: AstExprId| -> bool {
+            really_suspends
+                .iter()
+                .any(|name| file.expr_uses_name_deep(e, name))
+        };
+        // `try` expressions in STATEMENT position — ordinary code can follow them, so a value spilled
+        // before the `try` can be read after it.
+        let stmt_position_tries: std::collections::HashSet<u32> = file
+            .stmt_arena
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Expr(e) => matches!(file.expr(*e), Expr::Try { .. }).then_some(e.0),
+                _ => None,
+            })
+            .collect();
+        // Each suspend body with the names whose value must survive a resume into a handler.
+        let mut suspend_bodies: Vec<(AstExprId, Vec<String>)> = Vec::new();
+        let mut note_suspend_fun = |f: &FunDecl| {
+            if !f.is_suspend() {
+                return;
+            }
+            let (FunBody::Expr(body) | FunBody::Block(body)) = f.body else {
+                return;
+            };
+            let mut names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
+            if f.receiver.is_some() {
+                names.push("this".to_string());
+            }
+            suspend_bodies.push((body, names));
+        };
         for &d in &file.decls {
-            if let Decl::Fun(f) = file.decl(d) {
-                if f.is_suspend() && f.receiver.is_some() {
-                    return lo.bail("gate:extension-suspend-fn");
+            match file.decl(d) {
+                Decl::Fun(f) => note_suspend_fun(f),
+                Decl::Class(c) => c.methods.iter().for_each(&mut note_suspend_fun),
+                Decl::Property(_) => {}
+            }
+        }
+        // A SUSPENSION reached through `super.f(…)`: the state machine would have to thread the
+        // continuation through a non-virtual dispatch and resume back into it, which the resume path
+        // does not model — the resumed frame read back `null`
+        // (`coroutines/suspendFunctionAsCoroutine/superCall*` answered with an NPE). Skip the file.
+        for (body, _) in &suspend_bodies {
+            let mut found = false;
+            for &e in &reachable(*body) {
+                let Expr::Call { callee, .. } = file.expr(e) else {
+                    continue;
+                };
+                let Expr::Member { receiver, name } = file.expr(*callee) else {
+                    continue;
+                };
+                if matches!(file.expr(*receiver), Expr::Name(n) if n.starts_with("super"))
+                    && (top_suspend.iter().any(|s| s == name)
+                        || member_suspend.iter().any(|s| s == name))
+                {
+                    found = true;
+                }
+            }
+            if found {
+                return lo.bail("gate:suspend-super-call");
+            }
+        }
+        for (body, params) in &suspend_bodies {
+            let body_exprs = reachable(*body);
+            // Locals declared anywhere in this body — each is a candidate spill slot.
+            let mut names = params.clone();
+            for &e in &body_exprs {
+                let Expr::Block { stmts, .. } = file.expr(e) else {
+                    continue;
+                };
+                for &s in stmts {
+                    match file.stmt(s) {
+                        Stmt::Local { name, .. }
+                        | Stmt::LocalLateinit { name, .. }
+                        | Stmt::LocalDelegate { name, .. }
+                        | Stmt::For { name, .. }
+                        | Stmt::ForEach { name, .. } => names.push(name.clone()),
+                        Stmt::Destructure { entries, .. } => {
+                            names.extend(entries.iter().map(|(n, _)| n.clone()))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if names.is_empty() {
+                continue;
+            }
+            for e in body_exprs {
+                let Expr::Try {
+                    body: guarded,
+                    catches,
+                    ..
+                } = file.expr(e)
+                else {
+                    continue;
+                };
+                if catches.is_empty() || !has_suspension(*guarded) {
+                    continue;
+                }
+                let observable = stmt_position_tries.contains(&e.0)
+                    || catches.iter().any(|c| {
+                        has_suspension(c.body)
+                            || names.iter().any(|n| file.expr_uses_name_deep(c.body, n))
+                    });
+                if observable {
+                    return lo.bail("gate:suspend-try-catch");
                 }
             }
         }
@@ -1647,20 +1912,13 @@ fn lower_file_at_reporting_impl(
                 let field_tp: std::collections::HashMap<String, String> =
                     class_field_tparams(c).into_iter().collect();
                 // kotlinc emits NO accessor for a `private` property (in-class reads go straight to the
-                // field); synthesizing one is an extra public member → an ABI divergence. Kept when the
-                // class HAS a companion — a companion reads the outer's privates through the getter
-                // (kotlinc uses an `access$…` bridge krusty doesn't emit yet; box `classes/kt504.kt`).
-                // A value class also keeps its getter (its unboxed-support synthesis expects it).
-                // Only a companion with CODE (methods, non-const props, a base) can read the
-                // outer class's privates through the getter (kt504); a CONST-ONLY companion never
-                // does — its outer keeps kotlinc's shape (no getter for a private property).
-                let has_companion = !c.companion_methods.is_empty()
-                    || c.companion_props.iter().any(|p| !p.is_const)
-                    || c.companion_base.is_some();
+                // field); synthesizing one is an extra public member → an ABI divergence. A reader in
+                // another class — the companion, a nested class, an inlined body — goes through the
+                // synthetic `access$…$p` bridge instead (`mark_private_access_bridge_if_outside`).
+                // A value class keeps its getter: its unboxed-support synthesis expects one.
                 for (pi, (pname, is_var, is_private, property_ty)) in field_props.iter().enumerate()
                 {
                     let fidx = pi + field_offset;
-                    let private_no_accessor = *is_private && !c.is_value && !has_companion;
                     let fty = fields[fidx].1;
                     // Use the class field's IrType (carries declared `?` via `mark_nullable`), not the
                     // bare `Ty` — so a nullable value-class property getter erases consistently with the
@@ -1668,13 +1926,24 @@ fn lower_file_at_reporting_impl(
                     let fty_ir = lo.ir.classes[id as usize].fields[fidx].ty;
                     let property_ir = ty_to_ir(*property_ty);
                     // `open`/`override` property accessors must stay non-final (kotlinc's member
-                    // modality — same rule as methods). Only BODY properties carry the flag;
-                    // an `open val` PRIMARY-CONSTRUCTOR property isn't modeled yet.
+                    // modality — same rule as methods). `field_props` interleaves PRIMARY-CONSTRUCTOR
+                    // and BODY properties, so both declaration forms must be consulted: the flag also
+                    // decides whether an in-class access may touch the raw backing field
+                    // (`jvm::ir_emit::direct_field_access`), and a ctor-declared `open val` overridden
+                    // by a subclass bypasses the override exactly like a body one.
                     let prop_open = c
-                        .body_props
+                        .props
                         .iter()
+                        .filter(|pp| pp.is_property)
                         .find(|pp| pp.name == *pname)
-                        .is_some_and(|pp| pp.is_open);
+                        .map(|pp| pp.is_open)
+                        .or_else(|| {
+                            c.body_props
+                                .iter()
+                                .find(|pp| pp.name == *pname)
+                                .map(|pp| pp.is_open)
+                        })
+                        .unwrap_or(false);
                     // A property that WRITES its own accessor over a backing field (`val x = init get() =
                     // field`) has source-written bodies, so its accessors must never be bypassed.
                     let prop_custom_accessor = c
@@ -1706,15 +1975,16 @@ fn lower_file_at_reporting_impl(
                             needs_access_bridge: false,
                         });
                     let prop_record = lo.ir.classes[id as usize].properties.len() - 1;
-                    // kotlinc emits NO accessor for a private property — in-class reads go straight to
-                    // the backing field. The DECLARATION is recorded above regardless, so a use from
-                    // outside the class can see there is nothing to call.
-                    if private_no_accessor {
-                        continue;
-                    }
-                    // A property with NO source-written accessor needs none from the language lowering:
-                    // its `getX`/`setX` are a target realization of the declaration recorded above, and
-                    // the backend synthesizes them.
+                    // kotlinc SYNTHESIZES no accessor for a private property — in-class reads go straight
+                    // to the backing field. The DECLARATION is recorded above regardless, so a use from
+                    // outside the class can see there is nothing to call. A SOURCE-WRITTEN accessor is
+                    // different: it is user code with a body, and dropping it silently replaces the
+                    // program's `set(l) { /* ignore */ }` with a plain field store (box
+                    // `properties/kt3551.kt`). So the private skip covers only the synthesized pair.
+                    //
+                    // A property with NO source-written accessor needs none from the language lowering
+                    // either: its `getX`/`setX` are a target realization of the declaration recorded
+                    // above, and the backend synthesizes them.
                     if !prop_custom_accessor {
                         continue;
                     }
@@ -1842,6 +2112,17 @@ fn lower_file_at_reporting_impl(
             // non-const `val` initialized in the outer class's `<clinit>` (see `emit_class`).
             for cp in &c.companion_props {
                 let cty = body_prop_ty(file, info, cp, &*syms.libraries);
+                // A field-less custom-accessor property has NO static to hoist: it is realized purely
+                // as accessor methods on the synthesized `C$Companion`, built in the companion-synthesis
+                // block below. Record its type/mutability so reads and writes can find those accessors.
+                if ast::is_computed_companion_prop(cp) {
+                    if cty == Ty::Error {
+                        return None;
+                    }
+                    lo.companion_computed_props
+                        .insert((type_name(&internal), cp.name.clone()), (cty, cp.is_var));
+                    continue;
+                }
                 lo.cur_class = None;
                 lo.scope.clear();
                 lo.boxed_elem.clear();
@@ -1863,7 +2144,7 @@ fn lower_file_at_reporting_impl(
                     name: cp.name.clone(),
                     ty: ty_to_ir(cty),
                     init,
-                    is_var: false,
+                    is_var: cp.is_var,
                     is_const: cp.is_const,
                     owner: Some(type_name(&internal)),
                     custom_accessor: false,
@@ -2119,6 +2400,57 @@ fn lower_file_at_reporting_impl(
                         .push((mi as u32, fid, ret));
                     cmethod_fids.push(fid);
                 }
+                // A FIELD-LESS custom-accessor companion property is realized as accessor METHODS on
+                // the companion (kotlinc's layout: `getZERO()`/`setLEVEL(int)` on `C$Companion`, no
+                // static anywhere). Declaring them here — beside the companion's own methods, in the
+                // same `methods` map — is what makes reads/writes resolve and gives value-class-typed
+                // accessors the same name mangling a companion method already gets.
+                for cp in c
+                    .companion_props
+                    .iter()
+                    .filter(|p| ast::is_computed_companion_prop(p))
+                {
+                    let cty = body_prop_ty(file, info, cp, &*syms.libraries);
+                    if cty == Ty::Error {
+                        return None;
+                    }
+                    let cty_ir = ty_to_ir(cty);
+                    // The recorded index is the accessor's position in the companion's method-fid
+                    // vector — that is what a `MethodCall` resolves against.
+                    let getter = property_getter_name(&cp.name);
+                    let gid = lo.ir.add_fun(IrFunction {
+                        name: getter.clone(),
+                        params: vec![],
+                        ret: cty_ir,
+                        body: None,
+                        is_static: false,
+                        dispatch_receiver: Some(type_name(&comp_fq)),
+                        param_checks: vec![],
+                    });
+                    cmethods
+                        .entry(getter)
+                        .or_default()
+                        .push((cmethod_fids.len() as u32, gid, cty));
+                    cmethod_fids.push(gid);
+                    if cp.is_var {
+                        let setter = property_setter_name(&cp.name);
+                        let sid = lo.ir.add_fun(IrFunction {
+                            name: setter.clone(),
+                            params: vec![cty_ir],
+                            ret: ty_to_ir(Ty::Unit),
+                            body: None,
+                            is_static: false,
+                            dispatch_receiver: Some(type_name(&comp_fq)),
+                            param_checks: vec![],
+                        });
+                        cmethods.entry(setter).or_default().push((
+                            cmethod_fids.len() as u32,
+                            sid,
+                            Ty::Unit,
+                        ));
+                        cmethod_fids.push(sid);
+                    }
+                }
                 lo.ir.classes[comp_id as usize].methods = cmethod_fids;
                 lo.ir.classes[id as usize].companion_class = Some(type_name(&comp_fq));
                 lo.insert_class_info(
@@ -2265,6 +2597,12 @@ fn lower_file_at_reporting_impl(
                 if f.visibility.is_private() {
                     lo.ir.private_methods.insert(id);
                 }
+                // Tag a `suspend` extension exactly like a plain top-level `suspend fun`: the receiver
+                // is already an ordinary leading static parameter, so the coroutine pass appends the
+                // CPS `Continuation` after it and threads call sites unchanged.
+                if f.is_suspend() {
+                    lo.ir.suspend_funs.push(id);
+                }
             } else {
                 let sig = syms.funs.get(&f.name)?.iter().find(|sig| {
                     sig.source_file == Some(lo.file_index) && sig.source_decl == Some(d)
@@ -2292,7 +2630,9 @@ fn lower_file_at_reporting_impl(
                 let param_checks =
                     param_checks_for(f, &sig.params, &[], &std::collections::HashSet::new());
                 let id = lo.ir.add_fun(IrFunction {
-                    name: f.name.clone(),
+                    // The BYTECODE name honours `@JvmName`; call sites still resolve by the SOURCE
+                    // name (`fun_ids` below), so they reach this id and emit the annotated spelling.
+                    name: f.jvm_name(file),
                     params,
                     ret,
                     body: None,
@@ -2651,45 +2991,10 @@ fn lower_file_at_reporting_impl(
                         }
                     }
                     // A property redeclared in the subclass (`override val field`) overrides the base's
-                    // `getX()`, so external access dispatches virtually to the subclass field — correct.
-                    // But a *base-class member that reads the property internally* reads the field
-                    // directly (not via `getX`), bypassing the override. Bail only then.
-                    let own_fields: Vec<&String> = c
-                        .props
-                        .iter()
-                        .filter(|p| p.is_property)
-                        .map(|p| &p.name)
-                        .chain(c.body_props.iter().map(|p| &p.name))
-                        .collect();
-                    let base_name = c.base_class.clone();
-                    let base_decl = base_name.as_ref().and_then(|bn| {
-                        file.decls.iter().find_map(|&d| match file.decl(d) {
-                            Decl::Class(bc) if bc.name == *bn => Some(bc),
-                            _ => None,
-                        })
-                    });
-                    for fname in own_fields {
-                        if lo.resolve_field_name(super_int, fname).is_some() {
-                            // A base with its own base, or a base member reading `fname`, risks the
-                            // internal-read bypass — bail conservatively; else the override is safe.
-                            let unsafe_base = base_decl.map_or(true, |bd| {
-                                bd.base_class.is_some()
-                                    || bd.methods.iter().any(|m| match &m.body {
-                                        FunBody::Expr(e) | FunBody::Block(e) => {
-                                            file.expr_uses_name(*e, fname)
-                                        }
-                                        FunBody::None => false,
-                                    })
-                                    || bd.body_props.iter().any(|p| {
-                                        p.init.map_or(false, |e| file.expr_uses_name(e, fname))
-                                    })
-                            });
-                            if unsafe_base {
-                                lo.set_bail("gate:base-reads-override-internally");
-                                return None;
-                            }
-                        }
-                    }
+                    // `getX()`, and every access — including a base member reading or writing it
+                    // internally — goes through that accessor, so the override is never bypassed. See
+                    // `Lower::open_source_property` (bare `name`) and `jvm::ir_emit::direct_field_access`
+                    // (qualified `this.name`), which decline the raw backing field for an `open` property.
                 }
                 // An interface's abstract methods have no body; its DEFAULT methods (with a body) are
                 // lowered like instance methods (fall through to the normal method-body loop below).
@@ -3175,6 +3480,51 @@ fn lower_file_at_reporting_impl(
                         }
                         let ret_ty = lo.ir.functions[fid as usize].ret.clone();
                         lo.lower_body(&m.body, &ret_ty, fid)?;
+                    }
+                    // The accessor bodies of a field-less companion property, lowered exactly like a
+                    // companion method: `this` is the companion instance at slot 0, and the setter's
+                    // parameter follows it.
+                    for cp in c
+                        .companion_props
+                        .iter()
+                        .filter(|p| ast::is_computed_companion_prop(p))
+                    {
+                        let cty = body_prop_ty(file, info, cp, &*syms.libraries);
+                        let getter_body = cp.getter.clone()?;
+                        let getter = property_getter_name(&cp.name);
+                        let (_, gid, _) = *lo.class_info(&comp_fq)?.methods[&getter].first()?;
+                        lo.scope.clear();
+                        lo.boxed_elem.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(comp_name);
+                        lo.cur_fn_name = getter.clone();
+                        let this_v = lo.fresh_value();
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
+                        let ret_ty = lo.ir.functions[gid as usize].ret;
+                        lo.lower_body(&getter_body, &ret_ty, gid)?;
+                        if !cp.is_var {
+                            continue;
+                        }
+                        let accessor = cp.setter.clone()?;
+                        let setter_body = accessor.body.clone()?;
+                        let setter = property_setter_name(&cp.name);
+                        let (_, sid, _) = *lo.class_info(&comp_fq)?.methods[&setter].first()?;
+                        lo.scope.clear();
+                        lo.boxed_elem.clear();
+                        lo.next_value = 0;
+                        lo.cur_class = Some(comp_name);
+                        lo.cur_fn_name = setter.clone();
+                        let this_v = lo.fresh_value();
+                        lo.scope
+                            .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
+                        let value_v = lo.fresh_value();
+                        lo.scope.push((
+                            ast::setter_param_or_value(accessor.param.as_ref()),
+                            value_v,
+                            cty,
+                        ));
+                        lo.lower_body(&setter_body, &ty_to_ir(Ty::Unit), sid)?;
                     }
                 }
                 // A superclass whose constructor needs more arguments than are supplied (`object : A()`
@@ -4607,6 +4957,31 @@ fn break_continue_stmt_tail_only(file: &ast::File, s: ast::StmtId) -> bool {
     }
 }
 
+/// The IR constant a selected library constant (`Int.MAX_VALUE`, `kotlin.math.PI`, …) inlines to —
+/// what kotlinc emits at every use site.
+///
+/// Every sub-`Int` constant (`Char.MAX_VALUE`, `Byte.MIN_VALUE`, `UByte.MIN_VALUE`, …) reads back from
+/// the classpath as an integer `ConstantValue`, but the constant's TYPE is the narrow one. Emit the
+/// narrow const so it boxes to `Character`/`Byte`/`Short` — not `Integer` — in a vararg or erased
+/// generic position, where the wrapper class decides `Intrinsics.areEqual`. The narrow unsigned types
+/// share their signed representation.
+fn library_const_ir(lc: &crate::libraries::LibraryConst) -> crate::ir::IrConst {
+    use crate::ir::IrConst;
+    use crate::libraries::LibConst;
+    match lc.value {
+        LibConst::Int(v) => match lc.ty.non_null() {
+            Ty::Char => IrConst::Char(v as u16),
+            Ty::Byte | Ty::UByte => IrConst::Byte(v as i8),
+            Ty::Short | Ty::UShort => IrConst::Short(v as i16),
+            _ => IrConst::Int(v),
+        },
+        LibConst::Long(v) => IrConst::Long(v),
+        LibConst::Float(v) => IrConst::Float(v),
+        LibConst::Double(v) => IrConst::Double(v),
+        LibConst::Str(ref v) => IrConst::String(v.clone()),
+    }
+}
+
 fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir::IrConst> {
     use crate::ir::IrConst;
     use ast::Expr;
@@ -4623,7 +4998,14 @@ fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir
         Expr::BoolLit(b) => IrConst::Boolean(*b),
         Expr::StringLit(s) => IrConst::String(s.clone()),
         Expr::CharLit(c) => IrConst::Char(*c),
-        Expr::UIntLit(v) => IrConst::Int(*v as i32),
+        // An unsigned literal stores the bit pattern of its magnitude in the declared type's
+        // representation (`200u` as a `UByte` is the byte -56), mirroring the signed arm above.
+        Expr::UIntLit(v) => match ty {
+            Ty::UByte => IrConst::Byte(*v as u8 as i8),
+            Ty::UShort => IrConst::Short(*v as u16 as i16),
+            Ty::ULong => IrConst::Long(*v as u32 as i64),
+            _ => IrConst::Int(*v as i32),
+        },
         Expr::ULongLit(v) => IrConst::Long(*v),
         _ => return None,
     })
@@ -4700,15 +5082,17 @@ fn reordered_base_args(file: &ast::File, c: &ast::ClassDecl) -> Option<Vec<AstEx
 }
 
 fn companion_props_lowerable(c: &ast::ClassDecl) -> bool {
-    // A plain companion `val` with an initializer and no custom accessor/delegate — emitted as a static
-    // field on the OUTER class (a `const val` as a `ConstantValue`, a non-const `val` initialized in the
-    // outer class's `<clinit>`), read as `getstatic C.X`.
+    // A plain companion property with an initializer and no custom accessor/delegate — emitted as a
+    // static field on the OUTER class (a `const val` as a `ConstantValue`, a non-const one initialized
+    // in the outer class's `<clinit>`), read as `getstatic C.X`. A `var` is the same backing field,
+    // written with `putstatic`. A FIELD-LESS custom-accessor property has no static at all: it lowers
+    // to accessor methods on the synthesized `C$Companion` (see `is_computed_companion_prop`).
     c.companion_props.iter().all(|p| {
-        !p.is_var
-            && p.init.is_some()
-            && p.getter.is_none()
-            && p.setter.is_none()
-            && p.delegate.is_none()
+        ast::is_computed_companion_prop(p)
+            || (p.init.is_some()
+                && p.getter.is_none()
+                && p.setter.is_none()
+                && p.delegate.is_none())
     })
 }
 
@@ -4742,7 +5126,7 @@ fn is_simple_class(c: &ast::ClassDecl) -> bool {
         // Body properties (`class C { val x = … }`) are allowed when they're plain backing fields
         // initialized in the constructor; `init { … }` blocks run there too (see `init_order`). An
         // `abstract val x: T` (no field, emitted as an abstract `getX()`) is also allowed.
-        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || is_field_accessor_prop(p) || p.is_abstract || is_deferred_val_prop(p) || is_lateinit_prop(p) || is_member_ext_prop(p) || p.delegate.is_some())
+        && c.body_props.iter().all(|p| is_plain_body_prop(p) || is_computed_prop(p) || is_field_accessor_prop(p) || p.is_abstract || is_deferred_prop(p) || is_lateinit_prop(p) || is_member_ext_prop(p) || p.delegate.is_some())
 }
 
 /// An `enum class` the IR can emit: a primary constructor of `val`/`var` props, concrete (non-extension,
@@ -4815,6 +5199,11 @@ fn is_simple_interface(c: &ast::ClassDecl) -> bool {
         && c.companion_base.is_none()
         && c.companion_supertypes.is_empty()
         && companion_props_lowerable(c)
+        // A JVM interface field is implicitly `public static final` — there is no non-final form — so
+        // an interface companion `var` has no representation on this path at all. A CLASS companion
+        // `var` does (a plain static field, written with `putstatic`), which is why
+        // `companion_props_lowerable` admits one.
+        && c.companion_props.iter().all(|p| !p.is_var)
         && c.props.is_empty()
         // Abstract properties (`val x: T`, no initializer/getter) become abstract `getX()`/`setX()`
         // — non-extension only: an extension's accessor takes the receiver as its first parameter,
@@ -4900,12 +5289,21 @@ fn ast_init_is_jvm_default(file: &ast::File, e: AstExprId) -> bool {
     }
 }
 
-/// A *deferred* `val` body property: declared with an explicit type and NO initializer/getter/setter
-/// (`val a: Int`), assigned exactly once in an `init` block. It's a real backing field, just initialized
-/// in the constructor body rather than at the declaration.
-fn is_deferred_val_prop(p: &ast::PropDecl) -> bool {
-    !p.is_var
-        && p.receiver.is_none()
+/// A *deferred* body property: declared with an explicit type and NO initializer/getter/setter
+/// (`val a: Int`), assigned in an `init` block or a constructor body. It's a real backing field, just
+/// initialized in the constructor body rather than at the declaration.
+///
+/// A deferred `var` is the same shape — the only difference is the synthesized setter, which the plain
+/// backing-field path already emits.
+///
+/// NOTE this gate is purely STRUCTURAL: it does not verify that the property is definitely assigned.
+/// kotlinc rejects `class C { var x: Int }` ("Property must be initialized"), while krusty emits the
+/// field with its zero value; the shape is only well-formed when an earlier initializer DIVERGES
+/// (`val t: String = TODO()` makes the rest unreachable). Admitting `var` widens a definite-assignment
+/// hole that already existed for `val` rather than introducing one — closing it needs real flow
+/// analysis in the checker, which is where the diagnostic belongs.
+fn is_deferred_prop(p: &ast::PropDecl) -> bool {
+    p.receiver.is_none()
         && !p.is_lateinit
         && p.init.is_none()
         && p.getter.is_none()
@@ -5240,6 +5638,11 @@ pub(crate) struct Lower<'a> {
     /// `(outer class internal, companion `const val` name)` → its type. Such a const lives as a
     /// `public static final` field on the OUTER class; a `C.X` read lowers to `getstatic C.X`.
     companion_consts: HashMap<(TypeName, String), Ty>,
+    /// `(outer class internal, companion property name)` → `(type, is_var)` for a FIELD-LESS
+    /// custom-accessor companion property. It has no static field at all: a `C.X` read lowers to
+    /// `getstatic C.Companion; invokevirtual C$Companion.getX()`, and a `C.X = v` write to the
+    /// matching `setX(v)`. See `is_computed_companion_prop`.
+    companion_computed_props: HashMap<(TypeName, String), (Ty, bool)>,
     /// Top-level `const val` name → its compile-time literal value. A same-file read inlines this as a
     /// constant (kotlinc's `ldc`), exactly like the reference compiler — byte-identical, no `getstatic`.
     const_lits: HashMap<String, crate::ir::IrConst>,
@@ -5385,6 +5788,16 @@ pub(crate) struct Lower<'a> {
     /// function result), so the return-lowering routes it through the frame instead of emitting a
     /// real `Return` the suspend flattener can't model inside the splice's `try`/`finally`.
     inline_lambda_ret: Vec<(String, u32, String, Ty, bool)>,
+    /// The explicit label of the lambda whose body is being lowered as a real CLOSURE, when a
+    /// `return@<that label>` in it is this closure method's own return (see `lower_lambda_sam`).
+    /// `None` while lowering anything else, which is what makes an explicit label reaching no splice
+    /// frame a skip rather than a real return out of the enclosing function.
+    closure_label: Option<String>,
+    /// Active `forEach` lambda splices, innermost last: `(source label, IR loop label)`. `forEach` is
+    /// spliced into a for-each LOOP rather than through a result-slot frame, so a `return@<label>` in
+    /// its body is the loop's `continue`, not a break to a result slot. The source label is the
+    /// lambda's explicit one (`forEach inner@{ … }`) or the implicit `forEach`.
+    foreach_splice: Vec<(String, String)>,
     /// The enclosing function's TAIL expression (an expression body, a block's trailing value, or the
     /// value of a final `return`), if any — the expression whose value is the function's result.
     /// Consulted by tail-position splice gates (`fn_tail` above).
@@ -5396,6 +5809,28 @@ impl<'a> Lower<'a> {
     /// internal `deep*`-phase refinement). Replaces the former free `set_bail` thread-local write.
     fn set_bail(&self, reason: &str) {
         *self.bail.borrow_mut() = reason.to_string();
+    }
+
+    /// The dotted CLASS path a qualifier expression spells — `Registry.Const` for
+    /// `Member { Name("Registry"), "Const" }` — or `None` when it isn't a chain of plain names.
+    ///
+    /// A nested declaration is flattened into `file.decls` under its dotted name, so this is the key
+    /// `object_const_lits` / `companion_consts` record it under. Without the chain, only a top-level
+    /// `Obj.CONST` matched and a nested `Outer.Obj.CONST` fell through to a bail.
+    ///
+    /// A path rooted in a VALUE (`a.b.c`) normally misses both maps — but not when the root name
+    /// collides with a classifier (`val Registry = …` beside `class Registry { object Const { … } }`),
+    /// where the local should shadow the type. The single-`Name` form has the same hole, so this is a
+    /// pre-existing shadowing gap the chain inherits rather than one it introduces; the fix is to
+    /// consult the lexical scope before these maps, for both forms at once.
+    fn dotted_class_path(&self, e: AstExprId) -> Option<String> {
+        match self.afile.expr(e) {
+            Expr::Name(n) => Some(n.clone()),
+            Expr::Member { receiver, name } => {
+                Some(format!("{}.{}", self.dotted_class_path(*receiver)?, name))
+            }
+            _ => None,
+        }
     }
 
     /// Stop lowering at a named, source-independent feature boundary.
@@ -5620,6 +6055,19 @@ impl<'a> Lower<'a> {
         else {
             return None;
         };
+        // A FIELD-LESS custom-accessor companion property has NO static to read — the read IS the
+        // getter call on the companion singleton. This is the choke point for every read the checker
+        // records as a static-field read (an unqualified one from an instance or companion method, a
+        // member initializer, an imported one); the qualified `C.X` form is handled at its own site.
+        // Without this the emitted `getstatic C.X` names a field that was never emitted, which is a
+        // `NoSuchFieldError` at run time rather than the clean rejection this shape used to get.
+        if self
+            .companion_computed_props
+            .contains_key(&(owner, name.clone()))
+        {
+            let getter = property_getter_name(&name);
+            return self.lower_companion_computed_accessor(owner, &getter, None);
+        }
         let descriptor = match descriptor {
             Some(descriptor) => descriptor,
             None => self.runtime.type_descriptor(self.info.ty(expression))?,
@@ -5780,12 +6228,57 @@ impl<'a> Lower<'a> {
         receiver: u32,
         args: Vec<Option<u32>>,
     ) -> u32 {
+        let (class, index) = self
+            .private_member_call_target(class, index, &args)
+            .unwrap_or((class, index));
         self.ir.add_expr(IrExpr::MethodCall {
             class,
             index,
             receiver,
             args,
         })
+    }
+
+    /// A PRIVATE member is reached by `invokespecial`, which the JVM permits only from the member's OWN
+    /// class. Kotlin's private visibility is LEXICAL and wider than that: a nested class, the companion
+    /// and an `inline` body spliced into a caller all sit inside the owner's braces but land in separate
+    /// class files. kotlinc reaches the member from them through a synthetic `access$<name>` bridge on
+    /// the owner; without it the call is a `VerifyError` ("current class isn't assignable to reference
+    /// class"). Retargeting here — at the one place a member call is constructed — is why the rule holds
+    /// for every caller instead of the handful that each re-derived it.
+    ///
+    /// Returns `None` when the call is already legal, when the target is an accessor or a constructor,
+    /// or when no bridge can be built; a call with an OMITTED argument is left alone because the bridge
+    /// carries no `$default` stub to dispatch.
+    fn private_member_call_target(
+        &mut self,
+        class: u32,
+        index: u32,
+        args: &[Option<u32>],
+    ) -> Option<(u32, u32)> {
+        if args.iter().any(Option::is_none) {
+            return None;
+        }
+        let fid = *self
+            .ir
+            .classes
+            .get(class as usize)?
+            .methods
+            .get(index as usize)?;
+        if !self.ir.private_methods.contains(&fid) {
+            return None;
+        }
+        let name = self.ir.functions[fid as usize].name.clone();
+        if name.starts_with("access$") || name == "<init>" {
+            return None;
+        }
+        let owner = existing_type_name(&self.ir.classes[class as usize].fq_name())?;
+        if self.can_access_source_private(owner) {
+            return None;
+        }
+        let accessor = self.ensure_private_accessor_name(owner, &name)?;
+        let (class, index, _, _) = self.resolve_method_name(owner, &accessor)?;
+        Some((class, index))
     }
 
     fn emit_external_call(
@@ -6334,12 +6827,33 @@ impl<'a> Lower<'a> {
         })
     }
 
+    /// Whether `name` resolves to an OPEN property on `owner` (or one of its supertypes). Such a
+    /// property is reached through its ACCESSOR even from inside the declaring class: a subclass
+    /// `override val`/`var` replaces the accessor, not this class's private backing field, so a direct
+    /// field access from a base member would read/write the base's own storage and bypass the
+    /// override. kotlinc emits `invokevirtual get<Name>()`/`set<Name>()` there for that reason.
+    ///
+    /// A WRITE to an open `val` is exempt: a `val` declares no setter at all, so its only write is the
+    /// deferred initialization Kotlin permits in a constructor/`init` block (`open val c: B` assigned
+    /// under `-ProhibitOpenValDeferredInitialization`), which kotlinc also emits as a direct
+    /// `putfield`. Routing it through `set<Name>` would be a `NoSuchMethodError`.
+    fn open_source_property(&self, owner: TypeName, name: &str, writable: bool) -> bool {
+        self.syms
+            .declared_member_prop(owner, name)
+            .is_some_and(|(_, property)| {
+                property.is_open && (!writable || property.setter_name.is_some())
+            })
+    }
+
     fn implicit_source_property_field(
         &self,
         owner: TypeName,
         name: &str,
         writable: bool,
     ) -> Option<(u32, u32)> {
+        if self.open_source_property(owner, name, writable) {
+            return None;
+        }
         if !self.can_access_source_private(owner)
             || (writable
                 && self
@@ -6791,12 +7305,13 @@ impl<'a> Lower<'a> {
             if name != "$dispatch" && name != "this" {
                 return None;
             }
-            let compatible = ty.obj_internal() == Some(owner)
-                || ty.obj_internal().is_some_and(|internal| {
-                    self.syms
-                        .supertype_internal_names(&internal.render())
-                        .contains(&owner)
-                });
+            // The selected declaration may be inherited from any symbol provider. Ask the federated
+            // semantic hierarchy whether the in-scope dispatch value is assignable to that owner;
+            // walking only `SymbolTable`'s source classes stops at a dependency boundary and makes an
+            // inherited classpath extension type-check successfully but disappear during lowering.
+            let compatible = self
+                .syms
+                .is_assignable_across_sources(*ty, Ty::obj_name(owner));
             compatible.then_some(*value)
         })
     }
@@ -6836,14 +7351,14 @@ impl<'a> Lower<'a> {
     }
 
     /// Lower a selected class-body extension call.
-    fn lower_module_member_extension_call(
+    fn lower_member_extension_call(
         &mut self,
         extension_value: u32,
         target: &ResolvedCall,
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
-        let ResolvedCall::ModuleMemberExtension {
+        let ResolvedCall::MemberExtension {
             extension_receiver,
             params,
             physical_params,
@@ -6862,18 +7377,17 @@ impl<'a> Lower<'a> {
         )?;
         let extension_value =
             self.spill_receiver_before_args(extension_value, *extension_receiver, &mut prelude);
-        let call =
-            self.emit_module_member_extension_call(extension_value, target, &mut provided)?;
+        let call = self.emit_member_extension_call(extension_value, target, &mut provided)?;
         Some(self.wrap_arg_prelude(call, prelude))
     }
 
-    fn emit_module_member_extension_call(
+    fn emit_member_extension_call(
         &mut self,
         extension_value: u32,
         target: &ResolvedCall,
         provided: &mut [Option<u32>],
     ) -> Option<u32> {
-        let ResolvedCall::ModuleMemberExtension {
+        let ResolvedCall::MemberExtension {
             owner,
             physical_receiver,
             name,
@@ -6946,6 +7460,30 @@ impl<'a> Lower<'a> {
     }
 
     /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
+    /// A read or write of a FIELD-LESS custom-accessor companion property (`C.ZERO`, `C.LEVEL = v`).
+    /// It has no static field, so both directions go through the accessor methods synthesized on
+    /// `C$Companion`: read the `Companion` singleton, then invoke `getX()` / `setX(value)`. `value`
+    /// is `None` for a read. See `is_computed_companion_prop`.
+    fn lower_companion_computed_accessor(
+        &mut self,
+        outer: TypeName,
+        accessor: &str,
+        value: Option<u32>,
+    ) -> Option<u32> {
+        let outer_internal = outer.render();
+        let comp_internal = format!("{outer_internal}$Companion");
+        let field =
+            self.runtime
+                .companion_instance_field(&outer_internal, &comp_internal, "Companion")?;
+        let recv = self.platform_static_field(field);
+        let comp_name = type_name(&comp_internal);
+        let args: Vec<Option<u32>> = value.into_iter().map(Some).collect();
+        let (class_id, index, _, _) = self
+            .resolve_method_by_arity(comp_name, accessor, args.len())
+            .or_else(|| self.resolve_method_name(comp_name, accessor))?;
+        Some(self.emit_method_call(class_id, index, recv, args))
+    }
+
     /// recorded by the checker as [`ExprLowering::ObjectMemberCall`]). Reads the singleton
     /// (`getstatic Obj.INSTANCE`) as the dispatch receiver and invokes the member — the same shape a
     /// qualified `Obj.m(args)` lowers to. `call_expr` is the AST call, for generic-return coercion.
@@ -7683,7 +8221,30 @@ impl<'a> Lower<'a> {
         if !c.owner_package_matches(pkg.as_str()) {
             return None;
         }
-        // A vararg FQ call is a later slice (sound skip).
+        // A VARARG FQ call packs its trailing arguments into the callee's array parameter — exactly
+        // what the bare-name path does. The CHECKER selected the overload and recorded the packing
+        // slot; a callee whose last parameter merely IS an array is not evidence of a vararg, so
+        // that shape stays a sound skip.
+        let packed_vararg = (!c.default_call)
+            .then_some(c.vararg_index)
+            .flatten()
+            .filter(|&slot| slot + 1 == c.params.len() && args.len() >= slot)
+            .filter(|_| !self.info.resolved_call_arg_slots.contains_key(&e));
+        if let Some(slot) = packed_vararg {
+            let params = tys_to_ir(&c.params);
+            let a = self.lower_call_args_vararg(args, &params, true, slot)?;
+            let physical_ret = c.physical_ret;
+            let logical_ret = c.ret;
+            let call_inline = c.inline.can_inline();
+            let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
+            let suspend = c.suspend;
+            let call = self.emit_library_static_call(c, a, suspend)?;
+            return Some(if call_inline || erased_generic_ret {
+                self.coerce_erased_call_result(e, call, &physical_ret, true)
+            } else {
+                call
+            });
+        }
         let last_is_array = c.params.last().is_some_and(|p| p.array_elem().is_some());
         if last_is_array {
             return None;
@@ -7724,7 +8285,21 @@ impl<'a> Lower<'a> {
         let call_inline = c.inline.can_inline();
         let physical_ret = c.physical_ret;
         let logical_ret = c.ret;
-        let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
+        // A BOUNDED type parameter's return erases to its BOUND, not to `Object`, so the erased-top
+        // test alone misses it (`fun <T : Comparable<T>> clampMax(…): T` erases to `Comparable`, and
+        // `clampMax(10, 7) != 7` left the boxed value on the stack where an `int` was expected — a
+        // VerifyError). A SCALAR logical result behind a REFERENCE physical one takes the same
+        // substituted-result coercion: the value on the stack is boxed and the use site wants the
+        // primitive. (This is the call-site half of the rule `coerce_erased_call_result` already
+        // applies once reached; the gate here was the narrower test.) UNSIGNED is excluded — its box
+        // is `kotlin/UInt`, not `Integer`, so the plain unbox `coerce_erased_call_result` emits would
+        // `checkcast` to the wrong wrapper (a live bug on the erased-top path already; not widened
+        // here). `coerce_erased_call_result` still decides what to emit.
+        let erased_generic_ret = logical_ret != physical_ret
+            && (physical_ret.is_erased_top()
+                || (self.has_scalar_value_repr(logical_ret)
+                    && !logical_ret.is_unsigned()
+                    && physical_ret.is_reference()));
         let suspend = c.suspend;
         let call = self.emit_library_static_call(c, a, suspend)?;
         let call = if arg_prelude.is_empty() {
@@ -8052,7 +8627,13 @@ impl<'a> Lower<'a> {
         if st != Ty::Error {
             self.ir.logical_types.insert(call, ty_to_ir(st));
         }
-        if self.has_scalar_value_repr(st) && phys.is_erased_top() {
+        // A scalar static type behind an erased return unboxes. This must NOT require the physical
+        // return to be erased-top: `fun <T : Number> id(x: T): T` returns `Number`, and kotlinc still
+        // emits the unbox (`invokevirtual Number.intValue`). Gating on erased-top left the boxed value
+        // on the stack where an `int` was expected — a VerifyError. The early return above already
+        // established that the erased return IS a type parameter (bounded or not), which is exactly
+        // when the checker's substituted type may refine it.
+        if self.has_scalar_value_repr(st) && phys.is_reference() {
             return self.emit_type_op(IrTypeOp::ImplicitCoercion, call, ty_to_ir(st));
         }
         if st.is_reference() && !st.is_erased_top() && st != Ty::Null && st.non_null() != phys {
@@ -8206,27 +8787,31 @@ impl<'a> Lower<'a> {
     /// Lower `val (a, b, …) = init` into `out`: a temp bound to `init`, then one local per component
     /// (`a = temp.component1()`, …). Each component is a user-class `componentN` (data class) or a
     /// library member (`Pair`, `Map.Entry`); a generic component's erased return coerces to its element.
-    /// Lower a single-spread call `foo(*a)` to a top-level `vararg` function: pass the array through
-    /// the platform array-copy helper + `checkcast`, exactly as kotlinc does, instead of packing the
-    /// array as one element. Returns `None` (→ the file skips) for any shape this doesn't handle: more
-    /// than one argument, a non-spread sole argument, a non-`Name` (non-reusable) spread expression, an
-    /// unsupported element type, or a callee that isn't a single-`vararg`-parameter top-level function in
-    /// this file.
-    fn lower_single_spread_call(
+    /// Lower a spread call `foo(*a)` / `foo(x, *a, y)` to a top-level `vararg` function in this file.
+    ///
+    /// The SOLE-spread form passes the array through the platform array-copy helper + `checkcast`,
+    /// exactly as kotlinc does, instead of packing the array as one element. A MIXED call (spreads and
+    /// plain arguments together, in any order) packs one `Vararg` node carrying a per-element spread
+    /// flag — the emitter turns that into kotlinc's `SpreadBuilder`/`<Prim>SpreadBuilder` sequence.
+    ///
+    /// Returns `None` (→ the file skips) for any shape this doesn't handle: a non-`Name` (non-reusable)
+    /// sole spread expression, an unsupported element type, or a callee that isn't a
+    /// single-`vararg`-parameter top-level function in this file. The caller diverts EVERY
+    /// spread-carrying call here, so a spread argument never reaches the spread-unaware packers.
+    fn lower_spread_call(
         &mut self,
         call: AstExprId,
         callee: AstExprId,
         args: &[AstExprId],
     ) -> Option<ExprId> {
-        let spread = match args {
-            [spread] if self.afile.is_spread_arg(*spread) => *spread,
-            _ => {
-                self.set_bail("call spread: not single spread arg");
-                return None;
-            }
+        let sole_spread = match args {
+            [spread] if self.afile.is_spread_arg(*spread) => Some(*spread),
+            _ => None,
         };
-        // kotlinc loads the spread twice; only a simple reusable name is safe without a temp.
-        if !matches!(self.afile.expr(spread), ast::Expr::Name(_)) {
+        // kotlinc loads the sole spread twice (array + its `size`); only a simple reusable name is safe
+        // without a temp. A MIXED call loads each argument once, so it has no such restriction.
+        if sole_spread.is_some_and(|spread| !matches!(self.afile.expr(spread), ast::Expr::Name(_)))
+        {
             self.set_bail("call spread: non-reusable spread expression");
             return None;
         }
@@ -8277,6 +8862,22 @@ impl<'a> Lower<'a> {
         }
         let array_ty = target.params[0];
         let array_ir = ty_to_ir(array_ty);
+
+        // Mixed spread: one packed array built by the platform spread builder. Each argument is lowered
+        // once — a spread at the ARRAY type (the builder's `addSpread` takes the whole array), a plain
+        // argument at the ELEMENT type — and the parallel flags tell the emitter which is which.
+        let Some(spread) = sole_spread else {
+            let mut elements = Vec::with_capacity(args.len());
+            let mut spreads = Vec::with_capacity(args.len());
+            for &arg in args {
+                let is_spread = self.afile.is_spread_arg(arg);
+                let want = if is_spread { array_ir } else { ty_to_ir(elem) };
+                elements.push(self.lower_arg(arg, &want)?);
+                spreads.push(is_spread);
+            }
+            let packed = self.emit_vararg_with_spreads(array_ir, elements, spreads);
+            return Some(self.emit_local_call(fid, vec![packed]));
+        };
 
         // Platform array copy. The JVM primitive overload returns the exact array type (no cast); the
         // reference overload returns `Object[]` and needs a `checkcast` to the element array type.
@@ -8435,11 +9036,11 @@ impl<'a> Lower<'a> {
             }
             DestructureComponentTarget::MemberExtension(target) => {
                 let ret = match target.as_ref() {
-                    ResolvedCall::ModuleMemberExtension { ret, .. } => *ret,
+                    ResolvedCall::MemberExtension { ret, .. } => *ret,
                     _ => return None,
                 };
                 let mut provided = [];
-                let call = self.emit_module_member_extension_call(recv, &target, &mut provided)?;
+                let call = self.emit_member_extension_call(recv, &target, &mut provided)?;
                 Some((call, ret))
             }
             DestructureComponentTarget::IndexedGet(m) => {
@@ -8534,13 +9135,37 @@ impl<'a> Lower<'a> {
         let implicit_count = context_count + receiver_count;
         let has_implicit_receiver = implicit_count > 0;
         let value_arity = arity.saturating_sub(implicit_count);
-        // A `Nothing`-returning lambda whose body is an unconditional NON-LOCAL `return` (`f { return … }`)
-        // is handled by the diverging path below: it only ever splices (the impl method is marked
-        // inline-only and not emitted), so its `return` becomes the enclosing fn's return, and the splicer
-        // synthesizes the stack-map frame the host's now-unreachable post-invoke continuation needs. But a
-        // Nothing lambda WITHOUT a bare return (a `throw`, or only a `return@label` — which can materialize
-        // as a real closure) isn't modeled that way — bail (skip, never miscompile) as before.
-        if sig.ret == Ty::Nothing && !body_has_bare_return(self.afile, body) {
+        // A `Nothing`-returning lambda needs no special handling here. One whose body is an
+        // unconditional NON-LOCAL `return` (`f { return … }`) only ever splices — the impl method is
+        // marked inline-only below and never emitted — so its `return` becomes the enclosing fn's
+        // return and the splicer synthesizes the stack-map frame the host's now-unreachable
+        // post-invoke continuation needs. One that diverges any OTHER way (a `throw`, or only a
+        // `return@label`) materializes as an ordinary closure whose impl method simply never falls off
+        // its end, which the diverging path below already emits.
+        //
+        // …with one correction to the declared type. A body that leaves ONLY through the lambda's own
+        // `return@label` is typed `Nothing` — it never falls off its end — yet it still produces that
+        // return's value, and the closure method is what returns it. Taking `Nothing` literally emits a
+        // void `return` with the value still on the operand stack ("Method expects a return value").
+        // Recover the labelled returns' common type; `Nothing` stands for every other divergence.
+        let lambda_ret = if sig.ret == Ty::Nothing {
+            self.afile
+                .lambda_labels
+                .get(&e.0)
+                .and_then(|label| self.labeled_return_ty(body, label))
+                .unwrap_or(sig.ret)
+        } else {
+            sig.ret
+        };
+        // A body that returns a value the recovery above could not type — a labelled return whose
+        // label is implicit (`build { return@build … }`, not spelled on the lambda), or a valueless
+        // `return@label` in a `Unit` lambda — would emit that same void `return` under a `Nothing`
+        // closure type. Skip those rather than miscompile; a body that diverges without returning at
+        // all (a `throw`) is unaffected, since it never reaches a return instruction.
+        if lambda_ret == Ty::Nothing
+            && body_has_return(self.afile, body)
+            && !body_has_bare_return(self.afile, body)
+        {
             return None;
         }
         // Bound parameter names: explicit, or the implicit single `it` for a unary lambda. For a receiver
@@ -8655,7 +9280,7 @@ impl<'a> Lower<'a> {
         // Closures return `Unit` through its reference carrier, including for `Unit?`.
         let sam_void_pre = matches!(&sam, Some((_, _, _, true)));
         let returns_unit_ref =
-            sig.ret.non_null() == Ty::Unit && !sam_void_pre && self.info.ty(body) != Ty::Nothing;
+            lambda_ret.non_null() == Ty::Unit && !sam_void_pre && self.info.ty(body) != Ty::Nothing;
         let saved_unit_ref =
             std::mem::replace(&mut self.cur_method_returns_unit_ref, returns_unit_ref);
         // When this closure does NOT capture the enclosing `this`, lower its body with `cur_class`
@@ -8671,11 +9296,25 @@ impl<'a> Lower<'a> {
         // closure method, not a non-local return of the enclosing fn. Lower its body with `cur_ret_ty`
         // set to the closure's own return type so `return` coerces to and `areturn`s that type.
         let is_anon_fun = self.afile.anon_fun_lambdas.contains(&e.0);
-        let saved_ret_ty = if is_anon_fun {
-            Some(std::mem::replace(&mut self.cur_ret_ty, sig.ret))
+        // A LABELLED lambda lowered as a real closure owns its `return@<own label>` the same way: the
+        // label is local to this lambda, so it is this closure method's own return. That holds only
+        // while no BARE `return` shares the body — a bare return is non-local and needs the enclosing
+        // function's type, and the two cannot both drive `cur_ret_ty`. Registering the label here is
+        // what lets the closure route serve a labelled lambda; without it the return-lowering guard
+        // (which cannot otherwise tell this from an unmodelled splice) would skip the whole file.
+        let own_closure_label = self
+            .afile
+            .lambda_labels
+            .get(&e.0)
+            .filter(|_| !body_has_bare_return(self.afile, body))
+            .cloned();
+        let saved_ret_ty = if is_anon_fun || own_closure_label.is_some() {
+            Some(std::mem::replace(&mut self.cur_ret_ty, lambda_ret))
         } else {
             None
         };
+        let owns_labelled_return = own_closure_label.is_some();
+        let saved_closure_label = std::mem::replace(&mut self.closure_label, own_closure_label);
         // A `var` declared INSIDE this lambda's body and mutated by a further (non-inline) closure
         // (`{ var v = …; call { v = … }; v }`) needs a `Ref` holder so the nested write is observed.
         // UNION the body-local shared cells with the inherited set (captured enclosing cells stay boxed)
@@ -8688,8 +9327,11 @@ impl<'a> Lower<'a> {
         // function must not capture a `return`/`return@label` lowered inside it (a non-local return
         // across a non-inline boundary is illegal Kotlin anyway; don't let one silently bind).
         let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
+        let saved_foreach = std::mem::take(&mut self.foreach_splice);
         let ve = self.expr(body);
+        self.foreach_splice = saved_foreach;
         self.inline_lambda_ret = saved_lam_frames;
+        self.closure_label = saved_closure_label;
         self.shared_cell_vars = saved_cells;
         if let Some(rt) = saved_ret_ty {
             self.cur_ret_ty = rt;
@@ -8710,29 +9352,29 @@ impl<'a> Lower<'a> {
         // non-local return), not the lambda.
         let (ret_ty, block, inline_body) = if diverges {
             let b = self.emit_block(vec![ve], None);
-            (ty_to_ir(sig.ret), b, ve)
+            (ty_to_ir(lambda_ret), b, ve)
         } else if sam_void {
             // The SAM method returns `void` (`run()V`): run the body for effect, no return value.
             let b = self.emit_block(vec![ve], None);
             (ty_to_ir(Ty::Unit), b, ve)
-        } else if sig.ret == Ty::Unit {
+        } else if lambda_ret == Ty::Unit {
             let unit = self.emit_unit();
             let ret = self.emit_return(Some(unit));
             let b = self.emit_block(vec![ve, ret], None);
             let inline_b = self.emit_block(vec![ve], Some(unit));
             (ty_to_ir(stored_value_ty(Ty::Unit)), b, inline_b)
         } else {
-            let ret_val = if sig.ret.is_reference()
-                && !matches!(sig.ret, Ty::Null)
-                && !sig.ret.is_erased_top()
+            let ret_val = if lambda_ret.is_reference()
+                && !matches!(lambda_ret, Ty::Null)
+                && !lambda_ret.is_erased_top()
             {
-                self.emit_type_op(IrTypeOp::Cast, ve, ty_to_ir(sig.ret))
+                self.emit_type_op(IrTypeOp::Cast, ve, ty_to_ir(lambda_ret))
             } else {
                 ve
             };
             let ret = self.emit_return(Some(ret_val));
             let b = self.emit_block(vec![ret], None);
-            (ty_to_ir(sig.ret), b, ret_val)
+            (ty_to_ir(lambda_ret), b, ret_val)
         };
         let seq = self.next_synthetic_seq();
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, seq);
@@ -8740,6 +9382,7 @@ impl<'a> Lower<'a> {
         let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
         let own_params_from = params_ir.len() as u32;
         params_ir.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
+        let params_len = params_ir.len() as u32;
         let fid = self.ir.add_fun(IrFunction {
             name: impl_name,
             params: params_ir,
@@ -8753,6 +9396,14 @@ impl<'a> Lower<'a> {
         // treat a reference-underlying value-class own-param as BOXED — it arrives through `FunctionN`'s
         // generic `Object` invoke slot. The lowerer stays value-class-agnostic; the pass decides VC-ness.
         self.ir.lambda_own_params_from.insert(fid, own_params_from);
+        // A SAM conversion targets a DECLARED method, not the generic `FunctionN.invoke` — record its
+        // declaration so the backend can realize each slot the way the interface actually spells it.
+        if let Some(declared) = sam
+            .as_ref()
+            .and_then(|(internal, ..)| self.sam_declared_signature(internal))
+        {
+            self.ir.lambda_sam_signature.insert(fid, declared);
+        }
         // A BARE `return` in a lambda body is a NON-LOCAL return (from the enclosing function) — valid only
         // when the lambda is spliced inline, never as a standalone closure method (the `areturn` would carry
         // the enclosing fn's return type, not the lambda's). Mark the impl method inline-only so the backend
@@ -8764,6 +9415,27 @@ impl<'a> Lower<'a> {
         if !is_anon_fun && body_has_bare_return(self.afile, body) {
             self.ir.inline_only_fns.insert(fid);
         }
+        // …but that same exemption makes the ANONYMOUS FUNCTION's `inline_body` wrong: spliced into a
+        // caller, its LOCAL `return` would emit a `*return` from the ENCLOSING method (`filter(fun(n:
+        // Int): Boolean { return … })` returned out of the caller mid-loop). A stdlib `inline` callee
+        // is `MustInline`, so declining the splice is not an option — splice a CALL to the impl method
+        // instead. The splice binds value indices `0..` (captures, then the lambda's own parameters) to
+        // the slots it prepared, so passing those very indices reproduces the closure call exactly, and
+        // the impl's own `*return` stays inside the impl.
+        //
+        // A lambda owning its `return@<own label>` needs the SAME treatment, for the same reason: that
+        // node was lowered as this closure method's own return, so splicing the raw body would turn it
+        // into a non-local return of the enclosing function, carrying the wrong type. Withholding the
+        // splice form instead is not an option — an `@InlineOnly` callee (`sumOf`, `require`) has no
+        // callable body, so a declined splice bails the whole file ("inline splice failed"). Splicing a
+        // CALL keeps the labelled return inside the impl, where it is correct.
+        let inline_body =
+            if (is_anon_fun && body_has_bare_return(self.afile, body)) || owns_labelled_return {
+                let args = (0..params_len).map(|i| self.emit_get_value(i)).collect();
+                self.emit_local_call(fid, args)
+            } else {
+                inline_body
+            };
         // A lambda impl method lives ON THE CLASS declaring the enclosing member (kotlinc's placement:
         // same class as the `invokedynamic` call site, so a PRIVATE impl — and any enclosing-`this`
         // member access — resolves without bridges); a top-level declaration's lambda keeps its impl on
@@ -9315,9 +9987,11 @@ impl<'a> Lower<'a> {
             // The suspend-lambda machine is its own return scope — don't let an enclosing splice's
             // return frame capture a `return` lowered inside it (illegal across the boundary anyway).
             let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
+            let saved_foreach = std::mem::take(&mut self.foreach_splice);
             // Evaluate WITHOUT `?` so the `cur_fn_suspend` / `scope` state is always restored, even when the
             // body bails (an early `?` here would leak `cur_fn_suspend = true` into the enclosing method).
             let body_val = self.expr(body);
+            self.foreach_splice = saved_foreach;
             self.inline_lambda_ret = saved_lam_frames;
             self.cur_fn_suspend = saved_cur_suspend;
             self.in_suspend_lambda_body = saved_in_sl;
@@ -9899,7 +10573,35 @@ impl<'a> Lower<'a> {
     }
 
     fn unsigned_to_string(&mut self, val: u32, ty: Ty) -> Option<u32> {
-        self.runtime_call(RuntimeOp::UnsignedToString, ty, vec![val])
+        // A `UByte`/`UShort` prints through the `UInt` helper on its zero-extended value — the same
+        // decimal `kotlin/UByte.toString-impl` produces, without a second platform row.
+        let val = self.widen_unsigned(val, ty);
+        self.runtime_call(
+            RuntimeOp::UnsignedToString,
+            ty.unsigned_op_type()?,
+            vec![val],
+        )
+    }
+
+    /// Zero-extend an unsigned value out of its own representation into the `int` its operations run
+    /// in: `UByte`/`UShort` live in a SIGN-extended `byte`/`short`, so every widening masks first
+    /// (`iand 0xFF`), exactly as kotlinc lowers `UByte.toInt()`. A no-op for any other type.
+    ///
+    /// The result is coerced to `Int` explicitly. The emitter types a `PrimitiveBinOp` from its LEFT
+    /// operand, which here is still the narrow `byte`/`short` — so without this the masked value reads
+    /// back as a `Byte`/`Short` and any consumer that BOXES it (an erased generic argument, a vararg
+    /// element) picks `Byte.valueOf`/`Short.valueOf`. That throws above 127 for `UByte` and silently
+    /// wraps to a negative for `UShort`. The coercion emits no bytecode — `byte`/`short` and `int`
+    /// share the int stack category — it only carries the right type forward.
+    fn widen_unsigned(&mut self, value: u32, ty: Ty) -> u32 {
+        match ty.unsigned_widen_mask() {
+            Some(mask) => {
+                let m = self.emit_const(IrConst::Int(mask));
+                let masked = self.emit_primitive_bin_op(IrBinOp::BitAnd, value, m);
+                self.emit_type_op(IrTypeOp::ImplicitCoercion, masked, ty_to_ir(Ty::Int))
+            }
+            None => value,
+        }
     }
 
     fn ir_const_str(&mut self, s: String) -> u32 {
@@ -10356,6 +11058,18 @@ impl<'a> Lower<'a> {
 
     fn class_of(&self, ty: Ty) -> Option<&ClassInfo> {
         ty.obj_internal().and_then(|i| self.class_info_name(i))
+    }
+
+    /// The label a lambda answers to. An EXPLICITLY labelled literal (`run rr@{ … }`) answers to its
+    /// own name; otherwise the lambda takes the name of the function it is passed to, which is what
+    /// `return@run` / `return@forEach` targets. Every site that decides whether a labelled return is
+    /// local to the lambda must ask this, not assume the callee's name.
+    fn lambda_label(&self, lambda: AstExprId, callee: &str) -> String {
+        self.afile
+            .lambda_labels
+            .get(&lambda.0)
+            .cloned()
+            .unwrap_or_else(|| callee.to_string())
     }
 
     fn single_lambda_arg(&self, args: &[AstExprId]) -> Option<(AstExprId, Vec<String>, AstExprId)> {
@@ -10956,6 +11670,18 @@ impl<'a> Lower<'a> {
         Some(self.wrap_arg_prelude(dcall, prelude))
     }
 
+    /// The method name to EMIT for a resolved module top-level call. Resolution keys on the source
+    /// name, but `@JvmName` may have renamed the emitted method — and the callee's AST belongs to
+    /// another file, so the rename is read from the module-wide table the collect pass filled.
+    fn module_call_emit_name(&self, target: &ResolvedModuleTopLevelCall) -> String {
+        target
+            .source_file
+            .zip(target.source_decl)
+            .and_then(|(file, decl)| self.syms.toplevel_jvm_names.get(&(file, decl.0)))
+            .cloned()
+            .unwrap_or_else(|| target.name.clone())
+    }
+
     fn lower_cross_file_module_call(
         &mut self,
         call: AstExprId,
@@ -10981,7 +11707,7 @@ impl<'a> Lower<'a> {
             let physical_ret = ty_to_ir(target.physical_ret);
             let emitted = self.emit_cross_file_call(
                 facade,
-                target.name.clone(),
+                self.module_call_emit_name(target),
                 ir_params,
                 physical_ret,
                 lowered_args,
@@ -11086,7 +11812,7 @@ impl<'a> Lower<'a> {
         let ret = ty_to_ir(target.physical_ret);
         let emitted = self.emit_cross_file_call(
             facade,
-            target.name.clone(),
+            self.module_call_emit_name(target),
             ir_params.clone(),
             ret,
             lowered_args,
@@ -11352,6 +12078,15 @@ impl<'a> Lower<'a> {
             || lt == Ty::Boolean
             || rt == Ty::Boolean
         {
+            return None;
+        }
+        // A `UByte`/`UShort` operator called BY NAME (`a.plus(b)`) never reaches lowering today: the
+        // checker doesn't surface the narrow receiver's metadata overloads and rejects the call. Decline
+        // it rather than fall through to the generic path below, which would compute on the operands'
+        // SIGN-extended `byte`/`short` and silently produce a negative. (The `a + b` operator form is
+        // handled correctly in the binary-expression lowering, which zero-extends first.) If the checker
+        // gap closes, the file skips instead of miscompiling until this grows a real lowering + test.
+        if lt.unsigned_widen_mask().is_some() {
             return None;
         }
         // Unsigned `div`/`rem` need platform unsigned helpers (signed `+`/`-`/`*` share opcodes).
@@ -11640,6 +12375,18 @@ impl<'a> Lower<'a> {
                     return None;
                 }
             }
+        }
+        // Same rule for a VALUE-CLASS-typed property: kotlinc emits its accessors under the
+        // value-class name mangle (`getZ-<hash>()I`, over the UNDERLYING type), while the reference
+        // dispatches the plain `getZ()`. Until the reference carries the mangle, dispatching the
+        // unmangled name is a `NoSuchMethodError`, so decline (skip) instead
+        // (box `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt` and its three siblings).
+        if prop_ty
+            .obj_internal()
+            .and_then(|internal| self.syms.class_by_type_name(internal))
+            .is_some_and(|signature| signature.value_field.is_some())
+        {
+            return None;
         }
         // A mutable (`var`) reference uses the `KMutableProperty*` runtime class and gets a `set`
         // method (emitted alongside `get`); an immutable one stays `KProperty*`.
@@ -12407,7 +13154,7 @@ impl<'a> Lower<'a> {
         };
         let internal = *owner;
         let (_, _, target_fid, _) = self.resolve_method_name(internal, name)?;
-        let Ty::Fun(sig) = self.info.ty(e) else {
+        let Ty::Fun(sig) = crate::types::callable_reference_function_type(self.info.ty(e)) else {
             return None;
         };
         if sig.ret == Ty::Nothing {
@@ -12708,7 +13455,14 @@ impl<'a> Lower<'a> {
         let args: Vec<Option<u32>> = (0..params.len())
             .map(|i| Some(self.emit_get_value((i + 1) as u32)))
             .collect();
-        let call = self.emit_method_call(class_id, index, recv, args);
+        // Constructed directly rather than through `emit_method_call`: this body IS the in-class call
+        // the bridge exists to provide, so it must not be retargeted at a bridge again.
+        let call = self.ir.add_expr(IrExpr::MethodCall {
+            class: class_id,
+            index,
+            receiver: recv,
+            args,
+        });
         // Wrap in an explicit return so the method's control flow terminates: `return this.<m>(args)`
         // for a value-returning target, or the call then a bare `return` for a `Unit`/void one.
         let stmts = if ret == Ty::Unit {
@@ -13691,16 +14445,54 @@ impl<'a> Lower<'a> {
         Some((f.name.clone(), None, f.ret == ty_to_ir(Ty::Unit)))
     }
 
-    /// Whether `internal` is a SAM interface a lambda ARGUMENT can be soundly converted to: a non-generic
-    /// user `fun interface` whose method involves no value class (mirrors the checker's gate). Generic /
-    /// value-class / library SAMs are excluded — `lower_lambda_sam`'s metafactory descriptor can't model
-    /// them yet.
+    /// Whether the classpath SAM method `method` on `internal` mentions a value class in its declared
+    /// signature. Only `@Metadata` says so — the erased descriptor shows the underlying — and only a
+    /// declaration this compilation holds can be realized against, so this is the gate for declining.
+    fn sam_mentions_value_class(&self, internal: &str, method: &str) -> bool {
+        let is_value_class = |ty: &Ty| {
+            ty.non_null()
+                .obj_internal()
+                .is_some_and(|fq| self.syms.libraries.is_value_name(fq))
+        };
+        self.syms
+            .libraries
+            .resolve_type(internal)
+            .and_then(|ty| ty.sam_method)
+            .is_some_and(|sam| {
+                sam.name == method
+                    && (is_value_class(&sam.ret) || sam.params.iter().any(is_value_class))
+            })
+    }
+
+    /// The DECLARED parameter types and return type of `internal`'s single abstract method, when
+    /// `internal` is a same-compilation `fun interface`. A lambda converted to it must realize those
+    /// exact declarations — which is not the same as its own inferred function type once the target
+    /// erases part of them (see [`crate::ir::IrFile::lambda_sam_signature`]).
+    fn sam_declared_signature(&self, internal: &str) -> Option<(Vec<Ty>, Ty)> {
+        let ci = self.class_info(internal)?;
+        let cls = &self.ir.classes[ci.id as usize];
+        if !cls.is_interface {
+            return None;
+        }
+        let mut abstract_methods = cls
+            .methods
+            .iter()
+            .filter(|&&m| self.ir.functions[m as usize].body.is_none());
+        let only = *abstract_methods.next()?;
+        if abstract_methods.next().is_some() {
+            return None;
+        }
+        let f = &self.ir.functions[only as usize];
+        Some((f.params.clone(), f.ret))
+    }
+
+    /// Whether `internal` is a SAM interface a lambda ARGUMENT can be soundly converted to: a user
+    /// `fun interface` in this compilation. Mirrors the checker's gate — see
+    /// `resolve::simple_fun_interface_name` for why generic and value-class methods both qualify.
     fn is_simple_fun_interface(&self, internal: &str) -> bool {
-        self.syms.class_by_internal(internal).is_some_and(|c| {
-            // Generic fun interfaces allowed (erased SAM descriptor); value-class methods excluded —
-            // see the matching note in `resolve::simple_fun_interface`.
-            c.is_fun_interface()
-        })
+        self.syms
+            .class_by_internal(internal)
+            .is_some_and(|c| c.is_fun_interface())
     }
 
     fn coerce_argument_value(&mut self, value: u32, actual: Ty, target: Ty) -> Option<u32> {
@@ -13806,6 +14598,17 @@ impl<'a> Lower<'a> {
                         })
                 };
                 if let Some((method, descriptor, void)) = target {
+                    // A CLASSPATH `fun interface` whose method mentions a value class cannot be
+                    // realized here: `lambda_sam_signature` is recorded only for a same-compilation
+                    // interface, whose declaration this file holds, so the pass would fall back to the
+                    // generic `FunctionN` reading and hand the closure a BOX in a slot the interface
+                    // declares as the carrier (`LambdaConversionException` / `ClassCastException`).
+                    // Skip rather than miscompile; a same-file interface carries its declaration.
+                    if self.sam_declared_signature(&internal).is_none()
+                        && self.sam_mentions_value_class(&internal, &method)
+                    {
+                        return None;
+                    }
                     return self.lower_lambda_sam(
                         arg,
                         &params,
@@ -14413,6 +15216,7 @@ impl<'a> Lower<'a> {
         interface: bool,
         field: Option<Box<crate::libraries::InstanceFieldRef>>,
     ) -> u32 {
+        self.mark_private_access_bridge_if_outside(owner, name);
         let read = self.ir.add_expr(IrExpr::PropertyRead {
             receiver,
             owner,
@@ -14426,6 +15230,23 @@ impl<'a> Lower<'a> {
         read
     }
 
+    /// A PRIVATE property NAMED from outside its declaring class has no accessor to call: kotlinc emits
+    /// none for a private property, and the backing field is unreachable from another class file — even
+    /// a lexically enclosed one, since the companion, a nested class and an inlined body are all separate
+    /// classes on the JVM. Such a use is reached through the synthetic `access$…$p` bridge instead.
+    ///
+    /// This sits at the one place every property read and write is CONSTRUCTED, so no naming path can
+    /// forget it. It previously lived on two of the callers, and the `StmtLowering::MemberPropertyWrite`
+    /// path — which preempts them — emitted a call to a `setX` that is never generated
+    /// (`NoSuchMethodError`; box `classes/kt504.kt`, a companion writing its outer class's private `var`).
+    fn mark_private_access_bridge_if_outside(&mut self, owner: TypeName, name: &str) {
+        if let Some((declaring, _, true)) = self.declared_property(owner, name) {
+            if !self.can_access_source_private(declaring) {
+                self.mark_property_access_bridge(declaring, name);
+            }
+        }
+    }
+
     /// Write analogue of [`Self::add_property_read`]. Reads and writes therefore preserve declaration
     /// types under the same rule instead of duplicating origin-sensitive metadata at their call sites.
     fn add_property_write(
@@ -14437,6 +15258,7 @@ impl<'a> Lower<'a> {
         ty: Ty,
         interface: bool,
     ) -> u32 {
+        self.mark_private_access_bridge_if_outside(owner, name);
         let write = self.ir.add_expr(IrExpr::PropertyWrite {
             receiver,
             owner,
@@ -14462,21 +15284,14 @@ impl<'a> Lower<'a> {
         }
         // A class whose declarations are not tracked yet (an enum entry's body, an anonymous object)
         // still has the backing field; read that.
-        let (declaring, ty, is_private) = match self.declared_property(owner, name) {
-            Some((declaring, ty, is_private)) => (declaring, ty, is_private),
-            None => (
-                owner,
-                self.resolve_field_name(owner, name).map(|(_, _, t)| t)?,
-                false,
-            ),
-        };
         // Reaching a PRIVATE property from outside its class is legal in Kotlin — an `inline` body is
-        // spliced into its caller — so the read stands and the declaring class exposes a synthetic
-        // accessor for it. Declining here would silently turn the `inline` call into an ordinary one,
-        // which is a different program.
-        if is_private && !self.can_access_source_private(owner) {
-            self.mark_property_access_bridge(declaring, name);
-        }
+        // spliced into its caller — so the read stands, and `add_property_read` marks the declaring
+        // class to expose the synthetic accessor. Declining here would silently turn the `inline` call
+        // into an ordinary one, which is a different program.
+        let ty = match self.declared_property(owner, name) {
+            Some((_, ty, _)) => ty,
+            None => self.resolve_field_name(owner, name).map(|(_, _, t)| t)?,
+        };
         let read = self.add_property_read(
             receiver,
             owner,
@@ -15650,14 +16465,14 @@ impl<'a> Lower<'a> {
             }
         }
         if let Some(
-            target @ ResolvedCall::ModuleMemberExtension {
+            target @ ResolvedCall::MemberExtension {
                 extension_receiver, ..
             },
         ) = self.info.resolved_calls.get(&e).cloned()
         {
             if extension_receiver == this_ty {
                 let extension = self.emit_get_value(this_v);
-                return self.lower_module_member_extension_call(extension, &target, args, e);
+                return self.lower_member_extension_call(extension, &target, args, e);
             }
         }
         // The checker resolved this as a MODULE member and recorded the argument→parameter mapping in
@@ -15812,6 +16627,84 @@ impl<'a> Lower<'a> {
             self.emit_block(vec![var_p], Some(body_val))
         };
         Some(result)
+    }
+
+    /// The IR loop label a `return@<label>` should `continue`, when `label` names an active `forEach`
+    /// lambda splice (innermost first). `None` when no such splice is active for that label.
+    fn foreach_splice_loop_label(&self, label: &str) -> Option<String> {
+        self.foreach_splice
+            .iter()
+            .rev()
+            .find(|(source, _)| source == label)
+            .map(|(_, loop_label)| loop_label.clone())
+    }
+
+    /// Whether `label` is an EXPLICIT lambda label written anywhere in this file (`run outer@{ … }`).
+    /// Such a label names a LAMBDA, never the enclosing function, so lowering a `return@<label>` that
+    /// matched no active splice frame as a real function return would be a miscompile — its callers
+    /// bail instead.
+    fn is_explicit_lambda_label(&self, label: &str) -> bool {
+        self.afile.lambda_labels.values().any(|l| l == label)
+    }
+
+    /// Splice a lambda body inline, modelling a `return@<label>` in it as a LOCAL return from that
+    /// lambda: the body is wrapped in a `while(true){ … break }` and a frame is registered, so the
+    /// labeled return assigns the result slot and breaks out. Same shape as the inline-fn lambda-invoke
+    /// splice, shared so the receiver-less `run { … }` route models the same returns. A body with no
+    /// labeled return needs neither wrapper nor frame and splices directly.
+    fn splice_labelled_body(&mut self, body: AstExprId, label: &str, result: Ty) -> Option<u32> {
+        if !body_has_labeled_return_deep(self.afile, body, label) {
+            return self.expr(body);
+        }
+        // A body whose EVERY path is a labelled return has a `Nothing` fall-through: there is no value
+        // to store after the wrapper loop, and emitting the store anyway leaves unreachable code the
+        // verifier rejects ("control flow falls through code end"). Skip that (rarer) shape.
+        if self.info.ty(body) == Ty::Nothing {
+            return None;
+        }
+        // The result slot is framed as `result` (the call's type, which the checker takes from the
+        // body's TAIL). A `return@label` whose value has an unrelated type stores through the same
+        // slot, and the two stackmap frames for it then disagree — the class fails to load. The
+        // checker does not fold labelled-return values into the call type, so verify the agreement
+        // here and skip when it does not hold.
+        let labelled_tys: std::cell::RefCell<Vec<Ty>> = std::cell::RefCell::new(Vec::new());
+        self.collect_labeled_return_tys(body, label, &labelled_tys);
+        if labelled_tys
+            .into_inner()
+            .iter()
+            .any(|&returned| returned != result && returned != Ty::Nothing)
+        {
+            return None;
+        }
+        let brk = format!("$lamret${}", self.fresh_value());
+        if result != Ty::Unit && result != Ty::Nothing {
+            let slot = self.fresh_value();
+            let dflt = self.emit_zero_value(result);
+            let decl = self.emit_variable(slot, ty_to_ir(result), Some(dflt));
+            self.inline_lambda_ret
+                .push((label.to_string(), slot, brk.clone(), result, false));
+            let body_val = self.expr(body);
+            self.inline_lambda_ret.pop();
+            let body_val = body_val?;
+            let assign = self.emit_set_value(slot, body_val);
+            let brk_stmt = self.emit_break(Some(brk.clone()));
+            let loop_body = self.emit_block(vec![assign, brk_stmt], None);
+            let cond = self.emit_const(IrConst::Boolean(true));
+            let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+            let get = self.emit_get_value(slot);
+            return Some(self.emit_block(vec![decl, loopw], Some(get)));
+        }
+        self.inline_lambda_ret
+            .push((label.to_string(), 0, brk.clone(), Ty::Unit, false));
+        let body_val = self.expr(body);
+        self.inline_lambda_ret.pop();
+        let body_val = body_val?;
+        let brk_stmt = self.emit_break(Some(brk.clone()));
+        let loop_body = self.emit_block(vec![body_val, brk_stmt], None);
+        let cond = self.emit_const(IrConst::Boolean(true));
+        let loopw = self.emit_while(cond, loop_body, None, false, Some(brk));
+        let unit = self.emit_unit();
+        Some(self.emit_block(vec![loopw], Some(unit)))
     }
 
     /// Inline a scope function over an ALREADY-LOWERED receiver value (`recv_val`) — the shared core for
@@ -16589,8 +17482,7 @@ impl<'a> Lower<'a> {
                 parameter,
                 owner,
                 source,
-                // Selected call capabilities drive coroutine CLASSIFICATION, not emission.
-                capabilities: _,
+                capabilities,
             } => {
                 let recv_key = receiver.erased_recv();
                 let selected_params = vec![parameter];
@@ -16619,19 +17511,26 @@ impl<'a> Lower<'a> {
                 let descriptor = self
                     .runtime
                     .method_descriptor(&[receiver, parameter], Ty::Unit)?;
-                Some(self.emit_static_call(
+                let call = self.emit_static_call(
                     owner,
                     aname.to_string(),
                     descriptor,
                     InlineKind::None,
                     vec![r, a],
-                ))
+                );
+                // A sibling-file `suspend operator fun` is reached through its CPS entry point, exactly
+                // like an ordinary cross-file suspend extension call: the descriptor above is the
+                // LOGICAL one and the coroutine pass rewrites it once the node is registered as a
+                // suspension point. Without the registration the driving lambda's state machine finds
+                // "no suspend call in any stmt" and the file is refused. The same-file branch above
+                // returns early — its callee is a local `FunId` the pass already knows.
+                Some(self.record_suspend_call(call, capabilities.suspends(), Ty::Unit))
             }
             CompoundAssignmentTarget::Member {
                 owner,
                 parameter,
                 interface,
-                capabilities: _,
+                capabilities,
             } => {
                 let r = self.expr(lhs)?;
                 let a = self.lower_arg(rhs, &parameter)?;
@@ -16641,7 +17540,7 @@ impl<'a> Lower<'a> {
                 {
                     return Some(self.emit_method_call(class, index, r, vec![Some(a)]));
                 }
-                Some(self.emit_call(
+                let call = self.emit_call(
                     Callee::Virtual {
                         owner,
                         name: aname.to_string(),
@@ -16651,7 +17550,8 @@ impl<'a> Lower<'a> {
                     },
                     Some(r),
                     vec![a],
-                ))
+                );
+                Some(self.record_suspend_call(call, capabilities.suspends(), Ty::Unit))
             }
             CompoundAssignmentTarget::LibraryExtension {
                 callable: c,
@@ -16679,6 +17579,37 @@ impl<'a> Lower<'a> {
     }
 
     fn stmt_inner(&mut self, s: crate::ast::StmtId) -> Option<u32> {
+        // `C.prop = value` on a companion (static) property — the write mirror of the `getstatic
+        // C.prop` read. The checker resolved the owner and property type; the static itself was
+        // registered while lowering the companion's declarations.
+        if let Some(StmtLowering::CompanionStaticWrite { owner, name, ty }) =
+            self.info.stmt_lowers.get(&s).cloned()
+        {
+            if let Stmt::AssignMember { value, .. } = self.afile.stmt(s).clone() {
+                // A FIELD-LESS custom-accessor companion property has no static to `putstatic`: the
+                // write IS the setter call on the companion singleton.
+                if self
+                    .companion_computed_props
+                    .contains_key(&(owner, name.clone()))
+                {
+                    let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
+                    let setter = property_setter_name(&name);
+                    return self.lower_companion_computed_accessor(owner, &setter, Some(lowered));
+                }
+                // `ir.statics` holds only the statics of the file being LOWERED, so a companion
+                // declared in another file of the module has no index here. Writing one needs an
+                // external static store, which the IR has no node for (`ExternalStaticField` is a read
+                // only) — decline with a NAMED reason instead of skipping the file silently.
+                let Some(index) = self.ir.statics.iter().position(|static_field| {
+                    static_field.owner == Some(owner) && static_field.name == name
+                }) else {
+                    return self.bail("companion-static write to another file");
+                };
+                let index = index as u32;
+                let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
+                return Some(self.emit_set_static(index, lowered));
+            }
+        }
         // A compound assignment routed to an `opAssign` operator (checker-selected) — emit the call.
         if let Some(StmtLowering::PlusAssign(target)) = self.info.stmt_lowers.get(&s) {
             if let Stmt::Assign { value, .. }
@@ -16716,6 +17647,23 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
+                // A `return@label` naming a `forEach` lambda spliced into a for-each LOOP is a local
+                // return from that lambda — i.e. the next iteration: `continue` the loop it spliced to.
+                // Before this, it fell through to the real-function-return path and emitted a bare
+                // `return` inside a value-returning method (a verifier error at class-load time).
+                if let Some(loop_label) = ret_label
+                    .as_deref()
+                    .and_then(|lbl| self.foreach_splice_loop_label(lbl))
+                {
+                    if e.is_none() {
+                        return Some(self.emit_continue(Some(loop_label)));
+                    }
+                    // `forEach`'s lambda returns `Unit`, so the only value a `return@forEach` can
+                    // carry is `Unit` itself — there is no result slot to store it in. Falling through
+                    // would emit a real return inside a value-returning method (a verifier error at
+                    // class load), so skip.
+                    return self.bail("valued return through a forEach splice");
+                }
                 // A `return@label` matching an active spliced-lambda frame is a LOCAL return from that
                 // lambda: break to the lambda's end label (`Unit` result — run any value for effect). A
                 // labeled return with no matching frame is a `return@enclosingFn` — fall through to the
@@ -16738,6 +17686,18 @@ impl<'a> Lower<'a> {
                 } else {
                     None
                 };
+                // An EXPLICIT lambda label (`run outer@{ … return@outer v … }`) never names the
+                // enclosing function, so the fall-through above would emit a real return out of the
+                // caller — a miscompile (a `String`-returning `box()` doing `areturn` on an `Int`).
+                // No frame matched ⇒ this splice route does not model the label yet: skip.
+                if frame.is_none()
+                    && ret_label.as_deref().is_some_and(|lbl| {
+                        self.is_explicit_lambda_label(lbl)
+                            && self.closure_label.as_deref() != Some(lbl)
+                    })
+                {
+                    return self.bail("unmodeled labelled lambda return");
+                }
                 {
                     if let Some((_, slot, brk, rty, _)) = frame {
                         let mut stmts = Vec::new();
@@ -17208,12 +18168,29 @@ impl<'a> Lower<'a> {
                 // A backing field of the enclosing class (`this.<field>`) shadows a same-named top-level
                 // property — resolve it BEFORE `statics` (kotlinc: a member's unqualified name binds to the
                 // class member first). Requires `this` in scope (a class member, not a top-level function).
+                // An OPEN property of the enclosing class is written through `setX` instead — see
+                // [`Self::open_source_property`]. This is the bare-name analogue of the qualified
+                // `this.x = …` write, which the emitter already routes through the accessor; without it
+                // the two spellings compile to different things in the same class body.
+                let own_open_property = self
+                    .lookup("this")
+                    .and_then(|(this_v, _)| self.cur_class.map(|c| (this_v, c)))
+                    .filter(|(_, owner)| self.open_source_property(*owner, &name, true))
+                    .and_then(|(this_v, owner)| {
+                        let ty = self.class_info_name(owner).and_then(|ci| {
+                            ci.fields.iter().find(|(f, _)| *f == name).map(|&(_, t)| t)
+                        })?;
+                        Some((this_v, owner, ty))
+                    });
                 let own_field = self.lookup("this").and_then(|(this_v, _)| {
                     self.cur_class.as_ref().and_then(|c| {
                         // A `var` custom-accessor property writes through `setX`, never the raw field.
                         // A `val` custom-accessor (no setter) is assigned once in a constructor by
                         // writing its backing field directly, so it is NOT excluded here.
                         if self.field_accessor_var_props.contains(&(*c, name.clone())) {
+                            return None;
+                        }
+                        if self.open_source_property(*c, &name, true) {
                             return None;
                         }
                         self.class_info_name(*c).and_then(|ci| {
@@ -17234,6 +18211,10 @@ impl<'a> Lower<'a> {
                     let recv = self.emit_get_value(this_v);
                     let val = self.lower_arg(value, &field_ty)?;
                     Some(self.emit_set_field(recv, class, idx, val))
+                } else if let Some((this_v, owner, ty)) = own_open_property {
+                    let recv = self.emit_get_value(this_v);
+                    let val = self.lower_arg(value, &ty_to_ir(ty))?;
+                    Some(self.emit_source_property_set(recv, owner, &name, ty, val))
                 } else if let Some(sfid) = self.computed_setters.get(&name).copied() {
                     // A top-level backing-field `var` with a custom setter → call `setX(value)` (which
                     // runs the custom body), not a direct `putstatic`.
@@ -17755,6 +18736,12 @@ impl<'a> Lower<'a> {
         label: &str,
         out: &std::cell::RefCell<Vec<Ty>>,
     ) {
+        // A NESTED lambda owns its own labels — an inner `run { return@run … }` says nothing about the
+        // enclosing lambda's return, and counting it would type this closure from an unrelated body.
+        // The same boundary `body_has_labeled_return`/`body_has_bare_return` stop at.
+        if matches!(self.afile.expr(e), Expr::Lambda { .. }) {
+            return;
+        }
         if let Expr::Return {
             value: Some(v),
             label: Some(l),
@@ -18266,13 +19253,6 @@ impl<'a> Lower<'a> {
         // The property's type comes from its backing field, or — for a property that has none (a custom
         // setter, a delegated `x$delegate`) — from the setter it declares. Neither means this is not a
         // property of the class, and the caller's other paths apply.
-        // A private property written from outside its class needs the synthetic setter, same as a read.
-        if let Some((declaring, _, true)) = self.declared_property(type_name(&owner_internal), name)
-        {
-            if !self.can_access_source_private(declaring) {
-                self.mark_property_access_bridge(declaring, name);
-            }
-        }
         let prop_ty = self
             .class_of(rt)
             .and_then(|ci| {
@@ -18534,18 +19514,22 @@ impl<'a> Lower<'a> {
         };
         // Default parameters ARE modeled (an inline fn substitutes the default expression directly — no
         // `$default` method): an omitted parameter is filled with its default below. A `vararg` IS
-        // supported, but only as the LAST parameter of a plain (non-extension) inline fn whose element
-        // isn't a type parameter or a function type. The two aren't combined (rare) — bail on the overlap.
+        // supported on a plain (non-extension) inline fn whose element isn't a type parameter or a
+        // function type. The two aren't combined (rare) — bail on the overlap.
+        //
+        // The vararg need not be LAST: `inline fun pick(vararg xs: Int, f: (Int) -> Boolean)` is the
+        // idiomatic shape for a trailing lambda after a vararg. Parameters AFTER it are supplied
+        // positionally at the END of the argument list, so the vararg takes the middle span.
         let has_default = f.params.iter().any(|p| p.default.is_some());
-        let vararg = f.params.last().is_some_and(|p| p.is_vararg);
+        let vararg_index = f.params.iter().position(|p| p.is_vararg);
+        let vararg = vararg_index.is_some();
+        // Parameters declared after the vararg — bound from the TAIL of the argument list.
+        let n_after = vararg_index.map_or(0, |vi| f.params.len() - vi - 1);
         if has_default && vararg {
             return None;
         }
-        if f.params.iter().rev().skip(1).any(|p| p.is_vararg) {
-            return None; // a non-last vararg (only reachable with trailing named args) — bail
-        }
-        if vararg {
-            let vp = f.params.last().unwrap();
+        if let Some(vi) = vararg_index {
+            let vp = &f.params[vi];
             let is_tparam = f.type_params.iter().any(|tp| tp == &vp.ty.name);
             if (recv_ty.is_some() && member.is_none()) || is_tparam || !vp.ty.fun_params.is_empty()
             {
@@ -18616,11 +19600,9 @@ impl<'a> Lower<'a> {
         if sig_params.len() != pnames.len() {
             return None;
         }
-        let n_fixed = if vararg {
-            sig_params.len() - 1
-        } else {
-            sig_params.len()
-        };
+        // The vararg parameter's INDEX: every earlier parameter binds args positionally by index,
+        // every later one binds from the argument list's tail.
+        let n_fixed = vararg_index.unwrap_or(sig_params.len());
         let source_args = args.to_vec();
         let eff_storage: Vec<AstExprId>;
         let mut named_vararg_omitted = false;
@@ -18630,6 +19612,9 @@ impl<'a> Lower<'a> {
             .get(&call_id)
             .is_some_and(|n| n.iter().any(|x| x.is_some()));
         let args: &[AstExprId] = if vararg && has_named {
+            if n_after > 0 {
+                return None; // named args around a non-last vararg — not modeled
+            }
             let slots = self.info.resolved_call_arg_slots.get(&AstExprId(call_id))?;
             if slots.len() != sig_params.len() || slots[..n_fixed].iter().any(Option::is_none) {
                 return None;
@@ -18638,7 +19623,7 @@ impl<'a> Lower<'a> {
             eff_storage = slots.iter().flatten().copied().collect();
             &eff_storage
         } else if vararg {
-            if args.len() < n_fixed {
+            if args.len() < n_fixed + n_after {
                 return None;
             }
             args
@@ -18884,6 +19869,13 @@ impl<'a> Lower<'a> {
             }
         }
         for (i, pty) in sig_params.iter().enumerate() {
+            // Parameters BEFORE the vararg bind by index; those after it bind from the argument
+            // list's tail (the vararg absorbs the variable-width middle span).
+            let ai = if vararg && i > n_fixed {
+                args.len() - (sig_params.len() - i)
+            } else {
+                i
+            };
             if vararg && i == n_fixed {
                 if has_named {
                     if named_vararg_omitted {
@@ -18894,10 +19886,10 @@ impl<'a> Lower<'a> {
                         continue;
                     }
                     let Some(value) = prelowered_args
-                        .get(&args[i])
+                        .get(&args[ai])
                         .copied()
                         .map(|slot| self.emit_get_value(slot))
-                        .or_else(|| self.lower_arg(args[i], &ty_to_ir(*pty)))
+                        .or_else(|| self.lower_arg(args[ai], &ty_to_ir(*pty)))
                     else {
                         self.scope.truncate(depth);
                         self.inline_lambdas.truncate(lam_depth);
@@ -18922,7 +19914,7 @@ impl<'a> Lower<'a> {
                 };
                 let elem_ir = ty_to_ir(elem_ty);
                 let mut elements = Vec::new();
-                for &arg in &args[n_fixed..] {
+                for &arg in &args[n_fixed..args.len() - n_after] {
                     if is_branchy(self.afile, arg) {
                         self.scope.truncate(depth);
                         self.inline_lambdas.truncate(lam_depth);
@@ -18954,7 +19946,7 @@ impl<'a> Lower<'a> {
                 // is also used as a VALUE — passed to another call (`a(f)`), stored, or returned — it must
                 // be materialized as a `FunctionN` instead (the value-binding branch below); a callable-ref
                 // argument is never a body to splice.
-                let arg_expr = self.afile.expr(args[i]).clone();
+                let arg_expr = self.afile.expr(args[ai]).clone();
                 let splice = matches!(arg_expr, Expr::Lambda { .. })
                     && !name_used_as_value(self.afile, body, &pnames[i]);
                 if let (
@@ -18965,6 +19957,11 @@ impl<'a> Lower<'a> {
                     },
                 ) = (splice, arg_expr)
                 {
+                    // An explicitly labelled lambda answers to its OWN label (`run rr@{ … return@rr
+                    // … }`); an unlabelled one takes the callee's name, which is what `return@run`
+                    // targets. Both the disallowed-return check and the splice frame use this name, so
+                    // it is resolved once here.
+                    let lam_label = self.lambda_label(args[ai], fname);
                     let context_count = fnsig.context_count.min(fnsig.params.len());
                     let receiver_count = usize::from(f.params[i].ty.fun_has_receiver())
                         .min(fnsig.params.len().saturating_sub(context_count));
@@ -18976,9 +19973,9 @@ impl<'a> Lower<'a> {
                     let mut params = vec!["this".to_string(); context_count + receiver_count];
                     params.extend(value_params);
                     // A bare `return` (non-local) or a `return@other` in the lambda body isn't modeled —
-                    // bail. A `return@<thisInlineFn>` IS modeled (a local return from the spliced lambda,
-                    // handled by the `inline_lambda_ret` frame set up at the invoke site), so it's allowed.
-                    if body_has_disallowed_return(self.afile, lbody, fname)
+                    // bail. A `return@<thisLambdaLabel>` IS modeled (a local return from the spliced
+                    // lambda, handled by the `inline_lambda_ret` frame set up at the invoke site).
+                    if body_has_disallowed_return(self.afile, lbody, &lam_label)
                         || params.len() != fnsig.params.len()
                     {
                         self.scope.truncate(depth);
@@ -19019,7 +20016,7 @@ impl<'a> Lower<'a> {
                         params,
                         body: lbody,
                         param_tys: lam_param_tys,
-                        label: fname.to_string(),
+                        label: lam_label,
                         lexical_scope: caller_scope.clone(),
                         lexical_class: caller_class,
                         lexical_fn_name: caller_fn_name.clone(),
@@ -19032,10 +20029,10 @@ impl<'a> Lower<'a> {
                     // the value form is box-OK and verifies) — no FunctionN-drop bookkeeping needed.
                     let slot = self.fresh_value();
                     let val = match prelowered_args
-                        .get(&args[i])
+                        .get(&args[ai])
                         .copied()
                         .map(|slot| self.emit_get_value(slot))
-                        .or_else(|| self.lower_arg(args[i], &ty_to_ir(*pty)))
+                        .or_else(|| self.lower_arg(args[ai], &ty_to_ir(*pty)))
                     {
                         Some(v) => v,
                         None => {
@@ -19062,10 +20059,10 @@ impl<'a> Lower<'a> {
                     .unwrap_or(*pty);
                 let slot = self.fresh_value();
                 let val = match prelowered_args
-                    .get(&args[i])
+                    .get(&args[ai])
                     .copied()
                     .map(|slot| self.emit_get_value(slot))
-                    .or_else(|| self.lower_arg(args[i], &ty_to_ir(spty)))
+                    .or_else(|| self.lower_arg(args[ai], &ty_to_ir(spty)))
                 {
                     Some(v) => v,
                     None => {
@@ -19585,9 +20582,18 @@ impl<'a> Lower<'a> {
         Some(match self.afile.expr(e).clone() {
             Expr::IntLit(v) => self.emit_const(IrConst::Int(v as i32)),
             Expr::LongLit(v) => self.emit_const(IrConst::Long(v)),
-            // Unsigned literals are the signed int/long bit pattern of their magnitude (`UInt.MAX` =
-            // 0xFFFFFFFFu reinterprets to int -1, which is what kotlinc stores).
-            Expr::UIntLit(v) => self.emit_const(IrConst::Int(v as u32 as i32)),
+            // Unsigned literals are the signed bit pattern of their magnitude in the REPRESENTATION of
+            // the type the checker gave them: `UInt.MAX` = 0xFFFFFFFFu reinterprets to int -1, and
+            // `200u` typed `UByte` is the byte -56 — which is what kotlinc stores in each case.
+            Expr::UIntLit(v) => {
+                let c = match self.info.ty(e).non_null() {
+                    Ty::UByte => IrConst::Byte(v as u8 as i8),
+                    Ty::UShort => IrConst::Short(v as u16 as i16),
+                    Ty::ULong => IrConst::Long(v as u32 as i64),
+                    _ => IrConst::Int(v as u32 as i32),
+                };
+                self.emit_const(c)
+            }
             Expr::ULongLit(v) => self.emit_const(IrConst::Long(v)),
             Expr::DoubleLit(v) => self.emit_const(IrConst::Double(v)),
             Expr::FloatLit(v) => self.emit_const(IrConst::Float(v)),
@@ -19616,7 +20622,21 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 if let Some(lbl) = &label {
-                    if self.inline_lambda_ret.iter().any(|(l, ..)| l == lbl) {
+                    // A `return@label` naming a `forEach` lambda spliced into a loop continues that
+                    // loop (see the statement form). `forEach`'s lambda is `Unit`, so it carries no
+                    // value.
+                    if let Some(loop_label) = self.foreach_splice_loop_label(lbl) {
+                        if value.is_none() {
+                            return Some(self.emit_continue(Some(loop_label)));
+                        }
+                    }
+                    // A label naming an active splice frame needs the statement-return handling; an
+                    // EXPLICIT lambda label with no frame names a lambda this route does not model, and
+                    // emitting a real function return for it would be a miscompile. Skip both.
+                    if self.inline_lambda_ret.iter().any(|(l, ..)| l == lbl)
+                        || (self.is_explicit_lambda_label(lbl)
+                            && self.closure_label.as_deref() != Some(lbl.as_str()))
+                    {
                         return None;
                     }
                 }
@@ -19967,12 +20987,12 @@ impl<'a> Lower<'a> {
                 if !matches!(self.afile.expr(callee), Expr::Name(_) | Expr::Member { .. })
                     && matches!(
                         self.info.resolved_calls.get(&e),
-                        Some(ResolvedCall::ModuleMemberExtension { .. })
+                        Some(ResolvedCall::MemberExtension { .. })
                     ) =>
             {
                 let target = self.info.resolved_calls.get(&e).cloned()?;
                 let extension = self.expr(callee)?;
-                self.lower_module_member_extension_call(extension, &target, &args, e)?
+                self.lower_member_extension_call(extension, &target, &args, e)?
             }
             Expr::Call { .. }
                 if matches!(
@@ -20018,13 +21038,14 @@ impl<'a> Lower<'a> {
                     _ => return None,
                 }
             }
-            // A call with a spread argument (`foo(*a)`). Only the single-spread-to-a-top-level-vararg
-            // form is handled (the array is passed through via the platform copy helper); ANY other
-            // shape (mixed spreads, fixed args, member/library callee, primitive element, complex spread
-            // expr) returns `None` → the file skips, never miscompiles. The guard ensures a spread arg
-            // never reaches the normal vararg-packing paths below.
+            // A call with a spread argument (`foo(*a)`, `foo(x, *a, y)`). Only a top-level single-
+            // `vararg` callee IN THIS FILE is handled — a sole spread passes the array through the
+            // platform copy helper, a mixed call packs one spread-flagged array; ANY other shape
+            // (member/library callee, unsupported element type) returns `None` → the file skips, never
+            // miscompiles. The guard ensures a spread arg never reaches the normal (spread-unaware)
+            // vararg-packing paths below.
             Expr::Call { callee, args } if args.iter().any(|&a| self.afile.is_spread_arg(a)) => {
-                self.lower_single_spread_call(e, callee, &args)?
+                self.lower_spread_call(e, callee, &args)?
             }
             Expr::Call { args, .. }
                 if self
@@ -20479,7 +21500,9 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ImportedObjectMemberRef { internal, member }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                if let Ty::Fun(sig) = self.info.ty(e) {
+                if let Ty::Fun(sig) =
+                    crate::types::callable_reference_function_type(self.info.ty(e))
+                {
                     return self.lower_imported_object_ref(
                         e,
                         internal,
@@ -20559,7 +21582,9 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ClasspathUnboundMemberRef { receiver, member }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                if let Ty::Fun(sig) = self.info.ty(e) {
+                if let Ty::Fun(sig) =
+                    crate::types::callable_reference_function_type(self.info.ty(e))
+                {
                     return self.lower_unbound_library_member_ref(
                         e,
                         &name,
@@ -20573,7 +21598,10 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ModuleBoundExtensionRef { target, owner }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                let (Some(recv), Ty::Fun(signature)) = (receiver, self.info.ty(e)) else {
+                let (Some(recv), Ty::Fun(signature)) = (
+                    receiver,
+                    crate::types::callable_reference_function_type(self.info.ty(e)),
+                ) else {
                     return None;
                 };
                 if target.params.len() != signature.params.len() + 1 || signature.ret == Ty::Nothing
@@ -20604,7 +21632,9 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ModuleFunctionRef { target, owner }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                let Ty::Fun(signature) = self.info.ty(e) else {
+                let Ty::Fun(signature) =
+                    crate::types::callable_reference_function_type(self.info.ty(e))
+                else {
                     return None;
                 };
                 if signature.params.len() != target.params.len() || signature.ret == Ty::Nothing {
@@ -20635,7 +21665,10 @@ impl<'a> Lower<'a> {
                 }
                 // A bound property ref on a LIBRARY receiver (`"kotlin"::length`) — its type is a
                 // `KProperty0`, not `Ty::Fun`, so it must lower before the function-ref fallthrough.
-                if !matches!(self.info.ty(e), Ty::Fun(_)) {
+                if !matches!(
+                    crate::types::callable_reference_function_type(self.info.ty(e)),
+                    Ty::Fun(_)
+                ) {
                     if let Some(pr) = self.lower_bound_library_prop_ref(e, recv, &name) {
                         return Some(pr);
                     }
@@ -20672,7 +21705,8 @@ impl<'a> Lower<'a> {
                     return Some(pr);
                 }
             }
-            let Ty::Fun(sig) = self.info.ty(e) else {
+            let Ty::Fun(sig) = crate::types::callable_reference_function_type(self.info.ty(e))
+            else {
                 return None;
             };
             let arity = sig.params.len();
@@ -20782,6 +21816,11 @@ impl<'a> Lower<'a> {
                 if ret == Ty::Nothing {
                     return None;
                 }
+                // The reflection NAME stays the Kotlin source name (that is what `KFunction.name`
+                // reports), but the INVOKE must target the emitted method — which `@JvmName` may have
+                // renamed. Reading it off the resolved function keeps the two in step instead of
+                // assuming they are the same string.
+                let call_name = self.ir.functions[fid as usize].name.clone();
                 return self.make_func_ref(
                     e.0,
                     false,
@@ -20791,7 +21830,7 @@ impl<'a> Lower<'a> {
                     1,
                     crate::ir::FrDispatch::Static,
                     None,
-                    name.clone(),
+                    call_name,
                     false,
                     fn_params,
                     ret,
@@ -20828,6 +21867,14 @@ impl<'a> Lower<'a> {
     }
 
     fn expr_inner_name(&mut self, e: AstExprId, n: String) -> Option<u32> {
+        // A library constant the checker selected — a companion constant (`Int.MAX_VALUE`) or a
+        // package-level `const val` reached by name (`import kotlin.math.PI`). Both inline their
+        // literal, which is what kotlinc emits at every use site.
+        if let Some(lc) = self.info.resolved_library_companion_const(e) {
+            let c = library_const_ir(&lc);
+            return Some(self.emit_const(c));
+        }
+
         let t = {
             if let Some(ExprLowering::ExtensionPropertyGet { getter }) =
                 self.info.expr_lowers.get(&e).cloned()
@@ -21172,24 +22219,36 @@ impl<'a> Lower<'a> {
                             Some(IrField { name: n0, ty, .. })
                                 if n0 == "this$0" && ty.non_null().obj_internal().is_some() =>
                             {
-                                ty.non_null().obj_internal().unwrap().to_string()
+                                ty.non_null().obj_internal().map(|o| o.to_string())
                             }
-                            _ => return None,
+                            _ => None,
                         };
-                        let this0 = if let Some((v, vty)) = self.lookup("this$0") {
-                            if !vty
-                                .obj_internal()
-                                .is_some_and(|n| n.matches(outer.as_str()))
-                            {
-                                return None;
-                            }
-                            self.emit_get_value(v)
-                        } else {
-                            self.emit_get_field(recv, cur_id, 0)
-                        };
-                        // The outer property, read from the inner class — a different class, so the
-                        // backend takes its accessor.
-                        self.lower_field_read_on(this0, &outer, &n, e, None)?
+                        let enclosing = outer.and_then(|outer| {
+                            let this0 = match self.lookup("this$0") {
+                                Some((v, vty)) => {
+                                    if !vty
+                                        .obj_internal()
+                                        .is_some_and(|n| n.matches(outer.as_str()))
+                                    {
+                                        return None;
+                                    }
+                                    self.emit_get_value(v)
+                                }
+                                None => self.emit_get_field(recv, cur_id, 0),
+                            };
+                            // The outer property, read from the inner class — a different class, so
+                            // the backend takes its accessor.
+                            self.lower_field_read_on(this0, &outer, &n, e, None)
+                        });
+                        match enclosing {
+                            Some(read) => read,
+                            // Neither a declared property of this class nor an enclosing one: an
+                            // unqualified read of a member INHERITED from a supertype (`name` /
+                            // `ordinal` on an enum, from `java.lang.Enum`). That is simply `this.n`,
+                            // so take the same path the QUALIFIED read takes — the extension /
+                            // receiver-lambda branch below already ends in this fallback.
+                            None => self.lower_member_read_on(recv, this_ty, &n, e)?,
+                        }
                     }
                 } else {
                     // An extension/receiver-lambda implicit receiver: `fun A.f() = n` (or
@@ -21235,6 +22294,42 @@ impl<'a> Lower<'a> {
         name: String,
     ) -> Option<u32> {
         let t = {
+            // `::prop.isInitialized` — a null check on the `lateinit` backing field, the shape kotlinc
+            // emits (`getfield prop; ifnull`). No `KProperty` value is materialized.
+            if let Some(ExprLowering::LateinitInitialized { owner, property }) =
+                self.info.expr_lowers.get(&e).cloned()
+            {
+                let (this_v, _) = self.lookup("this")?;
+                let receiver = self.emit_get_value(this_v);
+                let (class, index, _) = self.resolve_field_name(owner, &property)?;
+                let raw = self.ir.add_expr(IrExpr::LateinitInitialized {
+                    receiver,
+                    class,
+                    index,
+                });
+                let null = self.emit_const(IrConst::Null);
+                return Some(self.emit_primitive_bin_op(IrBinOp::Ne, raw, null));
+            }
+            // `ClassName.Companion` — the companion singleton named explicitly. Same read as the
+            // bare `ClassName` value form: `getstatic C.Companion:LC$Companion;`.
+            if name == "Companion" {
+                if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
+                    if self.lookup(&rn).is_none() {
+                        if let Some(cls) = self.syms.classes.get(&rn) {
+                            let cls_internal = cls.internal();
+                            let comp_internal = format!("{cls_internal}$Companion");
+                            if self.syms.class_by_internal(&comp_internal).is_some() {
+                                let field = self.runtime.companion_instance_field(
+                                    &cls_internal,
+                                    &comp_internal,
+                                    "Companion",
+                                )?;
+                                return Some(self.platform_static_field(field));
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(ExprLowering::EnumEntriesRead { owner, accessor }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
@@ -21368,27 +22463,17 @@ impl<'a> Lower<'a> {
             }
             // Primitive companion constant `Int.MAX_VALUE` / `Double.NaN` / ... selected by the checker.
             if let Some(lc) = self.info.resolved_library_companion_const(e) {
-                let c = match lc.value {
-                    // `Char.MAX_VALUE`/`MIN_VALUE` read back as an integer ConstantValue, but the
-                    // constant's type is `Char` — emit a `Char` const so it boxes to `Character` (not
-                    // `Integer`) in a vararg/generic position.
-                    // (`Char.MIN_HIGH_SURROGATE` and friends are lone surrogates — legal code units
-                    // that are NOT valid code points, so the value stays a raw `u16`.)
-                    crate::libraries::LibConst::Int(v) if lc.ty == Ty::Char => {
-                        IrConst::Char(v as u16)
-                    }
-                    crate::libraries::LibConst::Int(v) => IrConst::Int(v),
-                    crate::libraries::LibConst::Long(v) => IrConst::Long(v),
-                    crate::libraries::LibConst::Float(v) => IrConst::Float(v),
-                    crate::libraries::LibConst::Double(v) => IrConst::Double(v),
-                    crate::libraries::LibConst::Str(v) => IrConst::String(v),
-                };
+                // Through the SHARED helper, which narrows an integer `ConstantValue` to the constant's
+                // own Kotlin type. `Char.MAX_VALUE` must box as `Character`, and `Byte.MIN_VALUE` as
+                // `Byte` — read as an `Int` it compared unequal to the same value held in a `byte`
+                // field (corpus `evaluate/intrinsicConst/incDec.kt`).
+                let c = library_const_ir(&lc);
                 return Some(self.emit_const(c));
             }
             if let Some(entry) = self.lower_resolved_enum_entry(e, &name) {
                 return Some(entry);
             }
-            if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
+            if let Some(rn) = self.dotted_class_path(receiver) {
                 let internal = class_internal(self.afile, &rn);
                 // `Obj.NAME` where `NAME` is a `const val` of an `object` → inline the literal
                 // (kotlinc inlines a const read; no `getstatic`).
@@ -21408,6 +22493,15 @@ impl<'a> Lower<'a> {
                         name.clone(),
                         self.runtime.type_descriptor(*cty)?,
                     ));
+                }
+                // `C.X` where `X` is a FIELD-LESS custom-accessor companion property — there is no
+                // static to fetch, so the read IS the getter call on the companion singleton.
+                if self
+                    .companion_computed_props
+                    .contains_key(&(internal_name, name.clone()))
+                {
+                    let getter = property_getter_name(&name);
+                    return self.lower_companion_computed_accessor(internal_name, &getter, None);
                 }
             }
             if rt == Ty::Char && name == "code" {
@@ -21513,6 +22607,41 @@ impl<'a> Lower<'a> {
             // `/`/`%` need target unsigned intrinsics. Comparisons use the platform unsigned
             // comparator and compare its result with zero.
             let lty = self.info.ty(lhs);
+            // A `UByte`/`UShort` operator IS the `UInt` one applied to both operands' `toInt()`
+            // (Kotlin defines them that way, and the checker typed the result `UInt` to match): mask
+            // each side out of its sign-extended `byte`/`short`, then run the `UInt` lowering. `==`/`!=`
+            // stay on the plain path — equality is BIT equality, identical on the narrow representation.
+            if lty.unsigned_widen_mask().is_some()
+                && self.info.ty(rhs) == lty
+                && matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Rem
+                        | BinOp::Lt
+                        | BinOp::Le
+                        | BinOp::Gt
+                        | BinOp::Ge
+                )
+            {
+                let op_ty = lty.unsigned_op_type()?;
+                let l = self.expr(lhs)?;
+                let l = self.widen_unsigned(l, lty);
+                let r = self.expr(rhs)?;
+                let r = self.widen_unsigned(r, lty);
+                return match op {
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        self.compare_ordered(op_ty, bin_to_ir(op)?, l, r)
+                    }
+                    BinOp::Div => self.runtime_call(RuntimeOp::UnsignedDivide, op_ty, vec![l, r]),
+                    BinOp::Rem => {
+                        self.runtime_call(RuntimeOp::UnsignedRemainder, op_ty, vec![l, r])
+                    }
+                    _ => Some(self.emit_primitive_bin_op(bin_to_ir(op)?, l, r)),
+                };
+            }
             if lty.is_unsigned()
                 && matches!(
                     op,
@@ -21932,6 +23061,16 @@ impl<'a> Lower<'a> {
                 }
                 return Some(contains_v);
             }
+            // A WIDENED value over a primitive range (`when (x: Any) { in 4..10 -> … }`). kotlinc
+            // emits `CollectionsKt.contains(4..10, x)`, whose result is true exactly when `x` is a
+            // BOXED element of the range — the range is not a `Collection`, so `contains` walks it
+            // comparing with `equals`, and a value of any other class never matches. That is the
+            // ordinary comparison chain on the unboxed value, guarded by an `instanceof` on the boxed
+            // element type. The guard must SHORT-CIRCUIT (a `when`, not the eager `iand`): unboxing a
+            // value of another class would throw.
+            if self.info.ty(value).is_reference() {
+                return self.lower_widened_in_range(value, start, end, kind, negated);
+            }
             // Evaluate the bounds then the value once each (source order: start, end, value —
             // matching kotlinc's `start..end` then `.contains(value)`), into temps, then a
             // comparison chain. `!in` uses the De Morgan dual so no logical-not node is needed.
@@ -21997,6 +23136,75 @@ impl<'a> Lower<'a> {
             self.emit_block(vec![var_s, var_e, var_v], Some(cond))
         };
         Some(t)
+    }
+
+    /// `x in a..b` where `x` is a REFERENCE (`Any`) and the bounds are primitive — see the call site in
+    /// [`Self::expr_inner_in_range`] for why this is the boxed-element test kotlinc's
+    /// `CollectionsKt.contains` performs. Evaluation order matches the primitive chain (bounds, then
+    /// value); only the unboxing and the comparisons sit behind the `instanceof` guard.
+    fn lower_widened_in_range(
+        &mut self,
+        value: AstExprId,
+        start: AstExprId,
+        end: AstExprId,
+        kind: ast::RangeKind,
+        negated: bool,
+    ) -> Option<u32> {
+        use crate::ast::RangeKind;
+        let elem = self.info.ty(start);
+        // Only the element types the checker admits for this shape — see
+        // `resolve::in_range_widened_value` for why a floating-point, `Byte`/`Short`, or unsigned
+        // range is not a boxed-element test.
+        if !matches!(elem, Ty::Int | Ty::Long | Ty::Char) {
+            return None;
+        }
+        let boxed = elem.boxed_ref()?;
+        let value_ty = self.info.ty(value);
+        let s = self.expr(start)?;
+        let sv = self.fresh_value();
+        let var_s = self.emit_variable(sv, ty_to_ir(elem), Some(s));
+        let en = self.expr(end)?;
+        let ev = self.fresh_value();
+        let var_e = self.emit_variable(ev, ty_to_ir(elem), Some(en));
+        let v = self.expr(value)?;
+        let vv = self.fresh_value();
+        let var_v = self.emit_variable(vv, ty_to_ir(value_ty), Some(v));
+
+        let boxed_read = self.emit_get_value(vv);
+        let guard = self.emit_type_op(IrTypeOp::InstanceOf, boxed_read, ty_to_ir(boxed));
+        // Inside the guarded branch the value is known to be a boxed element — unbox it once into a
+        // temp so both comparisons read the same primitive.
+        let boxed_read = self.emit_get_value(vv);
+        let unboxed = self.emit_type_op(IrTypeOp::ImplicitCoercion, boxed_read, ty_to_ir(elem));
+        let uv = self.fresh_value();
+        let var_u = self.emit_variable(uv, ty_to_ir(elem), Some(unboxed));
+        // `downTo` runs high→low, so membership is `end <= value <= start` — swap the bounds.
+        let (lo, hi, hi_strict) = match kind {
+            RangeKind::Through => (sv, ev, false),
+            RangeKind::Until => (sv, ev, true),
+            RangeKind::DownTo => (ev, sv, false),
+        };
+        let lo_read = self.emit_get_value(lo);
+        let u_read = self.emit_get_value(uv);
+        let c1 = self.compare_ordered(elem, IrBinOp::Le, lo_read, u_read)?;
+        let u_read = self.emit_get_value(uv);
+        let hi_read = self.emit_get_value(hi);
+        let c2 = self.compare_ordered(
+            elem,
+            if hi_strict { IrBinOp::Lt } else { IrBinOp::Le },
+            u_read,
+            hi_read,
+        )?;
+        let mut in_chain = self.emit_primitive_bin_op(IrBinOp::And, c1, c2);
+        if negated {
+            let f = self.emit_const(IrConst::Boolean(false));
+            in_chain = self.emit_primitive_bin_op(IrBinOp::Eq, in_chain, f);
+        }
+        let hit = self.emit_block(vec![var_u], Some(in_chain));
+        // A value of any other class is not in the range — so `in` is false there and `!in` is true.
+        let miss = self.emit_const(IrConst::Boolean(negated));
+        let selected = self.emit_when(vec![(Some(guard), hit), (None, miss)]);
+        Some(self.emit_block(vec![var_s, var_e, var_v], Some(selected)))
     }
 
     fn expr_inner_inc_dec(
@@ -22452,6 +23660,33 @@ impl<'a> Lower<'a> {
         Some(t)
     }
 
+    /// The boxed type a `when` comparand must be lowered to, when the SUBJECT is a reference and the
+    /// comparand is a primitive (`when (x: Any) { 1 -> … }`): kotlinc compares the boxed value through
+    /// `Intrinsics.areEqual`. The nullable form is the boxed CARRIER here — a non-null `Int` still
+    /// lowers to the JVM `int`. `None` when the arm needs no boxing, or for a comparand whose boxed
+    /// `equals` is not Kotlin `==`:
+    ///
+    /// * an UNSIGNED comparand boxes to its own inline class rather than a plain wrapper;
+    /// * a FLOAT/DOUBLE comparand compares by IEEE `==` whenever the subject is a primitive, and
+    ///   `Double.equals` is not that relation (`-0.0 != 0.0`, `NaN == NaN`). Which of the two applies
+    ///   depends on whether an enclosing/earlier `is` test smart-casts the SUBJECT to the primitive
+    ///   for this arm — per-arm subject narrowing this lowering does not model — so the whole shape
+    ///   is skipped rather than risk the wrong equality. Corpus case:
+    ///   `ieee754/smartCastOnWhenSubjectAfterCheckInBranch_properIeeeComparisons.kt`.
+    fn when_boxed_comparand(&self, subject_ty: Ty, condition: AstExprId) -> Option<Ty> {
+        if !subject_ty.is_reference() || is_when_test(self.afile, condition) {
+            return None;
+        }
+        let ct = self.info.ty(condition);
+        if !self.has_scalar_value_repr(ct)
+            || ct.is_unsigned()
+            || matches!(ct, Ty::Double | Ty::Float)
+        {
+            return None;
+        }
+        ct.nullable_boxed()
+    }
+
     fn expr_inner_when(
         &mut self,
         e: AstExprId,
@@ -22479,10 +23714,21 @@ impl<'a> Lower<'a> {
             if any_unit && !all_unit {
                 return None;
             }
-            // An unsigned subject compares its arms with unsigned `==` (bit-equal, same as signed),
-            // but a `ULong` subject whose magnitude exceeds `Long.MAX` needs care, and the unsigned
-            // const-val arms aren't materialized yet — bail rather than risk a mismatch.
-            if subject.map_or(false, |s| self.info.ty(s).is_unsigned()) {
+            // An unsigned subject compares its arms with unsigned `==`, which is BIT equality — the
+            // same comparison the emitter already produces for the underlying `int`/`long`, for
+            // `UInt` and `ULong` alike (magnitude never enters an equality test). So a subject whose
+            // arms are all unsigned LITERALS lowers exactly like a signed one.
+            //
+            // Everything else still bails: an `in` test needs unsigned ORDERING (where a `ULong`
+            // above `Long.MAX` really does differ from the signed compare), and an unsigned
+            // `const val` comparand isn't materialized yet.
+            if subject.is_some_and(|s| self.info.ty(s).is_unsigned())
+                && !arms.iter().all(|arm| {
+                    arm.conditions.iter().all(|&c| {
+                        matches!(self.afile.expr(c), Expr::UIntLit(_) | Expr::ULongLit(_))
+                    })
+                })
+            {
                 return None;
             }
             // A no-`else` `when` used as a *value* is only accepted by the checker when it is
@@ -22492,8 +23738,8 @@ impl<'a> Lower<'a> {
             // behavior-preserving for an exhaustive `when`.
             let has_else = arms.iter().any(|a| a.conditions.is_empty());
             let make_last_else = !has_else && self.info.ty(e) != Ty::Unit && !arms.is_empty();
-            if let Some(subj) = subject {
-                let st = self.info.ty(subj);
+            let subj_ty = subject.map(|subj| self.info.ty(subj));
+            if let Some(st) = subj_ty {
                 for arm in &arms {
                     for &c in &arm.conditions {
                         // `is`/`in` conditions are complete boolean tests, not `==` comparands —
@@ -22501,8 +23747,14 @@ impl<'a> Lower<'a> {
                         if is_when_test(self.afile, c) {
                             continue;
                         }
+                        // A REFERENCE subject with a primitive comparand (`when (x: Any) { 1 -> … }`)
+                        // is not a bad-typed compare: it is the BOXED comparison kotlinc emits
+                        // (`Intrinsics.areEqual(x, Integer.valueOf(1))`), so the comparand is boxed
+                        // below instead. Only the converse (a primitive subject, a reference
+                        // comparand) has no such form and still bails.
                         if self.has_scalar_value_repr(st)
                             != self.has_scalar_value_repr(self.info.ty(c))
+                            && self.when_boxed_comparand(st, c).is_none()
                         {
                             return None;
                         }
@@ -22552,7 +23804,10 @@ impl<'a> Lower<'a> {
                                 Some((v, _)) => self.emit_get_value(v),
                                 None => self.expr(subject?)?,
                             };
-                            let cv = self.expr(c)?;
+                            let cv = match subj_ty.and_then(|st| self.when_boxed_comparand(st, c)) {
+                                Some(boxed) => self.lower_arg(c, &ty_to_ir(boxed))?,
+                                None => self.expr(c)?,
+                            };
                             self.emit_primitive_bin_op(IrBinOp::Eq, s, cv)
                         };
                         cond = Some(match cond {
@@ -22658,14 +23913,19 @@ impl<'a> Lower<'a> {
             // block()`): inline the lambda body directly as the value. The receiver scope
             // functions (`x.let`/`with(x)`) are intercepted similarly; without this, no-receiver
             // `run` falls to the bytecode splicer, which bails on a branchy body (`run { if … }`).
-            if let ("run", Some((_, params, body)), true, true) = (
+            if let ("run", Some((arg, params, body)), true, true) = (
                 fname.as_str(),
                 one_lambda_arg.as_ref(),
                 self.lookup(&fname).is_none(),
                 !self.module_declares(&fname),
             ) {
-                if params.is_empty() && !body_has_labeled_return(self.afile, *body, "run") {
-                    return self.expr(*body);
+                if params.is_empty() {
+                    // A `return@run` (or `return@<explicit label>`) inside is a LOCAL return from the
+                    // lambda, not from the enclosing function — splice through the labeled-return
+                    // frame so it lands on the `run` result instead of returning out of the caller.
+                    let label = self.lambda_label(*arg, "run");
+                    let result = self.info.ty(e);
+                    return self.splice_labelled_body(*body, &label, result);
                 }
             }
             // A call to a lifted local function — the checker mapped this call to its decl.
@@ -23007,6 +24267,35 @@ impl<'a> Lower<'a> {
             } {
                 r
             } else if let Some(r) = {
+                // An unqualified call to a COMPANION method from an instance member of its own class
+                // (`class C { companion object { fun tag() = … }; fun describe() = tag() }`). A
+                // companion's members are in scope throughout the class body, and the emitted shape is
+                // the one a qualified `C.tag()` already produces: `getstatic C.Companion; invokevirtual
+                // C$Companion.tag()`. Reached only after the instance-member attempt above declines,
+                // so a same-named member of the class still wins.
+                self.cur_class
+                    .filter(|_| self.lookup(&fname).is_none() && !self.module_declares(&fname))
+                    .and_then(|cur| {
+                        let outer = cur.render();
+                        let companion = format!("{outer}$Companion");
+                        let companion_name = type_name(&companion);
+                        let (class, index, _, _) =
+                            self.resolve_method_name(companion_name, &fname)?;
+                        let field = self.runtime.companion_instance_field(
+                            &outer,
+                            &companion,
+                            "Companion",
+                        )?;
+                        let receiver = self.platform_static_field(field);
+                        let mut lowered = Vec::with_capacity(args.len());
+                        for &arg in &args {
+                            lowered.push(Some(self.expr(arg)?));
+                        }
+                        Some(self.emit_method_call(class, index, receiver, lowered))
+                    })
+            } {
+                r
+            } else if let Some(r) = {
                 // `this` was flow-narrowed to a subtype `B` by an enclosing `if (this is B)`, and
                 // the checker resolved the bare call to a member of `B` (`fun A.test() = if (this
                 // is B) foo()`). Load the implicit receiver (the extension receiver or enclosing
@@ -23261,12 +24550,23 @@ impl<'a> Lower<'a> {
                 // null must stay a legal value until a primitive/non-null use site demands it.
                 if call_inline {
                     self.coerce_erased_call_result(e, call, &call_phys, true)
-                } else if call_phys.is_erased_top() && call_log != call_phys {
+                } else if call_log != call_phys
+                    && (call_phys.is_erased_top()
+                        || (self.has_scalar_value_repr(call_log)
+                            && !call_log.is_unsigned()
+                            && call_phys.is_reference()))
+                {
                     // A NON-inline classpath top-level fn with an ERASED generic return
                     // (`runBlocking<T> { … }`, whose `$default` returns `Object`): the checker
                     // substituted the concrete result type (`T = Ch`/`Int`), so `checkcast`/unbox
                     // the `Object` result to it — else it lands boxed in a stricter slot
-                    // (`VerifyError`). A concrete (non-erased) return keeps the raw call, unchanged.
+                    // (`VerifyError`). A BOUNDED type parameter erases to its BOUND rather than to
+                    // `Object` (`fun <T : Comparable<T>> clampMax(…): T` → `Comparable`), so the
+                    // erased-top test alone misses it; a SCALAR logical result behind a REFERENCE
+                    // physical one is the same situation — the value on the stack is boxed and the
+                    // use site wants the primitive. UNSIGNED is excluded: its box is `kotlin/UInt`,
+                    // not `Integer`, so the unbox would `checkcast` the wrong wrapper. A concrete
+                    // return whose logical and physical types agree keeps the raw call, unchanged.
                     self.coerce_erased_call_result(e, call, &call_phys, true)
                 } else {
                     call
@@ -23926,7 +25226,8 @@ impl<'a> Lower<'a> {
             // capture in the lambda works, exactly as kotlinc's inlining does. Gated on the
             // receiver being iterable (so a user `forEach` on a non-iterable falls through).
             let one_lambda_arg = self.single_lambda_arg(&args);
-            if let ("forEach", Some((_, params, lbody))) = (name.as_str(), one_lambda_arg.as_ref())
+            if let ("forEach", Some((arg, params, lbody))) =
+                (name.as_str(), one_lambda_arg.as_ref())
             {
                 let rty = self.info.ty(receiver);
                 // An array, a `String`, or an `Obj` iterable (List/Set/Iterable) — all handled
@@ -23939,7 +25240,16 @@ impl<'a> Lower<'a> {
                     });
                 if iterable {
                     let param = ast::first_lambda_param_or_it(params);
-                    return self.lower_for_each(&param, receiver, *lbody, None, true);
+                    // A `return@forEach` (or `return@<explicit label>`) in the body is a local return
+                    // from the lambda — the spliced loop's `continue`. Label the loop and register the
+                    // splice so the return lowering can find it.
+                    let source_label = self.lambda_label(*arg, "forEach");
+                    let loop_label = format!("$foreach${}", self.fresh_value());
+                    self.foreach_splice.push((source_label, loop_label.clone()));
+                    let lowered =
+                        self.lower_for_each(&param, receiver, *lbody, Some(loop_label), true);
+                    self.foreach_splice.pop();
+                    return lowered;
                 }
             }
             // `iterable.map/flatMap { … }` WHERE THE LAMBDA BODY SUSPENDS: a stdlib collection HOF
@@ -24257,7 +25567,8 @@ impl<'a> Lower<'a> {
             {
                 let rty = self.info.ty(receiver);
                 if args.is_empty()
-                    && (rty.is_unsigned() || matches!(name.as_str(), "toUInt" | "toULong"))
+                    && (rty.is_unsigned()
+                        || matches!(name.as_str(), "toUByte" | "toUShort" | "toUInt" | "toULong"))
                 {
                     if rty.is_unsigned() && name == "toString" {
                         let r = self.expr(receiver)?;
@@ -24272,7 +25583,25 @@ impl<'a> Lower<'a> {
                         } else {
                             IrBinOp::Add
                         };
-                        return Some(self.emit_primitive_bin_op(op, r, o));
+                        // `UByte`/`UShort` add in the int category, so the sum must be truncated back
+                        // into the `byte`/`short` the value lives in (`UByte.MAX.inc()` is `0`, and
+                        // kotlinc emits `iadd; i2b`). Skipping it left the result outside the canonical
+                        // representation, where `==` — BIT equality on that representation — stopped
+                        // matching the same value written as a literal. Widening the RECEIVER to `Int`
+                        // first is what makes the truncation land: the emitter types a `PrimitiveBinOp`
+                        // from its left operand, so a narrow lhs would make the sum read back as an
+                        // already-`byte` value and the coercion emit nothing. Neither widening step
+                        // costs an instruction (`byte`/`short` and `int` share the int stack category).
+                        // `UInt`/`ULong` already compute in their own width, so both steps are no-ops.
+                        let repr = self.scalar_value_repr(rty)?;
+                        let int_ir = ty_to_ir(repr.int_arithmetic_repr());
+                        let r = self.emit_type_op(IrTypeOp::ImplicitCoercion, r, int_ir);
+                        let sum = self.emit_primitive_bin_op(op, r, o);
+                        return Some(self.emit_type_op(
+                            IrTypeOp::ImplicitCoercion,
+                            sum,
+                            ty_to_ir(repr),
+                        ));
                     }
                     if is_conversion_call_name(&name) {
                         let target = self.info.ty(e);
@@ -24280,6 +25609,21 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         let r = self.expr(receiver)?;
+                        let rrepr = self.scalar_value_repr(rty).unwrap_or(rty);
+                        let trepr = self.scalar_value_repr(target).unwrap_or(target);
+                        if rrepr == trepr {
+                            // identity reinterpret (UInt↔Int, ULong↔Long, UByte↔Byte, UInt→UInt)
+                            return Some(r);
+                        }
+                        // A `UByte`/`UShort` leaving its sign-extended `byte`/`short` zero-extends
+                        // first; from there it is an ordinary `Int` conversion.
+                        let (r, rrepr) = match rty.unsigned_widen_mask() {
+                            Some(_) => (self.widen_unsigned(r, rty), Ty::Int),
+                            None => (r, rrepr),
+                        };
+                        if rrepr == trepr {
+                            return Some(r); // e.g. `UByte.toInt()` — the mask IS the conversion
+                        }
                         if matches!(target, Ty::Long | Ty::ULong) {
                             // zero-extend the 32-bit unsigned value into a long
                             if let Some(call) =
@@ -24287,11 +25631,6 @@ impl<'a> Lower<'a> {
                             {
                                 return Some(call);
                             }
-                        }
-                        let rrepr = self.scalar_value_repr(rty).unwrap_or(rty);
-                        let trepr = self.scalar_value_repr(target).unwrap_or(target);
-                        if rrepr == trepr {
-                            return Some(r); // identity reinterpret (UInt↔Int, ULong↔Long, UInt→UInt)
                         }
                         if self.has_scalar_value_repr(rrepr) && self.has_scalar_value_repr(trepr) {
                             return Some(self.emit_type_op(
@@ -24375,11 +25714,9 @@ impl<'a> Lower<'a> {
         let t = {
             let rt = self.recv_ty(receiver).non_null();
             let module_target = self.info.resolved_calls.get(&e).cloned();
-            if let Some(target @ ResolvedCall::ModuleMemberExtension { .. }) =
-                module_target.as_ref()
-            {
+            if let Some(target @ ResolvedCall::MemberExtension { .. }) = module_target.as_ref() {
                 let extension = self.expr(receiver)?;
-                self.lower_module_member_extension_call(extension, target, &args, e)?
+                self.lower_member_extension_call(extension, target, &args, e)?
             } else if let Some(
                 resolved @ ResolvedCall::ModuleMember {
                     name: target,
@@ -24713,6 +26050,8 @@ fn name_used_as_value(file: &ast::File, e: AstExprId, name: &str) -> bool {
 /// (transitively) encloses it must be inlined — a nested lambda's bare return surfaces in the outer
 /// lambda's body once spliced, making the outer impl method invalid too. A labeled `return@x` (a local
 /// return) is excluded. (Kotlin forbids a bare return inside a non-inline lambda, so descending is sound.)
+/// A nested ANONYMOUS FUNCTION is also excluded — its bare return is LOCAL to it, so it says nothing
+/// about this body; see the stop below.
 fn body_has_bare_return(file: &ast::File, e: AstExprId) -> bool {
     fn stmt_bare(file: &ast::File, s: ast::StmtId) -> bool {
         match file.stmt(s) {
@@ -24720,6 +26059,16 @@ fn body_has_bare_return(file: &ast::File, e: AstExprId) -> bool {
             Stmt::Return(_, Some(_)) => false,
             _ => file.any_child_stmt(s, &mut |x| body_has_bare_return(file, x)),
         }
+    }
+    // A nested ANONYMOUS FUNCTION owns its bare `return` — it is a LOCAL return from that function,
+    // so it says nothing about whether THIS body carries a non-local one. Counting it marked the
+    // enclosing lambda splice-only, and its impl method was then dropped while the `invokedynamic`
+    // referencing it remained (`NoSuchMethodError`; corpus `inference/pcla/issues/kt65300f.kt`, which
+    // only reaches lowering now that the front end accepts an anonymous function's local return). A
+    // nested plain LAMBDA is still descended into: ITS bare return is non-local to the enclosing
+    // function, which is exactly what this asks.
+    if file.anon_fun_lambdas.contains(&e.0) {
+        return false;
     }
     file.any_child_expr(e, &mut |x| body_has_bare_return(file, x), &mut |s| {
         stmt_bare(file, s)
@@ -24758,6 +26107,33 @@ fn body_has_labeled_return(file: &ast::File, e: AstExprId, label: &str) -> bool 
     fn expr_has(file: &ast::File, e: AstExprId, lbl: &str) -> bool {
         if matches!(file.expr(e), Expr::Lambda { .. }) {
             return false;
+        }
+        file.any_child_expr(e, &mut |x| expr_has(file, x, lbl), &mut |s| {
+            stmt_has(file, s, lbl)
+        })
+    }
+    expr_has(file, e, label)
+}
+
+/// Does `e` contain a `return@<label>` anywhere, INCLUDING inside nested lambda literals, and in both
+/// the statement and the expression form? A nested lambda that is itself SPLICED (`forEach { … }` becomes
+/// a loop) is not its own return scope, so a `return@<outer label>` written inside it still targets this
+/// body's frame. Over-approximating is safe: an unused frame only wraps the body in a loop that breaks
+/// once, whereas missing one would emit a real function return — a miscompile.
+fn body_has_labeled_return_deep(file: &ast::File, e: AstExprId, label: &str) -> bool {
+    fn stmt_has(file: &ast::File, s: ast::StmtId, lbl: &str) -> bool {
+        if let Stmt::Return(_, Some(l)) = file.stmt(s) {
+            if l == lbl {
+                return true;
+            }
+        }
+        file.any_child_stmt(s, &mut |x| expr_has(file, x, lbl))
+    }
+    fn expr_has(file: &ast::File, e: AstExprId, lbl: &str) -> bool {
+        if let Expr::Return { label: Some(l), .. } = file.expr(e) {
+            if l == lbl {
+                return true;
+            }
         }
         file.any_child_expr(e, &mut |x| expr_has(file, x, lbl), &mut |s| {
             stmt_has(file, s, lbl)
@@ -26381,15 +27757,28 @@ fn ir_array_element(t: &Ty) -> Option<Ty> {
 /// shifts them) no guards are emitted.
 /// Whether the expression tree rooted at `e` contains a CALL to the unqualified `name` — recursing FULLY
 /// through nested lambdas AND statement bodies (so a `sequence { for (…) { yield(i) } }` is found).
-fn expr_tree_calls_name(file: &ast::File, e: AstExprId, name: &str) -> bool {
+/// Whether the expression tree contains a call to `name` that `accept` admits — so a caller can ask
+/// about the call's RESOLUTION, not only its spelling.
+fn expr_tree_calls_name_where(
+    file: &ast::File,
+    e: AstExprId,
+    name: &str,
+    accept: &dyn Fn(AstExprId) -> bool,
+) -> bool {
     if let Expr::Call { callee, .. } = file.expr(e) {
-        if matches!(file.expr(*callee), Expr::Name(n) if n == name) {
+        if matches!(file.expr(*callee), Expr::Name(n) if n == name) && accept(e) {
             return true;
         }
     }
-    file.any_child_expr(e, &mut |c| expr_tree_calls_name(file, c, name), &mut |s| {
-        file.any_child_stmt(s, &mut |c| expr_tree_calls_name(file, c, name))
-    })
+    file.any_child_expr(
+        e,
+        &mut |c| expr_tree_calls_name_where(file, c, name, accept),
+        &mut |s| {
+            file.any_child_stmt(s, &mut |c| {
+                expr_tree_calls_name_where(file, c, name, accept)
+            })
+        },
+    )
 }
 
 fn param_checks_for(

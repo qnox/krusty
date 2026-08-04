@@ -2,14 +2,8 @@ use super::common;
 
 #[test]
 fn named_and_anonymous_classes_extend_an_abstract_classpath_class() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib(
         "absbase",
         "package lib\n\
@@ -27,7 +21,7 @@ fn named_and_anonymous_classes_extend_an_abstract_classpath_class() {
         \x20 val named: Greeter = NamedGreeter()\n\
         \x20 return if (anonymous.greet(\"anonymous\") == \"hi anonymous\" && named.greet(\"named\") == \"hi named\") \"OK\" else \"fail\"\n\
         }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to subclass an abstract classpath class");
     match common::run_box(&classes, "MainKt", &[libout, sl]) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
@@ -37,12 +31,8 @@ fn named_and_anonymous_classes_extend_an_abstract_classpath_class() {
 
 #[test]
 fn unsafe_abstract_classpath_bases_are_declined() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib(
         "unsafeabsbase",
         "package lib\n\
@@ -55,10 +45,17 @@ fn unsafe_abstract_classpath_bases_are_declined() {
 
     let implements_abstract =
         "import lib.RequiresOverride\nclass Child : RequiresOverride() { override fun value() = \"x\" }\n";
-    assert!(common::compile_in_process(implements_abstract, "Override", &cp, Some(&jdk)).is_none());
+    assert!(
+        common::compile_in_process(implements_abstract, "Override", &cp, Some(jdk.as_path()))
+            .is_none()
+    );
 
     let inaccessible_constructor = "import lib.Closed\nclass Child : Closed()\n";
-    assert!(
-        common::compile_in_process(inaccessible_constructor, "Closed", &cp, Some(&jdk)).is_none()
-    );
+    assert!(common::compile_in_process(
+        inaccessible_constructor,
+        "Closed",
+        &cp,
+        Some(jdk.as_path())
+    )
+    .is_none());
 }

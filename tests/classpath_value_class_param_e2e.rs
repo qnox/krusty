@@ -45,12 +45,8 @@ fn top_level_value_class_parameters_resolve_and_run() {
     let Some(libout) = common::compile_lib("value_class_top_level_param", LIB) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [libout, stdlib];
     // Covers a REFERENCE underlying (`Tag` → `String`, the one the `else if` chain rejected) and a
     // PRIMITIVE one (`Budget` → `J`, the `runTest(timeout: Duration)` shape); no defaults, all
@@ -71,10 +67,11 @@ fn top_level_value_class_parameters_resolve_and_run() {
         \x20 if (spend(budget = budgetOf(5)) != \"-/5/false\") return \"primitive: ${spend(budget = budgetOf(5))}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(&jdk)) else {
+    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path()))
+    else {
         panic!(
             "compile/run returned None: {:?}",
-            common::front_end_diagnostics(main, &classpath, Some(&jdk))
+            common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()))
         );
     };
     assert_eq!(out, "OK");

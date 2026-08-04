@@ -11,9 +11,7 @@ use super::common;
 
 #[test]
 fn subclass_calls_protected_classpath_member() {
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let java_home = common::java_home();
     let javac = format!("{java_home}/bin/javac");
     let java = format!("{java_home}/bin/java");
     if !std::path::Path::new(&javac).exists() {
@@ -60,7 +58,7 @@ fn subclass_calls_protected_classpath_member() {
 
     let main = "public class M { public static void main(String[] a) { System.out.println(UseKt.box()); } }";
     fs::write(kr.join("M.java"), main).unwrap();
-    let stdlib = common::stdlib_jar()
+    let stdlib = Some(common::stdlib_jar())
         .map(|p| format!(":{}", p.display()))
         .unwrap_or_default();
     let kcp = format!(

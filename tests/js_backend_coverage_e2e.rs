@@ -22,8 +22,8 @@ use std::path::PathBuf;
 /// Lower `src`, emit JS, append `console.log(box())`, run on Node. Returns Node's stdout, or `None`
 /// to skip (toolchain/node missing or a front-end gap).
 fn run(src: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar()?;
-    let java_home = common::java_home()?;
+    let stdlib = common::stdlib_jar();
+    let java_home = common::java_home();
     let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
     let mut js = common::compile_js_in_process(src, "Main", &[stdlib], Some(&jdk))?;
     js.push_str("\nconsole.log(box());\n");

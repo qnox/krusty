@@ -42,6 +42,8 @@ mod bound_expr_ref_e2e;
 mod bound_library_ref_e2e;
 #[path = "bounded_type_param_e2e.rs"]
 mod bounded_type_param_e2e;
+#[path = "box_harness_skip_semantics_e2e.rs"]
+mod box_harness_skip_semantics_e2e;
 #[path = "boxed_array_construction_e2e.rs"]
 mod boxed_array_construction_e2e;
 #[path = "bracket_lambda_param_e2e.rs"]
@@ -140,6 +142,8 @@ mod classpath_companion_ext_lambda_e2e;
 mod classpath_companion_invoke_e2e;
 #[path = "classpath_covariant_override_e2e.rs"]
 mod classpath_covariant_override_e2e;
+#[path = "classpath_ctor_receiver_lambda_e2e.rs"]
+mod classpath_ctor_receiver_lambda_e2e;
 #[path = "classpath_ctor_vs_same_named_function_e2e.rs"]
 mod classpath_ctor_vs_same_named_function_e2e;
 #[path = "classpath_data_copy_e2e.rs"]
@@ -300,6 +304,8 @@ mod cross_file_ctor_default_e2e;
 mod cross_file_inline_call_e2e;
 #[path = "cross_file_operator_e2e.rs"]
 mod cross_file_operator_e2e;
+#[path = "ctor_numeric_widening_e2e.rs"]
+mod ctor_numeric_widening_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
 mod data_class_metadata_wiring_e2e;
 #[path = "data_class_param_check_e2e.rs"]
@@ -352,6 +358,8 @@ mod diagnostic_markers_e2e;
 mod diagnostics_match_kotlinc;
 #[path = "diverging_init_e2e.rs"]
 mod diverging_init_e2e;
+#[path = "diverging_lambda_e2e.rs"]
+mod diverging_lambda_e2e;
 #[path = "diverging_value_position_e2e.rs"]
 mod diverging_value_position_e2e;
 #[path = "do_while_e2e.rs"]
@@ -482,12 +490,16 @@ mod fq_source_typeref_e2e;
 mod fq_static_call_e2e;
 #[path = "fq_toplevel_call_e2e.rs"]
 mod fq_toplevel_call_e2e;
+#[path = "fq_vararg_call_e2e.rs"]
+mod fq_vararg_call_e2e;
 #[path = "front_end_errors_e2e.rs"]
 mod front_end_errors_e2e;
 #[path = "front_end_errors_more_e2e.rs"]
 mod front_end_errors_more_e2e;
 #[path = "full_form_destructuring_e2e.rs"]
 mod full_form_destructuring_e2e;
+#[path = "fun_interface_value_class_e2e.rs"]
+mod fun_interface_value_class_e2e;
 #[path = "function_type_is_e2e.rs"]
 mod function_type_is_e2e;
 #[path = "function_type_supertype_e2e.rs"]
@@ -578,6 +590,8 @@ mod interface_supertype_members_e2e;
 mod internal_classpath_access_e2e;
 #[path = "invoke_operator_extension_e2e.rs"]
 mod invoke_operator_extension_e2e;
+#[path = "invoke_operator_lambda_arg_e2e.rs"]
+mod invoke_operator_lambda_arg_e2e;
 #[path = "ir_edge_coverage_e2e.rs"]
 mod ir_edge_coverage_e2e;
 #[path = "ir_lower_bail_coverage_e2e.rs"]
@@ -606,6 +620,8 @@ mod jimage_compressed_e2e;
 mod js_backend_coverage_e2e;
 #[path = "js_backend_e2e.rs"]
 mod js_backend_e2e;
+#[path = "jvm_name_toplevel_e2e.rs"]
+mod jvm_name_toplevel_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
@@ -618,6 +634,8 @@ mod ksp_apt_loop_e2e;
 mod ksp_provision_e2e;
 #[path = "labeled_expression_e2e.rs"]
 mod labeled_expression_e2e;
+#[path = "labeled_lambda_return_e2e.rs"]
+mod labeled_lambda_return_e2e;
 #[path = "labeled_this_e2e.rs"]
 mod labeled_this_e2e;
 #[path = "lambda_e2e.rs"]
@@ -986,6 +1004,8 @@ mod suspend_loop_compound_assign_e2e;
 mod suspend_loop_continue_break_e2e;
 #[path = "suspend_member_after_call_e2e.rs"]
 mod suspend_member_after_call_e2e;
+#[path = "suspend_operator_convention_cross_file_e2e.rs"]
+mod suspend_operator_convention_cross_file_e2e;
 #[path = "suspend_receiver_lambda_e2e.rs"]
 mod suspend_receiver_lambda_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
@@ -1056,6 +1076,8 @@ mod type_annotation_newline_e2e;
 mod type_param_vararg_check_e2e;
 #[path = "typealias_function_type_e2e.rs"]
 mod typealias_function_type_e2e;
+#[path = "typealias_generic_target_e2e.rs"]
+mod typealias_generic_target_e2e;
 #[path = "typeparam_cast_e2e.rs"]
 mod typeparam_cast_e2e;
 #[path = "unit_as_any_e2e.rs"]

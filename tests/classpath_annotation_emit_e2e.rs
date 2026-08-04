@@ -14,8 +14,8 @@ const LIB: &str = "package lib\n\
     annotation class Src(val v: String)\n";
 
 fn role_bytes() -> Vec<u8> {
-    let jdk = common::jdk_modules().expect("jdk modules");
-    let sl = common::stdlib_jar().expect("stdlib jar");
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let lib = common::compile_lib("annlib", LIB).expect("compile annotation lib");
     let classes = common::compile_in_process(
         "package demo\n\
@@ -28,7 +28,7 @@ fn role_bytes() -> Vec<u8> {
          }\n",
         "File",
         &[lib, sl, jdk.clone()],
-        Some(&jdk),
+        Some(jdk.as_path()),
     )
     .expect("compile enum against the annotation lib");
     classes

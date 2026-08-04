@@ -10,10 +10,8 @@ use krusty::jvm::classreader::parse_class;
 fn facade(src: &str) -> krusty::jvm::classreader::ClassInfo {
     let sl = common::stdlib_jar();
     let jh = common::java_home();
-    let jdk = jh
-        .as_ref()
-        .map(|h| std::path::PathBuf::from(format!("{h}/lib/modules")));
-    let cp: Vec<std::path::PathBuf> = sl.into_iter().collect();
+    let jdk = Some(std::path::PathBuf::from(format!("{jh}/lib/modules")));
+    let cp: Vec<std::path::PathBuf> = vec![sl];
     let classes =
         common::compile_in_process(src, "Main", &cp, jdk.as_deref()).expect("const file compiles");
     let (_, bytes) = classes

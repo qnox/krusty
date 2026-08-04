@@ -18,10 +18,7 @@ fn same_package_classpath_constructors_resolve_without_import() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     // 1. A library declaring a data class and a plain class in package `app`, compiled by real kotlinc.

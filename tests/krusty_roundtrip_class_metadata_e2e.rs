@@ -18,8 +18,8 @@ type CompiledLib = (PathBuf, Vec<(String, Vec<u8>)>);
 /// Compile `lib_src` with krusty's default backend options and write the classes into a fresh
 /// directory. `None` only when the external toolchain (stdlib jar / JDK jimage) is unavailable.
 fn krusty_lib_dir(tag: &str, lib_src: &str) -> Option<CompiledLib> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [stdlib];
     let classes = common::compile_in_process(lib_src, "Lib", &classpath, Some(&jdk))
         .unwrap_or_else(|| {
@@ -43,8 +43,8 @@ fn expect_roundtrip_ok(tag: &str, lib_src: &str, main: &str) {
         eprintln!("skip ({tag}: kotlin stdlib / JDK unavailable)");
         return;
     };
-    let stdlib = common::stdlib_jar().expect("stdlib checked above");
-    let jdk = common::jdk_modules().expect("jimage checked above");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [dir, stdlib];
     let output =
         common::compile_and_run_box(main, "Main", &classpath, Some(&jdk)).unwrap_or_else(|| {
@@ -181,8 +181,8 @@ class Holder {\n\
             .any(|w| w == b"Lkotlin/Metadata;"),
         "a value-class-involved member means the class carries NO @Metadata at all",
     );
-    let stdlib = common::stdlib_jar().expect("stdlib checked above");
-    let jdk = common::jdk_modules().expect("jimage checked above");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let diagnostics = common::front_end_diagnostics(MAIN, &[dir, stdlib], Some(&jdk));
     assert!(
         diagnostics.iter().any(|d| d.contains("'make'")),

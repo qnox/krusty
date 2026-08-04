@@ -29,10 +29,7 @@ fn kept(cp: &Classpath, name: &str, params: &[Ty]) -> Option<usize> {
 
 #[test]
 fn vararg_factory_keeps_its_array_param() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let cp = Classpath::new(vec![jar]);
     // `mutableListOf(vararg elements: T): MutableList<T>` → descriptor `([Ljava/lang/Object;)…`. The
     // `vararg` is ONE source value param (the array), so the kept count must be 1 — NOT 0 (which would
@@ -53,10 +50,7 @@ fn vararg_factory_keeps_its_array_param() {
 
 #[test]
 fn empty_factory_keeps_zero_params() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let cp = Classpath::new(vec![jar]);
     // The no-arg `listOf(): List<T>` overload — descriptor `()…`, zero params — aligns at zero kept,
     // which equals its descriptor arity, so the resolver truncates nothing.

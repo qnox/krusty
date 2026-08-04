@@ -44,12 +44,8 @@ fn top_level_reified_inline_call_splices_and_runs() {
     let Some(libout) = common::compile_lib("reified_inline_top_level", LIB) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [libout, stdlib];
     // `nameOf` reifies into `T::class`; `isA` into an `instanceof`; `describe` covers the shapes
     // crossed with defaults — all supplied, all omitted, and one named while an earlier is omitted
@@ -67,10 +63,11 @@ fn top_level_reified_inline_call_splices_and_runs() {
         \x20 if (isA<String>(7)) return \"isA false\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(&jdk)) else {
+    let Some(out) = common::compile_and_run_box(main, "Main", &classpath, Some(jdk.as_path()))
+    else {
         panic!(
             "compile/run returned None: {:?}",
-            common::front_end_diagnostics(main, &classpath, Some(&jdk))
+            common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()))
         );
     };
     assert_eq!(out, "OK");
@@ -86,23 +83,19 @@ fn a_body_needing_class_reification_bails_instead_of_miscompiling() {
     else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let classpath = [libout, stdlib];
     let main = "import lib.configure\n\
         fun box(): String = configure<String>()\n";
-    let diagnostics = common::front_end_diagnostics(main, &classpath, Some(&jdk));
+    let diagnostics = common::front_end_diagnostics(main, &classpath, Some(jdk.as_path()));
     // The front end accepts it — resolution is fine; the BACKEND is what must refuse.
     assert!(
         diagnostics.is_empty(),
         "resolution should succeed, got {diagnostics:?}"
     );
     assert!(
-        common::compile_in_process(main, "Main", &classpath, Some(&jdk)).is_none(),
+        common::compile_in_process(main, "Main", &classpath, Some(jdk.as_path())).is_none(),
         "a needClassReification body must not be emitted as a call that throws at runtime"
     );
 }

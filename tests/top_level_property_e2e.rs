@@ -30,7 +30,7 @@ fn top_level_properties_run_and_round_trip() {
     // Compile the property library in-process (warm classpath cache), not via a cold krusty CLI spawn.
     let lib_src = "package demo\nval greeting: String = \"hi\"\nvar counter: Int = 10\nfun bump(): Int { counter = counter + 1; return counter }\n";
     let jdk = common::jdk_modules();
-    if common::compile_to_dir(lib_src, "Lib", &[], jdk.as_deref(), &lib).is_none() {
+    if common::compile_to_dir(lib_src, "Lib", &[], Some(jdk.as_path()), &lib).is_none() {
         eprintln!("skip (IR unsupported)");
         return;
     }
@@ -79,10 +79,7 @@ fn top_level_properties_run_and_round_trip() {
             let _ = fs::remove_dir_all(&root);
             return;
         }
-        let Some(stdlib) = common::stdlib_jar() else {
-            let _ = fs::remove_dir_all(&root);
-            return;
-        };
+        let stdlib = common::stdlib_jar();
         let cp = format!(
             "{}:{}:{}",
             cout.to_string_lossy(),

@@ -102,12 +102,8 @@ fn numeric_api() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
 
 #[test]
 fn static_fields_and_integer_literal_arguments_use_declared_types() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
@@ -151,11 +147,11 @@ fn static_fields_and_integer_literal_arguments_use_declared_types() {
             return "OK"
         }
     "#;
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(&jdk))
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
         .unwrap_or_else(|| {
             panic!(
                 "compile static interop: {:?}",
-                common::front_end_diagnostics(source, &classpath, Some(&jdk))
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
             )
         });
     let output = common::run_box(&classes, "MainKt", &classpath).expect("run static interop");
@@ -165,9 +161,7 @@ fn static_fields_and_integer_literal_arguments_use_declared_types() {
 
 #[test]
 fn non_literal_int_does_not_match_long_parameter() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
@@ -176,8 +170,11 @@ fn non_literal_int_does_not_match_long_parameter() {
             "import fixtures.NumericApi\n\
              fun f(value: Int): String = NumericApi.onlyLong({expression})\n"
         );
-        let diagnostics =
-            common::front_end_diagnostics(&source, std::slice::from_ref(&java_classes), Some(&jdk));
+        let diagnostics = common::front_end_diagnostics(
+            &source,
+            std::slice::from_ref(&java_classes),
+            Some(jdk.as_path()),
+        );
         assert!(
             diagnostics
                 .iter()
@@ -190,16 +187,14 @@ fn non_literal_int_does_not_match_long_parameter() {
 
 #[test]
 fn java_vararg_does_not_omit_fixed_parameters() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
     let diagnostics = common::front_end_diagnostics(
         "import fixtures.NumericApi\nfun value(): String = NumericApi().prefixedJoin()\n",
         &[java_classes],
-        Some(&jdk),
+        Some(jdk.as_path()),
     );
     let _ = std::fs::remove_dir_all(temp_root);
     assert!(
@@ -269,9 +264,7 @@ fn fully_qualified_jdk_vararg_constructor_accepts_expanded_arguments() {
 
 #[test]
 fn function_value_is_not_passed_to_java_sam_without_an_adapter() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
@@ -283,8 +276,11 @@ fn function_value_is_not_passed_to_java_sam_without_an_adapter() {
             "import fixtures.NumericApi\n\
              fun f(operation: (Int) -> Int): Int = {call}\n"
         );
-        let diagnostics =
-            common::front_end_diagnostics(&source, std::slice::from_ref(&java_classes), Some(&jdk));
+        let diagnostics = common::front_end_diagnostics(
+            &source,
+            std::slice::from_ref(&java_classes),
+            Some(jdk.as_path()),
+        );
         assert!(
             diagnostics.iter().any(|message| {
                 message.contains("unresolved Java static")
@@ -298,14 +294,12 @@ fn function_value_is_not_passed_to_java_sam_without_an_adapter() {
 
 #[test]
 fn unrelated_instance_sam_overloads_are_ambiguous() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
     let source = "import fixtures.NumericApi\nfun f(): Int = NumericApi().choose { 1 }\n";
-    let diagnostics = common::front_end_diagnostics(source, &[java_classes], Some(&jdk));
+    let diagnostics = common::front_end_diagnostics(source, &[java_classes], Some(jdk.as_path()));
     let _ = std::fs::remove_dir_all(temp_root);
     assert!(
         diagnostics
@@ -317,15 +311,13 @@ fn unrelated_instance_sam_overloads_are_ambiguous() {
 
 #[test]
 fn implicit_parameter_lambda_does_not_match_a_multi_input_java_sam() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
     let source =
         "import fixtures.NumericApi\nfun f(): Int = NumericApi.consumeBoth { \"unused\" }\n";
-    let diagnostics = common::front_end_diagnostics(source, &[java_classes], Some(&jdk));
+    let diagnostics = common::front_end_diagnostics(source, &[java_classes], Some(jdk.as_path()));
     let _ = std::fs::remove_dir_all(temp_root);
     assert!(
         diagnostics
@@ -337,15 +329,13 @@ fn implicit_parameter_lambda_does_not_match_a_multi_input_java_sam() {
 
 #[test]
 fn heterogeneous_generic_evidence_does_not_narrow_a_later_sam() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
     let source = "import fixtures.NumericApi\n\
         fun f(): String = NumericApi.consumePair(\"x\", Any()) { it.length }\n";
-    let diagnostics = common::front_end_diagnostics(source, &[java_classes], Some(&jdk));
+    let diagnostics = common::front_end_diagnostics(source, &[java_classes], Some(jdk.as_path()));
     let _ = std::fs::remove_dir_all(temp_root);
     assert!(
         diagnostics
@@ -357,9 +347,7 @@ fn heterogeneous_generic_evidence_does_not_narrow_a_later_sam() {
 
 #[test]
 fn incomparable_literal_overloads_are_ambiguous() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
@@ -369,7 +357,7 @@ fn incomparable_literal_overloads_are_ambiguous() {
         "NumericApi.incomparable(1, \"x\")",
     ] {
         let source = format!("import fixtures.NumericApi\nfun f(): String = {call}\n");
-        let diagnostics = common::front_end_diagnostics(&source, &classpath, Some(&jdk));
+        let diagnostics = common::front_end_diagnostics(&source, &classpath, Some(jdk.as_path()));
         assert!(
             diagnostics
                 .iter()
@@ -378,7 +366,7 @@ fn incomparable_literal_overloads_are_ambiguous() {
         );
     }
     let source = "import fixtures.NumericApi\nfun f(): Int = NumericApi.supply { \"wrong\" }\n";
-    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(&jdk));
+    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
     assert!(
         diagnostics
             .iter()
@@ -386,7 +374,7 @@ fn incomparable_literal_overloads_are_ambiguous() {
         "{diagnostics:?}"
     );
     let source = "import fixtures.NumericApi\nfun f(): String = NumericApi.supplyText { 1 }\n";
-    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(&jdk));
+    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
     assert!(
         diagnostics
             .iter()
@@ -398,12 +386,8 @@ fn incomparable_literal_overloads_are_ambiguous() {
 
 #[test]
 fn top_level_library_calls_use_literal_origin_after_argument_mapping() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(library) = common::compile_lib(
         "integer_literal_top_level",
         r#"
@@ -436,11 +420,11 @@ fn top_level_library_calls_use_literal_origin_after_argument_mapping() {
             return "OK"
         }
     "#;
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(&jdk))
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
         .unwrap_or_else(|| {
             panic!(
                 "compile top-level interop: {:?}",
-                common::front_end_diagnostics(source, &classpath, Some(&jdk))
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
             )
         });
     let output = common::run_box(&classes, "MainKt", &classpath).expect("run top-level interop");
@@ -482,11 +466,11 @@ fn jdk_static_call_return_type_inferred_for_private_property() {
         }\n";
 
     let output = common::compile_and_run_with_stdlib(SOURCE, "Main").unwrap_or_else(|| {
-        let stdlib = common::stdlib_jar().unwrap();
-        let jdk = common::jdk_modules().unwrap();
+        let stdlib = common::stdlib_jar();
+        let jdk = common::jdk_modules();
         panic!(
             "{:?}",
-            common::front_end_diagnostics(SOURCE, &[stdlib], Some(&jdk))
+            common::front_end_diagnostics(SOURCE, &[stdlib], Some(jdk.as_path()))
         )
     });
     assert_eq!(output.trim(), "OK");

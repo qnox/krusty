@@ -102,11 +102,9 @@ fun box(): String {\n\
     if (holder.block().javaClass.componentType.name != \"java.lang.String\") return \"block type\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], jdk.as_deref());
+    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], Some(jdk.as_path()));
     assert!(
         diagnostics.is_empty(),
         "context-typed empty arrayOf should be frontend-valid: {diagnostics:?}"

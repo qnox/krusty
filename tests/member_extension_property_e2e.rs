@@ -157,9 +157,7 @@ fun box(): String {
 /// illegal call to the private JVM method.
 #[test]
 fn member_ext_prop_private_setter_is_inaccessible_outside_the_owner() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let source = r#"
 class SyntheticOwner {
     var Int.token: String
@@ -177,7 +175,7 @@ fun box(): String = with(SyntheticOwner()) {
         source,
         "MemberExtPropPrivateSetterAccess",
         &classpath,
-        Some(&jdk),
+        Some(jdk.as_path()),
     );
     assert_ne!(
         outcome,
@@ -431,9 +429,7 @@ fn corpus_generic_receiver_member_ext_prop_stays_skipped() {
 /// run-based check pass, but only the former is acceptable.
 #[test]
 fn unsupported_member_ext_prop_shapes_still_rejected() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let cases: &[(&str, &str)] = &[
         // A DELEGATED member extension property (`by Del()`): the delegate's getValue receives a
         // KProperty + the extension receiver — a splice this path doesn't build.
@@ -552,7 +548,7 @@ fun box(): String = with(SyntheticOwner()) { 1.token }
     ];
     for (stem, src) in cases {
         let cp = krusty::toolchain::classpath_jars_for(src);
-        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(&jdk));
+        let outcome = common::backend_outcome_in_process(src, stem, &cp, Some(jdk.as_path()));
         assert_ne!(
             outcome,
             Some(common::BackendOutcome::Emitted),

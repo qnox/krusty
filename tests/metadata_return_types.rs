@@ -13,10 +13,7 @@ use super::common;
 
 #[test]
 fn collection_factory_return_types_distinguish_mutable() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let cp = Classpath::new(vec![jar]);
     // `listOf`/`mutableListOf`/`emptyList` live in this CollectionsKt facade part.
     let ci = cp
@@ -45,10 +42,7 @@ fn collection_factory_return_types_distinguish_mutable() {
 
 #[test]
 fn nullable_type_parameter_return_metadata_is_kept() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let cp = Classpath::new(vec![jar]);
     let ret = ["kotlin/StandardKt", "kotlin/StandardKt__StandardKt"]
         .iter()
@@ -71,10 +65,7 @@ fn nullable_type_parameter_return_metadata_is_kept() {
 /// descriptor. Parsed straight from the jar entry (`PackageFragment` + `QualifiedNameTable`).
 #[test]
 fn builtins_decode_collection_hierarchy() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
     let mut entry = zip
         .by_name("kotlin/collections/collections.kotlin_builtins")
@@ -108,10 +99,7 @@ fn builtins_decode_collection_hierarchy() {
 /// the `get(Int): Char` operator, `length: Int`, `plus(Any?): String`, `compareTo(String): Int`.
 #[test]
 fn builtins_string_members_from_metadata() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
     let mut entry = zip
         .by_name("kotlin/kotlin.kotlin_builtins")
@@ -163,10 +151,7 @@ fn builtins_fragment(jar: &std::path::Path, path: &str) -> Vec<u8> {
 /// Both are the only record of these signatures when the mapped JVM class is off the classpath.
 #[test]
 fn builtins_decode_type_parameters_and_arguments() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let bytes = builtins_fragment(&jar, "kotlin/collections/collections.kotlin_builtins");
     let classes = parse_builtins(&bytes);
 
@@ -210,10 +195,7 @@ fn builtins_decode_type_parameters_and_arguments() {
 /// supported configuration, so its members must carry a generic signature like any other.
 #[test]
 fn builtin_generic_member_binds_receiver_argument_without_jdk() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     // Only the stdlib jar: no JDK, so `java/util/List` is absent and the builtins fallback is taken.
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
     let scope = [type_name("kotlin/collections")];
@@ -254,10 +236,7 @@ fn builtin_generic_member_binds_receiver_argument_without_jdk() {
 /// depend on the builtins decode keeping type parameters AND type arguments.
 #[test]
 fn builtin_generic_members_type_check_without_jdk() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let src = r#"
 fun a(l: List<String>): String = l.get(1)
 fun b(l: List<String>): String = l[1]
@@ -279,10 +258,8 @@ fun d(m: Map<String, Int>): List<Int> = m.entries.map { (k, v) -> k.length + v }
 /// or an unrelated method silently becomes the `java.util.List.remove(int)` implementation.
 #[test]
 fn read_only_list_impl_gets_no_remove_bridge() {
-    let (Some(jar), Some(jdk)) = (common::stdlib_jar(), common::jdk_modules()) else {
-        eprintln!("skip: no kotlin-stdlib jar / JDK");
-        return;
-    };
+    let jar = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let cp = [jar];
     let bridge_of = |src: &str| -> bool {
         let classes = common::compile_in_process(src, "Ro", &cp, Some(&jdk)).expect("compiles");
@@ -324,10 +301,7 @@ abstract class Ro : MutableList<String> {
 /// `MutableList` receiver and not to a `List`. A non-builtin name (`ArrayList`) is not in the hierarchy.
 #[test]
 fn kotlin_collection_subtyping() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let cp = Classpath::new(vec![jar]);
     assert!(cp.is_kotlin_collection("kotlin/collections/MutableList"));
     assert!(cp.is_kotlin_collection("kotlin/collections/List"));
@@ -352,10 +326,7 @@ fn kotlin_collection_subtyping() {
 /// mutable receiver.
 #[test]
 fn plus_assign_receiver_is_mutable() {
-    let Some(jar) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let jar = common::stdlib_jar();
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
     let scope = [type_name("kotlin/collections")];
     let resolver = SymbolResolver::new_scoped(&libs, &scope);

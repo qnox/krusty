@@ -86,6 +86,8 @@ fn is_scalar(t: Ty) -> bool {
             | Ty::Double
             | Ty::Boolean
             | Ty::Char
+            | Ty::UByte
+            | Ty::UShort
             | Ty::UInt
             | Ty::ULong
     )
@@ -168,6 +170,12 @@ fn assignable_inner(
         return sub == sup;
     }
 
+    // A `KFunction{N}` IS a function type — it is what a callable reference's own binding is typed as
+    // (`val f = A::b`), and it must stay assignable wherever that function type is accepted. Compare
+    // through the function shape rather than through the synthesized classifier's hierarchy, so the
+    // parameter/return variance rules below apply to it exactly as to any other function value.
+    let sub = crate::types::callable_reference_function_type(sub);
+    let sup = crate::types::callable_reference_function_type(sup);
     match (sub, sup) {
         (Ty::Fun(a), Ty::Fun(b)) => {
             a.params.len() == b.params.len()

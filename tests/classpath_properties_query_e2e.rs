@@ -14,10 +14,7 @@ use super::common;
 
 #[test]
 fn member_property_getter_and_setter_from_metadata() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let Some(dir) = common::compile_lib(
         "propquery",
         "class Holder(val label: String) { var count: Int = 0 }\n\
@@ -99,12 +96,13 @@ fn jvmname_extension_property_resolves_via_metadata_getter() {
     let lib = "package lib\nclass Holder(val label: String)\n\
                val Holder.tag: String @JvmName(\"grabTag\") get() = \"T:\" + label";
     let main = "import lib.Holder\nimport lib.tag\nfun box(): String = Holder(\"x\").tag";
-    if let Some(out) = common::run_box_against("jvmnameextprop", lib, main) {
-        assert_eq!(
-            out, "T:x",
-            "@JvmName extension property must resolve via its metadata getter"
-        );
-    }
+    let Some(out) = common::expect_box_run_against("jvmnameextprop", lib, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(
+        out, "T:x",
+        "@JvmName extension property must resolve via its metadata getter"
+    );
 }
 
 #[test]
@@ -115,12 +113,13 @@ fn classpath_var_member_setter_assigns_via_metadata() {
     let lib = "package lib\nclass Box(var count: Int)";
     let main = "import lib.Box\nfun box(): String {\n  val b = Box(1)\n  b.count = 7\n  \
                 return if (b.count == 7) \"OK\" else \"f:${b.count}\"\n}";
-    if let Some(out) = common::run_box_against("varsetterplain", lib, main) {
-        assert_eq!(
-            out, "OK",
-            "a classpath var member setter must resolve via its metadata setter"
-        );
-    }
+    let Some(out) = common::expect_box_run_against("varsetterplain", lib, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(
+        out, "OK",
+        "a classpath var member setter must resolve via its metadata setter"
+    );
 }
 
 #[test]
@@ -131,24 +130,19 @@ fn classpath_jvmname_var_setter_assigns_via_metadata() {
                @JvmName(\"grab\") get() = raw\n    @JvmName(\"stash\") set(v) { raw = v }\n}";
     let main = "import lib.Box\nfun box(): String {\n  val b = Box(1)\n  b.n = 7\n  \
                 return if (b.n == 7) \"OK\" else \"f:${b.n}\"\n}";
-    if let Some(out) = common::run_box_against("varsetterjvmname", lib, main) {
-        assert_eq!(
-            out, "OK",
-            "an @JvmName var setter must resolve via its metadata setter"
-        );
-    }
+    let Some(out) = common::expect_box_run_against("varsetterjvmname", lib, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(
+        out, "OK",
+        "an @JvmName var setter must resolve via its metadata setter"
+    );
 }
 
 #[test]
 fn callable_reference_targets_must_have_a_real_virtual_method() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skip: no kotlin-stdlib jar");
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skip: no JDK modules");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let lib = JvmLibraries::new(Rc::new(Classpath::new(vec![stdlib, jdk])));
 
     let target = |receiver, name: &str| {

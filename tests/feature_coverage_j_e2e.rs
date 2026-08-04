@@ -27,13 +27,17 @@ fun <T> runBlocking(block: suspend () -> T): T {
 "#;
 
 /// Compile `PREAMBLE + body` as one file (stem `stem`) and run its `box()` on the shared JVM.
-/// Returns the trimmed `box()` output, or `None` when the Kotlin/JDK toolchain is unavailable
-/// (the caller then skips rather than fails spuriously).
+/// Returns the trimmed `box()` output, or `None` when the Kotlin/JDK toolchain is unavailable —
+/// that, and only that, is a skip: a source the front end rejects panics with its diagnostics.
 fn run_box(stem: &str, body: &str) -> Option<String> {
-    let stdlib = common::stdlib_jar()?;
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let src = format!("{PREAMBLE}{body}");
-    common::compile_and_run_box(&src, stem, &[stdlib], jdk.as_deref()).map(|s| s.trim().to_string())
+    Some(
+        common::expect_box_run(&src, stem, &[stdlib], Some(jdk.as_path()))
+            .trim()
+            .to_string(),
+    )
 }
 
 #[test]

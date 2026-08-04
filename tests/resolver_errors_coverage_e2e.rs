@@ -15,11 +15,9 @@ use super::common;
 /// Run the front end with stdlib + JDK on the classpath. If the toolchain is unavailable, return a
 /// sentinel so the "non-empty" assertions still hold (the test effectively skips).
 fn diags(src: &str) -> Vec<String> {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return vec!["<skip: no stdlib>".into()];
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    common::front_end_diagnostics(src, &[stdlib], jdk.as_deref())
+    common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
 }
 
 fn assert_rejected(d: &[String], what: &str) {

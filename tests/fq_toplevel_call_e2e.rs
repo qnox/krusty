@@ -25,7 +25,8 @@ fn fully_qualified_top_level_call() {
         \x20 if (trace != \"BA\") return \"fail order: $trace\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("fq_toplevel", LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    let Some(out) = common::expect_box_run_against("fq_toplevel", LIB, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
 }

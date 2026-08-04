@@ -140,11 +140,9 @@ fn ambiguous_super_delegation_is_diagnosed() {
         class A : B {\n\
         \x20 constructor(value: Both): super(value)\n\
         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let diagnostics =
-        common::front_end_diagnostics(SRC, &[stdlib], common::jdk_modules().as_deref());
+        common::front_end_diagnostics(SRC, &[stdlib], Some(common::jdk_modules().as_path()));
     assert!(
         diagnostics
             .iter()

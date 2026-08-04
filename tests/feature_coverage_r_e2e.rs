@@ -7,7 +7,7 @@ use super::common;
 /// Compile `src` (with a `box()` returning "OK") under `stem` against the stdlib + JDK modules and
 /// assert it prints "OK". Skips (returns) when the toolchain isn't provisioned.
 fn run_ok(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]
@@ -254,6 +254,24 @@ fun box(): String {\n\
     return \"OK\"\n\
 }\n";
     run_ok(src, "CompanionIface");
+}
+
+/// A companion's members are in scope throughout the class body, so an INSTANCE member calls a
+/// companion function unqualified; and a companion `var` is a static backing field that reads back.
+#[test]
+fn companion_member_unqualified_from_instance() {
+    let src = "class Widget(val id: Int) {\n\
+    companion object {\n\
+        val seed: Int = 5\n\
+        fun tag(): String = \"w\"\n\
+    }\n\
+    fun describe(): String = tag() + id + seed\n\
+}\n\
+fun box(): String {\n\
+    if (Widget(7).describe() != \"w75\") return \"f1: \" + Widget(7).describe()\n\
+    return \"OK\"\n\
+}\n";
+    run_ok(src, "CompanionUnqualified");
 }
 
 #[test]

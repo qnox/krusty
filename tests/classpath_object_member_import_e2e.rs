@@ -40,9 +40,10 @@ fn classpath_object_member_imported_unqualified() {
         \x20 if (a.read() != \"P\" || b.read() != \"P\") return \"fail twice\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("objmember", LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    let Some(out) = common::expect_box_run_against("objmember", LIB, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
 }
 
 /// A trailing lambda captures the ENCLOSING lambda's implicit `it`, as in
@@ -66,9 +67,10 @@ fn classpath_overloaded_member_trailing_lambda_captures_enclosing_it() {
         \x20 s?.let { eventSink.emit { \"k=$it\" } }\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("objmember_it", OVERLOAD_LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    let Some(out) = common::expect_box_run_against("objmember_it", OVERLOAD_LIB, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
 }
 
 /// A top-level `val` with a name DISTINCT from the imported member (`val target = sink {}`) — the pure
@@ -78,7 +80,8 @@ fn classpath_object_member_toplevel_distinct_name() {
     let main = "import lib.SinkFactory.sink\n\
         private val target = sink {}\n\
         fun box(): String = if (target.read() == \"OK\") \"OK\" else \"fail: ${target.read()}\"\n";
-    if let Some(out) = common::run_box_against("objmember_distinct", LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    let Some(out) = common::expect_box_run_against("objmember_distinct", LIB, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
 }

@@ -19,7 +19,7 @@ use krusty::symbol_source::SymbolSource;
 fn resolve_errors(src: &str) -> Option<Vec<String>> {
     // The shared classpath the gate/survey use: stdlib family per directives + JDK `lib/modules`.
     let mut cp_paths = common::classpath_jars_for(src);
-    let jdk = common::jdk_modules()?;
+    let jdk = common::jdk_modules();
     // No stdlib jar located → can't meaningfully assert resolution; signal skip.
     if cp_paths.is_empty() {
         return None;
@@ -115,10 +115,7 @@ fun box(): String { build<String> { yield(\"OK\") }; return \"OK\" }\n",
 fn kotlin_test_assert_fails_with_default_is_inline_only_callable() {
     let mut cp_paths =
         common::classpath_jars_for("// WITH_STDLIB\nimport kotlin.test.assertFailsWith\n");
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skip assertFailsWith provider shape: no JDK modules");
-        return;
-    };
+    let jdk = common::jdk_modules();
     if cp_paths.is_empty() {
         eprintln!("skip assertFailsWith provider shape: no stdlib/test jars");
         return;

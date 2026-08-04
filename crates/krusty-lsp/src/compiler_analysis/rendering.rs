@@ -48,6 +48,8 @@ pub(crate) fn render_ty(ty: Ty) -> String {
         Ty::Double => "Double".to_string(),
         Ty::Boolean => "Boolean".to_string(),
         Ty::Char => "Char".to_string(),
+        Ty::UByte => "UByte".to_string(),
+        Ty::UShort => "UShort".to_string(),
         Ty::UInt => "UInt".to_string(),
         Ty::ULong => "ULong".to_string(),
         Ty::String => "String".to_string(),
