@@ -5969,6 +5969,11 @@ impl<'a> Lower<'a> {
         args: Vec<u32>,
     ) -> Option<u32> {
         let owner = member.owner_type_or(owner_fallback);
+        // Captured before `member` is consumed below. Recorded against the CALL node itself rather
+        // than whatever this returns: the receiver-spill path below wraps the call in a `Block`, and
+        // the representation analysis reads the fact off the `Call`, so keying the wrapper drops it
+        // silently (the map just gains a dead id).
+        let declared_ret = member.declared_ret;
         // An `invokevirtual` on an unsigned value class needs the BOXED receiver (`kotlin/UInt`) on
         // the stack, but krusty carries an unsigned value in the primitive slot of its carrier —
         // push it raw and the verifier rejects the call. Box it here, with the same `box-impl` an
@@ -6010,6 +6015,7 @@ impl<'a> Lower<'a> {
             if suspend {
                 self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
             }
+            self.record_call_declared_ret(call, declared_ret);
             return Some(self.emit_block(vec![decl], Some(call)));
         }
         let call =
@@ -6017,6 +6023,7 @@ impl<'a> Lower<'a> {
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
+        self.record_call_declared_ret(call, declared_ret);
         Some(call)
     }
 
@@ -6119,6 +6126,7 @@ impl<'a> Lower<'a> {
         record_suspend: bool,
     ) -> Option<u32> {
         let logical_ret = callable.ret;
+        let declared_ret = callable.declared_ret;
         // A descriptor that spells a CPS `Continuation` the lowered arguments do not fill. For a
         // SUSPEND callable that is the normal `$default` shape — the plain suspend descriptor has
         // already had its trailing continuation stripped, but a `$default` one spells it BEFORE the
@@ -6207,6 +6215,7 @@ impl<'a> Lower<'a> {
         if record_suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
+        self.record_call_declared_ret(call, declared_ret);
         Some(call)
     }
 
@@ -8843,6 +8852,17 @@ impl<'a> Lower<'a> {
     fn record_ext_source_receiver(&mut self, call: u32, source_receiver: Option<Ty>) {
         if let Some(sr) = source_receiver {
             self.ir.ext_call_source_receiver.insert(call, sr);
+        }
+    }
+
+    /// Forward a resolved library member's DECLARED return onto the emitted call, verbatim — the return
+    /// analogue of [`Self::record_ext_source_receiver`], and equally free of value-class reasoning. The
+    /// value-class pass reads `call_declared_ret` to tell a value class handed back as its erased
+    /// CARRIER (declared `A`) from the same value class arriving BOXED out of a generic slot (declared
+    /// `E`); the two are identical in the JVM descriptor.
+    fn record_call_declared_ret(&mut self, call: u32, declared_ret: Option<Ty>) {
+        if let Some(declared) = declared_ret {
+            self.ir.call_declared_ret.insert(call, declared);
         }
     }
 
@@ -15194,6 +15214,34 @@ impl<'a> Lower<'a> {
             return read;
         }
         self.ir.physical_types.insert(read, ty_to_ir(physical));
+        // Record the SUBSTITUTED static type beside the physical one. The two together are what let a
+        // later representation analysis tell an erased result apart from a boxed one WITHOUT this
+        // lowering knowing anything about value classes: `coerce_erased_call_result` already records
+        // the same pair on its own (type-parameter) path, for the same reason. Here it closes the
+        // classpath value-class RETURN: a mangled member hands back the UNDERLYING (`make-<hash>():
+        // String`) while its static type is the value class, and with only the physical fact recorded
+        // the `Cast` emitted below reads as "an erased value narrowed to `K`" — i.e. a BOXED `K` — so
+        // a member access on the result emits `checkcast K; K.unbox-impl()` over a `String` that is
+        // already the carrier. With both facts present the value-class pass reprs the result as the
+        // UNBOXED value class, the cast strips as redundant, and the access is identity.
+        //
+        // Scoped twice over, because each guard answers a different miscompile.
+        //
+        // To a VALUE-CLASS static type: the pair is only ever consulted to tell a value class's erased
+        // carrier from its box, so recording it for every coerced read re-reprs unrelated erased
+        // results.
+        //
+        // And to a CONCRETE physical type, because the SUBSTITUTED type alone cannot classify an
+        // erased-top result. A value class whose underlying itself erases to `Object`
+        // (`TokenBox(val holder: Any?)`) reads identically whether it is the carrier or a BOX out of
+        // a generic slot: `List<TokenBox>.get` returns `Object` either way, and "physical
+        // return == the underlying → UNBOXED" then unboxes the box (`TokenBox cannot be cast to
+        // java.lang.Integer`, four corpus cases). Where the physical type IS erased-top the decision
+        // belongs to `call_declared_ret`, which knows whether the callee returns the value class BY
+        // DECLARATION — the one fact that separates the two.
+        if self.is_value_class_type(logical) && !physical.non_null().is_erased_top() {
+            self.ir.logical_types.insert(read, ty_to_ir(logical));
+        }
         // An unsigned value out of an erased reference: checkcast to the inline-class object, then
         // `unbox-impl` — the wrapper is `kotlin/UInt`, not `Integer`.
         if logical.is_unsigned() && physical.is_reference() {
@@ -15238,6 +15286,19 @@ impl<'a> Lower<'a> {
     /// file/member/implicit read branches about `Result` or any concrete value class. Once property
     /// construction/accessor realization boxes generic value-class values, this single predicate can
     /// be removed and every caller becomes supported together.
+    /// Whether `ty` names a `@JvmInline value class`, from EITHER origin — one this file declares and
+    /// one reached through the federated symbol source (a sibling module's, or the classpath's). Used
+    /// only to decide whether a coerced read's static type is worth recording for the value-class pass;
+    /// the pass itself owns every representation decision that follows.
+    fn is_value_class_type(&self, ty: Ty) -> bool {
+        ty.non_null().obj_internal().is_some_and(|name| {
+            self.syms
+                .class_by_type_name(name)
+                .is_some_and(|class| class.value_field.is_some())
+                || self.syms.libraries.value_underlying_name(name).is_some()
+        })
+    }
+
     fn source_property_read_needs_generic_value_class_box(
         &self,
         owner: TypeName,

@@ -457,49 +457,113 @@ fn build_class_metadata(
                 && !value_method_names.contains(n)
         })
         .collect();
-    // VALUE-CLASS-INVOLVED MEMBERS: decline the whole class. The writer can produce kotlinc's exact
-    // payload for these (the byte-identity tests proved it) — what is missing is the READ half. The
-    // physical method already returns/takes the ERASED underlying, but a caller that learns the Kotlin
-    // return from `@Metadata` still emits kotlinc's boxed-form sequence — `invokevirtual I.f-XLNMDGE()
-    // Ljava/lang/String; checkcast K; invokevirtual K.unbox-impl()` — and the `String` on the stack is
-    // not a `K`: ClassCastException, or VerifyError once a fake override lands the receiver wrong.
-    // Reproduced for both shapes: a VALUE class with a declared member (`S("O").k`) and a PLAIN class
-    // whose member's signature mentions one (`I().f().v`, `C().foo("OK").s` inherited from `A`,
-    // `WhateverUseCase()(Result.failure(…))`). Withholding the record puts each caller back on the
-    // descriptor fallback, which is what it used before any class metadata was written. Reinstate this
-    // when the classpath value-class RETURN is modelled (`MetadataCallFacts` carries
-    // `value_class_params` but has no return counterpart). Pinned by the box corpus's
-    // `compileKotlinAgainstKotlin/inlineClasses/*` MODULE chains.
-    // The property signal is its stamped JVM REALIZATION, not `vc_declared_sigs`: that table holds
-    // non-synthesized FUNCTIONS only, so a value-class-typed CONSTRUCTOR PARAMETER
-    // (`class Holder(val id: ItemId)`, whose generated `getId-YyT5sjE` is synthesized) and a
-    // value-class-typed BODY PROPERTY both slip past it. The value-class pass has already resolved
-    // whether a property's getter/setter needs mangling and records the exact spelling on the
-    // declaration; consulting that stamp here keeps metadata admission tied to the same semantic fact
-    // that accessor emission consumes. Do not infer ownership from the global function table:
-    // synthesized property accessors are emitted directly from `IrProperty` and deliberately have no
-    // `IrFunction` entry, so a dispatch-receiver scan cannot see them.
+    // A VALUE-CLASS-INVOLVED MEMBER is now DESCRIBED. The writer could always produce kotlinc's exact
+    // payload for one (the byte-identity tests proved it); what was missing was the READ half, and the
+    // classpath value-class RETURN model supplies it — `MetadataCallFacts::value_class_ret` reports
+    // that the physical method already hands back the ERASED underlying, so a caller that learns the
+    // Kotlin return `K` from `@Metadata` no longer also emits kotlinc's boxed sequence (`invokevirtual
+    // I.f-XLNMDGE()Ljava/lang/String; checkcast K; K.unbox-impl()`) over a `String` that IS the
+    // carrier. Round-tripped by `krusty_roundtrip_class_metadata_e2e`'s value-class cases (each RUNS
+    // `box()`) and pinned by the box corpus's `compileKotlinAgainstKotlin/inlineClasses/*` MODULE
+    // chains.
     //
-    // `Holder` is the constructor-property case that proves the wider net is needed: krusty described
-    // `id` as `String` (kotlinc: `LItemId;`), named the PRIVATE `<init>(Ljava/lang/String;)V` rather than
-    // kotlinc's `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`, and dropped the
-    // getter's mangled name — real kotlinc reading that record rejects `Holder(ItemId("OK"))` as a
-    // type mismatch, and a caller that satisfied it would `invokespecial` the private constructor.
-    // A stamp is present only when the ordinary property convention is not the physical ABI. Testing
-    // both sides keeps this admission rule correct for `var` even if a future realization needs only a
-    // setter override. The conservative decline is temporary until the metadata reader can preserve
-    // value-class property types and consume these exact JVM signatures end to end.
+    // Three shapes still decline, and NONE of them for the reason removed above: each is a WRITE-side
+    // gap — krusty's own output differs from kotlinc's — so the read half fixed here cannot reach them.
+    // Each was invisible while the record was withheld, and each is proven by a differential comparison
+    // against real kotlinc for the same source.
+    //
+    // 1. A VALUE-CLASS-typed CONSTRUCTOR PARAMETER. `class Holder(val id: ItemId)` gets kotlinc's
+    //    PRIVATE-primary + synthetic `DefaultConstructorMarker` ABI, which the builder cannot describe:
+    //    krusty named the PRIVATE `<init>(Ljava/lang/String;)V` rather than kotlinc's
+    //    `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`, typed `id` as `String`
+    //    instead of `LItemId;`, and dropped the getter's mangled `getId-YyT5sjE`. Real kotlinc reading
+    //    that record rejects `Holder(ItemId("OK"))` as a type mismatch, and a caller that satisfied it
+    //    would `invokespecial` the private constructor. `ir.has_value_param_ctor` (recorded before
+    //    erasure loses the parameter's identity) is the signal; `vc_declared_sigs` cannot be, as it
+    //    holds non-synthesized FUNCTIONS only.
+    //
+    // 2. A VALUE-CLASS-typed PROPERTY. The METHODS match kotlinc exactly (both emit `getK-XLNMDGE()
+    //    Ljava/lang/String;`), but the RECORD does not: for `class Holder { val k: K = K("OK") }`
+    //    krusty writes `d2=[…,"k","","getK","()Ljava/lang/String;"]` where kotlinc writes
+    //    `[…,"k","LK;","getK-XLNMDGE","()Ljava/lang/String;","Ljava/lang/String;"]` — the property's
+    //    Kotlin type is EMPTY rather than `LK;` and its getter is spelled unmangled. A reader binds a
+    //    `getK()` the class file does not define; krusty's own reader reports `.k`'s result as having
+    //    no member `v`. Describing a value-class property type is a separate write-side model from the
+    //    value-class RETURN, which is why the stamped realization still gates admission here.
+    //
+    // 3. A VALUE class with a DECLARED MEMBER of its own. kotlinc realizes
+    //    `value class S(val v: String) { fun k(): String }` as the STATIC
+    //    `k-impl(Ljava/lang/String;)Ljava/lang/String;` over the unboxed carrier; krusty emits an
+    //    INSTANCE `k()` on the box. Reading krusty's record then puts the carrier on the stack under an
+    //    `invokevirtual S.k()` — "Type 'java/lang/String' is not assignable to 'S'", a VerifyError.
+    //    (krusty's caller is right: against a KOTLINC-built `S` the same source runs.)
+    //
+    //    A COMPUTED property counts, and `declared_fids` cannot see it: its accessor is synthesized
+    //    straight from `IrProperty` and has no `IrFunction` entry, while `accessor_names` is derived
+    //    from BACKING fields, which a computed property has none of. `A<T> { val publicValue: String
+    //    get() = … }` is that shape — kotlinc emits the static `getPublicValue-impl(Object)`, krusty an
+    //    instance `getPublicValue()`. The SOLE underlying property is not a declared member in this
+    //    sense: kotlinc gives it an instance `getV()` too, so it stays admissible.
+    // 4. A member whose value-class position erases to `Object` — i.e. the value class's underlying is
+    //    itself erased-top (`value class A<T>(val value: T)`, `kotlin/Result`). The RETURN model
+    //    described above rests on the physical type identifying the carrier, and at `Object` it does
+    //    not: a carrier and a BOX sitting in a generic slot are spelled identically, which is the same
+    //    ambiguity `call_declared_ret` exists to resolve — and it is only threaded on the member and
+    //    static call paths, not yet on the operator-invoke one (`useCase(param)` still lands a raw
+    //    carrier under a `checkcast kotlin/Result`). Describing these members turns a SKIP into a
+    //    miscompile, so they wait for the remaining paths. Read off the ERASED signature rather than a
+    //    value-class table, so it holds for a classpath value class (`Result`) exactly as for a
+    //    same-file one: a position that DECLARED a value class and now spells `Object` is the case.
+    //
+    //    A `suspend` member's return is EXEMPT, because the CPS rewrite makes every suspend method
+    //    return `Object` regardless of what it declares (the real return rides the `Continuation`'s
+    //    type argument). Reading that `Object` as value-class erasure would decline shapes that are
+    //    perfectly describable — `interface I { suspend fun f(a: K): String }` is byte-identical to
+    //    kotlinc. Value-class PARAMETERS are still checked; only the return is exempt.
+    //
+    //    The exemption itself has an exception, and it is a real miscompile rather than a lost
+    //    opportunity: when the value-class pass BOXES the value-class return at the CPS `areturn`
+    //    (`ir.suspend_boxed_value_class_returns`), krusty's bytecode and kotlinc's disagree. kotlinc
+    //    boxes only for a PRIMITIVE underlying; over a reference, nullable, or generic underlying it
+    //    returns the raw carrier, while krusty boxes unconditionally. Since the RECORD krusty writes
+    //    is byte-identical to kotlinc's, describing such a member advertises an ABI the class file
+    //    does not implement: a consumer compiled against it does `C().gk().v` and gets
+    //    "class K cannot be cast to class java.lang.String". Against a KOTLINC-built `C` the same
+    //    source runs, so this is krusty's boxing, not its reader. That table is keyed by `FunId` and
+    //    holds exactly the members whose CPS return krusty boxes — an ABSTRACT member has no return
+    //    expression and never appears, which is why the interface shapes above stay admissible.
+    let erases_value_class_to_object = |fid: &u32| {
+        let Some((_, declared_params, declared_ret)) = ir.vc_declared_sigs.get(fid) else {
+            return false;
+        };
+        let f = &ir.functions[*fid as usize];
+        // The CPS marker itself: a suspend method's erased signature ends in the `Continuation`.
+        let is_cps = f
+            .params
+            .last()
+            .and_then(|p| p.non_null().obj_internal())
+            .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"));
+        let cps_boxes_value_class_return = ir.suspend_boxed_value_class_returns.contains_key(fid);
+        let param_erased = declared_params
+            .iter()
+            .zip(f.params.iter())
+            .any(|(declared, erased)| declared != erased && erased.non_null().is_erased_top());
+        let ret_erased = (!is_cps || cps_boxes_value_class_return)
+            && *declared_ret != f.ret
+            && f.ret.non_null().is_erased_top();
+        param_erased || ret_erased
+    };
+    let has_object_erased_value_class_member =
+        declared_fids.iter().any(erases_value_class_to_object);
+    let has_computed_property = c.properties.iter().any(|p| p.backing_field.is_none());
     let has_value_class_property_realization = c
         .properties
         .iter()
         .any(|p| p.getter_jvm_name.is_some() || p.setter_jvm_name.is_some());
-    let has_value_class_member = declared_fids
-        .iter()
-        .any(|fid| ir.vc_declared_sigs.contains_key(fid));
-    if has_value_class_member
+    if has_object_erased_value_class_member
         || (!c.is_value
             && (has_value_class_property_realization || ir.has_value_param_ctor(&c.fq_name())))
-        || (c.is_value && !declared_fids.is_empty())
+        || (c.is_value && (!declared_fids.is_empty() || has_computed_property))
     {
         return None;
     }

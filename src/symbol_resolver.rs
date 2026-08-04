@@ -5397,6 +5397,7 @@ mod tests {
             contract: None,
             generic_sig: None,
             singleton_dispatch: None,
+            declared_ret: None,
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),
