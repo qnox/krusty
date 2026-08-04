@@ -29522,8 +29522,21 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
             .into_iter()
             .filter(|o| o.kind == crate::libraries::FnKind::Member)
-            .filter(|o| o.call_sig.has_param_names())
             .filter_map(|o| {
+                // A candidate with NO recorded parameter names cannot be slot-mapped, but an
+                // UNLABELLED call may match it directly — a zero-parameter overload (`any()` next
+                // to `any(classifier)`), or a Java member without `-parameters`. Route such a call
+                // to the direct member path instead of letting a sibling overload's mapping error
+                // reject it. A LABELLED call can never bind a no-names candidate, and deferring it
+                // would starve the sibling's slot mapping and hand the labels to the label-blind
+                // positional fallback (`tag(value = 3, prefix = "v")` silently swapped) — drop the
+                // candidate without deferring so the labelled sibling still resolves via slots.
+                if !o.call_sig.has_param_names() {
+                    if arg_names.is_none() {
+                        direct_candidate = true;
+                    }
+                    return None;
+                }
                 let params = o.callable.params.clone();
                 if arg_names.is_none() && o.call_sig.vararg && args.len() != params.len() {
                     direct_candidate = true;
