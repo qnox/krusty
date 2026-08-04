@@ -848,7 +848,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unchanged — `unescape_chunk` still accepts `"\0"`, which kotlinc rejects. The sibling truncation in
   `ast_literal_const` (`Ty::Char => IrConst::Char(*v as u16)` for an `IntLit`) needs no diagnostic:
   `val c: Char = 128000` is already rejected upstream with the same `initializer type mismatch` kotlinc
-  reports, so no source reaches it. Tests: `tests/char_literal_diagnostics_e2e.rs`.
+  reports, so no source reaches it. Validation and decoding are one token-layer contract used by
+  both lexer and parser; this avoids separate escape tables drifting while keeping the diagnostic at
+  the lexer boundary. Tests: `tests/char_literal_diagnostics_e2e.rs`.
 - **A `Char` constant folded into a string renders as the CHARACTER, not its code unit.** The constant
   string evaluator behind the `trimIndent`/`trimMargin` fold accepts a `Char` (`${'$'}` is the idiomatic
   way to write a literal `$` in a template), so it must spell the character out. A code unit that is not
