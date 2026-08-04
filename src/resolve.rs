@@ -703,6 +703,24 @@ impl ClassFlags {
     }
 }
 
+/// One source of truth for declaration-level classifier flags. The same packed value seeds the
+/// all-files header index and is later installed on the complete `ClassSig`, preventing early
+/// inference and final checking from classifying a declaration differently.
+fn source_class_flags(class: &ClassDecl) -> ClassFlags {
+    ClassFlags::default()
+        .with_interface(class.is_interface())
+        .with_object(class.is_object())
+        .with_abstract(class.is_abstract())
+        .with_fun_interface(class.is_fun_interface)
+        .with_sealed(class.is_sealed())
+        .with_final(class.is_final())
+        .with_has_abstract_members(
+            class.methods.iter().any(|method| method.is_abstract())
+                || class.body_props.iter().any(|property| property.is_abstract),
+        )
+        .with_annotation(class.is_annotation())
+}
+
 #[derive(Clone, Debug)]
 pub struct DeclaredPropertySig {
     pub ty: Ty,
@@ -1684,6 +1702,10 @@ pub struct SymbolTable {
     /// never evicts the other. This is a strict invariant: source aliases live in the separate
     /// declaration-keyed alias index below and never introduce a differently shaped key here.
     pub classes: HashMap<TypeName, ClassSig>,
+    /// Declaration-header facts keyed by classifier identity, available before full signatures are
+    /// collected. Forward property inference may need to classify a later-file source singleton; this
+    /// identity table avoids both source-order dependence and the old global simple-name object set.
+    source_class_headers: HashMap<TypeName, ClassFlags>,
     /// Source `typealias` bindings by declaring file and alias spelling. An alias is a name-resolution
     /// edge to a classifier identity, not another class declaration; keeping it separate prevents a
     /// simple alias key from corrupting the internal-name invariant of [`Self::classes`].
@@ -1762,6 +1784,7 @@ impl Default for SymbolTable {
             conflicting_top_level_key_by_source: HashMap::new(),
             conflicting_top_level_candidates: HashMap::new(),
             classes: HashMap::new(),
+            source_class_headers: HashMap::new(),
             source_class_aliases: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),
@@ -2030,11 +2053,43 @@ impl SymbolTable {
     where
         I: IntoIterator<Item = TypeName>,
     {
+        self.source_class_identity(file, explicit_candidates, same_package, alias)
+            .and_then(|internal| self.classes.get(&internal))
+    }
+
+    /// Select the semantic classifier identity even while its complete `ClassSig` is still being
+    /// collected. This is the declaration-header twin of [`Self::source_class_binding`]; both use the
+    /// same precedence and alias edges, so early inference cannot grow its own import/package branch.
+    fn source_class_identity<I>(
+        &self,
+        file: u32,
+        explicit_candidates: I,
+        same_package: TypeName,
+        alias: &str,
+    ) -> Option<TypeName>
+    where
+        I: IntoIterator<Item = TypeName>,
+    {
+        let known = |internal: &TypeName| {
+            self.source_class_headers.contains_key(internal) || self.classes.contains_key(internal)
+        };
         explicit_candidates
             .into_iter()
-            .find_map(|internal| self.classes.get(&internal))
-            .or_else(|| self.classes.get(&same_package))
-            .or_else(|| self.source_class_alias(file, alias))
+            .find(|internal| known(internal))
+            .or_else(|| known(&same_package).then_some(same_package))
+            .or_else(|| {
+                self.source_class_aliases
+                    .get(&(file, alias.to_string()))
+                    .copied()
+            })
+    }
+
+    fn source_class_is_object(&self, internal: TypeName) -> bool {
+        self.classes.get(&internal).is_some_and(ClassSig::is_object)
+            || self
+                .source_class_headers
+                .get(&internal)
+                .is_some_and(|flags| flags.has(ClassFlags::OBJECT))
     }
 
     /// Find the source declaration that owns a member property across the complete module hierarchy.
@@ -4597,14 +4652,17 @@ fn collect_signatures_with_cp_impl(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
-    // Pre-seed enum static values from ALL files so lightweight initializer inference is independent
-    // of declaration order. Object-ness stays on the canonical `ClassSig`; a second name-only index
-    // would recreate the cross-package collision this pass is designed to avoid.
+    // Pre-seed identity-keyed declaration headers and enum static values from ALL files so lightweight
+    // initializer inference is independent of declaration order. These are the exact flags later moved
+    // onto each canonical `ClassSig`, not a parallel simple-name object index.
     for file in files {
         for &d in &file.decls {
             if let Decl::Class(c) = file.decl(d) {
+                let internal = type_name(&class_internal(file, &c.name));
+                table
+                    .source_class_headers
+                    .insert(internal, source_class_flags(c));
                 if c.is_enum() {
-                    let internal = type_name(&class_internal(file, &c.name));
                     for entry in &c.enum_entries {
                         table
                             .static_classifier_values
@@ -4691,7 +4749,7 @@ fn collect_signatures_with_cp_impl(
                                     })
                                     .unwrap_or_default();
                                 let t = infer_lit_ty_scoped(
-                                    file,
+                                    InferenceSource(file, i as u32),
                                     *e,
                                     &class_names,
                                     &fun_rets,
@@ -5381,7 +5439,7 @@ fn collect_signatures_with_cp_impl(
                                 Some(r) => ty_of_ref(r, &class_names, &btp, diags),
                                 None => {
                                     let dt = infer_lit_ty_scoped(
-                                        file,
+                                        InferenceSource(file, i as u32),
                                         de,
                                         &class_names,
                                         &fun_rets,
@@ -5403,7 +5461,7 @@ fn collect_signatures_with_cp_impl(
                                 (Some(r), _) => ty_of_ref(r, &class_names, &btp, diags),
                                 (None, Some(FunBody::Expr(g))) if !c.is_value => {
                                     let inferred = infer_lit_ty_scoped(
-                                        file,
+                                        InferenceSource(file, i as u32),
                                         *g,
                                         &class_names,
                                         &fun_rets,
@@ -5432,10 +5490,10 @@ fn collect_signatures_with_cp_impl(
                                 }
                                 (None, _) => bp
                                     .init
-                                    .map(|i| {
+                                    .map(|expression| {
                                         infer_lit_ty_scoped(
-                                            file,
-                                            i,
+                                            InferenceSource(file, i as u32),
+                                            expression,
                                             &class_names,
                                             &fun_rets,
                                             &property_scope,
@@ -5454,7 +5512,7 @@ fn collect_signatures_with_cp_impl(
                                 .or_else(|| {
                                     bp.init.map(|init| {
                                         infer_lit_ty_scoped(
-                                            file,
+                                            InferenceSource(file, i as u32),
                                             init,
                                             &class_names,
                                             &fun_rets,
@@ -5643,10 +5701,10 @@ fn collect_signatures_with_cp_impl(
                                 Some(r) => ty_of_ref(r, &class_names, &bctp, diags),
                                 None => bp
                                     .init
-                                    .map(|i| {
+                                    .map(|expression| {
                                         infer_lit_ty_scoped(
-                                            file,
-                                            i,
+                                            InferenceSource(file, i as u32),
+                                            expression,
                                             &class_names,
                                             &fun_rets,
                                             &[],
@@ -5758,7 +5816,7 @@ fn collect_signatures_with_cp_impl(
                                         .collect();
                                     scope.extend(props.iter().cloned());
                                     let t = infer_lit_ty_scoped(
-                                        file,
+                                        InferenceSource(file, i as u32),
                                         *e,
                                         &class_names,
                                         &local_rets,
@@ -6092,7 +6150,7 @@ fn collect_signatures_with_cp_impl(
                                         // object, static-classifier, and cycle-guard behavior while
                                         // adding the companion properties as the lexical value scope.
                                         let t = infer_lit_ty_scoped(
-                                            file,
+                                            InferenceSource(file, i as u32),
                                             *e,
                                             &class_names,
                                             &fun_rets,
@@ -6329,18 +6387,7 @@ fn collect_signatures_with_cp_impl(
                                 })
                                 .collect(),
                             methods,
-                            flags: ClassFlags::default()
-                                .with_interface(c.is_interface())
-                                .with_object(c.is_object())
-                                .with_abstract(c.is_abstract())
-                                .with_fun_interface(c.is_fun_interface)
-                                .with_sealed(c.is_sealed())
-                                .with_final(c.is_final())
-                                .with_has_abstract_members(
-                                    c.methods.iter().any(|method| method.is_abstract())
-                                        || c.body_props.iter().any(|property| property.is_abstract),
-                                )
-                                .with_annotation(c.is_annotation()),
+                            flags: source_class_flags(c),
                             inner_of: inner_of_ref,
                             static_methods,
                             companion_fun_names,
@@ -6486,7 +6533,7 @@ fn collect_signatures_with_cp_impl(
                                 .map(|r| ty_of_ref(r, &class_names, &ptp, diags))
                                 .or_else(|| match &p.getter {
                                     Some(FunBody::Expr(g)) => Some(infer_lit_ty_scoped(
-                                        file,
+                                        InferenceSource(file, i as u32),
                                         *g,
                                         &class_names,
                                         &fun_rets,
@@ -6584,7 +6631,7 @@ fn collect_signatures_with_cp_impl(
                             (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
                             (None, Some(FunBody::Expr(g))) if is_computed => {
                                 infer_top_level_property_expr(
-                                    file,
+                                    InferenceSource(file, i as u32),
                                     *g,
                                     &class_names,
                                     &fun_rets,
@@ -6595,10 +6642,10 @@ fn collect_signatures_with_cp_impl(
                             }
                             (None, _) => p
                                 .init
-                                .map(|i| {
+                                .map(|expression| {
                                     infer_top_level_property_expr(
-                                        file,
-                                        i,
+                                        InferenceSource(file, i as u32),
+                                        expression,
                                         &class_names,
                                         &fun_rets,
                                         &context_scope,
@@ -7739,7 +7786,7 @@ fn infer_lit_ty(
     let env = InferEnv {
         up: &|_, _| None,
         inferring: &inferring,
-        is_object: &|_| false,
+        module_object: &|_| None,
         static_classifier_value: &|_, _| None,
     };
     infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &env)
@@ -7839,20 +7886,27 @@ struct InferEnv<'a> {
     /// Expression-body ids currently on the inference stack — a companion method whose inferred return
     /// recurses back to itself (`a()=C.b(); b()=C.a()`) yields `Error` (skip) instead of looping.
     inferring: &'a std::cell::RefCell<std::collections::HashSet<u32>>,
-    /// True if a simple name is a SAME-MODULE `object` (`val h = Helper`) — the library source can't
-    /// see it, so the `Name` arm's classpath object-check misses it; this closes that gap.
-    is_object: &'a dyn Fn(&str) -> bool,
+    /// Resolve a source spelling to the SAME-MODULE `object` identity (`val h = Helper`). Returning the
+    /// identity—not only a boolean—is essential for explicit imports and package homonyms: the global
+    /// class-name projection cannot recover which singleton value the file actually bound.
+    module_object: &'a dyn Fn(&str) -> Option<TypeName>,
     /// Resolve a static value declared by a same-module classifier. The lightweight inferer receives
     /// only the external platform source, so source enum entries need this module-table bridge.
     static_classifier_value: &'a dyn Fn(TypeName, &str) -> Option<Ty>,
 }
+
+/// Source identity for lightweight signature inference. The AST and its module file index are one
+/// semantic context: alias/import edges are file-scoped, so passing either independently invites a
+/// mismatched lookup and needlessly widens every inference helper's argument list.
+#[derive(Clone, Copy)]
+struct InferenceSource<'a>(&'a File, u32);
 
 /// Infer an eager top-level initializer or expression getter against the same value scope. Named
 /// context parameters come first because lightweight name resolution is first-match; they therefore
 /// shadow module properties just as they do in the real checker. Module properties follow so nested
 /// expressions such as `holder.value` and `a.compareTo(b)` do not need call-site-specific branches.
 fn infer_top_level_property_expr(
-    file: &File,
+    source: InferenceSource<'_>,
     expression: ExprId,
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
@@ -7870,7 +7924,15 @@ fn infer_top_level_property_expr(
                 .map(|(name, (ty, is_var, _))| (name.clone(), *ty, *is_var)),
         )
         .collect::<Vec<_>>();
-    infer_lit_ty_scoped(file, expression, class_names, fun_rets, &props, src, table)
+    infer_lit_ty_scoped(
+        source,
+        expression,
+        class_names,
+        fun_rets,
+        &props,
+        src,
+        table,
+    )
 }
 
 /// A member computed getter whose first-pass inference hit `Error`, kept for the post-walk retry
@@ -7920,7 +7982,7 @@ fn finish_member_computed_getter_inference(
                 }
             }
             let inferred = infer_lit_ty_scoped(
-                &files[entry.file_index],
+                InferenceSource(&files[entry.file_index], entry.file_index as u32),
                 entry.getter,
                 &entry.class_names,
                 fun_rets,
@@ -8016,7 +8078,7 @@ fn finish_top_level_computed_property_inference(
                     .map(|(parameter, ty)| (parameter.name.clone(), *ty, false))
                     .collect::<Vec<_>>();
                 let inferred = infer_top_level_property_expr(
-                    file,
+                    InferenceSource(file, file_index as u32),
                     *getter,
                     &file_class_names[file_index],
                     fun_rets,
@@ -8085,7 +8147,7 @@ fn finish_top_level_computed_property_inference(
 /// Infer a declaration initializer's type with a fresh cycle-guard, using `table` to resolve
 /// module-local class properties — the common entry used by signature collection.
 fn infer_lit_ty_scoped(
-    file: &File,
+    source: InferenceSource<'_>,
     e: ExprId,
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
@@ -8093,15 +8155,32 @@ fn infer_lit_ty_scoped(
     src: &dyn SemanticPlatform,
     table: &SymbolTable,
 ) -> Ty {
+    let InferenceSource(file, file_index) = source;
     let up = |recv: Ty, name: &str| table.applied_member_prop_ty(recv, name);
-    // Resolve through this file's semantic classifier binding, then read object-ness from the one
-    // canonical class signature. A global simple-name set cannot answer this question correctly when
-    // two packages declare homonyms.
-    let is_object = |name: &str| {
-        class_names
-            .get_class(name)
-            .and_then(|internal| table.class_by_type_name(internal))
-            .is_some_and(ClassSig::is_object)
+    // Resolve through the same file-aware module binding used by checking/lowering, then read
+    // object-ness from the canonical class signature. `ClassNames::get_class(name)` is a global
+    // simple-name projection and cannot represent an explicit source import when packages contain
+    // homonyms. Candidate spelling remains a syntax concern here; selection stays centralized.
+    let module_object = |name: &str| {
+        let explicit_candidates = file
+            .imports
+            .iter()
+            .filter(|import| import.rsplit('.').next() == Some(name))
+            .flat_map(|import| {
+                nested_internal_name_candidates(&import.replace('.', "/"))
+                    .into_iter()
+                    .rev()
+            })
+            .filter_map(|candidate| existing_type_name(&candidate))
+            .collect::<Vec<_>>();
+        table
+            .source_class_identity(
+                file_index,
+                explicit_candidates.iter().copied(),
+                type_name(&class_internal(file, name)),
+                name,
+            )
+            .filter(|internal| table.source_class_is_object(*internal))
     };
     let static_classifier_value = |internal: TypeName, name: &str| {
         table
@@ -8114,7 +8193,7 @@ fn infer_lit_ty_scoped(
     let env = InferEnv {
         up: &up,
         inferring: &inferring,
-        is_object: &is_object,
+        module_object: &module_object,
         static_classifier_value: &static_classifier_value,
     };
     infer_lit_ty_p(file, e, class_names, fun_rets, props, src, &env)
@@ -8238,8 +8317,8 @@ fn infer_lit_ty_p(
                     .filter(|internal| {
                         src.resolve_type_name(*internal)
                             .is_some_and(|t| t.is_object())
-                            || (env.is_object)(n)
                     })
+                    .or_else(|| (env.module_object)(n))
                     .map(Ty::obj_name)
             })
             .unwrap_or(Ty::Error),
@@ -36407,6 +36486,12 @@ mod tests {
             .classes
             .iter()
             .all(|(internal, signature)| *internal == signature.internal_name()));
+        // The forward-reference header index is keyed by those same identities and is generated by
+        // the same flag function as the completed signature; it must never become a second, divergent
+        // classification table while making source-order-independent inference possible.
+        assert!(symbols.classes.iter().all(|(internal, signature)| {
+            symbols.source_class_headers.get(internal) == Some(&signature.flags)
+        }));
         assert_eq!(
             symbols
                 .source_class_alias(0, "LocalRecord")
