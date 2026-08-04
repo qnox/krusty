@@ -27548,13 +27548,31 @@ impl<'a> Checker<'a> {
             .and_then(|generic| generic.receiver)
             .or_else(|| member.params.first().copied())?;
         let (_, value_params) = member.params.split_first()?;
-        // The call sig's names cover the source VALUE parameters. Use them only when they line up;
-        // a mismatch would silently misname a parameter for a named-argument call.
-        let param_names = if member.call_sig.param_names.len() == value_params.len() {
-            member.call_sig.param_names.clone()
+        // The call sig covers the source VALUE parameters (the receiver is excluded by construction).
+        // Use it only when it lines up: a mismatch would silently misname a parameter for a
+        // named-argument call, or claim a default that is not there.
+        let call_sig = member.call_sig.clone();
+        let aligned = call_sig.param_names.len() == value_params.len();
+        let param_names = if aligned {
+            call_sig.param_names.clone()
         } else {
             Vec::new()
         };
+        let param_defaults = if aligned && call_sig.param_defaults.len() == value_params.len() {
+            call_sig.param_defaults.clone()
+        } else {
+            vec![false; value_params.len()]
+        };
+        // A parameter with a default may be omitted; `required` is the count that may not.
+        let required = if aligned {
+            call_sig.required.min(value_params.len())
+        } else {
+            value_params.len()
+        };
+        // `vararg_index` is an index into the LOGICAL parameters, which is what `value_params` is.
+        let vararg_index = call_sig
+            .vararg_index
+            .filter(|index| *index < value_params.len());
         let signature = Signature {
             params: value_params.to_vec(),
             ret: member.ret,
@@ -27563,10 +27581,11 @@ impl<'a> Checker<'a> {
             flags: SigFlags::default()
                 .with_is_operator(member.is_operator())
                 .with_is_suspend(member.suspend())
-                .with_is_final(true),
-            vararg_index: None,
-            required: value_params.len(),
-            param_defaults: vec![false; value_params.len()],
+                .with_is_final(true)
+                .with_vararg(vararg_index.is_some()),
+            vararg_index,
+            required,
+            param_defaults,
             param_names,
             param_default_values: vec![None; value_params.len()],
             lambda_param_types: value_params

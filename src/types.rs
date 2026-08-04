@@ -1326,10 +1326,16 @@ pub fn builtin_receiver_property_ty(receiver: Ty, name: &str) -> Option<Ty> {
 /// together with the `Ty` they describe rather than in a platform module.
 pub const KFUNCTION_INTERNAL: &str = "kotlin/reflect/KFunction";
 
+/// The highest `KFunction{N}` kotlinc synthesizes — matching `Function0` … `Function22`. A larger
+/// spelling is an unresolved reference, not a type.
+const MAX_KFUNCTION_ARITY: usize = 22;
+
 /// The arity of a synthesized `kotlin.reflect.KFunction{N}`; `None` for the arity-less `KFunction`
-/// itself and for every other name.
+/// itself, for an arity kotlinc does not synthesize, and for every other name.
 pub fn kfunction_arity(internal: TypeName) -> Option<usize> {
-    internal.unsigned_suffix_after_prefix(KFUNCTION_INTERNAL)
+    internal
+        .unsigned_suffix_after_prefix(KFUNCTION_INTERNAL)
+        .filter(|arity| *arity <= MAX_KFUNCTION_ARITY)
 }
 
 /// The function type a callable reference's reflection type stands for — `KFunction2<A, B, R>` →

@@ -4096,3 +4096,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   mentioning a type parameter also records its JVM method handle, as kotlinc does — the descriptor is
   not derivable from the proto types, and without it reflection reports "several matching members found"
   for a function that has exactly one.
+
+- **A `data class`'s `componentN`/`copy` cover the PRIMARY-CONSTRUCTOR properties only.** `IrClass::fields`
+  holds constructor properties, body properties and delegate fields together, so reading it whole made
+  the `@Metadata` of `data class P(val a: Int) { val b = "x" }` advertise `component2` and `copy(a, b)`
+  — neither of which the class emits. The same reading made a `data object` WITH a body property
+  (`data object Config { val name = "c" }`) look like a data class and advertise `copy`/`component1`
+  that a singleton never has. `ctor_param_count` is the exact slice, and a data declaration with NONE
+  of those properties is exactly a `data object` (a `data class` must declare at least one). Both now
+  match kotlinc's `d2` byte for byte. Tests:
+  `sealed_interface_nested_e2e::data_object_has_no_copy`, `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn`.
+
+- **A function reference's value-class mangle is applied at most once.** The mangle used to be re-applied
+  to whatever name the lowerer recorded. For a DEPENDENCY's target that name is already kotlinc's
+  mangled one, so a second pass produced `decode-X4E9McA-X4E9McA` — a method that exists nowhere.
+  Origin cannot be the test: this pass sees one FILE at a time, so a SIBLING source file's target looks
+  foreign to it while that file's own run does mangle it — declining there emitted a call to an
+  unmangled method that never exists either. Idempotence is the test instead: a name that already
+  carries exactly the suffix this signature would append is left alone, which a JVM method name can
+  only do because kotlinc's mangle put it there. Tests:
+  `classpath_unbound_callable_ref_e2e::classpath_callable_references_resolve_reflection_targets` (the
+  classpath direction) and corpus `inlineClasses/callableReferences/*` (the same-compilation direction).

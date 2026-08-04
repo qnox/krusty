@@ -1117,8 +1117,8 @@ impl ClassWriter {
         // erased descriptor, kotlinc's order), @NotNull (return), then `new <self>(...)` (ctor Methodref).
         // A `data object` gets none of it: kotlinc synthesizes no `copy`/`copy$default` for a singleton,
         // and seeding the names alone would leave them in the constant pool of a class that has no such
-        // method. No fields IS the test — a `data class` must declare at least one primary-constructor
-        // property, so an empty field list can only be an object.
+        // method. `fields` here is already sliced to the PRIMARY-CONSTRUCTOR properties, so an empty
+        // list is exactly a data declaration with none — which can only be an object.
         if !fields.is_empty() {
             self.cp.utf8("copy");
             let copy_desc = format!("({}){self_ref}", params);

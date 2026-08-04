@@ -160,9 +160,9 @@ fn accessor_takes_receiver(access: &crate::jvm::inline::PropertyAccess) -> bool 
             ..
         } => {
             !is_static
-                || (is_value_class_impl_accessor(name)
-                    && crate::jvm::names::parse_method_descriptor(descriptor)
-                        .is_some_and(|(params, _)| !params.is_empty()))
+                || crate::jvm::names::parse_method_descriptor(descriptor).is_some_and(
+                    |(params, ret)| is_value_class_impl_accessor(name, params.len(), ret != "V"),
+                )
         }
         // The receiver is the bridge's first ARGUMENT, so it is pushed like an ordinary receiver.
         PropertyAccess::AccessBridge { .. } => true,
@@ -172,8 +172,13 @@ fn accessor_takes_receiver(access: &crate::jvm::inline::PropertyAccess) -> bool 
 /// kotlinc's spelling for a `@JvmInline value class` member realized as a static over the carrier: the
 /// Kotlin name with an `-impl` suffix (`isSuccess-impl`, `getLabel-impl`). It is the only static
 /// accessor shape whose leading parameter is a receiver rather than a value.
-fn is_value_class_impl_accessor(name: &str) -> bool {
-    name.ends_with("-impl")
+///
+/// `is_read` distinguishes the two sites, because the parameter COUNT is what separates a carrier from
+/// a value: such a getter takes exactly the carrier, and such a setter the carrier AND the new value. A
+/// `@JvmStatic` property whose name merely ends in `-impl` (reachable through `@JvmName`) therefore
+/// cannot be mistaken for one — its static setter takes a single VALUE parameter.
+fn is_value_class_impl_accessor(name: &str, params: usize, is_read: bool) -> bool {
+    name.ends_with("-impl") && params == if is_read { 1 } else { 2 }
 }
 
 /// The type the receiver must hold ON THE STACK for `access`, given the property's `owner`.
@@ -191,8 +196,8 @@ fn accessor_receiver_ty(access: &crate::jvm::inline::PropertyAccess, owner: &str
         ..
     } = access
     {
-        if is_value_class_impl_accessor(name) {
-            if let Some((params, _)) = crate::jvm::names::parse_method_descriptor(descriptor) {
+        if let Some((params, ret)) = crate::jvm::names::parse_method_descriptor(descriptor) {
+            if is_value_class_impl_accessor(name, params.len(), ret != "V") {
                 if let Some(carrier) = params.first() {
                     return crate::jvm::jvm_libraries::desc_to_ty(carrier);
                 }
@@ -558,9 +563,13 @@ fn build_class_metadata(
     };
     let methods: Vec<FnMeta> = if c.is_data {
         let class_ty = Ty::obj(&c.fq_name());
-        let field_tys: Vec<Ty> = c.fields.iter().map(|f| f.ty).collect();
-        let mut m: Vec<FnMeta> = c
-            .fields
+        // `componentN`/`copy` are synthesized over the PRIMARY-CONSTRUCTOR properties only — a body
+        // property (`data class P(val a: Int) { val b = "x" }`) is a field like any other and takes no
+        // component or `copy` parameter. `c.fields` holds both, so slice it the way the constructor
+        // record above already does.
+        let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
+        let field_tys: Vec<Ty> = data_fields.iter().map(|f| f.ty).collect();
+        let mut m: Vec<FnMeta> = data_fields
             .iter()
             .enumerate()
             .map(|(i, f)| FnMeta {
@@ -574,13 +583,14 @@ fn build_class_metadata(
             })
             .collect();
         // A `data object` is a singleton: kotlinc synthesizes `equals`/`hashCode`/`toString` for it but
-        // NO `copy` (and no `componentN` — the loop above is already empty). No-fields IS the test: a
-        // `data class` must declare at least one primary-constructor property, so an empty field list
-        // can only be an object. (`is_object` is not set on a class hoisted out of an interface body.)
-        if !c.fields.is_empty() {
+        // NO `copy` (and no `componentN` — the loop above is then empty). No PRIMARY-CONSTRUCTOR
+        // property IS the test: a `data class` must declare at least one, so a data declaration with
+        // none can only be an object. (`is_object` is not set on a class hoisted out of an interface
+        // body, and a data object may still have body properties, so neither is usable here.)
+        if !data_fields.is_empty() {
             m.push(FnMeta {
                 name: "copy".into(),
-                params: c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect(),
+                params: data_fields.iter().map(|f| (f.name.clone(), f.ty)).collect(),
                 ret: class_ty,
                 flags: COPY_FN_FLAGS,
                 params_have_defaults: true,
@@ -919,9 +929,12 @@ fn seed_plain_class_pool(
     );
     if c.is_data {
         let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
+        // The synthesized `componentN`/`copy` cover the PRIMARY-CONSTRUCTOR properties only — a body
+        // property is a field but takes no component or `copy` parameter.
         let data_fields: Vec<(String, String)> = c
             .fields
             .iter()
+            .take(c.ctor_param_count as usize)
             .map(|f| (f.name.clone(), desc(f.ty)))
             .collect();
         // Per-field `hashCode` owner (interface field → `java/lang/Object`), recorded by `field_hash`.
@@ -1233,7 +1246,8 @@ fn attach_synth_debug_tables(
     // (equals also `other`); `copy` has the ctor parameters.
     if c.is_data {
         let self_ref = format!("L{};", c.fq_name());
-        for (i, f) in c.fields.iter().enumerate() {
+        let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
+        for (i, f) in data_fields.iter().enumerate() {
             cw.set_method_debug(
                 &format!("component{}", i + 1),
                 &format!("(){}", desc(f.ty)),
@@ -1242,10 +1256,10 @@ fn attach_synth_debug_tables(
             );
         }
         // A `data object` synthesizes no `copy` (see the metadata assembly), so it has no table either.
-        if !c.fields.is_empty() {
+        if !data_fields.is_empty() {
             let mut copy_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
             let mut slot = 1u16;
-            for f in &c.fields {
+            for f in data_fields {
                 copy_locals.push((f.name.clone(), desc(f.ty), slot));
                 slot += slot_size(f.ty);
             }
@@ -1354,13 +1368,14 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     if c.is_data {
         let not_null = "Lorg/jetbrains/annotations/NotNull;";
         let self_ref = format!("L{};", c.fq_name());
+        let data_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
         // A `data object` synthesizes no `copy` (see the metadata assembly), so it takes no annotations.
-        if !c.fields.is_empty() {
+        if !data_fields.is_empty() {
             let copy_desc = format!("({}){self_ref}", ctor_field_descs(c));
             // `copy`'s parameters mirror the primary-constructor properties, so each reference param
             // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
             let copy_params: Vec<Option<&str>> =
-                c.fields.iter().map(|f| ann(&f.name, f.ty)).collect();
+                data_fields.iter().map(|f| ann(&f.name, f.ty)).collect();
             cw.set_method_nullability("copy", &copy_desc, Some(not_null), &copy_params);
         }
         cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(not_null), &[]);
@@ -1370,7 +1385,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
             None,
             &[Some("Lorg/jetbrains/annotations/Nullable;")],
         );
-        for (i, f) in c.fields.iter().enumerate() {
+        for (i, f) in data_fields.iter().enumerate() {
             if let Some(a) = ann(&f.name, f.ty) {
                 cw.set_method_nullability(
                     &format!("component{}", i + 1),

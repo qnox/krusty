@@ -1214,39 +1214,29 @@ pub fn lower_value_classes(
         };
         let fr_suspend =
             suspend_sig.contains(&(call_owner, fr.call_name.clone(), target_decl_params.len()));
-        // Only a target THIS compilation emits still needs mangling. One from a dependency already
-        // carries its final JVM name — kotlinc mangled it when that dependency was built, and the
-        // lowerer recorded that physical name — so mangling again yields `decode-X4E9McA-X4E9McA`: a
-        // method that exists nowhere, and a reflection signature kotlin-reflect cannot resolve.
-        // `target_param_map` is built from this file's functions, so its key set IS that target set.
-        // Matched on OWNER + NAME only: a bound extension reference's mangle-relevant parameter list
-        // leads with the receiver while the map is keyed by the invoke arity, so an arity match would
-        // miss a same-file target and leave its call unmangled.
-        let target_is_local = target_param_map
-            .keys()
-            .any(|(owner, name, _)| *owner == call_owner && *name == fr.call_name);
-        if target_is_local {
-            let mangled_call_name = vc_mangle(
-                &fr.call_name,
+        // Mangling is IDEMPOTENT here. A target from a DEPENDENCY already carries its final JVM name —
+        // kotlinc mangled it when that dependency was built, and the lowerer recorded that physical
+        // name — so a second pass produced `decode-X4E9McA-X4E9McA`: a method that exists nowhere, and
+        // a reflection signature kotlin-reflect cannot resolve. `vc_mangle_once` leaves a name that
+        // already carries exactly the suffix this signature would append. (Origin cannot be the test:
+        // this pass sees one FILE, so a sibling source file's target looks foreign while its own run
+        // does mangle it — skipping there emitted a call to an unmangled method that never exists.)
+        let mangle_once = |base: &str| {
+            vc_mangle_once(
+                base,
                 &mangle_params,
                 &fr.ret_ty,
                 &under,
                 is_file_class,
                 fr_suspend,
-            );
-            let reflection_base = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
-            let mangled_reflection_name = vc_mangle(
-                reflection_base,
-                &mangle_params,
-                &fr.ret_ty,
-                &under,
-                is_file_class,
-                fr_suspend,
-            );
-            fr.reflection_name =
-                (mangled_reflection_name != fr.fn_name).then_some(mangled_reflection_name);
-            fr.call_name = mangled_call_name;
-        }
+            )
+        };
+        let mangled_call_name = mangle_once(&fr.call_name);
+        let reflection_base = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
+        let mangled_reflection_name = mangle_once(reflection_base);
+        fr.reflection_name =
+            (mangled_reflection_name != fr.fn_name).then_some(mangled_reflection_name);
+        fr.call_name = mangled_call_name;
         // Preserve classpath erasure already recorded in the target shape.
         let erase_src = fr.target_param_tys.clone();
         let erase_ret = fr.target_ret_ty;
@@ -5027,6 +5017,26 @@ fn mangling_info(t: &Ty, under: &Under) -> crate::jvm::inline_class::InfoForMang
 
 /// kotlinc's name for a function whose JVM signature mentions a value class: `base-<hash>` (a value-class
 /// parameter, or a value-class return, triggers it). Plain `base` otherwise.
+/// [`vc_mangle`] that leaves an ALREADY-mangled name alone: if `base` is exactly what this signature
+/// would produce from its own stem, it is returned unchanged. A JVM method name a Kotlin declaration
+/// produces never contains `-` unless kotlinc's value-class mangle put it there, so splitting at the
+/// last `-` and re-mangling the stem is an exact test for "this name is already the answer".
+fn vc_mangle_once(
+    base: &str,
+    params: &[Ty],
+    ret: &Ty,
+    under: &Under,
+    is_file_class: bool,
+    is_suspend: bool,
+) -> String {
+    if let Some((stem, _)) = base.rsplit_once('-') {
+        if vc_mangle(stem, params, ret, under, is_file_class, is_suspend) == base {
+            return base.to_string();
+        }
+    }
+    vc_mangle(base, params, ret, under, is_file_class, is_suspend)
+}
+
 fn vc_mangle(
     base: &str,
     params: &[Ty],

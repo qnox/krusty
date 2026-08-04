@@ -14305,6 +14305,25 @@ impl<'a> Lower<'a> {
         Some((f.name.clone(), None, f.ret == ty_to_ir(Ty::Unit)))
     }
 
+    /// Whether the classpath SAM method `method` on `internal` mentions a value class in its declared
+    /// signature. Only `@Metadata` says so — the erased descriptor shows the underlying — and only a
+    /// declaration this compilation holds can be realized against, so this is the gate for declining.
+    fn sam_mentions_value_class(&self, internal: &str, method: &str) -> bool {
+        let is_value_class = |ty: &Ty| {
+            ty.non_null()
+                .obj_internal()
+                .is_some_and(|fq| self.syms.libraries.is_value_name(fq))
+        };
+        self.syms
+            .libraries
+            .resolve_type(internal)
+            .and_then(|ty| ty.sam_method)
+            .is_some_and(|sam| {
+                sam.name == method
+                    && (is_value_class(&sam.ret) || sam.params.iter().any(is_value_class))
+            })
+    }
+
     /// The DECLARED parameter types and return type of `internal`'s single abstract method, when
     /// `internal` is a same-compilation `fun interface`. A lambda converted to it must realize those
     /// exact declarations — which is not the same as its own inferred function type once the target
@@ -14434,6 +14453,17 @@ impl<'a> Lower<'a> {
                         })
                 };
                 if let Some((method, descriptor, void)) = target {
+                    // A CLASSPATH `fun interface` whose method mentions a value class cannot be
+                    // realized here: `lambda_sam_signature` is recorded only for a same-compilation
+                    // interface, whose declaration this file holds, so the pass would fall back to the
+                    // generic `FunctionN` reading and hand the closure a BOX in a slot the interface
+                    // declares as the carrier (`LambdaConversionException` / `ClassCastException`).
+                    // Skip rather than miscompile; a same-file interface carries its declaration.
+                    if self.sam_declared_signature(&internal).is_none()
+                        && self.sam_mentions_value_class(&internal, &method)
+                    {
+                        return None;
+                    }
                     return self.lower_lambda_sam(
                         arg,
                         &params,
@@ -18567,6 +18597,12 @@ impl<'a> Lower<'a> {
         label: &str,
         out: &std::cell::RefCell<Vec<Ty>>,
     ) {
+        // A NESTED lambda owns its own labels — an inner `run { return@run … }` says nothing about the
+        // enclosing lambda's return, and counting it would type this closure from an unrelated body.
+        // The same boundary `body_has_labeled_return`/`body_has_bare_return` stop at.
+        if matches!(self.afile.expr(e), Expr::Lambda { .. }) {
+            return;
+        }
         if let Expr::Return {
             value: Some(v),
             label: Some(l),
