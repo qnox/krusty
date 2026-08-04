@@ -2397,6 +2397,24 @@ fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<Ty>)> {
     Some((formals, supers))
 }
 
+/// The field descriptor of the CPS `Continuation` parameter kotlinc appends to a `suspend` method.
+const CONTINUATION_PARAM_DESCRIPTOR: &str = "Lkotlin/coroutines/Continuation;";
+
+/// The single parameter position of `descriptor` that holds a `Continuation`.
+///
+/// Exactly one position may be the synthetic CPS continuation. A descriptor spelling it more than
+/// once is not a shape kotlinc emits, and guessing between them would align a caller's arguments to
+/// the wrong slots — report nothing and let the caller stay conservative.
+fn continuation_param_index(descriptor: &str) -> Option<usize> {
+    let (params, _) = crate::jvm::names::parse_method_descriptor(descriptor)?;
+    let mut found = params
+        .iter()
+        .enumerate()
+        .filter(|&(_, &p)| p == CONTINUATION_PARAM_DESCRIPTOR);
+    let (index, _) = found.next()?;
+    found.next().is_none().then_some(index)
+}
+
 /// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
 /// The LOGICAL descriptor of a `suspend fun`'s physical CPS method: drop the trailing
 /// `kotlin/coroutines/Continuation` parameter kotlinc appends (`(ILkotlin/coroutines/Continuation;)…`
@@ -2404,9 +2422,8 @@ fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<Ty>)> {
 /// suspend callee is resolved by this logical signature; the coroutine pass re-derives the CPS form for
 /// the emitted call. A no-op if the descriptor has no trailing continuation (not a CPS method).
 fn strip_continuation_param(desc: &str) -> String {
-    const CONT: &str = "Lkotlin/coroutines/Continuation;";
     if let Some(close) = desc.rfind(')') {
-        if let Some(stripped) = desc[1..close].strip_suffix(CONT) {
+        if let Some(stripped) = desc[1..close].strip_suffix(CONTINUATION_PARAM_DESCRIPTOR) {
             return format!("({}){}", stripped, &desc[close + 1..]);
         }
     }
@@ -3857,6 +3874,10 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         )
     }
 
+    fn descriptor_continuation_param(&self, descriptor: &str) -> Option<usize> {
+        continuation_param_index(descriptor)
+    }
+
     fn function_reference_impl_type(&self) -> Option<Ty> {
         Some(Ty::obj("kotlin/jvm/internal/FunctionReferenceImpl"))
     }
@@ -4298,13 +4319,41 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, parse_class_gsig, parse_concrete_field_gsig, parse_field_gsig,
-        parse_method_desc, parse_method_gsig,
+        continuation_param_index, desc_to_ty, parse_class_gsig, parse_concrete_field_gsig,
+        parse_field_gsig, parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::SemanticPlatform;
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
     use crate::types::Ty;
+
+    /// Common lowering aligns a `suspend` `$default` call by this position, so it has to name the
+    /// slot the backend fills and nothing else.
+    #[test]
+    fn continuation_param_is_reported_only_when_unambiguous() {
+        // `withLock$default` — the continuation sits BEFORE the mask/marker tail, not at the end.
+        assert_eq!(
+            continuation_param_index(
+                "(Lkotlinx/coroutines/sync/Mutex;Ljava/lang/Object;Lkotlin/jvm/functions/Function0;\
+                 Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;"
+            ),
+            Some(3)
+        );
+        // A plain suspend method's trailing continuation.
+        assert_eq!(
+            continuation_param_index("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;"),
+            Some(1)
+        );
+        assert_eq!(continuation_param_index("(ILjava/lang/String;)V"), None);
+        // Two of them: no position is derivable, so the caller must not be handed a guess.
+        assert_eq!(
+            continuation_param_index(
+                "(Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)V"
+            ),
+            None
+        );
+        assert_eq!(continuation_param_index("not a descriptor"), None);
+    }
 
     #[test]
     fn inherited_access_finds_self_entry_when_member_name_contains_dollar() {

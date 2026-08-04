@@ -37,8 +37,13 @@ use super::common::BackendOutcome;
 /// rejection fails too: these are backend tests and must not pass through a parse/type error.
 fn expect_emitted_box_verifies(src: &str, stem: &str) {
     let stdlib = common::stdlib_jar();
+    expect_emitted_box_verifies_on(src, stem, std::slice::from_ref(&stdlib));
+}
+
+/// [`expect_emitted_box_verifies`] against an explicit classpath — for a shape that needs a callee
+/// no stdlib declaration has (a `suspend` classpath function with a defaulted unsigned parameter).
+fn expect_emitted_box_verifies_on(src: &str, stem: &str, cp: &[std::path::PathBuf]) {
     let jdk = common::jdk_modules();
-    let cp = std::slice::from_ref(&stdlib);
     match common::backend_outcome_in_process(src, stem, cp, Some(&jdk)) {
         None => panic!("{stem}: the front end rejected the source; this is a backend test"),
         Some(BackendOutcome::Emitted) => {
@@ -122,6 +127,198 @@ fn unsigned_equals_call_emits_verifiable_bytecode() {
 }\n",
         "ULongEquals",
     );
+}
+
+/// A value class's member, reached on a receiver that HOLDS an unsigned value.
+///
+/// `kotlin/Result`'s members are mangled `-impl` statics whose descriptor spells the receiver as the
+/// LEADING parameter (`getOrNull-impl:(Ljava/lang/Object;)Ljava/lang/Object;`) while the receiver
+/// travels beside the arguments — the count mismatch that used to skip the check outright, and the
+/// single most common one in the box corpus. The receiver slot is a reference here, so the boxed
+/// `UInt` inside belongs in it and the call must EMIT; the alignment is what tells the two apart.
+///
+/// The payload is only tested for presence: comparing it back (`r.getOrNull() == 7u`) answers `false`
+/// today, a separate wrong-VALUE defect in the boxed round trip that has nothing to do with which
+/// descriptor slot the receiver occupies.
+#[test]
+fn value_class_impl_member_on_an_unsigned_payload_still_emits() {
+    let stdlib = common::stdlib_jar();
+    let cp = std::slice::from_ref(&stdlib);
+    let jdk = common::jdk_modules();
+    let src = "fun box(): String {\n\
+    val r: Result<UInt> = Result.success(7u)\n\
+    return if (r.getOrNull() != null) \"OK\" else \"bad\"\n\
+}\n";
+    assert_eq!(
+        common::backend_outcome_in_process(src, "UResultImplMember", cp, Some(&jdk)),
+        Some(BackendOutcome::Emitted),
+        "the receiver occupies the descriptor's leading REFERENCE slot; do not decline"
+    );
+    expect_emitted_box_verifies(src, "UResultImplMember");
+}
+
+/// A BOXED unsigned argument to a `suspend` classpath function with a defaulted parameter.
+///
+/// The shape the descriptor/argument check used to skip outright. A `$default` synthetic spells the
+/// CPS `Continuation` BEFORE the `int mask` + `Object marker`
+/// (`libAny$default(Object, String, Continuation, int, Object)`) and the backend appends that
+/// continuation at emit time, so the descriptor carries five slots where lowering built four values.
+/// The counts disagreed and every argument went unchecked.
+///
+/// `7u` into an `Any` parameter is a legitimate box — `Ljava/lang/Object;` takes it — so this pins
+/// that the shape is ALIGNED rather than merely skipped or blanket-declined: dropping the
+/// continuation slot puts the box back on the reference slot it really occupies.
+///
+/// Needs a fixture jar: no stdlib `suspend` function pairs a default with a parameter that boxes.
+#[test]
+fn boxed_unsigned_argument_to_a_suspend_default_classpath_call_still_emits() {
+    let stdlib = common::stdlib_jar();
+    let Some(lib) = common::compile_libs(
+        "USuspendDefaultLib",
+        &[(
+            "Lib.kt",
+            "package lib\n\
+fun mark(): String = \"!\"\n\
+suspend fun libAny(t: Any, s: String = mark()): String = \"$t$s\"\n",
+        )],
+    ) else {
+        // kotlinc unavailable in this environment: the fixture cannot be built, and a source-only
+        // stand-in would not exercise a CLASSPATH call at all. A fixture kotlinc REJECTS panics
+        // inside the helper rather than skipping.
+        return;
+    };
+    let src = "import kotlin.coroutines.*\n\
+import lib.libAny\n\
+\n\
+fun box(): String {\n\
+    var out = \"\"\n\
+    val body: suspend () -> Unit = { out = libAny(7u) }\n\
+    body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    return if (out == \"7!\") \"OK\" else \"bad: $out\"\n\
+}\n";
+    let cp = [lib, stdlib];
+    let jdk = common::jdk_modules();
+    // STRICTER than the file's usual contract on purpose. A decline would pass there, and a decline
+    // is exactly what a blanket-conservative answer to the count mismatch produces — the box is on
+    // the stack, so "cannot align, therefore refuse" would swallow this legal call.
+    assert_eq!(
+        common::backend_outcome_in_process(src, "USuspendDefaultBoxed", &cp, Some(&jdk)),
+        Some(BackendOutcome::Emitted),
+        "a box landing in a reference slot must still emit once the continuation slot is aligned out"
+    );
+    expect_emitted_box_verifies_on(src, "USuspendDefaultBoxed", &cp);
+}
+
+/// An unsigned VALUE PARAMETER mangles the `suspend` function's JVM name (`libU` → `libU-OzbTU-A`),
+/// and the `$default` synthetic is named from the mangled form. krusty looks suspend-ness up under
+/// that JVM name, `@Metadata` records the SOURCE name, and the callable comes back marked
+/// non-suspend — so the coroutine pass never threads the `Continuation` its descriptor still spells,
+/// and the emitted `invokestatic` is one argument short. That links and fails verification, which is
+/// the outcome this whole file exists to rule out.
+///
+/// The unfilled continuation slot is visible at the call site, so the file is declined instead. BOTH
+/// call forms are covered: the `$default` synthetic (an argument omitted) and the plain mangled
+/// method (every argument supplied) fail the same way, so the decline cannot key on `$default`.
+///
+/// The underlying gap is the mangled-name suspend lookup, not the argument shape — recovering it
+/// would make these shapes EMIT, which the contract here already allows.
+#[test]
+fn suspend_call_with_an_unthreaded_continuation_declines() {
+    let stdlib = common::stdlib_jar();
+    let Some(lib) = common::compile_libs(
+        "UMangledSuspendLib",
+        &[(
+            "Lib.kt",
+            "package lib\n\
+fun mark(): String = \"!\"\n\
+suspend fun libU(t: UInt, s: String = mark()): String = \"$t$s\"\n",
+        )],
+    ) else {
+        return;
+    };
+    let cp = [lib, stdlib];
+    let jdk = common::jdk_modules();
+    let body = |call: &str| {
+        format!(
+            "import kotlin.coroutines.*\n\
+import lib.libU\n\
+\n\
+fun box(): String {{\n\
+    var out = \"\"\n\
+    val body: suspend () -> Unit = {{ out = {call} }}\n\
+    body.startCoroutine(Continuation(EmptyCoroutineContext) {{ it.getOrThrow() }})\n\
+    return if (out == \"7!\") \"OK\" else \"bad: $out\"\n\
+}}\n"
+        )
+    };
+    for (stem, call) in [
+        // `libU-OzbTU-A$default(int, String, Continuation, int, Object)` — 5 slots, 4 values.
+        ("UMangledSuspendDefault", "libU(7u)"),
+        // `libU-OzbTU-A(int, String, Continuation)` — 3 slots, 2 values. No `$default` involved.
+        ("UMangledSuspendPlain", "libU(7u, \"!\")"),
+    ] {
+        let src = body(call);
+        // Name the decline exhaustively: any OTHER outcome means this shape is being skipped by an
+        // unrelated gate and the unthreaded continuation is back to reaching the backend unnoticed.
+        match common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)) {
+            Some(BackendOutcome::LowerBail(reason)) => assert_eq!(
+                reason, "gate:unthreaded-continuation-slot",
+                "{stem}: the unfilled continuation slot is what must decline this call"
+            ),
+            // Recovering the mangled-name suspend lookup makes the call correct; then it must run.
+            Some(BackendOutcome::Emitted) => {}
+            other => {
+                panic!("{stem}: expected the continuation decline or a correct emit, got {other:?}")
+            }
+        }
+        expect_emitted_box_verifies_on(&src, stem, &cp);
+    }
+}
+
+/// The unthreaded-continuation decline keys on the UNFILLED slot, not on the word `Continuation`.
+///
+/// A non-suspend function may take one as an ordinary parameter, and a call to it — through the
+/// `$default` synthetic or not — fills every slot it has. Refusing on the type alone would decline a
+/// perfectly ordinary call, so both call forms are pinned as EMITTED.
+#[test]
+fn a_plain_continuation_parameter_is_not_an_unthreaded_continuation() {
+    let stdlib = common::stdlib_jar();
+    let Some(lib) = common::compile_libs(
+        "ContParamDefaultLib",
+        &[(
+            "Lib.kt",
+            "package lib\n\
+import kotlin.coroutines.Continuation\n\
+fun mark(): String = \"!\"\n\
+fun libCont(c: Continuation<Unit>, s: String = mark()): String = \"$s\"\n",
+        )],
+    ) else {
+        return;
+    };
+    let cp = [lib, stdlib];
+    let jdk = common::jdk_modules();
+    for (stem, call, want) in [
+        // Through `libCont$default(Continuation, String, int, Object)` — 4 values over 4 slots.
+        ("ContParamDefault", "libCont(c)", "!"),
+        // The plain method `libCont(Continuation, String)` — 2 over 2.
+        ("ContParamPlain", "libCont(c, \"x\")", "x"),
+    ] {
+        let src = format!(
+            "import kotlin.coroutines.*\n\
+import lib.libCont\n\
+\n\
+fun box(): String {{\n\
+    val c = Continuation<Unit>(EmptyCoroutineContext) {{ }}\n\
+    return if ({call} == \"{want}\") \"OK\" else \"bad\"\n\
+}}\n"
+        );
+        assert_eq!(
+            common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)),
+            Some(BackendOutcome::Emitted),
+            "{stem}: a declared Continuation parameter fills its own slot; do not decline"
+        );
+        expect_emitted_box_verifies_on(&src, stem, &cp);
+    }
 }
 
 /// `UByte`/`UShort` have no carrier `Ty` of their own and are declined by `jvm_can_emit`'s

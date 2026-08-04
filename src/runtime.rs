@@ -134,6 +134,19 @@ pub trait TargetRuntime {
         None
     }
 
+    /// The parameter position of an already-spelled platform method `descriptor` that holds the
+    /// synthetic CPS `Continuation`, when the descriptor spells one.
+    ///
+    /// Common lowering needs it to align a `suspend` `$default` synthetic: its descriptor carries the
+    /// continuation BEFORE the mask/marker tail, while the backend appends that value at emit time —
+    /// so every lowered argument past that position sits one slot to the right of where it looks.
+    /// Same division of labour as [`Self::descriptor_reference_params`]: the platform reads its own
+    /// spelling and lowering asks by position. `None` when the descriptor cannot be read or spells no
+    /// continuation.
+    fn descriptor_continuation_param(&self, _descriptor: &str) -> Option<usize> {
+        None
+    }
+
     /// Runtime superclass used for synthesized function references on this platform.
     fn function_reference_impl_type(&self) -> Option<Ty> {
         None
