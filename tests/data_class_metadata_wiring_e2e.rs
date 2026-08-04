@@ -164,22 +164,24 @@ fn suspend_member_returning_a_value_is_byte_identical() {
 }
 
 /// A member taking a value-class parameter. The JVM method is mangled and takes the erased underlying
-/// type; krusty's codegen matches kotlinc, but the class `@Metadata` describing it is withheld until a
-/// reader can consume it.
+/// type. The record is now WRITTEN — the classpath value-class RETURN model gave the reader the
+/// missing half — so this asserts the whole class file, `@Metadata` included, against kotlinc's.
 #[test]
-fn value_class_parameter_member_matches_kotlinc_without_metadata() {
-    assert_methods_match_kotlinc_but_metadata_is_withheld(
+fn value_class_parameter_member_is_byte_identical() {
+    assert_byte_identical(
         "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\ninterface I {\n    suspend fun f(a: K): String\n}\n",
         "demo/I",
+        &[],
     );
 }
 
 /// The same for a value-class RETURN, which mangles the name on its own.
 #[test]
-fn value_class_return_member_matches_kotlinc_without_metadata() {
-    assert_methods_match_kotlinc_but_metadata_is_withheld(
+fn value_class_return_member_is_byte_identical() {
+    assert_byte_identical(
         "package demo\n\n@JvmInline\nvalue class K(val v: String)\n\ninterface I {\n    fun f(): K\n}\n",
         "demo/I",
+        &[],
     );
 }
 
@@ -261,15 +263,16 @@ fn string_template_is_byte_identical() {
 }
 
 /// A `suspend` function returning a NULLABLE value class — the port shape `suspend fun resolve(k):
-/// OrgId?`. The value-class pass (which runs before the coroutine pass) erases the return to the
+/// Token?`. The value-class pass (which runs before the coroutine pass) erases the return to the
 /// underlying, but kotlinc keeps the value class in the continuation's generic type argument
-/// (`Continuation<? super OrgId>`, not `<? super String>`). The declared return is recovered from the
-/// value-class pass's record. Codegen matches kotlinc; the class `@Metadata` is withheld (below).
+/// (`Continuation<? super Token>`, not `<? super String>`). The declared return is recovered from the
+/// value-class pass's record. The record is now written too, so this pins the whole class file.
 #[test]
-fn suspend_returning_nullable_value_class_matches_kotlinc_without_metadata() {
-    assert_methods_match_kotlinc_but_metadata_is_withheld(
+fn suspend_returning_nullable_value_class_is_byte_identical() {
+    assert_byte_identical(
         "package demo\n@JvmInline\nvalue class Id(val v: String)\ninterface R {\n    suspend fun resolve(k: String): Id?\n}\n",
         "demo/R",
+        &[],
     );
 }
 

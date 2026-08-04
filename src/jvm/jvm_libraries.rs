@@ -77,6 +77,23 @@ pub struct JvmLibraries {
     cp: std::rc::Rc<Classpath>,
 }
 
+/// The declaration-level return fact shared by both classpath member construction loops. Keep this
+/// normalization at the metadata boundary: ordinary descriptor members and source-name aliases for
+/// mangled members must not disagree about whether the later value-class representation pass may see
+/// a declared return.
+///
+/// Nullable returns are genuine boxes, and suspend descriptors return the CPS `Object` regardless of
+/// the declared type (including primitive-underlying value classes, which the callee boxes). In both
+/// cases recording the classifier as an erased carrier would be unsound, so neither is handed off.
+/// Value-class identification itself intentionally remains downstream; probing it while a classpath
+/// type is being built can recursively re-enter type resolution on cyclic class graphs.
+fn metadata_declared_nonnull_nonsuspend_return(function: &super::metadata::MetaFn) -> Option<Ty> {
+    function
+        .ret_class
+        .filter(|_| !function.ret_nullable() && !function.is_suspend())
+        .map(Ty::obj_name)
+}
+
 impl JvmLibraries {
     /// The TOP-LEVEL (receiver-less) function overloads of `name` declared in package `pkg` —
     /// `listOf`/`run`/`println`/… each with its inline/`@InlineOnly` flags and logical
@@ -205,7 +222,13 @@ impl JvmLibraries {
                     None => physical_ret,
                 }
             } else {
-                physical_ret
+                // A value-class RETURN erases to its underlying in the descriptor exactly like a
+                // parameter does, and unlike `suspend` it has no continuation type argument to recover
+                // it from — so without this a non-suspend top-level function declared `(): Duration`
+                // reads back as `Long` and every member access on its result fails to resolve. The
+                // callable keeps `physical_ret`/`descriptor` erased below, which is what tells the
+                // value-class pass the result is ALREADY the carrier and must not be unboxed again.
+                meta.value_class_ret.unwrap_or(physical_ret)
             };
             // A value-class parameter erases to its underlying in the descriptor. Resolution compares
             // the ARGUMENT's Kotlin type against these, so a `Duration`/`Tag` argument matches nothing
@@ -234,6 +257,10 @@ impl JvmLibraries {
                 context_count,
                 contract,
                 generic_sig: generic_sig_for_callable.clone().map(Box::new),
+                // The DECLARED value-class return, when `@Metadata` says the descriptor return is that
+                // class's erased carrier. This is the fact the value-class pass needs and the
+                // descriptor cannot supply; it is already computed for `ret` above.
+                declared_ret: meta.value_class_ret,
                 ..LibraryCallable::library(
                     c.owner,
                     c.name.clone(),
@@ -1201,6 +1228,18 @@ impl JvmLibraries {
                 });
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                // The DECLARED return classifier, verbatim (see `LibraryMember::declared_ret`). Taken
+                // from the metadata this member was already aligned against, so no extra decode; a
+                // NULLABLE declared return stays `None` because it is genuinely boxed.
+                //
+                // A `suspend` member is excluded: CPS makes its descriptor return `Object` whatever it
+                // declares, so the descriptor no longer witnesses that the result is the erased
+                // carrier — and for a PRIMITIVE-underlying value class it is not (kotlinc's
+                // `make-<hash>(Continuation)Ljava/lang/Object;` hands back `M.box-impl(I)LM;`, a BOX).
+                // Claiming the fact there would repr a boxed value as unboxed. Without it the member
+                // falls back to the descriptor comparison, which classifies this case correctly.
+                member.declared_ret =
+                    member_metadata.and_then(metadata_declared_nonnull_nonsuspend_return);
                 if let Some(java_nullable) = platform_nullable_params.clone() {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
@@ -1450,6 +1489,14 @@ impl JvmLibraries {
                 member.set_ret_nullable(mf.ret_nullable());
                 member.set_suspend(mf.is_suspend());
                 member.call_sig = mf.member_call_sig();
+                // The DECLARED return classifier, verbatim and un-substituted — recorded with no
+                // value-class probing (which is unsafe on this path: it runs inside `resolve_type_name`'s
+                // type build and would recurse on cyclic class graphs). A NULLABLE declared return is
+                // deliberately excluded: a nullable value class really is BOXED, so it must keep the
+                // ordinary boxed handling. The value-class pass decides what the classifier means.
+                // `suspend` excluded for the reason given at the descriptor-loop site above: CPS
+                // erases the descriptor return to `Object`, which stops witnessing the carrier.
+                member.declared_ret = metadata_declared_nonnull_nonsuspend_return(mf);
                 crate::trace_compiler!(
                     "resolve",
                     "mangled member {}.{} jvm={} logical_params={:?}",
@@ -2406,8 +2453,8 @@ const CONTINUATION_PARAM_DESCRIPTOR: &str = "Lkotlin/coroutines/Continuation;";
 /// once is not a shape kotlinc emits, and guessing between them would align a caller's arguments to
 /// the wrong slots. Its representation facts are still valid, so retain those while reporting no
 /// continuation position and let the caller stay conservative if its value count does not align.
-fn method_parameter_layout(descriptor: &str) -> Option<crate::runtime::PlatformMethodLayout> {
-    let (params, _) = crate::jvm::names::parse_method_descriptor(descriptor)?;
+fn method_layout(descriptor: &str) -> Option<crate::runtime::PlatformMethodLayout> {
+    let (params, ret) = crate::jvm::names::parse_method_descriptor(descriptor)?;
     let mut found = params
         .iter()
         .enumerate()
@@ -2423,6 +2470,13 @@ fn method_parameter_layout(descriptor: &str) -> Option<crate::runtime::PlatformM
             .map(|p| p.starts_with('L') || p.starts_with('['))
             .collect(),
         continuation_slot,
+        // Only an object return names a class. A primitive carrier (`I`, `J`, ...), array (`[...`),
+        // or `V` makes no reference-class claim, which keeps a carrier-returning call from reading as
+        // an already boxed value.
+        return_class: ret
+            .strip_prefix('L')
+            .and_then(|ret| ret.strip_suffix(';'))
+            .map(type_name),
     })
 }
 
@@ -3001,6 +3055,15 @@ impl SymbolSource for JvmLibraries {
                     continue;
                 };
                 let bytecode_public = cand.as_ref().map_or(mf.is_public(), |c| c.public);
+                // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
+                // return to `Object`; present the LOGICAL signature (drop the continuation) so a
+                // normal call resolves — the same rule the top-level and member paths apply. The
+                // coroutine pass re-threads the CPS `Continuation` at the emitted call.
+                let descriptor = if mf.is_suspend() {
+                    strip_continuation_param(&descriptor)
+                } else {
+                    descriptor
+                };
                 let Some((params, pret)) = parse_method_desc(&descriptor) else {
                     continue;
                 };
@@ -3873,11 +3936,11 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         Some(method_descriptor(params, ret))
     }
 
-    fn descriptor_parameter_layout(
+    fn descriptor_method_layout(
         &self,
         descriptor: &str,
     ) -> Option<crate::runtime::PlatformMethodLayout> {
-        method_parameter_layout(descriptor)
+        method_layout(descriptor)
     }
 
     fn function_reference_impl_type(&self) -> Option<Ty> {
@@ -4331,8 +4394,8 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, method_parameter_layout, parse_class_gsig, parse_concrete_field_gsig,
-        parse_field_gsig, parse_method_desc, parse_method_gsig,
+        desc_to_ty, method_layout, parse_class_gsig, parse_concrete_field_gsig, parse_field_gsig,
+        parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::SemanticPlatform;
     use crate::symbol_source::SymbolSource;
@@ -4344,38 +4407,37 @@ mod tests {
     #[test]
     fn descriptor_layout_reports_representation_and_one_continuation_from_one_parse() {
         // `withLock$default` — the continuation sits BEFORE the mask/marker tail, not at the end.
-        let layout = method_parameter_layout(
+        let layout = method_layout(
             "(Lkotlinx/coroutines/sync/Mutex;Ljava/lang/Object;Lkotlin/jvm/functions/Function0;\
                  Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;",
         )
         .expect("valid descriptor");
         assert_eq!(layout.continuation_slot, Some(3));
+        assert_eq!(layout.return_class, Some(type_name("java/lang/Object")));
         assert_eq!(
             layout.reference_slots,
             vec![true, true, true, true, false, true]
         );
         // A plain suspend method's trailing continuation.
         assert_eq!(
-            method_parameter_layout("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;")
+            method_layout("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;")
                 .and_then(|layout| layout.continuation_slot),
             Some(1)
         );
         assert_eq!(
-            method_parameter_layout("(ILjava/lang/String;)V")
+            method_layout("(ILjava/lang/String;)V")
                 .expect("valid descriptor")
                 .continuation_slot,
             None
         );
         // Two of them: no position is derivable, so the caller must not be handed a guess.
         assert_eq!(
-            method_parameter_layout(
-                "(Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)V"
-            )
-            .expect("the parameter representations remain readable")
-            .continuation_slot,
+            method_layout("(Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)V")
+                .expect("the parameter representations remain readable")
+                .continuation_slot,
             None
         );
-        assert!(method_parameter_layout("not a descriptor").is_none());
+        assert!(method_layout("not a descriptor").is_none());
     }
 
     #[test]
@@ -4797,5 +4859,26 @@ mod tests {
             c.descriptor,
             "(Lkotlin/jvm/functions/Function2;Ljava/lang/Object;Lkotlin/coroutines/Continuation;)V"
         );
+    }
+
+    /// Lowering asks the provider what a call LEAVES on the stack so it never parses a JVM
+    /// descriptor itself. Only an object return names a class: `kotlin/UInt.box-impl` is how an
+    /// unsigned value becomes a reference, and its carrier-returning siblings (`constructor-impl`,
+    /// `unbox-impl`) must answer `None` or a value still in its primitive slot would read as boxed.
+    #[test]
+    fn descriptor_method_layout_names_only_an_object_return_class() {
+        assert_eq!(
+            method_layout("(I)Lkotlin/UInt;").and_then(|layout| layout.return_class),
+            Some(type_name("kotlin/UInt"))
+        );
+        for carrier in ["(I)I", "()I", "(Lkotlin/UInt;)V", "(I)[Ljava/lang/String;"] {
+            assert_eq!(
+                method_layout(carrier).and_then(|layout| layout.return_class),
+                None,
+                "{carrier}"
+            );
+        }
+        // A descriptor the platform cannot read is not a claim about anything.
+        assert!(method_layout("nonsense").is_none());
     }
 }
