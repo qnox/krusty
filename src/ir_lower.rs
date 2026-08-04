@@ -5953,7 +5953,17 @@ impl<'a> Lower<'a> {
             }
             _ => recv,
         };
-        self.check_unsigned_boxes_fit_descriptor(&member.descriptor, &args)?;
+        // The receiver is checked with the arguments: a member of a value class is realized as a
+        // mangled `-impl` static whose descriptor spells it as the leading parameter, and the box
+        // above is the one thing that can put a reference in it.
+        self.check_unsigned_boxes_fit_descriptor(
+            self.runtime
+                .descriptor_parameter_layout(&member.descriptor)
+                .map(|layout| layout.reference_slots),
+            Some(recv),
+            &args,
+            None,
+        )?;
         let interface = member.is_interface() || self.library_type_is_interface(owner);
         // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
         // the pushed receiver into a continuation spill slot (an unnamed temp local in its
@@ -6082,7 +6092,39 @@ impl<'a> Lower<'a> {
         record_suspend: bool,
     ) -> Option<u32> {
         let logical_ret = callable.ret;
-        self.check_unsigned_boxes_fit_descriptor(&callable.descriptor, &args)?;
+        // A descriptor that spells a CPS `Continuation` the lowered arguments do not fill. For a
+        // SUSPEND callable that is the normal `$default` shape — the plain suspend descriptor has
+        // already had its trailing continuation stripped, but a `$default` one spells it BEFORE the
+        // mask/marker tail, so it survives and the backend appends the value at emit time.
+        let descriptor_layout = self
+            .runtime
+            .descriptor_parameter_layout(&callable.descriptor);
+        let continuation = descriptor_layout
+            .as_ref()
+            .filter(|layout| layout.reference_slots.len() == args.len() + 1)
+            .and_then(|layout| layout.continuation_slot);
+        // For a callable NOT marked suspend, nothing will thread it, so the emitted `invokestatic` is
+        // an argument SHORT: it links and fails verification. The record is wrong rather than the
+        // call — an unsigned value parameter mangles the JVM name (`libU` → `libU-OzbTU-A`) and the
+        // suspend lookup, keyed by that name, misses the `@Metadata` entry under the SOURCE name.
+        // Both call forms reach this: the `$default` synthetic and the plain mangled method, which is
+        // why the test is the UNFILLED slot rather than `$default`-ness. A non-suspend callee that
+        // takes a `Continuation` as an ordinary parameter fills every slot and is untouched.
+        // Declining keeps the wrong record out of a class file; recovering the lookup would let the
+        // shape emit again.
+        if continuation.is_some() && !callable.suspend {
+            return self.bail("gate:unthreaded-continuation-slot");
+        }
+        // The singleton receiver of an imported object member is a static field READ, so it is not a
+        // descriptor slot; the emitter decides a leading receiver by COUNT, and an unfilled slot here
+        // reaches `check_unsigned_boxes_fit_descriptor` as `None` — its conservative path — rather
+        // than as a wrong position.
+        self.check_unsigned_boxes_fit_descriptor(
+            descriptor_layout.map(|layout| layout.reference_slots),
+            None,
+            &args,
+            continuation,
+        )?;
         // A member of an `object` / `companion object` brought into scope by `import Owner.name`: its
         // realization is an INSTANCE invoke on the singleton, not a facade static. Resolution recorded
         // exactly which field holds it (a plain object's `INSTANCE`, or the outer class's field for a
@@ -6174,19 +6216,51 @@ impl<'a> Lower<'a> {
     /// disagreement from reaching a class file; it is a net, not the mechanism any supported shape
     /// relies on.
     ///
-    /// Positions are compared only when the counts line up: a `$default` mask, an appended
-    /// `Continuation`, and a packed vararg all shift them, and none of those shapes can put a box
-    /// where a carrier belongs. A descriptor the platform cannot read is left to its own gates —
-    /// lowering asks which slots are references rather than parsing a target spelling itself.
-    fn check_unsigned_boxes_fit_descriptor(&self, descriptor: &str, args: &[u32]) -> Option<()> {
-        let Some(reference_slot) = self.runtime.descriptor_reference_params(descriptor) else {
+    /// Positions come from [`align_call_values_to_slots`], which reconciles the two shapes whose
+    /// descriptor carries a slot the lowered arguments do not: a value class's mangled `-impl`
+    /// member (the receiver is the LEADING parameter) and a `suspend` `$default` synthetic (the CPS
+    /// `Continuation` sits before the mask/marker tail, and the backend appends it). Any shape it
+    /// cannot line up falls back to declining whenever a box is on the stack at all, so no call
+    /// skips the check. `slot_is_reference` is `None` for a descriptor the platform cannot read,
+    /// which is left to its own gates — lowering asks which slots are references rather than parsing
+    /// a target spelling itself, and takes the answer PARSED so a caller that already needed the
+    /// slots does not pay for a second read.
+    ///
+    /// The RECEIVER is checked alongside the arguments: it is a descriptor slot exactly for the
+    /// `-impl` shape, and `emit_library_member_call` boxes it for a value-class owner — the same
+    /// disagreement, one position to the left.
+    fn check_unsigned_boxes_fit_descriptor(
+        &self,
+        slot_is_reference: Option<Vec<bool>>,
+        receiver: Option<u32>,
+        args: &[u32],
+        continuation_slot: Option<usize>,
+    ) -> Option<()> {
+        let Some(slot_is_reference) = slot_is_reference else {
             return Some(());
         };
-        if reference_slot.len() != args.len() {
-            return Some(());
-        }
-        let fits = std::iter::zip(args, reference_slot)
-            .all(|(&a, is_ref)| is_ref || self.lowered_unsigned_box(a).is_none());
+        let boxed = |value: u32| self.lowered_unsigned_box(value).is_some();
+        let Some(slots) = align_call_values_to_slots(
+            slot_is_reference,
+            receiver.is_some(),
+            args.len(),
+            continuation_slot,
+        ) else {
+            // An alignment this function does not model: no position is trustworthy, so the only
+            // sound answer is to decline whenever a box is on the stack at all. A call that carries
+            // none is unaffected, which is why the fallback costs nothing on every shape observed —
+            // it exists so an unmodelled shape cannot silently skip the check.
+            return match receiver.into_iter().chain(args.iter().copied()).any(boxed) {
+                true => self.bail("gate:unsigned-box-in-erased-slot"),
+                false => Some(()),
+            };
+        };
+        let receiver_fits = match (slots.receiver, receiver) {
+            (Some(is_reference), Some(receiver)) => is_reference || !boxed(receiver),
+            _ => true,
+        };
+        let fits = receiver_fits
+            && std::iter::zip(args, slots.args).all(|(&a, is_reference)| is_reference || !boxed(a));
         if !fits {
             return self.bail("gate:unsigned-box-in-erased-slot");
         }
@@ -27881,6 +27955,61 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
     })
 }
 
+/// Which descriptor slots a call's LOWERED values occupy, in the order those values are pushed.
+struct CallValueSlots {
+    /// Whether the RECEIVER's own descriptor slot holds a reference, when the descriptor spells one
+    /// at all. `None` for an ordinary instance call, whose receiver is off the descriptor.
+    receiver: Option<bool>,
+    /// Whether each value argument's slot holds a reference, in argument order.
+    args: Vec<bool>,
+}
+
+/// Line a call's lowered values up with the descriptor slots they land in.
+///
+/// A callee's descriptor is emitted VERBATIM, but the value list the lowerer builds is not always
+/// one-per-slot. Two shapes carry a descriptor slot no lowered value fills:
+///
+/// - a value class's members are realized as mangled `-impl` STATICS, whose descriptor spells the
+///   receiver as the LEADING parameter (`kotlin/Result.getOrNull-impl(Ljava/lang/Object;)…`) while
+///   the receiver travels beside the arguments, not in them;
+/// - a `suspend` `$default` synthetic spells the CPS `Continuation` BEFORE the mask/marker tail
+///   (`withLock$default(Mutex, Object, Function0, Continuation, int, Object)`), and the backend
+///   appends it — so `continuation_slot` names a position the caller never lowered.
+///
+/// A packed vararg and a non-suspend `$default` need no reconciliation: the vararg array is emitted
+/// before the values reach here, and the `$default` mask and marker are pushed as ordinary values.
+///
+/// Returns `None` when the counts still disagree — an unmodelled shape, or one whose synthetic tail
+/// is wider than a single mask word. Callers must treat that as "no position is known", never as
+/// "nothing to check".
+fn align_call_values_to_slots(
+    mut slot_is_reference: Vec<bool>,
+    has_receiver: bool,
+    arg_count: usize,
+    continuation_slot: Option<usize>,
+) -> Option<CallValueSlots> {
+    if let Some(slot) = continuation_slot {
+        if slot >= slot_is_reference.len() {
+            return None;
+        }
+        slot_is_reference.remove(slot);
+    }
+    if slot_is_reference.len() == arg_count {
+        return Some(CallValueSlots {
+            receiver: None,
+            args: slot_is_reference,
+        });
+    }
+    if has_receiver && slot_is_reference.len() == arg_count + 1 {
+        let receiver = slot_is_reference.remove(0);
+        return Some(CallValueSlots {
+            receiver: Some(receiver),
+            args: slot_is_reference,
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -27924,5 +28053,65 @@ mod tests {
             )),
             None
         );
+    }
+
+    /// The ordinary shape: one lowered value per descriptor slot, receiver off the descriptor.
+    #[test]
+    fn positional_call_values_line_up_slot_for_slot() {
+        // `maxOf-J1ME1BU:(II)I` — both slots are erased unsigned carriers.
+        let slots = align_call_values_to_slots(vec![false, false], false, 2, None)
+            .expect("equal counts line up");
+        assert_eq!(slots.receiver, None);
+        assert_eq!(slots.args, vec![false, false]);
+    }
+
+    /// A value class's member is a mangled `-impl` STATIC: the receiver is the descriptor's LEADING
+    /// parameter, so it must be checked as a slot of its own and the arguments must shift past it.
+    /// Comparing only when the counts matched left `kotlin/Result.getOrNull-impl` — the shape the box
+    /// corpus hits over a hundred times — checking nothing at all.
+    #[test]
+    fn value_class_impl_receiver_takes_the_leading_slot() {
+        // `kotlin/Result.getOrNull-impl:(Ljava/lang/Object;)Ljava/lang/Object;` with no arguments.
+        let slots = align_call_values_to_slots(vec![true], true, 0, None)
+            .expect("the extra leading slot is the receiver");
+        assert_eq!(slots.receiver, Some(true));
+        assert!(slots.args.is_empty());
+        // A mangled `-impl` on an unsigned carrier spells that receiver slot as the PRIMITIVE it
+        // rides in; a boxed receiver there is exactly what the gate has to catch.
+        let slots = align_call_values_to_slots(vec![false, true], true, 1, None)
+            .expect("the extra leading slot is the receiver");
+        assert_eq!(slots.receiver, Some(false));
+        assert_eq!(slots.args, vec![true]);
+        // Without a receiver to spend it on, the extra slot stays unexplained.
+        assert!(align_call_values_to_slots(vec![true], false, 0, None).is_none());
+    }
+
+    /// A `suspend` `$default` synthetic spells the CPS `Continuation` between the value parameters
+    /// and the mask/marker tail, and the backend appends it — so the slot has no lowered value, and
+    /// every value after it sits one position to the right of where a naive zip would put it.
+    #[test]
+    fn suspend_default_continuation_is_not_an_argument_slot() {
+        // `MutexKt.withLock$default:(Mutex, Object, Function0, Continuation, int, Object)Object` —
+        // five lowered values (receiver, owner, action, mask, marker) over six slots.
+        let descriptor = vec![true, true, true, true, false, true];
+        let slots = align_call_values_to_slots(descriptor.clone(), false, 5, Some(3))
+            .expect("dropping the continuation slot lines the rest up");
+        assert_eq!(slots.receiver, None);
+        // The mask `int` is the one primitive slot, and it must land on the mask VALUE (index 3),
+        // not on the action lambda it would have been compared against unaligned.
+        assert_eq!(slots.args, vec![true, true, true, false, true]);
+        // The same descriptor without the continuation removed does not line up — which is what
+        // made this shape skip the check entirely.
+        assert!(align_call_values_to_slots(descriptor, false, 5, None).is_none());
+    }
+
+    /// A shape the alignment does not model reports NO alignment rather than a wrong one. The caller
+    /// turns that into "decline if any box is on the stack", so a skip is never silent.
+    #[test]
+    fn unmodelled_shapes_report_no_alignment() {
+        // Two unexplained slots: a wider `$default` mask, a synthetic tail, anything else.
+        assert!(align_call_values_to_slots(vec![true, false, true], true, 1, None).is_none());
+        // A continuation slot the descriptor does not have is a malformed record, not an alignment.
+        assert!(align_call_values_to_slots(vec![true, true], false, 1, Some(7)).is_none());
     }
 }

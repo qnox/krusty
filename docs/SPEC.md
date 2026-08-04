@@ -1193,6 +1193,61 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **A comparison that PRODUCES a `Boolean` fuses its test exactly like one that drives a branch.** Both
+  positions share one rule: never materialize an `iconst_0` just to feed a two-operand `if_icmp*` when a
+  single-operand branch already says the same thing.
+  - `Long`/`Double`/`Float` compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, whose result is *already* -1/0/1
+    relative to zero, so the test is the single-operand `ifeq`/`ifne`/`iflt`/`ifle`/`ifgt`/`ifge` family.
+    `a == b` on `Long` (and therefore on `ULong`, which compares its carriers) is `lcmp; ifne`, **not**
+    `lcmp; iconst_0; if_icmpeq`. Same for the `Double` and `Float` pairs (`dcmpg; ifne`, `fcmpg; ifne`),
+    with the NaN-correct variant still chosen per operator (`a > b` is `dcmpl; ifle`). For `!=` on
+    `Double`/`Float` krusty is *shorter* than kotlinc, which materializes `==` and then negates it with a
+    second branch pair — an accepted divergence in the same family as the `ixor` one below.
+  - The int category fuses the same way against the literal `0`: `a != 0` is `iload_0; ifeq`, never
+    `iload_0; iconst_0; if_icmpne`.
+  - **Zero on the LEFT fuses only for `==`/`!=`.** `0 == x` is `iload x; ifne` (kotlinc's shape), but
+    kotlinc does NOT mirror the ORDERING operators, so `0 < x` stays the two-operand
+    `iconst_0; iload x; if_icmpge`. Both value and branch consumers now go through the same
+    non-structural comparison classifier and numeric operand emitter; the former branch-only
+    `swap_cmp` exception was removed so identical comparison IR cannot acquire a different opcode shape
+    from its surrounding position.
+  - This previously held only for comparisons in *branch* position (`if`/`while`/`when` conditions, via
+    `emit_compare_branch`); the value-producing path (`emit_compare`) always pushed the zero. Surfaced by
+    diffing unsigned `equals` against kotlinc.
+- **Value-position comparisons branch on the NEGATED condition to a `false` arm** — kotlinc's polarity:
+  `if_icmpne L; iconst_1; goto E; L: iconst_0; E:`, i.e. fall through to *true*. krusty previously jumped
+  to the *true* arm (`if_icmpeq L; iconst_0; goto E; L: iconst_1`). Semantically identical and the same
+  instruction count, but matching costs nothing (one flip in the shared tail, `materialize_cmp_bool`) and
+  makes the null (`ifnonnull`), referential (`if_acmpne`) and numeric (`if_icmpne`/`ifne`) arms match
+  kotlinc, so the differential harness stops reporting permanent noise there. The null check runs BEFORE
+  the referential arm, so `a === null` is `ifnonnull` and not `aconst_null; if_acmpne` — the same ordering
+  `emit_compare_branch` already used, and the reason `lhs_null`/`rhs_null` are computed up front.
+  - Known exception, **pre-existing and not fixed here**: `===` between a reference and a *primitive*
+    (`a: Any === b: Int`, which kotlinc only warns about) reaches the numeric tail unboxed, because
+    `int_cat` treats every non-`Long`/`Double`/`Float` type as int-category. That emits an int branch on
+    a reference and fails verification. Same in both positions, and on the pre-change compiler.
+  - Fixing the merge-point accounting (`set_stack` at the false arm, previously applied only to the
+    numeric arm) also removed a permanent `+1` drift in the null/referential arms. That drift made a
+    LATER branchy inline splice in the same expression see a non-empty baseline and refuse, escalating to
+    a hard `inline splice failed` compile error — so e.g.
+    `two(a === b, x.takeIf { it > 0 }.toString())` now compiles.
+  `tests/bytecode_parity_e2e.rs`: `long_compare_in_value_position_tests_lcmp_without_materialized_zero`,
+  `unsigned_long_equality_tests_lcmp_without_materialized_zero`,
+  `double_compare_in_value_position_tests_dcmp_without_materialized_zero`,
+  `float_compare_in_value_position_tests_fcmp_without_materialized_zero`,
+  `compare_against_zero_in_value_position_is_single_operand_branch`,
+  `zero_on_the_left_in_value_position_fuses_only_for_equality`,
+  `zero_on_the_left_in_branch_position_fuses_only_for_equality`,
+  `referential_null_comparison_in_value_position_is_single_operand`,
+  `value_position_comparison_does_not_poison_a_later_inline_splice`,
+  `value_position_comparison_polarity_matches_kotlinc` (branch position:
+  `compare_against_zero_is_single_operand_branch`).
+- **Accepted divergence — reference `!=` in value position uses `ixor`.** For `a != b` on two non-null
+  references krusty emits `Intrinsics.areEqual; iconst_1; ixor`; kotlinc emits the four-instruction branch
+  form `areEqual; ifne L; iconst_1; goto E; L: iconst_0; E:`. krusty's is two instructions shorter and
+  provably equivalent (`areEqual` returns a `Z`, i.e. 0 or 1, so `xor 1` is exactly logical negation), and
+  unlike the cases above it is not a redundancy to remove — so it stays. Recorded here so a future ABI
+  diff against kotlinc reads it as intentional rather than a bug.
 - **A class method's expression-body return type is inferred with its own parameters in scope**
   (`fun m(x: Int) = x + 1` → `Int`). Signature collection adds the method's parameters (alongside the
   class properties) to the literal-inference scope; previously only the properties were visible, so a
@@ -1502,6 +1557,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recovery, which turns the miscompile back into a clean skip.
   `tests/unsigned_classpath_call_e2e.rs` asserts the backend contract directly (a decline passes; an
   EMITTED class that does not verify and run fails), so it keeps holding whichever way a shape is handled.
+  The net compares POSITIONS, so the lowered values have to be lined up with the descriptor slots first
+  (`align_call_values_to_slots`). Two shapes carry a slot no lowered value fills, and both were measured
+  over the box corpus and the full e2e suite rather than assumed:
+  - a value class's members are realized as mangled `-impl` STATICS whose descriptor spells the receiver
+    as the LEADING parameter (`kotlin/Result.getOrNull-impl:(Ljava/lang/Object;)…`) while the receiver
+    travels beside the arguments — the corpus hits this over a hundred times. The receiver is checked
+    with the arguments there, since a value-class owner is exactly where the lowerer boxes it;
+  - a `suspend` `$default` synthetic spells the CPS `Continuation` BEFORE the `int mask` + `Object`
+    marker (`withLock$default(Mutex, Object, Function0, Continuation, int, Object)`) and the backend
+    appends it at emit time. The plain suspend descriptor has already had its TRAILING continuation
+    stripped, so only the `$default` form needs this.
+  A packed vararg needs no reconciliation — the array is emitted before the values reach the check — so
+  the earlier claim that it shifts positions was wrong; no such call was observed. Any shape the
+  alignment cannot line up now declines whenever a box is on the stack at all, rather than skipping: a
+  count mismatch is "no position is known", never "nothing to check".
+  The runtime provider returns reference/primitive positions and the unambiguous runtime-supplied
+  continuation position together as one `PlatformMethodLayout`; JVM descriptor syntax remains outside
+  common lowering, and the descriptor is parsed once rather than by independent representation and
+  continuation queries that could disagree.
+
+  Aligning that second shape surfaced a separate miscompile, now also declined
+  (`gate:unthreaded-continuation-slot`): an unsigned VALUE PARAMETER mangles the JVM name (`libU` →
+  `libU-OzbTU-A`), krusty looks suspend-ness up under that name while `@Metadata` records the SOURCE
+  name, and the callable comes back marked non-suspend — so nothing threads the `Continuation` its
+  descriptor still spells and the emitted `invokestatic` is one argument short. BOTH call forms hit
+  it, the `$default` synthetic and the plain mangled method, so the test is the UNFILLED slot (the
+  descriptor has one parameter more than the call has values, and that parameter is a `Continuation`)
+  rather than `$default`-ness. A non-suspend callee that declares a `Continuation` parameter of its
+  own fills every slot and is untouched. Recovering the mangled-name suspend lookup would let these
+  shapes emit again; until then they skip instead of failing verification.
+
   `tests/bytecode_parity_e2e.rs` pins the two `equals` SHAPES: the folded carrier compare, and
   `equals-impl` with an unboxed receiver — the latter across all four carriers (`B`/`S`/`I`/`J`) and
   across `Any`, `String`, `UInt?`, cross-carrier, and the literal-`null` divergence. It also pins that
