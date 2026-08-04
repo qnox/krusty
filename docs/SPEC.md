@@ -821,7 +821,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   file-independent `resolve::CtorDefaultValue::Char`, which is a `u16` for the same reason), and an
   ANNOTATION ARGUMENT is written as an `element_value` tagged `'C'` over a `CONSTANT_Integer` holding
   the raw code unit. Tests: `CharSurrogateConst`, `CharSurrogateLiteral`, `CharSurrogateCtorDefault`,
-  `CharSurrogateWhen`, and `CharSurrogateAnnotationArg` in `tests/feature_box_e2e.rs`.
+  `CharSurrogateWhen`, and `CharSurrogateAnnotationArg` in `tests/feature_box_e2e.rs`, plus
+  `cross_file_super_ctor_char_defaults_keep_utf16_code_units` in
+  `tests/cross_file_ctor_default_e2e.rs` for the sibling-file handoff.
 - **A `Char` constant folded into a string renders as the CHARACTER, not its code unit.** The constant
   string evaluator behind the `trimIndent`/`trimMargin` fold accepts a `Char` (`${'$'}` is the idiomatic
   way to write a literal `$` in a template), so it must spell the character out. A code unit that is not
