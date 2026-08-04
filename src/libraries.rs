@@ -746,6 +746,7 @@ pub fn map_call_args<T: Copy>(
     let mut slots = vec![None; parameter_count];
     let mut positional = 0usize;
     let mut seen_named = false;
+    let mut vararg_named = false;
     let mut named_order_matches = true;
     let mut errors = Vec::new();
     let mut recovery_argument = None;
@@ -775,6 +776,9 @@ pub fn map_call_args<T: Copy>(
                     });
                     continue;
                 }
+                if vararg == Some(parameter_index) {
+                    vararg_named = true;
+                }
                 slots[parameter_index] = Some(argument);
             }
             None => {
@@ -800,6 +804,12 @@ pub fn map_call_args<T: Copy>(
 
                 if seen_named {
                     if named_order_matches && argument_index >= parameter_count {
+                        // Overflow past the parameter list is legal when a vararg absorbs it
+                        // (`f(a = 1, "x", "y")` — the extras are its elements, reconstructed by
+                        // the slot-map contract), unless the vararg was already bound BY NAME.
+                        if vararg.is_some() && !vararg_named {
+                            continue;
+                        }
                         errors.push(CallArgMappingError::TooManyArguments {
                             argument: argument_index,
                             expected: parameter_count,

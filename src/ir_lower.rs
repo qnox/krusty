@@ -14,11 +14,11 @@ use crate::ast::{
 use crate::frontend::{
     classifier_over_default, function_import_scope, qualified_path, typeref_leaf,
     AnonymousObjectCapture, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
-    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendSymbols,
-    FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget,
-    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall,
-    ResolvedConstructor, ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
+    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendClassSig,
+    FrontendSymbols, FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind,
+    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda,
+    ResolvedCall, ResolvedConstructor, ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall,
+    ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -838,7 +838,7 @@ fn lower_file_at_reporting_impl(
             // An `inner class` captures the enclosing instance: a synthetic `this$0` field of the outer
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
-            let class_sig = syms.classes.get(&c.name)?;
+            let class_sig = syms.class_by_internal(&internal)?;
             let resolved_prop_ty = |name: &str| {
                 class_sig
                     .props
@@ -948,8 +948,7 @@ fn lower_file_at_reporting_impl(
                     let (_, _, gv_ret, _, _) =
                         lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
                     let prop_ty = syms
-                        .classes
-                        .get(&c.name)
+                        .class_by_internal(&internal)
                         .and_then(|cs| {
                             cs.props
                                 .iter()
@@ -1360,7 +1359,7 @@ fn lower_file_at_reporting_impl(
             let mut method_fids = Vec::new();
             for (mi, m) in c.methods.iter().enumerate() {
                 // Ordinary and extension overloads occupy separate signature tables.
-                let class_sig = syms.classes.get(&c.name)?;
+                let class_sig = syms.class_by_internal(&internal)?;
                 let extension_receiver = if m.receiver.is_some() {
                     let overload_idx = c.methods[..mi]
                         .iter()
@@ -1633,7 +1632,7 @@ fn lower_file_at_reporting_impl(
                 .enumerate()
                 .filter(|(_, p)| is_member_ext_prop(p))
             {
-                let sig = member_extension_property_plan(syms, c, pi)?;
+                let sig = member_extension_property_plan(syms, &internal, c, pi)?;
                 // Only the concrete shape: a receiver/return mentioning a class type parameter's own
                 // type erases through bounds the read/write handoff doesn't carry, and a value-class
                 // receiver/return needs the boxed/mangled form — both stay gated (skip, never
@@ -1714,8 +1713,7 @@ fn lower_file_at_reporting_impl(
             // instance method that calls the delegate's `getValue`/`setValue`. Bodies built in pass 2.
             for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
                 let prop_ty = syms
-                    .classes
-                    .get(&c.name)
+                    .class_by_internal(&internal)
                     .and_then(|cs| {
                         cs.props
                             .iter()
@@ -2219,7 +2217,7 @@ fn lower_file_at_reporting_impl(
                 // `AbstractMethodError`. Verify each overriding method matches exactly; otherwise (or for a
                 // classpath interface, whose methods aren't checked here) skip the file — never miscompile.
                 let mut comp_ifaces = Vec::new();
-                let csig0 = syms.classes.get(&c.name)?;
+                let csig0 = syms.class_by_internal(&internal)?;
                 for st in &c.companion_supertypes {
                     let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface()));
                     if !is_file_iface {
@@ -2337,7 +2335,7 @@ fn lower_file_at_reporting_impl(
                     field_annotations: Vec::new(),
                     runtime_retained: false,
                 });
-                let csig = syms.classes.get(&c.name)?;
+                let csig = syms.class_by_internal(&internal)?;
                 let mut cmethods: HashMap<String, Vec<(u32, u32, Ty)>> = HashMap::new();
                 let mut cmethod_fids = Vec::new();
                 for (mi, m) in c.companion_methods.iter().enumerate() {
@@ -2907,13 +2905,13 @@ fn lower_file_at_reporting_impl(
                         Some(d) => is_const_literal(file, d),
                         None => true,
                     });
-                // A trailing `vararg` is allowed for a TOP-LEVEL function (no receiver): the vararg
-                // parameter carries no default (`$default` passes its array through), so its omitted-arg
-                // call routes through the stub with an empty array for the vararg slot. An extension's
-                // receiver-offset vararg is left out (a later slice).
-                let vararg_ok = !f.params.iter().any(|p| p.is_vararg)
-                    || (f.receiver.is_none() && f.params.last().is_some_and(|p| p.is_vararg));
-                if const_ok && f.params.iter().any(|p| p.default.is_some()) && vararg_ok {
+                // A `vararg` is allowed alongside defaults: the vararg parameter carries no default
+                // (`$default` passes its array through / the call site packs it), so an omitted-arg
+                // call routes through the stub — or, for an EXTENSION, inlines the constant defaults
+                // at the call site (`const_ok` already restricts extension defaults to constants).
+                // A NON-final vararg (`fun topd(vararg s: String, flag: Boolean = false)`) is the
+                // same shape: the parameters after it are reachable only by name and defaulted.
+                if const_ok && f.params.iter().any(|p| p.default.is_some()) {
                     let ir_params = lo.ir.functions[fid as usize].params.clone();
                     let recv_off = usize::from(f.receiver.is_some());
                     let mut defaults: Vec<Option<u32>> = vec![None; recv_off];
@@ -3098,7 +3096,7 @@ fn lower_file_at_reporting_impl(
                     }
                     // A member extension has dispatch `this` at slot 0 and extension `this` at slot 1.
                     let dispatch_v = lo.fresh_value();
-                    let class_sig = syms.classes.get(&c.name)?;
+                    let class_sig = syms.class_by_internal(&internal)?;
                     let extension_signature = if m.receiver.is_some() {
                         Some(
                             class_sig
@@ -3205,7 +3203,7 @@ fn lower_file_at_reporting_impl(
                     .enumerate()
                     .filter(|(_, p)| is_member_ext_prop(p))
                 {
-                    let sig = member_extension_property_plan(syms, c, pi)?;
+                    let sig = member_extension_property_plan(syms, &internal, c, pi)?;
                     let (receiver_ir, ret_ir) = sig.ir_types(p);
                     // Link the accessor by name AND parameter list: a plain computed property of the
                     // same name registers `getX()` first, and receiver overloads share `getX` —
@@ -3473,7 +3471,10 @@ fn lower_file_at_reporting_impl(
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
-                        let sig = syms.classes.get(&c.name)?.static_methods.get(&m.name)?;
+                        let sig = syms
+                            .class_by_internal(&internal)?
+                            .static_methods
+                            .get(&m.name)?;
                         for (p, t) in m.params.iter().zip(&sig.params) {
                             let v = lo.fresh_value();
                             lo.scope.push((p.name.clone(), v, *t));
@@ -4443,8 +4444,7 @@ fn lower_file_at_reporting_impl(
                             // member is declared on the enum itself, OR on an implemented interface
                             // (`enum class E : I { A { override fun … } }`).
                             let sig = match syms
-                                .classes
-                                .get(&c.name)
+                                .class_by_internal(&internal)
                                 .and_then(|cs| cs.method(&bm.name))
                             {
                                 Some(s) => s.clone(),
@@ -5454,6 +5454,7 @@ impl MemberExtensionPropertyPlan {
 /// pass 1 from registering one overload while pass 2 links and overwrites another overload's body.
 fn member_extension_property_plan(
     symbols: &FrontendSymbols,
+    internal: &str,
     class: &ast::ClassDecl,
     property_index: usize,
 ) -> Option<MemberExtensionPropertyPlan> {
@@ -5463,8 +5464,7 @@ fn member_extension_property_plan(
         .filter(|candidate| candidate.name == property.name && candidate.receiver.is_some())
         .count();
     let signature = symbols
-        .classes
-        .get(&class.name)?
+        .class_by_internal(internal)?
         .member_ext_props(&property.name)
         .get(overload_index)?;
     Some(MemberExtensionPropertyPlan {
@@ -5608,6 +5608,33 @@ struct RecordedImplicitPropertyWrite {
 enum IncDecSite {
     Statement(ast::StmtId),
     Expression(AstExprId),
+}
+
+/// How the common checker-slot consumer fills a parameter that has no source argument. Keeping the
+/// policy explicit lets module/source/classpath call sites share argument evaluation and vararg
+/// packing without confusing three different ABI meanings of an empty slot: unsupported, a
+/// `$default` placeholder (except for its non-null vararg array), or a source constant default.
+#[derive(Clone, Copy)]
+enum OmittedSlotPolicy<'a> {
+    Reject,
+    DefaultPlaceholders {
+        vararg: Option<usize>,
+    },
+    SourceDefaults {
+        values: &'a [Option<CtorDefaultValue>],
+        semantic_params: &'a [Ty],
+    },
+}
+
+#[derive(Clone, Copy)]
+struct LoweredVarargContribution {
+    temp: u32,
+    /// An explicit `*array`: merge/copy it through the platform spread builder.
+    spread: bool,
+    /// A named whole-array value (`items = values`): pass the sole array through directly. This is
+    /// distinct from both a plain element and `*values`; storing the array as one element produces
+    /// an `ArrayStoreException`, while treating it as a spread changes the call's copy semantics.
+    whole_array: bool,
 }
 
 pub(crate) struct Lower<'a> {
@@ -8233,7 +8260,33 @@ impl<'a> Lower<'a> {
             .class_names
             .get(name)
             .map(TypeName::render)
-            .or_else(|| self.syms.classes.get(name).map(|c| c.internal()))
+            .or_else(|| self.module_class_named(name).map(|c| c.internal()))
+    }
+
+    /// The MODULE class a bare classifier name binds to in THIS file: an explicit import naming a
+    /// module class first, then a same-package declaration — mirrors the checker's
+    /// `module_class_named` (the class map keys on internal names, so a same-simple-name class in
+    /// another package never answers). The import arm is classifier-first: a nested source class
+    /// shadows the identical package path. An import naming no module classifier (a classpath type,
+    /// or a FUNCTION like `import lib.Foo`) falls through to the same-package arm.
+    fn module_class_named(&self, name: &str) -> Option<&FrontendClassSig> {
+        let explicit_candidates = self
+            .afile
+            .imports
+            .iter()
+            .filter(|import| import.rsplit('.').next() == Some(name))
+            .flat_map(|import| {
+                crate::names::nested_internal_name_candidates(&import.replace('.', "/"))
+                    .into_iter()
+                    .rev()
+            })
+            .filter_map(|candidate| existing_type_name(&candidate));
+        self.syms.source_class_binding(
+            self.file_index,
+            explicit_candidates,
+            type_name(&class_internal(self.afile, name)),
+            name,
+        )
     }
 
     /// Lower construction of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
@@ -10470,8 +10523,11 @@ impl<'a> Lower<'a> {
         // symbol handoff, not the resolver implementation that originally populated it.
         let mut properties: Vec<(TypeName, String, String, Option<String>, Ty)> = Vec::new();
         let mut seen_ifaces: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
-        let mut queue = vec![existing_type_name(&iface_internal)
-            .or_else(|| self.syms.classes.get(iface_name).map(|c| c.internal_name()))?];
+        let mut queue = vec![existing_type_name(&iface_internal).or_else(|| {
+            self.syms
+                .class_by_internal(&class_internal(file, iface_name))
+                .map(|c| c.internal_name())
+        })?];
         while let Some(cur) = queue.pop() {
             if !seen_ifaces.insert(cur) {
                 continue;
@@ -11789,10 +11845,27 @@ impl<'a> Lower<'a> {
             if ctx_n != 0 || vararg >= ir_params.len() {
                 return None;
             }
-            let lowered_args = if vararg + 1 < ir_params.len() {
-                self.lower_non_last_vararg_args(call, args, &ir_params, vararg)?
+            let named = self.afile.call_arg_names.contains_key(&call.0);
+            let (lowered_args, prelude) = if named {
+                let slots = self.info.resolved_call_arg_slots.get(&call)?.clone();
+                self.lower_source_slot_args(
+                    args,
+                    &slots,
+                    &ir_params,
+                    &target.params,
+                    Some(vararg),
+                    &target.param_default_values,
+                )?
+            } else if vararg + 1 < ir_params.len() {
+                (
+                    self.lower_non_last_vararg_args(call, args, &ir_params, vararg)?,
+                    Vec::new(),
+                )
             } else {
-                self.lower_call_args_vararg(args, &ir_params, true, vararg)?
+                (
+                    self.lower_call_args_vararg(args, &ir_params, true, vararg)?,
+                    Vec::new(),
+                )
             };
             let physical_ret = ty_to_ir(target.physical_ret);
             let emitted = self.emit_cross_file_call(
@@ -11805,7 +11878,8 @@ impl<'a> Lower<'a> {
             if target.suspend {
                 self.ir.suspend_calls.insert(emitted, physical_ret);
             }
-            return Some(self.coerce_to_static(emitted, target.ret, target.physical_ret));
+            let emitted = self.coerce_to_static(emitted, target.ret, target.physical_ret);
+            return Some(self.wrap_arg_prelude(emitted, prelude));
         }
 
         let names = self
@@ -12003,45 +12077,6 @@ impl<'a> Lower<'a> {
         } else {
             Some((self.lower_args(args, params)?, Vec::new()))
         }
-    }
-
-    fn lower_source_extension_args(
-        &mut self,
-        function: u32,
-        call: AstExprId,
-        args: &[AstExprId],
-        params: &[Ty],
-    ) -> Option<(Vec<u32>, Vec<u32>)> {
-        let slots = self.info.resolved_call_arg_slots.get(&call)?.clone();
-        if slots.len() != params.len() {
-            return None;
-        }
-        let defaults = self.ir.fn_params.get(&function)?.defaults.as_ref()?.clone();
-        let mut slot_temp = vec![None; params.len()];
-        let mut prelude = Vec::new();
-        for &argument in args {
-            let index = slots.iter().position(|slot| *slot == Some(argument))?;
-            let value = self.lower_arg(argument, &params[index])?;
-            let temp = self.fresh_value();
-            prelude.push(self.emit_variable(temp, params[index], Some(value)));
-            slot_temp[index] = Some(temp);
-        }
-        let mut lowered = Vec::with_capacity(params.len());
-        for (index, temp) in slot_temp.into_iter().enumerate() {
-            if let Some(temp) = temp {
-                lowered.push(self.emit_get_value(temp));
-                continue;
-            }
-            let default = defaults
-                .get(index + 1)
-                .and_then(|default| *default)
-                .map(|default| self.ir.exprs[default as usize].clone())?;
-            let IrExpr::Const(constant) = default else {
-                return None;
-            };
-            lowered.push(self.emit_const(constant));
-        }
-        Some((lowered, prelude))
     }
 
     /// The receiver's class type for member access. The checker types a bare `object` name as
@@ -13840,6 +13875,8 @@ impl<'a> Lower<'a> {
                 owner,
                 source,
                 vararg,
+                vararg_index,
+                param_default_values,
                 inline,
                 suspend,
             } => {
@@ -13883,28 +13920,28 @@ impl<'a> Lower<'a> {
                     }
                     let receiver_value = self.coerce_argument_value(recv_v, recv_ty, params[0])?;
                     let (arguments, mut prelude) = match source_expr {
-                        Some(call)
-                            if self
-                                .info
-                                .resolved_call_arg_slots
-                                .get(&call)
-                                .is_some_and(|slots| slots.iter().any(Option::is_none)) =>
-                        {
-                            self.lower_source_extension_args(fid, call, args, &params[1..])?
-                        }
-                        Some(call)
-                            if vararg && !self.info.resolved_call_arg_slots.contains_key(&call) =>
-                        {
-                            let value_params = &params[1..];
-                            let n_fixed = value_params.len().checked_sub(1)?;
-                            (
-                                self.lower_call_args_vararg(args, value_params, true, n_fixed)?,
-                                Vec::new(),
-                            )
-                        }
-                        Some(call) => {
-                            self.lower_call_args_in_slot_order(call, args, &params[1..])?
-                        }
+                        Some(call) => match self.info.resolved_call_arg_slots.get(&call).cloned() {
+                            // A vararg or omission consumes the selected semantic slots through the
+                            // same core for local and sibling declarations. In particular, the value
+                            // stored at a vararg slot is an ELEMENT, never the descriptor's array.
+                            Some(slots) if vararg || slots.iter().any(Option::is_none) => self
+                                .lower_source_slot_args(
+                                    args,
+                                    &slots,
+                                    &params[1..],
+                                    &selected_params,
+                                    vararg.then_some(vararg_index).flatten(),
+                                    &param_default_values,
+                                )?,
+                            Some(_) => {
+                                self.lower_call_args_in_slot_order(call, args, &params[1..])?
+                            }
+                            // The checker records slots for every source vararg call. A missing
+                            // record is stale/incomplete semantic input, so decline instead of
+                            // rebuilding a provider-specific positional map in the backend.
+                            None if vararg => return None,
+                            None => (self.lower_args(args, &params[1..])?, Vec::new()),
+                        },
                         None if args.len() == params.len() - 1 => {
                             (self.lower_args(args, &params[1..])?, Vec::new())
                         }
@@ -13938,16 +13975,20 @@ impl<'a> Lower<'a> {
                     self.coerce_argument_value(recv_v, recv_ty, physical_receiver)?;
                 let params = tys_to_ir(&selected_params);
                 let (arguments, mut prelude) = match source_expr {
-                    Some(call)
-                        if vararg && !self.info.resolved_call_arg_slots.contains_key(&call) =>
-                    {
-                        let n_fixed = params.len().checked_sub(1)?;
-                        (
-                            self.lower_call_args_vararg(args, &params, true, n_fixed)?,
-                            Vec::new(),
-                        )
-                    }
-                    Some(call) => self.lower_call_args_in_slot_order(call, args, &params)?,
+                    Some(call) => match self.info.resolved_call_arg_slots.get(&call).cloned() {
+                        Some(slots) if vararg || slots.iter().any(Option::is_none) => self
+                            .lower_source_slot_args(
+                                args,
+                                &slots,
+                                &params,
+                                &selected_params,
+                                vararg.then_some(vararg_index).flatten(),
+                                &param_default_values,
+                            )?,
+                        Some(_) => self.lower_call_args_in_slot_order(call, args, &params)?,
+                        None if vararg => return None,
+                        None => (self.lower_args(args, &params)?, Vec::new()),
+                    },
                     None if args.len() == params.len() => {
                         (self.lower_args(args, &params)?, Vec::new())
                     }
@@ -13994,7 +14035,8 @@ impl<'a> Lower<'a> {
                 let receiver = self.spill_receiver_before_args(receiver, recv_ty, &mut prelude);
                 let mut lowered = vec![receiver];
                 lowered.extend(arguments);
-                let call = self.emit_library_static_call(callable, lowered, false)?;
+                let suspend = callable.suspend;
+                let call = self.emit_library_static_call(callable, lowered, suspend)?;
                 Some((self.wrap_arg_prelude(call, prelude), selected_ret))
             }
             _ => None,
@@ -14900,12 +14942,19 @@ impl<'a> Lower<'a> {
                 out.push(self.zero_placeholder(param));
             }
             let mut elements = Vec::new();
+            let mut spreads = Vec::new();
             if args.len() > slot {
                 for &arg in &args[slot..] {
-                    elements.push(self.lower_vararg_element(arg, elem, array_type)?);
+                    let is_spread = self.afile.is_spread_arg(arg);
+                    elements.push(if is_spread {
+                        self.lower_arg(arg, &ty_to_ir(array_type))?
+                    } else {
+                        self.lower_vararg_element(arg, elem, array_type)?
+                    });
+                    spreads.push(is_spread);
                 }
             }
-            out.push(self.emit_vararg(ty_to_ir(array_type), elements));
+            out.push(self.emit_vararg_with_spreads(ty_to_ir(array_type), elements, spreads));
             for &param in &params[slot + 1..] {
                 out.push(self.zero_placeholder(param));
             }
@@ -15842,9 +15891,64 @@ impl<'a> Lower<'a> {
             source_args,
             slots,
             params,
-            fill_omitted,
             None,
             None,
+            if fill_omitted {
+                OmittedSlotPolicy::DefaultPlaceholders { vararg: None }
+            } else {
+                OmittedSlotPolicy::Reject
+            },
+        )
+    }
+
+    /// [`Self::lower_call_slot_args_source_order`] for a callable with a vararg: arguments absent
+    /// from the slot map are that vararg's second and later elements, and the vararg slot's value
+    /// is the packed (spread-aware) array.
+    fn lower_call_slot_args_vararg_pack(
+        &mut self,
+        source_args: &[AstExprId],
+        slots: &[Option<AstExprId>],
+        params: &[Ty],
+        fill_omitted: bool,
+        vararg_index: Option<usize>,
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        self.lower_call_slot_args_source_order_with_element(
+            source_args,
+            slots,
+            params,
+            None,
+            vararg_index,
+            if fill_omitted {
+                OmittedSlotPolicy::DefaultPlaceholders { vararg: None }
+            } else {
+                OmittedSlotPolicy::Reject
+            },
+        )
+    }
+
+    /// Consume checker-owned slots for a source callable. The same operation handles local and
+    /// sibling-facade functions/extensions: arguments evaluate once in source order, a selected
+    /// vararg packs once, and only file-independent defaults from the selected signature may fill
+    /// omissions. No AST label or declaration-origin probe participates in binding here.
+    fn lower_source_slot_args(
+        &mut self,
+        source_args: &[AstExprId],
+        slots: &[Option<AstExprId>],
+        physical_params: &[Ty],
+        semantic_params: &[Ty],
+        vararg_index: Option<usize>,
+        defaults: &[Option<CtorDefaultValue>],
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        self.lower_call_slot_args_source_order_with_element(
+            source_args,
+            slots,
+            physical_params,
+            None,
+            vararg_index,
+            OmittedSlotPolicy::SourceDefaults {
+                values: defaults,
+                semantic_params,
+            },
         )
     }
 
@@ -15865,9 +15969,11 @@ impl<'a> Lower<'a> {
             source_args,
             slots,
             params,
-            true,
             None,
-            vararg_index,
+            None,
+            OmittedSlotPolicy::DefaultPlaceholders {
+                vararg: vararg_index,
+            },
         )
     }
 
@@ -15915,17 +16021,54 @@ impl<'a> Lower<'a> {
         source_args: &[AstExprId],
         slots: &[Option<AstExprId>],
         params: &[Ty],
-        fill_omitted: bool,
         elem_prim: Option<Ty>,
-        omitted_vararg: Option<usize>,
+        vararg_pack: Option<usize>,
+        omitted: OmittedSlotPolicy<'_>,
     ) -> Option<(Vec<u32>, Vec<u32>)> {
         if slots.len() != params.len() {
             return None;
         }
         let mut slot_temp: Vec<Option<u32>> = vec![None; params.len()];
+        let mut vararg_temp: Vec<LoweredVarargContribution> = Vec::new();
         let mut prelude = Vec::new();
         for &arg in source_args {
-            let slot_idx = slots.iter().position(|slot| *slot == Some(arg))?;
+            let slot_idx = slots.iter().position(|slot| *slot == Some(arg));
+            // The slot map stores ONE expression per parameter; with a packing vararg, every
+            // argument absent from it — and the one stored at the vararg slot — is a vararg
+            // element (or a SPREAD contributing its whole array), packed below in source order.
+            let packs = match (slot_idx, vararg_pack) {
+                (Some(index), Some(vararg)) => index == vararg,
+                (None, Some(_)) => true,
+                (None, None) => return None,
+                _ => false,
+            };
+            if packs {
+                let array = *params.get(vararg_pack?)?;
+                let element = array.array_elem().unwrap_or(array);
+                let is_spread = self.afile.is_spread_arg(arg);
+                // A named vararg may bind the whole array without `*` (`items = values`). Consume the
+                // checker-selected form directly: comparing `Ty` here is unsound for generic calls,
+                // where inference can retain different type arguments for the expression and selected
+                // parameter even though both erase to the same JVM array. The semantic marker is shared
+                // by every callable origin and prevents lowering from rediscovering labels or types.
+                let whole_array = self.info.resolved_whole_array_vararg_args.contains(&arg);
+                let want = if is_spread || whole_array {
+                    array
+                } else {
+                    element
+                };
+                let ir_ty = ty_to_ir(want);
+                let value = self.lower_arg(arg, &ir_ty)?;
+                let tmp = self.fresh_value();
+                prelude.push(self.emit_variable(tmp, ir_ty, Some(value)));
+                vararg_temp.push(LoweredVarargContribution {
+                    temp: tmp,
+                    spread: is_spread,
+                    whole_array,
+                });
+                continue;
+            }
+            let slot_idx = slot_idx?;
             if slot_temp[slot_idx].is_some() {
                 return None;
             }
@@ -15950,12 +16093,53 @@ impl<'a> Lower<'a> {
         for (i, tmp) in slot_temp.into_iter().enumerate() {
             match tmp {
                 Some(tmp) => lowered.push(self.emit_get_value(tmp)),
-                None if omitted_vararg == Some(i) => {
-                    let array = self.emit_vararg(ty_to_ir(params[i]), Vec::new());
-                    lowered.push(array);
+                None if vararg_pack == Some(i) => {
+                    let whole_array = match vararg_temp.as_slice() {
+                        [contribution] if contribution.whole_array => Some(contribution.temp),
+                        _ => None,
+                    };
+                    if let Some(temp) = whole_array {
+                        lowered.push(self.emit_get_value(temp));
+                    } else {
+                        // A whole-array named binding is exclusive by the call-mapping rules. If
+                        // stale semantic input ever combines one with elements, decline rather than
+                        // storing an array inside its own element array.
+                        if vararg_temp.iter().any(|item| item.whole_array) {
+                            return None;
+                        }
+                        let elements = vararg_temp
+                            .iter()
+                            .map(|item| self.emit_get_value(item.temp))
+                            .collect();
+                        let spreads = vararg_temp.iter().map(|item| item.spread).collect();
+                        lowered.push(self.emit_vararg_with_spreads(
+                            ty_to_ir(params[i]),
+                            elements,
+                            spreads,
+                        ));
+                    }
                 }
-                None if fill_omitted => lowered.push(self.zero_placeholder(params[i])),
-                None => return None,
+                None => match omitted {
+                    OmittedSlotPolicy::Reject => return None,
+                    OmittedSlotPolicy::DefaultPlaceholders { vararg } if vararg == Some(i) => {
+                        let array = self.emit_vararg(ty_to_ir(params[i]), Vec::new());
+                        lowered.push(array);
+                    }
+                    OmittedSlotPolicy::DefaultPlaceholders { .. } => {
+                        lowered.push(self.zero_placeholder(params[i]));
+                    }
+                    OmittedSlotPolicy::SourceDefaults {
+                        values,
+                        semantic_params,
+                    } => {
+                        let default = values.get(i).and_then(Option::as_ref)?;
+                        let semantic = *semantic_params.get(i)?;
+                        if !default.fills_param_ty(semantic) {
+                            return None;
+                        }
+                        lowered.push(ctor_default_to_ir(&mut self.ir, self.runtime, default)?);
+                    }
+                },
             }
         }
         Some((lowered, prelude))
@@ -16265,8 +16449,13 @@ impl<'a> Lower<'a> {
         // handoff for labelled, reordered, positional-default, and trailing-lambda calls; it must not
         // rediscover a different mapping based on this callable's classpath-extension emit branch.
         if let Some(slots) = self.info.resolved_call_arg_slots.get(&e).cloned() {
-            let (slot_args, prelude) =
-                self.lower_call_slot_args_source_order(args, &slots, explicit_params, true)?;
+            let (slot_args, prelude) = self.lower_call_slot_args_vararg_pack(
+                args,
+                &slots,
+                explicit_params,
+                true,
+                c.vararg_index,
+            )?;
             arg_prelude = prelude;
             if c.default_call {
                 // This emitter currently writes one 32-bit `$default` mask. The checker may faithfully
@@ -16275,16 +16464,22 @@ impl<'a> Lower<'a> {
                 if slots.len() > 32 {
                     return None;
                 }
+                // The vararg slot never takes a mask bit: its value is the packed (possibly empty)
+                // array, which the `$default` stub passes straight through.
                 let mask: i32 = slots
                     .iter()
                     .enumerate()
-                    .filter(|(_, slot)| slot.is_none())
+                    .filter(|(i, slot)| slot.is_none() && c.vararg_index != Some(*i))
                     .map(|(i, _)| 1i32 << i)
                     .sum();
                 a.extend(slot_args);
                 self.append_default_mask_marker(&mut a, mask);
             } else {
-                if slots.iter().any(Option::is_none) {
+                if slots
+                    .iter()
+                    .enumerate()
+                    .any(|(i, slot)| slot.is_none() && c.vararg_index != Some(i))
+                {
                     return None;
                 }
                 a.extend(slot_args);
@@ -16308,8 +16503,11 @@ impl<'a> Lower<'a> {
         // type arguments (`Collection<T>.toTypedArray()` infers `T` from the receiver) so the splicer
         // specializes the body.
         let physical_ret = c.physical_ret;
-        let suspend_default = c.default_call && c.suspend;
-        let call = self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt))?;
+        // Every suspend classpath extension call is a suspension point — `$default` or not. The
+        // provider presents the LOGICAL (continuation-stripped) descriptor, so an unrecorded call
+        // would emit that stripped shape verbatim: no CPS rewrite, `NoSuchMethodError` at runtime.
+        let suspend = c.suspend;
+        let call = self.emit_reified_library_static_call(e, c, a, suspend, Some(rt))?;
         self.record_ext_source_receiver(call, source_receiver);
         let call = self.coerce_erased_call_result(e, call, &physical_ret, true);
         Some(self.wrap_arg_prelude(call, arg_prelude))
@@ -16340,10 +16538,19 @@ impl<'a> Lower<'a> {
         } else {
             let elem = array_param.array_elem().unwrap_or(array_param);
             let mut elements = Vec::with_capacity(trailing.len());
+            let mut spreads = Vec::with_capacity(trailing.len());
             for &arg in trailing {
-                elements.push(self.lower_arg(arg, &elem)?);
+                // A SPREAD (`*xs`) mixed with elements contributes its whole array; the flags
+                // route the emitter to the `SpreadBuilder` sequence.
+                let is_spread = self.afile.is_spread_arg(arg);
+                elements.push(if is_spread {
+                    self.lower_arg(arg, &array_param)?
+                } else {
+                    self.lower_arg(arg, &elem)?
+                });
+                spreads.push(is_spread);
             }
-            out.push(self.emit_vararg(array_param, elements));
+            out.push(self.emit_vararg_with_spreads(array_param, elements, spreads));
         }
         Some(out)
     }
@@ -16966,9 +17173,7 @@ impl<'a> Lower<'a> {
             }
             InheritedNestedClassifier::Ambiguous => InheritedNestedClassifier::Ambiguous,
             InheritedNestedClassifier::NotFound => self
-                .syms
-                .classes
-                .get(name)
+                .module_class_named(name)
                 .map(|class| class.internal_name())
                 .or_else(|| self.syms.class_names.get_class(name))
                 .map_or(
@@ -17043,9 +17248,7 @@ impl<'a> Lower<'a> {
         // the checker — an in-scope type name shadows a package path.
         if let Some((outer, rest)) = name.split_once('.') {
             let base = self
-                .syms
-                .classes
-                .get(outer)
+                .module_class_named(outer)
                 .map(|c| c.internal())
                 .or_else(|| {
                     self.syms
@@ -17150,7 +17353,7 @@ impl<'a> Lower<'a> {
         } else if self.contains_class(&class_internal(self.afile, &r.name)) {
             // A nested class by source name (`Outer.Inner` → `Outer$Inner`).
             Ty::obj(&class_internal(self.afile, &r.name))
-        } else if let Some(cs) = self.syms.classes.get(&r.name) {
+        } else if let Some(cs) = self.module_class_named(&r.name) {
             Ty::obj(&cs.internal())
         } else if let Some(internal) = self.syms.class_names.get(&r.name) {
             // A classpath / built-in mapped type (`Number`, `CharSequence`, `Runnable`, a Java class) —
@@ -21169,13 +21372,19 @@ impl<'a> Lower<'a> {
                     _ => return None,
                 }
             }
-            // A call with a spread argument (`foo(*a)`, `foo(x, *a, y)`). Only a top-level single-
-            // `vararg` callee IN THIS FILE is handled — a sole spread passes the array through the
-            // platform copy helper, a mixed call packs one spread-flagged array; ANY other shape
-            // (member/library callee, unsupported element type) returns `None` → the file skips, never
-            // miscompiles. The guard ensures a spread arg never reaches the normal (spread-unaware)
-            // vararg-packing paths below.
-            Expr::Call { callee, args } if args.iter().any(|&a| self.afile.is_spread_arg(a)) => {
+            // A PLAIN-NAME call with a spread argument (`foo(*a)`, `foo(x, *a, y)`): a sole spread
+            // passes the array through the platform copy helper, a mixed call packs one
+            // spread-flagged array; an unhandled shape returns `None` → the file skips, never
+            // miscompiles. A QUALIFIED callee (`b.seg("a", *xs)`) is NOT diverted: its resolved
+            // member/extension path packs the vararg slot itself, and each of those packers is
+            // spread-aware (`emit_vararg_with_spreads`) or declines an argument it cannot map.
+            Expr::Call { callee, args }
+                if args.iter().any(|&a| self.afile.is_spread_arg(a))
+                    && matches!(self.afile.expr(callee), Expr::Name(_))
+                    // A NAMED spread call (`topd(*xs, flag = true)`) maps arguments by label;
+                    // the label-aware module paths below pack it, `lower_spread_call` cannot.
+                    && !self.afile.call_arg_names.contains_key(&e.0) =>
+            {
                 self.lower_spread_call(e, callee, &args)?
             }
             Expr::Call { args, .. }
@@ -21486,7 +21695,7 @@ impl<'a> Lower<'a> {
                 result_ty.obj_internal().is_some_and(|i| self
                     .syms
                     .classes
-                    .get(i.render().rsplit('/').next().unwrap_or(""))
+                    .get(&i)
                     .is_some_and(|c| c.value_field.is_some()))
             );
             if member_diverges
@@ -21504,7 +21713,7 @@ impl<'a> Lower<'a> {
             } else if result_ty.non_null().obj_internal().is_some_and(|i| {
                 self.syms
                     .classes
-                    .get(i.render().rsplit('/').next().unwrap_or(""))
+                    .get(&i)
                     .is_some_and(|c| c.value_field.is_some())
             }) {
                 // A nullable VALUE-CLASS result (`a?.foo()` : `Z?`): the member returns the unboxed
@@ -22096,7 +22305,7 @@ impl<'a> Lower<'a> {
             // declares a supertype get a registered `C$Companion` ClassSig (checked here); a local of
             // the same name shadows it.
             if self.lookup(&n).is_none() {
-                if let Some(cls) = self.syms.classes.get(&n) {
+                if let Some(cls) = self.module_class_named(&n) {
                     let cls_internal = cls.internal();
                     let comp_internal = format!("{cls_internal}$Companion");
                     if self.syms.class_by_internal(&comp_internal).is_some() {
@@ -22112,7 +22321,7 @@ impl<'a> Lower<'a> {
             // A SAME-MODULE `object` referenced as a value (`val h = Helper`): not on the classpath
             // and not a local — read its singleton via `getstatic <internal>.INSTANCE`.
             if self.lookup(&n).is_none() {
-                if let Some(cls) = self.syms.classes.get(&n) {
+                if let Some(cls) = self.module_class_named(&n) {
                     if cls.is_object() {
                         let internal = cls.internal();
                         return Some(self.emit_external_static_field(
@@ -22446,7 +22655,7 @@ impl<'a> Lower<'a> {
             if name == "Companion" {
                 if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                     if self.lookup(&rn).is_none() {
-                        if let Some(cls) = self.syms.classes.get(&rn) {
+                        if let Some(cls) = self.module_class_named(&rn) {
                             let cls_internal = cls.internal();
                             let comp_internal = format!("{cls_internal}$Companion");
                             if self.syms.class_by_internal(&comp_internal).is_some() {
@@ -24213,6 +24422,23 @@ impl<'a> Lower<'a> {
                     if fixed >= params.len() {
                         return None;
                     }
+                    // A NAMED call (`topd("O", "K", flag = true)`): labels bind their parameters,
+                    // the selected slots pack the vararg, and source constants fill omissions.
+                    // The lowerer never re-maps labels: the checker already selected this exact
+                    // callable and recorded how each source argument binds.
+                    if self.afile.call_arg_names.contains_key(&e.0) {
+                        let slots = self.info.resolved_call_arg_slots.get(&e)?.clone();
+                        let (lowered, prelude) = self.lower_source_slot_args(
+                            &args,
+                            &slots,
+                            &params,
+                            &target.params,
+                            Some(fixed),
+                            &target.param_default_values,
+                        )?;
+                        let call = self.emit_local_call(fid, lowered);
+                        return Some(self.wrap_arg_prelude(call, prelude));
+                    }
                     if fixed + 1 < params.len() {
                         let lowered = self.lower_non_last_vararg_args(e, &args, &params, fixed)?;
                         return Some(self.emit_local_call(fid, lowered));
@@ -25963,7 +26189,12 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         self.lower_call_slot_args_source_order_with_element(
-                            &args, &slots, &mparams, false, elem_prim, None,
+                            &args,
+                            &slots,
+                            &mparams,
+                            elem_prim,
+                            None,
+                            OmittedSlotPolicy::Reject,
                         )?
                     } else {
                         let mut lowered = Vec::new();
@@ -26092,11 +26323,21 @@ impl<'a> Lower<'a> {
                     for (&arg, &pt) in args[..fixed].iter().zip(&explicit_params[..fixed]) {
                         a.push(self.lower_arg(arg, &ty_to_ir(pt))?);
                     }
+                    // A SPREAD in the tail (`segd("a", *xs)`) contributes its whole ARRAY; the
+                    // per-element spread flags route the emitter to kotlinc's `SpreadBuilder`
+                    // sequence instead of storing the array as one element.
                     let mut elems = Vec::with_capacity(args.len() - fixed);
+                    let mut spreads = Vec::with_capacity(args.len() - fixed);
                     for &arg in &args[fixed..] {
-                        elems.push(self.lower_vararg_element(arg, elem, arr_ty)?);
+                        let is_spread = self.afile.is_spread_arg(arg);
+                        elems.push(if is_spread {
+                            self.lower_arg(arg, &ty_to_ir(arr_ty))?
+                        } else {
+                            self.lower_vararg_element(arg, elem, arr_ty)?
+                        });
+                        spreads.push(is_spread);
                     }
-                    a.push(self.emit_vararg(ty_to_ir(arr_ty), elems));
+                    a.push(self.emit_vararg_with_spreads(ty_to_ir(arr_ty), elems, spreads));
                 } else {
                     for (i, &arg) in args.iter().enumerate() {
                         match explicit_params.get(i) {
@@ -26105,18 +26346,19 @@ impl<'a> Lower<'a> {
                         }
                     }
                 }
-                // A suspend EXTENSION resolved to its `name$default` synthetic (`m.withLock { … }`
-                // omitting the defaulted `owner`): its physical descriptor spells the `Continuation`
-                // before the mask/marker, so record the call for the coroutine pass to INSERT the
-                // continuation value there (`append_continuation`, `$default` arm). `c.ret` is the
+                // A suspend EXTENSION is a suspension point in either call form. The `name$default`
+                // synthetic (`m.withLock { … }` omitting the defaulted `owner`) spells the
+                // `Continuation` before the mask/marker, and a PLAIN suspend extension's provider
+                // descriptor is continuation-STRIPPED — both rely on the coroutine pass to INSERT
+                // the continuation value (`append_continuation`). An unrecorded plain call would
+                // emit the stripped shape verbatim: `NoSuchMethodError` at runtime. `c.ret` is the
                 // logical return the pass unboxes the erased `Object` suspension result by.
                 let physical_ret = c.physical_ret;
-                let suspend_default = c.default_call && c.suspend;
+                let suspend = c.suspend;
                 // `rt` is the extension receiver's type — its type args bind a reified `T` that is
                 // inferred from the receiver (`Collection<T>.toTypedArray()`) when none is explicit.
                 let source_receiver = c.source_receiver;
-                let call =
-                    self.emit_reified_library_static_call(e, c, a, suspend_default, Some(rt))?;
+                let call = self.emit_reified_library_static_call(e, c, a, suspend, Some(rt))?;
                 self.record_ext_source_receiver(call, source_receiver);
                 self.coerce_generic_read(call, e, physical_ret)
             } else if let Some(ResolvedCall::LambdaReturnMember(c)) =

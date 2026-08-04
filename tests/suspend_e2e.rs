@@ -2319,6 +2319,47 @@ fun box(): String = builder { result = bars(foo(1), foo(2)) }\n";
     );
 }
 
+/// A suspension hoisted from a binary expression must not move ahead of an earlier operand.
+///
+/// The coroutine normalizer rewrites nested suspension points into bound temporaries. Rewriting only
+/// the right call turns `left() + awaitRight()` into `val r = awaitRight(); left() + r`, reversing
+/// Kotlin's observable left-to-right evaluation. This regression is intentionally expressed only in
+/// terms of IR operand order: no particular helper/classifier spelling should affect the result.
+#[test]
+fn suspend_binary_hoist_preserves_left_to_right_evaluation() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let src = "import kotlin.coroutines.*\n\
+\n\
+fun <T> runBlocking(block: suspend () -> T): T {\n\
+    var res: Result<T>? = null\n\
+    block.startCoroutine(Continuation(EmptyCoroutineContext) { res = it })\n\
+    return res!!.getOrThrow()\n\
+}\n\
+var trace = \"\"\n\
+fun left(): Int { trace += \"L\"; return 1 }\n\
+suspend fun awaitRight(): Int = suspendCoroutineUninterceptedOrReturn { continuation ->\n\
+    trace += \"R\"\n\
+    continuation.resume(2)\n\
+    COROUTINE_SUSPENDED\n\
+}\n\
+fun box(): String = runBlocking {\n\
+    val sum = left() + awaitRight()\n\
+    if (trace == \"LR\" && sum == 3) \"OK\" else \"$trace/$sum\"\n\
+}\n";
+    let Some(out) = common::compile_and_run_box(
+        src,
+        "SuspendBinaryEvaluationOrder",
+        &[stdlib],
+        Some(jdk.as_path()),
+    ) else {
+        panic!(
+            "SuspendBinaryEvaluationOrder: lowering or emission unexpectedly declined the source"
+        );
+    };
+    assert_eq!(out.trim(), "OK");
+}
+
 /// A suspension whose own ARGUMENT writes a local (`foo(i++)`) observes the write in its spill.
 ///
 /// The spill stores used to be emitted ahead of the call, so the argument's update to `i` landed in the
