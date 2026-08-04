@@ -3682,6 +3682,18 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         Some(method_descriptor(params, ret))
     }
 
+    fn descriptor_reference_params(&self, descriptor: &str) -> Option<Vec<bool>> {
+        // A JVM parameter is a reference exactly when its field descriptor is an object (`L…;`) or an
+        // array (`[…`); everything else is a primitive carrier (`I`, `J`, `Z`, …).
+        let (params, _) = super::names::parse_method_descriptor(descriptor)?;
+        Some(
+            params
+                .iter()
+                .map(|p| p.starts_with('L') || p.starts_with('['))
+                .collect(),
+        )
+    }
+
     fn function_reference_impl_type(&self) -> Option<Ty> {
         Some(Ty::obj("kotlin/jvm/internal/FunctionReferenceImpl"))
     }

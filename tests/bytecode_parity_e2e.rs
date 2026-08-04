@@ -887,3 +887,42 @@ fn data_class_primitive_hashcode_is_byte_identical_to_kotlinc() {
 fn data_class_equals_is_byte_identical_to_kotlinc() {
     assert_diff("dc_eq");
 }
+
+/// `a.equals(b)` where BOTH sides are the same unsigned type is kotlinc's `equals` INTRINSIC: an
+/// unsigned value class wraps exactly one field, so its `equals` can only compare the carriers —
+/// kotlinc folds the call away to the same instructions `a == b` emits, with no box in sight.
+/// (`kotlin/UInt.equals` is what krusty used to emit here, on a receiver it had to box first.)
+#[test]
+fn same_type_unsigned_equals_compares_carriers_without_boxing() {
+    for (name, src, compare) in [
+        (
+            "ueq",
+            "fun p(n: Int): UInt = n.toUInt()\n\
+fun box(): String {\n  val a = p(2); val b = p(1)\n  return if (a.equals(b)) \"f\" else \"OK\"\n}\n",
+            "if_icmp",
+        ),
+        (
+            "uleq",
+            "fun p(n: Int): ULong = n.toULong()\n\
+fun box(): String {\n  val a = p(2); val b = p(1)\n  return if (a.equals(b)) \"f\" else \"OK\"\n}\n",
+            "lcmp",
+        ),
+    ] {
+        let Some((dir, jh)) = krusty_compile_stdlib(name, src) else {
+            return;
+        };
+        let d = javap(&jh, &dir.join("BKt.class"));
+        let _ = fs::remove_dir_all(&dir);
+        let n = normalize(&d);
+        assert!(
+            n.contains(compare),
+            "{name}: same-type unsigned `equals` must compare carriers with `{compare}`:\n{n}"
+        );
+        for gone in ["box-impl", "kotlin/UInt.equals", "kotlin/ULong.equals"] {
+            assert!(
+                !n.contains(gone),
+                "{name}: same-type unsigned `equals` must not emit `{gone}`:\n{n}"
+            );
+        }
+    }
+}

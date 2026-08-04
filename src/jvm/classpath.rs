@@ -218,7 +218,22 @@ fn value_class_param_types(
             continue;
         };
         if underlying.non_null() == declared.non_null() {
-            out[position] = Some(Ty::obj_name(name));
+            // A value class krusty models as a SCALAR of its own is recovered as THAT scalar, never
+            // as the boxed class. `UInt`/`ULong` ride in the JVM primitive slot of their carrier, so
+            // a REFERENCE spelling here makes the lowerer box the argument (`kotlin/UInt.box-impl`)
+            // into the erased descriptor slot (`I`/`J`) that takes it unboxed — a class file that
+            // fails verification at load time. The scalar spelling is also the sharper one for the
+            // overload selection this recovery exists for: it is exactly the type the checker gives
+            // an unsigned argument. Every other value class (`Duration`, a user `Tag`) keeps the
+            // class name: it is a reference on both sides, and the value-classes pass erases it at
+            // the call.
+            out[position] = Some(
+                meta_ids()
+                    .prim
+                    .get(&name)
+                    .copied()
+                    .unwrap_or_else(|| Ty::obj_name(name)),
+            );
         }
     }
     out

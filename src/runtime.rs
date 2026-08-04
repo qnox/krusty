@@ -122,6 +122,18 @@ pub trait TargetRuntime {
         None
     }
 
+    /// Per parameter position of an already-spelled platform method `descriptor`, whether that slot
+    /// holds a REFERENCE (so a boxed value may occupy it) rather than a primitive carrier.
+    ///
+    /// Common lowering needs this to check its own work: a callee's descriptor is emitted VERBATIM
+    /// while arguments are coerced to the callable's declared parameter types, and the two can
+    /// disagree about whether a value is boxed. Asking the platform keeps descriptor SYNTAX where it
+    /// belongs — lowering never parses a target's spelling itself. `None` when the descriptor cannot
+    /// be read, which leaves the decision to the platform's own gates.
+    fn descriptor_reference_params(&self, _descriptor: &str) -> Option<Vec<bool>> {
+        None
+    }
+
     /// Runtime superclass used for synthesized function references on this platform.
     fn function_reference_impl_type(&self) -> Option<Ty> {
         None
@@ -159,6 +171,20 @@ pub trait TargetRuntime {
     /// `is UInt` shapes without spelling target class names.
     fn unsigned_integer_box_type(&self, _ty: Ty) -> Option<Ty> {
         None
+    }
+
+    /// The semantic unsigned integer carried by the platform box named by `internal`.
+    ///
+    /// This is deliberately derived from [`TargetRuntime::unsigned_integer_box_type`] instead of
+    /// maintained as a second target-name table. Call lowering needs the reverse direction when a
+    /// selected library member supplies its physical owner, but common lowering must not learn the
+    /// JVM box names (or let the forward and reverse mappings drift on another target).
+    fn unsigned_integer_carrier_for_box_type(&self, internal: TypeName) -> Option<Ty> {
+        [Ty::UInt, Ty::ULong].into_iter().find(|&carrier| {
+            self.unsigned_integer_box_type(carrier)
+                .and_then(|boxed| boxed.obj_internal())
+                == Some(internal)
+        })
     }
 
     /// If `internal` is a platform range/progression type that can be emitted as a counted loop,
