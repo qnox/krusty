@@ -262,6 +262,8 @@ mod companion_member_read_e2e;
 mod companion_non_const_prop_e2e;
 #[path = "companion_supertype_e2e.rs"]
 mod companion_supertype_e2e;
+#[path = "companion_toplevel_property_e2e.rs"]
+mod companion_toplevel_property_e2e;
 #[path = "compare_to_zero_branch_e2e.rs"]
 mod compare_to_zero_branch_e2e;
 #[path = "compound_index_assign_e2e.rs"]

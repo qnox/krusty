@@ -7019,6 +7019,19 @@ impl<'a> Lower<'a> {
                 let Some(internal) = this_ty.obj_internal().map(|s| s.to_string()) else {
                     return false;
                 };
+                // A PLAIN companion has no `C$Companion` ClassSig; its members live on the OUTER
+                // class's statics. Probe the outer then — and skip the outer's INSTANCE members,
+                // which a companion body can't see (they don't shadow the top-level name there).
+                let plain_companion = self.syms.class_by_internal(&internal).is_none()
+                    && internal.ends_with("$Companion");
+                let internal = if plain_companion {
+                    internal
+                        .strip_suffix("$Companion")
+                        .expect("suffix checked above")
+                        .to_string()
+                } else {
+                    internal
+                };
                 let companion_free = self.syms.class_by_internal(&internal).is_some_and(|c| {
                     !c.static_props.contains_key(name)
                         && !c.static_methods.contains_key(&property_getter_name(name))
@@ -7033,8 +7046,8 @@ impl<'a> Lower<'a> {
                 });
                 self.syms.class_scope_fully_visible(&internal)
                     && companion_free
-                    && self.syms.prop_of(&internal, name).is_none()
-                    && !declares_property
+                    && (plain_companion || self.syms.prop_of(&internal, name).is_none())
+                    && (plain_companion || !declares_property)
             })
     }
 
