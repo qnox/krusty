@@ -377,16 +377,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   hoisted nested class is seen; "suspension point" is the same file-local name approximation
   `gate:suspend-call-from-non-suspend` makes, so a suspend callee from another file is not counted.
 
-  KNOWN GAP, deliberately not covered: the same handler never tests the DECLARED CATCH TYPE either, so
-  `catch (e: RuntimeException)` also swallows a plain `Exception` that Kotlin requires to propagate to
-  the completion (krusty answers `"no-exception"` where kotlinc propagates `"propagated"`). Whether that
-  fires depends on what the callee throws, which no AST scan can decide, and covering it would mean a
-  blanket skip of every suspending `try`/`catch` — including the accepted shapes above. It stays an
-  accepted unsoundness until the exception dispatch emits a real type test
-  (`tests/suspend_e2e.rs::suspend_try_catch_over_a_suspension_still_skips`,
-  `::suspend_try_catch_without_a_suspension_runs`; corpus
-  `coroutines/suspendFunctionAsCoroutine/handleException`, whose other blocker — the cross-loop labeled
-  jump — is now fixed, leaving this bail as the only reason it still skips).
+  The handler now DOES test the DECLARED CATCH TYPE (previously an accepted unsoundness): each catch
+  arm in the handler state is guarded by `instanceof` on the stashed exception and a non-matching
+  exception RE-THROWS, so `catch (e: Miss)` no longer swallows an `IllegalStateException` Kotlin
+  requires to propagate to the completion — for a NON-suspending catch body (which previously ran
+  unguarded) and a suspending one (which previously threw a `ClassCastException` at its exception
+  bind) alike. A `Throwable`-typed catch is full-coverage: no guard, later arms dead, exact prior
+  shape. The same handler generalizes to MULTIPLE catches when no catch body suspends (each arm
+  emits inside the one handler state); a suspending catch body is still modeled only alone. And a
+  VALUE-position `try` under a RESULT COERCION (`suspend fun f(): Base = try { sub() } catch …`, the
+  cast the checker inserts to the declared return type) desugars like the bare form — the coercion
+  moves onto each selected branch, `desugar_value_when`-style, and the desugar also rewrites the
+  locally-BOUND form (`val v = try { … }`) targeting the bound local; `hoist_suspensions` runs a
+  second time after the value desugars (they bind branch values whose suspensions can sit NESTED,
+  e.g. in a constructor argument — `IrExpr::New` arguments hoist like call arguments now).
+  (`tests/suspend_try_catch_shapes_e2e.rs`;
+  `tests/suspend_e2e.rs::suspend_try_catch_without_a_suspension_runs`.) The `gate:suspend-try-catch`
+  above is UNCHANGED — it guards the separate locals-restore loss, so a `try` over a REAL suspension
+  with a value live across it still skips (`tests/suspend_e2e.rs::
+  suspend_try_catch_over_a_suspension_still_skips`; corpus
+  `coroutines/suspendFunctionAsCoroutine/handleException` remains skipped by it).
 - **A never-entered branch emits NO body — the folded jump makes what follows it dead.**
   `emit_cond_branch` folds a constant condition: an always-taken test becomes an unconditional `goto`
   and an always-failing one emits no branch at all. Every instruction after an unconditional `goto` is
@@ -4144,6 +4154,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   spliced lambda (a `this` used only inside a NESTED lambda is that lambda's own capture), matching the
   shallow named-capture scan. `forEach { member() }` already worked (a `for`-loop desugar).
   (`build840_kk1_inline_hof_enclosing_member_e2e`; box-OK 2379→2380)
+
+- **A lambda using a MEMBER EXTENSION of the enclosing class through an EXPLICIT receiver captures the
+  enclosing `this`.** `class Ctl { fun list(ms) = ms.map { it.toResponse() }; private fun
+  Model.toResponse() = … }` — the call names only the EXTENSION receiver (`it`); its DISPATCH receiver is
+  the implicit enclosing `this` the accessor call needs (`member_extension_dispatch_value`). The
+  `lambda_uses_enclosing_this` scan recognized only bare-name uses (`this`, an implicit-`this` member
+  access), so this dispatch use was invisible: `cur_class` was cleared for the closure body, the dispatch
+  lookup found nothing, and the file bailed ("this construct is not yet supported by the IR backend").
+  The scan now also consults the SELECTED targets — a `ResolvedCall::MemberExtension`, an
+  `ExprLowering::MemberExtensionPropertyRead`, and a `StmtLowering::MemberExtensionPropertyWrite` whose
+  owner the enclosing class is ASSIGNABLE to (assignability, not equality: the extension may be declared
+  on a base class) — so member extension FUNCTION calls, PROPERTY reads and PROPERTY writes in a lambda
+  all capture `this` and lower, in inline-spliced and real (invokedynamic) closures alike. An extension
+  owned by an unrelated object stays uncaptured (its dispatch is the object's `INSTANCE`). The direct
+  (non-lambda) call and the bare-name form (kk1 above) already worked.
+  (`tests/member_extension_in_lambda_e2e.rs`; production: micronaut controller
+  `ms.map { it.toResponse() }` with a private member extension.)
 
 - **A static method DECLARED ON AN INTERFACE uses an `InterfaceMethodref` constant.** A Kotlin interface's
   `foo$default` synthetic (reached when a call OMITS an interface-declared default arg — `interface A { fun

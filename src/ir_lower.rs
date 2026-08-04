@@ -9498,6 +9498,31 @@ impl<'a> Lower<'a> {
                     return true;
                 }
             }
+            // A selected MEMBER EXTENSION use dispatched on the enclosing instance is an enclosing-
+            // `this` reference the source never spells: `it.toResponse()` / `it.tag` name only the
+            // EXTENSION receiver, while the dispatch receiver is the implicit `this` the accessor
+            // call needs (`member_extension_dispatch_value`). Assignability, not equality — the
+            // extension may be declared on a base class of `cur`.
+            if let Some(ResolvedCall::MemberExtension { owner, .. }) =
+                lo.info.resolved_calls.get(&e)
+            {
+                if lo
+                    .syms
+                    .is_assignable_across_sources(Ty::obj_name(cur), Ty::obj_name(*owner))
+                {
+                    return true;
+                }
+            }
+            if let Some(ExprLowering::MemberExtensionPropertyRead { owner, .. }) =
+                lo.info.expr_lowers.get(&e)
+            {
+                if lo
+                    .syms
+                    .is_assignable_across_sources(Ty::obj_name(cur), Ty::obj_name(*owner))
+                {
+                    return true;
+                }
+            }
             // A SHALLOW (inline-splice) scan does not descend into a NESTED lambda's body.
             if !deep && matches!(lo.afile.expr(e), Expr::Lambda { .. }) {
                 return false;
@@ -9515,6 +9540,18 @@ impl<'a> Lower<'a> {
                                 || !crate::module_symbols::ModuleSymbols::new(lo.syms)
                                     .instance_members(Ty::obj_name(cur), name)
                                     .is_empty())
+                        {
+                            return true;
+                        }
+                    }
+                    // A member extension PROPERTY write (`it.mark = v`) dispatches on the
+                    // enclosing `this` the same way the read/call forms above do.
+                    if let Some(StmtLowering::MemberExtensionPropertyWrite { owner, .. }) =
+                        lo.info.stmt_lowers.get(&s)
+                    {
+                        if lo
+                            .syms
+                            .is_assignable_across_sources(Ty::obj_name(cur), Ty::obj_name(*owner))
                         {
                             return true;
                         }

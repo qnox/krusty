@@ -95,8 +95,11 @@ fn suspend_return_in_try_rejected() {
 }
 
 #[test]
-fn suspend_try_as_expression_rejected() {
-    assert!(rejects(
+fn suspend_try_as_expression_accepted() {
+    // Previously rejected; the value-`try` desugar now rewrites the locally-BOUND form too
+    // (`val x = try { … }` targets the bound local). Behavioral coverage:
+    // `suspend_try_catch_shapes_e2e` (incl. the bound form's exception-type filtering).
+    assert!(!rejects(
         "suspend fun d(): Int = 1\n\
          suspend fun f(): Int { val x = try { d() } catch (e: Exception) { 0 }; return x }\n"
     ));
