@@ -3857,6 +3857,14 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         )
     }
 
+    fn descriptor_return_class(&self, descriptor: &str) -> Option<TypeName> {
+        // Only an object return names a class: a primitive carrier (`I`, `J`, …), an array (`[…`)
+        // and `V` all answer `None`, which is what keeps a carrier-returning call from reading as a
+        // value that is already boxed.
+        let (_, ret) = super::names::parse_method_descriptor(descriptor)?;
+        Some(type_name(ret.strip_prefix('L')?.strip_suffix(';')?))
+    }
+
     fn function_reference_impl_type(&self) -> Option<Ty> {
         Some(Ty::obj("kotlin/jvm/internal/FunctionReferenceImpl"))
     }
@@ -4725,5 +4733,26 @@ mod tests {
             c.descriptor,
             "(Lkotlin/jvm/functions/Function2;Ljava/lang/Object;Lkotlin/coroutines/Continuation;)V"
         );
+    }
+
+    /// Lowering asks the provider what a call LEAVES on the stack so it never parses a JVM
+    /// descriptor itself. Only an object return names a class: `kotlin/UInt.box-impl` is how an
+    /// unsigned value becomes a reference, and its carrier-returning siblings (`constructor-impl`,
+    /// `unbox-impl`) must answer `None` or a value still in its primitive slot would read as boxed.
+    #[test]
+    fn descriptor_return_class_names_only_an_object_return() {
+        use crate::runtime::TargetRuntime;
+        let libs = super::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(Vec::new()),
+        ));
+        assert_eq!(
+            libs.descriptor_return_class("(I)Lkotlin/UInt;"),
+            Some(type_name("kotlin/UInt"))
+        );
+        for carrier in ["(I)I", "()I", "(Lkotlin/UInt;)V", "(I)[Ljava/lang/String;"] {
+            assert_eq!(libs.descriptor_return_class(carrier), None, "{carrier}");
+        }
+        // A descriptor the platform cannot read is not a claim about anything.
+        assert_eq!(libs.descriptor_return_class("nonsense"), None);
     }
 }

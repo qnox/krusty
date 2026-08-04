@@ -180,3 +180,91 @@ fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
         "ULongEqualsSemantics",
     );
 }
+
+/// A member call whose receiver passed through a REFERENCE position in the source before reaching it.
+///
+/// These are the shapes that would double-box if the receiver-boxing branch ever saw an already-boxed
+/// receiver: the value is boxed while it sits in the nullable local / map / elvis, so a branch that
+/// boxed it again would push a `Lkotlin/UInt;` at the `(I)` its own factory declares.
+///
+/// They do NOT reach the member call boxed today, and this test does not pretend otherwise. Checked
+/// against the emitted bytecode: `UNullableBangEquals`, `UMapValueEquals`, `UWhenReceiverEquals` and
+/// `ULongNullableBangEquals` emit, and each one UNBOXES to the carrier (the `!!`/erased-read coercion)
+/// and then boxes once for the `invokevirtual` — the round trip is visible as
+/// `checkcast kotlin/UInt; unbox-impl; box-impl`. `UNullableSmartCastEquals`, `UNullableSafeEquals`
+/// and `UElvisReceiverEquals` are declined by the backend outright.
+///
+/// So what is pinned here is the backend's contract, not the representation query's arms: these are
+/// the source shapes closest to putting a boxed unsigned in receiver position, and whatever the
+/// lowerer decides about any of them, the result must be a class that verifies and runs — or a
+/// decline. The query's own arms are covered where they can be reached directly, by the walk's unit
+/// tests in `src/ir_lower.rs`.
+#[test]
+fn unsigned_member_calls_on_a_reference_carried_receiver_verify() {
+    // A nullable local: the value lives boxed, and `!!` brings it back to a member call.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: UInt? = 5u\n\
+    val s: Any = \"5\"\n\
+    return if (!u!!.equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "UNullableBangEquals",
+    );
+    // The same value reached by a smart cast rather than by an assertion.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: UInt? = 5u\n\
+    val s: Any = \"5\"\n\
+    if (u != null) return if (!u.equals(s)) \"OK\" else \"bad\"\n\
+    return \"bad null\"\n\
+}\n",
+        "UNullableSmartCastEquals",
+    );
+    // A safe call — the receiver is a temp the lowerer introduced, not a source local.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: UInt? = 5u\n\
+    val s: Any = \"5\"\n\
+    return if (u?.equals(s) == false) \"OK\" else \"bad\"\n\
+}\n",
+        "UNullableSafeEquals",
+    );
+    // An ERASED read: the map holds the box, and the element comes back as `Object`.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val m = mapOf(\"k\" to 5u)\n\
+    val s: Any = \"5\"\n\
+    return if (!m[\"k\"]!!.equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "UMapValueEquals",
+    );
+    // A `when` receiver — no single node produces the value the call runs on.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val a: UInt = 5u\n\
+    val b: UInt = 7u\n\
+    val s: Any = \"5\"\n\
+    val c = a < b\n\
+    return if (!(if (c) a else b).equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "UWhenReceiverEquals",
+    );
+    // An elvis result, then a member call on it.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: UInt? = null\n\
+    val s: Any = \"0\"\n\
+    return if (!(u ?: 0u).equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "UElvisReceiverEquals",
+    );
+    // The `ULong` carrier takes the same path through its own box.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: ULong? = 5uL\n\
+    val s: Any = \"5\"\n\
+    return if (!u!!.equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "ULongNullableBangEquals",
+    );
+}

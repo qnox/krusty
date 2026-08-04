@@ -134,6 +134,18 @@ pub trait TargetRuntime {
         None
     }
 
+    /// The class named by an already-spelled platform method `descriptor`'s RETURN, when that return
+    /// is a reference to a class rather than a primitive carrier, an array, or nothing at all.
+    ///
+    /// The return-position companion to [`TargetRuntime::descriptor_reference_params`], and the same
+    /// division of labour: common lowering asks WHAT a call leaves on the stack instead of parsing a
+    /// target's descriptor spelling itself. It needs the class and not just "is a reference" because
+    /// the question it answers is whether a value is already in a specific platform BOX
+    /// (`Lkotlin/UInt;`), which no boolean can distinguish from any other object.
+    fn descriptor_return_class(&self, _descriptor: &str) -> Option<TypeName> {
+        None
+    }
+
     /// Runtime superclass used for synthesized function references on this platform.
     fn function_reference_impl_type(&self) -> Option<Ty> {
         None
