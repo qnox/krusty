@@ -972,6 +972,8 @@ mod super_to_base_secondary_ctor_e2e;
 mod superclass_bridge_e2e;
 #[path = "supertype_scan_arrow_e2e.rs"]
 mod supertype_scan_arrow_e2e;
+#[path = "suspend_arg_order_e2e.rs"]
+mod suspend_arg_order_e2e;
 #[path = "suspend_class_implements_interface_e2e.rs"]
 mod suspend_class_implements_interface_e2e;
 #[path = "suspend_collection_hof_e2e.rs"]

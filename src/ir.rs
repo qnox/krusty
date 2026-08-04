@@ -1229,7 +1229,9 @@ pub struct IrFile {
     /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
     /// logical type may be a value class (`runCatching{…}: Result`), so the pass knows the result is the
     /// value class's UNBOXED underlying, not an opaque `Object`. Populated for every lowered expression;
-    /// consumed ONLY by the value-class pass (the sole owner of value-class knowledge).
+    /// consumed by the value-class pass (the sole owner of value-class knowledge) and — for scalar and
+    /// `String` types only, where logical = physical representation — by the suspend pass's operand
+    /// snapshot typing (`hoisted_value_ty`) for external callees.
     pub logical_types: std::collections::HashMap<u32, Ty>,
     /// Physical type before a semantic read coercion.
     pub physical_types: std::collections::HashMap<u32, Ty>,

@@ -459,6 +459,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_runs`,
   `::suspend_member_call_whose_operand_writes_a_local_runs`,
   `::suspend_operand_write_to_a_locally_dead_scratch_runs`).
+- **`suspend fun` — hoisting a suspension out of a call/template operand list preserves left-to-right
+  evaluation.** Kotlin evaluates a call's receiver and arguments (and a string template's parts)
+  strictly left to right; kotlinc spills every operand of a call with a suspending operand.
+  `hoist_expr` used to rewrite only the SUSPENSION to a preceding temp, so `f(g(), susp())` became
+  `val t = susp(); f(g(), t)` — running `g()` AFTER the suspension. `hoist_operands_in_order` now
+  binds every effectful operand that precedes a later suspending operand to a prelude temp first
+  (constants and plain local reads stay inline, per `operand_needs_snapshot`), for the
+  `Call`/`MethodCall`/`StringConcat` arms of `hoist_expr`, the suspension-point path itself
+  (receiver included), and the `hoist_stmt` arms that keep a direct `val r = <suspend call>` /
+  bare-call statement (whose nested suspending arguments previously reached emit unhoisted and
+  skipped the file — corpus `coroutines/controlFlow_chain.kt` now compiles). The snapshot plan is
+  typed on the ORIGINAL operands before any rewrite (`hoisted_value_ty`; head kinds are preserved by
+  hoisting), so an untypeable operand bails with the IR untouched and the flattener declines the
+  shape — skip, never a reorder and never a double evaluation. An external callee
+  (`Callee::External`) has no signature in the IR; its snapshot type comes from
+  `ir.logical_types`, accepted only where logical = physical representation (scalars and `String`,
+  e.g. the flattened `String.plus` chain whose intermediate accumulators ir_lower now records).
+  "Effectful" includes more than calls: a top-level `var` read (`GetStatic` with `is_var`) must be
+  materialized because the suspension may write it (a `val` read commutes and stays inline), and a
+  wrapper that can THROW (`!!`, `as`/non-null cast, an unboxing `ImplicitCoercion`) snapshots
+  regardless of its child so its exception precedes any later suspension's effects. Snapshot types
+  also come from the declarations the node indexes (`GetStatic`/`GetField`/`RefGet`, and
+  `PropertyRead`'s inline type except `Unit`/type-parameter reads), covering the service-receiver
+  shape `h.svc.m(susp())` without a skip.
+  Ordering pinned by box runs against a real suspension (`yield()`), including the snapshot temp
+  surviving the spill, the pre-mutation `var` read, the `!!`-throws-before-suspension case, and an
+  effectful operand between two suspensions (`tests/suspend_arg_order_e2e.rs`, all nine shapes).
 - **`suspend fun` — an INTRINSIC suspension point needs no operand temps.** A
   `suspendCoroutineUninterceptedOrReturn { c -> … }` recorded in `ir.intrinsic_suspension_points` is an
   inlined BLOCK, not a call: it has no operands to move ahead of the spill, and its body runs after the
