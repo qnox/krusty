@@ -3241,9 +3241,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   … }; fun describe() = tag() }` — an INSTANCE member calls a companion function unqualified. Kotlin
   puts a companion's members in scope throughout the class body, so this binds the same static a
   qualified `C.tag()` does, and emits the same shape: `getstatic C.Companion; invokevirtual
-  C$Companion.tag()`. The instance-member lookup is attempted first, so a same-named member of the
-  class still wins. A companion `var` is admitted too — the same static backing field on the outer
-  class a companion `val` already uses. Test:
+  C$Companion.tag()`. A same-named INSTANCE and companion method may coexist when their accepted
+  argument-count ranges do not overlap: the companion fallback only claims an arity its signature
+  accepts, then the ordinary implicit-instance receiver gets a chance. Arity is the shared callable
+  shape (defaults lower the minimum; a vararg removes the maximum), not raw parameter-vector length.
+  An overlapping pair remains conservatively rejected because the current lexical lookup cannot yet
+  rank two families that both accept the unqualified call without risking the companion owner winning
+  inside an instance member. A companion `var` is admitted too — the same static backing field on the
+  outer class a companion `val` already uses. Tests: `tests/companion_e2e.rs` (non-overlapping default
+  and vararg shapes) and `tests/resolve_parser_diag_coverage_e2e.rs` (overlap guards), plus:
   `tests/feature_coverage_r_e2e.rs::companion_member_unqualified_from_instance`.
 
   A companion `var` is also WRITTEN through the class name (`C.created = 3`). The receiver is a
