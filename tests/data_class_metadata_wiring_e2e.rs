@@ -121,8 +121,8 @@ fn suspend_member_returning_a_value_is_byte_identical() {
 }
 
 /// A member taking a value-class parameter. The JVM method is mangled and takes the erased underlying
-/// type, while the record states the member in Kotlin terms and carries the mangled name + erased
-/// descriptor as its `JvmMethodSignature` — both halves have to be right for the bytes to match.
+/// type. The record is now WRITTEN — the classpath value-class RETURN model gave the reader the
+/// missing half — so this asserts the whole class file, `@Metadata` included, against kotlinc's.
 #[test]
 fn value_class_parameter_member_is_byte_identical() {
     assert_byte_identical(
@@ -240,10 +240,10 @@ fn string_template_is_byte_identical() {
 }
 
 /// A `suspend` function returning a NULLABLE value class — the port shape `suspend fun resolve(k):
-/// OrgId?`. The value-class pass (which runs before the coroutine pass) erases the return to the
+/// Token?`. The value-class pass (which runs before the coroutine pass) erases the return to the
 /// underlying, but kotlinc keeps the value class in the continuation's generic type argument
-/// (`Continuation<? super OrgId>`, not `<? super String>`). The declared return is recovered from the
-/// value-class pass's record — the same record the class `@Metadata` states the member with.
+/// (`Continuation<? super Token>`, not `<? super String>`). The declared return is recovered from the
+/// value-class pass's record. The record is now written too, so this pins the whole class file.
 #[test]
 fn suspend_returning_nullable_value_class_is_byte_identical() {
     assert_byte_identical(

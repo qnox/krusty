@@ -509,19 +509,108 @@ fn build_class_metadata(
                 && !value_method_names.contains(n)
         })
         .collect();
-    // A VALUE-CLASS-typed CONSTRUCTOR PARAMETER still declines. That shape gets kotlinc's
-    // private-primary + synthetic `DefaultConstructorMarker` constructor ABI, which the builder does not
-    // describe: it names the PRIVATE `<init>(Ljava/lang/String;)V` where kotlinc names
-    // `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`, so real kotlinc reading the
-    // record rejects `Holder(ItemId("OK"))` as a type mismatch and a caller that satisfied it would
-    // `invokespecial` a private constructor. `ir.has_value_param_ctor` — recorded before erasure loses
-    // the parameter's identity — is the signal; the constructor ABI, not the property, is what is
-    // missing, and the properties of such a class are described correctly by the code below.
+    // A VALUE-CLASS-INVOLVED MEMBER is now DESCRIBED. The writer could always produce kotlinc's exact
+    // payload for one (the byte-identity tests proved it); what was missing was the READ half, and the
+    // classpath value-class RETURN model supplies it — `MetadataCallFacts::value_class_ret` reports
+    // that the physical method already hands back the ERASED underlying, so a caller that learns the
+    // Kotlin return `K` from `@Metadata` no longer also emits kotlinc's boxed sequence (`invokevirtual
+    // I.f-XLNMDGE()Ljava/lang/String; checkcast K; K.unbox-impl()`) over a `String` that IS the
+    // carrier. Round-tripped by `krusty_roundtrip_class_metadata_e2e`'s value-class cases (each RUNS
+    // `box()`) and pinned by the box corpus's `compileKotlinAgainstKotlin/inlineClasses/*` MODULE
+    // chains.
     //
-    // A VALUE class with a DECLARED member also declines: its member runs on the unboxed carrier
-    // through a static `-impl` pair that the record's Kotlin-terms description does not yet spell.
-    if (!c.is_value && ir.has_value_param_ctor(&c.fq_name()))
-        || (c.is_value && !declared_fids.is_empty())
+    // Three shapes still decline, and NONE of them for the reason removed above: each is a WRITE-side
+    // gap — krusty's own output differs from kotlinc's — so the read half fixed here cannot reach them.
+    // Each was invisible while the record was withheld, and each is proven by a differential comparison
+    // against real kotlinc for the same source.
+    //
+    // 1. A VALUE-CLASS-typed CONSTRUCTOR PARAMETER. `class Holder(val id: ItemId)` gets kotlinc's
+    //    PRIVATE-primary + synthetic `DefaultConstructorMarker` ABI, which the builder cannot describe:
+    //    krusty named the PRIVATE `<init>(Ljava/lang/String;)V` rather than kotlinc's
+    //    `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`, typed `id` as `String`
+    //    instead of `LItemId;`, and dropped the getter's mangled `getId-YyT5sjE`. Real kotlinc reading
+    //    that record rejects `Holder(ItemId("OK"))` as a type mismatch, and a caller that satisfied it
+    //    would `invokespecial` the private constructor. `ir.has_value_param_ctor` (recorded before
+    //    erasure loses the parameter's identity) is the signal; `vc_declared_sigs` cannot be, as it
+    //    holds non-synthesized FUNCTIONS only.
+    //
+    // 2. A VALUE-CLASS-typed PROPERTY. The METHODS match kotlinc exactly (both emit `getK-XLNMDGE()
+    //    Ljava/lang/String;`), but the RECORD does not: for `class Holder { val k: K = K("OK") }`
+    //    krusty writes `d2=[…,"k","","getK","()Ljava/lang/String;"]` where kotlinc writes
+    //    `[…,"k","LK;","getK-XLNMDGE","()Ljava/lang/String;","Ljava/lang/String;"]` — the property's
+    //    Kotlin type is EMPTY rather than `LK;` and its getter is spelled unmangled. A reader binds a
+    //    `getK()` the class file does not define; krusty's own reader reports `.k`'s result as having
+    //    no member `v`. Describing a value-class property type is a separate write-side model from the
+    //    value-class RETURN, which is why the stamped realization still gates admission here.
+    //
+    // 3. A VALUE class with a DECLARED MEMBER of its own. kotlinc realizes
+    //    `value class S(val v: String) { fun k(): String }` as the STATIC
+    //    `k-impl(Ljava/lang/String;)Ljava/lang/String;` over the unboxed carrier; krusty emits an
+    //    INSTANCE `k()` on the box. Reading krusty's record then puts the carrier on the stack under an
+    //    `invokevirtual S.k()` — "Type 'java/lang/String' is not assignable to 'S'", a VerifyError.
+    //    (krusty's caller is right: against a KOTLINC-built `S` the same source runs.)
+    //
+    //    A COMPUTED property counts, and `declared_fids` cannot see it: its accessor is synthesized
+    //    straight from `IrProperty` and has no `IrFunction` entry, while `accessor_names` is derived
+    //    from BACKING fields, which a computed property has none of. `A<T> { val publicValue: String
+    //    get() = … }` is that shape — kotlinc emits the static `getPublicValue-impl(Object)`, krusty an
+    //    instance `getPublicValue()`. The SOLE underlying property is not a declared member in this
+    //    sense: kotlinc gives it an instance `getV()` too, so it stays admissible.
+    // 4. A member whose value-class position erases to `Object` — i.e. the value class's underlying is
+    //    itself erased-top (`value class A<T>(val value: T)`, `kotlin/Result`). The RETURN model
+    //    described above rests on the physical type identifying the carrier, and at `Object` it does
+    //    not: a carrier and a BOX sitting in a generic slot are spelled identically, which is the same
+    //    ambiguity `call_declared_ret` exists to resolve — and it is only threaded on the member and
+    //    static call paths, not yet on the operator-invoke one (`useCase(param)` still lands a raw
+    //    carrier under a `checkcast kotlin/Result`). Describing these members turns a SKIP into a
+    //    miscompile, so they wait for the remaining paths. Read off the ERASED signature rather than a
+    //    value-class table, so it holds for a classpath value class (`Result`) exactly as for a
+    //    same-file one: a position that DECLARED a value class and now spells `Object` is the case.
+    //
+    //    A `suspend` member's return is EXEMPT, because the CPS rewrite makes every suspend method
+    //    return `Object` regardless of what it declares (the real return rides the `Continuation`'s
+    //    type argument). Reading that `Object` as value-class erasure would decline shapes that are
+    //    perfectly describable — `interface I { suspend fun f(a: K): String }` is byte-identical to
+    //    kotlinc. Value-class PARAMETERS are still checked; only the return is exempt.
+    //
+    //    The exemption itself has an exception, and it is a real miscompile rather than a lost
+    //    opportunity: when the value-class pass BOXES the value-class return at the CPS `areturn`
+    //    (`ir.suspend_boxed_value_class_returns`), krusty's bytecode and kotlinc's disagree. kotlinc
+    //    boxes only for a PRIMITIVE underlying; over a reference, nullable, or generic underlying it
+    //    returns the raw carrier, while krusty boxes unconditionally. Since the RECORD krusty writes
+    //    is byte-identical to kotlinc's, describing such a member advertises an ABI the class file
+    //    does not implement: a consumer compiled against it does `C().gk().v` and gets
+    //    "class K cannot be cast to class java.lang.String". Against a KOTLINC-built `C` the same
+    //    source runs, so this is krusty's boxing, not its reader. That table is keyed by `FunId` and
+    //    holds exactly the members whose CPS return krusty boxes — an ABSTRACT member has no return
+    //    expression and never appears, which is why the interface shapes above stay admissible.
+    let erases_value_class_to_object = |fid: &u32| {
+        let Some((_, declared_params, declared_ret)) = ir.vc_declared_sigs.get(fid) else {
+            return false;
+        };
+        let f = &ir.functions[*fid as usize];
+        // The CPS marker itself: a suspend method's erased signature ends in the `Continuation`.
+        let is_cps = f
+            .params
+            .last()
+            .and_then(|p| p.non_null().obj_internal())
+            .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"));
+        let cps_boxes_value_class_return = ir.suspend_boxed_value_class_returns.contains_key(fid);
+        let param_erased = declared_params
+            .iter()
+            .zip(f.params.iter())
+            .any(|(declared, erased)| declared != erased && erased.non_null().is_erased_top());
+        let ret_erased = (!is_cps || cps_boxes_value_class_return)
+            && *declared_ret != f.ret
+            && f.ret.non_null().is_erased_top();
+        param_erased || ret_erased
+    };
+    let has_object_erased_value_class_member =
+        declared_fids.iter().any(erases_value_class_to_object);
+    let has_computed_property = c.properties.iter().any(|p| p.backing_field.is_none());
+    if has_object_erased_value_class_member
+        || (!c.is_value && ir.has_value_param_ctor(&c.fq_name()))
+        || (c.is_value && (!declared_fids.is_empty() || has_computed_property))
     {
         return None;
     }
@@ -968,6 +1057,9 @@ fn class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
         || (c.fields.len() as u32) < c.ctor_param_count
         || (c.is_value && (c.fields.len() != 1 || !c.fields[0].is_final()))
         || ir.has_value_param_ctor(&c.fq_name())
+        // A COMPUTED property is realized by kotlinc as a static `-impl` over the carrier and by krusty
+        // as an instance accessor, so a value class with one is withheld — mirror that here.
+        || (c.is_value && c.properties.iter().any(|p| p.backing_field.is_none()))
     {
         return false;
     }
@@ -10945,137 +11037,45 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_compare(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        let lt = self.value_ty(lhs);
-        // Referential identity (`===`/`!==`) on *reference* operands: compare the two object refs
-        // directly with `if_acmp*` (never the structural `Intrinsics.areEqual` the `Eq`/`Ne` reference
-        // path uses below). On *primitive* operands Kotlin's `===` is just value `==`, so those fall
-        // through to the ordinary numeric comparison after remapping to `Eq`/`Ne`.
-        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe)
-            && lt.is_reference()
-            && self.value_ty(rhs).is_reference()
-        {
-            self.emit_operands(&[lhs, rhs], code);
-            let t = code.new_label();
-            let end = code.new_label();
-            self.frame(t, vec![], code);
-            if op == IrBinOp::RefEq {
-                code.if_acmpeq(t)
-            } else {
-                code.if_acmpne(t)
-            }
-            code.push_int(0, self.cw);
-            self.frame(end, vec![VerifType::Integer], code);
-            code.goto(end);
-            code.bind(t);
+        let f = code.new_label();
+        // Every comparison that needs a conditional branch goes through the same classifier and
+        // operand emitter used by `if`/`while`/`when`. Value position merely supplies a false target
+        // and materializes the resulting 0/1. This is intentionally one semantic path: keeping separate
+        // null/reference/numeric case tables here previously let zero-left ordering acquire a different
+        // node-shape rule depending on whether the comparison happened to be an `if` condition.
+        if self.emit_non_structural_compare_branch(op, lhs, rhs, f, false, code) {
+            self.materialize_cmp_bool(f, code);
+            return;
+        }
+
+        // The shared emitter returns false only for structural equality between two non-null
+        // references. `Intrinsics.areEqual` already produces the Boolean value kotlinc returns in value
+        // position, so branching merely to reconstruct it would be longer and less faithful.
+        self.emit_structural_equality(lhs, rhs, code);
+        if op == IrBinOp::Ne {
             code.push_int(1, self.cw);
-            code.bind(end);
-            return;
+            code.ixor();
         }
-        let op = match op {
-            IrBinOp::RefEq => IrBinOp::Eq,
-            IrBinOp::RefNe => IrBinOp::Ne,
-            o => o,
-        };
-        // `x == null` / `x != null`: compare against null directly with `ifnull`/`ifnonnull` (kotlinc's
-        // bytecode), regardless of the operand's static value type. `Intrinsics.areEqual` below is only
-        // for two reference operands neither of which is the `null` literal — and a plain `if_icmp*` on
-        // a reference (what the numeric path would emit) is only accepted by the verifier when no
-        // stackmap frame pins the operand types, so it must not be relied on.
-        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
-        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
-        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && (lhs_null || rhs_null) {
-            let operand = if lhs_null { rhs } else { lhs };
-            self.emit_value(operand, code);
-            let t = code.new_label();
-            let end = code.new_label();
-            self.frame(t, vec![], code);
-            if op == IrBinOp::Eq {
-                code.ifnull(t)
-            } else {
-                code.ifnonnull(t)
-            }
-            code.push_int(0, self.cw);
-            self.frame(end, vec![VerifType::Integer], code);
-            code.goto(end);
-            code.bind(t);
-            code.push_int(1, self.cw);
-            code.bind(end);
-            return;
-        }
-        // Kotlin `==`/`!=` on reference operands is structural (`a?.equals(b)`), realized by the
-        // null-safe `kotlin/jvm/internal/Intrinsics.areEqual` — the exact helper kotlinc's JVM backend
-        // emits (`intrinsics/Equals.kt`), so the bytecode matches. Primitives keep the
-        // `if_icmp*`/3-way-compare path below.
-        if matches!(op, IrBinOp::Eq | IrBinOp::Ne)
-            && lt.is_reference()
-            && self.value_ty(rhs).is_reference()
-        {
-            // Spill if rhs is branchy (`x == when{…}`) so lhs isn't live across its merge frames.
-            self.emit_operands(&[lhs, rhs], code);
-            let m = self.cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "areEqual",
-                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-            );
-            code.invokestatic(m, 2, 1);
-            if op == IrBinOp::Ne {
-                code.push_int(1, self.cw);
-                code.ixor();
-            }
-            return;
-        }
-        self.emit_operands(&[lhs, rhs], code);
-        // Long/Double/Float compare to a 3-way result, then test against 0 with `if_icmp*`. For float
-        // types `>`/`>=` use the `*l` variant (NaN → -1) and `<`/`<=` the `*g` variant (NaN → +1), so a
-        // NaN operand makes the comparison false either way — matching kotlinc.
-        let nan_l = matches!(op, IrBinOp::Gt | IrBinOp::Ge);
-        match lt {
-            Ty::Long => {
-                code.lcmp();
-                code.push_int(0, self.cw);
-            }
-            Ty::Double => {
-                if nan_l {
-                    code.dcmpl();
-                } else {
-                    code.dcmpg();
-                }
-                code.push_int(0, self.cw);
-            }
-            Ty::Float => {
-                if nan_l {
-                    code.fcmpl();
-                } else {
-                    code.fcmpg();
-                }
-                code.push_int(0, self.cw);
-            }
-            _ => {}
-        }
-        let t = code.new_label();
-        let end = code.new_label();
-        self.frame(t, vec![], code);
-        match op {
-            IrBinOp::Lt => code.if_icmplt(t),
-            IrBinOp::Le => code.if_icmple(t),
-            IrBinOp::Gt => code.if_icmpgt(t),
-            IrBinOp::Ge => code.if_icmpge(t),
-            IrBinOp::Eq => code.if_icmpeq(t),
-            IrBinOp::Ne => code.if_icmpne(t),
-            _ => unreachable!(),
-        }
-        // The `if_icmp*` popped both operands — this is the height on BOTH merge paths (the `t`
-        // branch and the fall-through). The 0/1 booleans below each leave exactly one value, so the
-        // tracker must be reset to this height at `bind(t)`; otherwise the linear counter carries the
-        // fall-through's `push 0` past the `goto`, drifting `cur_stack` +1 (harmless for max_stack, but
-        // it makes `stack_height()` over-report, which the branchy-inline baseline check relies on).
+    }
+
+    /// Tail of a value-position comparison: the caller has emitted a conditional branch to `f` taken
+    /// exactly when the comparison is FALSE. Fall through to `iconst_1`, jump over the `iconst_0` the
+    /// `f` arm pushes — kotlinc's polarity (`if_icmpne; iconst_1; goto; iconst_0`), which keeps the
+    /// null, referential and numeric arms byte-identical to it at no extra instruction cost.
+    fn materialize_cmp_bool(&mut self, f: Label, code: &mut CodeBuilder) {
+        // The branch popped its operands — this is the height on BOTH merge paths (the `f` branch and
+        // the fall-through). The 0/1 booleans below each leave exactly one value, so the tracker must be
+        // reset to this height at `bind(f)`; otherwise the linear counter carries the fall-through's
+        // `push 1` past the `goto`, drifting `cur_stack` +1 (harmless for max_stack, but it makes
+        // `stack_height()` over-report, which the branchy-inline baseline check relies on).
         let merged = code.stack_height().max(0) as u16;
-        code.push_int(0, self.cw);
+        let end = code.new_label();
+        code.push_int(1, self.cw);
         self.frame(end, vec![VerifType::Integer], code);
         code.goto(end);
-        code.bind(t);
+        code.bind(f);
         code.set_stack(merged);
-        code.push_int(1, self.cw);
+        code.push_int(0, self.cw);
         code.bind(end);
     }
 
@@ -11176,6 +11176,38 @@ impl<'a> Emitter<'a> {
         jt: bool,
         code: &mut CodeBuilder,
     ) {
+        if self.emit_non_structural_compare_branch(op, lhs, rhs, target, jt, code) {
+            return;
+        }
+
+        // The shared classifier leaves only non-null structural `==`/`!=` here. Unlike value position,
+        // a condition must consume `Intrinsics.areEqual` with one final branch; the comparison's
+        // requested polarity determines whether equality means taking or skipping the target.
+        debug_assert!(matches!(op, IrBinOp::Eq | IrBinOp::Ne));
+        self.emit_structural_equality(lhs, rhs, code);
+        self.frame(target, vec![], code);
+        if (op == IrBinOp::Eq) == jt {
+            code.ifne(target);
+        } else {
+            code.ifeq(target);
+        }
+    }
+
+    /// Emit every comparison except non-null structural reference equality as a branch.
+    ///
+    /// Returning `false` is a deliberately narrow contract: both operands are non-null references and
+    /// `op` is `==`/`!=`, so the caller must emit `Intrinsics.areEqual` in the form appropriate to its
+    /// consumer. All null, identity and numeric classification lives here so comparison semantics cannot
+    /// drift based on whether an identical IR node is consumed as a Boolean value or as control flow.
+    fn emit_non_structural_compare_branch(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+        target: Label,
+        jt: bool,
+        code: &mut CodeBuilder,
+    ) -> bool {
         use IrBinOp::*;
         let lt = self.value_ty(lhs);
         // `x == null` / `x != null` / `x === null` / `x !== null` → single-operand `ifnull`/`ifnonnull`
@@ -11197,7 +11229,7 @@ impl<'a> Emitter<'a> {
             } else {
                 code.if_acmpne(target);
             }
-            return;
+            return true;
         }
         let op = match op {
             RefEq => Eq,
@@ -11213,105 +11245,90 @@ impl<'a> Emitter<'a> {
             } else {
                 code.ifnonnull(target);
             }
-            return;
+            return true;
         }
-        // Reference structural `==`/`!=` → `Intrinsics.areEqual` then test the `Z` result.
+        // Structural equality's value result has different optimal consumers: value position can use it
+        // directly, while control flow branches on it. Tell the caller to select that final operation;
+        // the semantic classification itself still occurs once, here.
         if matches!(op, Eq | Ne) && lt.is_reference() && self.value_ty(rhs).is_reference() {
-            self.emit_operands(&[lhs, rhs], code);
-            let m = self.cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "areEqual",
-                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-            );
-            code.invokestatic(m, 2, 1);
-            self.frame(target, vec![], code);
-            if (op == Eq) == jt {
-                code.ifne(target); // areEqual true ⇒ equal
-            } else {
-                code.ifeq(target);
-            }
-            return;
+            return false;
         }
+        self.emit_numeric_compare_branch(op, lhs, rhs, target, jt, code);
+        true
+    }
+
+    /// Put the null-safe structural equality result for two references on the operand stack.
+    fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
+        // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.
+        self.emit_operands(&[lhs, rhs], code);
+        let m = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "areEqual",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        );
+        code.invokestatic(m, 2, 1);
+    }
+
+    /// Emit numeric comparison operands and the final branch for both value and branch consumers.
+    /// Centralizing the zero-literal rule here is important: operand syntax must not select a different
+    /// optimization merely because the surrounding node consumes a Boolean instead of control flow.
+    fn emit_numeric_compare_branch(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+        target: Label,
+        jt: bool,
+        code: &mut CodeBuilder,
+    ) {
+        use IrBinOp::*;
+        let lt = self.value_ty(lhs);
         // Numeric. A comparison against the integer literal `0` uses the single-operand compare-to-zero
         // branch (`ifeq`/`iflt`/… — kotlinc's form), saving the `iconst_0`. Only the int category; the
         // others compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, which already tests the result vs 0.
         let int_cat = !matches!(lt, Ty::Long | Ty::Double | Ty::Float);
         let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
-        if int_cat && zero(rhs) {
+        let cmp0_int = if int_cat && zero(rhs) {
             self.emit_value(lhs, code);
-            self.frame(target, vec![], code);
-            self.cmp0_branch(op, jt, target, code);
-            return;
-        }
-        if int_cat && zero(lhs) {
+            Some(op)
+        } else if int_cat && zero(lhs) && matches!(op, Eq | Ne) {
+            // Equality is symmetric, so dropping the left zero preserves kotlinc's bytecode. Ordering
+            // deliberately keeps both operands: kotlinc does not rewrite `0 < x` as `x > 0`, and doing
+            // so only in branch position was the positional special case this shared path removes.
             self.emit_value(rhs, code);
-            self.frame(target, vec![], code);
-            self.cmp0_branch(swap_cmp(op), jt, target, code);
-            return;
-        }
-        // int-category fuses to `if_icmp*`; Long/Double/Float → 3-way compare then single-operand `if*`.
-        self.emit_operands(&[lhs, rhs], code);
-        // `>`/`>=` use the `*l` float-compare variant, `<`/`<=` the `*g` — so NaN yields false (kotlinc).
-        let nan_l = matches!(op, Gt | Ge);
-        match lt {
-            Ty::Long => code.lcmp(),
-            Ty::Double => {
-                if nan_l {
-                    code.dcmpl()
-                } else {
-                    code.dcmpg()
+            Some(op)
+        } else {
+            self.emit_operands(&[lhs, rhs], code);
+            None
+        };
+        if !int_cat {
+            // `>`/`>=` use the `*l` float-compare variant, `<`/`<=` the `*g` — so NaN yields false
+            // (kotlinc). Long has no NaN distinction but shares the three-way-result branch below.
+            let nan_l = matches!(op, Gt | Ge);
+            match lt {
+                Ty::Long => code.lcmp(),
+                Ty::Double => {
+                    if nan_l {
+                        code.dcmpl()
+                    } else {
+                        code.dcmpg()
+                    }
                 }
-            }
-            Ty::Float => {
-                if nan_l {
-                    code.fcmpl()
-                } else {
-                    code.fcmpg()
+                Ty::Float => {
+                    if nan_l {
+                        code.fcmpl()
+                    } else {
+                        code.fcmpg()
+                    }
                 }
+                _ => unreachable!("int_cat is false only for Long/Double/Float"),
             }
-            _ => {}
         }
         self.frame(target, vec![], code);
-        if !int_cat {
-            self.cmp0_branch(op, jt, target, code);
-        } else {
-            match (op, jt) {
-                (Lt, true) => code.if_icmplt(target),
-                (Lt, false) => code.if_icmpge(target),
-                (Le, true) => code.if_icmple(target),
-                (Le, false) => code.if_icmpgt(target),
-                (Gt, true) => code.if_icmpgt(target),
-                (Gt, false) => code.if_icmple(target),
-                (Ge, true) => code.if_icmpge(target),
-                (Ge, false) => code.if_icmplt(target),
-                (Eq, true) => code.if_icmpeq(target),
-                (Eq, false) => code.if_icmpne(target),
-                (Ne, true) => code.if_icmpne(target),
-                (Ne, false) => code.if_icmpeq(target),
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    /// A single-operand compare-to-zero branch (`ifeq`/`ifne`/`iflt`/`ifle`/`ifgt`/`ifge`) to `target`,
-    /// taken when `(value <op> 0) == jt`. Used for `x <op> 0` and for the 3-way `lcmp`/`dcmp*`/`fcmp*`
-    /// result tested against 0.
-    fn cmp0_branch(&self, op: IrBinOp, jt: bool, target: Label, code: &mut CodeBuilder) {
-        use IrBinOp::*;
-        match (op, jt) {
-            (Lt, true) => code.iflt(target),
-            (Lt, false) => code.ifge(target),
-            (Le, true) => code.ifle(target),
-            (Le, false) => code.ifgt(target),
-            (Gt, true) => code.ifgt(target),
-            (Gt, false) => code.ifle(target),
-            (Ge, true) => code.ifge(target),
-            (Ge, false) => code.iflt(target),
-            (Eq, true) => code.ifeq(target),
-            (Eq, false) => code.ifne(target),
-            (Ne, true) => code.ifne(target),
-            (Ne, false) => code.ifeq(target),
-            _ => unreachable!(),
+        match cmp0_int {
+            Some(o) => cmp0_branch(o, jt, target, code),
+            None if !int_cat => cmp0_branch(op, jt, target, code),
+            None => icmp_branch(op, jt, target, code),
         }
     }
 
@@ -12380,16 +12397,47 @@ fn primitive_spread_builder(element: Ty) -> Option<(&'static str, &'static str, 
     })
 }
 
-/// Swap the operands of a comparison operator (`a < b` ≡ `b > a`) — used to normalize `0 <op> x` into
-/// `x <swapped-op> 0` so the single-operand compare-to-zero branch applies.
-fn swap_cmp(op: IrBinOp) -> IrBinOp {
+/// A single-operand compare-to-zero branch (`ifeq`/`ifne`/`iflt`/`ifle`/`ifgt`/`ifge`) to `target`,
+/// taken when `(value <op> 0) == jt`. Used for `x <op> 0` and for the 3-way `lcmp`/`dcmp*`/`fcmp*`
+/// result tested against 0, which is already -1/0/1.
+fn cmp0_branch(op: IrBinOp, jt: bool, target: Label, code: &mut CodeBuilder) {
     use IrBinOp::*;
-    match op {
-        Lt => Gt,
-        Le => Ge,
-        Gt => Lt,
-        Ge => Le,
-        o => o,
+    match (op, jt) {
+        (Lt, true) => code.iflt(target),
+        (Lt, false) => code.ifge(target),
+        (Le, true) => code.ifle(target),
+        (Le, false) => code.ifgt(target),
+        (Gt, true) => code.ifgt(target),
+        (Gt, false) => code.ifle(target),
+        (Ge, true) => code.ifge(target),
+        (Ge, false) => code.iflt(target),
+        (Eq, true) => code.ifeq(target),
+        (Eq, false) => code.ifne(target),
+        (Ne, true) => code.ifne(target),
+        (Ne, false) => code.ifeq(target),
+        _ => unreachable!(),
+    }
+}
+
+/// A two-operand int-category comparison branch (`if_icmplt`/`if_icmpge`/…) to `target`, taken when
+/// `(a <op> b) == jt`. The `jt = false` rows are the negated operator, which is how a value-position
+/// comparison reaches its `false` arm.
+fn icmp_branch(op: IrBinOp, jt: bool, target: Label, code: &mut CodeBuilder) {
+    use IrBinOp::*;
+    match (op, jt) {
+        (Lt, true) => code.if_icmplt(target),
+        (Lt, false) => code.if_icmpge(target),
+        (Le, true) => code.if_icmple(target),
+        (Le, false) => code.if_icmpgt(target),
+        (Gt, true) => code.if_icmpgt(target),
+        (Gt, false) => code.if_icmple(target),
+        (Ge, true) => code.if_icmpge(target),
+        (Ge, false) => code.if_icmplt(target),
+        (Eq, true) => code.if_icmpeq(target),
+        (Eq, false) => code.if_icmpne(target),
+        (Ne, true) => code.if_icmpne(target),
+        (Ne, false) => code.if_icmpeq(target),
+        _ => unreachable!(),
     }
 }
 

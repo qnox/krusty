@@ -108,6 +108,8 @@ mod callable_ref_equality_e2e;
 mod callable_ref_extension_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
 mod catch_annotation_comma_e2e;
+#[path = "char_literal_diagnostics_e2e.rs"]
+mod char_literal_diagnostics_e2e;
 #[path = "checker_operator_methods_e2e.rs"]
 mod checker_operator_methods_e2e;
 #[path = "class_body_e2e.rs"]
@@ -158,6 +160,8 @@ mod classpath_default_vararg_call_e2e;
 mod classpath_enum_regex_vc_e2e;
 #[path = "classpath_extension_default_implicit_receiver_e2e.rs"]
 mod classpath_extension_default_implicit_receiver_e2e;
+#[path = "classpath_extension_receiver_lambda_e2e.rs"]
+mod classpath_extension_receiver_lambda_e2e;
 #[path = "classpath_function_reference_e2e.rs"]
 mod classpath_function_reference_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
@@ -1130,6 +1134,8 @@ mod vararg_e2e;
 mod vararg_element_default_e2e;
 #[path = "vararg_extension_overload_e2e.rs"]
 mod vararg_extension_overload_e2e;
+#[path = "vararg_spread_shapes_e2e.rs"]
+mod vararg_spread_shapes_e2e;
 #[path = "vc_mangled_default_e2e.rs"]
 mod vc_mangled_default_e2e;
 #[path = "when_branch_if_no_else_e2e.rs"]

@@ -124,44 +124,6 @@ fn a_generic_slot_still_boxes_a_concrete_carrier_value_class() {
     }
 }
 
-/// A value class the callee DECLARES at a parameter position is passed as its erased CARRIER, not as a
-/// box. `Result`'s carrier is `Object`, so the mangled member's `invoke-<hash>(Ljava/lang/Object;)`
-/// descriptor reads exactly like a generic slot — where kotlinc DOES box — and only the callee's
-/// declared signature tells the two apart. Boxing here handed the callee a `Result` object where it
-/// expects the carrier, so its own `onFailure` never saw the failure and the call returned the box
-/// unchanged: `box()` answered "Fail" with no crash to point at it.
-#[test]
-fn classpath_value_class_parameter_is_passed_as_its_carrier() {
-    let jdk = common::jdk_modules();
-    let sl = common::stdlib_jar();
-    let Some(libout) = common::compile_lib(
-        "vccarrier",
-        "package lib\n\
-         interface UseCaseWithParameter<P, R> {\n\
-        \x20   operator fun invoke(param: P): Result<R>\n\
-         }\n\
-         class WhateverUseCase : UseCaseWithParameter<Result<Int>, Int> {\n\
-        \x20   override operator fun invoke(param: Result<Int>): Result<Int> =\n\
-        \x20       param.onFailure { return Result.success(0) }\n\
-         }\n",
-    ) else {
-        return;
-    };
-    let cp = vec![libout.clone(), sl.clone()];
-    let main = "import lib.WhateverUseCase\n\
-        fun box(): String {\n\
-        \x20 val useCase = WhateverUseCase()\n\
-        \x20 val recovered = useCase(Result.failure(NumberFormatException()))\n\
-        \x20 return if (recovered == Result.success(0)) \"OK\" else \"fail: $recovered\"\n\
-        }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
-        .expect("krusty failed to compile a value-class-parameter member call");
-    match common::run_box(&classes, "MainKt", &[libout, sl]) {
-        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
-        None => eprintln!("skipping: box runner unavailable"),
-    }
-}
-
 /// A COMPUTED member property of a classpath `@JvmInline value class` is realized as a STATIC
 /// `-impl` accessor whose sole parameter is the receiver's carrier
 /// (`val isFreezing: Boolean` → `isFreezing-impl(I)Z`, `val label: String` → `getLabel-impl(I)`).

@@ -322,8 +322,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   extension reached that way is a `Member` callee, invisible to the bare-`Name` scan, and it is not an
   instance member of the receiver's type, so the resolved-member scan misses it too. The lambda then got
   no state machine and the call emitted without a `Continuation` ("call arity mismatch").
-  `collect_member_call_names` closes it, matched by name against the file's suspend EXTENSIONS only so
-  the (documented, safe) over-approximation stays narrow. An extension body may now suspend on a MEMBER
+  The shape-free `collect_call_sites` scan closes it — every call is inspected through the CHECKER's
+  selected target, so receiver syntax needs no name-matching heuristic of its own (the earlier
+  `collect_member_call_names` name scan it replaced was narrower and keyed to the AST shape). An
+  extension body may now suspend on a MEMBER
   of its receiver — the receiver is an ordinary parameter and the member call threads its own
   continuation, so `gate:extension-suspend-fn-member-suspension` is retired
   (`tests/suspend_e2e.rs::suspend_extension_suspending_on_a_receiver_member`). One residual shape the
@@ -603,40 +605,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   builder and the constant-pool seeder now both take the `c.ctor_param_count` prefix, which makes the
   `d2` string table byte-identical to kotlinc's for this source (`krusty_roundtrip_class_metadata_e2e::
   a_body_property_adds_no_component_or_copy_parameter`).
-  **A VALUE-CLASS RETURN reached through the CLASSPATH is already the unboxed carrier — this is what
-  let the value-class records land.** A member whose declared return is a value class is JVM-name-
-  MANGLED and its descriptor carries the ERASED underlying (`fun make(): K` →
-  `make-XLNMDGE()Ljava/lang/String;`), so the value the call leaves on the stack IS the carrier. The
-  lowerer nevertheless tagged the result with its declared type, and that tag became a `checkcast K`
-  over a `String`; the following sole-property read then `unbox-impl`'d a value that was never boxed
-  (`h.echo(h.make())` verified as "Type 'lib/K' is not assignable to 'java/lang/String'"). kotlinc
-  emits NEITHER instruction. `coerce_to_static` now asks whether the physical type IS the declared value
-  class's carrier and, if so, leaves the value alone — the same test the JVM value-class pass already
-  applies to a library call's representation (physical descriptor == the underlying's ⇒ unboxed). The
-  underlying is followed through a value class declared over another one, as erasure does.
-  The carrier must be a CONCRETE type for this to be a test at all: `Ljava/lang/Object;` is equally
-  what a GENERIC slot erases to, where the value really is a box (`listOf(W(…))[0]` hands back a `W`
-  object), so a value class whose underlying erases to `Object` (`kotlin/Result`, `value class W(val v:
-  Any?)`) is excluded and keeps its cast. `src/jvm/value_classes.rs` draws the same line at its
-  call-argument boundary, for the same reason. Test:
-  `classpath_value_class_member_e2e::a_generic_slot_still_boxes_a_concrete_carrier_value_class`.
-  Test: `classpath_value_class_member_e2e::classpath_value_class_return_member_is_already_unboxed`
-  (against a kotlinc-built library, checking the member, the sibling property, and passing the result
-  back into a value-class parameter).
-  **A value class the callee DECLARES at a PARAMETER is passed as its carrier too — and only the
-  declared signature can say so.** When the carrier erases to `Object` (`Result`), the mangled member's
-  `invoke-bjn95JY(Ljava/lang/Object;)` descriptor is indistinguishable from a generic slot, where
-  kotlinc DOES box; the JVM pass had only the descriptor and boxed. The callee then received a `Result`
-  OBJECT where it expects the carrier, its own `onFailure` never matched, and the call returned the box
-  unchanged — `box()` answered "Fail" with nothing to point at. The lowerer, which holds the declared
-  signature resolution recovered from `@Metadata`, now records the carrier positions per call
-  (`IrFile::value_class_carrier_args`) and the pass skips boxing there. The signal for "this member's
-  value classes are erased in its descriptor" is the JVM NAME: kotlinc mangles such a member to
-  `name-<hash>`, and `-` cannot occur in a name otherwise — a member reached with a value class merely
-  SUBSTITUTED into a generic parameter (`MutableList<Result<Int>>.add`) keeps its plain name and its
-  boxing. The value class's own `-impl` family is excluded (its parameters follow the owner rules).
-  Test: `classpath_value_class_member_e2e::classpath_value_class_parameter_is_passed_as_its_carrier`;
-  the box corpus's `inlineClasses/kt50974_resultMultiModule` is the case that found it.
   **Admission is TRANSITIVE: a class is not described in terms of a value class a reader cannot read
   back as one.** A value class without a record reads downstream as an ordinary class — the caller
   casts the carrier to the box and binds an INSTANCE accessor where kotlinc emits the static `-impl`
@@ -691,17 +659,95 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its member runs on the unboxed carrier through a static `-impl` pair the record does not yet spell.
   `ir.has_value_param_ctor` (recorded before erasure) is the signal. Test:
   `krusty_roundtrip_class_metadata_e2e::a_value_class_constructor_parameter_withholds_the_record`.
+  **The classpath value-class RETURN, and why a VALUE-CLASS-INVOLVED member can now be DESCRIBED.**
+  A value-class return erases exactly like a value-class parameter: the JVM method hands back the
+  UNDERLYING (`fun make(): K` → `make-XLNMDGE()Ljava/lang/String;`) while `@Metadata` names `K`. A
+  call site needs BOTH halves. `MetadataCallFacts` carried only `value_class_params`, so a caller
+  learned the Kotlin return and boxed as kotlinc does at a genuine box boundary —
+  `invokevirtual Holder.make-XLNMDGE()Ljava/lang/String; checkcast K; K.unbox-impl()` — over a
+  `String` that already IS the carrier (`ClassCastException: class java.lang.String cannot be cast to
+  class K`). The record was therefore withheld, and every caller stayed on the descriptor path.
+  The model has three parts.
+  **`MetadataCallFacts::value_class_ret`** (`value_class_return_type`, mirroring
+  `value_class_param_types`) reports the value class a descriptor return really has: the metadata
+  names a value class, it is NON-nullable, and the descriptor carries exactly that class's underlying.
+  A nullable value class is genuinely BOXED, so `metadata_value_class_underlying` returning `None`
+  for it is what keeps it on the boxed path. `jvm_libraries` applies it as the non-suspend return
+  (previously `physical_ret` outright, so a top-level `(): Duration` read back as `Long`), keeping
+  `physical_ret`/`descriptor` erased.
+  **`LibraryMember::declared_ret` / `LibraryCallable::declared_ret` → `IrFile::call_declared_ret`** is
+  the return analogue of `source_receiver`: the callee's DECLARED, un-erased, pre-substitution return,
+  forwarded verbatim by `ir_lower` (which does no value-class reasoning) and read by the value-class
+  pass. The SUBSTITUTED type cannot serve. `List<TokenBox>.get` and `A.create(): A<String>`
+  both present as "returns a value class, physically `Object`", yet the first hands back a BOX out of
+  a generic slot and the second the erased carrier; only the DECLARATION separates them — `get`
+  declares the type parameter `E`, `create` declares `A`. `value_classes::repr` consults it FIRST, and
+  a declared value-class return is `Unboxed` whatever the underlying erases to.
+  **`coerce_to_static` records the substituted type in `logical_types`** beside the physical one, so a
+  `Cast` to the value class strips as redundant instead of reading as "an erased value narrowed to
+  `K`". Scoped to a value-class static type AND a non-erased-top physical type: at `Object` the pair
+  cannot classify the result, and recording it there unboxed real boxes
+  (`TokenBox cannot be cast to java.lang.Integer`, four corpus cases).
+  **What still declines, and why none of it is the return model.** Each is a WRITE-side divergence
+  from kotlinc, invisible while the record was withheld, and each is proven by a differential
+  comparison for the same source. (1) A VALUE-CLASS-typed CONSTRUCTOR PARAMETER, unchanged — see the
+  paragraph above. (2) A VALUE class with a
+  DECLARED MEMBER: kotlinc realizes `value class S(val v: String) { fun k(): String }` as the STATIC
+  `k-impl(Ljava/lang/String;)Ljava/lang/String;` over the carrier, krusty as an INSTANCE `k()` on the
+  box, so reading krusty's record puts the carrier under an `invokevirtual S.k()` — a VerifyError.
+  The read side is fine there: against a KOTLINC-built `S` the same `box()` runs. A COMPUTED property
+  counts as such a member and `declared_fids` cannot see it (its accessor is synthesized from
+  `IrProperty`, and `accessor_names` comes from backing fields); the SOLE underlying property does
+  not, since kotlinc gives it an instance `getV()` too. (3) A member whose value-class position erases
+  to `Object` (`value class A<T>(val value: T)`, `kotlin/Result`): the return model rests on the
+  physical type identifying the carrier, and at `Object` it does not — `call_declared_ret` resolves
+  that ambiguity but is threaded only on the member and static call paths, not yet the
+  operator-invoke one, where `useCase(param)` still lands a raw carrier under a `checkcast
+  kotlin/Result`. Read off the ERASED signature rather than a value-class table, so it holds for a
+  classpath value class exactly as for a same-file one. A `suspend` member's RETURN is exempt from
+  this test — CPS makes it `Object` whatever it declares — with one exception that is a real
+  miscompile: (4) a CONCRETE `suspend` member whose value-class return krusty BOXES at the CPS
+  `areturn` (`ir.suspend_boxed_value_class_returns`). kotlinc boxes there only for a PRIMITIVE
+  underlying; over a reference, nullable, or generic underlying it `areturn`s the raw carrier, while
+  krusty boxes unconditionally. Because the record krusty writes is byte-identical to kotlinc's,
+  describing such a member advertises an ABI the class file does not implement — a consumer doing
+  `C().gk().v` gets "class K cannot be cast to class java.lang.String", and against a KOTLINC-built
+  `C` the same source runs. An ABSTRACT suspend member has no return expression to box and never
+  enters that table, which is why the suspend INTERFACE shapes stay describable. For the same reason
+  `LibraryMember::declared_ret` is not set for a `suspend` member: CPS erases its descriptor return to
+  `Object`, so the descriptor stops witnessing that the result is the carrier, and for a
+  primitive-underlying value class it is not one (`make-<hash>(Continuation)Ljava/lang/Object;` hands
+  back `M.box-impl(I)LM;`) — those fall back to the descriptor comparison, which classifies them
+  correctly.
+  Tests: `krusty_roundtrip_class_metadata_e2e::a_value_class_returning_member_round_trips`,
+  `a_value_class_parameter_member_round_trips` and
+  `an_inherited_value_class_returning_member_round_trips` each RUN `box()` against krusty's own class
+  output (a caller that merely compiles while emitting the boxed form still fails);
+  `a_value_class_with_a_declared_member_withholds_the_record`,
+  `value_class_body_property_withholds_the_record` and
+  `a_concrete_suspend_value_class_return_withholds_the_record` pin the declines above on the emitted
+  METHOD, so each fails the day its ABI is corrected. `data_class_metadata_wiring_e2e::
+  value_class_parameter_member_is_byte_identical`, `value_class_return_member_is_byte_identical` and
+  `suspend_returning_nullable_value_class_is_byte_identical` assert the whole class file, `@Metadata`
+  included, against kotlinc's.
   The box corpus's `// MODULE:` path — the only place the gate compiles a DOWNSTREAM module against
-  krusty's own class output — now emits class metadata too, matching what ships; it is a net gain
-  (3466 → 3471 → 3588 cases compiled with the value-class records, still 0 miscompiles). Keeping it
-  off would have left the gate blind to
-  precisely the defects above: they surfaced only once that path wrote what the CLI writes.
+  krusty's own class output — now emits class metadata too, matching what ships; switching the
+  annotation on was itself a net gain (3466 → 3471 → 3589 cases compiled as the value-class records landed, still 0 miscompiles), and
+  describing value-class members took it from 3472 to **3587 cases compiled, still 0 miscompiles**.
+  Keeping it off would have left the gate blind to precisely the defects above: they surfaced only
+  once that path wrote what the CLI writes.
+  One test had to be corrected before the default-on switch could pass, and the correction is the
+  interesting part: it asserted that a plain enum carries NO `RuntimeVisibleAnnotations` attribute at
+  all, which contradicts kotlinc — a kotlinc-compiled plain enum carries one, its own class-level
+  `@Metadata` among them. It now asserts on the annotation TYPE (`Ldemo/Mark;`), which is what "the
+  constants are not annotated" actually means
+  (`enum_constant_annotation_emit_e2e::unapplied_annotation_leaves_no_trace_on_a_plain_enum`).
   Tests: `tests/krusty_roundtrip_class_metadata_e2e.rs` (the write side pinned by decoding the emitted
   `Point.class`, plus `copy(y = …)`/destructuring and a plain class's member named arguments
-  round-tripping through krusty's own output). Still open, and NOT about class metadata: the generic
-  half of `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` — a facade record for
-  `fun <T : Comparable<T>> clampMax` keeps the ERASED bound, so the caller reports "operator '!='
-  cannot be applied to 'Comparable' and 'Int'".
+  round-tripping through krusty's own output), and the data-class half of
+  `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` — whose GENERIC half is a separate,
+  facade-side rule (see "A facade `@Metadata` record keeps a BOUNDED type parameter as a type
+  parameter").
 - **`suspend` function TYPE representation (`suspend (A..) -> R`).** kotlinc realizes it as
   `Function{n+1}<A.., Continuation<R>, Object>` — the arity is the logical parameter count PLUS one (a
   trailing continuation), the result erased to `Object`. krusty historically dropped the `suspend`
@@ -868,8 +914,42 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Expr::CharLit` is a `u16` and `unquote_char` takes a `\uXXXX` escape verbatim, so a *source* literal
   `'\uD800'` keeps its code unit too (it used to fold to NUL by the same round-trip). A `char` that
   reaches either from a code POINT truncates with the JVM's own `i2c`, since a well-formed `Char`
-  literal is always in the BMP. Tests: `CharSurrogateConst` and `CharSurrogateLiteral` in
-  `tests/feature_box_e2e.rs`.
+  literal is always in the BMP. The code unit survives every encoding a `Char` constant reaches: a
+  primary-constructor DEFAULT keeps it through both fill paths (the same-class path lowers the
+  default's AST `Expr::CharLit`; a subclass's `: B()` fills the base's `super(…)` args from the
+  file-independent `resolve::CtorDefaultValue::Char`, which is a `u16` for the same reason), and an
+  ANNOTATION ARGUMENT is written as an `element_value` tagged `'C'` over a `CONSTANT_Integer` holding
+  the raw code unit. Tests: `CharSurrogateConst`, `CharSurrogateLiteral`, `CharSurrogateCtorDefault`,
+  `CharSurrogateWhen`, and `CharSurrogateAnnotationArg` in `tests/feature_box_e2e.rs`, plus
+  `cross_file_super_ctor_char_defaults_keep_utf16_code_units` in
+  `tests/cross_file_ctor_default_e2e.rs` for the sibling-file handoff.
+- **A `Char` literal that is not exactly one UTF-16 code unit is REJECTED in the lexer.** The `i2c`
+  truncation above is correct only because a *well-formed* literal is in the BMP, so the ill-formed ones
+  have to be diagnosed rather than truncated: `const val E = '😀'` used to compile silently to
+  `'\uF600'` — `unquote_char` truncates a code POINT to 16 bits, so U+1F600 landed on U+F600, not even on
+  a surrogate half. A literal holds exactly one *element* — one BMP character, or one escape from
+  Kotlin's set (`\n \t \r \b \\ \' \" \$` and `\uXXXX`; there is **no** `\0`, unlike C, and kotlinc
+  rejects `'\0'`) — and never spans a line. kotlinc splits the failures by how the content STARTS, which
+  krusty mirrors: `''` is `empty character literal`; content holding a raw CR or LF is `incorrect
+  character literal` (a bare LF *is* one code unit, so the grammar bars it, not the count — and because
+  the scan runs past a newline hunting the closing quote, this also covers an unterminated literal that
+  found one further down); content beginning with a backslash must be exactly one valid escape or it is
+  `unsupported escape sequence` (`'\0'`, `'\q'`, `'\u12'`, and the two-escape spelling of a surrogate
+  pair, `'\uD83D\uDE00'`); anything else that is not one BMP character is `too many characters in a
+  character literal` (`'ab'`, `'a\n'`, and a raw astral character — two code units, so it lands in the
+  counting arm, not an encoding complaint). A LONE surrogate written as an escape (`'\uD83D'`) stays
+  legal — it is one code unit — so the check never asks whether the result is well-formed UTF-16; a raw
+  TAB stays legal too, since only CR and LF are excluded. The check belongs in the lexer because it needs
+  nothing but the literal's own text, and sitting beside `unterminated character literal` it cannot be
+  missed by a parser path that never reads the token; it therefore also covers a literal inside a string
+  template, the `${'$'}` idiom's path. Two knowingly-unclosed edges: `'\'` is `unterminated character
+  literal` where kotlinc says `unsupported escape sequence` (both reject), and string literals are
+  unchanged — `unescape_chunk` still accepts `"\0"`, which kotlinc rejects. The sibling truncation in
+  `ast_literal_const` (`Ty::Char => IrConst::Char(*v as u16)` for an `IntLit`) needs no diagnostic:
+  `val c: Char = 128000` is already rejected upstream with the same `initializer type mismatch` kotlinc
+  reports, so no source reaches it. Validation and decoding are one token-layer contract used by
+  both lexer and parser; this avoids separate escape tables drifting while keeping the diagnostic at
+  the lexer boundary. Tests: `tests/char_literal_diagnostics_e2e.rs`.
 - **A `Char` constant folded into a string renders as the CHARACTER, not its code unit.** The constant
   string evaluator behind the `trimIndent`/`trimMargin` fold accepts a `Char` (`${'$'}` is the idiomatic
   way to write a literal `$` in a template), so it must spell the character out. A code unit that is not
@@ -1204,6 +1284,61 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stackmap frame pins the operand types (it "works" until a nearby branch forces a frame, then
   `VerifyError: Bad type on operand stack`). `Intrinsics.areEqual` is reserved for two reference operands
   neither of which is the `null` literal. `records_frame` accounts for the `ifnull` branch+merge frame.
+- **A comparison that PRODUCES a `Boolean` fuses its test exactly like one that drives a branch.** Both
+  positions share one rule: never materialize an `iconst_0` just to feed a two-operand `if_icmp*` when a
+  single-operand branch already says the same thing.
+  - `Long`/`Double`/`Float` compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, whose result is *already* -1/0/1
+    relative to zero, so the test is the single-operand `ifeq`/`ifne`/`iflt`/`ifle`/`ifgt`/`ifge` family.
+    `a == b` on `Long` (and therefore on `ULong`, which compares its carriers) is `lcmp; ifne`, **not**
+    `lcmp; iconst_0; if_icmpeq`. Same for the `Double` and `Float` pairs (`dcmpg; ifne`, `fcmpg; ifne`),
+    with the NaN-correct variant still chosen per operator (`a > b` is `dcmpl; ifle`). For `!=` on
+    `Double`/`Float` krusty is *shorter* than kotlinc, which materializes `==` and then negates it with a
+    second branch pair — an accepted divergence in the same family as the `ixor` one below.
+  - The int category fuses the same way against the literal `0`: `a != 0` is `iload_0; ifeq`, never
+    `iload_0; iconst_0; if_icmpne`.
+  - **Zero on the LEFT fuses only for `==`/`!=`.** `0 == x` is `iload x; ifne` (kotlinc's shape), but
+    kotlinc does NOT mirror the ORDERING operators, so `0 < x` stays the two-operand
+    `iconst_0; iload x; if_icmpge`. Both value and branch consumers now go through the same
+    non-structural comparison classifier and numeric operand emitter; the former branch-only
+    `swap_cmp` exception was removed so identical comparison IR cannot acquire a different opcode shape
+    from its surrounding position.
+  - This previously held only for comparisons in *branch* position (`if`/`while`/`when` conditions, via
+    `emit_compare_branch`); the value-producing path (`emit_compare`) always pushed the zero. Surfaced by
+    diffing unsigned `equals` against kotlinc.
+- **Value-position comparisons branch on the NEGATED condition to a `false` arm** — kotlinc's polarity:
+  `if_icmpne L; iconst_1; goto E; L: iconst_0; E:`, i.e. fall through to *true*. krusty previously jumped
+  to the *true* arm (`if_icmpeq L; iconst_0; goto E; L: iconst_1`). Semantically identical and the same
+  instruction count, but matching costs nothing (one flip in the shared tail, `materialize_cmp_bool`) and
+  makes the null (`ifnonnull`), referential (`if_acmpne`) and numeric (`if_icmpne`/`ifne`) arms match
+  kotlinc, so the differential harness stops reporting permanent noise there. The null check runs BEFORE
+  the referential arm, so `a === null` is `ifnonnull` and not `aconst_null; if_acmpne` — the same ordering
+  `emit_compare_branch` already used, and the reason `lhs_null`/`rhs_null` are computed up front.
+  - Known exception, **pre-existing and not fixed here**: `===` between a reference and a *primitive*
+    (`a: Any === b: Int`, which kotlinc only warns about) reaches the numeric tail unboxed, because
+    `int_cat` treats every non-`Long`/`Double`/`Float` type as int-category. That emits an int branch on
+    a reference and fails verification. Same in both positions, and on the pre-change compiler.
+  - Fixing the merge-point accounting (`set_stack` at the false arm, previously applied only to the
+    numeric arm) also removed a permanent `+1` drift in the null/referential arms. That drift made a
+    LATER branchy inline splice in the same expression see a non-empty baseline and refuse, escalating to
+    a hard `inline splice failed` compile error — so e.g.
+    `two(a === b, x.takeIf { it > 0 }.toString())` now compiles.
+  `tests/bytecode_parity_e2e.rs`: `long_compare_in_value_position_tests_lcmp_without_materialized_zero`,
+  `unsigned_long_equality_tests_lcmp_without_materialized_zero`,
+  `double_compare_in_value_position_tests_dcmp_without_materialized_zero`,
+  `float_compare_in_value_position_tests_fcmp_without_materialized_zero`,
+  `compare_against_zero_in_value_position_is_single_operand_branch`,
+  `zero_on_the_left_in_value_position_fuses_only_for_equality`,
+  `zero_on_the_left_in_branch_position_fuses_only_for_equality`,
+  `referential_null_comparison_in_value_position_is_single_operand`,
+  `value_position_comparison_does_not_poison_a_later_inline_splice`,
+  `value_position_comparison_polarity_matches_kotlinc` (branch position:
+  `compare_against_zero_is_single_operand_branch`).
+- **Accepted divergence — reference `!=` in value position uses `ixor`.** For `a != b` on two non-null
+  references krusty emits `Intrinsics.areEqual; iconst_1; ixor`; kotlinc emits the four-instruction branch
+  form `areEqual; ifne L; iconst_1; goto E; L: iconst_0; E:`. krusty's is two instructions shorter and
+  provably equivalent (`areEqual` returns a `Z`, i.e. 0 or 1, so `xor 1` is exactly logical negation), and
+  unlike the cases above it is not a redundancy to remove — so it stays. Recorded here so a future ABI
+  diff against kotlinc reads it as intentional rather than a bug.
 - **A class method's expression-body return type is inferred with its own parameters in scope**
   (`fun m(x: Int) = x + 1` → `Int`). Signature collection adds the method's parameters (alongside the
   class properties) to the literal-inference scope; previously only the properties were visible, so a
@@ -1443,7 +1578,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
   The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
   new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
-<<<<<<< HEAD
 - **Unsigned types `UByte`/`UShort`/`UInt`/`ULong`** — Kotlin inline classes over `Byte`/`Short`/`Int`/`Long`;
   unboxed they ARE that JVM primitive (descriptor `B`/`S`/`I`/`J`), with unsignedness driving
   operation/conversion choice (kotlinc hardcodes these intrinsic mappings, so krusty mirrors them). Literals
@@ -1464,17 +1598,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   DIVERGENCE, not a skip: the native unsigned types do not carry kotlinc's value-class NAME MANGLING on a
   function that takes one — krusty emits `f(byte)` where kotlinc emits `f-7apg3OU(byte)`, pre-existing and
   shared by `UInt`/`ULong`.
-=======
-- **Unsigned types `UInt`/`ULong`** — Kotlin inline classes over `Int`/`Long`; unboxed they ARE that JVM
-  primitive (descriptor `I`/`J`), with unsignedness driving operation/conversion choice (kotlinc hardcodes
-  these intrinsic mappings, so krusty mirrors them). Literals `1u`/`0xFFuL`; `+`/`-`/`*`/`==` use the signed
-  two's-complement opcodes; `/`/`%`/`<`/`>` use `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for
-  `ULong`); `toString`/templates use `Integer.toUnsignedString`; `UInt.toLong()` zero-extends via
-  `Integer.toUnsignedLong` (not the sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into
-  a reference context uses the inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and
-  `unbox-impl` on read, `is UInt` → `instanceof kotlin/UInt`) — never `Integer`, so identity and large
-  values are preserved. `tests/unsigned_e2e.rs`. (`UByte`/`UShort`, `UIntRange` value iteration, and unsigned
-  `when` subjects are not yet modeled — they cleanly skip.)
 - **Unsigned values at a CLASSPATH call boundary** — because an unsigned value has TWO representations
   (the carrier in a primitive slot, and the boxed inline class), every classpath call is a place where the
   representation the lowerer produced must agree with the descriptor the backend spells verbatim. Both
@@ -1506,7 +1629,63 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recovery, which turns the miscompile back into a clean skip.
   `tests/unsigned_classpath_call_e2e.rs` asserts the backend contract directly (a decline passes; an
   EMITTED class that does not verify and run fails), so it keeps holding whichever way a shape is handled.
->>>>>>> origin/master
+  Both the receiver box and that net rest on ONE question — *is this lowered value already a
+  reference?* — which the checker's `Ty` cannot answer, since a value class and its carrier share one
+  `Ty` on both sides of a box. Lowering answers it with a **representation query**,
+  `lowered_reference_class`: the class a lowered node leaves on the stack, read off the node's own type
+  (a callee's descriptor return, read from the provider's single `PlatformMethodLayout`; a
+  cast's type operand; a field's declared type) and followed through the nodes that carry a value
+  unchanged (a block's value, a `when` whose branches agree, a reference-to-reference coercion). A
+  primitive-to-reference coercion does NOT claim its target class: the backend chooses a wrapper from
+  the source carrier, and a broad target such as `Any` cannot prove which class was produced. It is not
+  a match on the node that PRODUCED the value: a box that is cast or carried out of a block is still a box, and boxing it again
+  would push a `Lkotlin/UInt;` at the `(I)` its own factory declares — the very `VerifyError` this
+  section is about. The query is deliberately partial and one-sided: `None` means "a primitive carrier,
+  OR a shape it cannot derive", so an unknown node keeps exactly the behaviour it had before that shape
+  was understood, and a new shape can only ever remove a wrong box.
+
+  A read of a LOCAL is the one carrier shape deliberately left unanswered. Its type lives on the
+  declaring `IrExpr::Variable`, reachable only through a value-index table — and value indices are
+  per-declaration-body and re-used (they restart at ~25 sites, are saved/restored around three nested
+  bodies, and one coroutine temp is declared under the enclosing body's numbering). An entry surviving
+  into the wrong scope would claim a box for a carrier and SKIP a required box, which is the same
+  `VerifyError` from the other direction — a hardening measure that can itself miscompile is worse than
+  none. Answering it soundly needs the value-numbering scopes made explicit first; until then the query
+  returns `None` there, which is exactly the behaviour that shipped before it existed. No source shape
+  is known that reaches a member call with an already-boxed unsigned receiver: every probed candidate
+  (a nullable local via `!!`, a smart cast, a safe call, an erased map read, a `when` receiver, elvis)
+  either declines or unboxes to the carrier first, so this remains a net rather than a live path.
+  The net compares POSITIONS, so the lowered values have to be lined up with the descriptor slots first
+  (`align_call_values_to_slots`). Two shapes carry a slot no lowered value fills, and both were measured
+  over the box corpus and the full e2e suite rather than assumed:
+  - a value class's members are realized as mangled `-impl` STATICS whose descriptor spells the receiver
+    as the LEADING parameter (`kotlin/Result.getOrNull-impl:(Ljava/lang/Object;)…`) while the receiver
+    travels beside the arguments — the corpus hits this over a hundred times. The receiver is checked
+    with the arguments there, since a value-class owner is exactly where the lowerer boxes it;
+  - a `suspend` `$default` synthetic spells the CPS `Continuation` BEFORE the `int mask` + `Object`
+    marker (`withLock$default(Mutex, Object, Function0, Continuation, int, Object)`) and the backend
+    appends it at emit time. The plain suspend descriptor has already had its TRAILING continuation
+    stripped, so only the `$default` form needs this.
+  A packed vararg needs no reconciliation — the array is emitted before the values reach the check — so
+  the earlier claim that it shifts positions was wrong; no such call was observed. Any shape the
+  alignment cannot line up now declines whenever a box is on the stack at all, rather than skipping: a
+  count mismatch is "no position is known", never "nothing to check".
+  The runtime provider returns reference/primitive parameter positions, the unambiguous
+  runtime-supplied continuation position, and the concrete object return class together as one
+  `PlatformMethodLayout`; JVM descriptor syntax remains outside common lowering, and the descriptor is
+  parsed once rather than by independent parameter, continuation, and return queries that could
+  disagree.
+
+  Aligning that second shape surfaced a separate miscompile, now also declined
+  (`gate:unthreaded-continuation-slot`): an unsigned VALUE PARAMETER mangles the JVM name (`libU` →
+  `libU-OzbTU-A`), krusty looks suspend-ness up under that name while `@Metadata` records the SOURCE
+  name, and the callable comes back marked non-suspend — so nothing threads the `Continuation` its
+  descriptor still spells and the emitted `invokestatic` is one argument short. BOTH call forms hit
+  it, the `$default` synthetic and the plain mangled method, so the test is the UNFILLED slot (the
+  descriptor has one parameter more than the call has values, and that parameter is a `Continuation`)
+  rather than `$default`-ness. A non-suspend callee that declares a `Continuation` parameter of its
+  own fills every slot and is untouched. Recovering the mangled-name suspend lookup would let these
+  shapes emit again; until then they skip instead of failing verification.
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
@@ -2967,7 +3146,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   loop recursion) and `tests/deep_expression_nesting_check_e2e.rs`
   (450-level `0+(…)` right-nesting through the checker and lowering, end-to-end).
 
-<<<<<<< HEAD
 - **Vararg spread arguments mixed with plain ones (`f(x, *a, y)`).** A call that mixes spreads and
   plain arguments packs ONE array through the platform spread builder, exactly as kotlinc does:
   `kotlin/jvm/internal/SpreadBuilder` for a reference element, `<Prim>SpreadBuilder`
@@ -3154,9 +3332,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   … }; fun describe() = tag() }` — an INSTANCE member calls a companion function unqualified. Kotlin
   puts a companion's members in scope throughout the class body, so this binds the same static a
   qualified `C.tag()` does, and emits the same shape: `getstatic C.Companion; invokevirtual
-  C$Companion.tag()`. The instance-member lookup is attempted first, so a same-named member of the
-  class still wins. A companion `var` is admitted too — the same static backing field on the outer
-  class a companion `val` already uses. Test:
+  C$Companion.tag()`. A same-named INSTANCE and companion method may coexist when their accepted
+  argument-count ranges do not overlap: the companion fallback only claims an arity its signature
+  accepts, then the ordinary implicit-instance receiver gets a chance. Arity is the shared callable
+  shape (defaults lower the minimum; a vararg removes the maximum), not raw parameter-vector length.
+  An overlapping pair remains conservatively rejected because the current lexical lookup cannot yet
+  rank two families that both accept the unqualified call without risking the companion owner winning
+  inside an instance member. A companion `var` is admitted too — the same static backing field on the
+  outer class a companion `val` already uses. Tests: `tests/companion_e2e.rs` (non-overlapping default
+  and vararg shapes) and `tests/resolve_parser_diag_coverage_e2e.rs` (overlap guards), plus:
   `tests/feature_coverage_r_e2e.rs::companion_member_unqualified_from_instance`.
 
   A companion `var` is also WRITTEN through the class name (`C.created = 3`). The receiver is a
@@ -3416,7 +3600,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unresolved. The remaining bounds are kept beside the erasure and retried when the lookup fails; the
   erasure itself is untouched, so descriptors still match kotlinc. Test:
   `tests/feature_coverage_n_e2e.rs::where_clause_two_bounds`.
-=======
 - **A member called on an OBJECT or COMPANION receiver types its lambda arguments from the selected
   candidate, exactly as an instance receiver does.** `Wrap.apply2 { it * 2 }` on
   `object Wrap { fun apply2(f: (Int) -> Int): Int }` must bind `it` to `Int`. The instance-receiver
@@ -3472,7 +3655,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   scores every candidate equally, so declaration order decides
   (`fun ap(f: (Int) -> Int)` + `fun ap(s: String)` fails on object and instance receivers alike).
   Test: `tests/object_receiver_lambda_e2e.rs`.
->>>>>>> origin/master
 
 ## 8. Success criteria for the PoC
 
@@ -4484,15 +4666,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for exactly this purpose and already used for the record's receiver — falling back to the erased form
   only for a non-generic function, which has no `generic_sig`. This is the metadata-WRITE half of the
   same rule the call site applies when inferring a bounded type parameter's return from source. Test:
-  `tests/bounded_type_param_e2e.rs::bounded_type_param_roundtrips_through_krusty_metadata`.
-
-  Still open (a separate gap, not generics): krusty emits `@Metadata` on the file FACADE only, never
-  on a CLASS — every in-tree caller passes no class-metadata builder to `emit_all_with_class_meta`,
-  though `metadata::class_builder::build_class` exists for external consumers. A krusty-compiled
-  `data class` therefore round-trips without the records a reader needs for `copy`'s PARAMETER NAMES
-  (named arguments) or for `componentN`'s operator marks (destructuring), even though both methods are
-  emitted into the class file. Blocks the rest of
-  `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn`.
+  `tests/bounded_type_param_e2e.rs::bounded_type_param_roundtrips_through_krusty_metadata`, and the
+  generic half of `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn` (whose data-class half
+  is the per-class record described under "`@Metadata` writer — the CLASS round-trip").
 
 - **A companion object's `private` members are in scope throughout the containing class.** Member
   access is decided on the LEXICAL enclosing chain, not the receiver chain — a nested (non-`inner`)
@@ -4624,24 +4800,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   never reaching a return instruction. Tests: `diverging_lambda_e2e`,
   `feature_coverage_n_e2e::result_is_success`; corpus `labels/infixCallLabelling.kt` and
   `coroutines/nonLocalReturn.kt` are the shapes still skipped.
-
-- **Class-level `@kotlin.Metadata` is emitted by default.** It used to be opt-in behind
-  `KRUSTY_EMIT_CLASS_METADATA` while the payload was being verified. Without it krusty cannot fully
-  read its OWN output: compiling a library and then compiling against those class files, `component1()`
-  resolves (it is a real JVM method) but `val (a, b) = p` does not, because the OPERATOR flag lives
-  only in metadata — as do `copy`'s parameter names, so `p.copy(y = 4)` reports "named arguments are
-  only supported for … methods with named parameters". Turning it on required finishing two shapes.
-  (1) A `data object` synthesizes NO `copy`/`copy$default` — it is a singleton — so neither the
-  metadata function list, the constant-pool seeding, the debug tables, nor the nullability annotations
-  may name one. An empty field list IS the test for that: a `data class` must declare at least one
-  primary-constructor property, so a fieldless data declaration can only be an object (`is_object` is
-  not set on a class hoisted out of an interface body, so it cannot be used here). (2) The plain-enum
-  test asserted that no `RuntimeVisibleAnnotations` attribute is emitted, which contradicts kotlinc —
-  a plain enum compiled by kotlinc carries one, its class-level `@Metadata` among them. It now asserts
-  on the annotation TYPE (`Ldemo/Mark;`), which is what "the constants are not annotated" actually
-  means. Tests: `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn`,
-  `sealed_interface_nested_e2e::data_object_has_no_copy`,
-  `enum_constant_annotation_emit_e2e::plain_enum_has_no_constant_annotation`.
 
 - **A CLASSPATH class's member extensions resolve like a source class's.** `ClassSig::member_ext_funs`
   is populated from source syntax alone, so a dependency's
