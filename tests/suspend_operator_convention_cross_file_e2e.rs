@@ -73,3 +73,73 @@ fn suspend_plus_assign_cross_file_executes() {
 fn suspend_unary_minus_cross_file_executes() {
     expect_ok("r = (-b).v + 3", "suspend_unary_minus_cross_file");
 }
+
+/// `compareTo` (via `a < b`) and `contains` (via `x in b`) were recorded in `docs/SPEC.md` as
+/// cross-file RESOLUTION gaps, refused by the front end "with or WITHOUT `suspend`". They are not:
+/// both resolve and run across the file boundary. The suspending spellings are checked here; the
+/// comparison additionally has a cross-file `suspend` guard in `cross_file_inline_call_e2e`.
+///
+/// Both results are bound to a local first — assigning a suspending if-EXPRESSION straight into a
+/// captured `var` hits an unrelated boundary (`SkipReason::Suspend`, pinned by
+/// `coroutine_intrinsics_e2e::suspend_in_an_if_expression_into_a_captured_var_skips_without_a_convention`).
+#[test]
+fn compare_to_and_contains_cross_file_execute() {
+    const CMP_LIB: &str = "class Box(var v: Int)\n\
+                           suspend operator fun Box.compareTo(o: Box): Int = v - o.v\n";
+    let cmp_main = main_driving("val c = Box(3); val less = b < c; r = if (less) 2 else 9");
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", CMP_LIB), ("Main.kt", cmp_main.as_str())],
+        "suspend_compare_to_cross_file",
+    );
+
+    const IN_LIB: &str = "class Box(var v: Int)\n\
+                          suspend operator fun Box.contains(i: Int): Boolean = i == v\n";
+    let in_main = main_driving("val has = 1 in b; r = if (has) 2 else 9");
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", IN_LIB), ("Main.kt", in_main.as_str())],
+        "suspend_contains_cross_file",
+    );
+}
+
+/// `invoke` IS still out of reach across the file boundary, so the SPEC entry keeps a residual gap —
+/// just a narrower one than it used to claim, and for a different reason. Both halves are pinned:
+/// the same declaration reached from its OWN file emits and runs, so this is a cross-file resolution
+/// gap and not a property of `invoke` or of `suspend`. Without `suspend` the refusal is SILENT (no
+/// diagnostic), which is the part worth noticing if anyone lifts this.
+#[test]
+fn invoke_convention_cross_file_is_the_residual_gap() {
+    const LIB: &str = "class Box(var v: Int)\n\
+                       operator fun Box.invoke(): Int = v\n";
+    const MAIN: &str = "fun box(): String {\n\
+                        \x20   val a = Box(1)\n\
+                        \x20   return if (a() == 1) \"OK\" else \"fail\"\n\
+                        }\n";
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    assert_eq!(
+        common::compile_and_run_box_files(
+            &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path())
+        ),
+        None,
+        "cross-file `invoke` convention: if this now compiles, assert the box() answer instead of \
+         deleting the check, and drop the residual gap from docs/SPEC.md"
+    );
+
+    const SAME_FILE: &str = "class Box(var v: Int)\n\
+                             operator fun Box.invoke(): Int = v\n\
+                             fun box(): String {\n\
+                             \x20   val a = Box(1)\n\
+                             \x20   return if (a() == 1) \"OK\" else \"fail\"\n\
+                             }\n";
+    assert_eq!(
+        common::compile_and_run_box_files(
+            &[("Main.kt", SAME_FILE)],
+            &[stdlib],
+            Some(jdk.as_path())
+        ),
+        Some("OK".to_string()),
+        "the same `invoke` extension must run within its own file — the gap is the file boundary"
+    );
+}

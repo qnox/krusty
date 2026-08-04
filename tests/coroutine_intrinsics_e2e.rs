@@ -202,6 +202,53 @@ fun box(): String {{ var r: String? = \"FAIL\"; val h: Holder? = Holder(); build
     common::assert_inline_source_backend_bail(&src, krusty::jvm::backend::SkipReason::Suspend);
 }
 
+/// The OTHER boundary the convention entries above are pinned against, in its bare form: a plain
+/// `suspend fun` call, ONE file, no operator convention and no extension anywhere. It reaches the
+/// same labelled `SkipReason::Suspend`, which is what forbids re-attributing the cross-file
+/// comparison skip in `cross_file_inline_call_e2e` to the convention (as it once was, to a
+/// suspending `RefSet`). kotlinc answers `7`.
+#[test]
+fn suspend_in_an_if_expression_into_a_captured_var_skips_without_a_convention() {
+    let src = format!(
+        "{BUILDER}\
+suspend fun less(): Boolean = true\n\
+fun box(): String {{ var r = 0; builder {{ r = if (less()) 7 else 9 }}; return if (r == 7) \"OK\" else \"fail: $r\" }}\n"
+    );
+    common::assert_inline_source_backend_bail(&src, krusty::jvm::backend::SkipReason::Suspend);
+}
+
+/// Half one of the disambiguation: the SAME suspending condition, the same captured `var` target,
+/// but the `if` is a STATEMENT rather than an expression — it compiles and runs. So "a suspension in
+/// an `if` condition" does not on its own name the boundary above.
+#[test]
+fn suspend_in_an_if_statement_condition_into_a_captured_var_runs() {
+    let src = format!(
+        "{BUILDER}\
+suspend fun less(): Boolean = true\n\
+fun box(): String {{ var r = 0; builder {{ if (less()) {{ r = 7 }} else {{ r = 9 }} }}; return if (r == 7) \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(
+        run(&src).expect("suspending if-STATEMENT condition runs"),
+        "OK"
+    );
+}
+
+/// Half two: the same suspending condition in a genuine if-EXPRESSION, but its value lands in a
+/// LOCAL instead of a captured `var` — also compiles and runs. Only the CONJUNCTION of the two
+/// halves declines, which is what the SPEC entry has to say for the boundary to be reproducible.
+#[test]
+fn suspend_in_an_if_expression_into_a_local_runs() {
+    let src = format!(
+        "{BUILDER}\
+suspend fun less(): Boolean = true\n\
+fun box(): String {{ var r = 0; builder {{ val x = if (less()) 7 else 9; r = x }}; return if (r == 7) \"OK\" else \"fail: $r\" }}\n"
+    );
+    assert_eq!(
+        run(&src).expect("suspending if-EXPRESSION into a local runs"),
+        "OK"
+    );
+}
+
 #[test]
 fn suspend_coroutine_unintercepted_reads_its_continuation() {
     // `suspendCoroutineUninterceptedOrReturn { c -> c.resume(t); COROUTINE_SUSPENDED }` reads its
