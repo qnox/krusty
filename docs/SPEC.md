@@ -1173,7 +1173,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   emitter now types the held `[array, array, index]` into a mid-fill element's frames (see "An operand
   held on the stack across a branchy sub-expression must be TYPED into its frames"), so the shapes that
   do reach emit are verifiable. `try` must stay rejected regardless: a handler CLEARS the operand stack,
-  so the partly-built array held there would be lost.
+  so the partly-built array held there would be lost. `is_branchy`'s `==`/`!=` arm fires only when the
+  LHS is *syntactically* a primitive literal (`file_expr_is_jvm_scalar`), so `listOf(x == y, …)` over
+  `Int` parameters is NOT declined and does reach emit — that gap is what exposed the frame bug.
 - **Enum reflection intrinsics** `enumValueOf<E>(name)` / `enumValues<E>()`: the checker requires an
   enum type argument and types the result as `E` / `Array<E>`. The synthetic registry emits
   `E.valueOf(name)` / `E.values()`, including through an expanded reified inline function. A reified
@@ -1338,10 +1340,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the value). A comparison in such a position (`listOf(x == y, x != y)`, `b[0] = x == y`) branches to a
   merge label whose frame previously declared an EMPTY stack; the class file still emitted successfully
   and only failed at link time (`VerifyError: Inconsistent stackmap frames at branch target N` /
-  "Current frame's stack size doesn't match stackmap"). kotlinc holds the same operands live, just with
-  full frames — it `astore`s the array to a local and reloads it per element. All comparison arms are
-  affected alike (numeric `if_icmp*`, referential `if_acmp*`, `ifnull`, and the `lcmp`/`dcmp*` three-way
-  forms), since each records its own branch+merge frames.
+  "Current frame's stack size doesn't match stackmap"). kotlinc also holds operands live across the
+  element, just with full frames — and one fewer, since it `astore`s the array to a local and reloads
+  it per element instead of `dup`ing it. All comparison arms are affected alike (numeric `if_icmp*`,
+  referential `if_acmp*`, `ifnull`, and the `lcmp`/`dcmp*` three-way forms), since each records its own
+  branch+merge frames. Where the position CAN spill instead — `Array.get`/`.set`, which start from an
+  empty stack — an operand that must not be held at all (`must_spill_across`: a `try`, whose handler
+  clears the operand stack) takes the `emit_operands` temp route; the `Vararg`/`SpreadBuilder` fill
+  loops have no such option, and lowering declines a `try` element for them (`is_branchy`).
   `tests/comparison_under_operands_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.

@@ -10118,12 +10118,19 @@ impl<'a> Emitter<'a> {
             "kotlin/Array.get" => {
                 let arr = recv.unwrap();
                 let elem = self.array_elem(arr);
-                self.emit_value(arr, code);
-                // The array stays live under the index (and, for `set`, under the value too): a branchy
-                // subscript must frame it — see `emit_value_over`.
-                let arr_ty = self.value_ty(arr);
-                let arr_v = self.verif_single(arr_ty);
-                self.emit_value_over(args[0], &[arr_v], code);
+                // The array stays live under the index (and, for `set`, under the value too), so a
+                // branchy subscript must frame it — see `emit_value_over`. Unlike the `Vararg` fill
+                // loop, though, a subscript CAN spill: nothing is on the stack yet. Take that route
+                // when the array must not be held at all (`must_spill_across` — a `try`, whose handler
+                // clears the operand stack, so no frame could describe the held array).
+                if self.must_spill_across(args[0]) {
+                    self.emit_operands(&[arr, args[0]], code);
+                } else {
+                    self.emit_value(arr, code);
+                    let arr_ty = self.value_ty(arr);
+                    let arr_v = self.verif_single(arr_ty);
+                    self.emit_value_over(args[0], &[arr_v], code);
+                }
                 let (op, w) = array_load_op(elem);
                 code.array_load(op, w);
                 // A boxed primitive array (`Array<Int>` = `Integer[]`): `a[i]` is an unboxed `Int`, so
@@ -10135,13 +10142,17 @@ impl<'a> Emitter<'a> {
             "kotlin/Array.set" => {
                 let arr = recv.unwrap();
                 let elem = self.array_elem(arr);
-                self.emit_value(arr, code);
-                let arr_ty = self.value_ty(arr);
-                let arr_v = self.verif_single(arr_ty);
-                self.emit_value_over(args[0], std::slice::from_ref(&arr_v), code);
-                let idx_ty = self.value_ty(args[0]);
-                let idx_v = self.verif_single(idx_ty);
-                self.emit_value_over(args[1], &[arr_v, idx_v], code);
+                if self.must_spill_across(args[0]) || self.must_spill_across(args[1]) {
+                    self.emit_operands(&[arr, args[0], args[1]], code);
+                } else {
+                    self.emit_value(arr, code);
+                    let arr_ty = self.value_ty(arr);
+                    let arr_v = self.verif_single(arr_ty);
+                    self.emit_value_over(args[0], std::slice::from_ref(&arr_v), code);
+                    let idx_ty = self.value_ty(args[0]);
+                    let idx_v = self.verif_single(idx_ty);
+                    self.emit_value_over(args[1], &[arr_v, idx_v], code);
+                }
                 // Boxed primitive array: box the primitive value before the `aastore`.
                 if let Some(p) = boxed_prim_of(elem) {
                     box_prim_free(self.cw, code, p);
@@ -10524,7 +10535,9 @@ impl<'a> Emitter<'a> {
             .truncate(self.pending_stack.len() - held.len());
     }
 
-    /// The two `[receiver, receiver]` stack entries a `new C; dup` / `dup`-then-call sequence holds.
+    /// The two `[receiver, receiver]` stack entries a `dup`-then-call sequence holds. The receiver
+    /// must already be INITIALIZED — right after `new C; dup` the verification type is
+    /// `Uninitialized(offset)`, not the class, so this is wrong for that position.
     fn held_pair(&mut self, owner: &str) -> [VerifType; 2] {
         let v = self.verif_single(Ty::obj(owner));
         [v.clone(), v]
