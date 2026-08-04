@@ -15985,10 +15985,12 @@ impl<'a> Lower<'a> {
                 let array = *params.get(vararg_pack?)?;
                 let element = array.array_elem().unwrap_or(array);
                 let is_spread = self.afile.is_spread_arg(arg);
-                // A named vararg may bind the whole array without `*` (`items = values`). The
-                // checker accepts that array form and stores it at the vararg slot; distinguish it
-                // by semantic type here so every callable origin gets the same pass-through rule.
-                let whole_array = !is_spread && self.info.ty(arg) == array;
+                // A named vararg may bind the whole array without `*` (`items = values`). Consume the
+                // checker-selected form directly: comparing `Ty` here is unsound for generic calls,
+                // where inference can retain different type arguments for the expression and selected
+                // parameter even though both erase to the same JVM array. The semantic marker is shared
+                // by every callable origin and prevents lowering from rediscovering labels or types.
+                let whole_array = self.info.resolved_whole_array_vararg_args.contains(&arg);
                 let want = if is_spread || whole_array {
                     array
                 } else {

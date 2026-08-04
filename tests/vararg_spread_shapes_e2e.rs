@@ -264,6 +264,28 @@ fn source_top_level_named_after_spread() {
     );
 }
 
+#[test]
+fn source_generic_named_whole_array_preserves_selected_array_form() {
+    // Generic inference may retain different type arguments on the array expression and the selected
+    // vararg parameter while both erase to the same runtime component class. Lowering must consume the
+    // checker's NAMED-WHOLE-ARRAY decision, not compare those `Ty` values and accidentally pack the
+    // array as one element. Exercise direct, spread, and mixed forms together so the regression also
+    // proves that the semantic marker does not change explicit-spread packing.
+    const SRC: &str = "class Sink<in T>\n\
+        fun <T> choose(vararg values: Sink<T>): T = null as T\n\
+        fun box(): String {\n\
+        \x20 val direct = choose(values = arrayOf(Sink<Int>(), Sink<String>()))\n\
+        \x20 val spread = choose(values = *arrayOf(Sink<Int>(), Sink<String>()))\n\
+        \x20 val mixed = choose(Sink<Int>(), *arrayOf(Sink<String>()), Sink<Long>())\n\
+        \x20 return if (direct == null && direct == spread && spread == mixed) \"OK\" else \"FAIL\"\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SRC, "generic_named_array")
+            .expect("strict helper always returns Some"),
+        "OK"
+    );
+}
+
 const LIB: &str = "package lib\n\
     class B\n\
     fun B.segd(vararg s: String, flag: Boolean = false): String =\n\

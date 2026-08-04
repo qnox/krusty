@@ -9736,6 +9736,13 @@ pub struct TypeInfo {
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    /// Plain named arguments that the selected call mapping bound as an ENTIRE vararg array. This is
+    /// a semantic call fact, not something lowering may infer by comparing instantiated `Ty` values:
+    /// generic inference can represent the call-site array and selected parameter with different type
+    /// arguments even though they share the same erased JVM array. Treating such an argument as an
+    /// element nests the array and can fail only at runtime. Expression ids are file-unique, so the
+    /// selected argument itself is a provider-neutral handoff for every callable origin.
+    pub resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// Extension callables the checker resolved for a SYNTHESIZED call that has no source-call `ExprId` —
     /// a destructuring `componentN`, a `for`-loop `iterator`, a `+=` `plusAssign` — keyed by the receiver
     /// expression's `ExprId` (the destructured value / iterable / assignment target) and the operator
@@ -11363,6 +11370,7 @@ fn make_checker<'a>(
         resolved_library_companion_consts: HashMap::new(),
         resolved_enum_entries: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
+        resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         synthetic_ext_calls: HashMap::new(),
         delegate_getvalue_targets: HashMap::new(),
         super_ctor_params: HashMap::new(),
@@ -13498,6 +13506,7 @@ fn check_file_at_impl_mode(
         resolved_library_companion_consts,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_whole_array_vararg_args,
         synthetic_ext_calls,
         delegate_getvalue_targets,
         context_args,
@@ -13650,6 +13659,7 @@ fn check_file_at_impl_mode(
         resolved_library_companion_consts,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_whole_array_vararg_args,
         synthetic_ext_calls,
         delegate_getvalue_targets,
         context_args,
@@ -14003,6 +14013,7 @@ struct Checker<'a> {
     resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
     resolved_enum_entries: HashMap<ExprId, TypeName>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     /// Implicit context arguments per call (see [`TypeInfo::context_args`]).
@@ -21142,6 +21153,13 @@ impl<'a> Checker<'a> {
             self.expect_assignable(expected, actual, self.span(argument), "argument");
             return;
         }
+        // Reaching this helper means the selected argument mapper bound a PLAIN NAMED argument to
+        // the vararg parameter. Kotlin defines that form as the whole array. Preserve that decision
+        // explicitly for lowering even when diagnostics below reject its type: successful callers
+        // must not depend on equality between generic-inference representations, while rejected files
+        // never lower. Centralizing the record here covers source, sibling-module, and dependency
+        // candidates without teaching any provider-specific lowerer about labels.
+        self.resolved_whole_array_vararg_args.insert(argument);
         self.expect_assignable(array, actual, self.span(argument), "argument");
         if actual != Ty::Error && !self.receiver_is_assignable(actual, array) {
             self.diags.error(
