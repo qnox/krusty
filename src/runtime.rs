@@ -173,6 +173,20 @@ pub trait TargetRuntime {
         None
     }
 
+    /// The semantic unsigned integer carried by the platform box named by `internal`.
+    ///
+    /// This is deliberately derived from [`TargetRuntime::unsigned_integer_box_type`] instead of
+    /// maintained as a second target-name table. Call lowering needs the reverse direction when a
+    /// selected library member supplies its physical owner, but common lowering must not learn the
+    /// JVM box names (or let the forward and reverse mappings drift on another target).
+    fn unsigned_integer_carrier_for_box_type(&self, internal: TypeName) -> Option<Ty> {
+        [Ty::UInt, Ty::ULong].into_iter().find(|&carrier| {
+            self.unsigned_integer_box_type(carrier)
+                .and_then(|boxed| boxed.obj_internal())
+                == Some(internal)
+        })
+    }
+
     /// If `internal` is a platform range/progression type that can be emitted as a counted loop,
     /// describe its source element type and platform accessors. The default keeps non-platform sources
     /// on the ordinary iterator path.

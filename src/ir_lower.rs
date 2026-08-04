@@ -5512,7 +5512,7 @@ impl<'a> Lower<'a> {
         // push it raw and the verifier rejects the call. Box it here, with the same `box-impl` an
         // unsigned ARGUMENT flowing into a reference parameter already gets. A receiver that is
         // ALREADY boxed (it came from a reference context) is left alone.
-        let recv = match unsigned_carrier_of_box_type(owner) {
+        let recv = match self.runtime.unsigned_integer_carrier_for_box_type(owner) {
             Some(carrier) if self.lowered_unsigned_box(recv).is_none() => {
                 self.box_unsigned(recv, carrier)?
             }
@@ -5711,7 +5711,7 @@ impl<'a> Lower<'a> {
             return None;
         };
         (name == "box-impl")
-            .then(|| unsigned_carrier_of_box_type(*owner))
+            .then(|| self.runtime.unsigned_integer_carrier_for_box_type(*owner))
             .flatten()
     }
 
@@ -26163,19 +26163,6 @@ fn ty_of(file: &ast::File, r: &ast::TypeRef, plat: &dyn SemanticPlatform) -> Ty 
     }
 }
 
-/// The unsigned carrier `Ty` whose BOXED form is the value class `internal` (`kotlin/UInt` →
-/// `Ty::UInt`), or `None` for anything else.
-///
-/// Derived from `Ty::boxed_ref` rather than spelled as a second table, so the two directions cannot
-/// drift. Deliberately NOT `Ty::unboxed_primitive`, which omits the unsigned rows on purpose: a boxed
-/// `kotlin/UInt` IS a reference everywhere the IR asks, and this answers a different question — which
-/// carrier a given box wraps.
-fn unsigned_carrier_of_box_type(internal: TypeName) -> Option<Ty> {
-    [Ty::UInt, Ty::ULong]
-        .into_iter()
-        .find(|t| t.boxed_ref().and_then(|b| b.obj_internal()) == Some(internal))
-}
-
 /// Whether an `IrType` is a reference type (anything except a primitive class FqName / Unit).
 fn ir_type_is_reference(t: &Ty) -> bool {
     // A NULLABLE value is always a reference: a nullable reference keeps its descriptor, and a nullable
@@ -26461,10 +26448,18 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
 mod tests {
     use super::*;
 
+    struct UnsignedBoxRuntime;
+
+    impl TargetRuntime for UnsignedBoxRuntime {
+        fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
+            ty.boxed_ref().filter(|_| ty.is_unsigned())
+        }
+    }
+
     /// The gate that keeps a boxed unsigned out of an erased descriptor slot reads a value's
     /// representation off its lowered node by recognising `<box>.box-impl`, so it is only as good as
-    /// this box→carrier mapping. Pinned here because the mapping is derived from `Ty::boxed_ref`
-    /// rather than spelled out: a new unsigned carrier must show up on both sides at once.
+    /// this box→carrier mapping. The reverse lookup must consume the provider's forward mapping so
+    /// common lowering neither spells target class names nor maintains a second table.
     #[test]
     fn unsigned_box_types_map_back_to_their_carrier() {
         for carrier in [Ty::UInt, Ty::ULong] {
@@ -26472,16 +26467,24 @@ mod tests {
                 .boxed_ref()
                 .and_then(|b| b.obj_internal())
                 .expect("an unsigned carrier boxes to its own inline class");
-            assert_eq!(unsigned_carrier_of_box_type(boxed), Some(carrier));
+            assert_eq!(
+                UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(boxed),
+                Some(carrier)
+            );
         }
         // A SIGNED primitive boxes to `kotlin/Int`, whose values never ride in an unsigned carrier —
         // recognising it here would box arguments that the descriptor wants as `Integer`.
         let signed = Ty::Int.boxed_ref().and_then(|b| b.obj_internal()).unwrap();
-        assert_eq!(unsigned_carrier_of_box_type(signed), None);
+        assert_eq!(
+            UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(signed),
+            None
+        );
         // A value class krusty has no carrier `Ty` for stays unmapped: it is a reference on both
         // sides of the call and needs no box/carrier reconciliation.
         assert_eq!(
-            unsigned_carrier_of_box_type(crate::types::type_name("kotlin/time/Duration")),
+            UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(crate::types::type_name(
+                "kotlin/time/Duration"
+            )),
             None
         );
     }
