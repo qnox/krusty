@@ -5,7 +5,7 @@
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
-use crate::token::{Token, TokenKind};
+use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 
 /// Parse with the default language feature set.
@@ -8291,47 +8291,17 @@ fn infix_bp(op: BinOp) -> (u8, u8) {
     }
 }
 
-/// Decode a `'x'` char literal (with simple escapes) to the UTF-16 code unit it denotes.
-/// A Kotlin `Char` is one code unit, so `\uXXXX` keeps
-/// its raw value even in the surrogate range D800..DFFF — `'\uD800'` is a legal `Char` (it is what
-/// `Char.MIN_HIGH_SURROGATE` equals) but not a legal Unicode scalar value, so a `char::from_u32`
-/// round-trip would reject it and silently yield NUL.
+/// Decode a lexer-validated `'x'` token to its UTF-16 code unit.
+///
+/// Validation and decoding deliberately share the token-layer contract. The fallback is parser
+/// recovery only: the lexer has already diagnosed malformed content, but the AST still needs a
+/// deterministic placeholder so later syntax recovery can continue without another escape table.
 fn unquote_char(raw: &str) -> u16 {
-    /// A source `char` is a code POINT; a well-formed `Char` literal is always in the BMP, so this is
-    /// the JVM's own `i2c` truncation.
-    fn unit(c: char) -> u16 {
-        c as u32 as u16
-    }
     let inner = raw
         .strip_prefix('\'')
         .and_then(|s| s.strip_suffix('\''))
         .unwrap_or(raw);
-    let mut chars = inner.chars();
-    match chars.next() {
-        Some('\\') => match chars.next() {
-            Some('n') => unit('\n'),
-            Some('t') => unit('\t'),
-            Some('r') => unit('\r'),
-            Some('b') => unit('\u{0008}'),
-            Some('\\') => unit('\\'),
-            Some('\'') => unit('\''),
-            Some('"') => unit('"'),
-            Some('0') => 0,
-            Some('$') => unit('$'),
-            // `\uXXXX` — a 4-hex-digit UTF-16 code unit, taken verbatim.
-            Some('u') => {
-                let hex: String = chars.by_ref().take(4).collect();
-                u32::from_str_radix(&hex, 16)
-                    .ok()
-                    .map(|v| v as u16)
-                    .unwrap_or(0)
-            }
-            Some(other) => unit(other),
-            None => 0,
-        },
-        Some(c) => unit(c),
-        None => 0,
-    }
+    decode_char_literal_content(inner).unwrap_or(0)
 }
 
 /// Unescape a literal chunk of a string template (no surrounding quotes).
