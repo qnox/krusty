@@ -1926,6 +1926,49 @@ impl Classpath {
         })
     }
 
+    /// The metadata-declared RETURN type of the member realized by JVM method `jvm_name`/`jvm_desc`,
+    /// with full structure (argument classifiers included) when the metadata generic signature
+    /// carries it, the bare return classifier otherwise. Functions are checked first; a property
+    /// GETTER is not a metadata function, so its `JvmPropertySignature` is matched second. This is
+    /// the carrier of the read-only-vs-mutable collection fact (`MutableList<MutableSet<T>>`) that
+    /// the JVM `Signature` attribute erases at every nesting level.
+    pub fn metadata_member_ret_ty_name(
+        &self,
+        internal: TypeName,
+        jvm_name: &str,
+        jvm_desc: &str,
+        value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+    ) -> Option<Ty> {
+        let ci = self.find_name(internal)?;
+        if let Some(function) = aligned_member_metadata(
+            super::metadata::class_functions(&ci),
+            jvm_name,
+            jvm_desc,
+            value_underlying,
+        ) {
+            return function
+                .generic_sig
+                .as_ref()
+                .map(|gsig| gsig.ret)
+                .or_else(|| function.ret_class.map(kotlin_type_name_to_ty));
+        }
+        super::metadata::class_properties(&ci)
+            .iter()
+            .find(|property| {
+                property
+                    .getter
+                    .as_ref()
+                    .is_some_and(|getter| getter.name == jvm_name && getter.desc == jvm_desc)
+            })
+            .and_then(|property| {
+                property
+                    .generic_sig
+                    .as_ref()
+                    .map(|gsig| gsig.ret)
+                    .or_else(|| property.ret_class.map(kotlin_type_name_to_ty))
+            })
+    }
+
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
     pub fn lambda_return_overloads(&self, internal: &str) -> std::rc::Rc<LambdaReturnOverloads> {
         let internal_id = type_name(internal);
