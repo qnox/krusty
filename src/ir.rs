@@ -1276,6 +1276,24 @@ pub struct IrFile {
     /// `-<hash>` mangling). Recorded by the value-class pass BEFORE erasure; read by `emit_default_stub`
     /// (signature + box-on-fill + unbox-on-delegate) AND the `$default` CALL site (boxed arg + descriptor).
     pub default_stub_boxed_params: std::collections::HashMap<u32, Vec<(usize, crate::types::Ty)>>,
+    /// Per CALL expression, the ARGUMENT positions whose callee declares a VALUE CLASS and whose JVM
+    /// parameter is that value class's erased carrier — a `@Metadata`-mangled classpath member
+    /// (`invoke(param: Result<Int>)` → `invoke-bjn95JY(Ljava/lang/Object;)`). Such a position takes the
+    /// value's own unboxed representation, NOT a box.
+    ///
+    /// The descriptor alone cannot say so once the carrier erases to `Object`: there `Ljava/lang/Object;`
+    /// reads exactly like a generic slot, where kotlinc DOES box. Only the callee's declared signature
+    /// distinguishes them, and only the lowerer has it (resolution recovered it from `@Metadata`), so it
+    /// is recorded here rather than re-derived in the JVM pass.
+    pub value_class_carrier_args: std::collections::HashMap<u32, Vec<bool>>,
+    /// Every value class this file's lowering resolved, by internal name → its erased underlying: the
+    /// ones declared here, the ones its module declares elsewhere, and the classpath ones it references.
+    /// Recorded by the JVM value-class pass, which is the phase that knows them.
+    pub value_class_underlyings: std::collections::HashMap<TypeName, crate::types::Ty>,
+    /// The subset declared in this MODULE's SOURCE (this file or a sibling). Whether such a class ends up
+    /// carrying an `@Metadata` record is decided by its own emit, so a record here cannot assume it does —
+    /// unlike a CLASSPATH value class, whose value-class-ness is itself decoded from that record.
+    pub module_source_value_classes: std::collections::HashSet<TypeName>,
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: std::collections::HashSet<TypeName>,

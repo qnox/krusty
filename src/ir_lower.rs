@@ -5955,6 +5955,7 @@ impl<'a> Lower<'a> {
         };
         self.check_unsigned_boxes_fit_descriptor(&member.descriptor, &args)?;
         let interface = member.is_interface() || self.library_type_is_interface(owner);
+        let carrier_args = self.value_class_carrier_args(&member);
         // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
         // the pushed receiver into a continuation spill slot (an unnamed temp local in its
         // bytecode). Mirror it with a temp in the spill scope: `val tmp = recv; tmp.m(<arg>)`.
@@ -5973,6 +5974,7 @@ impl<'a> Lower<'a> {
             if suspend {
                 self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
             }
+            self.record_value_class_carrier_args(call, carrier_args);
             return Some(self.emit_block(vec![decl], Some(call)));
         }
         let call =
@@ -5980,7 +5982,64 @@ impl<'a> Lower<'a> {
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
+        self.record_value_class_carrier_args(call, carrier_args);
         Some(call)
+    }
+
+    /// Which of `member`'s ARGUMENT positions take a value class's erased CARRIER rather than a box.
+    ///
+    /// A member whose declared signature mentions a value class is JVM-name-MANGLED, and resolution
+    /// exposes it under its source name with the DECLARED (value-class) parameter types while the
+    /// descriptor keeps the erased ones. A declared value class at such a position therefore names the
+    /// carrier the physical parameter holds. Empty when no position qualifies — the overwhelming
+    /// majority, and the JVM pass then keeps its descriptor-driven rule.
+    fn value_class_carrier_args(&self, member: &crate::libraries::LibraryMember) -> Vec<bool> {
+        // The JVM name is the marker: kotlinc mangles a method whose SIGNATURE mentions a value class to
+        // `name-<hash>`. That is (nearly) exactly the set of members whose value-class parameters are
+        // erased to carriers in the descriptor — a member reached with a value class merely SUBSTITUTED
+        // into a generic parameter (`MutableList<Result<Int>>.add`) keeps its plain name and a genuinely
+        // generic slot, which takes the BOX. The value class's own `-impl` family is excluded: its
+        // parameters follow the value class's own conventions, which the owner-based rules below model.
+        //
+        // `-` is not exclusively the mangle separator: a backtick-quoted Kotlin name (`` `a-b` ``) and a
+        // `@JvmName("do-it")` can both carry one, and the mangle HASH itself may contain `-`
+        // (`plain-dash-CRE-rSA`) — which is why the `-impl` test takes the FIRST segment, the source
+        // name, rather than the last. A backtick name that also has a value class substituted into a
+        // generic parameter would be misread here; no such shape has been observed, and the boxing that
+        // matters for it is decided at the argument's own lowering, before this table is consulted.
+        let jvm_name = member
+            .physical_name
+            .as_deref()
+            .unwrap_or(member.name.as_str());
+        let mangled = jvm_name
+            .split_once('-')
+            .is_some_and(|(_, suffix)| !suffix.starts_with("impl"));
+        if !mangled {
+            return Vec::new();
+        }
+        let carriers: Vec<bool> = member
+            .params
+            .iter()
+            .map(|p| {
+                // A NULLABLE value class can itself be the boxed form (a scalar underlying cannot carry
+                // `null`), so only a non-null declaration is certainly the carrier here.
+                !p.is_nullable()
+                    && p.obj_internal().is_some_and(|fq_name| {
+                        self.syms.libraries.value_underlying_name(fq_name).is_some()
+                    })
+            })
+            .collect();
+        if carriers.iter().any(|&c| c) {
+            carriers
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn record_value_class_carrier_args(&mut self, call: u32, carriers: Vec<bool>) {
+        if !carriers.is_empty() {
+            self.ir.value_class_carrier_args.insert(call, carriers);
+        }
     }
 
     /// Pack expanded member arguments into the physical trailing array.
@@ -15086,6 +15145,11 @@ impl<'a> Lower<'a> {
         // channel — the emitter decides (box/unbox/nothing) from the value's actual type.
         if self.has_scalar_value_repr(logical) && physical.is_reference() {
             self.emit_type_op(IrTypeOp::ImplicitCoercion, read, ty_to_ir(logical))
+        } else if self.value_class_already_carried(logical, physical) {
+            // The value is ALREADY the value class's unboxed carrier, so the declared type is a
+            // description of it, not a narrowing: tagging it would `checkcast` the carrier to the box
+            // and every later use would unbox a value that was never boxed.
+            read
         } else if logical.is_reference()
             && !matches!(logical, Ty::Null)
             && physical.is_reference()
@@ -15099,6 +15163,51 @@ impl<'a> Lower<'a> {
         } else {
             read
         }
+    }
+
+    /// Whether a value of PHYSICAL type `physical` already IS the representation of the value class
+    /// `logical` — its erased underlying carrier.
+    ///
+    /// A member whose declared return is a value class is JVM-name-mangled and its descriptor carries
+    /// the ERASED underlying (`fun make(): K` → `make-XLNMDGE()Ljava/lang/String;`), so the value the
+    /// call leaves on the stack is the unboxed carrier, not a box. This is the READ-side counterpart of
+    /// the write-side mangling, and the same test the JVM value-class pass applies to a library call's
+    /// representation (physical descriptor == the underlying's ⇒ unboxed, otherwise boxed).
+    ///
+    /// An `Object` carrier is NOT such a test — and this is the whole subtlety. `Ljava/lang/Object;`
+    /// is equally what a GENERIC slot erases to, where the value really is a box (`listOf(W(…))[0]`
+    /// hands back a `W` object). The two are indistinguishable from the (logical, physical) pair alone,
+    /// so a value class whose underlying erases to `Object` (`kotlin/Result`, `value class W(val v:
+    /// Any?)`) keeps the cast and the pass's own boxed classification; only a value class with a
+    /// CONCRETE carrier is answered here. `src/jvm/value_classes.rs` draws exactly this line at its
+    /// call-argument boundary, for the same reason.
+    ///
+    /// The underlying is followed through a value class declared over another one, exactly as erasure
+    /// does; the bound iteration keeps a cyclic classpath declaration from spinning.
+    fn value_class_already_carried(&self, logical: Ty, physical: Ty) -> bool {
+        if !physical.is_reference()
+            || physical
+                .non_null()
+                .obj_internal()
+                .is_some_and(|name| name.matches("java/lang/Object"))
+        {
+            return false;
+        }
+        let mut declared = logical.non_null();
+        for _ in 0..8 {
+            let Some(fq_name) = declared.obj_internal() else {
+                return false;
+            };
+            let Some(underlying) = self.syms.libraries.value_underlying_name(fq_name) else {
+                return false;
+            };
+            let underlying = underlying.scalar_value_repr().unwrap_or(underlying);
+            if underlying.non_null() == physical.non_null() {
+                return true;
+            }
+            declared = underlying.non_null();
+        }
+        false
     }
 
     fn coerce_generic_read(&mut self, read: u32, member: AstExprId, pty: Ty) -> u32 {
@@ -20337,6 +20446,7 @@ impl<'a> Lower<'a> {
                         .unwrap_or_else(|| "kotlin/Any".to_string())
                 });
                 let is_interface = member.is_interface();
+                let carrier_args = self.value_class_carrier_args(&member);
                 let call = self.emit_virtual_call(
                     owner,
                     member.name,
@@ -20345,6 +20455,7 @@ impl<'a> Lower<'a> {
                     recv,
                     a,
                 );
+                self.record_value_class_carrier_args(call, carrier_args);
                 Some(self.coerce_to_static(call, ret, physical_ret))
             }
             InvokeKind::ExtensionOperator { receiver_ty: rt } => {

@@ -361,6 +361,22 @@ pub fn lower_value_classes(
     if under.is_empty() {
         return true;
     }
+    // Publish what this pass resolved: WHICH names are value classes, and which of them this module
+    // declares in source. The `@Metadata` writer needs both — it may only describe a member in terms of
+    // a value class a downstream compilation can read back as one, and a module-source value class's
+    // record is decided by its own emit, not here.
+    ir.value_class_underlyings = under.clone();
+    ir.module_source_value_classes = under
+        .keys()
+        .copied()
+        .filter(|fq_name| {
+            module_value_classes.contains_key(fq_name)
+                || ir
+                    .classes
+                    .iter()
+                    .any(|c| c.is_value && c.fq_name == *fq_name)
+        })
+        .collect();
 
     // A semantic property operation deliberately keeps the Kotlin property name. For an owner compiled
     // from another source file there is no classfile for the emitter to inspect, so record the JVM
@@ -2568,6 +2584,11 @@ pub fn lower_value_classes(
                 ..
             } = &ir.exprs[id as usize]
             {
+                let carrier_args = ir
+                    .value_class_carrier_args
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_default();
                 // A call OWNED by a value class (its own `-impl`/mangled members) takes the underlying at
                 // most parameters — never box those. EXCEPT when a parameter's declared type is itself a
                 // BOXED value class (`ZN.constructor-impl(LZ1;)`, where `ZN`'s underlying `Z1?` boxes):
@@ -2604,6 +2625,15 @@ pub fn lower_value_classes(
                     // dedicated `ext_call_source_receiver` handling above owns it. Never box it here, even
                     // though its `Object` param would otherwise look like a generic boxed slot.
                     if recv_is_ref_vc && k == 0 {
+                        continue;
+                    }
+                    // A position the CALLEE declares as a value class holds that value class's erased
+                    // carrier (a `@Metadata`-mangled classpath member: `invoke(param: Result<Int>)` →
+                    // `invoke-bjn95JY(Ljava/lang/Object;)`). The value is already in that form; boxing it
+                    // hands the callee a `Result` object where it expects the carrier, and the callee's
+                    // own `onFailure`/unwrap then operates on the box. Only the declared signature can
+                    // say so — the `Object` descriptor reads exactly like a generic slot, which DOES box.
+                    if carrier_args.get(k).copied().unwrap_or(false) {
                         continue;
                     }
                     let Repr::Unboxed(x) = repr_ctx.repr(a) else {
