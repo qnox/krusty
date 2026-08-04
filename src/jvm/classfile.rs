@@ -1115,19 +1115,25 @@ impl ClassWriter {
         }
         // copy — name, descriptor, its generic Signature (a parameterized ctor param — right after the
         // erased descriptor, kotlinc's order), @NotNull (return), then `new <self>(...)` (ctor Methodref).
-        self.cp.utf8("copy");
-        let copy_desc = format!("({}){self_ref}", params);
-        self.cp.utf8(&copy_desc);
-        if let Some(s) = info.copy_sig {
-            self.cp.utf8(s);
+        // A `data object` gets none of it: kotlinc synthesizes no `copy`/`copy$default` for a singleton,
+        // and seeding the names alone would leave them in the constant pool of a class that has no such
+        // method. No fields IS the test — a `data class` must declare at least one primary-constructor
+        // property, so an empty field list can only be an object.
+        if !fields.is_empty() {
+            self.cp.utf8("copy");
+            let copy_desc = format!("({}){self_ref}", params);
+            self.cp.utf8(&copy_desc);
+            if let Some(s) = info.copy_sig {
+                self.cp.utf8(s);
+            }
+            self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
+            self.cp.methodref(this_internal, "<init>", ctor_desc);
+            // copy$default — its descriptor, then the Methodref back to `copy`.
+            self.cp.utf8("copy$default");
+            let copy_default_desc = format!("({self_ref}{}ILjava/lang/Object;){self_ref}", params);
+            self.cp.utf8(&copy_default_desc);
+            self.cp.methodref(this_internal, "copy", &copy_desc);
         }
-        self.cp.utf8("Lorg/jetbrains/annotations/NotNull;");
-        self.cp.methodref(this_internal, "<init>", ctor_desc);
-        // copy$default — its descriptor, then the Methodref back to `copy`.
-        self.cp.utf8("copy$default");
-        let copy_default_desc = format!("({self_ref}{}ILjava/lang/Object;){self_ref}", params);
-        self.cp.utf8(&copy_default_desc);
-        self.cp.methodref(this_internal, "copy", &copy_desc);
         // toString. kotlinc's shape depends on the target: `invokedynamic makeConcatWithConstants`
         // (JVM 9+) or a `StringBuilder` chain (below). The body emitter picks the same fork on the
         // class major; seed to match so the pool positions line up.

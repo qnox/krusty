@@ -376,7 +376,7 @@ impl Backend for JvmBackend {
             module_name: (module_name != "main").then(|| module_name.to_string()),
             // Opt-in (WIP): compute + emit `@Metadata` for supported shapes. Off unless requested, so
             // the default emit is unchanged (an unverified payload breaks kotlin-reflect).
-            emit_class_metadata: std::env::var_os("KRUSTY_EMIT_CLASS_METADATA").is_some(),
+            emit_class_metadata: true,
             inner_class_resolver: Some(classpath_inner_class_resolver(self.cp.clone())),
         };
 

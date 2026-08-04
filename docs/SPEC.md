@@ -4024,3 +4024,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   never reaching a return instruction. Tests: `diverging_lambda_e2e`,
   `feature_coverage_n_e2e::result_is_success`; corpus `labels/infixCallLabelling.kt` and
   `coroutines/nonLocalReturn.kt` are the shapes still skipped.
+
+- **Class-level `@kotlin.Metadata` is emitted by default.** It used to be opt-in behind
+  `KRUSTY_EMIT_CLASS_METADATA` while the payload was being verified. Without it krusty cannot fully
+  read its OWN output: compiling a library and then compiling against those class files, `component1()`
+  resolves (it is a real JVM method) but `val (a, b) = p` does not, because the OPERATOR flag lives
+  only in metadata — as do `copy`'s parameter names, so `p.copy(y = 4)` reports "named arguments are
+  only supported for … methods with named parameters". Turning it on required finishing two shapes.
+  (1) A `data object` synthesizes NO `copy`/`copy$default` — it is a singleton — so neither the
+  metadata function list, the constant-pool seeding, the debug tables, nor the nullability annotations
+  may name one. An empty field list IS the test for that: a `data class` must declare at least one
+  primary-constructor property, so a fieldless data declaration can only be an object (`is_object` is
+  not set on a class hoisted out of an interface body, so it cannot be used here). (2) The plain-enum
+  test asserted that no `RuntimeVisibleAnnotations` attribute is emitted, which contradicts kotlinc —
+  a plain enum compiled by kotlinc carries one, its class-level `@Metadata` among them. It now asserts
+  on the annotation TYPE (`Ldemo/Mark;`), which is what "the constants are not annotated" actually
+  means. Tests: `feature_coverage_x_e2e::roundtrip_data_class_and_generic_fn`,
+  `sealed_interface_nested_e2e::data_object_has_no_copy`,
+  `enum_constant_annotation_emit_e2e::plain_enum_has_no_constant_annotation`.

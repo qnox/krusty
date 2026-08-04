@@ -103,9 +103,9 @@ fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
 
 /// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
 /// `ClassWriter` (via [`new_writer`]) so synthetic serializer/companion/DefaultImpls classes inherit
-/// it too. The `Default` (v52, no `SourceFile`) keeps [`emit_all`]'s output byte-identical to before —
-/// only the CLI-driven backend path overrides it (`-jvm-target`, the source `.kt` name).
-#[derive(Clone, Default)]
+/// it too. The `Default` is v52 with no `SourceFile`; only the CLI-driven backend path overrides those
+/// (`-jvm-target`, the source `.kt` name).
+#[derive(Clone)]
 pub struct EmitOptions {
     /// Class-file major version to emit (default v52; `-jvm-target 25` ⇒ v69).
     pub class_major: Option<u16>,
@@ -114,13 +114,26 @@ pub struct EmitOptions {
     /// `-module-name` value, recorded in each class's `@Metadata` (`classModuleName`). kotlinc omits it
     /// for the default module `main`; `None` here matches that.
     pub module_name: Option<String>,
-    /// Emit a computed `@kotlin.Metadata` for supported class shapes (WIP — [`build_class_metadata`]).
+    /// Emit a computed `@kotlin.Metadata` for supported class shapes ([`build_class_metadata`]).
     /// Byte-verified vs kotlinc for a plain `val`/`var`-property class and a `data class` (its IS_DATA
     /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); other shapes are gated
-    /// out and emit no metadata. OFF by default: an unverified payload breaks kotlin-reflect (a
-    /// box-corpus case caught this), so the default emit stays unchanged until a shape is verified.
+    /// out and emit no metadata. ON by default: without it krusty cannot fully read its OWN output —
+    /// `componentN` resolves (a real JVM method) but `val (a, b) = p` does not, because the OPERATOR
+    /// flag lives only in metadata, as do `copy`'s parameter names.
     pub emit_class_metadata: bool,
     pub inner_class_resolver: Option<InnerClassResolver>,
+}
+
+impl Default for EmitOptions {
+    fn default() -> Self {
+        Self {
+            class_major: None,
+            source_file: None,
+            module_name: None,
+            emit_class_metadata: true,
+            inner_class_resolver: None,
+        }
+    }
 }
 
 /// `Class.flags` (proto field 1) for any Kotlin class kind — ONE bitfield, not a per-kind constant.
@@ -560,15 +573,21 @@ fn build_class_metadata(
                 jvm_sig_name: None,
             })
             .collect();
-        m.push(FnMeta {
-            name: "copy".into(),
-            params: c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect(),
-            ret: class_ty,
-            flags: COPY_FN_FLAGS,
-            params_have_defaults: true,
-            jvm_sig: boxed_fn_sig(&field_tys, class_ty),
-            jvm_sig_name: None,
-        });
+        // A `data object` is a singleton: kotlinc synthesizes `equals`/`hashCode`/`toString` for it but
+        // NO `copy` (and no `componentN` — the loop above is already empty). No-fields IS the test: a
+        // `data class` must declare at least one primary-constructor property, so an empty field list
+        // can only be an object. (`is_object` is not set on a class hoisted out of an interface body.)
+        if !c.fields.is_empty() {
+            m.push(FnMeta {
+                name: "copy".into(),
+                params: c.fields.iter().map(|f| (f.name.clone(), f.ty)).collect(),
+                ret: class_ty,
+                flags: COPY_FN_FLAGS,
+                params_have_defaults: true,
+                jvm_sig: boxed_fn_sig(&field_tys, class_ty),
+                jvm_sig_name: None,
+            });
+        }
         m.push(FnMeta {
             name: "equals".into(),
             params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
@@ -1222,21 +1241,24 @@ fn attach_synth_debug_tables(
                 &this_only,
             );
         }
-        let mut copy_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
-        let mut slot = 1u16;
-        for f in &c.fields {
-            copy_locals.push((f.name.clone(), desc(f.ty), slot));
-            slot += slot_size(f.ty);
+        // A `data object` synthesizes no `copy` (see the metadata assembly), so it has no table either.
+        if !c.fields.is_empty() {
+            let mut copy_locals = vec![("this".to_string(), this_desc.clone(), 0u16)];
+            let mut slot = 1u16;
+            for f in &c.fields {
+                copy_locals.push((f.name.clone(), desc(f.ty), slot));
+                slot += slot_size(f.ty);
+            }
+            cw.set_method_debug(
+                "copy",
+                &format!(
+                    "{ctor_desc_no_v}{self_ref}",
+                    ctor_desc_no_v = &ctor_desc[..ctor_desc.len() - 1]
+                ),
+                None,
+                &copy_locals,
+            );
         }
-        cw.set_method_debug(
-            "copy",
-            &format!(
-                "{ctor_desc_no_v}{self_ref}",
-                ctor_desc_no_v = &ctor_desc[..ctor_desc.len() - 1]
-            ),
-            None,
-            &copy_locals,
-        );
         cw.set_method_debug(
             "equals",
             "(Ljava/lang/Object;)Z",
@@ -1332,11 +1354,15 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     if c.is_data {
         let not_null = "Lorg/jetbrains/annotations/NotNull;";
         let self_ref = format!("L{};", c.fq_name());
-        let copy_desc = format!("({}){self_ref}", ctor_field_descs(c));
-        // `copy`'s parameters mirror the primary-constructor properties, so each reference param takes
-        // the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
-        let copy_params: Vec<Option<&str>> = c.fields.iter().map(|f| ann(&f.name, f.ty)).collect();
-        cw.set_method_nullability("copy", &copy_desc, Some(not_null), &copy_params);
+        // A `data object` synthesizes no `copy` (see the metadata assembly), so it takes no annotations.
+        if !c.fields.is_empty() {
+            let copy_desc = format!("({}){self_ref}", ctor_field_descs(c));
+            // `copy`'s parameters mirror the primary-constructor properties, so each reference param
+            // takes the SAME `@NotNull`/`@Nullable` annotation kotlinc puts on the constructor's.
+            let copy_params: Vec<Option<&str>> =
+                c.fields.iter().map(|f| ann(&f.name, f.ty)).collect();
+            cw.set_method_nullability("copy", &copy_desc, Some(not_null), &copy_params);
+        }
         cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(not_null), &[]);
         cw.set_method_nullability(
             "equals",

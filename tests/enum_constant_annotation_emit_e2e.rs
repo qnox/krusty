@@ -42,13 +42,16 @@ fn runtime_annotation_on_enum_constant_is_emitted() {
 }
 
 #[test]
-fn plain_enum_has_no_annotation_attribute() {
+fn plain_enum_has_no_constant_annotation() {
     let bytes = role_bytes(
         "package demo\n\
          enum class Role(val v: String) { SYSTEM(\"system\"), USER(\"user\") }\n",
     );
+    // Asserted on the annotation TYPE, not the attribute NAME: a plain enum compiled by kotlinc does
+    // carry `RuntimeVisibleAnnotations` — its class-level `@kotlin.Metadata` is one — so the attribute
+    // name says nothing about whether the CONSTANTS were annotated, which is what this test is about.
     assert!(
-        !contains(&bytes, "RuntimeVisibleAnnotations"),
-        "unexpected annotation attribute on a plain enum",
+        !contains(&bytes, "Ldemo/Mark;"),
+        "unexpected annotation on a plain enum's constants",
     );
 }
