@@ -4622,7 +4622,13 @@ fn collect_signatures_with_cp_impl(
                             }
                         })
                         .collect();
-                    let generic_sig = source_generic_signature(f, &class_names, ret, diags);
+                    let generic_sig = source_generic_signature(
+                        f,
+                        &class_names,
+                        ret,
+                        inferred_return_type_parameter(file, f),
+                        diags,
+                    );
                     let source_receiver = f
                         .receiver
                         .as_ref()
@@ -5597,6 +5603,7 @@ fn collect_signatures_with_cp_impl(
                                 &class_names,
                                 &symbolic_mtp,
                                 signature.ret,
+                                inferred_return_type_parameter(file, method),
                                 diags,
                             ));
                         }
@@ -5679,6 +5686,7 @@ fn collect_signatures_with_cp_impl(
                                     &class_names,
                                     &method_tparams,
                                     ret_shape,
+                                    inferred_return_type_parameter(file, method),
                                     diags,
                                 ));
                         }
@@ -8422,6 +8430,49 @@ fn infer_lit_ty_p(
     }
 }
 
+/// The `KFunction{N}` a callable reference's function type corresponds to — `(A, B) -> R` →
+/// `KFunction2<A, B, R>`. `None` for a shape with no `KFunction{N}` spelling (suspend, a receiver, or
+/// context parameters).
+fn callable_reference_reflect_type(function_type: Ty) -> Option<Ty> {
+    let Ty::Fun(signature) = function_type else {
+        return None;
+    };
+    if signature.suspend || signature.has_receiver || signature.context_count != 0 {
+        return None;
+    }
+    let mut args = signature.params.to_vec();
+    args.push(signature.ret);
+    Some(Ty::obj_args(
+        &format!(
+            "{}{}",
+            crate::types::KFUNCTION_INTERNAL,
+            signature.params.len()
+        ),
+        &args,
+    ))
+}
+
+/// The reflection type a callable reference EXPRESSION takes, or `None` to keep its function type.
+///
+/// Only where a `KFunction{N}` is expected (`val f: KFunction0<String> = ::hello`,
+/// `fun reference(): KFunction0<String> = ::reveal`). Everywhere else the expression keeps its function
+/// type: that is the shape every existing consumer is written against — argument passing, SAM
+/// conversion, the backend's reference dispatch — and re-typing them all regressed reference dispatch
+/// broadly (indy lambdas where a `FunctionReferenceImpl` was required).
+fn expected_callable_reference_reflect_type(function_type: Ty, expected: Option<Ty>) -> Option<Ty> {
+    let Ty::Fun(signature) = function_type else {
+        return None;
+    };
+    let arity_matches = expected?
+        .non_null()
+        .obj_internal()
+        .and_then(crate::types::kfunction_arity)
+        .is_some_and(|arity| arity == signature.params.len());
+    arity_matches
+        .then(|| callable_reference_reflect_type(function_type))
+        .flatten()
+}
+
 /// The `invoke` arity of a reflection property/function-reference type — a `KProperty{N}`,
 /// `KMutableProperty{N}`, or `KFunction{N}` extends `Function{N}`, so calling the reference invokes
 /// `Function{N}.invoke`. Returns `N` for those internal names, else `None`.
@@ -9113,10 +9164,34 @@ fn member_signature(
     }
 }
 
+/// The function's own type parameter that an INFERRED return type resolves to, read off the
+/// declaration rather than the erased inference: an expression body that IS one of the function's value
+/// parameters returns exactly that parameter's declared type, so a bare type-parameter parameter makes
+/// the return that type parameter (`fun <T> foo(x: T) = x` returns `T`, not `Any`). `None` for a
+/// declared return, any other body, or a parameter whose type is not a bare type parameter.
+fn inferred_return_type_parameter(file: &File, function: &FunDecl) -> Option<String> {
+    if function.ret.is_some() || function.type_params.is_empty() {
+        return None;
+    }
+    let FunBody::Expr(body) = &function.body else {
+        return None;
+    };
+    let Expr::Name(name) = file.expr(*body) else {
+        return None;
+    };
+    let parameter = function.params.iter().find(|p| &p.name == name)?;
+    function
+        .type_params
+        .iter()
+        .find(|tp| *tp == &parameter.ty.name && parameter.ty.targs.is_empty())
+        .cloned()
+}
+
 fn source_generic_signature(
     function: &FunDecl,
     classes: &ClassNames,
     resolved_ret: Ty,
+    inferred_ret_tparam: Option<String>,
     diags: &mut DiagSink,
 ) -> Option<GenericSig> {
     if function.type_params.is_empty() {
@@ -9132,6 +9207,7 @@ fn source_generic_signature(
         classes,
         &type_params,
         resolved_ret,
+        inferred_ret_tparam,
         diags,
     ))
 }
@@ -9141,6 +9217,7 @@ fn source_generic_signature_from_tparams(
     classes: &ClassNames,
     type_params: &TParams,
     resolved_ret: Ty,
+    inferred_ret_tparam: Option<String>,
     diags: &mut DiagSink,
 ) -> GenericSig {
     let resolve = |reference: &TypeRef, diags: &mut DiagSink| {
@@ -9167,6 +9244,15 @@ fn source_generic_signature_from_tparams(
         .as_ref()
         .map(|reference| resolve(reference, diags))
         .unwrap_or(resolved_ret);
+    // An INFERRED return that is one of the declared type parameters. `resolved_ret` is the ERASED
+    // inference (`fun <T> foo(x: T) = x` infers `Any`), and recording that erasure in `@Metadata` says
+    // the function returns `Any` — which is not the declaration, and leaves kotlin-reflect unable to
+    // resolve the function against its bytecode method. Recover the parameter from the body when it is
+    // exactly one of the function's own value parameters, whose declared type says it directly.
+    let ret = match (&function.ret, inferred_ret_tparam) {
+        (None, Some(name)) => Ty::ty_param(&name, Ty::nullable(Ty::obj("kotlin/Any"))),
+        _ => ret,
+    };
     let formal_bounds = function
         .type_params
         .iter()
@@ -16704,14 +16790,27 @@ impl<'a> Checker<'a> {
             Ty::Obj(internal, _) if callable_reference_invoke_arity(internal).is_some() => {
                 let arity = callable_reference_invoke_arity(internal).unwrap();
                 let obj = Ty::obj_name(crate::types::wk::any());
-                (
-                    vec![obj; arity],
-                    obj,
-                    InvokeKind::Function {
-                        ret: obj,
-                        suspend: false,
-                    },
-                )
+                // A `KFunction{N}` spells its parameter and return types as its type ARGUMENTS, so the
+                // call is typed from the declaration (`::Greeter` invoked yields a `Greeter`, not `Any`).
+                // A `KProperty{N}` carries no such list here and keeps the erased reflection shape.
+                match crate::types::callable_reference_function_type(receiver_ty) {
+                    Ty::Fun(signature) => (
+                        signature.params.to_vec(),
+                        signature.ret,
+                        InvokeKind::Function {
+                            ret: signature.ret,
+                            suspend: false,
+                        },
+                    ),
+                    _ => (
+                        vec![obj; arity],
+                        obj,
+                        InvokeKind::Function {
+                            ret: obj,
+                            suspend: false,
+                        },
+                    ),
+                }
             }
             _ => {
                 // A member `operator fun invoke`: source/user classes are emitted by IR method id later,
@@ -23831,7 +23930,30 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
+    /// A callable reference's type. kotlinc types `Sample::decode` as `KFunction2<Sample, Marker,
+    /// String>` — a `Function2` that is ALSO a `KCallable`, which is why `.returnType` resolves on one
+    /// but not on a lambda. krusty computes the function type first and then, in the positions where
+    /// kotlinc's reflection type is observable, re-types the reference as the matching `KFunction{N}`.
+    ///
+    /// Only where a `KFunction{N}` is EXPECTED. Everywhere else the reference keeps its function type:
+    /// that is the shape every existing consumer is written against, and re-typing them all regressed
+    /// reference dispatch broadly (indy lambdas where a `FunctionReferenceImpl` was required).
     fn expr_inner_callable_ref(
+        &mut self,
+        e: ExprId,
+        expected: Option<Ty>,
+        receiver: Option<ExprId>,
+        name: String,
+    ) -> Ty {
+        let function_type = self.callable_ref_function_type(e, expected, receiver, name);
+        let Some(reflect) = expected_callable_reference_reflect_type(function_type, expected)
+        else {
+            return function_type;
+        };
+        self.set(e, reflect)
+    }
+
+    fn callable_ref_function_type(
         &mut self,
         e: ExprId,
         expected: Option<Ty>,
@@ -34251,6 +34373,24 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether `e` is an UNBOUND callable reference — `::foo`, or `Type::member` on a classifier name
+    /// (as opposed to `value::member`, which captures a receiver).
+    fn unbound_callable_reference(&self, e: ExprId) -> bool {
+        let Expr::CallableRef { receiver, name } = self.file.expr(e) else {
+            return false;
+        };
+        if name == "class" {
+            return false;
+        }
+        match receiver {
+            None => true,
+            Some(receiver) => match self.file.expr(*receiver) {
+                Expr::Name(n) => self.class_literal_unbound_ty(n).is_some(),
+                _ => false,
+            },
+        }
+    }
+
     fn stmt_local(
         &mut self,
         s: StmtId,
@@ -34312,15 +34452,26 @@ impl<'a> Checker<'a> {
             && it != Ty::Nothing
             && bind.non_null().is_reference()
             && !self.ty_is_value_class(bind.non_null());
-        self.declare(
-            &name,
-            if stable_reference_val {
-                bind.non_null()
-            } else {
-                bind
-            },
-            is_var,
-        );
+        let bound_ty = if stable_reference_val {
+            bind.non_null()
+        } else {
+            bind
+        };
+        // An UNANNOTATED local bound to an UNBOUND callable reference takes kotlinc's INFERRED type,
+        // which is the reflection one (`val f = A::b` is a `KFunction2`, not a `(A, B) -> R`) — that is
+        // why `f.returnType` resolves on it.
+        //
+        // UNBOUND only, because that is the set krusty realizes as a real Kotlin reference object
+        // (`FunctionReferenceImpl`, hence a `KFunction`). A BOUND reference on a value receiver
+        // (`E.A::foo`) can still lower to an `invokedynamic` lambda, which implements `Function{N}` and
+        // nothing else; typing its binding as a `KFunction` would `ClassCastException` on the first
+        // store. Widening those needs the backend to realize EVERY reference as a reference class.
+        let bound_ty = if declared.is_none() && self.unbound_callable_reference(init) {
+            callable_reference_reflect_type(bound_ty).unwrap_or(bound_ty)
+        } else {
+            bound_ty
+        };
+        self.declare(&name, bound_ty, is_var);
         // Flow-narrow a nullable `var` whose initializer is a non-null value (`var x: Int? = 10`
         // reads as `Int`), matching kotlinc's smart-cast, but only when the var is not written
         // inside a closure that could reset it to null on a deferred path.

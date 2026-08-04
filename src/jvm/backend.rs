@@ -571,7 +571,15 @@ pub fn facade_package_metadata(
         // fn needs the handle too: its erased descriptor (receiver + erased params + erased return)
         // maps the metadata function to its bytecode method. A normal fn's method is name +
         // logical descriptor — recoverable without a recorded handle.
-        let jvm_desc = (f.is_suspend() || f.is_inline()).then(|| {
+        // A declared TYPE PARAMETER in the signature needs the handle too: the descriptor is not
+        // derivable from the proto types (`T` erases to its bound, which the record does not name), so
+        // without it kotlin-reflect cannot tell which bytecode method the record describes and reports
+        // "several matching members found" for a function that has exactly one.
+        let mentions_type_parameter = matches!(declared_ret, Ty::TyParam(..))
+            || declared_params
+                .iter()
+                .any(|parameter| matches!(parameter, Ty::TyParam(..)));
+        let jvm_desc = (f.is_suspend() || f.is_inline() || mentions_type_parameter).then(|| {
             let mut p = String::new();
             if let Some(r) = receiver {
                 p.push_str(&crate::jvm::names::type_descriptor(r));

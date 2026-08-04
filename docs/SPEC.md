@@ -4063,3 +4063,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invoke_operator_extension_e2e::{classpath_member_extension_resolves_in_a_plain_receiver_lambda,
   non_operator_classpath_member_extension_is_not_used_by_call_syntax,
   classpath_super_ctor_receiver_lambda_uses_shared_resolution}`.
+
+- **A callable reference is a `KFunction{N}` where kotlinc's reflection type is observable.** kotlinc
+  types `Sample::decode` as `KFunction2<Sample, Marker, String>` — a `Function2` that is ALSO a
+  `KCallable`, which is why `.returnType` resolves on a reference but not on a lambda. Those
+  `KFunction{N}` names exist in no jar (not `kotlin-stdlib`, not `kotlin-reflect`, and the
+  `kotlin/reflect` builtins declare only the arity-less `KFunction`): kotlinc synthesizes them, and a
+  declaration typed with one erases to `Lkotlin/reflect/KFunction;`. krusty synthesizes the same shape —
+  `KFunction<R>` for the reflection members plus `Function{N}` so the value stays invocable — and
+  computes a reference's function type first, re-typing it as the matching `KFunction{N}` in exactly two
+  positions: where a `KFunction{N}` is EXPECTED (`fun reference(): KFunction0<String> = ::reveal`), and
+  as the inferred type of an unannotated local bound to an UNBOUND reference (`val f = A::b`).
+  Everywhere else the reference keeps its function type — that is the shape argument passing, SAM
+  conversion, and the backend's reference dispatch are written against, and re-typing them all regressed
+  reference dispatch broadly. Unbound only, because that is the set krusty realizes as a real
+  `FunctionReferenceImpl`; a bound reference on a value receiver can still lower to an `invokedynamic`
+  lambda, which is no `KFunction` (see `docs/IMPLEMENTATION_PLAN.md`). Invoking a `KFunction{N}` is
+  typed from its type ARGUMENTS, not the erased reflection shape, so `::Greeter` invoked yields a
+  `Greeter`. Tests:
+  `classpath_unbound_callable_ref_e2e::classpath_callable_references_resolve_reflection_targets`,
+  corpus `reflection/functions/typeParameterInReturnType.kt`.
+
+- **A reference to a dependency's target is not re-mangled, and a generic function's metadata names its
+  type-parameter return.** Two emit bugs that only a reflection READ can catch. (1) The value-class
+  mangle was applied to a function reference's recorded name even when the target came from a
+  dependency, where kotlinc had already mangled it — yielding `decode-X4E9McA-X4E9McA`, a method that
+  exists nowhere and a signature kotlin-reflect cannot resolve. Only a target this compilation emits is
+  mangled, matched on owner + name (an arity match misses a bound extension, whose mangle-relevant
+  parameter list leads with the receiver). (2) An INFERRED return that is one of the function's own type
+  parameters (`fun <T> foo(x: T) = x`) was recorded in `@Metadata` as the ERASED `Any`; it is now
+  recovered from the declaration when the expression body IS one of the value parameters. A signature
+  mentioning a type parameter also records its JVM method handle, as kotlinc does — the descriptor is
+  not derivable from the proto types, and without it reflection reports "several matching members found"
+  for a function that has exactly one.

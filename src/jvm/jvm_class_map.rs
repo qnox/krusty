@@ -298,6 +298,14 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     if let Some(j) = kotlin_builtin_to_jvm(internal) {
         return j;
     }
+    // A synthesized `kotlin.reflect.KFunction{N}` (no such class exists) erases to the arity-less
+    // `kotlin/reflect/KFunction`, exactly as kotlinc emits it.
+    if internal
+        .strip_prefix(crate::types::KFUNCTION_INTERNAL)
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return crate::types::KFUNCTION_INTERNAL;
+    }
     TYPE_MAP
         .iter()
         .find(|(k, _)| *k == internal)

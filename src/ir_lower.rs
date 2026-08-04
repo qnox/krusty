@@ -13028,7 +13028,7 @@ impl<'a> Lower<'a> {
         };
         let internal = *owner;
         let (_, _, target_fid, _) = self.resolve_method_name(internal, name)?;
-        let Ty::Fun(sig) = self.info.ty(e) else {
+        let Ty::Fun(sig) = crate::types::callable_reference_function_type(self.info.ty(e)) else {
             return None;
         };
         if sig.ret == Ty::Nothing {
@@ -21317,7 +21317,9 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ImportedObjectMemberRef { internal, member }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                if let Ty::Fun(sig) = self.info.ty(e) {
+                if let Ty::Fun(sig) =
+                    crate::types::callable_reference_function_type(self.info.ty(e))
+                {
                     return self.lower_imported_object_ref(
                         e,
                         internal,
@@ -21397,7 +21399,9 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ClasspathUnboundMemberRef { receiver, member }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                if let Ty::Fun(sig) = self.info.ty(e) {
+                if let Ty::Fun(sig) =
+                    crate::types::callable_reference_function_type(self.info.ty(e))
+                {
                     return self.lower_unbound_library_member_ref(
                         e,
                         &name,
@@ -21411,7 +21415,10 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ModuleBoundExtensionRef { target, owner }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                let (Some(recv), Ty::Fun(signature)) = (receiver, self.info.ty(e)) else {
+                let (Some(recv), Ty::Fun(signature)) = (
+                    receiver,
+                    crate::types::callable_reference_function_type(self.info.ty(e)),
+                ) else {
                     return None;
                 };
                 if target.params.len() != signature.params.len() + 1 || signature.ret == Ty::Nothing
@@ -21442,7 +21449,9 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ModuleFunctionRef { target, owner }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                let Ty::Fun(signature) = self.info.ty(e) else {
+                let Ty::Fun(signature) =
+                    crate::types::callable_reference_function_type(self.info.ty(e))
+                else {
                     return None;
                 };
                 if signature.params.len() != target.params.len() || signature.ret == Ty::Nothing {
@@ -21473,7 +21482,10 @@ impl<'a> Lower<'a> {
                 }
                 // A bound property ref on a LIBRARY receiver (`"kotlin"::length`) — its type is a
                 // `KProperty0`, not `Ty::Fun`, so it must lower before the function-ref fallthrough.
-                if !matches!(self.info.ty(e), Ty::Fun(_)) {
+                if !matches!(
+                    crate::types::callable_reference_function_type(self.info.ty(e)),
+                    Ty::Fun(_)
+                ) {
                     if let Some(pr) = self.lower_bound_library_prop_ref(e, recv, &name) {
                         return Some(pr);
                     }
@@ -21510,7 +21522,8 @@ impl<'a> Lower<'a> {
                     return Some(pr);
                 }
             }
-            let Ty::Fun(sig) = self.info.ty(e) else {
+            let Ty::Fun(sig) = crate::types::callable_reference_function_type(self.info.ty(e))
+            else {
                 return None;
             };
             let arity = sig.params.len();

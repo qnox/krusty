@@ -1214,26 +1214,39 @@ pub fn lower_value_classes(
         };
         let fr_suspend =
             suspend_sig.contains(&(call_owner, fr.call_name.clone(), target_decl_params.len()));
-        let mangled_call_name = vc_mangle(
-            &fr.call_name,
-            &mangle_params,
-            &fr.ret_ty,
-            &under,
-            is_file_class,
-            fr_suspend,
-        );
-        let reflection_base = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
-        let mangled_reflection_name = vc_mangle(
-            reflection_base,
-            &mangle_params,
-            &fr.ret_ty,
-            &under,
-            is_file_class,
-            fr_suspend,
-        );
-        fr.reflection_name =
-            (mangled_reflection_name != fr.fn_name).then_some(mangled_reflection_name);
-        fr.call_name = mangled_call_name;
+        // Only a target THIS compilation emits still needs mangling. One from a dependency already
+        // carries its final JVM name — kotlinc mangled it when that dependency was built, and the
+        // lowerer recorded that physical name — so mangling again yields `decode-X4E9McA-X4E9McA`: a
+        // method that exists nowhere, and a reflection signature kotlin-reflect cannot resolve.
+        // `target_param_map` is built from this file's functions, so its key set IS that target set.
+        // Matched on OWNER + NAME only: a bound extension reference's mangle-relevant parameter list
+        // leads with the receiver while the map is keyed by the invoke arity, so an arity match would
+        // miss a same-file target and leave its call unmangled.
+        let target_is_local = target_param_map
+            .keys()
+            .any(|(owner, name, _)| *owner == call_owner && *name == fr.call_name);
+        if target_is_local {
+            let mangled_call_name = vc_mangle(
+                &fr.call_name,
+                &mangle_params,
+                &fr.ret_ty,
+                &under,
+                is_file_class,
+                fr_suspend,
+            );
+            let reflection_base = fr.reflection_name.as_deref().unwrap_or(&fr.fn_name);
+            let mangled_reflection_name = vc_mangle(
+                reflection_base,
+                &mangle_params,
+                &fr.ret_ty,
+                &under,
+                is_file_class,
+                fr_suspend,
+            );
+            fr.reflection_name =
+                (mangled_reflection_name != fr.fn_name).then_some(mangled_reflection_name);
+            fr.call_name = mangled_call_name;
+        }
         // Preserve classpath erasure already recorded in the target shape.
         let erase_src = fr.target_param_tys.clone();
         let erase_ret = fr.target_ret_ty;

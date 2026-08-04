@@ -1051,6 +1051,25 @@ impl JvmLibraries {
     /// mapping (`to_jvm_internal`) the emitter uses for the call owner, so resolution and codegen stay
     /// byte-consistent. Members/return types erase to the JVM forms (`get(int)Object`, etc.).
     fn build_library_type(&self, internal_name: TypeName) -> Option<LibraryType> {
+        // `kotlin.reflect.KFunction0` … `KFunction22` are COMPILER-SYNTHESIZED, exactly like
+        // `kotlin.FunctionN`: they exist in no jar, and the `kotlin/reflect` builtins declare only the
+        // arity-less `KFunction`. Build the shape kotlinc gives them — `KFunction<R>` for the reflection
+        // members (`returnType`, `name`, …) plus `FunctionN` so the value is invocable — instead of
+        // reporting `import kotlin.reflect.KFunction0` as an unresolved reference. A declaration typed
+        // with one erases to `Lkotlin/reflect/KFunction;` (see `jvm_class_map::to_jvm_internal`).
+        if let Some(arity) = crate::types::kfunction_arity(internal_name) {
+            let mut shape =
+                (*self.resolve_type_name(type_name(crate::types::KFUNCTION_INTERNAL))?).clone();
+            let mut supertypes = crate::types::TypeNameList::new();
+            supertypes.push(crate::types::KFUNCTION_INTERNAL);
+            supertypes.push(&format!("kotlin/Function{arity}"));
+            shape.supertypes = supertypes;
+            shape.type_params = (0..arity)
+                .map(|index| format!("P{}", index + 1))
+                .chain(std::iter::once("R".to_string()))
+                .collect();
+            return Some(shape);
+        }
         {
             let internal = &internal_name.render();
             let ci = match self.cp.find(internal) {
