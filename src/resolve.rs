@@ -38059,6 +38059,7 @@ fun box(): String {
                         inline: crate::libraries::InlineKind::None,
                         visibility: crate::types::Visibility::Public,
                         call_sig: CallSig::default(),
+                        declared_ret: None,
                     };
                     vec![
                         member(

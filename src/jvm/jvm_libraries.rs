@@ -205,7 +205,13 @@ impl JvmLibraries {
                     None => physical_ret,
                 }
             } else {
-                physical_ret
+                // A value-class RETURN erases to its underlying in the descriptor exactly like a
+                // parameter does, and unlike `suspend` it has no continuation type argument to recover
+                // it from — so without this a non-suspend top-level function declared `(): Duration`
+                // reads back as `Long` and every member access on its result fails to resolve. The
+                // callable keeps `physical_ret`/`descriptor` erased below, which is what tells the
+                // value-class pass the result is ALREADY the carrier and must not be unboxed again.
+                meta.value_class_ret.unwrap_or(physical_ret)
             };
             // A value-class parameter erases to its underlying in the descriptor. Resolution compares
             // the ARGUMENT's Kotlin type against these, so a `Duration`/`Tag` argument matches nothing
@@ -234,6 +240,10 @@ impl JvmLibraries {
                 context_count,
                 contract,
                 generic_sig: generic_sig_for_callable.clone().map(Box::new),
+                // The DECLARED value-class return, when `@Metadata` says the descriptor return is that
+                // class's erased carrier. This is the fact the value-class pass needs and the
+                // descriptor cannot supply; it is already computed for `ret` above.
+                declared_ret: meta.value_class_ret,
                 ..LibraryCallable::library(
                     c.owner,
                     c.name.clone(),
@@ -1201,6 +1211,20 @@ impl JvmLibraries {
                 });
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                // The DECLARED return classifier, verbatim (see `LibraryMember::declared_ret`). Taken
+                // from the metadata this member was already aligned against, so no extra decode; a
+                // NULLABLE declared return stays `None` because it is genuinely boxed.
+                //
+                // A `suspend` member is excluded: CPS makes its descriptor return `Object` whatever it
+                // declares, so the descriptor no longer witnesses that the result is the erased
+                // carrier — and for a PRIMITIVE-underlying value class it is not (kotlinc's
+                // `make-<hash>(Continuation)Ljava/lang/Object;` hands back `M.box-impl(I)LM;`, a BOX).
+                // Claiming the fact there would repr a boxed value as unboxed. Without it the member
+                // falls back to the descriptor comparison, which classifies this case correctly.
+                member.declared_ret = member_metadata
+                    .filter(|metadata| !metadata.is_suspend())
+                    .and_then(|metadata| metadata.ret_class.filter(|_| !metadata.ret_nullable()))
+                    .map(Ty::obj_name);
                 if let Some(java_nullable) = platform_nullable_params.clone() {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
@@ -1450,6 +1474,17 @@ impl JvmLibraries {
                 member.set_ret_nullable(mf.ret_nullable());
                 member.set_suspend(mf.is_suspend());
                 member.call_sig = mf.member_call_sig();
+                // The DECLARED return classifier, verbatim and un-substituted — recorded with no
+                // value-class probing (which is unsafe on this path: it runs inside `resolve_type_name`'s
+                // type build and would recurse on cyclic class graphs). A NULLABLE declared return is
+                // deliberately excluded: a nullable value class really is BOXED, so it must keep the
+                // ordinary boxed handling. The value-class pass decides what the classifier means.
+                // `suspend` excluded for the reason given at the descriptor-loop site above: CPS
+                // erases the descriptor return to `Object`, which stops witnessing the carrier.
+                member.declared_ret = mf
+                    .ret_class
+                    .filter(|_| !mf.ret_nullable() && !mf.is_suspend())
+                    .map(Ty::obj_name);
                 crate::trace_compiler!(
                     "resolve",
                     "mangled member {}.{} jvm={} logical_params={:?}",
