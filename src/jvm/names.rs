@@ -193,8 +193,26 @@ fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static st
 
 /// A JVM field/type descriptor from a krusty `Ty`.
 pub fn type_descriptor(ty: Ty) -> String {
-    let obj_desc =
-        |internal: &str| format!("L{};", crate::jvm::jvm_class_map::to_jvm_internal(internal));
+    // `@Metadata` spells a nested class with a dot (`kotlin/coroutines/CoroutineContext.Key`), and
+    // the frontend deliberately KEEPS that spelling for the stdlib-mapped nested collections
+    // (`Map.Entry`) so their extensions match. A descriptor is the JVM-emission boundary: dots in
+    // the class segment are nested separators and MUST be `$` here — emitted raw, the JVM refuses
+    // to load the class (ClassFormatError). Normalizing at this one boundary, rather than at the
+    // metadata decode sites, leaves the frontend's spelling equilibrium untouched and covers every
+    // `Ty` that reaches bytecode.
+    let obj_desc = |internal: &str| {
+        let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
+        let slash = mapped.rfind('/').map(|i| i + 1).unwrap_or(0);
+        if mapped[slash..].contains('.') {
+            format!(
+                "L{}{};",
+                &mapped[..slash],
+                mapped[slash..].replace('.', "$")
+            )
+        } else {
+            format!("L{mapped};")
+        }
+    };
     match ty {
         Ty::Int => "I".into(),
         Ty::Byte => "B".into(),

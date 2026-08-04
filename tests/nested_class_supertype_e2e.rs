@@ -83,6 +83,22 @@ fn implements_stdlib_nested_interface() {
 }
 
 #[test]
+fn overriding_nested_typed_supertype_property_emits_loadable_class() {
+    // `CoroutineContext.Element.key` is typed `CoroutineContext.Key<*>`; the classpath metadata spells
+    // the nested class with a dot (`kotlin/coroutines/CoroutineContext.Key`). A covariant-override
+    // bridge derived from that spelling wrote the dot RAW into the method descriptor, so the emitted
+    // class failed to load (ClassFormatError). `type_descriptor` now converts class-segment dots to
+    // `$` at the JVM-emission boundary, so the supertype's and the override's descriptors compare
+    // equal and the bogus `Key`-covariant bridge is not derived at all.
+    const SRC: &str = "import kotlin.coroutines.CoroutineContext\n\
+        class Elem(val name: String) : CoroutineContext.Element {\n\
+        \x20 override val key: CoroutineContext.Key<*> get() = TODO()\n\
+        }\n\
+        fun box(): String = Elem(\"OK\").name\n";
+    assert_eq!(run(SRC).expect("nested-typed property override"), "OK");
+}
+
+#[test]
 fn coroutine_context_nested_supertypes_resolve_on_the_frontend() {
     // The intellij find (`ActionContextElement`): `CoroutineContext.Element` + `CoroutineContext.Key`
     // as supertypes of a class AND its companion. The full shape additionally extends an abstract
