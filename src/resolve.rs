@@ -9445,6 +9445,32 @@ pub enum ResolvedCall {
     LambdaReturnMember(crate::libraries::LibraryCallable),
 }
 
+/// The two callable capabilities needed before IR emission: whether invoking the selected target is a
+/// coroutine suspension point, and whether its body may/must be spliced. Keep them together because
+/// the unsafe combination is specifically `suspend inline`: a generated suspend-lambda state machine
+/// cannot splice the call and must decline before it emits a direct invocation. This value is derived
+/// from the exact checker-selected target, independent of whether that target came from source,
+/// another module, or a classpath provider.
+#[derive(Clone, Copy, Debug)]
+pub struct SelectedCallCapabilities {
+    suspend: bool,
+    inline: InlineKind,
+}
+
+impl SelectedCallCapabilities {
+    fn new(suspend: bool, inline: InlineKind) -> Self {
+        Self { suspend, inline }
+    }
+
+    fn suspends(self) -> bool {
+        self.suspend
+    }
+
+    fn is_suspend_inline(self) -> bool {
+        self.suspend && self.inline.can_inline()
+    }
+}
+
 impl ResolvedCall {
     pub(crate) fn is_extension(&self) -> bool {
         matches!(
@@ -9468,49 +9494,39 @@ impl ResolvedCall {
         }
     }
 
-    /// Whether this exact checker-selected call suspends. This is the common classification consumed
-    /// by AST-level coroutine discovery before an IR suspension set exists.
-    pub(crate) fn is_suspend(&self) -> bool {
+    /// Complete callable capabilities for this exact checker-selected target. Computing both facts in
+    /// one origin switch prevents the suspend classifier and suspend-inline safety gate from drifting
+    /// when a new target provider or syntax path is added.
+    fn capabilities(&self) -> SelectedCallCapabilities {
         match self {
-            Self::Member(resolved) => resolved.suspend,
-            Self::TopLevel(callable)
-            | Self::Extension(callable)
-            | Self::LambdaReturnMember(callable) => callable.suspend,
-            Self::Companion(member) => member.suspend(),
-            Self::ModuleMember { suspend, .. }
-            | Self::ModuleMemberExtension { suspend, .. }
-            | Self::ModuleExtension { suspend, .. } => *suspend,
-            Self::ModuleTopLevel(callable) => callable.suspend,
-            Self::LocalFunction(callable) => callable.sig.is_suspend(),
-        }
-    }
-
-    /// Inline capability of the exact selected target. `None` means an ordinary callable, while the
-    /// stronger states preserve whether splicing is optional or mandatory.
-    fn inline_kind(&self) -> InlineKind {
-        match self {
-            Self::Member(resolved) => resolved.member.inline,
-            Self::TopLevel(callable)
-            | Self::Extension(callable)
-            | Self::LambdaReturnMember(callable) => callable.inline,
-            Self::Companion(member) => member.inline,
-            Self::ModuleMember { inline, .. }
-            | Self::ModuleMemberExtension { inline, .. }
-            | Self::ModuleExtension { inline, .. } => *inline,
-            Self::ModuleTopLevel(callable) => callable.inline,
-            Self::LocalFunction(callable) => {
-                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice())
+            Self::Member(resolved) => {
+                SelectedCallCapabilities::new(resolved.suspend, resolved.member.inline)
             }
+            Self::TopLevel(callable)
+            | Self::Extension(callable)
+            | Self::LambdaReturnMember(callable) => {
+                SelectedCallCapabilities::new(callable.suspend, callable.inline)
+            }
+            Self::Companion(member) => {
+                SelectedCallCapabilities::new(member.suspend(), member.inline)
+            }
+            Self::ModuleMember {
+                suspend, inline, ..
+            }
+            | Self::ModuleMemberExtension {
+                suspend, inline, ..
+            }
+            | Self::ModuleExtension {
+                suspend, inline, ..
+            } => SelectedCallCapabilities::new(*suspend, *inline),
+            Self::ModuleTopLevel(callable) => {
+                SelectedCallCapabilities::new(callable.suspend, callable.inline)
+            }
+            Self::LocalFunction(callable) => SelectedCallCapabilities::new(
+                callable.sig.is_suspend(),
+                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice()),
+            ),
         }
-    }
-
-    /// Whether this EXACT checker-selected call is both suspending and inline. A suspend lambda's
-    /// state-machine body cannot currently splice such a callee, so lowering must decline it before
-    /// emitting a direct call. Keeping this classification on the resolved target is important: a
-    /// name-wide lookup would conflate overloads and unrelated members, while origin-specific probes
-    /// would make source, sibling-module, and classpath calls disagree.
-    pub(crate) fn is_suspend_inline(&self) -> bool {
-        self.is_suspend() && self.inline_kind().can_inline()
     }
 }
 
@@ -9836,6 +9852,26 @@ pub enum SyntheticOperatorCall {
 }
 
 impl SyntheticOperatorCall {
+    /// Every convention key, so a scan can ask "was ANY operator selected here?" without knowing
+    /// which spelling the source used. Keep in sync with the variants above.
+    pub(crate) const ALL: [Self; 15] = [
+        Self::RangeTo,
+        Self::Contains,
+        Self::Set,
+        Self::Put,
+        Self::Plus,
+        Self::Minus,
+        Self::Times,
+        Self::Div,
+        Self::Rem,
+        Self::UnaryMinus,
+        Self::UnaryPlus,
+        Self::Not,
+        Self::Inc,
+        Self::Dec,
+        Self::CompareTo,
+    ];
+
     fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "rangeTo" => Self::RangeTo,
@@ -10496,14 +10532,43 @@ pub enum CompoundAssignmentTarget {
         owner: TypeName,
         parameter: Ty,
         interface: bool,
+        capabilities: SelectedCallCapabilities,
     },
     SourceExtension {
         receiver: Ty,
         parameter: Ty,
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
+        capabilities: SelectedCallCapabilities,
     },
-    LibraryExtension(Box<crate::libraries::LibraryCallable>),
+    LibraryExtension {
+        callable: Box<crate::libraries::LibraryCallable>,
+        capabilities: SelectedCallCapabilities,
+    },
+}
+
+impl CompoundAssignmentTarget {
+    /// Whether the operator this compound assignment desugars to is a `suspend` function — i.e.
+    /// whether the statement is a SUSPENSION POINT. A compound assignment never appears as an
+    /// `Expr::Call`, so a call-shaped scan cannot see this; the coroutine classification asks here.
+    pub(crate) fn suspends(&self) -> bool {
+        match self {
+            Self::Member { capabilities, .. }
+            | Self::SourceExtension { capabilities, .. }
+            | Self::LibraryExtension { capabilities, .. } => capabilities.suspends(),
+        }
+    }
+
+    /// The stronger capability pair used by the suspend-lambda inline safety gate. Keeping it on the
+    /// selected target makes statement-form `plusAssign` agree with expression-form operators and
+    /// ordinary calls instead of growing another name/origin-specific lookup.
+    pub(crate) fn is_suspend_inline(&self) -> bool {
+        match self {
+            Self::Member { capabilities, .. }
+            | Self::SourceExtension { capabilities, .. }
+            | Self::LibraryExtension { capabilities, .. } => capabilities.is_suspend_inline(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -10534,6 +10599,75 @@ impl TypeInfo {
             StmtLowering::PlusAssign(target) => Some(target),
             _ => None,
         }
+    }
+
+    /// Apply one capability predicate to every exact target a convention-shaped EXPRESSION can select.
+    /// The checker keys indexed/safe/plain calls and synthetic operators separately; centralizing that
+    /// storage detail here keeps every later safety classifier syntax-independent.
+    fn convention_call_has(
+        &self,
+        expr_id: ExprId,
+        predicate: impl Fn(SelectedCallCapabilities) -> bool,
+    ) -> bool {
+        self.resolved_calls
+            .get(&expr_id)
+            .is_some_and(|call| predicate(call.capabilities()))
+            || SyntheticOperatorCall::ALL.iter().any(|&key| {
+                self.resolved_operator_calls
+                    .get(&(expr_id, key))
+                    .is_some_and(|call| predicate(call.capabilities()))
+            })
+    }
+
+    /// Statement counterpart of [`Self::convention_call_has`]. Statement-position operators use a
+    /// resolved-call table; an in-place compound assignment has a specialized emission target that
+    /// retains the same selected capabilities.
+    fn convention_stmt_has(
+        &self,
+        stmt_id: StmtId,
+        predicate: impl Fn(SelectedCallCapabilities) -> bool,
+        compound_predicate: impl Fn(&CompoundAssignmentTarget) -> bool,
+    ) -> bool {
+        SyntheticOperatorCall::ALL.iter().any(|&key| {
+            self.resolved_stmt_operator_calls
+                .get(&(stmt_id, key))
+                .is_some_and(|call| predicate(call.capabilities()))
+        }) || self
+            .compound_assignment_target(stmt_id)
+            .is_some_and(compound_predicate)
+    }
+
+    /// Whether a CONVENTION call selected at expression `expr_id` targets a `suspend` function —
+    /// indexed access (`b[i]`), an arithmetic/comparison operator (`a + b`, `a < b`), or a unary
+    /// operator. None of these is necessarily an `Expr::Call`, so coroutine classification asks the
+    /// exact selected capabilities instead of matching syntax.
+    pub(crate) fn convention_call_suspends(&self, expr_id: ExprId) -> bool {
+        self.convention_call_has(expr_id, SelectedCallCapabilities::suspends)
+    }
+
+    /// Statement form of [`Self::convention_call_suspends`].
+    pub(crate) fn convention_stmt_suspends(&self, stmt_id: StmtId) -> bool {
+        self.convention_stmt_has(
+            stmt_id,
+            SelectedCallCapabilities::suspends,
+            CompoundAssignmentTarget::suspends,
+        )
+    }
+
+    /// Whether an expression-form convention selected a `suspend inline` target. A suspend-lambda
+    /// state machine cannot splice it, so lowering must decline before emitting a direct call.
+    pub(crate) fn convention_call_is_suspend_inline(&self, expr_id: ExprId) -> bool {
+        self.convention_call_has(expr_id, SelectedCallCapabilities::is_suspend_inline)
+    }
+
+    /// Statement-form counterpart of [`Self::convention_call_is_suspend_inline`], including the
+    /// specialized in-place compound-assignment target.
+    pub(crate) fn convention_stmt_is_suspend_inline(&self, stmt_id: StmtId) -> bool {
+        self.convention_stmt_has(
+            stmt_id,
+            SelectedCallCapabilities::is_suspend_inline,
+            CompoundAssignmentTarget::is_suspend_inline,
+        )
     }
 
     /// Whether a lambda has an implicit receiver.
@@ -23261,7 +23395,7 @@ impl<'a> Checker<'a> {
                 }
             }
             // Resolve reference arithmetic through operator-call selection.
-            if let Ty::Obj(internal, _) = &lt {
+            if matches!(lt, Ty::Obj(..)) {
                 let op_name = op.arith_operator_name();
                 if let Some(fname) = op_name {
                     if let Some((ret, target)) =
@@ -23279,34 +23413,6 @@ impl<'a> Checker<'a> {
                     }
                     if self.report_required_operator_modifier(lt, fname, &[rt], operator_span) {
                         return self.set(e, Ty::Error);
-                    }
-                }
-                // A class `compareTo(o): Int` drives `<`/`<=`/`>`/`>=`.
-                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) && rt != Ty::Error {
-                    if let Some(sig) = self.syms.method_of_name(*internal, "compareTo") {
-                        if let Some(param) = sig.single_param().filter(|_| sig.ret == Ty::Int) {
-                            self.expect_assignable(param, rt, self.span(rhs), "operator argument");
-                            return self.set(e, Ty::Boolean);
-                        }
-                    }
-                    // A CLASSPATH `Comparable` type (`class Money : Comparable<Money>` compiled
-                    // separately): its `operator fun compareTo(o): Int` is on the classpath, not in
-                    // `method_of`. Resolve it through the library set and record the selected member
-                    // for lowering.
-                    // Only a REFERENCE right operand: an erased generic `Comparable<Double>.compareTo`
-                    // takes `Object`, so a PRIMITIVE argument would need a box the lowering path here
-                    // doesn't apply — leave that to the existing generic handling / a sound skip.
-                    if rt.is_reference() {
-                        if let Some(m) = self.resolve_instance_member(lt, "compareTo", &[rt]) {
-                            if m.ret == Ty::Int {
-                                crate::trace_compiler!(
-                                    "resolve",
-                                    "classpath compareTo drives comparison on {internal}"
-                                );
-                                self.resolved_calls.insert(e, ResolvedCall::Member(m));
-                                return self.set(e, Ty::Boolean);
-                            }
-                        }
                     }
                 }
                 // A library operator function on a reference receiver: `a + b` desugars to `a.plus(b)`,
@@ -23331,48 +23437,24 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // A user `compareTo(o): Int` EXTENSION on a nullable primitive (`Long?.compareTo`)
-            // drives `<`/`<=`/`>`/`>=` — the builtin comparison needs a non-null receiver, so the
-            // extension is the only applicable operator. Keyed under the boxed wrapper, which a
-            // non-null primitive comparison never looks up.
+            // One selected-target path for every non-builtin relational convention: a source/classpath
+            // member or extension `compareTo`. A nullable primitive is included because it has no
+            // builtin comparison; a non-null primitive is deliberately excluded because its builtin
+            // member wins over extensions. Recording the exact target removes the former source-only
+            // name/hierarchy fallback from coroutine classification and lets lowering use the same
+            // provider-neutral operator emitter for every origin.
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
-                && lt.nullable_primitive().is_some()
+                && (matches!(lt, Ty::Obj(..)) || lt.nullable_primitive().is_some())
                 && rt != Ty::Error
             {
-                let rhs_kind = self.checked_call_arg_kinds(&[rhs]);
-                if let Some((selected, signature)) = self
-                    .selected_source_extension(lt, "compareTo", &rhs_kind)
-                    .filter(|(_, signature)| signature.is_operator() && signature.ret == Ty::Int)
+                if let Some((ret, target)) =
+                    self.operator_call_ret(lt, "compareTo", &[rt], &[rhs], self.span(e))
                 {
-                    let inline = selected.flags.inline;
-                    let suspend = selected.flags.suspend;
-                    let Some(param) = signature.single_param() else {
-                        return self.check_binary(op, lt, rt, self.span(e));
-                    };
-                    self.expect_assignable(param, rt, self.span(rhs), "operator argument");
-                    let owner = signature.source_file.zip(signature.source_decl).and_then(
-                        |(file, declaration)| {
-                            self.syms
-                                .fn_facades_by_decl
-                                .get(&(file, declaration.0))
-                                .copied()
-                        },
-                    );
-                    self.resolved_operator_calls.insert(
-                        (e, SyntheticOperatorCall::CompareTo),
-                        ResolvedCall::ModuleExtension {
-                            receiver: lt,
-                            name: "compareTo".to_string(),
-                            params: signature.params.clone(),
-                            ret: signature.ret,
-                            owner,
-                            source: selected.source_key,
-                            vararg: selected.call_sig.vararg,
-                            inline,
-                            suspend,
-                        },
-                    );
-                    return self.set(e, Ty::Boolean);
+                    if ret == Ty::Int {
+                        self.resolved_operator_calls
+                            .insert((e, SyntheticOperatorCall::CompareTo), target);
+                        return self.set(e, Ty::Boolean);
+                    }
                 }
             }
             self.check_binary(op, lt, rt, self.span(e))
@@ -33899,6 +33981,10 @@ impl<'a> Checker<'a> {
         if ret != Ty::Unit {
             return false;
         }
+        // Preserve the complete capability pair before specializing the selected call into the
+        // statement emitter's target shape. Coroutine classification consumes the same facts as every
+        // other call form; it must not reconstruct them later from an operator name or provider.
+        let capabilities = call.capabilities();
         let target = match call {
             ResolvedCall::ModuleMember {
                 owner,
@@ -33913,6 +33999,7 @@ impl<'a> Checker<'a> {
                     owner,
                     parameter: *parameter,
                     interface,
+                    capabilities,
                 }
             }
             ResolvedCall::ModuleExtension {
@@ -33930,11 +34017,13 @@ impl<'a> Checker<'a> {
                     parameter: *parameter,
                     owner,
                     source,
+                    capabilities,
                 }
             }
-            ResolvedCall::Extension(callable) => {
-                CompoundAssignmentTarget::LibraryExtension(Box::new(callable))
-            }
+            ResolvedCall::Extension(callable) => CompoundAssignmentTarget::LibraryExtension {
+                callable: Box::new(callable),
+                capabilities,
+            },
             _ => return false,
         };
         self.stmt_lowers.insert(s, StmtLowering::PlusAssign(target));
@@ -37818,7 +37907,10 @@ fun box(): String {
                 _ => None,
             })
             .expect("source should contain a < b comparison");
-        let Some(ResolvedCall::Member(selected)) = info.resolved_calls.get(&comparison) else {
+        let Some(ResolvedCall::Member(selected)) = info
+            .resolved_operator_calls
+            .get(&(comparison, SyntheticOperatorCall::CompareTo))
+        else {
             panic!("checker must record classpath compareTo selected for relational lowering");
         };
         assert_eq!(selected.member.name, "compareTo");
