@@ -7866,6 +7866,48 @@ fn array_builtin_ret(fname: &str, arg_tys: &[Ty]) -> Option<Ty> {
     None
 }
 
+/// The return type a top-level call's EXPLICIT type arguments determine on their own, for the
+/// lightweight signature inferer: every top-level overload of `name` must declare exactly
+/// `targs.len()` type parameters, and substituting the arguments into each overload's return must
+/// produce the SAME fully-bound type (`inline fun <reified T : Any> mockk(…): T` with `<C>` → `C`).
+/// `None` — a sound skip to the full checker — when overloads disagree, when a return still
+/// mentions an unbound type parameter (it depends on argument inference), or when the name has no
+/// top-level overloads. Deliberately blind to the argument list: it exists for calls whose
+/// arguments the positional selection cannot map (named arguments out of declared position).
+fn explicit_targ_return_agreement(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+    name: &str,
+    targs: &[Ty],
+) -> Option<Ty> {
+    let overloads = resolver
+        .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
+        .map(crate::symbol_resolver::Symbol::overloads)
+        .unwrap_or_default();
+    let mut agreed: Option<Ty> = None;
+    for overload in (crate::libraries::FunctionSet { overloads }).into_top_level() {
+        let semantic = overload.semantic_signature();
+        if semantic.formals.len() != targs.len() {
+            return None;
+        }
+        let binds: crate::symbol_resolver::GSigBinds = semantic
+            .formals
+            .iter()
+            .cloned()
+            .zip(targs.iter().copied())
+            .collect();
+        let ret = crate::symbol_resolver::ty_subst(semantic.ret, &binds);
+        if ret == Ty::Error || ret.mentions_ty_param() {
+            return None;
+        }
+        match agreed {
+            None => agreed = Some(ret),
+            Some(previous) if previous == ret => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
 /// The common type of two branch values for the lightweight signature inferer: identical types
 /// collapse, numeric types widen (`Int`/`Long` → `Long`); anything else is `Error` (so the caller
 /// conservatively skips rather than guessing a supertype). Deliberately narrower than the full
@@ -8497,6 +8539,17 @@ fn infer_lit_ty_p(
                             .and_then(crate::symbol_resolver::Symbol::top_level_call)
                         {
                             return c.ret;
+                        }
+                    }
+                    // An argument list the positional selection above cannot map — a NAMED argument
+                    // out of its declared position (`mockk<C>(relaxed = true)`), or an argument whose
+                    // type this lightweight pass cannot infer — with EXPLICIT type arguments that by
+                    // themselves determine the return. Bind them into each overload's return; when
+                    // every overload agrees on a fully-bound type, that IS the property's type
+                    // (argument legality stays with the full checker, which maps names itself).
+                    if !call_targs.is_empty() {
+                        if let Some(t) = explicit_targ_return_agreement(&resolver, n, &call_targs) {
+                            return t;
                         }
                     }
                 }
@@ -15215,8 +15268,35 @@ impl<'a> Checker<'a> {
         arg_tys: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
+        type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
-        self.top_level_lambda_shape_in_scope(name, arg_tys, arg_names, trailing_lambda, None)
+        self.top_level_lambda_shape_in_scope(
+            name,
+            arg_tys,
+            arg_names,
+            trailing_lambda,
+            None,
+            type_args,
+        )
+    }
+
+    /// Seed `bindings` with a call's EXPLICIT type arguments, positionally against the overload's
+    /// formals (`build<C> { … }` binds `T` → `C` before any argument unification). Explicit
+    /// arguments are authoritative in kotlinc, so they are seeded FIRST — argument unification
+    /// only fills formals the call left implicit.
+    fn seed_explicit_type_args(
+        semantic: &crate::libraries::GenericSig,
+        type_args: &[Ty],
+        bindings: &mut crate::symbol_resolver::GSigBinds,
+    ) {
+        // Callers guard the count; a silent partial seed would bind the wrong formals.
+        debug_assert!(
+            type_args.is_empty() || semantic.formals.len() == type_args.len(),
+            "explicit type args must match the overload's formal count"
+        );
+        for (formal, argument) in semantic.formals.iter().zip(type_args) {
+            bindings.insert(formal.clone(), *argument);
+        }
     }
 
     fn lambda_overload_partially_applicable(
@@ -15225,6 +15305,7 @@ impl<'a> Checker<'a> {
         receiver: Option<Ty>,
         arg_tys: &[Option<Ty>],
         argument_map: &[usize],
+        type_args: &[Ty],
     ) -> bool {
         let semantic = overload.semantic_signature();
         let generic_params = argument_map
@@ -15232,6 +15313,7 @@ impl<'a> Checker<'a> {
             .all(|&parameter| parameter < semantic.params.len())
             .then(|| {
                 let mut bindings = std::collections::HashMap::new();
+                Self::seed_explicit_type_args(&semantic, type_args, &mut bindings);
                 if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
                     crate::symbol_resolver::unify_ty(receiver_shape, receiver, &mut bindings);
                 }
@@ -15281,10 +15363,12 @@ impl<'a> Checker<'a> {
         receiver: Option<Ty>,
         arg_tys: &[Option<Ty>],
         argument_map: &[usize],
+        type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let mut shape = crate::symbol_resolver::LambdaCallShape::default();
         let semantic = overload.semantic_signature();
         let mut binds = std::collections::HashMap::new();
+        Self::seed_explicit_type_args(&semantic, type_args, &mut binds);
         if let (Some(receiver), Some(receiver_sig)) = (receiver, semantic.receiver) {
             crate::symbol_resolver::unify_ty(receiver_sig, receiver, &mut binds);
         }
@@ -15430,6 +15514,7 @@ impl<'a> Checker<'a> {
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
         scope: Option<&[TypeName]>,
+        type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let resolver = match scope {
             Some(scope) => self.resolver_in_scope(scope),
@@ -15477,14 +15562,89 @@ impl<'a> Checker<'a> {
                 };
                 map
             };
-            if !self.lambda_overload_partially_applicable(o, None, arg_tys, &argument_map) {
+            // EXPLICIT type arguments must match the overload's formal count exactly (kotlinc
+            // rejects a partial list), so a mismatching overload cannot be the called one.
+            if !type_args.is_empty() && o.semantic_signature().formals.len() != type_args.len() {
                 continue;
             }
-            let Some(shape) = self.lambda_shape_for_overload(o, None, arg_tys, &argument_map)
+            if !self.lambda_overload_partially_applicable(
+                o,
+                None,
+                arg_tys,
+                &argument_map,
+                type_args,
+            ) {
+                continue;
+            }
+            let Some(shape) =
+                self.lambda_shape_for_overload(o, None, arg_tys, &argument_map, type_args)
             else {
                 continue;
             };
             return Some(shape);
+        }
+        None
+    }
+
+    /// The lambda shape for a classpath `Type(args) { … }` FACTORY call — the companion's
+    /// `operator fun invoke` overloads stand in for top-level overloads (`MockEngine { req ->
+    /// respond(…) }`: the handler parameter is a suspend RECEIVER function type, and the block's
+    /// implicit `this` must bind to that receiver before the body is typed). Reuses the exact
+    /// per-overload mapping/shape machinery of [`Self::top_level_lambda_shape_in_scope`].
+    fn companion_invoke_lambda_shape(
+        &self,
+        name: &str,
+        arg_tys: &[Option<Ty>],
+        arg_names: Option<&[Option<String>]>,
+        trailing_lambda: bool,
+        type_args: &[Ty],
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        if self.value_root_shadows_classifier(name) {
+            return None;
+        }
+        let companion = self.classpath_companion_ty(name)?;
+        let overloads = self
+            .resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(companion),
+                CALLABLE_INVOKE_OPERATOR,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default();
+        for overload in &overloads {
+            if overload.is_extension() {
+                continue;
+            }
+            let Some(argument_map) = call_argument_parameter_indices(
+                arg_tys.len(),
+                overload.semantic_params().len(),
+                arg_names,
+                trailing_lambda,
+                &overload.call_sig,
+            ) else {
+                continue;
+            };
+            if !type_args.is_empty()
+                && overload.semantic_signature().formals.len() != type_args.len()
+            {
+                continue;
+            }
+            if !self.lambda_overload_partially_applicable(
+                overload,
+                None,
+                arg_tys,
+                &argument_map,
+                type_args,
+            ) {
+                continue;
+            }
+            if let Some(shape) =
+                self.lambda_shape_for_overload(overload, None, arg_tys, &argument_map, type_args)
+            {
+                return Some(shape);
+            }
         }
         None
     }
@@ -15541,6 +15701,7 @@ impl<'a> Checker<'a> {
                     Some(binding_receiver),
                     arg_tys,
                     &argument_map,
+                    &[],
                 );
                 if !partial {
                     continue;
@@ -15550,6 +15711,7 @@ impl<'a> Checker<'a> {
                     Some(binding_receiver),
                     arg_tys,
                     &argument_map,
+                    &[],
                 ) {
                     return Some(shape);
                 }
@@ -15604,17 +15766,23 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[CallArgKind],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
-        self.resolve_instance_member_with_literal_and_lambda_args(recv, name, args)
+        self.resolve_instance_member_with_literal_and_lambda_args(recv, name, args, &[])
     }
     fn resolve_instance_member_with_literal_and_lambda_args(
         &self,
         recv: Ty,
         name: &str,
         args: &[CallArgKind],
+        type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::ResolvedMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol_with_literal_and_lambda_args(SymRecv::Value(recv), name, args, &[])
+            .resolve_symbol_with_literal_and_lambda_args(
+                SymRecv::Value(recv),
+                name,
+                args,
+                type_args,
+            )
             .and_then(Symbol::call)
     }
 
@@ -20937,6 +21105,36 @@ impl<'a> Checker<'a> {
                 .is_some_and(|t| t.is_enum())
     }
 
+    /// Whether `name`'s CLASSPATH companion declares an `invoke` member that could answer a
+    /// trailing-lambda factory call: `Type(args) { … }` may be kotlinc's companion-factory call,
+    /// so constructor selection must decline (not diagnose) and let the invoke arm resolve it.
+    /// Mirrors the invoke arm's own filters — non-extension, non-suspend (the arm refuses a
+    /// suspend `invoke`) — and requires a function-typed last parameter, so a companion whose
+    /// invoke could never take the lambda keeps the constructor's own mapping diagnostic.
+    fn classpath_companion_declares_invoke(&self, name: &str) -> bool {
+        self.classpath_companion_ty(name)
+            .and_then(|companion| {
+                self.resolver()
+                    .resolve_symbol(
+                        crate::symbol_resolver::SymRecv::Value(companion),
+                        CALLABLE_INVOKE_OPERATOR,
+                        &[],
+                        &[],
+                    )
+                    .map(crate::symbol_resolver::Symbol::overloads)
+            })
+            .is_some_and(|overloads| {
+                overloads.iter().any(|overload| {
+                    !overload.is_extension()
+                        && !overload.flags.suspend
+                        && overload
+                            .semantic_params()
+                            .last()
+                            .is_some_and(|parameter| matches!(parameter.non_null(), Ty::Fun(_)))
+                })
+            })
+    }
+
     fn classpath_companion_ty(&self, name: &str) -> Option<Ty> {
         let internal = self.syms.class_names.get(name)?;
         if internal.starts_with("__ty/") {
@@ -21752,6 +21950,196 @@ impl<'a> Checker<'a> {
                 .type_args()
                 .iter()
                 .any(|argument| argument.is_erased_top())
+    }
+
+    /// Whether `expression` is a generic call whose type can only come from the OUTSIDE — the
+    /// mockk matcher shape `client.create(any())`: a bare-name call with no explicit type
+    /// arguments whose first-pass type collapsed to its formal's erased bound, carrying no type
+    /// arguments to refine. The postponable predicate covers the `mutableSetOf()` family (erased
+    /// type ARGUMENTS); this adds the bare-`T` return (erased to the TOP type itself).
+    fn expected_retypable_generic_argument(&self, expression: ExprId, actual: Ty) -> bool {
+        if self.postponable_generic_call(expression, actual) {
+            return true;
+        }
+        if !actual.is_erased_top() {
+            return false;
+        }
+        let Expr::Call { callee, .. } = self.file.expr(expression) else {
+            return false;
+        };
+        if self
+            .file
+            .call_type_args
+            .get(&expression.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return false;
+        }
+        let callee_shape_admits = match self.file.expr(*callee) {
+            Expr::Name(name) => !self.lexical_value_declares(name) && !self.module_declares(name),
+            // A qualified matcher (`m.any()`): the member's provenance is the receiver's, so no
+            // shadowing concern applies.
+            Expr::Member { .. } => true,
+            _ => false,
+        };
+        // The erased-top result must come from an UNBOUND bare-`T` return — a non-generic callee
+        // that really returns `Any`/`Object` keeps its type; overriding it would accept programs
+        // kotlinc rejects and record a type the runtime value does not have.
+        callee_shape_admits && self.argument_callee_returns_bare_type_param(expression)
+    }
+
+    /// Whether `argument`'s RESOLVED callee declares a generic signature whose return is a bare
+    /// type parameter (`fun <T : Any> any(): T`). Only that shape erases to the top type while
+    /// remaining bindable by an expected type; an unresolved argument declines conservatively.
+    fn argument_callee_returns_bare_type_param(&self, argument: ExprId) -> bool {
+        fn bare_param(ret: Ty) -> bool {
+            matches!(ret.non_null(), Ty::TyParam(..))
+        }
+        match self.resolved_calls.get(&argument) {
+            Some(ResolvedCall::Member(member)) => member
+                .member
+                .generic_sig
+                .as_ref()
+                .is_some_and(|generic| bare_param(generic.ret)),
+            Some(ResolvedCall::Companion(member)) => member
+                .generic_sig
+                .as_ref()
+                .is_some_and(|generic| bare_param(generic.ret)),
+            Some(ResolvedCall::TopLevel(callable)) | Some(ResolvedCall::Extension(callable)) => {
+                callable
+                    .generic_sig
+                    .as_ref()
+                    .is_some_and(|generic| bare_param(generic.ret))
+            }
+            _ => false,
+        }
+    }
+
+    /// Last-resort MEMBER retry for `recv.name(args)` after every resolution path declined: when
+    /// an argument is a generic call with nothing to bind its type parameter from (see
+    /// [`Self::expected_retypable_generic_argument`]), the enclosing member's own parameter type
+    /// IS its expected type — kotlinc's expected-type inference. Re-type those arguments against
+    /// the parameter every mappable member overload agrees on, then run member resolution once
+    /// more. `None` (fall through to the inapplicable diagnostic) when nothing was re-typed or
+    /// the retry still finds no member.
+    fn retry_member_call_with_expected_arguments(
+        &mut self,
+        call: ExprId,
+        rt: Ty,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &mut [Ty],
+    ) -> Option<Ty> {
+        let overloads: Vec<crate::libraries::FunctionInfo> = self
+            .resolver()
+            .resolve_symbol(crate::symbol_resolver::SymRecv::Value(rt), name, &[], &[])
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|overload| !overload.is_extension())
+            .collect();
+        if overloads.is_empty() {
+            return None;
+        }
+        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut changed = false;
+        for (index, &argument) in args.iter().enumerate() {
+            if !self.expected_retypable_generic_argument(argument, arg_tys[index]) {
+                continue;
+            }
+            // The expected type must be one EVERY mappable overload agrees on — a divergent set
+            // can't tell this pass which parameter the argument lands in.
+            let mut expected: Option<Ty> = None;
+            let mut agree = true;
+            let mut mapped_any = false;
+            for overload in &overloads {
+                let Some(map) = call_argument_parameter_indices(
+                    args.len(),
+                    overload.semantic_params().len(),
+                    arg_names.as_deref(),
+                    trailing_lambda,
+                    &overload.call_sig,
+                ) else {
+                    continue;
+                };
+                let Some(parameter) = map
+                    .get(index)
+                    .and_then(|&parameter| overload.semantic_params().get(parameter))
+                    .copied()
+                else {
+                    agree = false;
+                    break;
+                };
+                if parameter.mentions_ty_param() {
+                    agree = false;
+                    break;
+                }
+                mapped_any = true;
+                match expected {
+                    None => expected = Some(parameter),
+                    Some(previous) if previous == parameter => {}
+                    Some(_) => {
+                        agree = false;
+                        break;
+                    }
+                }
+            }
+            if !agree || !mapped_any {
+                continue;
+            }
+            if let Some(expected) = expected {
+                // NOTE: this re-types (and may force) `expr_types` even when the retry below
+                // still fails — sound only because a failing retry always falls through to the
+                // inapplicable/unresolved diagnostic. An arm added AFTER the retry hook must not
+                // consume these forced types as evidence of a resolution.
+                let retyped = self.expr_expected(argument, expected);
+                // A generic call whose return REMAINS the erased top even under the expectation
+                // (`any(): T` erases to `Object` and nothing else binds `T`): the expected
+                // parameter type IS kotlinc's inference result — record it as the argument's
+                // type so the retried selection and the lowering both see the bound type.
+                arg_tys[index] = if retyped.is_erased_top() && !expected.is_erased_top() {
+                    // The producer's selected callable kept its erased return; set the bound type
+                    // as its LOGICAL return — the same channel a resolver-side recovery fills — so
+                    // lowering's `coerce_to_static` checkcasts the `Object` result to the type the
+                    // enclosing parameter's descriptor expects (else: VerifyError).
+                    match self.resolved_calls.get_mut(&argument) {
+                        Some(ResolvedCall::Member(member)) => member.ret = expected,
+                        Some(ResolvedCall::Companion(member)) => member.ret = expected,
+                        Some(ResolvedCall::TopLevel(callable))
+                        | Some(ResolvedCall::Extension(callable)) => callable.ret = expected,
+                        _ => {}
+                    }
+                    self.set(argument, expected)
+                } else {
+                    retyped
+                };
+                changed = true;
+            }
+        }
+        if !changed {
+            return None;
+        }
+        match self.record_classpath_member_call_with_slots(call, rt, name, args, false) {
+            ClasspathMemberSlotCall::Resolved(ret) => return Some(ret),
+            ClasspathMemberSlotCall::Ambiguous | ClasspathMemberSlotCall::Rejected => {
+                return Some(Ty::Error)
+            }
+            ClasspathMemberSlotCall::NoMatch => {}
+        }
+        let arg_kinds: Vec<CallArgKind> = args
+            .iter()
+            .zip(arg_tys.iter())
+            .map(|(&argument, &ty)| call_arg_kind(self.file, argument, ty))
+            .collect();
+        let type_args = self.resolved_explicit_type_args(call);
+        self.resolve_instance_member_with_literal_and_lambda_args(rt, name, &arg_kinds, &type_args)
+            .map(|member| {
+                let ret = member.ret;
+                self.resolved_calls
+                    .insert(call, ResolvedCall::Member(member));
+                ret
+            })
     }
 
     /// Recheck postponed arguments after the outer call establishes their expected types.
@@ -23938,7 +24326,7 @@ impl<'a> Checker<'a> {
                                         .map(|(&x, &ty)| call_arg_kind(self.file, x, ty))
                                         .collect();
                                     self.resolve_instance_member_with_literal_and_lambda_args(
-                                        recv, &name, &arg_kinds,
+                                        recv, &name, &arg_kinds, &type_args,
                                     )
                                     .map(|member| {
                                         let ret = member.ret;
@@ -31456,12 +31844,14 @@ impl<'a> Checker<'a> {
                                 let mut partial: Vec<Option<Ty>> =
                                     arg_tys.iter().map(|t| Some(*t)).collect();
                                 partial[last] = None;
+                                let explicit_type_args = self.resolved_explicit_type_args(call);
                                 let shape = self.top_level_lambda_shape_in_scope(
                                     &name,
                                     &partial,
                                     arg_names.as_deref(),
                                     true,
                                     Some(&pkg_scope),
+                                    &explicit_type_args,
                                 );
                                 if let Some(pt) = shape
                                     .as_ref()
@@ -32146,6 +32536,7 @@ impl<'a> Checker<'a> {
                                 // (`Json.encodeToString(…)`/`Random.nextInt(…)` = `<Class>.Default.m(…)`):
                                 // resolve `m` as an instance method on the companion's type.
                                 None => {
+                                    let call_targs = self.resolved_explicit_type_args(call);
                                     let inst = self
                                         .resolved_type(&internal)
                                         .and_then(|lt| lt.companion_object)
@@ -32154,6 +32545,7 @@ impl<'a> Checker<'a> {
                                                 Ty::obj_name(cty),
                                                 &name,
                                                 &arg_kinds,
+                                                &call_targs,
                                             )
                                             .map(|m| (cty, m))
                                         });
@@ -32196,6 +32588,7 @@ impl<'a> Checker<'a> {
                                                         Ty::obj(&internal),
                                                         &name,
                                                         &arg_kinds,
+                                                        &call_targs,
                                                     )
                                                 {
                                                     crate::trace_compiler!(
@@ -32574,11 +32967,13 @@ impl<'a> Checker<'a> {
                 // `known(x)` would otherwise resolve as `known(1)` here and the unknown name would
                 // compile silently — the deferred error below is what makes it a diagnostic.
                 let unknown_named_arg = self.pending_unknown_named_arg.contains_key(&call);
+                let member_call_targs = self.resolved_explicit_type_args(call);
                 if rt == Ty::String && !unknown_named_arg {
                     if let Some(m) = self.resolve_instance_member_with_literal_and_lambda_args(
                         rt,
                         &name,
                         &provider_member_arg_kinds,
+                        &member_call_targs,
                     ) {
                         let ret = m.ret;
                         self.resolved_calls.insert(call, ResolvedCall::Member(m));
@@ -32596,6 +32991,7 @@ impl<'a> Checker<'a> {
                         rt,
                         &name,
                         &provider_member_arg_kinds,
+                        &member_call_targs,
                     ) {
                         crate::trace_compiler!(
                             "resolve",
@@ -32987,6 +33383,15 @@ impl<'a> Checker<'a> {
                         self.report_nullable_receiver_call(call, rt);
                         return Ty::Error;
                     }
+                }
+                if let Some(ret) = self.retry_member_call_with_expected_arguments(
+                    call,
+                    rt,
+                    &name,
+                    args,
+                    &mut arg_tys,
+                ) {
+                    return ret;
                 }
                 let inapplicable_candidates = self
                     .resolver()
@@ -33592,6 +33997,10 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .filter(|_| has_lambda_argument)
                     .and_then(|partial| self.user_generic_call(&fname, partial));
+                // EXPLICIT type arguments (`mockk<C> { … }`): they bind the callee's formals ahead
+                // of any argument unification, so the lambda shape's receiver/params substitute to
+                // the written types instead of the formals' bounds.
+                let explicit_type_args = self.resolved_explicit_type_args(call);
                 let toplevel_lambda_shape = toplevel_partial
                     .as_ref()
                     .filter(|_| has_lambda_argument)
@@ -33603,7 +34012,22 @@ impl<'a> Checker<'a> {
                             partial,
                             arg_names.as_deref(),
                             self.file.call_has_trailing_lambda.contains(&call.0),
+                            &explicit_type_args,
                         )
+                        // A classpath `Type(args) { … }` FACTORY: the companion's `operator fun
+                        // invoke` is the callee (`MockEngine { req -> respond(…) }`), so its
+                        // parameter — a (suspend) receiver function type — shapes the lambda the
+                        // same way a top-level overload's would. Without it the block types
+                        // receiver-less and every member inside is "unresolved".
+                        .or_else(|| {
+                            self.companion_invoke_lambda_shape(
+                                &fname,
+                                partial,
+                                arg_names.as_deref(),
+                                self.file.call_has_trailing_lambda.contains(&call.0),
+                                &explicit_type_args,
+                            )
+                        })
                     });
                 let mut known_generic_bindings = if let Some((_, bindings)) = adapted_outer {
                     bindings
@@ -34495,7 +34919,16 @@ impl<'a> Checker<'a> {
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
-                                    if !self.same_named_callable_exists(&fname) {
+                                    // A companion `operator fun invoke` makes `Type { … }` a
+                                    // FACTORY candidate (ktor's `MockEngine { req -> … }`): the
+                                    // constructor's mapping failure must not claim the call
+                                    // before the invoke arm below has had its chance. Only the
+                                    // trailing-lambda form defers — a named-argument-only call
+                                    // is never the factory sugar, so it keeps this diagnostic.
+                                    if !self.same_named_callable_exists(&fname)
+                                        && !(self.file.call_has_trailing_lambda.contains(&call.0)
+                                            && self.classpath_companion_declares_invoke(&fname))
+                                    {
                                         self.report_call_arg_mapping_error(call, args, error);
                                     }
                                 }

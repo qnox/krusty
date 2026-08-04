@@ -2029,7 +2029,14 @@ impl<'a> SymbolResolver<'a> {
                 };
                 let call = member_receiver_accessible
                     .then(|| {
-                        resolve_instance_member(self.lib, ty, name, args, Some(&member_access))
+                        resolve_instance_member(
+                            self.lib,
+                            ty,
+                            name,
+                            args,
+                            type_args,
+                            Some(&member_access),
+                        )
                     })
                     .flatten();
                 let read = member_receiver_accessible
@@ -3857,6 +3864,7 @@ fn resolve_instance_member(
     recv: Ty,
     name: &str,
     args: &[CallArgKind],
+    type_args: &[Ty],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
     let o = select_instance_info(lib, recv, name, args, member_access)?;
@@ -3864,7 +3872,32 @@ fn resolve_instance_member(
     let ret = o
         .generic_sig
         .as_ref()
-        .map(|gsig| bind_member_return(gsig, recv, &arg_tys, o.callable.ret))
+        .map(|gsig| {
+            // EXPLICIT type arguments (`m.any<Org>()`) bind the member's own formals ahead of
+            // receiver/argument unification — kotlinc treats them as authoritative, so a bare-`T`
+            // return must come out as the written type, not the formal's bound.
+            if gsig.formals.len() == type_args.len() && !type_args.is_empty() {
+                let mut binds = seeded_gsig_binds(gsig, type_args);
+                if let Some(declared_receiver) = gsig.receiver {
+                    unify_ty(declared_receiver, recv, &mut binds);
+                } else {
+                    // Class-level (undeclared) type variables still recover from the provider's
+                    // substituted return, exactly as the implicit path does.
+                    seed_undeclared_return_bindings(
+                        gsig.ret,
+                        o.callable.ret,
+                        &gsig.formals,
+                        &mut binds,
+                    );
+                }
+                for (&parameter, &argument) in gsig.params.iter().zip(&arg_tys) {
+                    unify_ty(parameter, argument, &mut binds);
+                }
+                merge_specialized_return(o.callable.ret, ty_subst(gsig.ret, &binds))
+            } else {
+                bind_member_return(gsig, recv, &arg_tys, o.callable.ret)
+            }
+        })
         .unwrap_or(o.callable.ret);
     let ret = o.ret.apply(ret);
     let member = o.member_with_return(o.callable.ret);
@@ -3912,7 +3945,7 @@ fn property_getter_via_query(
     if getter.contains('-') && value_class_typed {
         return None;
     }
-    resolve_instance_member(lib, recv, &getter, &[], member_access)
+    resolve_instance_member(lib, recv, &getter, &[], &[], member_access)
         .filter(|m| m.ret.is_read_value_result())
 }
 
@@ -3926,13 +3959,13 @@ fn resolve_property_member(
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
     property_getter_via_query(lib, recv, property, member_access)
-        .or_else(|| resolve_instance_member(lib, recv, property, &[], member_access))
+        .or_else(|| resolve_instance_member(lib, recv, property, &[], &[], member_access))
         .filter(|m| m.ret.is_read_value_result())
         .or_else(|| {
             lib.physical_property_getter_names(property)
                 .into_iter()
                 .find_map(|getter| {
-                    resolve_instance_member(lib, recv, &getter, &[], member_access)
+                    resolve_instance_member(lib, recv, &getter, &[], &[], member_access)
                         .filter(|m| m.ret.is_read_value_result())
                 })
         })
@@ -6109,8 +6142,9 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_nullable_string_info(),
         };
-        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], None)
-            .expect("nullable member should resolve");
+        let resolved =
+            resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], &[], None)
+                .expect("nullable member should resolve");
         assert_eq!(resolved.ret, Ty::nullable(Ty::String));
         assert_eq!(resolved.member.physical_ret, Ty::String);
     }
@@ -6122,8 +6156,9 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_metadata_class_info(),
         };
-        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], None)
-            .expect("member with metadata return class should resolve");
+        let resolved =
+            resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], &[], None)
+                .expect("member with metadata return class should resolve");
         assert_eq!(
             resolved.ret,
             Ty::obj_args("kotlin/collections/List", &[Ty::String])

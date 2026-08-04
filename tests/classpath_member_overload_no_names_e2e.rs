@@ -111,3 +111,99 @@ fn reordered_same_type_named_args_keep_label_order_at_runtime() {
         fun main() { println(box()) }\n";
     common::expect_box_ok_against("member_no_names_swap", LABELLED_LIB, MAIN);
 }
+
+// The mockk MATCHER-IN-ARGUMENT shape: `coEvery { client.createOrganization(any()) }`. The
+// zero-arg reified `any()` has NOTHING to bind `T` from on its own — its type must come from the
+// ENCLOSING member call's parameter (`org: Org`), exactly as kotlinc's expected-type inference
+// binds it. Includes the explicit-argument form `any<Org>()`, whose written type argument must
+// bind the member's return regardless of surrounding context.
+const MATCHER_LIB: &str = "package lib\n\
+    import kotlin.reflect.KClass\n\
+    class Org\n\
+    class Matcher {\n\
+    \x20 inline fun <reified T : Any> any(): T = TODO()\n\
+    \x20 fun <T : Any> any(classifier: KClass<T>): T = TODO()\n\
+    }\n\
+    class Client {\n\
+    \x20 fun sync(org: Org): String = \"x\"\n\
+    \x20 suspend fun create(org: Org): String = \"x\"\n\
+    \x20 suspend fun add(orgId: String, userId: String) {}\n\
+    }\n\
+    fun <T> ev(block: suspend Matcher.() -> T): T = TODO()\n";
+
+#[test]
+fn zero_arg_generic_member_binds_from_argument_position() {
+    const MAIN: &str = "import lib.Client\n\
+        import lib.Matcher\n\
+        import lib.ev\n\
+        fun t(c: Client, m: Matcher) {\n\
+        \x20 ev { c.create(any()) }\n\
+        \x20 ev { c.add(any(), any()) }\n\
+        \x20 val direct: String = c.sync(m.any())\n\
+        \x20 direct.length\n\
+        }\n";
+    let Some(diagnostics) = common::checker_diags_against("member_matcher_arg", MATCHER_LIB, MAIN)
+    else {
+        return;
+    };
+    assert_eq!(
+        diagnostics,
+        Vec::<String>::new(),
+        "a zero-arg generic member argument must bind from the enclosing parameter type"
+    );
+}
+
+#[test]
+fn explicit_type_argument_binds_generic_member_return() {
+    const MAIN: &str = "import lib.Client\n\
+        import lib.Matcher\n\
+        import lib.Org\n\
+        fun t(c: Client, m: Matcher) {\n\
+        \x20 val v = m.any<Org>()\n\
+        \x20 val r: String = c.sync(v)\n\
+        \x20 val inline1: String = c.sync(m.any<Org>())\n\
+        \x20 r.length + inline1.length\n\
+        }\n";
+    let Some(diagnostics) =
+        common::checker_diags_against("member_explicit_targ", MATCHER_LIB, MAIN)
+    else {
+        return;
+    };
+    assert_eq!(
+        diagnostics,
+        Vec::<String>::new(),
+        "an explicit type argument must bind a generic member's return"
+    );
+}
+
+// The RUNTIME half of expected-type inference: `take(): T` really returns `Object` on the JVM,
+// so once the checker records the bound type, the LOWERING must reconcile the erased producer
+// with the enclosing parameter's descriptor — only the run output can prove it.
+const MATCHER_RUNTIME_LIB: &str = "package lib\n\
+    class Org(val name: String)\n\
+    class Holder {\n\
+    \x20 var value: Any? = null\n\
+    \x20 @Suppress(\"UNCHECKED_CAST\")\n\
+    \x20 fun <T : Any> take(): T = value as T\n\
+    }\n\
+    class Client {\n\
+    \x20 fun label(org: Org): String = \"org:\" + org.name\n\
+    }\n";
+
+#[test]
+fn zero_arg_generic_member_argument_box_runs() {
+    const MAIN: &str = "import lib.Client\n\
+        import lib.Holder\n\
+        import lib.Org\n\
+        fun box(): String {\n\
+        \x20 val h = Holder()\n\
+        \x20 h.value = Org(\"acme\")\n\
+        \x20 val got = Client().label(h.take())\n\
+        \x20 return if (got == \"org:acme\") \"OK\" else \"F:\" + got\n\
+        }\n";
+    if let Some(out) =
+        common::expect_box_run_against("member_matcher_arg_box", MATCHER_RUNTIME_LIB, MAIN)
+    {
+        assert_eq!(out, "OK");
+    }
+}
