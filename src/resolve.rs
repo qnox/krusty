@@ -15716,11 +15716,11 @@ impl<'a> Checker<'a> {
     fn resolve_constructor_name(
         &self,
         internal: TypeName,
-        args: &[Ty],
+        args: &[CallArgKind],
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::TypeName(internal), "", args, &[])
+            .resolve_symbol_with_literal_args(SymRecv::TypeName(internal), "", args, &[])
             .and_then(Symbol::constructor)
     }
     fn resolve_synthetic_constructor_name(
@@ -27762,7 +27762,21 @@ impl<'a> Checker<'a> {
         args: Vec<ExprId>,
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
-        if let Some(member) = self.resolve_constructor_name(internal, arg_tys) {
+        // Lambda arguments keep their literal provenance (as method-call overload selection does) so
+        // a Java SAM-interface parameter admits them through `classpath_sam_signature`; every other
+        // argument stays a plain typed value.
+        let arg_kinds: Vec<CallArgKind> = args
+            .iter()
+            .zip(arg_tys)
+            .map(|(&argument, &ty)| {
+                if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                    CallArgKind::LambdaLiteral(ty)
+                } else {
+                    CallArgKind::Typed(ty)
+                }
+            })
+            .collect();
+        if let Some(member) = self.resolve_constructor_name(internal, &arg_kinds) {
             // A value-class ctor has an EMPTY descriptor (the marker krusty uses); resolve it like any
             // class — `Plain` carrying its parameter types. ir_lower emits a uniform `New` from those, and
             // the value-class JVM pass realizes `constructor-impl`. No value-class handling in the resolver.
@@ -27780,6 +27794,40 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
         let target = self.select_library_constructor_name(internal, args, arg_tys)?;
+        // A lambda argument whose checking the argument pass DEFERRED (still unchecked now) gets its
+        // first check here, against the selected constructor's parameter: a SAM-interface parameter
+        // contributes its method's parameter types — the conversion `expect_call_arg` applies after
+        // method-call selection — any other parameter is the expectation. An already-checked
+        // argument (every non-deferred call shape) is left as it is.
+        let recheck = |c: &mut Self, parameter: Ty, argument: ExprId, actual: Ty| {
+            if matches!(c.file.expr(argument), Expr::Lambda { .. })
+                && c.expr_types[argument.0 as usize] == Ty::Error
+            {
+                if crate::symbol_resolver::classpath_sam_signature(&*c.syms.libraries, parameter)
+                    .is_some()
+                {
+                    c.expect_call_arg(parameter, argument, actual);
+                } else {
+                    c.check_argument_expected(argument, parameter, false, None);
+                }
+            }
+        };
+        match &target {
+            ResolvedConstructor::Plain { member, args } => {
+                for (index, (&argument, &parameter)) in args.iter().zip(&member.params).enumerate()
+                {
+                    recheck(self, parameter, argument, arg_tys[index]);
+                }
+            }
+            ResolvedConstructor::Synthetic { ctor, args } => {
+                for (index, (&argument, &parameter)) in
+                    args.iter().zip(&ctor.real_params).enumerate()
+                {
+                    recheck(self, parameter, argument, arg_tys[index]);
+                }
+            }
+            _ => {}
+        }
         self.resolved_constructors.insert(call, target.clone());
         Some(target)
     }
@@ -27797,7 +27845,10 @@ impl<'a> Checker<'a> {
             &*self.syms.libraries,
             internal,
             classifier,
-            arg_tys,
+            &arg_tys
+                .iter()
+                .map(|&ty| CallArgKind::Typed(ty))
+                .collect::<Vec<_>>(),
         ) {
             if !self.member_accessible(member.visibility, internal) {
                 return None;
@@ -27868,7 +27919,10 @@ impl<'a> Checker<'a> {
                 &*self.syms.libraries,
                 internal,
                 classifier,
-                &types,
+                &types
+                    .iter()
+                    .map(|&ty| CallArgKind::Typed(ty))
+                    .collect::<Vec<_>>(),
             ) else {
                 return Ok(None);
             };
@@ -33583,6 +33637,22 @@ impl<'a> Checker<'a> {
                 // class: if no constructor accepts them, a companion `operator fun invoke` re-types
                 // them against ITS signature and this pass's complaints never applied.
                 let pre_arg_diags = self.diags.diags.len();
+                // A lambda argument of a CLASSPATH CONSTRUCTOR call (`InplaceButton(icons) { … }`)
+                // stays UNCHECKED until overload selection picks the constructor: its parameters
+                // bind to the selected SAM parameter's types on the first check, exactly as the
+                // method-call path defers lambda checking (see `call_arg_kinds`). Checking it here,
+                // expectation-free, would bind `it`/declared parameters as `Any` and record
+                // spurious diagnostics before the expected type is known.
+                let ctor_lambda_args_deferred = has_lambda_argument
+                    && !self.lexical_value_declares(&fname)
+                    && !self.module_declares(&fname)
+                    && self.module_class_named(&fname).is_none()
+                    && (self
+                        .imports
+                        .get(&fname)
+                        .and_then(|i| self.nested_internal_name(i))
+                        .is_some()
+                        || self.syms.class_names.contains_key(&fname));
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .enumerate()
@@ -33874,6 +33944,14 @@ impl<'a> Checker<'a> {
                             if let Some(elem) = t.array_elem() {
                                 return elem;
                             }
+                        }
+                        // A lambda of a classpath-constructor-shaped call defers its check to the
+                        // selected constructor's SAM parameter (`ctor_lambda_args_deferred` above);
+                        // the probe type only feeds candidate matching.
+                        if ctor_lambda_args_deferred
+                            && matches!(self.file.expr(a), Expr::Lambda { .. })
+                        {
+                            return self.lambda_probe_ty(a).unwrap_or(Ty::Error);
                         }
                         self.expr(a)
                     })
