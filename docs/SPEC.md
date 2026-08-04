@@ -230,6 +230,43 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and against a **real** kotlinc-compiled `helper` on the `-cp` classpath, both reaching 43
   (`tests/suspend_e2e.rs::suspend_fun_calls_cross_file_suspend_fun`,
   `::suspend_fun_calls_classpath_suspend_fun`).
+- **`suspend fun` — a call that is not spelled as a call is still a suspension point.** Kotlin's
+  operator conventions desugar to calls, so `b[i]`, `b[i] = v`, `b += x`, `a < b`, `-a`, `!a`, `a..b`,
+  `x in r` and `a++`/`a--` are suspension points whenever the operator they select is `suspend` —
+  exactly like the call spelled out longhand. So is `a?.f()`, whose `Expr::SafeCall` is likewise not
+  an `Expr::Call`. The coroutine CLASSIFICATION scan (`ir_lower::ast_body_suspends`, which decides
+  whether a `suspend { … }` lambda gets a state machine at all; and `ast_execution_scope_suspends`,
+  the file gate refusing a suspension in a non-suspend body) therefore cannot find them by call
+  shape. It reads the checker's selected target instead, and must consult FOUR keys, because the
+  checker files a convention target under whichever one fits the syntax:
+  `resolved_calls[expr]` (a plain call, a safe call, indexed access `b[i]`),
+  `resolved_operator_calls[(expr, op)]` (arithmetic, comparison, unary, `a..b`, `x in r`, and the
+  value-returning `b += x` — which desugars to `b = b.plus(x)`, an EXPRESSION),
+  `resolved_stmt_operator_calls[(stmt, op)]` (statement-position `a++`/`a--`, and an index STORE
+  `b[i] = v`, both of which are statements with no expression to key), and
+  `CompoundAssignmentTarget` (the in-place `b += x` selecting a `Unit`-returning `plusAssign`,
+  recorded against the statement — the specialized emission target retains the selected callable
+  capabilities). Relational syntax records its selected `compareTo` under the same operator table for
+  source/classpath members and extensions; neither classification nor lowering reselects it by class
+  name or symbol origin.
+  Missing any of these misclassifies the ENCLOSING lambda as non-suspend, which is the dangerous
+  direction: the callee still gets its CPS signature while the call site keeps the pre-CPS
+  descriptor, and the resulting `NoSuchMethodError` is swallowed by the driving `Continuation` —
+  `box()` returns a wrong answer instead of failing. (Before this was fixed the files happened to die
+  at emit with no labelled reason, which is a refusal, but an accidental and unattributable one.)
+  A convention suspension now behaves exactly like its longhand form, including where the
+  state-machine pass still declines one: a suspension inside an `if` CONDITION, or on a safe call's
+  short-circuiting branch, reaches the same labelled `SkipReason::Suspend` either way.
+  A `suspend` EXTENSION operator is a separate, unrelated restriction — the file declaring it is
+  refused whole by `gate:extension-suspend-fn`, so a sibling-file call has no callee to link against
+  and the module does not compile
+  (`tests/coroutine_intrinsics_e2e.rs::suspend_operator_get_convention_is_a_suspension_point`,
+  `::suspend_operator_plus_convention_is_a_suspension_point`,
+  `::suspend_operator_plus_assign_convention_is_a_suspension_point`,
+  `::suspend_operator_compare_to_convention_is_a_suspension_point`,
+  `::suspend_call_behind_a_safe_call_is_seen_as_a_suspension`,
+  `tests/cross_file_inline_call_e2e.rs::suspend_operator_extension_file_stops_at_the_extension_gate`
+  and the three `::suspend_operator_*_convention_cross_file_still_rejects` guards).
 - **`suspend fun` — async resume + parameters live across a suspension.** Two correctness items the
   synchronous-completion tests couldn't reach. (1) The suspend-call sequence emits
   `when(result == COROUTINE_SUSPENDED) { return result }` before storing the synchronous value; its
@@ -485,8 +522,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and reads each checker's exact provider-neutral `ResolvedCall`; it does not reselect by name or branch
   on local/module/classpath origin. Consequently an unrelated same-named declaration cannot suppress a
   valid ordinary call. The same exact target drives `Lower::ast_body_suspends`, so that ordinary call is
-  not falsely promoted to a state machine either. The selected suspend-inline target bails. Corpus
-  `coroutines/kt15017.kt` and the collision regression in `tests/suspend_receiver_lambda_e2e.rs`.
+  not falsely promoted to a state machine either. This applies equally to convention syntax: the
+  expression/statement target queries expose one selected capability pair across `resolved_calls`,
+  `resolved_operator_calls`, `resolved_stmt_operator_calls`, and the specialized compound-assignment
+  target. Without that shared query, a `suspend inline operator fun plus` promoted the lambda to a
+  state machine but escaped this stricter gate because its target was not in `resolved_calls`; the
+  generated state then emitted an unspliceable direct call. The selected suspend-inline target bails.
+  Corpus `coroutines/kt15017.kt`, the collision regression in
+  `tests/suspend_receiver_lambda_e2e.rs`, and the expression/statement convention regressions in
+  `tests/coroutine_intrinsics_e2e.rs`.
 - Integer overflow / wraparound semantics (Kotlin `Int` is 32-bit two's complement).
 - Integer division/modulo by constants; `/` truncation toward zero; `%` sign.
 - `Long` vs `Int` literal typing and promotion; `Double` arithmetic & NaN comparisons.
