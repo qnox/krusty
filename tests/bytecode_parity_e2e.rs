@@ -255,7 +255,7 @@ fn float_compare_in_value_position_tests_fcmp_without_materialized_zero() {
 }
 
 #[test]
-fn zero_on_the_left_fuses_only_for_equality() {
+fn zero_on_the_left_in_value_position_fuses_only_for_equality() {
     // kotlinc fuses `0 == x` / `0 != x` (they are symmetric) but does NOT mirror the ORDERING operators:
     // `0 < x` stays the two-operand `iconst_0; iload x; if_icmpge`. Mirroring it to `iload x; ifle` is
     // shorter but diverges, so the fusion is deliberately restricted to `==`/`!=`.
@@ -279,6 +279,30 @@ fn zero_on_the_left_fuses_only_for_equality() {
     assert!(
         !n.contains("iload_0\nifle"),
         "`0 < a` must not be mirrored — that fuses shorter than kotlinc and diverges:\n{n}"
+    );
+}
+
+#[test]
+fn zero_on_the_left_in_branch_position_fuses_only_for_equality() {
+    // Branch and value consumers share one comparison emitter. This branch-position regression is
+    // intentionally separate from the value-position check above: the old branch-only implementation
+    // mirrored `0 < a` to the shorter `a > 0`, producing `iload_0; ifle` even though kotlinc retains
+    // operand order and emits `iconst_0; iload_0; if_icmpge` for the false edge.
+    let Some(d) = facade_disasm(
+        "zeroleftbranch",
+        "fun zlt(a: Int): String {\n  if (0 < a) return \"t\"\n  return \"f\"\n}\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        n.contains("iconst_0\niload_0\nif_icmpge"),
+        "branch-position `0 < a` must retain kotlinc's two-operand, source-order form:\n{n}"
+    );
+    assert!(
+        !n.contains("iload_0\nifle"),
+        "branch-position `0 < a` must not select a positional mirror optimization:\n{n}"
     );
 }
 

@@ -10832,139 +10832,25 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_compare(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        let lt = self.value_ty(lhs);
-        // Whether either side is the `null` literal, computed UP FRONT so the referential-identity arm
-        // below doesn't claim a null comparison (a `null` literal's type is a reference, so `a === null`
-        // would otherwise emit `aconst_null; if_acmpne` instead of kotlinc's single-operand `ifnonnull`).
-        // `emit_compare_branch` orders it the same way for the same reason.
-        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
-        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
-        // Referential identity (`===`/`!==`) on *reference* operands: compare the two object refs
-        // directly with `if_acmp*` (never the structural `Intrinsics.areEqual` the `Eq`/`Ne` reference
-        // path uses below). On *primitive* operands Kotlin's `===` is just value `==`, so those fall
-        // through to the ordinary numeric comparison after remapping to `Eq`/`Ne`.
-        if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe)
-            && lt.is_reference()
-            && self.value_ty(rhs).is_reference()
-            && !lhs_null
-            && !rhs_null
-        {
-            self.emit_operands(&[lhs, rhs], code);
-            let f = code.new_label();
-            self.frame(f, vec![], code);
-            if op == IrBinOp::RefEq {
-                code.if_acmpne(f)
-            } else {
-                code.if_acmpeq(f)
-            }
-            self.materialize_cmp_bool(f, code);
-            return;
-        }
-        let op = match op {
-            IrBinOp::RefEq => IrBinOp::Eq,
-            IrBinOp::RefNe => IrBinOp::Ne,
-            o => o,
-        };
-        // `x == null` / `x != null` (and `===`/`!==`, remapped just above): compare against null directly
-        // with `ifnull`/`ifnonnull` (kotlinc's bytecode), regardless of the operand's static value type.
-        // `Intrinsics.areEqual` below is only for two reference operands neither of which is the `null`
-        // literal — and a plain `if_icmp*` on a reference (what the numeric path would emit) is only
-        // accepted by the verifier when no stackmap frame pins the operand types, so it must not be
-        // relied on.
-        if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && (lhs_null || rhs_null) {
-            let operand = if lhs_null { rhs } else { lhs };
-            self.emit_value(operand, code);
-            let f = code.new_label();
-            self.frame(f, vec![], code);
-            if op == IrBinOp::Eq {
-                code.ifnonnull(f)
-            } else {
-                code.ifnull(f)
-            }
-            self.materialize_cmp_bool(f, code);
-            return;
-        }
-        // Kotlin `==`/`!=` on reference operands is structural (`a?.equals(b)`), realized by the
-        // null-safe `kotlin/jvm/internal/Intrinsics.areEqual` — the exact helper kotlinc's JVM backend
-        // emits (`intrinsics/Equals.kt`), so the bytecode matches. Primitives keep the
-        // `if_icmp*`/3-way-compare path below.
-        if matches!(op, IrBinOp::Eq | IrBinOp::Ne)
-            && lt.is_reference()
-            && self.value_ty(rhs).is_reference()
-        {
-            // Spill if rhs is branchy (`x == when{…}`) so lhs isn't live across its merge frames.
-            self.emit_operands(&[lhs, rhs], code);
-            let m = self.cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "areEqual",
-                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-            );
-            code.invokestatic(m, 2, 1);
-            if op == IrBinOp::Ne {
-                code.push_int(1, self.cw);
-                code.ixor();
-            }
-            return;
-        }
-        // Numeric. Mirrors `emit_compare_branch`'s operand handling — the ONLY difference is that the
-        // fused branch here goes to a `false` arm that materializes the 0/1 boolean.
-        //
-        // `Long`/`Double`/`Float` compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, whose result is already
-        // -1/0/1 relative to zero: the test is then the SINGLE-operand `ifeq`/`ifne`/`iflt`/… family, not
-        // a materialized `iconst_0` plus a two-operand `if_icmp*` (kotlinc's shape; see docs/SPEC.md).
-        // The int category gets the same treatment when one side is the literal `0`.
-        let int_cat = !matches!(lt, Ty::Long | Ty::Double | Ty::Float);
-        let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
-        // Zero on the RIGHT fuses for every operator. Zero on the LEFT fuses only for `==`/`!=`, which
-        // are symmetric: kotlinc does NOT mirror the ORDERING operators, so `0 < x` stays the
-        // two-operand `iconst_0; iload x; if_icmpge` rather than becoming `iload x; ifle`. Mirroring
-        // them would be shorter but would open a fresh parity gap, which is the opposite of the point.
-        // (`emit_compare_branch` does mirror them — see docs/SPEC.md, recorded as a branch-position
-        // divergence rather than changed here, since that path is not what this is fixing.)
-        let cmp0_int = if int_cat && zero(rhs) {
-            self.emit_value(lhs, code);
-            Some(op)
-        } else if int_cat && zero(lhs) && matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
-            // `swap_cmp` is the identity on `Eq`/`Ne`; the operand order simply doesn't matter.
-            self.emit_value(rhs, code);
-            Some(op)
-        } else {
-            self.emit_operands(&[lhs, rhs], code);
-            None
-        };
-        if !int_cat {
-            // For float types `>`/`>=` use the `*l` variant (NaN → -1) and `<`/`<=` the `*g` variant
-            // (NaN → +1), so a NaN operand makes the comparison false either way — matching kotlinc.
-            let nan_l = matches!(op, IrBinOp::Gt | IrBinOp::Ge);
-            match lt {
-                Ty::Long => code.lcmp(),
-                Ty::Double => {
-                    if nan_l {
-                        code.dcmpl()
-                    } else {
-                        code.dcmpg()
-                    }
-                }
-                Ty::Float => {
-                    if nan_l {
-                        code.fcmpl()
-                    } else {
-                        code.fcmpg()
-                    }
-                }
-                _ => unreachable!("int_cat is false only for Long/Double/Float"),
-            }
-        }
         let f = code.new_label();
-        self.frame(f, vec![], code);
-        // Branch to the `false` arm, i.e. on the NEGATED comparison (`jt = false`). A 3-way compare left
-        // -1/0/1, so it tests against zero exactly like a fused `x <op> 0` does.
-        match cmp0_int {
-            Some(o) => cmp0_branch(o, false, f, code),
-            None if !int_cat => cmp0_branch(op, false, f, code),
-            None => icmp_branch(op, false, f, code),
+        // Every comparison that needs a conditional branch goes through the same classifier and
+        // operand emitter used by `if`/`while`/`when`. Value position merely supplies a false target
+        // and materializes the resulting 0/1. This is intentionally one semantic path: keeping separate
+        // null/reference/numeric case tables here previously let zero-left ordering acquire a different
+        // node-shape rule depending on whether the comparison happened to be an `if` condition.
+        if self.emit_non_structural_compare_branch(op, lhs, rhs, f, false, code) {
+            self.materialize_cmp_bool(f, code);
+            return;
         }
-        self.materialize_cmp_bool(f, code);
+
+        // The shared emitter returns false only for structural equality between two non-null
+        // references. `Intrinsics.areEqual` already produces the Boolean value kotlinc returns in value
+        // position, so branching merely to reconstruct it would be longer and less faithful.
+        self.emit_structural_equality(lhs, rhs, code);
+        if op == IrBinOp::Ne {
+            code.push_int(1, self.cw);
+            code.ixor();
+        }
     }
 
     /// Tail of a value-position comparison: the caller has emitted a conditional branch to `f` taken
@@ -11085,6 +10971,38 @@ impl<'a> Emitter<'a> {
         jt: bool,
         code: &mut CodeBuilder,
     ) {
+        if self.emit_non_structural_compare_branch(op, lhs, rhs, target, jt, code) {
+            return;
+        }
+
+        // The shared classifier leaves only non-null structural `==`/`!=` here. Unlike value position,
+        // a condition must consume `Intrinsics.areEqual` with one final branch; the comparison's
+        // requested polarity determines whether equality means taking or skipping the target.
+        debug_assert!(matches!(op, IrBinOp::Eq | IrBinOp::Ne));
+        self.emit_structural_equality(lhs, rhs, code);
+        self.frame(target, vec![], code);
+        if (op == IrBinOp::Eq) == jt {
+            code.ifne(target);
+        } else {
+            code.ifeq(target);
+        }
+    }
+
+    /// Emit every comparison except non-null structural reference equality as a branch.
+    ///
+    /// Returning `false` is a deliberately narrow contract: both operands are non-null references and
+    /// `op` is `==`/`!=`, so the caller must emit `Intrinsics.areEqual` in the form appropriate to its
+    /// consumer. All null, identity and numeric classification lives here so comparison semantics cannot
+    /// drift based on whether an identical IR node is consumed as a Boolean value or as control flow.
+    fn emit_non_structural_compare_branch(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+        target: Label,
+        jt: bool,
+        code: &mut CodeBuilder,
+    ) -> bool {
         use IrBinOp::*;
         let lt = self.value_ty(lhs);
         // `x == null` / `x != null` / `x === null` / `x !== null` → single-operand `ifnull`/`ifnonnull`
@@ -11106,7 +11024,7 @@ impl<'a> Emitter<'a> {
             } else {
                 code.if_acmpne(target);
             }
-            return;
+            return true;
         }
         let op = match op {
             RefEq => Eq,
@@ -11122,69 +11040,90 @@ impl<'a> Emitter<'a> {
             } else {
                 code.ifnonnull(target);
             }
-            return;
+            return true;
         }
-        // Reference structural `==`/`!=` → `Intrinsics.areEqual` then test the `Z` result.
+        // Structural equality's value result has different optimal consumers: value position can use it
+        // directly, while control flow branches on it. Tell the caller to select that final operation;
+        // the semantic classification itself still occurs once, here.
         if matches!(op, Eq | Ne) && lt.is_reference() && self.value_ty(rhs).is_reference() {
-            self.emit_operands(&[lhs, rhs], code);
-            let m = self.cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "areEqual",
-                "(Ljava/lang/Object;Ljava/lang/Object;)Z",
-            );
-            code.invokestatic(m, 2, 1);
-            self.frame(target, vec![], code);
-            if (op == Eq) == jt {
-                code.ifne(target); // areEqual true ⇒ equal
-            } else {
-                code.ifeq(target);
-            }
-            return;
+            return false;
         }
+        self.emit_numeric_compare_branch(op, lhs, rhs, target, jt, code);
+        true
+    }
+
+    /// Put the null-safe structural equality result for two references on the operand stack.
+    fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
+        // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.
+        self.emit_operands(&[lhs, rhs], code);
+        let m = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "areEqual",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        );
+        code.invokestatic(m, 2, 1);
+    }
+
+    /// Emit numeric comparison operands and the final branch for both value and branch consumers.
+    /// Centralizing the zero-literal rule here is important: operand syntax must not select a different
+    /// optimization merely because the surrounding node consumes a Boolean instead of control flow.
+    fn emit_numeric_compare_branch(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+        target: Label,
+        jt: bool,
+        code: &mut CodeBuilder,
+    ) {
+        use IrBinOp::*;
+        let lt = self.value_ty(lhs);
         // Numeric. A comparison against the integer literal `0` uses the single-operand compare-to-zero
         // branch (`ifeq`/`iflt`/… — kotlinc's form), saving the `iconst_0`. Only the int category; the
         // others compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, which already tests the result vs 0.
         let int_cat = !matches!(lt, Ty::Long | Ty::Double | Ty::Float);
         let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
-        if int_cat && zero(rhs) {
+        let cmp0_int = if int_cat && zero(rhs) {
             self.emit_value(lhs, code);
-            self.frame(target, vec![], code);
-            cmp0_branch(op, jt, target, code);
-            return;
-        }
-        if int_cat && zero(lhs) {
+            Some(op)
+        } else if int_cat && zero(lhs) && matches!(op, Eq | Ne) {
+            // Equality is symmetric, so dropping the left zero preserves kotlinc's bytecode. Ordering
+            // deliberately keeps both operands: kotlinc does not rewrite `0 < x` as `x > 0`, and doing
+            // so only in branch position was the positional special case this shared path removes.
             self.emit_value(rhs, code);
-            self.frame(target, vec![], code);
-            cmp0_branch(swap_cmp(op), jt, target, code);
-            return;
-        }
-        // int-category fuses to `if_icmp*`; Long/Double/Float → 3-way compare then single-operand `if*`.
-        self.emit_operands(&[lhs, rhs], code);
-        // `>`/`>=` use the `*l` float-compare variant, `<`/`<=` the `*g` — so NaN yields false (kotlinc).
-        let nan_l = matches!(op, Gt | Ge);
-        match lt {
-            Ty::Long => code.lcmp(),
-            Ty::Double => {
-                if nan_l {
-                    code.dcmpl()
-                } else {
-                    code.dcmpg()
+            Some(op)
+        } else {
+            self.emit_operands(&[lhs, rhs], code);
+            None
+        };
+        if !int_cat {
+            // `>`/`>=` use the `*l` float-compare variant, `<`/`<=` the `*g` — so NaN yields false
+            // (kotlinc). Long has no NaN distinction but shares the three-way-result branch below.
+            let nan_l = matches!(op, Gt | Ge);
+            match lt {
+                Ty::Long => code.lcmp(),
+                Ty::Double => {
+                    if nan_l {
+                        code.dcmpl()
+                    } else {
+                        code.dcmpg()
+                    }
                 }
-            }
-            Ty::Float => {
-                if nan_l {
-                    code.fcmpl()
-                } else {
-                    code.fcmpg()
+                Ty::Float => {
+                    if nan_l {
+                        code.fcmpl()
+                    } else {
+                        code.fcmpg()
+                    }
                 }
+                _ => unreachable!("int_cat is false only for Long/Double/Float"),
             }
-            _ => {}
         }
         self.frame(target, vec![], code);
-        if !int_cat {
-            cmp0_branch(op, jt, target, code);
-        } else {
-            icmp_branch(op, jt, target, code);
+        match cmp0_int {
+            Some(o) => cmp0_branch(o, jt, target, code),
+            None if !int_cat => cmp0_branch(op, jt, target, code),
+            None => icmp_branch(op, jt, target, code),
         }
     }
 
@@ -12251,19 +12190,6 @@ fn primitive_spread_builder(element: Ty) -> Option<(&'static str, &'static str, 
         Ty::Double => ("kotlin/jvm/internal/DoubleSpreadBuilder", "(D)V", "[D"),
         _ => return None,
     })
-}
-
-/// Swap the operands of a comparison operator (`a < b` ≡ `b > a`) — used to normalize `0 <op> x` into
-/// `x <swapped-op> 0` so the single-operand compare-to-zero branch applies.
-fn swap_cmp(op: IrBinOp) -> IrBinOp {
-    use IrBinOp::*;
-    match op {
-        Lt => Gt,
-        Le => Ge,
-        Gt => Lt,
-        Ge => Le,
-        o => o,
-    }
 }
 
 /// A single-operand compare-to-zero branch (`ifeq`/`ifne`/`iflt`/`ifle`/`ifgt`/`ifge`) to `target`,

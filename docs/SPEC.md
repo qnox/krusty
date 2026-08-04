@@ -1207,10 +1207,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `iload_0; iconst_0; if_icmpne`.
   - **Zero on the LEFT fuses only for `==`/`!=`.** `0 == x` is `iload x; ifne` (kotlinc's shape), but
     kotlinc does NOT mirror the ORDERING operators, so `0 < x` stays the two-operand
-    `iconst_0; iload x; if_icmpge`. Mirroring it via `swap_cmp` would be shorter yet would open a fresh
-    parity gap, so the value path deliberately does not. (`emit_compare_branch` *does* mirror the
-    ordering four — a pre-existing **branch-position** divergence, recorded here rather than changed,
-    since narrowing it would rewrite unrelated branch bytecode.)
+    `iconst_0; iload x; if_icmpge`. Both value and branch consumers now go through the same
+    non-structural comparison classifier and numeric operand emitter; the former branch-only
+    `swap_cmp` exception was removed so identical comparison IR cannot acquire a different opcode shape
+    from its surrounding position.
   - This previously held only for comparisons in *branch* position (`if`/`while`/`when` conditions, via
     `emit_compare_branch`); the value-producing path (`emit_compare`) always pushed the zero. Surfaced by
     diffing unsigned `equals` against kotlinc.
@@ -1236,7 +1236,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `double_compare_in_value_position_tests_dcmp_without_materialized_zero`,
   `float_compare_in_value_position_tests_fcmp_without_materialized_zero`,
   `compare_against_zero_in_value_position_is_single_operand_branch`,
-  `zero_on_the_left_fuses_only_for_equality`,
+  `zero_on_the_left_in_value_position_fuses_only_for_equality`,
+  `zero_on_the_left_in_branch_position_fuses_only_for_equality`,
   `referential_null_comparison_in_value_position_is_single_operand`,
   `value_position_comparison_does_not_poison_a_later_inline_splice`,
   `value_position_comparison_polarity_matches_kotlinc` (branch position:
