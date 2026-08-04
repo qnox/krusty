@@ -139,20 +139,28 @@ epoch_ms() {
 }
 export -f epoch_ms
 
+# `$2` is `<binary>[::<extra args>]`; optional `$3` labels this invocation. The label matters when one
+# binary is invoked more than once (the conformance binary is run twice, below): the log name derives
+# from the binary's basename, so without a distinct label the second run TRUNCATES the first run's log
+# and a failure in the first gets reported with the second's passing output — a FAILED binary whose
+# printed log shows zero failures. FAILED therefore records the log key next to the display name, and
+# each labelled invocation gets its own TIMINGS row (they are separate processes with separate wall
+# times, so one row per run is the honest report).
 run_one() {
-  local b="${2%%::*}" extra="" name
+  local b="${2%%::*}" extra="" name key
   [ "$2" != "$b" ] && extra="${2#*::}"
   name="$(basename "$b")"
+  key="$name${3:+.$3}"
   local start end ms
   start="$(epoch_ms)"
-  if "$b" $extra >"$1/$name.log" 2>&1; then
+  if "$b" $extra >"$1/$key.log" 2>&1; then
     :
   else
-    echo "$b" >>"$1/FAILED"
+    printf '%s\t%s\n' "$key" "$b${3:+ ($3)}" >>"$1/FAILED"
   fi
   end="$(epoch_ms)"
   ms=$((end - start))
-  printf '%08d %s\n' "$ms" "$name" >>"$1/TIMINGS"
+  printf '%08d %s\n' "$ms" "$key" >>"$1/TIMINGS"
 }
 export -f run_one
 
@@ -163,8 +171,8 @@ export -f run_one
 # just avoids carrying earlier external-suite state into the large corpus pass on small CI machines.
 gate="$(printf '%s\n' "${bins[@]}" | grep '/conformance-' || true)"
 if [ -n "$gate" ]; then
-  run_one "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1"
-  run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=1"
+  run_one "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" box-corpus
+  run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=1" rest
 fi
 
 ncpu="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
@@ -203,9 +211,9 @@ fi
 
 if [ -f "$logdir/FAILED" ]; then
   echo "=== FAILED TEST BINARIES ==="
-  while read -r b; do
-    echo "----- $b -----"
-    cat "$logdir/$(basename "$b").log"
+  while IFS=$'\t' read -r key label; do
+    echo "----- $label -----"
+    cat "$logdir/$key.log"
   done <"$logdir/FAILED"
   exit 1
 fi
