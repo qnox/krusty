@@ -125,8 +125,9 @@ fn fq_source_unresolved_path_still_errors() {
 
 /// A class named `Cls` exists in BOTH `pkg1` (member `n`) and `pkg3` (member `other`):
 /// `pkg1.Cls` must bind the named package's declaration, not just any same-named class.
-/// Asserted via TYPE IDENTITY (a mismatched return type errors both ways) rather than member
-/// access — member lookup on same-named cross-package classes is a separate pre-existing bug.
+/// Asserted via TYPE IDENTITY (a mismatched return type errors both ways); member access on
+/// same-named cross-package classes is covered by
+/// `same_named_classes_in_different_packages_member_lookup` below.
 const OTHER_CLS: &str = "package pkg3\nclass Cls(val other: Int)\n";
 
 #[test]
@@ -318,5 +319,114 @@ fn fq_source_typerefs_compile_and_run() {
             ),
         ],
         "fq_typerefs",
+    );
+}
+
+#[test]
+fn same_named_classes_in_different_packages_member_lookup() {
+    // Two same-simple-name classes in DIFFERENT packages of one module: member lookup must bind the
+    // declaration of the actual receiver type, not whichever registration won a simple-name map. The
+    // OTHER_CLS tests above cover type identity for the same shape without embedding any external
+    // repository's private classifier spelling in this regression fixture.
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            (
+                "a/Wrapper",
+                "package a\nopen class Wrapper(val x: Int) {\n\
+                 fun get(): Int = x\n\
+                 fun self(): Wrapper = this\n\
+                 }\n",
+            ),
+            ("b/Wrapper", "package b\nclass Wrapper(val s: String)\n"),
+            (
+                "box/Box",
+                "import a.Wrapper\n\
+                 fun box(): String {\n\
+                 val w = Wrapper(5)\n\
+                 if (w.get() != 5) return \"get=\" + w.get()\n\
+                 if (w.self().x != 5) return \"self\"\n\
+                 return \"OK\"\n\
+                 }\n",
+            ),
+        ],
+        "same_named_pkgs",
+    );
+}
+
+#[test]
+fn same_named_objects_and_enums_use_classifier_identity() {
+    // Objects and enum entries are classifier facts, not independent simple-name facts. Exercise both
+    // through an explicit import while a homonym in another package carries deliberately incompatible
+    // members/entries; whichever file is registered last must not affect the selected declaration.
+    // This is a front-end identity test because the backend intentionally declines part of this
+    // combined object+enum shape; accepting/rejecting the exact members is the behavior under review.
+    let declarations = [
+        "package first\n\
+         object Registry { fun value(): String = \"O\" }\n\
+         enum class Phase { READY }\n",
+        "package second\n\
+         object Registry { fun number(): Int = 9 }\n\
+         enum class Phase { WAITING }\n",
+    ];
+    let accepted = common::front_end_diagnostics_files(
+        &[
+            declarations[0],
+            declarations[1],
+            "import first.Registry\n\
+             import first.Phase\n\
+             fun readObject(): String = Registry.value()\n\
+             fun readEnum(): Phase = Phase.READY\n",
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        accepted.is_empty(),
+        "selected classifier facts: {accepted:?}"
+    );
+
+    let rejected = common::front_end_diagnostics_files(
+        &[
+            declarations[0],
+            declarations[1],
+            "import first.Registry\n\
+             import first.Phase\n\
+             fun wrongObject(): Int = Registry.number()\n\
+             fun wrongEnum(): Phase = Phase.WAITING\n",
+        ],
+        &[],
+        None,
+    );
+    assert!(
+        rejected
+            .iter()
+            .any(|diagnostic| diagnostic.contains("number"))
+            && rejected
+                .iter()
+                .any(|diagnostic| diagnostic.contains("WAITING") || diagnostic.contains("Phase")),
+        "homonym-only facts must stay unavailable: {rejected:?}"
+    );
+}
+
+#[test]
+fn source_typealias_constructor_keeps_class_table_internally_keyed() {
+    // A typealias is a per-file binding to an existing classifier, not a duplicate class entry under
+    // a simple key. Construction must still select the target signature while hierarchy/member users
+    // continue to see a class table whose every key equals the signature's internal identity.
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            (
+                "model/Record",
+                "package model\nclass Record(val value: Int)\n",
+            ),
+            (
+                "box/Box",
+                "package box\n\
+                 import model.Record\n\
+                 typealias LocalRecord = Record\n\
+                 fun box(): String = if (LocalRecord(7).value == 7) \"OK\" else \"fail\"\n",
+            ),
+        ],
+        "source_alias_identity",
     );
 }
