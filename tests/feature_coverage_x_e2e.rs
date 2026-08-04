@@ -15,12 +15,14 @@ use super::common;
 /// Single-compilation box run: everything lives in one source, cross-referencing declarations (which
 /// still drives the checker/`types` resolution heavily).
 ///
-/// The `Option` is vestigial, matching [`common::expect_box_run_with_stdlib`]: toolchain lookup is
-/// fail-fast and a rejected source panics with its diagnostics, so the `let Some(..) else` branches
-/// below cannot silently turn either condition into a passing skip. Collapsing those mechanical
-/// call-site shapes is separate from the two-round-trip contract hardened in this file.
-fn run(src: &str, stem: &str) -> Option<String> {
-    common::expect_box_run_with_stdlib(src, stem)
+/// STRICT, and returns no `Option`: `stdlib_jar` / `jdk_modules` are fail-fast, and
+/// [`common::expect_box_run`] panics with the front-end diagnostics when krusty declines the source.
+/// There is no skip path a rejection could hide behind — every test below asserts on the box output
+/// directly, so a source krusty stops accepting fails loudly instead of reading as a pass.
+fn run(src: &str, stem: &str) -> String {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    common::expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()))
 }
 
 /// Compile `lib_src` with krusty (emitting `@Metadata`), persist its classfiles to a fresh classpath
@@ -69,11 +71,7 @@ fun box(): String {\n\
     if (maxOfThree(\"a\", \"z\", \"m\") != \"z\") return \"f2\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "GenBound") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "GenBound"), "OK");
 }
 
 #[test]
@@ -95,11 +93,7 @@ fun box(): String {\n\
     if (c.last != \"x\") return \"f2\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "Variance") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "Variance"), "OK");
 }
 
 #[test]
@@ -117,11 +111,7 @@ fun box(): String {\n\
     if (orNull(5) != 5) return \"f4\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "NullableGen") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "NullableGen"), "OK");
 }
 
 #[test]
@@ -137,11 +127,7 @@ fun box(): String {\n\
     if (h(3) != 8) return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "FnTypes") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "FnTypes"), "OK");
 }
 
 #[test]
@@ -159,11 +145,7 @@ fun box(): String {\n\
     if (s != \"a1\") return \"f2\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "RecvFnType") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "RecvFnType"), "OK");
 }
 
 #[test]
@@ -186,11 +168,7 @@ fun box(): String {\n\
     if (b.first != 1 || b.second != 20) return \"f2\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "NestedGen") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "NestedGen"), "OK");
 }
 
 // ---------------------------------------------------------------------------
@@ -220,11 +198,7 @@ fun box(): String {\n\
     if (render(\"a\", fmt = { it + \"!\" }) != \"a!:1:t:none:0\") return \"f5\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "DefaultParams") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "DefaultParams"), "OK");
 }
 
 #[test]
@@ -236,11 +210,7 @@ fun box(): String {\n\
     if (span(5, 8, \"x\") != \"x\") return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "DefaultRefPrior") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "DefaultRefPrior"), "OK");
 }
 
 // ---------------------------------------------------------------------------
@@ -264,11 +234,7 @@ fun box(): String {\n\
     if (u.component2() != \"ann\") return \"f7\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "DataMembers") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "DataMembers"), "OK");
 }
 
 // ---------------------------------------------------------------------------
@@ -295,11 +261,7 @@ fun box(): String {\n\
     if (Op.entries[0].name != \"ADD\") return \"f9\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "EnumRich") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "EnumRich"), "OK");
 }
 
 // ---------------------------------------------------------------------------
@@ -323,11 +285,7 @@ fun box(): String {\n\
     if (eval(Lit(9)) != 9) return \"f2\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "SealedWhen") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "SealedWhen"), "OK");
 }
 
 #[test]
@@ -346,11 +304,7 @@ fun box(): String {\n\
     if (unwrap(b, -1) != -1) return \"f2\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "SealedGeneric") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "SealedGeneric"), "OK");
 }
 
 // ---------------------------------------------------------------------------
@@ -375,11 +329,7 @@ fun box(): String {\n\
     if (Temp.of(50).isBoiling()) return \"f4\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "Companion") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "Companion"), "OK");
 }
 
 #[test]
@@ -397,11 +347,7 @@ fun box(): String {\n\
     if (Counter.label != \"counter\") return \"f4\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "ObjectSingleton") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "ObjectSingleton"), "OK");
 }
 
 // ---------------------------------------------------------------------------
@@ -424,11 +370,7 @@ fun box(): String {\n\
     if (g.greet() != \"Hello, Ann from HR\") return \"f1|\" + g.greet()\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "IfaceDefault") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "IfaceDefault"), "OK");
 }
 
 #[test]
@@ -449,11 +391,7 @@ fun box(): String {\n\
     if (c.mapToString() != \"7\") return \"f2\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "GenIface") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "GenIface"), "OK");
 }
 
 #[test]
@@ -467,11 +405,7 @@ fun box(): String {\n\
     if (d.tag() != \"D:BC\") return \"f1|\" + d.tag()\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "Diamond") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "Diamond"), "OK");
 }
 
 // ---------------------------------------------------------------------------
@@ -495,11 +429,7 @@ fun box(): String {\n\
     if (lookup(t, \"z\") != -1) return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "TypeAlias") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "TypeAlias"), "OK");
 }
 
 // ---------------------------------------------------------------------------
@@ -526,11 +456,7 @@ fun box(): String {\n\
     if (o.make(3).total() != 103) return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "NestedInner") else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run(SRC, "NestedInner"), "OK");
 }
 
 // ---------------------------------------------------------------------------
