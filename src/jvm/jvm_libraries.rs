@@ -3008,6 +3008,15 @@ impl SymbolSource for JvmLibraries {
                     continue;
                 };
                 let bytecode_public = cand.as_ref().map_or(mf.is_public(), |c| c.public);
+                // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
+                // return to `Object`; present the LOGICAL signature (drop the continuation) so a
+                // normal call resolves — the same rule the top-level and member paths apply. The
+                // coroutine pass re-threads the CPS `Continuation` at the emitted call.
+                let descriptor = if mf.is_suspend() {
+                    strip_continuation_param(&descriptor)
+                } else {
+                    descriptor
+                };
                 let Some((params, pret)) = parse_method_desc(&descriptor) else {
                     continue;
                 };
@@ -3380,7 +3389,27 @@ impl SymbolSource for JvmLibraries {
                                 m.ret,
                                 generic_sig.is_some()
                             );
-                            recovered.unwrap_or(m.ret)
+                            // The JVM signature erases read-only vs mutable (`List`/`MutableList`
+                            // both spell `java/util/List`); the member's `@Metadata` return
+                            // classifier preserves it. Same guarded rule as the suspend arm: only a
+                            // same-JVM-internal `kotlin/collections/…` sibling overrides the outer
+                            // name, keeping the signature's type arguments.
+                            let base = recovered.unwrap_or(m.ret);
+                            match (
+                                base,
+                                member_facts.as_ref().and_then(|facts| facts.ret.class),
+                            ) {
+                                (Ty::Obj(base_name, args), Some(Ty::Obj(meta_cls, _)))
+                                    if meta_cls.starts_with("kotlin/collections/")
+                                        && super::jvm_class_map::type_names_map_to_same_jvm_internal(
+                                            meta_cls,
+                                            base_name,
+                                        ) =>
+                                {
+                                    Ty::obj_args_name(meta_cls, args)
+                                }
+                                (b, _) => b,
+                            }
                         };
                         let call_sig = member_facts
                             .as_ref()

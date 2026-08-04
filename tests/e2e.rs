@@ -160,6 +160,8 @@ mod classpath_default_vararg_call_e2e;
 mod classpath_enum_regex_vc_e2e;
 #[path = "classpath_extension_default_implicit_receiver_e2e.rs"]
 mod classpath_extension_default_implicit_receiver_e2e;
+#[path = "classpath_extension_receiver_lambda_e2e.rs"]
+mod classpath_extension_receiver_lambda_e2e;
 #[path = "classpath_function_reference_e2e.rs"]
 mod classpath_function_reference_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
@@ -172,6 +174,10 @@ mod classpath_jdk_static_e2e;
 mod classpath_jvmstatic_object_property_e2e;
 #[path = "classpath_member_metadata_alignment_e2e.rs"]
 mod classpath_member_metadata_alignment_e2e;
+#[path = "classpath_member_mutable_collection_e2e.rs"]
+mod classpath_member_mutable_collection_e2e;
+#[path = "classpath_member_overload_no_names_e2e.rs"]
+mod classpath_member_overload_no_names_e2e;
 #[path = "classpath_member_receiver_lambda_e2e.rs"]
 mod classpath_member_receiver_lambda_e2e;
 #[path = "classpath_named_arg_skips_default_e2e.rs"]
@@ -1132,6 +1138,8 @@ mod vararg_e2e;
 mod vararg_element_default_e2e;
 #[path = "vararg_extension_overload_e2e.rs"]
 mod vararg_extension_overload_e2e;
+#[path = "vararg_spread_shapes_e2e.rs"]
+mod vararg_spread_shapes_e2e;
 #[path = "vc_mangled_default_e2e.rs"]
 mod vc_mangled_default_e2e;
 #[path = "when_branch_if_no_else_e2e.rs"]

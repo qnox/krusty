@@ -1182,7 +1182,9 @@ fn folded_integer_literal(file: &File, expression: ExprId) -> Option<i32> {
 
 /// Combine an already-computed runtime type with syntax-only call-argument provenance.
 fn call_arg_kind(file: &File, expression: ExprId, ty: Ty) -> CallArgKind {
-    if matches!(file.expr(expression), Expr::Lambda { .. }) {
+    if file.is_spread_arg(expression) {
+        CallArgKind::Spread(ty)
+    } else if matches!(file.expr(expression), Expr::Lambda { .. }) {
         CallArgKind::LambdaLiteral(ty)
     } else if let Some(value) = folded_integer_literal(file, expression) {
         CallArgKind::integer_literal(ty, value)
@@ -9655,6 +9657,10 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
+        /// The vararg's VALUE-parameter position. A vararg need not be last
+        /// (`fun B.segd(vararg s: String, flag: Boolean = false)`), and the lowerer must not
+        /// re-derive the position from a declaration it may not have (a sibling file's).
+        vararg_index: Option<usize>,
         /// Selected callable capabilities. Carrying the complete semantic facts, rather than only a
         /// derived `requires_splice` bit, lets safety gates distinguish `suspend inline` from ordinary
         /// inline calls and keeps those gates independent of declaration name and symbol origin.
@@ -14323,7 +14329,7 @@ impl<'a> Checker<'a> {
     ) -> bool {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
         if arg_names.is_none() && selected.call_sig.vararg {
-            self.expect_call_args(params, true, args, arg_tys);
+            self.expect_call_args_at(params, selected.call_sig.vararg_index, args, arg_tys);
             return true;
         }
         if arg_names.is_some()
@@ -14342,14 +14348,63 @@ impl<'a> Checker<'a> {
                     return false;
                 }
             };
+            // Every argument the mapper left out of `slots` is a vararg ELEMENT beyond the first
+            // (the slot map stores one expression per parameter): the argument at the vararg slot
+            // and each unmapped one checks against the element type — or the ARRAY for a spread.
+            let vararg_expected = |this: &Self, argument: ExprId, array: Ty| {
+                if this.file.is_spread_arg(argument) {
+                    array
+                } else {
+                    array.array_elem().unwrap_or(array)
+                }
+            };
+            let named_argument = |argument: ExprId| {
+                args.iter().position(|&a| a == argument).is_some_and(|i| {
+                    arg_names
+                        .as_ref()
+                        .and_then(|names| names.get(i))
+                        .and_then(Option::as_ref)
+                        .is_some()
+                })
+            };
             for (index, argument) in slots.iter().enumerate() {
                 if let Some(argument) = argument {
+                    if selected.call_sig.vararg_index == Some(index) && named_argument(*argument) {
+                        self.expect_named_vararg_arg(
+                            *argument,
+                            self.expr_types[argument.0 as usize],
+                            params[index],
+                        );
+                        continue;
+                    }
+                    let expected = if selected.call_sig.vararg_index == Some(index) {
+                        vararg_expected(self, *argument, params[index])
+                    } else {
+                        params[index]
+                    };
                     self.expect_assignable(
-                        params[index],
+                        expected,
                         self.expr_types[argument.0 as usize],
                         self.span(*argument),
                         "argument",
                     );
+                }
+            }
+            if let Some(array) = selected
+                .call_sig
+                .vararg_index
+                .and_then(|index| params.get(index).copied())
+            {
+                for &argument in args {
+                    if !slots.contains(&Some(argument)) {
+                        let expected = vararg_expected(self, argument, array);
+                        self.expect_assignable(
+                            expected,
+                            self.expr_types[argument.0 as usize],
+                            self.span(argument),
+                            "argument",
+                        );
+                    }
                 }
             }
             self.resolved_call_arg_slots.insert(call, slots);
@@ -15105,12 +15160,29 @@ impl<'a> Checker<'a> {
                 // `T` bound by this call). `call_sig.lambda_receivers` is the weaker fallback: a callable
                 // with no generic signature records only the receiver's CLASS, so preferring it would
                 // shape the lambda against a raw `Config` and lose the binding.
-                overload
+                //
+                // An EXTENSION's call sig deliberately carries no receiver-lambda marks (see
+                // `CallSig::metadata_extension`), so the semantic parameter type is the authority for
+                // it: a `Ty::Fun` whose `has_receiver` is set marks the parameter just as the call-sig
+                // flag does. Only a CONCRETE receiver derives the mark — a type-parameter receiver
+                // (`T.() -> R`, the scope functions) is already bound by extension resolution's own
+                // lambda channel, and marking it here re-checks the block through this second channel,
+                // where labeled `this` lowering has different ownership (`run { this@C.bar() }` bailed).
+                let receiver_fun_param = overload
                     .call_sig
                     .lambda_receiver_params
                     .get(parameter)
                     .copied()
                     .unwrap_or(false)
+                    || matches!(
+                        semantic.params.get(parameter).map(|ty| ty.non_null()),
+                        Some(Ty::Fun(sig)) if sig.has_receiver
+                            && sig
+                                .params
+                                .get(sig.context_count)
+                                .is_some_and(|receiver| !receiver.is_ty_param())
+                    );
+                receiver_fun_param
                     .then(|| {
                         let context_count = overload
                             .call_sig
@@ -16200,6 +16272,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
+                    vararg_index: selected.call_sig.vararg_index,
                     inline,
                     suspend,
                 },
@@ -16887,9 +16960,15 @@ impl<'a> Checker<'a> {
                 &value_signature,
                 trailing_lambda,
             ) {
-                Ok(slots) => {
-                    mapped.push((self.call_slot_score(value_params, &slots), slots, candidate))
-                }
+                Ok(slots) => mapped.push((
+                    self.call_slot_score_vararg(
+                        value_params,
+                        &slots,
+                        candidate.call_sig.vararg_index,
+                    ),
+                    slots,
+                    candidate,
+                )),
                 Err(error) => failures.push((error, candidate)),
             }
         }
@@ -17030,9 +17109,7 @@ impl<'a> Checker<'a> {
         function: &FunDecl,
         argument_count: usize,
     ) -> Option<(usize, Vec<usize>)> {
-        if self.file.call_arg_names.contains_key(&call.0) {
-            return None;
-        }
+        let names = self.file.call_arg_names.get(&call.0);
         let vararg = function
             .params
             .iter()
@@ -17041,17 +17118,49 @@ impl<'a> Checker<'a> {
             && self.file.call_has_trailing_lambda.contains(&call.0)
             && argument_count > 0)
             .then_some(function.params.len() - 1);
+        // A NAMED argument maps to its parameter by label (`topd("O", "K", flag = true)` — the
+        // positional elements pack into the vararg, the label binds the trailing parameter). An
+        // unknown label declines the mapping so the labelled diagnostics path reports it. A
+        // positional argument takes the next parameter NOT bound by name — Kotlin allows a named
+        // argument in its own position followed by positionals (`f(a = 1, "x")`), so the counter
+        // must skip name-bound slots or the positional lands on an already-taken parameter.
+        let named_slot = |argument: usize| {
+            names
+                .and_then(|names| names.get(argument))
+                .and_then(Option::as_ref)
+                .map(|name| {
+                    function
+                        .params
+                        .iter()
+                        .position(|parameter| &parameter.name == name)
+                })
+        };
+        let mut name_bound = vec![false; function.params.len()];
+        for argument in 0..argument_count {
+            if let Some(slot) = named_slot(argument) {
+                name_bound[slot?] = true;
+            }
+        }
+        let mut positional = 0usize;
         let mapping = (0..argument_count)
             .map(|argument| {
-                if argument < vararg {
-                    argument
+                if let Some(slot) = named_slot(argument) {
+                    return slot;
+                }
+                while positional < vararg && name_bound[positional] {
+                    positional += 1;
+                }
+                Some(if positional < vararg {
+                    let parameter = positional;
+                    positional += 1;
+                    parameter
                 } else if argument + 1 == argument_count {
                     trailing.unwrap_or(vararg)
                 } else {
                     vararg
-                }
+                })
             })
-            .collect();
+            .collect::<Option<Vec<usize>>>()?;
         Some((vararg, mapping))
     }
 
@@ -20791,18 +20900,38 @@ impl<'a> Checker<'a> {
     /// T)` accepts `f(a, b)` with `a, b: T`); a single array argument is also accepted (a spread). For a
     /// non-`vararg` list the arguments match positionally.
     fn expect_call_args(&mut self, params: &[Ty], vararg: bool, args: &[ExprId], arg_tys: &[Ty]) {
-        if vararg && !params.is_empty() {
-            let n_fixed = params.len() - 1;
+        self.expect_call_args_at(
+            params,
+            vararg.then(|| params.len().saturating_sub(1)),
+            args,
+            arg_tys,
+        );
+    }
+
+    /// [`Self::expect_call_args`] with an EXPLICIT vararg slot: a vararg followed by defaulted
+    /// parameters (`fun f(vararg s: String, flag: Boolean = false)`) packs every positional
+    /// argument from the slot on, so the trailing parameters must not be matched positionally.
+    fn expect_call_args_at(
+        &mut self,
+        params: &[Ty],
+        vararg_index: Option<usize>,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+    ) {
+        if let Some(n_fixed) = vararg_index.filter(|&slot| slot < params.len()) {
             let array_param = params[n_fixed];
             let elem = array_param.array_elem().unwrap_or(array_param);
             for (i, a) in arg_tys.iter().enumerate() {
                 if i >= args.len() {
                     break;
                 }
-                // A lone argument already OF the array type is a spread/pass-through, not an element.
+                // A lone argument already OF the array type is a spread/pass-through, not an
+                // element; an explicit SPREAD (`*xs`) contributes its whole array in any position.
                 let expected = if i < n_fixed {
                     params[i]
-                } else if arg_tys.len() - n_fixed == 1 && *a == array_param {
+                } else if self.file.is_spread_arg(args[i])
+                    || (arg_tys.len() - n_fixed == 1 && *a == array_param)
+                {
                     array_param
                 } else {
                     elem
@@ -20820,6 +20949,31 @@ impl<'a> Checker<'a> {
     /// against the SAM method parameters here, at the common call-argument seam; import/member/vararg
     /// paths must not each reimplement the conversion or accidentally compare `FunctionN` to the Java
     /// interface type.
+    /// Check a NAMED argument bound to a vararg parameter. The named form takes the WHOLE array —
+    /// a spread (`s = *arr`) or an array-typed value (`parts = values`); a single element gets
+    /// kotlinc's diagnostic pair: the array-type mismatch AND the named-form prohibition.
+    fn expect_named_vararg_arg(&mut self, argument: ExprId, actual: Ty, array: Ty) {
+        // A SPREAD's expression may be typed by the array or by its element depending on the
+        // path that typed it — compare against the matching form so `s = *ints` on a `String`
+        // vararg is the compile-time mismatch kotlinc reports, not an `ArrayStoreException`.
+        if self.file.is_spread_arg(argument) {
+            let expected = if actual.non_null().array_elem().is_some() {
+                array
+            } else {
+                array.array_elem().unwrap_or(array)
+            };
+            self.expect_assignable(expected, actual, self.span(argument), "argument");
+            return;
+        }
+        self.expect_assignable(array, actual, self.span(argument), "argument");
+        if actual != Ty::Error && !self.receiver_is_assignable(actual, array) {
+            self.diags.error(
+                self.span(argument),
+                "assigning single elements to varargs in named form is prohibited.".to_string(),
+            );
+        }
+    }
+
     fn expect_call_arg(&mut self, expected: Ty, argument: ExprId, actual: Ty) {
         if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
             if let Some(sam) =
@@ -22803,6 +22957,7 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
+                        vararg_index: selected.call_sig.vararg_index,
                         inline,
                         suspend,
                     },
@@ -25407,6 +25562,7 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
+                vararg_index: selected.call_sig.vararg_index,
                 inline,
                 suspend,
             },
@@ -26658,7 +26814,13 @@ impl<'a> Checker<'a> {
                     // answer, and score cannot tell `pick(value: Any)` from
                     // `pick(value: CharSequence)` — it would silently take whichever came first.
                     if let [entry] = candidates.as_slice() {
-                        let score = self.call_slot_score(&entry.1, &entry.2).unwrap_or(0);
+                        let score = self
+                            .call_slot_score_vararg(
+                                &entry.1,
+                                &entry.2,
+                                entry.0.call_sig.vararg_index,
+                            )
+                            .unwrap_or(0);
                         if best_mapped.as_ref().is_none_or(|(best, _)| score > *best) {
                             best_mapped = Some((score, entry.clone()));
                         }
@@ -26748,7 +26910,29 @@ impl<'a> Checker<'a> {
             return Some(Ty::Error);
         }
         let (fi, _params, slots, callable, selection_params) = selected?;
-        for (&argument, &parameter) in args.iter().zip(&selection_params) {
+        let call_names = self.file.call_arg_names.get(&call.0).cloned();
+        let vararg_array = fi
+            .call_sig
+            .vararg_index
+            .and_then(|index| fi.extension_value_params().get(index).copied());
+        for (index, (&argument, &parameter)) in args.iter().zip(&selection_params).enumerate() {
+            let named = call_names
+                .as_ref()
+                .and_then(|names| names.get(index))
+                .and_then(Option::as_ref)
+                .is_some();
+            let named_vararg = named
+                && vararg_array.is_some()
+                && fi
+                    .call_sig
+                    .vararg_index
+                    .is_some_and(|vararg| slots.get(vararg).copied() == Some(Some(argument)));
+            if let (true, Some(array)) = (named_vararg, vararg_array) {
+                // The named form takes the whole array; an element gets kotlinc's
+                // mismatch + prohibition pair.
+                self.expect_named_vararg_arg(argument, self.expr_types[argument.0 as usize], array);
+                continue;
+            }
             self.expect_assignable(
                 parameter,
                 self.expr_types[argument.0 as usize],
@@ -26786,6 +26970,7 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
+                    vararg_index: fi.call_sig.vararg_index,
                     inline,
                     suspend,
                 },
@@ -29405,8 +29590,21 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
             .into_iter()
             .filter(|o| o.kind == crate::libraries::FnKind::Member)
-            .filter(|o| o.call_sig.has_param_names())
             .filter_map(|o| {
+                // A candidate with NO recorded parameter names cannot be slot-mapped, but an
+                // UNLABELLED call may match it directly — a zero-parameter overload (`any()` next
+                // to `any(classifier)`), or a Java member without `-parameters`. Route such a call
+                // to the direct member path instead of letting a sibling overload's mapping error
+                // reject it. A LABELLED call can never bind a no-names candidate, and deferring it
+                // would starve the sibling's slot mapping and hand the labels to the label-blind
+                // positional fallback (`tag(value = 3, prefix = "v")` silently swapped) — drop the
+                // candidate without deferring so the labelled sibling still resolves via slots.
+                if !o.call_sig.has_param_names() {
+                    if arg_names.is_none() {
+                        direct_candidate = true;
+                    }
+                    return None;
+                }
                 let params = o.callable.params.clone();
                 if arg_names.is_none() && o.call_sig.vararg && args.len() != params.len() {
                     direct_candidate = true;
@@ -29439,7 +29637,7 @@ impl<'a> Checker<'a> {
                         .map(|slot| slot.map_or(Ty::Error, |a| self.expr_types[a.0 as usize]))
                         .collect::<Vec<_>>(),
                 );
-                let score = self.call_slot_score(&params, &slots);
+                let score = self.call_slot_score_vararg(&params, &slots, o.call_sig.vararg_index);
                 Some((score, o, params, slots))
             })
             .collect();
@@ -29683,7 +29881,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn call_slot_score(&self, params: &[Ty], slots: &[Option<ExprId>]) -> Option<usize> {
+    /// Score a mapped call's slots against the candidate's parameters. At the vararg slot the
+    /// ELEMENT form (a positional first element) and the ARRAY form (a spread, or the named
+    /// whole-array assignment) both score — the slot map keeps element-form arguments.
+    fn call_slot_score_vararg(
+        &self,
+        params: &[Ty],
+        slots: &[Option<ExprId>],
+        vararg_index: Option<usize>,
+    ) -> Option<usize> {
         if params.len() != slots.len() {
             return None;
         }
@@ -29692,14 +29898,24 @@ impl<'a> Checker<'a> {
             let Some(arg) = slot else { continue };
             let aty = self.expr_types[arg.0 as usize];
             let argument = call_arg_kind(self.file, *arg, aty);
-            if aty != Ty::Error
+            // At the vararg slot the ELEMENT form (a positional first element) and the ARRAY form
+            // (a spread, or the named whole-array assignment `parts = values`) are both admissible.
+            let expected = if vararg_index == Some(i)
+                && !argument.is_spread()
                 && !self.receiver_is_assignable(aty, params[i])
-                && !argument.adapts_integer_literal_to(params[i])
-                && !self.erased_function_param_fits(params[i], aty)
+            {
+                params[i].array_elem().unwrap_or(params[i])
+            } else {
+                params[i]
+            };
+            if aty != Ty::Error
+                && !self.receiver_is_assignable(aty, expected)
+                && !argument.adapts_integer_literal_to(expected)
+                && !self.erased_function_param_fits(expected, aty)
             {
                 return None;
             }
-            score += if params[i] == aty { 4 } else { 1 };
+            score += if expected == aty { 4 } else { 1 };
         }
         Some(score)
     }
@@ -34432,11 +34648,35 @@ impl<'a> Checker<'a> {
                                     .iter()
                                     .filter(|&&parameter| parameter == vararg)
                                     .count();
+                                let call_names = self.file.call_arg_names.get(&call.0).cloned();
                                 for (argument, &parameter) in mapping.iter().enumerate() {
                                     let physical = ctx_count + parameter;
+                                    let named = call_names
+                                        .as_ref()
+                                        .and_then(|names| names.get(argument))
+                                        .and_then(Option::as_ref)
+                                        .is_some();
+                                    if parameter == vararg && named {
+                                        // The named form takes the whole array; an element gets
+                                        // kotlinc's mismatch + prohibition pair.
+                                        self.expect_named_vararg_arg(
+                                            args[argument],
+                                            arg_tys[argument],
+                                            array,
+                                        );
+                                        continue;
+                                    }
+                                    // A vararg argument checks against the ELEMENT type; the ARRAY
+                                    // form is admitted for a spread or a sole pass-through whose
+                                    // actual type IS the array (a spread of a forwarded vararg is
+                                    // typed by its element here, so the actual decides).
                                     let expected = if parameter == vararg
-                                        && !(vararg_arguments == 1 && arg_tys[argument] == array)
+                                        && arg_tys[argument] == array
+                                        && (self.file.is_spread_arg(args[argument])
+                                            || vararg_arguments == 1)
                                     {
+                                        array
+                                    } else if parameter == vararg {
                                         element
                                     } else {
                                         params[physical]
