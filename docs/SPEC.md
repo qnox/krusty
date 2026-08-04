@@ -1553,6 +1553,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the earlier claim that it shifts positions was wrong; no such call was observed. Any shape the
   alignment cannot line up now declines whenever a box is on the stack at all, rather than skipping: a
   count mismatch is "no position is known", never "nothing to check".
+  The runtime provider returns reference/primitive positions and the unambiguous runtime-supplied
+  continuation position together as one `PlatformMethodLayout`; JVM descriptor syntax remains outside
+  common lowering, and the descriptor is parsed once rather than by independent representation and
+  continuation queries that could disagree.
 
   Aligning that second shape surfaced a separate miscompile, now also declined
   (`gate:unthreaded-continuation-slot`): an unsigned VALUE PARAMETER mangles the JVM name (`libU` →

@@ -2400,19 +2400,30 @@ fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<Ty>)> {
 /// The field descriptor of the CPS `Continuation` parameter kotlinc appends to a `suspend` method.
 const CONTINUATION_PARAM_DESCRIPTOR: &str = "Lkotlin/coroutines/Continuation;";
 
-/// The single parameter position of `descriptor` that holds a `Continuation`.
+/// Read a JVM method descriptor once into the complete call-boundary layout common lowering needs.
 ///
 /// Exactly one position may be the synthetic CPS continuation. A descriptor spelling it more than
 /// once is not a shape kotlinc emits, and guessing between them would align a caller's arguments to
-/// the wrong slots — report nothing and let the caller stay conservative.
-fn continuation_param_index(descriptor: &str) -> Option<usize> {
+/// the wrong slots. Its representation facts are still valid, so retain those while reporting no
+/// continuation position and let the caller stay conservative if its value count does not align.
+fn method_parameter_layout(descriptor: &str) -> Option<crate::runtime::PlatformMethodLayout> {
     let (params, _) = crate::jvm::names::parse_method_descriptor(descriptor)?;
     let mut found = params
         .iter()
         .enumerate()
         .filter(|&(_, &p)| p == CONTINUATION_PARAM_DESCRIPTOR);
-    let (index, _) = found.next()?;
-    found.next().is_none().then_some(index)
+    let continuation_slot = found
+        .next()
+        .and_then(|(index, _)| found.next().is_none().then_some(index));
+    Some(crate::runtime::PlatformMethodLayout {
+        // A JVM parameter is a reference exactly when its field descriptor is an object (`L…;`) or
+        // an array (`[…`); everything else is a primitive carrier (`I`, `J`, `Z`, …).
+        reference_slots: params
+            .iter()
+            .map(|p| p.starts_with('L') || p.starts_with('['))
+            .collect(),
+        continuation_slot,
+    })
 }
 
 /// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
@@ -3862,20 +3873,11 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         Some(method_descriptor(params, ret))
     }
 
-    fn descriptor_reference_params(&self, descriptor: &str) -> Option<Vec<bool>> {
-        // A JVM parameter is a reference exactly when its field descriptor is an object (`L…;`) or an
-        // array (`[…`); everything else is a primitive carrier (`I`, `J`, `Z`, …).
-        let (params, _) = super::names::parse_method_descriptor(descriptor)?;
-        Some(
-            params
-                .iter()
-                .map(|p| p.starts_with('L') || p.starts_with('['))
-                .collect(),
-        )
-    }
-
-    fn descriptor_continuation_param(&self, descriptor: &str) -> Option<usize> {
-        continuation_param_index(descriptor)
+    fn descriptor_parameter_layout(
+        &self,
+        descriptor: &str,
+    ) -> Option<crate::runtime::PlatformMethodLayout> {
+        method_parameter_layout(descriptor)
     }
 
     fn function_reference_impl_type(&self) -> Option<Ty> {
@@ -4319,7 +4321,7 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        continuation_param_index, desc_to_ty, parse_class_gsig, parse_concrete_field_gsig,
+        desc_to_ty, method_parameter_layout, parse_class_gsig, parse_concrete_field_gsig,
         parse_field_gsig, parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::SemanticPlatform;
@@ -4330,29 +4332,40 @@ mod tests {
     /// Common lowering aligns a `suspend` `$default` call by this position, so it has to name the
     /// slot the backend fills and nothing else.
     #[test]
-    fn continuation_param_is_reported_only_when_unambiguous() {
+    fn descriptor_layout_reports_representation_and_one_continuation_from_one_parse() {
         // `withLock$default` — the continuation sits BEFORE the mask/marker tail, not at the end.
+        let layout = method_parameter_layout(
+            "(Lkotlinx/coroutines/sync/Mutex;Ljava/lang/Object;Lkotlin/jvm/functions/Function0;\
+                 Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;",
+        )
+        .expect("valid descriptor");
+        assert_eq!(layout.continuation_slot, Some(3));
         assert_eq!(
-            continuation_param_index(
-                "(Lkotlinx/coroutines/sync/Mutex;Ljava/lang/Object;Lkotlin/jvm/functions/Function0;\
-                 Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;"
-            ),
-            Some(3)
+            layout.reference_slots,
+            vec![true, true, true, true, false, true]
         );
         // A plain suspend method's trailing continuation.
         assert_eq!(
-            continuation_param_index("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;"),
+            method_parameter_layout("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;")
+                .and_then(|layout| layout.continuation_slot),
             Some(1)
         );
-        assert_eq!(continuation_param_index("(ILjava/lang/String;)V"), None);
-        // Two of them: no position is derivable, so the caller must not be handed a guess.
         assert_eq!(
-            continuation_param_index(
-                "(Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)V"
-            ),
+            method_parameter_layout("(ILjava/lang/String;)V")
+                .expect("valid descriptor")
+                .continuation_slot,
             None
         );
-        assert_eq!(continuation_param_index("not a descriptor"), None);
+        // Two of them: no position is derivable, so the caller must not be handed a guess.
+        assert_eq!(
+            method_parameter_layout(
+                "(Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)V"
+            )
+            .expect("the parameter representations remain readable")
+            .continuation_slot,
+            None
+        );
+        assert!(method_parameter_layout("not a descriptor").is_none());
     }
 
     #[test]

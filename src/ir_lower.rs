@@ -5957,7 +5957,9 @@ impl<'a> Lower<'a> {
         // mangled `-impl` static whose descriptor spells it as the leading parameter, and the box
         // above is the one thing that can put a reference in it.
         self.check_unsigned_boxes_fit_descriptor(
-            self.runtime.descriptor_reference_params(&member.descriptor),
+            self.runtime
+                .descriptor_parameter_layout(&member.descriptor)
+                .map(|layout| layout.reference_slots),
             Some(recv),
             &args,
             None,
@@ -6094,17 +6096,13 @@ impl<'a> Lower<'a> {
         // SUSPEND callable that is the normal `$default` shape — the plain suspend descriptor has
         // already had its trailing continuation stripped, but a `$default` one spells it BEFORE the
         // mask/marker tail, so it survives and the backend appends the value at emit time.
-        let slot_is_reference = self
+        let descriptor_layout = self
             .runtime
-            .descriptor_reference_params(&callable.descriptor);
-        let continuation = slot_is_reference
+            .descriptor_parameter_layout(&callable.descriptor);
+        let continuation = descriptor_layout
             .as_ref()
-            .is_some_and(|slots| slots.len() == args.len() + 1)
-            .then(|| {
-                self.runtime
-                    .descriptor_continuation_param(&callable.descriptor)
-            })
-            .flatten();
+            .filter(|layout| layout.reference_slots.len() == args.len() + 1)
+            .and_then(|layout| layout.continuation_slot);
         // For a callable NOT marked suspend, nothing will thread it, so the emitted `invokestatic` is
         // an argument SHORT: it links and fails verification. The record is wrong rather than the
         // call — an unsigned value parameter mangles the JVM name (`libU` → `libU-OzbTU-A`) and the
@@ -6121,7 +6119,12 @@ impl<'a> Lower<'a> {
         // descriptor slot; the emitter decides a leading receiver by COUNT, and an unfilled slot here
         // reaches `check_unsigned_boxes_fit_descriptor` as `None` — its conservative path — rather
         // than as a wrong position.
-        self.check_unsigned_boxes_fit_descriptor(slot_is_reference, None, &args, continuation)?;
+        self.check_unsigned_boxes_fit_descriptor(
+            descriptor_layout.map(|layout| layout.reference_slots),
+            None,
+            &args,
+            continuation,
+        )?;
         // A member of an `object` / `companion object` brought into scope by `import Owner.name`: its
         // realization is an INSTANCE invoke on the singleton, not a facade static. Resolution recorded
         // exactly which field holds it (a plain object's `INSTANCE`, or the outer class's field for a

@@ -38,6 +38,19 @@ pub struct PlatformField {
     pub descriptor: String,
 }
 
+/// Provider-owned interpretation of an already-spelled method descriptor's parameter list.
+///
+/// Common lowering needs both facts together when it validates a call boundary: representation says
+/// whether a boxed value may occupy each physical slot, while `continuation_slot` identifies the one
+/// runtime-supplied CPS value that is present in the descriptor but appended later by the backend.
+/// Keeping them in one result makes the provider parse its descriptor once and prevents two queries
+/// from disagreeing about the same physical parameter list.
+#[derive(Clone, Debug)]
+pub struct PlatformMethodLayout {
+    pub reference_slots: Vec<bool>,
+    pub continuation_slot: Option<usize>,
+}
+
 /// Platform construction plan for a Kotlin range value expression. `elem` is the semantic element
 /// type operands coerce to; `through` constructs `a..b`; `until` realizes `a..<b` when supported.
 #[derive(Clone, Debug)]
@@ -122,28 +135,17 @@ pub trait TargetRuntime {
         None
     }
 
-    /// Per parameter position of an already-spelled platform method `descriptor`, whether that slot
-    /// holds a REFERENCE (so a boxed value may occupy it) rather than a primitive carrier.
+    /// Interpret the parameters of an already-spelled platform method `descriptor` in one pass.
     ///
     /// Common lowering needs this to check its own work: a callee's descriptor is emitted VERBATIM
     /// while arguments are coerced to the callable's declared parameter types, and the two can
     /// disagree about whether a value is boxed. Asking the platform keeps descriptor SYNTAX where it
-    /// belongs — lowering never parses a target's spelling itself. `None` when the descriptor cannot
-    /// be read, which leaves the decision to the platform's own gates.
-    fn descriptor_reference_params(&self, _descriptor: &str) -> Option<Vec<bool>> {
-        None
-    }
-
-    /// The parameter position of an already-spelled platform method `descriptor` that holds the
-    /// synthetic CPS `Continuation`, when the descriptor spells one.
-    ///
-    /// Common lowering needs it to align a `suspend` `$default` synthetic: its descriptor carries the
-    /// continuation BEFORE the mask/marker tail, while the backend appends that value at emit time —
-    /// so every lowered argument past that position sits one slot to the right of where it looks.
-    /// Same division of labour as [`Self::descriptor_reference_params`]: the platform reads its own
-    /// spelling and lowering asks by position. `None` when the descriptor cannot be read or spells no
-    /// continuation.
-    fn descriptor_continuation_param(&self, _descriptor: &str) -> Option<usize> {
+    /// belongs — lowering never parses a target's spelling itself. The same result identifies an
+    /// unambiguous synthetic CPS continuation, when present, so a `suspend` `$default` descriptor can
+    /// be aligned without reparsing or a second provider contract. `None` means the descriptor itself
+    /// cannot be read and leaves the decision to platform gates; an absent/ambiguous continuation is
+    /// represented by `layout.continuation_slot == None` while retaining the trustworthy slot kinds.
+    fn descriptor_parameter_layout(&self, _descriptor: &str) -> Option<PlatformMethodLayout> {
         None
     }
 
