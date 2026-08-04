@@ -458,7 +458,8 @@ pub enum CtorDefaultValue {
     Bool(bool),
     /// A UTF-16 code unit, matching `ast::Expr::CharLit` / `IrConst::Char`.
     Char(u16),
-    Str(String),
+    /// A UTF-16 code-unit sequence, matching `ast::Expr::StringLit` / `IrConst::String`.
+    Str(crate::kt_string::KtString),
     Null,
     /// An `object` singleton default (`= EmptyCoroutineContext`) — read as `getstatic <internal>.INSTANCE`.
     Object(String),
@@ -40161,7 +40162,7 @@ fun box(): String {
             .iter()
             .map(|slot| {
                 slot.map(|arg| match files[0].expr(arg) {
-                    Expr::StringLit(v) => v.clone(),
+                    Expr::StringLit(v) => v.to_lossy(),
                     Expr::IntLit(v) => v.to_string(),
                     other => panic!("unexpected argument expression in slot: {other:?}"),
                 })

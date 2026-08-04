@@ -861,13 +861,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the lexer boundary. Tests: `tests/char_literal_diagnostics_e2e.rs`.
 - **A `Char` constant folded into a string renders as the CHARACTER, not its code unit.** The constant
   string evaluator behind the `trimIndent`/`trimMargin` fold accepts a `Char` (`${'$'}` is the idiomatic
-  way to write a literal `$` in a template), so it must spell the character out. A code unit that is not
-  a scalar value has no Rust `String` spelling at all, so the evaluator reports "not a constant" rather
-  than substituting a stand-in; the file then hits the existing "`trimIndent` on a non-constant receiver"
-  gap and is rejected with a diagnostic. kotlinc folds that case — krusty's is a **loud bail, not a wrong
-  value**, and closing it needs a UTF-16 representation for string constants (`IrConst::String` is a Rust
-  `String`, which cannot hold a lone surrogate either). Test: `ConstCharTemplateFold` in
-  `tests/feature_box_e2e.rs`.
+  way to write a literal `$` in a template), so it must spell the character out. Test:
+  `ConstCharTemplateFold` in `tests/feature_box_e2e.rs`.
+- **A `String` is a sequence of UTF-16 code UNITS**, the same rule as `Char` one level up. `"\uD800"` is
+  a one-element string whose element is `Char.MIN_HIGH_SURROGATE`, and `"\uD83D\uDE00"` is U+1F600
+  written as its two halves — neither has a Rust `String` spelling, because `char::from_u32` rejects a
+  surrogate. Decoding each `\uXXXX` escape through `char` silently DROPPED both, so `"\uD83D\uDE00"`
+  (an ordinary escaped emoji) compiled to `""` where kotlinc gives a 2-element string; and a `Char`
+  template part with no scalar form made the whole `trimIndent`/`trimMargin` fold unrepresentable, so
+  the file was rejected with "this construct is not yet supported by the IR backend" where kotlinc
+  compiles it. String constants therefore carry `KtString` (`src/kt_string.rs`) — a `String` fast path
+  that degrades to a `Vec<u16>` only for content with an unpaired surrogate — from `ast::Expr::StringLit`
+  and `ast::TemplatePart::Str` through `File::const_string_value` and `IrConst::String` to the class
+  file. The two representations are kept disjoint (`KtStringBuf::finish` re-tests the result, so a
+  completed surrogate pair comes back out as text), which is what lets the constant pool keep deduping
+  on value equality. `trimIndent`/`trimMargin` fold in code units too, matching how Kotlin measures an
+  indent. Tests: `tests/utf16_string_constant_e2e.rs`, `kt_string::tests`.
+  - `CONSTANT_Utf8` is **modified UTF-8**, whose units are UTF-16 code units: a supplementary character
+    is written as its surrogate PAIR (two 3-byte sequences) and an unpaired surrogate encodes exactly
+    the same way, so the class-file format carries these values unchanged (`modified_utf8_units`,
+    `src/metadata/encoding.rs`). A JS string is likewise a code-unit sequence; the JS backend writes a
+    lone surrogate as `\uXXXX`.
+  - The `StringBuilder` template path appends a **one-code-unit** string constant as a `char`
+    (kotlinc's form). "One character" must be counted in code units, not `char`s: a supplementary
+    character is two units and does not fit a `Char`, so appending it that way would truncate it
+    through `i2c`. It stays on the `append(String)` path.
+  - Known gap, read side: `decode_modified_utf8` (`src/jvm/classreader.rs`) returns a Rust `String`, so
+    a **classpath** `const val` whose value contains an unpaired surrogate reads back with U+FFFD in its
+    place. Surrogate PAIRS (any non-BMP character) decode correctly. Names and descriptors are
+    unaffected. Likewise `@JvmName("…")` falls back to the declared name if given an unpaired surrogate —
+    a JVM method name has no such spelling.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.

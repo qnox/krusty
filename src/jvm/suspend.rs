@@ -30,6 +30,7 @@ use crate::ir::{
     for_each_child, Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrFile,
     IrFunction, IrTypeOp,
 };
+use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
 use std::collections::HashSet;
@@ -2230,9 +2231,9 @@ fn build_state_machine(
     // default: `throw IllegalStateException(...)` (an unreachable resume label) — matches kotlinc.
     let msg = k(
         ir,
-        IrExpr::Const(IrConst::String(
-            "call to 'resume' before 'invoke' with coroutine".to_string(),
-        )),
+        IrExpr::Const(IrConst::String(KtString::from(
+            "call to 'resume' before 'invoke' with coroutine",
+        ))),
     );
     let exc = ir.new_external(
         "java/lang/IllegalStateException",
@@ -2629,9 +2630,9 @@ fn build_lambda_state_machine(
     }
     let msg = k(
         ir,
-        IrExpr::Const(IrConst::String(
-            "call to 'resume' before 'invoke' with coroutine".to_string(),
-        )),
+        IrExpr::Const(IrConst::String(KtString::from(
+            "call to 'resume' before 'invoke' with coroutine",
+        ))),
     );
     let exc = ir.new_external(
         "java/lang/IllegalStateException",

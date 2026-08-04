@@ -835,36 +835,50 @@ impl<'a> Reader<'a> {
 }
 
 /// Decode JVM modified UTF-8 (handles `C0 80` → U+0000 and 2/3-byte sequences).
+///
+/// The encoding's units are UTF-16 code units, so a character outside the BMP arrives as its
+/// surrogate PAIR — two 3-byte sequences that must be recombined, not decoded one at a time.
+/// `String::from_utf16_lossy` does exactly that, and an UNPAIRED surrogate (which the encoding also
+/// admits, and which no Rust `String` can hold) becomes U+FFFD. That last case is lossy: a library
+/// `const val` whose value contains one reads back changed. See `docs/SPEC.md`.
 fn decode_modified_utf8(bytes: &[u8]) -> String {
-    let mut s = String::new();
+    let mut units: Vec<u16> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if b & 0x80 == 0 {
-            s.push(b as char);
+            units.push(b as u16);
             i += 1;
         } else if b & 0xe0 == 0xc0 && i + 1 < bytes.len() {
-            let c = (((b & 0x1f) as u32) << 6) | (bytes[i + 1] & 0x3f) as u32;
-            s.push(char::from_u32(c).unwrap_or('\u{fffd}'));
+            units.push((((b & 0x1f) as u16) << 6) | (bytes[i + 1] & 0x3f) as u16);
             i += 2;
         } else if b & 0xf0 == 0xe0 && i + 2 < bytes.len() {
-            let c = (((b & 0x0f) as u32) << 12)
-                | (((bytes[i + 1] & 0x3f) as u32) << 6)
-                | (bytes[i + 2] & 0x3f) as u32;
-            s.push(char::from_u32(c).unwrap_or('\u{fffd}'));
+            units.push(
+                (((b & 0x0f) as u16) << 12)
+                    | (((bytes[i + 1] & 0x3f) as u16) << 6)
+                    | (bytes[i + 2] & 0x3f) as u16,
+            );
             i += 3;
         } else {
-            s.push('\u{fffd}');
+            units.push(0xfffd);
             i += 1;
         }
     }
-    s
+    String::from_utf16_lossy(&units)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::jvm::classfile::*;
+
+    #[test]
+    fn decodes_a_supplementary_character_from_its_surrogate_pair() {
+        // U+1F600 is encoded as two 3-byte surrogate sequences; decoding each on its own yields two
+        // replacement characters instead of the emoji.
+        let bytes = crate::metadata::encoding::modified_utf8("\u{1F600}");
+        assert_eq!(decode_modified_utf8(&bytes), "\u{1F600}");
+    }
 
     #[test]
     fn reads_krusty_emitted_class_roundtrip() {

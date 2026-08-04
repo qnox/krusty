@@ -28,7 +28,15 @@ mod tests {
         // grows the same-thread stack per level so the bound survives any thread's stack size.
         assert_allowed_crate_modules(
             "src/parser.rs",
-            &["ast", "diag", "features", "token", "types", "wide_stack"],
+            &[
+                "ast",
+                "diag",
+                "features",
+                "kt_string",
+                "token",
+                "types",
+                "wide_stack",
+            ],
         );
     }
 
@@ -185,6 +193,7 @@ mod tests {
             "ir",
             "ir_lower",
             "jvm",
+            "kt_string",
             "libraries",
             "lru",
             "metadata",
@@ -241,7 +250,7 @@ mod tests {
 
     #[test]
     fn js_emitter_uses_only_ir_contract_dependencies() {
-        assert_allowed_crate_modules("src/js/emit.rs", &["ir", "types"]);
+        assert_allowed_crate_modules("src/js/emit.rs", &["ir", "kt_string", "types"]);
     }
 
     #[test]
@@ -260,6 +269,7 @@ mod tests {
                 "ast",
                 "frontend",
                 "ir",
+                "kt_string",
                 "libraries",
                 "module_symbols",
                 "names",
@@ -314,6 +324,7 @@ mod tests {
                 "ast",
                 "diag",
                 "ir",
+                "kt_string",
                 "libraries",
                 "lexer",
                 "names",

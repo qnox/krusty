@@ -14,6 +14,7 @@ use crate::jvm::names::{
     method_descriptor, property_getter_name, property_setter_name, reference_array_element,
     type_descriptor,
 };
+use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::{Ty, TypeName, Visibility};
 
 struct InlineStaticTarget<'a> {
@@ -296,7 +297,7 @@ fn init_body_stored_fields(ir: &IrFile, c: &IrClass) -> std::collections::HashSe
     out
 }
 
-fn init_body_string_consts(ir: &IrFile, c: &IrClass) -> std::collections::HashMap<u32, String> {
+fn init_body_string_consts(ir: &IrFile, c: &IrClass) -> std::collections::HashMap<u32, KtString> {
     let mut out = std::collections::HashMap::new();
     let Some(body) = c.init_body else { return out };
     let IrExpr::Block { stmts, .. } = ir.expr(body) else {
@@ -2291,7 +2292,7 @@ fn const_value_idx(ir: &IrFile, init: crate::ir::ExprId, cw: &mut ClassWriter) -
             IrConst::Long(v) => cw.const_long(*v),
             IrConst::Float(v) => cw.const_float(*v),
             IrConst::Double(v) => cw.const_double(*v),
-            IrConst::String(s) => cw.const_string(s),
+            IrConst::String(s) => cw.const_string_kt(s),
             IrConst::Null => return None,
         }),
         _ => None,
@@ -8687,7 +8688,7 @@ impl<'a> Emitter<'a> {
                 IrConst::Long(v) => code.push_long(*v, self.cw),
                 IrConst::Double(v) => code.push_double(*v, self.cw),
                 IrConst::Float(v) => code.push_float(*v, self.cw),
-                IrConst::String(s) => code.push_string(s, self.cw),
+                IrConst::String(s) => code.push_string_kt(s, self.cw),
                 IrConst::Null => code.aconst_null(),
             },
             IrExpr::ClassConst { internal } => {
@@ -10258,28 +10259,33 @@ impl<'a> Emitter<'a> {
         if parts.iter().any(|&p| self.records_frame(p)) {
             return false;
         }
-        let mut recipe = String::new();
+        // The recipe is itself a string CONSTANT, so it carries whatever code units the literal
+        // parts hold — including an unpaired surrogate, which no Rust `String` can spell.
+        let mut recipe = KtStringBuf::new();
         let mut arg_parts: Vec<u32> = Vec::new();
         for &p in parts {
             if let IrExpr::Const(IrConst::String(s)) = self.ir.expr(p) {
                 // A literal carrying a recipe tag would have to move to the constants array — rare;
                 // fall back rather than encode it wrong.
-                if s.contains(TAG_ARG) || s.contains(TAG_CONST) {
+                if s.units()
+                    .any(|u| u == TAG_ARG as u16 || u == TAG_CONST as u16)
+                {
                     return false;
                 }
-                recipe.push_str(s);
+                recipe.push_kt(s);
             } else {
                 recipe.push(TAG_ARG);
                 arg_parts.push(p);
             }
         }
+        let recipe = recipe.finish();
         let arg_descs: String = arg_parts
             .iter()
             .map(|&p| type_descriptor(self.value_ty(p)))
             .collect();
         // kotlinc interns the recipe (the bootstrap's static argument) BEFORE the bootstrap method
         // handle, so intern in that order to match its constant-pool layout.
-        let recipe_const = self.cw.const_string(&recipe);
+        let recipe_const = self.cw.const_string_kt(&recipe);
         let mh = self.cw.method_handle_static(
             "java/lang/invoke/StringConcatFactory",
             "makeConcatWithConstants",
@@ -10305,17 +10311,15 @@ impl<'a> Emitter<'a> {
     /// Append one string-template part to the `StringBuilder` beneath it. A single-character string
     /// constant appends as a `char` (kotlinc emits `append(C)` with the char constant, not `append(String)`).
     fn append_part(&mut self, p: u32, code: &mut CodeBuilder) {
-        let single_char = if let IrExpr::Const(IrConst::String(s)) = self.ir.expr(p) {
-            if s.chars().count() == 1 {
-                s.chars().next()
-            } else {
-                None
-            }
+        // "single character" is one UTF-16 code UNIT — the width of a `Char` — so a supplementary
+        // character (two units) stays on the `append(String)` path, as it must.
+        let single_unit = if let IrExpr::Const(IrConst::String(s)) = self.ir.expr(p) {
+            s.single_unit()
         } else {
             None
         };
-        if let Some(c) = single_char {
-            code.push_int(c as i32, self.cw);
+        if let Some(unit) = single_unit {
+            code.push_int(unit as i32, self.cw);
             self.append_top(Ty::Char, code);
         } else {
             self.append(p, code);
