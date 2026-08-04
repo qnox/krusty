@@ -93,6 +93,27 @@ open class Base(val ctx: CoroutineContext = EmptyCoroutineContext)\n";
 }
 
 #[test]
+fn cross_file_super_ctor_char_defaults_keep_utf16_code_units() {
+    // Keep the declaration and the omitted `super(...)` call in different source arenas. The
+    // single-file feature-box case proves the two lowering forms exist, but only this module shape
+    // proves the subclass cannot accidentally reread file A's `Expr::CharLit` through file B. The
+    // handoff must use the AST-free `CtorDefaultValue::Char(u16)` for both surrogate endpoints; a
+    // Rust `char`/Unicode-scalar conversion would turn either lone surrogate into NUL.
+    let declarations = "open class CharBase(\n\
+        val high: Char = '\\uD800',\n\
+        val low: Char = '\\uDFFF',\n\
+    )\n";
+    let use_site = "class CharDerived : CharBase()\n\
+        fun box(): String {\n\
+            val value = CharDerived()\n\
+            if (value.high.code != 55296) return \"high:${value.high.code}\"\n\
+            if (value.low.code != 57343) return \"low:${value.low.code}\"\n\
+            return \"OK\"\n\
+        }\n";
+    assert_eq!(run_two(declarations, use_site).as_deref(), Some("OK"));
+}
+
+#[test]
 fn cross_file_top_level_default_uses_selected_decl() {
     let a = "fun choose(x: Int = 1): String = \"int:$x\"\n\
              fun choose(s: String, suffix: String = \"K\"): String = s + suffix\n";

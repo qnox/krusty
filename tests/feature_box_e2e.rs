@@ -3917,6 +3917,85 @@ fun box(): String {
 }
 "#,
     ),
+    // A `Char` primary-constructor DEFAULT keeps its code unit through both of the two independent
+    // paths that fill it: the same-class path lowers the default's AST `Expr::CharLit` directly, while
+    // `: B()` on a subclass fills the base's `super(…)` args from the file-independent
+    // `resolve::CtorDefaultValue::Char` (an AST-free copy of the value, so it works cross-file). Both
+    // carry a UTF-16 code unit; a `char` round-trip on either folds a lone surrogate to NUL.
+    (
+        "CharSurrogateCtorDefault",
+        r#"
+open class B(val c: Char = '\uD800', val d: Char = '\uDFFF')
+class D() : B()
+class P(val c: Char = '\uD800')
+
+fun box(): String {
+    val p = P()
+    if (p.c.code != 55296) return "f0: ${p.c.code}"
+    if (p.c != Char.MIN_HIGH_SURROGATE) return "f1"
+    val b = D()
+    if (b.c.code != 55296) return "f2: ${b.c.code}"
+    if (b.d.code != 57343) return "f3: ${b.d.code}"
+    if (b.c != Char.MIN_HIGH_SURROGATE) return "f4"
+    if (b.d != Char.MAX_LOW_SURROGATE) return "f5"
+    if (P('x').c != 'x') return "f6"
+    return "OK"
+}
+"#,
+    ),
+    // A `when` over a `Char` SUBJECT compares each branch constant against the subject — krusty
+    // emits no `lookupswitch`, so this really is an if-chain of equality tests — and a branch
+    // constant that collapsed to NUL both misses its own surrogate and steals the NUL subject.
+    // `f1`/`f3` are the load-bearing checks: their subject is an inlined CLASSPATH constant, so a
+    // folded branch constant falls through to `else`. `f4`/`f5` catch the collision half. `f0`/`f2`
+    // route the subject and the branch constant through the same `unquote_char` and so cancel out;
+    // they, and the `'x'`/`'y'` cases, are controls that the ordinary literal path still works.
+    (
+        "CharSurrogateWhen",
+        r#"
+fun tag(c: Char): String = when (c) {
+    '\uD800' -> "hi"
+    '\uDFFF' -> "lo"
+    '\u0000' -> "nul"
+    'x' -> "x"
+    else -> "other"
+}
+
+fun box(): String {
+    if (tag('\uD800') != "hi") return "f0: ${tag('\uD800')}"
+    if (tag(Char.MIN_HIGH_SURROGATE) != "hi") return "f1: ${tag(Char.MIN_HIGH_SURROGATE)}"
+    if (tag('\uDFFF') != "lo") return "f2: ${tag('\uDFFF')}"
+    if (tag(Char.MAX_LOW_SURROGATE) != "lo") return "f3: ${tag(Char.MAX_LOW_SURROGATE)}"
+    if (tag('\u0000') != "nul") return "f4: ${tag('\u0000')}"
+    if (tag(0.toChar()) != "nul") return "f5: ${tag(0.toChar())}"
+    if (tag('x') != "x") return "f6: ${tag('x')}"
+    if (tag('y') != "other") return "f7: ${tag('y')}"
+    if (tag(55297.toChar()) != "other") return "f8: ${tag(55297.toChar())}"
+    return "OK"
+}
+"#,
+    ),
+    // A `Char` ANNOTATION ARGUMENT is written into the class file as an `element_value` tagged `'C'`
+    // plus a `CONSTANT_Integer` holding the code unit. With `@Retention(RUNTIME)` the JVM hands the
+    // value back through `getAnnotation`, so the read below observes the emitted constant pool entry
+    // itself — a lone surrogate that folded to NUL on the way in comes back as 0.
+    (
+        "CharSurrogateAnnotationArg",
+        r#"
+@Retention(AnnotationRetention.RUNTIME)
+annotation class CharTag(val c: Char)
+
+@CharTag('\uD800')
+class Tagged
+
+fun box(): String {
+    val a = Tagged::class.java.getAnnotation(CharTag::class.java) ?: return "f0"
+    if (a.c.code != 55296) return "f1: ${a.c.code}"
+    if (a.c != Char.MIN_HIGH_SURROGATE) return "f2"
+    return "OK"
+}
+"#,
+    ),
 ];
 
 #[test]
