@@ -3033,18 +3033,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   own with no object internal name, so `"apple" < "banana"` fell through to the primitive comparison —
   the checker reported `operator cannot be applied to 'String' and 'String'`, and forcing it past the
   checker produced a `VerifyError` on a reference operand. Both sides now resolve `compareTo` through
-  the library set for any left operand type and emit that member, comparing its `Int` result with 0.
-  The right operand must be a reference: an erased `Comparable<T>.compareTo` takes `Object`, so a
-  primitive argument would need a box this path doesn't apply. Test:
-  `tests/feature_coverage_v_e2e.rs::string_chunked_and_compare`.
+  the library set and emit that member, comparing its `Int` result with 0. `Ty::String` is admitted
+  alongside `Ty::Obj` by the ONE selected-target block, which records the callable in
+  `resolved_operator_calls` — the single map lowering reads. The right operand must be a reference: an
+  erased `Comparable<T>.compareTo` takes `Object`, so a primitive argument would need a box this path
+  doesn't apply; for a `String` left operand it must be a `String` too, because resolving through the
+  erased `compareTo(Object)` accepted `s < any`, which kotlinc rejects with "argument type mismatch:
+  actual type is 'Any', but 'String' was expected". Tests:
+  `tests/feature_coverage_v_e2e.rs::string_chunked_and_compare`,
+  `tests/relational_compare_to_seam_e2e.rs::relation_with_non_comparable_right_operand_is_rejected`.
 
   A source `enum class` compares the same way, through the `compareTo` it INHERITS from
   `java.lang.Enum` — which no member lookup on the enum itself reports, so it is resolved on the
   SUPERTYPE. The parameter is the erased `Enum`, so the right operand is cast to it. krusty emits
   `invokevirtual java/lang/Enum.compareTo(Ljava/lang/Enum;)I` where kotlinc emits a `checkcast` plus
   `invokevirtual <E>.compareTo(Ljava/lang/Enum;)I`; both dispatch to the same method, and this matches
-  what krusty already emitted for an EXPLICIT `a.compareTo(b)` on an enum. Test:
-  `tests/feature_coverage_r_e2e.rs::enum_comparison_ordering`.
+  what krusty already emitted for an EXPLICIT `a.compareTo(b)` on an enum. That supertype resolution
+  is a FALLBACK, reached only when the selected-target block above found nothing — with kotlin-stdlib
+  on the classpath the enum's `Comparable` supertype carries the member and the ordinary path wins; an
+  empty classpath resolves `Comparable` from the builtins fallback, which does not. The fallback
+  records its target in `resolved_operator_calls`, the same map as every other relational target.
+  Recorded in `resolved_calls` instead — which lowering never consults for a relation — the checker
+  typed the comparison `Boolean` while lowering fell through to the primitive `if_icmp*` on two enum
+  references: a class file that compiled and then failed to load with `VerifyError: Bad type on
+  operand stack`. Tests: `tests/feature_coverage_r_e2e.rs::enum_comparison_ordering`,
+  `tests/relational_compare_to_seam_e2e.rs::enum_and_string_relations_run_without_stdlib`.
 - **A BOUNDED type parameter's return, inferred at the call site.** `fun <T : Number> id(x: T): T`
   called as `id(3)` types as `Int`, not the erased bound `Number`. Two halves had to meet: the
   checker declined a bounded return outright ("an erased-return coercion is not modeled"), and the

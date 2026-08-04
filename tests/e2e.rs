@@ -878,6 +878,8 @@ mod reified_inline_check_e2e;
 mod reified_inline_return_infer_e2e;
 #[path = "reified_inline_splice_ldc_wide_e2e.rs"]
 mod reified_inline_splice_ldc_wide_e2e;
+#[path = "relational_compare_to_seam_e2e.rs"]
+mod relational_compare_to_seam_e2e;
 #[path = "require_check_smartcast_e2e.rs"]
 mod require_check_smartcast_e2e;
 #[path = "resolve_parse_deep_coverage_e2e.rs"]

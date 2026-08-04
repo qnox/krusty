@@ -22696,9 +22696,15 @@ impl<'a> Lower<'a> {
                 }
             }
             // Every non-builtin relational convention is emitted from the checker's exact selected
-            // `compareTo` target. Source/classpath members and extensions therefore share argument
-            // adaptation, suspend marking, and inline capability handling; lowering never reselects by
-            // receiver class or declaration name.
+            // `compareTo` target. Source/classpath members and extensions — and the `java.lang.Enum`
+            // member a source `enum class` INHERITS, which the checker resolves on the supertype —
+            // therefore share argument adaptation, suspend marking, and inline capability handling;
+            // lowering never reselects by receiver class or declaration name.
+            //
+            // `resolved_operator_calls` is the ONLY map consulted here (unlike `lower_op_call`, which
+            // also falls back to `resolved_calls`), so a relational target recorded anywhere else is
+            // invisible: the checker types the comparison `Boolean` and lowering falls through to the
+            // primitive `emit_primitive_bin_op` below, which has no reference guard.
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
                 if let Some(selected) = self.info.resolved_operator_call(e, "compareTo").cloned() {
                     let l = self.expr(lhs)?;

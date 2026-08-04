@@ -23986,50 +23986,42 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // A comparison whose left operand isn't a source/classpath `Obj` handled above still
-            // desugars to `a.compareTo(b) < 0`. Two shapes reach here: `String` (a `Ty` of its own,
-            // never `Ty::Obj`, though `java.lang.String` implements `Comparable`), and a source
-            // `enum class`, whose `compareTo` is INHERITED from `java.lang.Enum` rather than declared
-            // (so `method_of_name` finds nothing). Resolve the member through the library set and
-            // record it, exactly as the classpath-`Comparable` path above does.
+            // A source `enum class` compares through the `compareTo` it INHERITS from
+            // `java.lang.Enum`, which no member lookup on the enum itself reports — so the selected-
+            // target block above finds nothing whenever the enum's `Comparable` supertype is not on
+            // the classpath (a build without kotlin-stdlib resolves `Comparable` from the builtins
+            // fallback, which carries no member). Resolve `compareTo` on the supertype instead — the
+            // parameter is the erased `Enum`, so lowering casts the right operand to it, exactly as
+            // kotlinc does.
             //
-            // Reference right operand only: an erased `Comparable<T>.compareTo` takes `Object`, so a
-            // primitive argument would need a box this path doesn't apply.
+            // This records into `resolved_operator_calls`, the SAME map the block above writes and
+            // the only one lowering reads (`ir_lower`'s relational arm). Recorded in `resolved_calls`
+            // instead, the checker typed the comparison `Boolean` while lowering found no target and
+            // fell through to the primitive `if_icmp*` on two enum references — a class file that
+            // compiles and then fails to load with `VerifyError: Bad type on operand stack`.
+            //
+            // The two operand tests carry the whole admissibility rule. `is_enum_type` starts from
+            // `obj_internal`, which is `None` for `Ty::Nullable` and `Ty::Error`, so a left operand
+            // that reaches here is a non-null object (or a type parameter bounded by one); `lt == rt`
+            // then pins the right operand to the same thing. A nullable operand is therefore rejected
+            // by this arm declining, not by a guard of its own — `a: Color?` reports "operator cannot
+            // be applied to 'Color?' and 'Color?'", which is what kotlinc reports too. That matters
+            // because `a > b` DEREFERENCES the argument: admitting a nullable one would emit a call
+            // that NPEs inside the callee.
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
-                && rt != Ty::Error
-                && rt.is_reference()
+                && lt == rt
+                && self.is_enum_type(lt)
             {
-                if let Some(member) = self
-                    .resolve_instance_member(lt, "compareTo", &[rt])
-                    // `a > b` desugars to `a.compareTo(b)`, which DEREFERENCES the argument — kotlinc
-                    // rejects a nullable one ("argument type mismatch"), and accepting it here would
-                    // emit a call that NPEs inside the callee.
-                    .filter(|_| !rt.is_nullable())
+                let enum_ty = Ty::obj_name(crate::types::wk::java_enum());
+                if let Some(member) = self.resolve_instance_member(enum_ty, "compareTo", &[enum_ty])
                 {
                     if member.ret == Ty::Int {
-                        crate::trace_compiler!(
-                            "resolve",
-                            "compareTo drives comparison on {:?}",
-                            lt
+                        crate::trace_compiler!("resolve", "enum compareTo drives comparison");
+                        self.resolved_operator_calls.insert(
+                            (e, SyntheticOperatorCall::CompareTo),
+                            ResolvedCall::Member(member),
                         );
-                        self.resolved_calls.insert(e, ResolvedCall::Member(member));
                         return self.set(e, Ty::Boolean);
-                    }
-                }
-                // A source `enum class` compares through the `compareTo` it INHERITS from
-                // `java.lang.Enum`, which no member lookup on the enum itself reports. Resolve it on
-                // the supertype instead — the parameter is the erased `Enum`, so lowering casts the
-                // right operand to it, exactly as kotlinc does.
-                if lt == rt && self.is_enum_type(lt) {
-                    let enum_ty = Ty::obj_name(crate::types::wk::java_enum());
-                    if let Some(member) =
-                        self.resolve_instance_member(enum_ty, "compareTo", &[enum_ty])
-                    {
-                        if member.ret == Ty::Int {
-                            crate::trace_compiler!("resolve", "enum compareTo drives comparison");
-                            self.resolved_calls.insert(e, ResolvedCall::Member(member));
-                            return self.set(e, Ty::Boolean);
-                        }
                     }
                 }
             }
