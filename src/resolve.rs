@@ -1681,9 +1681,13 @@ pub struct SymbolTable {
         HashMap<TopLevelFunctionConflictKey, TopLevelFunctionConflictCandidates>,
     /// Declared classes by JVM internal name (e.g. `pkg/Point`, `pkg/Outer$Inner`) — two classes
     /// sharing a SIMPLE name in different packages are distinct entries, so member lookup on one
-    /// never evicts the other. `typealias` copies are the one exception: they key on the alias's
-    /// simple name so constructor-call paths that only have the alias spelling still find a sig.
+    /// never evicts the other. This is a strict invariant: source aliases live in the separate
+    /// declaration-keyed alias index below and never introduce a differently shaped key here.
     pub classes: HashMap<TypeName, ClassSig>,
+    /// Source `typealias` bindings by declaring file and alias spelling. An alias is a name-resolution
+    /// edge to a classifier identity, not another class declaration; keeping it separate prevents a
+    /// simple alias key from corrupting the internal-name invariant of [`Self::classes`].
+    source_class_aliases: HashMap<(u32, String), TypeName>,
     anonymous_object_types: HashMap<(u32, DeclId), TypeName>,
     anonymous_object_captures: HashMap<(u32, DeclId), Vec<AnonymousObjectCapture>>,
     anonymous_object_capture_discovered: std::collections::HashSet<(u32, DeclId)>,
@@ -1701,10 +1705,10 @@ pub struct SymbolTable {
     /// name but must emit the annotated one, and the callee's AST is out of its reach — so the name
     /// is recorded here, where the collect pass can see every file. Absent = the two agree.
     pub toplevel_jvm_names: HashMap<(u32, u32), String>,
-    /// Simple names declared as `object` singletons (accessed via `Name.member`).
-    pub objects: std::collections::HashSet<String>,
-    /// Declared `enum` types (simple name → entry names), accessed via `Name.ENTRY`.
-    pub enums: HashMap<String, Vec<String>>,
+    /// Declared enum entries by classifier identity, accessed via `Name.ENTRY`. Object identity is
+    /// already carried by `ClassSig::is_object`; duplicating it in a simple-name set made the two
+    /// sources disagree for cross-package homonyms.
+    pub enums: HashMap<TypeName, Vec<String>>,
     /// Static values by resolved classifier identity. Pre-indexed before signature inference so enum
     /// initializers do not depend on source declaration order or collide across packages.
     pub static_classifier_values: HashMap<TypeName, HashMap<String, Ty>>,
@@ -1758,6 +1762,7 @@ impl Default for SymbolTable {
             conflicting_top_level_key_by_source: HashMap::new(),
             conflicting_top_level_candidates: HashMap::new(),
             classes: HashMap::new(),
+            source_class_aliases: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),
             anonymous_object_capture_discovered: std::collections::HashSet::new(),
@@ -1766,7 +1771,6 @@ impl Default for SymbolTable {
             context_prop_names: std::collections::HashSet::new(),
             computed_props: std::collections::HashSet::new(),
             toplevel_jvm_names: HashMap::new(),
-            objects: std::collections::HashSet::new(),
             enums: HashMap::new(),
             static_classifier_values: HashMap::new(),
             libraries: Box::new(EmptySymbolSource),
@@ -1827,6 +1831,10 @@ impl SymbolTable {
         for class in self.classes.values_mut() {
             class.source_file += offset;
         }
+        self.source_class_aliases = std::mem::take(&mut self.source_class_aliases)
+            .into_iter()
+            .map(|((file, alias), internal)| ((file + offset, alias), internal))
+            .collect();
         self.conflicting_top_level_key_by_source =
             std::mem::take(&mut self.conflicting_top_level_key_by_source)
                 .into_iter()
@@ -1905,12 +1913,6 @@ impl SymbolTable {
     pub fn insert_class(&mut self, sig: ClassSig) -> Option<ClassSig> {
         let internal = sig.internal;
         self.classes.insert(internal, sig)
-    }
-
-    /// Insert a `typealias` copy under the ALIAS's simple name — the one deliberate exception to
-    /// internal-name keying, so constructor-call paths that only have the alias spelling find a sig.
-    pub fn insert_class_alias(&mut self, alias: String, sig: ClassSig) -> Option<ClassSig> {
-        self.classes.insert(type_name(&alias), sig)
     }
 
     pub fn insert_class_sig(&mut self, internal: TypeName, sig: ClassSig) -> Option<ClassSig> {
@@ -2002,6 +2004,37 @@ impl SymbolTable {
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.get(&internal)
+    }
+
+    /// Resolve one source file's alias spelling to its target module class. The returned class still
+    /// comes from the canonical internal-name table; aliases never manufacture duplicate signatures.
+    pub fn source_class_alias(&self, file: u32, alias: &str) -> Option<&ClassSig> {
+        self.source_class_aliases
+            .get(&(file, alias.to_string()))
+            .and_then(|internal| self.classes.get(internal))
+    }
+
+    /// Select a module class from a file's already-normalized name-resolution candidates.
+    ///
+    /// Both checker and lowerer have file-specific syntax views, but class-table lookup semantics are
+    /// identical: an explicit imported classifier wins, then the same-package identity, then a source
+    /// alias edge. Centralizing that identity selection prevents either consumer from growing a
+    /// file/module/classpath-specific fallback or accidentally querying [`Self::classes`] by spelling.
+    pub fn source_class_binding<I>(
+        &self,
+        file: u32,
+        explicit_candidates: I,
+        same_package: TypeName,
+        alias: &str,
+    ) -> Option<&ClassSig>
+    where
+        I: IntoIterator<Item = TypeName>,
+    {
+        explicit_candidates
+            .into_iter()
+            .find_map(|internal| self.classes.get(&internal))
+            .or_else(|| self.classes.get(&same_package))
+            .or_else(|| self.source_class_alias(file, alias))
     }
 
     /// Find the source declaration that owns a member property across the complete module hierarchy.
@@ -2564,15 +2597,9 @@ impl SymbolTable {
         )
     }
 
-    /// The source enum entry names for the class with this INTERNAL name, matching the
-    /// source-spelling `enums` key to the exact internal (`pkg/E` / `pkg/Outer$E`), so a
-    /// same-simple-name enum in another package cannot supply the entries.
+    /// The source enum entry names for this classifier identity.
     pub fn enum_entries_of(&self, internal: TypeName) -> Option<&Vec<String>> {
-        self.enums.iter().find_map(|(name, entries)| {
-            let mangled = name.replace('.', "$");
-            (internal.matches(&mangled) || internal.render().ends_with(&format!("/{mangled}")))
-                .then_some(entries)
-        })
+        self.enums.get(&internal)
     }
 
     /// The source spelling (`Wrapper`, `Outer.Inner` for a nested class) of a MODULE class's internal
@@ -4570,14 +4597,12 @@ fn collect_signatures_with_cp_impl(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
-    // Pre-seed object names and enum static values from ALL files so lightweight initializer
-    // inference is independent of declaration order.
+    // Pre-seed enum static values from ALL files so lightweight initializer inference is independent
+    // of declaration order. Object-ness stays on the canonical `ClassSig`; a second name-only index
+    // would recreate the cross-package collision this pass is designed to avoid.
     for file in files {
         for &d in &file.decls {
             if let Decl::Class(c) = file.decl(d) {
-                if c.is_object() {
-                    table.objects.insert(c.name.clone());
-                }
                 if c.is_enum() {
                     let internal = type_name(&class_internal(file, &c.name));
                     for entry in &c.enum_entries {
@@ -5939,12 +5964,9 @@ fn collect_signatures_with_cp_impl(
                             }],
                         );
                     }
-                    if c.is_object() {
-                        table.objects.insert(c.name.clone());
-                    }
                     if c.is_enum() {
                         table.enums.insert(
-                            c.name.clone(),
+                            type_name(&internal),
                             c.enum_entries.iter().map(|e| e.name.clone()).collect(),
                         );
                     }
@@ -6687,17 +6709,18 @@ fn collect_signatures_with_cp_impl(
         }
     }
 
-    // Add ClassSig aliases so that `typealias Bar = Foo` allows `Bar(...)` constructor calls.
-    // The copy keys on the ALIAS's simple name (the class map itself keys on internal names);
-    // the target resolves through `class_names`, whose per-name binding the import pass built.
-    for (alias, target) in &alias_map {
-        if !table.classes.contains_key(&type_name(alias)) {
-            if let Some(cs) = class_names
-                .get(target)
-                .and_then(|internal| table.classes.get(&internal))
-                .cloned()
+    // Retain source aliases as per-file name-resolution edges. A copied `ClassSig` under a simple
+    // alias key would violate the class table's internal-name invariant and make hierarchy walks,
+    // module providers, and direct lookups disagree about the same table.
+    for (file_index, file) in files.iter().enumerate() {
+        for (alias, _) in &file.type_aliases {
+            if let Some(internal) = file_class_names[file_index]
+                .get_class(alias)
+                .filter(|internal| table.classes.contains_key(internal))
             {
-                table.insert_class_alias(alias.clone(), cs);
+                table
+                    .source_class_aliases
+                    .insert((file_index as u32, alias.clone()), internal);
             }
         }
     }
@@ -8071,7 +8094,15 @@ fn infer_lit_ty_scoped(
     table: &SymbolTable,
 ) -> Ty {
     let up = |recv: Ty, name: &str| table.applied_member_prop_ty(recv, name);
-    let is_object = |name: &str| table.objects.contains(name);
+    // Resolve through this file's semantic classifier binding, then read object-ness from the one
+    // canonical class signature. A global simple-name set cannot answer this question correctly when
+    // two packages declare homonyms.
+    let is_object = |name: &str| {
+        class_names
+            .get_class(name)
+            .and_then(|internal| table.class_by_type_name(internal))
+            .is_some_and(ClassSig::is_object)
+    };
     let static_classifier_value = |internal: TypeName, name: &str| {
         table
             .static_classifier_values
@@ -18831,22 +18862,26 @@ impl<'a> Checker<'a> {
     /// module class, so the same-package arm still answers; the caller's `imported_type_name` /
     /// `class_names` arms resolve the classpath side.
     fn module_class_named(&self, name: &str) -> Option<&ClassSig> {
-        if let Some(fq) = self.imports.get(name) {
-            // Fold interning and class lookup into ONE find_map: `existing_type_name` only proves
-            // the string was interned (incidental probes intern `$`-spellings without a class behind
-            // them), so stopping there would drop a valid package-path import binding.
-            if let Some(sig) = nested_internal_name_candidates(fq)
-                .into_iter()
-                .rev()
-                .find_map(|candidate| {
-                    existing_type_name(&candidate)
-                        .and_then(|internal| self.syms.classes.get(&internal))
-                })
-            {
-                return Some(sig);
-            }
-        }
-        self.same_package_class(name)
+        let explicit_candidates = self
+            .imports
+            .get(name)
+            .into_iter()
+            .flat_map(|fq| nested_internal_name_candidates(fq).into_iter().rev())
+            .filter_map(|candidate| existing_type_name(&candidate));
+        self.syms.source_class_binding(
+            self.file_index,
+            explicit_candidates,
+            type_name(&class_internal(self.file, name)),
+            name,
+        )
+    }
+
+    /// The module classifier bound by `name`, narrowed to a singleton object. This keeps lookup and
+    /// classification on the same resolved `ClassSig`; a parallel simple-name set cannot preserve
+    /// identity across packages.
+    fn module_object_named(&self, name: &str) -> Option<&ClassSig> {
+        self.module_class_named(name)
+            .filter(|class| class.is_object())
     }
 
     fn scoped_classifier_name(&self, name: &str) -> InheritedNestedClassifier {
@@ -18960,10 +18995,8 @@ impl<'a> Checker<'a> {
         let internal = self
             .enclosing_nested_type_name(name)
             .or_else(|| self.module_class_named(name).map(ClassSig::internal_name))?;
-        let declaration = self.syms.class_simple_name(internal)?;
         self.syms
-            .enums
-            .get(&declaration)?
+            .enum_entries_of(internal)?
             .iter()
             .any(|candidate| candidate == entry)
             .then_some(internal)
@@ -23863,20 +23896,18 @@ impl<'a> Checker<'a> {
                     self.diags.error(self.span(e), "krusty: top-level property access from a companion member is not supported".to_string());
                     return self.set(e, Ty::Error);
                 }
-                if self.syms.objects.contains(&n) {
+                if let Some(cls) = self.module_object_named(&n) {
                     // A bare `object` name used as a value (`val x = Foo`, or a self-reference
                     // `object Foo { … Foo … }`) — its type is the singleton, read as `Foo.INSTANCE`
                     // by lowering. Resolved here so an object can refer to itself in its own body.
-                    if let Some(cls) = self.module_class_named(&n) {
-                        return self.set(e, Ty::obj(&cls.internal()));
-                    }
+                    return self.set(e, Ty::obj(&cls.internal()));
                 }
                 // A class NAME with a typed `companion object` used as a VALUE (`val c: I = C`): its
                 // value is the companion instance (`C.Companion`), typed as `C$Companion` — which the
                 // collect pass registered with the companion's supertypes, so it is assignable to them.
                 // Lowering reads `getstatic C.Companion`. (Only classes whose companion declares a
                 // supertype get a `C$Companion` ClassSig; a plain companion isn't a first-class value.)
-                if !self.syms.objects.contains(&n) {
+                if self.module_object_named(&n).is_none() {
                     if let Some(cls) = self.module_class_named(&n) {
                         let comp_internal = format!("{}$Companion", cls.internal());
                         if self.syms.class_by_internal(&comp_internal).is_some() {
@@ -24260,14 +24291,14 @@ impl<'a> Checker<'a> {
                         .dotted_root(receiver)
                         .is_some_and(|r| !self.value_root_shadows_classifier(&r))
                     {
-                        if let Some(entries) = self.syms.enums.get(&path) {
-                            if entries.iter().any(|en| en == &name) {
-                                let internal = self
-                                    .module_class_named(&path)
-                                    .map(ClassSig::internal_name)
-                                    .unwrap_or_else(|| type_name(&path.replace('.', "$")));
-                                self.resolved_enum_entries.insert(e, internal);
-                                return self.set(e, Ty::obj_name(internal));
+                        if let Some(internal) =
+                            self.module_class_named(&path).map(ClassSig::internal_name)
+                        {
+                            if let Some(entries) = self.syms.enum_entries_of(internal) {
+                                if entries.iter().any(|en| en == &name) {
+                                    self.resolved_enum_entries.insert(e, internal);
+                                    return self.set(e, Ty::obj_name(internal));
+                                }
                             }
                         }
                     }
@@ -24330,10 +24361,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // `ObjectName.prop` — a property on a singleton `object`.
-                    if self.syms.objects.contains(&en) {
-                        if let Some((ty, _)) =
-                            self.module_class_named(&en).and_then(|c| c.prop(&name))
-                        {
+                    if let Some(object) = self.module_object_named(&en) {
+                        if let Some((ty, _)) = object.prop(&name) {
                             return self.set(e, ty);
                         }
                     }
@@ -25001,7 +25030,8 @@ impl<'a> Checker<'a> {
                     }
                     // unbound `Type::m` (skip objects: `O::m` is bound to the singleton, which
                     // emit doesn't model — it would be miscompiled as unbound).
-                    if !self.value_root_shadows_classifier(&rn) && !self.syms.objects.contains(&rn)
+                    if !self.value_root_shadows_classifier(&rn)
+                        && self.module_object_named(&rn).is_none()
                     {
                         if let Some(cls) = self.module_class_named(&rn).cloned() {
                             if let Some(sig) = cls.method(&name).cloned() {
@@ -25110,7 +25140,9 @@ impl<'a> Checker<'a> {
                     // Object/singleton method reference `O::m` → BOUND to the singleton instance,
                     // so its arity is the method's own args (the receiver is captured, not a param).
                     // The lowering captures `O.INSTANCE`.
-                    if !self.value_root_shadows_classifier(&rn) && self.syms.objects.contains(&rn) {
+                    if !self.value_root_shadows_classifier(&rn)
+                        && self.module_object_named(&rn).is_some()
+                    {
                         if let Some(cls) = self.module_class_named(&rn).cloned() {
                             if let Some(sig) = cls.method(&name).cloned() {
                                 if sig.requires_all_args() {
@@ -29830,13 +29862,12 @@ impl<'a> Checker<'a> {
         let (owner_path, member) = full.rsplit_once('/')?;
         // A SAME-FILE object with a member of this name — dispatch on its singleton exactly like a
         // classpath object (`getstatic Obj.INSTANCE; invoke`).
-        if self.syms.objects.contains(owner_path) {
-            if let Some(cls) =
-                existing_type_name(owner_path).and_then(|internal| self.syms.classes.get(&internal))
-            {
-                if cls.methods.contains_key(member) {
-                    return Some((cls.internal_name(), member.to_string()));
-                }
+        if let Some(cls) = existing_type_name(owner_path)
+            .and_then(|internal| self.syms.class_by_type_name(internal))
+            .filter(|class| class.is_object())
+        {
+            if cls.methods.contains_key(member) {
+                return Some((cls.internal_name(), member.to_string()));
             }
         }
         let owner = self.nested_internal_name(owner_path)?;
@@ -31267,19 +31298,21 @@ impl<'a> Checker<'a> {
                 }
                 // `EnumName.values()` / `EnumName.valueOf(s)` — synthetic static enum methods.
                 if let Expr::Name(en) = self.file.expr(receiver).clone() {
-                    if !self.value_root_shadows_classifier(&en) && self.syms.enums.contains_key(&en)
-                    {
-                        let internal = self
-                            .module_class_named(&en)
-                            .map(ClassSig::internal)
-                            .unwrap_or(en.clone());
+                    let source_enum = (!self.value_root_shadows_classifier(&en))
+                        .then(|| {
+                            self.module_class_named(&en)
+                                .map(ClassSig::internal_name)
+                                .filter(|internal| self.syms.enum_entries_of(*internal).is_some())
+                        })
+                        .flatten();
+                    if let Some(internal) = source_enum {
                         if name == "values" && args.is_empty() {
-                            return Ty::array(Ty::obj(&internal));
+                            return Ty::array(Ty::obj_name(internal));
                         }
                         if let ("valueOf", [arg]) = (name.as_str(), args) {
                             let at = self.expr(*arg);
                             self.expect_assignable(Ty::String, at, self.span(*arg), "argument");
-                            return Ty::obj(&internal);
+                            return Ty::obj_name(internal);
                         }
                     }
                 }
@@ -36355,6 +36388,32 @@ mod tests {
 
         assert!(callable_accepts_arity(true, 0, 2, 0));
         assert!(callable_accepts_arity(true, 0, 2, 7));
+    }
+
+    #[test]
+    fn source_aliases_do_not_break_internal_class_table_keys() {
+        // A source alias is a file-scoped binding edge to `sample/Record`, never a second class entry
+        // keyed by the alias spelling. This invariant lets direct lookup, hierarchy traversal, module
+        // symbol projection, and lowering all use the same map without an alias-only branch.
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "package sample\nclass Record(val value: Int)\ntypealias LocalRecord = Record",
+            &mut diagnostics,
+        );
+        let symbols = collect_signatures(&[file], &mut diagnostics);
+
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        assert!(symbols
+            .classes
+            .iter()
+            .all(|(internal, signature)| *internal == signature.internal_name()));
+        assert_eq!(
+            symbols
+                .source_class_alias(0, "LocalRecord")
+                .map(ClassSig::internal_name),
+            Some(type_name("sample/Record"))
+        );
+        assert!(!symbols.classes.contains_key(&type_name("LocalRecord")));
     }
 
     #[test]

@@ -8234,20 +8234,23 @@ impl<'a> Lower<'a> {
     /// shadows the identical package path. An import naming no module classifier (a classpath type,
     /// or a FUNCTION like `import lib.Foo`) falls through to the same-package arm.
     fn module_class_named(&self, name: &str) -> Option<&FrontendClassSig> {
-        if let Some(sig) = self.afile.imports.iter().find_map(|imp| {
-            (imp.rsplit('.').next() == Some(name))
-                .then(|| imp.replace('.', "/"))
-                .and_then(|candidate| {
-                    crate::names::nested_internal_name_candidates(&candidate)
-                        .into_iter()
-                        .rev()
-                        .find_map(|candidate| self.syms.class_by_internal(&candidate))
-                })
-        }) {
-            return Some(sig);
-        }
-        self.syms
-            .class_by_internal(&class_internal(self.afile, name))
+        let explicit_candidates = self
+            .afile
+            .imports
+            .iter()
+            .filter(|import| import.rsplit('.').next() == Some(name))
+            .flat_map(|import| {
+                crate::names::nested_internal_name_candidates(&import.replace('.', "/"))
+                    .into_iter()
+                    .rev()
+            })
+            .filter_map(|candidate| existing_type_name(&candidate));
+        self.syms.source_class_binding(
+            self.file_index,
+            explicit_candidates,
+            type_name(&class_internal(self.afile, name)),
+            name,
+        )
     }
 
     /// Lower construction of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.

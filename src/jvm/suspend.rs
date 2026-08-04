@@ -1038,7 +1038,28 @@ fn hoist_expr(
     match ir.exprs[e as usize].clone() {
         // Unconditional value nodes: recurse, rewriting children.
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-            let nl = hoist_expr(ir, lhs, suspend_set, orig_rets, prelude);
+            // Hoisting a suspension out of the right operand must not leapfrog evaluation of the
+            // left operand. In `effect() + await()`, rewriting only the suspension to a preceding
+            // temp produces `val r = await(); effect() + r`, reversing Kotlin's left-to-right order.
+            // Bind the complete left value first whenever the right subtree suspends. This rule is
+            // based solely on ordered IR operands and their semantic value type; it does not depend
+            // on the call's source spelling, package, or provider.
+            let rhs_suspends = expr_calls_suspend(ir, rhs, suspend_set);
+            let mut nl = hoist_expr(ir, lhs, suspend_set, orig_rets, prelude);
+            if rhs_suspends {
+                let ty = hoisted_value_ty(ir, nl, orig_rets).unwrap_or_else(|| {
+                    panic!("primitive binary operand lost its semantic value type during suspend hoisting")
+                });
+                let tmp = max_value_index(ir) + 1;
+                let bound = ir.add_expr(IrExpr::Variable {
+                    index: tmp,
+                    ty,
+                    init: Some(nl),
+                    named: false,
+                });
+                prelude.push(bound);
+                nl = ir.add_expr(IrExpr::GetValue(tmp));
+            }
             let nr = hoist_expr(ir, rhs, suspend_set, orig_rets, prelude);
             ir.exprs[e as usize] = IrExpr::PrimitiveBinOp {
                 op,
@@ -1260,6 +1281,75 @@ fn hoist_expr(
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
         // flattener, which restructures it or skips the file).
         _ => e,
+    }
+}
+
+/// The semantic JVM value type needed when suspend normalization materializes an already-evaluated
+/// expression into a temporary. This is deliberately an IR-identity query: it reads the selected
+/// callee/field/type node and never re-resolves a source name. Keep the surface narrow to shapes that
+/// can appear as primitive-binary operands; returning `None` makes an unexpected lowering shape an
+/// internal invariant failure instead of emitting a temp with a guessed verification type.
+fn hoisted_value_ty(ir: &IrFile, expression: ExprId, orig_rets: &[Ty]) -> Option<Ty> {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Const(constant) => Some(match constant {
+            IrConst::Boolean(_) => Ty::Boolean,
+            IrConst::Int(_) => Ty::Int,
+            IrConst::Long(_) => Ty::Long,
+            IrConst::Double(_) => Ty::Double,
+            IrConst::Float(_) => Ty::Float,
+            IrConst::Char(_) => Ty::Char,
+            IrConst::String(_) => Ty::String,
+            IrConst::Short(_) => Ty::Short,
+            IrConst::Byte(_) => Ty::Byte,
+            IrConst::Null => Ty::Null,
+        }),
+        IrExpr::GetValue(index) => ir.exprs.iter().rev().find_map(|candidate| match candidate {
+            IrExpr::Variable {
+                index: candidate,
+                ty,
+                ..
+            } if candidate == index => Some(*ty),
+            _ => None,
+        }),
+        IrExpr::Call { callee, .. } => match callee {
+            Callee::Local(function) | Callee::LocalDefault(function) => {
+                orig_rets.get(*function as usize).copied()
+            }
+            Callee::CrossFile { ret, .. } => Some(*ret),
+            Callee::Static { descriptor, .. } | Callee::Special { descriptor, .. } => {
+                crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
+            }
+            Callee::Virtual {
+                descriptor, params, ..
+            } => params.as_ref().map(|(_, ret)| *ret).or_else(|| {
+                crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
+            }),
+            Callee::External(_) => None,
+        },
+        IrExpr::MethodCall { class, index, .. } => ir
+            .classes
+            .get(*class as usize)
+            .and_then(|class| class.methods.get(*index as usize))
+            .and_then(|function| orig_rets.get(*function as usize))
+            .copied(),
+        IrExpr::PrimitiveBinOp { op, lhs, .. } => Some(match op {
+            IrBinOp::Lt
+            | IrBinOp::Le
+            | IrBinOp::Gt
+            | IrBinOp::Ge
+            | IrBinOp::Eq
+            | IrBinOp::Ne
+            | IrBinOp::RefEq
+            | IrBinOp::RefNe
+            | IrBinOp::And
+            | IrBinOp::Or => Ty::Boolean,
+            _ => hoisted_value_ty(ir, *lhs, orig_rets)?,
+        }),
+        IrExpr::PrimitiveNeg { ty, .. }
+        | IrExpr::TypeOp {
+            type_operand: ty, ..
+        } => Some(*ty),
+        _ => None,
     }
 }
 

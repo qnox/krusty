@@ -8208,6 +8208,31 @@ mod tests {
     }
 
     #[test]
+    fn semantic_tokens_keep_same_named_source_classifiers_package_qualified() {
+        // Editor classification must follow the same internal classifier identity as the compiler.
+        // A global simple-name table would let the later class declaration overwrite the imported
+        // enum's kind and entries in the usage file.
+        let first = "package first\nenum class Marker { ONE }";
+        let second = "package second\nclass Marker { fun other(): Int = 1 }";
+        let usage = "package use\nimport first.Marker\nfun pick(): Marker = Marker.ONE";
+        let sources = [first, second, usage];
+        let analysis = analyze_standalone_source_set(&sources);
+        let highlight_symbols =
+            HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
+        let index = SemanticTokenIndex::from_source_set_file_analysis(
+            usage,
+            &analysis.files[2],
+            &analysis.symbols,
+            &highlight_symbols,
+        );
+        let tokens = decoded_tokens(&index);
+        let lines = usage.lines().collect::<Vec<_>>();
+
+        assert!(tokens.contains(&(1, lines[1].find("Marker").unwrap() as u32, 6, 2, 0,)));
+        assert!(tokens.contains(&(2, lines[2].rfind("ONE").unwrap() as u32, 3, 10, 4,)));
+    }
+
+    #[test]
     fn semantic_tokens_keep_type_alias_metadata_package_qualified() {
         let deprecated = "package old\n\
                           @Deprecated(\"old\") data class Record(val value: Int)\n\

@@ -1028,7 +1028,7 @@ mod tests {
             .classes
             .insert(type_name("sample/Phase"), class("sample/Phase"));
         symbols.enums.insert(
-            "Phase".to_string(),
+            type_name("sample/Phase"),
             vec!["FIRST".to_string(), "SECOND".to_string()],
         );
 
