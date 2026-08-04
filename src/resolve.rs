@@ -4407,9 +4407,12 @@ fn collect_signatures_with_cp_impl(
                     })
                     .or_else(|| {
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
-                        // or a nested type under a resolvable outer prefix.
+                        // or a nested type under a resolvable outer prefix. Supertype/delegation
+                        // positions arrive internalized (`CoroutineContext/Element`); the dotted
+                        // resolver speaks '.', so hand it the restored form. The map key stays the
+                        // file's original spelling, so later lookups by that spelling find it.
                         resolve_dotted_classpath_type(
-                            &name,
+                            &name.replace('/', "."),
                             &class_names,
                             &imap,
                             &wilds,

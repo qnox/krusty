@@ -70,3 +70,31 @@ fn packaged_nested_class_implements_qualified_interface() {
         }\n";
     common::expect_box_ok_with_stdlib(SRC, "PackagedNestedInterface");
 }
+
+#[test]
+fn implements_stdlib_nested_interface() {
+    // A CLASSPATH Kotlin nested interface as supertype (`MutableMap.MutableEntry` →
+    // `kotlin/collections/MutableMap$MutableEntry`): the dotted form must join with `$`, not `/`.
+    const SRC: &str = "class Entry(override val key: String, override val value: Int) : MutableMap.MutableEntry<String, Int> {\n\
+        \x20 override fun setValue(newValue: Int): Int = value\n\
+        }\n\
+        fun box(): String = Entry(\"OK\", 1).key\n";
+    assert_eq!(run(SRC).expect("stdlib nested interface supertype"), "OK");
+}
+
+#[test]
+fn coroutine_context_nested_supertypes_resolve_on_the_frontend() {
+    // The intellij find (`ActionContextElement`): `CoroutineContext.Element` + `CoroutineContext.Key`
+    // as supertypes of a class AND its companion. The full shape additionally extends an abstract
+    // classpath base, which hits a SEPARATE IR-backend gate — pin here that the FRONT END resolves
+    // both nested supertypes without the "supertype could not be resolved" diagnostic.
+    const SRC: &str = "import kotlin.coroutines.AbstractCoroutineContextElement\n\
+        import kotlin.coroutines.CoroutineContext\n\
+        class Elem(val name: String) : AbstractCoroutineContextElement(Elem), CoroutineContext.Element {\n\
+        \x20 companion object : CoroutineContext.Key<Elem>\n\
+        }\n";
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SRC) else {
+        return;
+    };
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
