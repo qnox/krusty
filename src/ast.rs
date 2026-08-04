@@ -1672,6 +1672,14 @@ impl File {
         let names: std::collections::HashSet<&str> = std::iter::once(name).collect();
         expr_refs_name_inner(self, e, &names, true)
     }
+
+    pub fn expr_uses_any_name_deep(
+        &self,
+        e: ExprId,
+        names: &std::collections::HashSet<&str>,
+    ) -> bool {
+        expr_refs_name_inner(self, e, names, true)
+    }
 }
 
 fn any_fun_body_expr(body: &FunBody, predicate: &mut impl FnMut(ExprId) -> bool) -> bool {

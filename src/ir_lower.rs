@@ -3560,10 +3560,11 @@ fn lower_file_at_reporting_impl(
                     }
                     // An anonymous object extending a *parameterized* base class can reference the
                     // enclosing instance's (private) members, which Kotlin binds by capture — not by
-                    // inheritance (a base's private field is invisible to a subclass). krusty has no
-                    // outer-instance capture, so it would resolve such a name to the inherited field
-                    // and miscompile (KT-3684). Bail those; SAM-style anon objects over interfaces or
-                    // no-argument classes are unaffected.
+                    // inheritance (a base's private field is invisible to a subclass). The construction
+                    // path still cannot mix captures with superclass constructor arguments, so it would
+                    // resolve such a name to the inherited field and miscompile (KT-3684). Bail those;
+                    // SAM-style anon objects over interfaces or no-argument classes are unaffected
+                    // (their outer-instance capture lowers through `this$0`).
                     // Anonymous-ness is an AST ownership fact, not a property of the generated JVM
                     // class name. Using declaration identity avoids coupling this soundness gate (and
                     // its diagnostics) to a synthetic naming convention or a user-chosen class name.
@@ -11057,6 +11058,13 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_anonymous_capture(&mut self, capture: &AnonymousObjectCapture) -> Option<u32> {
+        // The synthetic outer-instance capture: supply the enclosing `this` (the dispatch receiver
+        // at the construction site) — it is neither a scope local nor a field of the current class.
+        if capture.name == "this$0" {
+            let (this, actual) = self.lookup("$dispatch").or_else(|| self.lookup("this"))?;
+            let value = self.emit_get_value(this);
+            return self.coerce_argument_value(value, actual, capture.ty);
+        }
         if let Some((value, actual)) = self.lookup(&capture.name) {
             let value = self.emit_get_value(value);
             return self.coerce_argument_value(value, actual, capture.ty);
@@ -21948,9 +21956,9 @@ impl<'a> Lower<'a> {
                 return Some(entry);
             }
             // `this@Label` the checker resolved: `LabeledThisInner` (the current receiver) reads as a
-            // bare `this`; `LabeledThisOuter` (the immediate enclosing class of an `inner class`) reads
-            // the captured outer instance `this.this$0` (field index 0). Any other (unmarked) label
-            // can't be reached yet — bail (skip).
+            // bare `this`; `LabeledThisOuter` (the immediate enclosing class of an `inner class` or an
+            // anonymous object) reads the captured outer instance `this.this$0` (field index 0). Any
+            // other (unmarked) label can't be reached yet — bail (skip).
             let n = if n.starts_with("this@") {
                 match self.info.expr_lowers.get(&e) {
                     Some(ExprLowering::LabeledThisInner) => "this".to_string(),
@@ -24672,9 +24680,9 @@ impl<'a> Lower<'a> {
                 // which the class synthesis put at field 0). Supply the current `this` and lower
                 // the explicit args after it. Only reached inside the enclosing instance (the
                 // checker resolved it there), so `this` is in scope. The `this$0` field name is
-                // krusty's synthetic outer-instance marker (created only by inner-class synthesis;
-                // `$` cannot appear in a plain Kotlin identifier), so it exactly identifies an
-                // inner class.
+                // krusty's synthetic outer-instance marker (created by inner-class synthesis and by
+                // the anonymous-object outer-instance capture; `$` cannot appear in a plain Kotlin
+                // identifier), so it exactly identifies a class with a captured outer instance.
                 let is_inner = self.ir.classes[class as usize]
                     .fields
                     .first()

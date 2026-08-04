@@ -10698,8 +10698,9 @@ pub enum ExprLowering {
     /// A `this@Label` that denotes the INNERMOST receiver (the current `this`), so it lowers as a bare
     /// `this`. Only recorded for the innermost match; an outer-receiver label is left unresolved/skipped.
     LabeledThisInner,
-    /// A `this@Outer` denoting the IMMEDIATE enclosing class of an `inner class` — one class level up —
-    /// so it lowers as the inner class's captured outer instance (`this.this$0`).
+    /// A `this@Outer` denoting the IMMEDIATE enclosing class of an `inner class` or an anonymous
+    /// object — one class level up — so it lowers as the class's captured outer instance
+    /// (`this.this$0`).
     LabeledThisOuter,
     /// A platform property implemented by an intrinsic getter.
     IntrinsicProperty(Box<crate::libraries::LibraryMember>),
@@ -11409,6 +11410,62 @@ fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty
                 .any(|expression| expression_has_member_call_named(file, expression, name))
 }
 
+/// Whether an anonymous class body reaches the ENCLOSING class instance: an explicit `this@Outer`
+/// naming the immediate structural owner, or a reference to one of its member functions (declared
+/// or inherited, skipping names the anonymous class itself binds). Such references cannot be
+/// captured by value like an immutable property — they bind through the synthetic `this$0`
+/// outer-instance capture. Names the body does not reference keep the capture out, so a
+/// construction with superclass arguments (`object : Base(1) { … }`) stays on the
+/// ordinary constructor path.
+fn anonymous_body_needs_outer_this(
+    file: &File,
+    declaration: DeclId,
+    syms: &SymbolTable,
+    outer: Ty,
+) -> bool {
+    let Decl::Class(class) = file.decl(declaration) else {
+        return false;
+    };
+    let Some(internal) = outer.obj_internal() else {
+        return false;
+    };
+    let bound = anonymous_body_bound_names(file, declaration);
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(simple) = syms.class_simple_name(internal) {
+        names.insert(format!("this@{}", class_declaration_label(&simple)));
+    }
+    let mut hierarchy = vec![internal];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(owner) = hierarchy.pop() {
+        if !visited.insert(owner) {
+            continue;
+        }
+        let Some(signature) = syms.class_by_type_name(owner) else {
+            continue;
+        };
+        names.extend(signature.methods.keys().cloned());
+        if let Some(base) = signature.super_internal {
+            hierarchy.push(base);
+        }
+        hierarchy.extend(signature.interfaces.iter());
+    }
+    let names: std::collections::HashSet<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !bound.contains(*name))
+        .collect();
+    if names.is_empty() {
+        return false;
+    }
+    class
+        .methods
+        .iter()
+        .filter_map(|method| fun_body_expr(&method.body))
+        .chain(class.body_props.iter().filter_map(|property| property.init))
+        .chain(class.base_args.iter().copied())
+        .any(|expression| file.expr_uses_any_name_deep(expression, &names))
+}
+
 #[derive(Clone)]
 struct AnonymousCaptureCandidate {
     name: String,
@@ -11436,8 +11493,11 @@ fn record_anonymous_construction_captures(
         .filter(|(_, candidate)| candidate.ty != Ty::Error)
         .filter(|(_, candidate)| !bound.contains(&candidate.name))
         .filter(|(_, candidate)| !anonymous_body_writes_name(file, declaration, &candidate.name))
+        // The synthetic outer-instance capture's name never appears in source, so the body-usage
+        // scan would always drop it; its need was decided by `anonymous_body_needs_outer_this`.
         .filter(|(_, candidate)| {
-            anonymous_body_uses_name(file, declaration, &candidate.name, candidate.ty)
+            candidate.name == "this$0"
+                || anonymous_body_uses_name(file, declaration, &candidate.name, candidate.ty)
         })
         .map(|(_, candidate)| AnonymousObjectCapture {
             name: candidate.name.clone(),
@@ -11469,6 +11529,8 @@ fn install_anonymous_object_captures(
             {
                 continue;
             }
+            // Each capture becomes a private synthetic property; for the `this$0` capture this
+            // property doubles as the outer-instance field lowering reads at index 0.
             class.props.push((capture.name.clone(), capture.ty, false));
             class.declared_props.insert(
                 capture.name.clone(),
@@ -12018,6 +12080,10 @@ fn preinfer_returns_pass_with_owners(
             );
             let labels_depth = pre.this_labels.len();
             pre.set_this_ty(Some(dispatch_ty));
+            if anonymous_lexical_scope.declarations.contains(&d) {
+                let outer = pre.anonymous_outer_receiver_labels();
+                pre.this_labels.extend(outer);
+            }
             pre.this_labels
                 .extend(class_receiver_labels(cl, pre.syms, Some(dispatch_ty)));
             let properties = pre.scoped_properties(internal_name);
@@ -12418,8 +12484,14 @@ fn check_file_at_impl_mode(
                 c.set_this_ty(current_owner.map(Ty::obj_name));
                 // Push the enclosing-class labels for the duration of this class's member checks: the
                 // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
-                // class's own label (`this@C`) innermost. Walk `inner_of` outward.
-                let labels = class_receiver_labels(cl, c.syms, c.this_ty);
+                // class's own label (`this@C`) innermost. Walk `inner_of` outward. An anonymous object
+                // has no `inner_of` edge; its outer chain is the structural ownership chain.
+                let mut labels = class_receiver_labels(cl, c.syms, c.this_ty);
+                if anonymous_lexical_scope.declarations.contains(&d) {
+                    let mut outer = c.anonymous_outer_receiver_labels();
+                    outer.append(&mut labels);
+                    labels = outer;
+                }
                 let label_depth = labels.len();
                 c.this_labels.extend(labels);
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
@@ -15720,6 +15792,55 @@ impl<'a> Checker<'a> {
             }
         }
         receivers
+    }
+
+    /// Receiver labels for the enclosing-class chain of a hoisted anonymous-object declaration —
+    /// the anonymous analogue of the `inner_of` walk in [`class_receiver_labels`]. The structural
+    /// owners sit in `lexical_class_context` nearest-first (installed by
+    /// [`Self::set_anonymous_lexical_class_context`]); each owner's own `inner_of` chain continues
+    /// outward. Returned outermost-first, matching [`class_receiver_labels`].
+    fn anonymous_outer_receiver_labels(&self) -> Vec<(String, Ty, bool)> {
+        let mut roots: Vec<TypeName> = Vec::new();
+        for &owner in &self.lexical_class_context {
+            let mut current = Some(owner);
+            while let Some(internal) = current {
+                if roots.contains(&internal) {
+                    break;
+                }
+                roots.push(internal);
+                current = self
+                    .syms
+                    .class_by_type_name(internal)
+                    .and_then(ClassSig::inner_of_name);
+            }
+        }
+        let mut labels = Vec::with_capacity(roots.len());
+        for internal in roots.iter().rev() {
+            let Some(signature) = self.syms.class_by_type_name(*internal) else {
+                continue;
+            };
+            let declaration = self
+                .syms
+                .class_simple_name(*internal)
+                .unwrap_or_else(|| "<anonymous>".to_string());
+            labels.push((
+                class_declaration_label(&declaration).to_string(),
+                Ty::obj_name(signature.internal_name()),
+                true,
+            ));
+        }
+        labels
+    }
+
+    /// The enclosing instance an anonymous-object construction captures as `this$0`: the innermost
+    /// CLASS receiver on the label stack — the dispatch instance lowering supplies at the
+    /// construction site (an extension receiver is not a capturable enclosing instance).
+    fn anonymous_construction_outer_this(&self) -> Option<Ty> {
+        self.this_labels
+            .iter()
+            .rev()
+            .find(|(_, _, is_class)| *is_class)
+            .map(|(_, receiver, _)| *receiver)
     }
 
     fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
@@ -22576,7 +22697,8 @@ impl<'a> Checker<'a> {
             // `this@Label` — a labeled receiver. Resolve from the receiver-label stack (innermost last):
             // the matching entry's type is the result. The INNERMOST match (the current `this`) records
             // `LabeledThisInner` (lowered as a bare `this`); a match exactly ONE class level up, with
-            // both ends classes, records `LabeledThisOuter` (lowered via the inner class's `this$0`).
+            // both ends classes, records `LabeledThisOuter` (lowered via the class's captured `this$0`
+            // — synthesized for `inner class`es and for anonymous objects that reach the outer instance).
             // Any other (captured / multi-level / cross-lambda) match type-checks but the lowerer skips.
             Expr::Name(n) if n.starts_with("this@") => {
                 let label = &n["this@".len()..];
@@ -30679,6 +30801,20 @@ impl<'a> Checker<'a> {
                     })
                     .collect::<Vec<_>>();
                 candidates.sort_by(|left, right| left.name.cmp(&right.name));
+                // A body reaching the enclosing instance (`this@Outer` or an outer member call)
+                // needs the instance itself, supplied FIRST so it lands at field 0 — the slot
+                // `inner_outer_method` and `LabeledThisOuter` lowering read as `this$0`.
+                if let Some(outer) = self.anonymous_construction_outer_this() {
+                    if anonymous_body_needs_outer_this(self.file, declaration, self.syms, outer) {
+                        candidates.insert(
+                            0,
+                            AnonymousCaptureCandidate {
+                                name: "this$0".to_string(),
+                                ty: outer,
+                            },
+                        );
+                    }
+                }
                 record_anonymous_construction_captures(
                     self.file,
                     call,
@@ -30701,10 +30837,16 @@ impl<'a> Checker<'a> {
                 .unwrap_or_default();
             if !captures.is_empty() {
                 for capture in captures {
-                    let actual = self
-                        .lookup(&capture.name)
-                        .map(|local| local.narrowed.unwrap_or(local.ty))
-                        .unwrap_or(Ty::Error);
+                    let actual = if capture.name == "this$0" {
+                        // The outer-instance capture is not a scope local; the construction site's
+                        // dispatch instance supplies it.
+                        self.anonymous_construction_outer_this()
+                            .unwrap_or(Ty::Error)
+                    } else {
+                        self.lookup(&capture.name)
+                            .map(|local| local.narrowed.unwrap_or(local.ty))
+                            .unwrap_or(Ty::Error)
+                    };
                     self.expect_assignable(capture.ty, actual, span, "anonymous object capture");
                 }
                 return self
