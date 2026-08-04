@@ -25541,22 +25541,70 @@ impl<'a> Lower<'a> {
                     .lower_selected_op_call(receiver, receiver_ty, &name, &args, target, Some(e))
                     .map(|(value, _)| value);
             }
-            // `a.equals(b)` between two values of the SAME unsigned type is kotlinc's `equals`
-            // INTRINSIC: an unsigned value class wraps exactly one field, so its equality can only
-            // compare the two carriers — kotlinc folds the call away to the instructions `a == b`
-            // emits, with no box anywhere. Deliberately narrow to an argument of exactly the receiver's
-            // type: for any OTHER argument the answer is the value class's own, which is what makes a
-            // cross-carrier comparison `false` (a `UInt` is never a `ULong`, however the bits line up)
-            // and a nullable one null-safe. Those keep the ordinary member-call path.
+            // `a.equals(b)` on an unsigned receiver. The `invokevirtual` form of this call needs a
+            // REFERENCE receiver, and an unsigned value lives in the primitive slot of its carrier —
+            // so reaching it means boxing the receiver purely to have something to invoke on. kotlinc
+            // avoids that in every shape but one (see the `null` note below), via two lowerings that
+            // both leave the receiver unboxed:
+            //
+            //  * BOTH sides the same unsigned type is kotlinc's `equals` INTRINSIC: an unsigned value
+            //    class wraps exactly one field, so its equality can only compare the two carriers, and
+            //    the call folds away to the instructions `a == b` emits, with no call at all;
+            //  * every OTHER argument keeps the value class's OWN equality, reached through the static
+            //    `kotlin/UInt."equals-impl":(ILjava/lang/Object;)Z`. It tests the argument's runtime
+            //    class first, which is what makes a cross-carrier comparison `false` (a `UInt` is never
+            //    a `ULong`, however the bits line up), a `null` argument `false`, and a `UInt?` one
+            //    null-safe — semantics a carrier compare would get wrong, hence the narrow fold above.
+            //
+            // Two deliberate shape divergences, both against a kotlinc result that is a CONSTANT and
+            // both answering that same constant:
+            //  * the CROSS-CARRIER pair, where kotlinc's PRIMITIVE-`equals` intrinsic sees the two
+            //    erased carriers, boxes both through the JAVA wrappers (`Integer.valueOf`/
+            //    `Long.valueOf`) and calls `Intrinsics.areEqual` — `false` by construction, which is
+            //    what `equals-impl` answers for a `kotlin/ULong` argument;
+            //  * a LITERAL `null` argument, the one place kotlinc does box the receiver and emit
+            //    `invokevirtual kotlin/UInt.equals` (its intrinsic declines the `Nothing?` argument).
+            //    `equals-impl` answers the same `false` without the box. A `null` held in an `Any?`
+            //    goes through `equals-impl` in kotlinc too — only the bare literal differs.
             {
                 let rty = self.info.ty(receiver);
-                if let [arg] = args[..] {
-                    // `Ty` equality here is exact, nullability included: `UInt?` is a different type
-                    // and must NOT fold (its equality is null-safe, a carrier compare is not).
-                    if rty.is_unsigned() && name == "equals" && self.info.ty(arg) == rty {
+                if rty.is_unsigned() && name == "equals" {
+                    if let [arg] = args[..] {
+                        // `Ty` equality here is exact, nullability included: `UInt?` is a different
+                        // type and must NOT fold (its equality is null-safe, a carrier compare is not).
+                        let same_type = self.info.ty(arg) == rty;
                         let l = self.expr(receiver)?;
-                        let r = self.expr(arg)?;
-                        return Some(self.emit_primitive_bin_op(IrBinOp::Eq, l, r));
+                        // A non-same-type argument occupies the erased `Object` slot, so it arrives
+                        // BOXED however it was carried: an unsigned one through its own `box-impl`
+                        // (never a Java wrapper — `equals-impl` type-tests it), a signed primitive
+                        // through the wrapper, a reference unchanged.
+                        let r = if same_type {
+                            self.expr(arg)?
+                        } else {
+                            self.lower_arg(arg, &Ty::obj("kotlin/Any"))?
+                        };
+                        // kotlinc evaluates the RECEIVER first. When the ARGUMENT suspends, everything
+                        // after the suspension point moves into the resume block — so a receiver left
+                        // as a plain operand is re-evaluated there, AFTER the argument, and a receiver
+                        // with a side effect runs in the wrong order. Spill it to a temp local first
+                        // (an unnamed slot in kotlinc's bytecode), the same fix and the same condition
+                        // `emit_library_member_call` applies to the shapes that still reach it.
+                        let spill =
+                            (self.cur_fn_suspend && self.ir_subtree_suspends(r)).then(|| {
+                                let rv = self.fresh_value();
+                                let decl = self.emit_named_variable(rv, ty_to_ir(rty), Some(l));
+                                (decl, self.emit_get_value(rv))
+                            });
+                        let l = spill.map_or(l, |(_, get)| get);
+                        let value = if same_type {
+                            self.emit_primitive_bin_op(IrBinOp::Eq, l, r)
+                        } else {
+                            self.runtime_call(RuntimeOp::UnsignedEquals, rty, vec![l, r])?
+                        };
+                        return Some(match spill {
+                            Some((decl, _)) => self.emit_block(vec![decl], Some(value)),
+                            None => value,
+                        });
                     }
                 }
             }

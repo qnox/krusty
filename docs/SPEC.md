@@ -1390,7 +1390,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
   The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
   new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
-<<<<<<< HEAD
 - **Unsigned types `UByte`/`UShort`/`UInt`/`ULong`** — Kotlin inline classes over `Byte`/`Short`/`Int`/`Long`;
   unboxed they ARE that JVM primitive (descriptor `B`/`S`/`I`/`J`), with unsignedness driving
   operation/conversion choice (kotlinc hardcodes these intrinsic mappings, so krusty mirrors them). Literals
@@ -1411,17 +1410,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   DIVERGENCE, not a skip: the native unsigned types do not carry kotlinc's value-class NAME MANGLING on a
   function that takes one — krusty emits `f(byte)` where kotlinc emits `f-7apg3OU(byte)`, pre-existing and
   shared by `UInt`/`ULong`.
-=======
-- **Unsigned types `UInt`/`ULong`** — Kotlin inline classes over `Int`/`Long`; unboxed they ARE that JVM
-  primitive (descriptor `I`/`J`), with unsignedness driving operation/conversion choice (kotlinc hardcodes
-  these intrinsic mappings, so krusty mirrors them). Literals `1u`/`0xFFuL`; `+`/`-`/`*`/`==` use the signed
-  two's-complement opcodes; `/`/`%`/`<`/`>` use `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for
-  `ULong`); `toString`/templates use `Integer.toUnsignedString`; `UInt.toLong()` zero-extends via
-  `Integer.toUnsignedLong` (not the sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into
-  a reference context uses the inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and
-  `unbox-impl` on read, `is UInt` → `instanceof kotlin/UInt`) — never `Integer`, so identity and large
-  values are preserved. `tests/unsigned_e2e.rs`. (`UByte`/`UShort`, `UIntRange` value iteration, and unsigned
-  `when` subjects are not yet modeled — they cleanly skip.)
 - **Unsigned values at a CLASSPATH call boundary** — because an unsigned value has TWO representations
   (the carrier in a primitive slot, and the boxed inline class), every classpath call is a place where the
   representation the lowerer produced must agree with the descriptor the backend spells verbatim. Both
@@ -1431,16 +1419,35 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     descriptor declares: `maxOf(a, b)` on a `UInt` emits `iload; iload; invokestatic
     UComparisonsKt."maxOf-J1ME1BU":(II)I`, byte-for-byte kotlinc's shape, and compares in UNSIGNED order
     (the stdlib callee owns the comparator, so values past the sign bit order correctly);
-  - `a.equals(b)` between two values of the SAME unsigned type is kotlinc's `equals` **intrinsic**: an
-    unsigned value class wraps exactly one field, so its equality can only compare the carriers, and the
-    call folds away to precisely the instructions `a == b` emits (byte-identical to krusty's own `==`,
-    no box anywhere). Deliberately narrow to an argument of exactly the receiver's type — every other
-    argument keeps the value class's own equality, which is what makes a cross-carrier comparison
-    `false` (`UInt.equals(ULong)`, however the bits line up) and a nullable one null-safe;
-  - an `invokevirtual` on the value class itself takes the **boxed** receiver, which is what those
-    remaining shapes (`Any`/nullable/cross-carrier arguments) use. kotlinc instead reaches the static
-    `kotlin/UInt."equals-impl"(ILjava/lang/Object;)Z` and leaves the receiver unboxed; krusty's call is
-    semantically equal, not shape-equal, on those paths only.
+  - `a.equals(b)` on an unsigned receiver never uses the `invokevirtual` form of the call. That
+    instruction needs a REFERENCE receiver, so it forces a `box-impl` purely to have something to
+    invoke on. The receiver stays the carrier in both directions:
+    - between two values of the SAME unsigned type it is kotlinc's `equals` **intrinsic**: an unsigned
+      value class wraps exactly one field, so its equality can only compare the carriers, and the call
+      folds away to precisely the instructions `a == b` emits (byte-identical to krusty's own `==`, no
+      box anywhere). Deliberately narrow to an argument of exactly the receiver's type — `Ty` equality
+      including nullability, since `UInt?` is null-safe and a carrier compare is not;
+    - every OTHER argument keeps the value class's own equality, reached through the static
+      `kotlin/UInt."equals-impl":(ILjava/lang/Object;)Z` (`B`/`S`/`J` for the other three). It
+      type-tests the argument first, which is what makes a cross-carrier comparison `false`
+      (`UInt.equals(ULong)`, however the bits line up), a `null` argument `false`, and a `UInt?` one
+      null-safe. The argument occupies the erased `Object` slot, so it arrives boxed however it was
+      carried: an unsigned one through its own `box-impl` (never a Java wrapper — `equals-impl`
+      type-tests it), a signed primitive through the wrapper, a reference unchanged.
+
+      Two deliberate shape divergences live here, both against a kotlinc result that is a CONSTANT, and
+      both answering that same constant without the box kotlinc pays for it:
+      - the CROSS-CARRIER pair. kotlinc's primitive-`equals` intrinsic sees the two erased carriers,
+        boxes both through the JAVA wrappers (`Integer.valueOf`/`Long.valueOf`) and calls
+        `Intrinsics.areEqual` — `false` by construction, since a `java/lang/Integer` never equals a
+        `java/lang/Long`. That is exactly what `equals-impl` answers for a `kotlin/ULong` argument, so
+        krusty rides the one static rather than earning a second arm;
+      - a LITERAL `null` argument — the ONE place kotlinc does box the receiver and emit `invokevirtual
+        kotlin/UInt.equals` (its intrinsic declines the `Nothing?` argument). `equals-impl` answers the
+        same `false` unboxed. Only the bare literal differs: a `null` held in an `Any?` goes through
+        `equals-impl` in kotlinc too.
+
+      Verified against kotlinc 2.4.10 with `javap` on all four unsigned types.
 
   Getting either wrong produced a class file that FAILED JVM VERIFICATION while krusty reported success —
   output strictly worse than declining the file, and invisible to a differential harness that checks
@@ -1453,7 +1460,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recovery, which turns the miscompile back into a clean skip.
   `tests/unsigned_classpath_call_e2e.rs` asserts the backend contract directly (a decline passes; an
   EMITTED class that does not verify and run fails), so it keeps holding whichever way a shape is handled.
->>>>>>> origin/master
+  `tests/bytecode_parity_e2e.rs` pins the two `equals` SHAPES: the folded carrier compare, and
+  `equals-impl` with an unboxed receiver — the latter across all four carriers (`B`/`S`/`I`/`J`) and
+  across `Any`, `String`, `UInt?`, cross-carrier, and the literal-`null` divergence. It also pins that
+  both lowerings evaluate the RECEIVER before a SUSPENDING argument: neither reaches
+  `emit_library_member_call`, so each spills the receiver to a temp itself, or the coroutine pass
+  re-evaluates it in the resume block after the argument has already run.
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
