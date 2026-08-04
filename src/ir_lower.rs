@@ -14,11 +14,11 @@ use crate::ast::{
 use crate::frontend::{
     classifier_over_default, function_import_scope, qualified_path, typeref_leaf,
     AnonymousObjectCapture, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
-    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendSymbols,
-    FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget,
-    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall,
-    ResolvedConstructor, ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
+    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendClassSig,
+    FrontendSymbols, FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind,
+    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda,
+    ResolvedCall, ResolvedConstructor, ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall,
+    ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -838,7 +838,7 @@ fn lower_file_at_reporting_impl(
             // An `inner class` captures the enclosing instance: a synthetic `this$0` field of the outer
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
-            let class_sig = syms.classes.get(&c.name)?;
+            let class_sig = syms.class_by_internal(&internal)?;
             let resolved_prop_ty = |name: &str| {
                 class_sig
                     .props
@@ -948,8 +948,7 @@ fn lower_file_at_reporting_impl(
                     let (_, _, gv_ret, _, _) =
                         lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
                     let prop_ty = syms
-                        .classes
-                        .get(&c.name)
+                        .class_by_internal(&internal)
                         .and_then(|cs| {
                             cs.props
                                 .iter()
@@ -1360,7 +1359,7 @@ fn lower_file_at_reporting_impl(
             let mut method_fids = Vec::new();
             for (mi, m) in c.methods.iter().enumerate() {
                 // Ordinary and extension overloads occupy separate signature tables.
-                let class_sig = syms.classes.get(&c.name)?;
+                let class_sig = syms.class_by_internal(&internal)?;
                 let extension_receiver = if m.receiver.is_some() {
                     let overload_idx = c.methods[..mi]
                         .iter()
@@ -1633,7 +1632,7 @@ fn lower_file_at_reporting_impl(
                 .enumerate()
                 .filter(|(_, p)| is_member_ext_prop(p))
             {
-                let sig = member_extension_property_plan(syms, c, pi)?;
+                let sig = member_extension_property_plan(syms, &internal, c, pi)?;
                 // Only the concrete shape: a receiver/return mentioning a class type parameter's own
                 // type erases through bounds the read/write handoff doesn't carry, and a value-class
                 // receiver/return needs the boxed/mangled form — both stay gated (skip, never
@@ -1714,8 +1713,7 @@ fn lower_file_at_reporting_impl(
             // instance method that calls the delegate's `getValue`/`setValue`. Bodies built in pass 2.
             for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
                 let prop_ty = syms
-                    .classes
-                    .get(&c.name)
+                    .class_by_internal(&internal)
                     .and_then(|cs| {
                         cs.props
                             .iter()
@@ -2219,7 +2217,7 @@ fn lower_file_at_reporting_impl(
                 // `AbstractMethodError`. Verify each overriding method matches exactly; otherwise (or for a
                 // classpath interface, whose methods aren't checked here) skip the file — never miscompile.
                 let mut comp_ifaces = Vec::new();
-                let csig0 = syms.classes.get(&c.name)?;
+                let csig0 = syms.class_by_internal(&internal)?;
                 for st in &c.companion_supertypes {
                     let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface()));
                     if !is_file_iface {
@@ -2337,7 +2335,7 @@ fn lower_file_at_reporting_impl(
                     field_annotations: Vec::new(),
                     runtime_retained: false,
                 });
-                let csig = syms.classes.get(&c.name)?;
+                let csig = syms.class_by_internal(&internal)?;
                 let mut cmethods: HashMap<String, Vec<(u32, u32, Ty)>> = HashMap::new();
                 let mut cmethod_fids = Vec::new();
                 for (mi, m) in c.companion_methods.iter().enumerate() {
@@ -3098,7 +3096,7 @@ fn lower_file_at_reporting_impl(
                     }
                     // A member extension has dispatch `this` at slot 0 and extension `this` at slot 1.
                     let dispatch_v = lo.fresh_value();
-                    let class_sig = syms.classes.get(&c.name)?;
+                    let class_sig = syms.class_by_internal(&internal)?;
                     let extension_signature = if m.receiver.is_some() {
                         Some(
                             class_sig
@@ -3205,7 +3203,7 @@ fn lower_file_at_reporting_impl(
                     .enumerate()
                     .filter(|(_, p)| is_member_ext_prop(p))
                 {
-                    let sig = member_extension_property_plan(syms, c, pi)?;
+                    let sig = member_extension_property_plan(syms, &internal, c, pi)?;
                     let (receiver_ir, ret_ir) = sig.ir_types(p);
                     // Link the accessor by name AND parameter list: a plain computed property of the
                     // same name registers `getX()` first, and receiver overloads share `getX` —
@@ -3473,7 +3471,10 @@ fn lower_file_at_reporting_impl(
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
-                        let sig = syms.classes.get(&c.name)?.static_methods.get(&m.name)?;
+                        let sig = syms
+                            .class_by_internal(&internal)?
+                            .static_methods
+                            .get(&m.name)?;
                         for (p, t) in m.params.iter().zip(&sig.params) {
                             let v = lo.fresh_value();
                             lo.scope.push((p.name.clone(), v, *t));
@@ -4443,8 +4444,7 @@ fn lower_file_at_reporting_impl(
                             // member is declared on the enum itself, OR on an implemented interface
                             // (`enum class E : I { A { override fun … } }`).
                             let sig = match syms
-                                .classes
-                                .get(&c.name)
+                                .class_by_internal(&internal)
                                 .and_then(|cs| cs.method(&bm.name))
                             {
                                 Some(s) => s.clone(),
@@ -5454,6 +5454,7 @@ impl MemberExtensionPropertyPlan {
 /// pass 1 from registering one overload while pass 2 links and overwrites another overload's body.
 fn member_extension_property_plan(
     symbols: &FrontendSymbols,
+    internal: &str,
     class: &ast::ClassDecl,
     property_index: usize,
 ) -> Option<MemberExtensionPropertyPlan> {
@@ -5463,8 +5464,7 @@ fn member_extension_property_plan(
         .filter(|candidate| candidate.name == property.name && candidate.receiver.is_some())
         .count();
     let signature = symbols
-        .classes
-        .get(&class.name)?
+        .class_by_internal(internal)?
         .member_ext_props(&property.name)
         .get(overload_index)?;
     Some(MemberExtensionPropertyPlan {
@@ -8224,7 +8224,33 @@ impl<'a> Lower<'a> {
             .class_names
             .get(name)
             .map(TypeName::render)
-            .or_else(|| self.syms.classes.get(name).map(|c| c.internal()))
+            .or_else(|| self.module_class_named(name).map(|c| c.internal()))
+    }
+
+    /// The MODULE class a bare classifier name binds to in THIS file: an explicit import naming a
+    /// module class first, then a same-package declaration — mirrors the checker's
+    /// `module_class_named` (the class map keys on internal names, so a same-simple-name class in
+    /// another package never answers). The import arm is classifier-first: a nested source class
+    /// shadows the identical package path. An import naming no module classifier (a classpath type,
+    /// or a FUNCTION like `import lib.Foo`) falls through to the same-package arm.
+    fn module_class_named(&self, name: &str) -> Option<&FrontendClassSig> {
+        let explicit_candidates = self
+            .afile
+            .imports
+            .iter()
+            .filter(|import| import.rsplit('.').next() == Some(name))
+            .flat_map(|import| {
+                crate::names::nested_internal_name_candidates(&import.replace('.', "/"))
+                    .into_iter()
+                    .rev()
+            })
+            .filter_map(|candidate| existing_type_name(&candidate));
+        self.syms.source_class_binding(
+            self.file_index,
+            explicit_candidates,
+            type_name(&class_internal(self.afile, name)),
+            name,
+        )
     }
 
     /// Lower construction of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
@@ -10450,8 +10476,11 @@ impl<'a> Lower<'a> {
         // symbol handoff, not the resolver implementation that originally populated it.
         let mut properties: Vec<(TypeName, String, String, Option<String>, Ty)> = Vec::new();
         let mut seen_ifaces: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
-        let mut queue = vec![existing_type_name(&iface_internal)
-            .or_else(|| self.syms.classes.get(iface_name).map(|c| c.internal_name()))?];
+        let mut queue = vec![existing_type_name(&iface_internal).or_else(|| {
+            self.syms
+                .class_by_internal(&class_internal(file, iface_name))
+                .map(|c| c.internal_name())
+        })?];
         while let Some(cur) = queue.pop() {
             if !seen_ifaces.insert(cur) {
                 continue;
@@ -16905,9 +16934,7 @@ impl<'a> Lower<'a> {
             }
             InheritedNestedClassifier::Ambiguous => InheritedNestedClassifier::Ambiguous,
             InheritedNestedClassifier::NotFound => self
-                .syms
-                .classes
-                .get(name)
+                .module_class_named(name)
                 .map(|class| class.internal_name())
                 .or_else(|| self.syms.class_names.get_class(name))
                 .map_or(
@@ -16982,9 +17009,7 @@ impl<'a> Lower<'a> {
         // the checker — an in-scope type name shadows a package path.
         if let Some((outer, rest)) = name.split_once('.') {
             let base = self
-                .syms
-                .classes
-                .get(outer)
+                .module_class_named(outer)
                 .map(|c| c.internal())
                 .or_else(|| {
                     self.syms
@@ -17089,7 +17114,7 @@ impl<'a> Lower<'a> {
         } else if self.contains_class(&class_internal(self.afile, &r.name)) {
             // A nested class by source name (`Outer.Inner` → `Outer$Inner`).
             Ty::obj(&class_internal(self.afile, &r.name))
-        } else if let Some(cs) = self.syms.classes.get(&r.name) {
+        } else if let Some(cs) = self.module_class_named(&r.name) {
             Ty::obj(&cs.internal())
         } else if let Some(internal) = self.syms.class_names.get(&r.name) {
             // A classpath / built-in mapped type (`Number`, `CharSequence`, `Runnable`, a Java class) —
@@ -21425,7 +21450,7 @@ impl<'a> Lower<'a> {
                 result_ty.obj_internal().is_some_and(|i| self
                     .syms
                     .classes
-                    .get(i.render().rsplit('/').next().unwrap_or(""))
+                    .get(&i)
                     .is_some_and(|c| c.value_field.is_some()))
             );
             if member_diverges
@@ -21443,7 +21468,7 @@ impl<'a> Lower<'a> {
             } else if result_ty.non_null().obj_internal().is_some_and(|i| {
                 self.syms
                     .classes
-                    .get(i.render().rsplit('/').next().unwrap_or(""))
+                    .get(&i)
                     .is_some_and(|c| c.value_field.is_some())
             }) {
                 // A nullable VALUE-CLASS result (`a?.foo()` : `Z?`): the member returns the unboxed
@@ -22035,7 +22060,7 @@ impl<'a> Lower<'a> {
             // declares a supertype get a registered `C$Companion` ClassSig (checked here); a local of
             // the same name shadows it.
             if self.lookup(&n).is_none() {
-                if let Some(cls) = self.syms.classes.get(&n) {
+                if let Some(cls) = self.module_class_named(&n) {
                     let cls_internal = cls.internal();
                     let comp_internal = format!("{cls_internal}$Companion");
                     if self.syms.class_by_internal(&comp_internal).is_some() {
@@ -22051,7 +22076,7 @@ impl<'a> Lower<'a> {
             // A SAME-MODULE `object` referenced as a value (`val h = Helper`): not on the classpath
             // and not a local — read its singleton via `getstatic <internal>.INSTANCE`.
             if self.lookup(&n).is_none() {
-                if let Some(cls) = self.syms.classes.get(&n) {
+                if let Some(cls) = self.module_class_named(&n) {
                     if cls.is_object() {
                         let internal = cls.internal();
                         return Some(self.emit_external_static_field(
@@ -22385,7 +22410,7 @@ impl<'a> Lower<'a> {
             if name == "Companion" {
                 if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                     if self.lookup(&rn).is_none() {
-                        if let Some(cls) = self.syms.classes.get(&rn) {
+                        if let Some(cls) = self.module_class_named(&rn) {
                             let cls_internal = cls.internal();
                             let comp_internal = format!("{cls_internal}$Companion");
                             if self.syms.class_by_internal(&comp_internal).is_some() {
