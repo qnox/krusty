@@ -108,6 +108,8 @@ mod callable_ref_equality_e2e;
 mod callable_ref_extension_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
 mod catch_annotation_comma_e2e;
+#[path = "char_literal_diagnostics_e2e.rs"]
+mod char_literal_diagnostics_e2e;
 #[path = "checker_operator_methods_e2e.rs"]
 mod checker_operator_methods_e2e;
 #[path = "class_body_e2e.rs"]
