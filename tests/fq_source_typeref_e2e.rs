@@ -125,8 +125,9 @@ fn fq_source_unresolved_path_still_errors() {
 
 /// A class named `Cls` exists in BOTH `pkg1` (member `n`) and `pkg3` (member `other`):
 /// `pkg1.Cls` must bind the named package's declaration, not just any same-named class.
-/// Asserted via TYPE IDENTITY (a mismatched return type errors both ways) rather than member
-/// access — member lookup on same-named cross-package classes is a separate pre-existing bug.
+/// Asserted via TYPE IDENTITY (a mismatched return type errors both ways); member access on
+/// same-named cross-package classes is covered by
+/// `same_named_classes_in_different_packages_member_lookup` below.
 const OTHER_CLS: &str = "package pkg3\nclass Cls(val other: Int)\n";
 
 #[test]
@@ -318,5 +319,36 @@ fn fq_source_typerefs_compile_and_run() {
             ),
         ],
         "fq_typerefs",
+    );
+}
+
+#[test]
+fn same_named_classes_in_different_packages_member_lookup() {
+    // Two same-simple-name classes in DIFFERENT packages of one module: member lookup must bind the
+    // declaration of the actual receiver type, not whichever registration won the simple-name map
+    // (seen on intellij-community's two `AnActionWrapper` classes; the OTHER_CLS tests above cover
+    // type identity for the same shape).
+    common::expect_box_ok_files_with_stdlib(
+        &[
+            (
+                "a/Wrapper",
+                "package a\nopen class Wrapper(val x: Int) {\n\
+                 fun get(): Int = x\n\
+                 fun self(): Wrapper = this\n\
+                 }\n",
+            ),
+            ("b/Wrapper", "package b\nclass Wrapper(val s: String)\n"),
+            (
+                "box/Box",
+                "import a.Wrapper\n\
+                 fun box(): String {\n\
+                 val w = Wrapper(5)\n\
+                 if (w.get() != 5) return \"get=\" + w.get()\n\
+                 if (w.self().x != 5) return \"self\"\n\
+                 return \"OK\"\n\
+                 }\n",
+            ),
+        ],
+        "same_named_pkgs",
     );
 }

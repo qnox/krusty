@@ -206,8 +206,11 @@ impl HighlightSymbols {
             class_kinds: symbols
                 .classes
                 .iter()
-                .map(|(name, class)| {
-                    let kind = if symbols.enums.contains_key(name) {
+                .map(|(internal, class)| {
+                    // The class map keys on internal names; recover the source spelling this
+                    // simple-name-keyed highlight table is queried by.
+                    let name = internal.segment().replace('$', ".");
+                    let kind = if symbols.enums.contains_key(&name) {
                         HighlightKind::Enum
                     } else if class.is_annotation() {
                         HighlightKind::Decorator
@@ -218,7 +221,7 @@ impl HighlightSymbols {
                     } else {
                         HighlightKind::Class
                     };
-                    (name.clone(), kind)
+                    (name, kind)
                 })
                 .collect(),
             class_modifiers: HashMap::new(),
@@ -2599,7 +2602,12 @@ impl<'a> SemanticClassifier<'a> {
                     modifiers: HighlightModifiers::READONLY | HighlightModifiers::STATIC,
                 };
             }
-            if let Some(class) = self.symbols.classes.get(&owner) {
+            if let Some(class) = self
+                .symbols
+                .class_names
+                .get_class(&owner)
+                .and_then(|internal| self.symbols.classes.get(&internal))
+            {
                 if let Some((_, is_var)) = class.prop(name) {
                     return MemberHighlight {
                         kind: HighlightKind::Property,
