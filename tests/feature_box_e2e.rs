@@ -1193,6 +1193,107 @@ fun box(): String {
 }
 "#,
     ),
+    // Mixed reference/primitive `===`/`!==`: kotlinc boxes the primitive side (`Integer.valueOf` …)
+    // and compares the two refs with `if_acmp*`. Emitting an int-category branch on the reference
+    // operand instead produces a class file that only fails at VERIFICATION time, so this snippet has
+    // to RUN. Both operand orders, both value and branch position, and the `=== 0` literal shape (which
+    // takes the compare-to-zero fast path in the branch emitter) are covered. The observable results
+    // come from the wrapper caches: `Integer`/`Long`/`Character` cache -128..127 (so `7` boxes to the
+    // same instance twice), `1000` is outside the cache, and `Double.valueOf` never caches.
+    (
+        "MixedRefPrimIdentity",
+        r#"
+fun box(): String {
+    val small: Any = 7
+    val big: Any = 1000
+    if (!(small === 7)) return "f1"
+    if (small !== 7) return "f2"
+    if (big === 1000) return "f3"
+    if (!(big !== 1000)) return "f4"
+    if (!(7 === small)) return "f5"
+    if (1000 === big) return "f6"
+    val r = if (small === 7) "y" else "n"
+    if (r != "y") return "f7:$r"
+    val r2 = if (big !== 1000) "y" else "n"
+    if (r2 != "y") return "f8:$r2"
+    val l: Any = 7L
+    if (!(l === 7L)) return "f9"
+    val c: Any = 'a'
+    if (!(c === 'a')) return "f10"
+    val bb: Any = true
+    if (!(bb === true)) return "f11"
+    val d: Any = 1.0
+    if (d === 1.0) return "f12"
+    val zero: Any = 0
+    if (!(zero === 0)) return "f13"
+    if (0 !== zero) return "f14"
+    val one: Any = 1
+    if (one === 0) return "f15"
+    val vz: Boolean = zero === 0
+    if (!vz) return "f16"
+    val vnz: Boolean = one === 0
+    if (vnz) return "f17"
+    return "OK"
+}
+"#,
+    ),
+    // A mixed-operand `===` under a generic reference type (`Comparable<Int>`), not just `Any` — the
+    // shape that first surfaced the int-branch-on-a-reference VerifyError.
+    (
+        "MixedRefPrimIdentityGeneric",
+        r#"
+fun q(a: Comparable<Int>) = a === 0
+fun p(a: Comparable<Int>, b: Int) = if (a === b) "y" else "n"
+fun box(): String {
+    if (!q(0)) return "f1"
+    if (q(1)) return "f2"
+    if (p(7, 7) != "y") return "f3"
+    if (p(7, 8) != "n") return "f4"
+    return "OK"
+}
+"#,
+    ),
+    // A `Unit` operand of `===`/`!==` is the `kotlin/Unit.INSTANCE` singleton and must be materialized
+    // by the lowerer, exactly as it already is for `==`/`!=`. Without it each operand pushes NOTHING
+    // (`invokestatic g()V` alone), so `if_acmp*` sees an empty stack — `VerifyError: Operand stack
+    // underflow` — and the backend sees a `Ty::Unit` that is neither a reference nor a JVM scalar.
+    // Every call to a `Unit` function yields the same singleton, so identity holds.
+    (
+        "UnitIdentity",
+        r#"
+fun g() {}
+fun h(): Unit {}
+fun box(): String {
+    if (!(g() === g())) return "f1"
+    if (g() !== h()) return "f2"
+    val a: Any = Unit
+    if (!(g() === a)) return "f3"
+    if (!(a === g())) return "f4"
+    if (g() === ("x" as Any)) return "f5"
+    return "OK"
+}
+"#,
+    ),
+    // A PRIMITIVE compared against the `null` literal with `===`/`!==` is legal Kotlin (kotlinc warns
+    // "condition is always 'false'" and folds it away). krusty keeps the comparison, so the primitive
+    // has to be boxed into a reference slot first — `iload_0; ifnonnull` is a reference branch testing
+    // an int. Covers value AND branch position; a primitive is never null, so the answers are constant.
+    (
+        "PrimitiveVsNullIdentity",
+        r#"
+fun v(x: Int) = x === null
+fun w(x: Long) = x !== null
+fun b(x: Int): String { if (x === null) return "n"; return "y" }
+fun c(x: Double): String { if (x !== null) return "y"; return "n" }
+fun box(): String {
+    if (v(1)) return "f1"
+    if (!w(1L)) return "f2"
+    if (b(1) != "y") return "f3"
+    if (c(1.0) != "y") return "f4"
+    return "OK"
+}
+"#,
+    ),
     // Char arithmetic: `Char + Int`/`Char - Int` → Char (truncated mod 2^16 with i2c, so it wraps),
     // `Char - Char` → Int (the distance). No promotion between Char and Int — the op runs on ints.
     (

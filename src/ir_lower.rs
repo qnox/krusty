@@ -23224,9 +23224,12 @@ impl<'a> Lower<'a> {
                 let (lt, rt) = (self.info.ty(lhs), self.info.ty(rhs));
                 let mut l = self.expr(lhs)?;
                 let mut r = self.expr(rhs)?;
-                // A `Unit` operand of `==`/`!=` is the `Unit.INSTANCE` singleton — materialize it so the
-                // structural `areEqual` gets an `Object` (`foo() != bar()` where `bar(): Unit`).
-                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                // A `Unit` operand of `==`/`!=`/`===`/`!==` is the `Unit.INSTANCE` singleton —
+                // materialize it so the comparison gets an `Object` (`foo() != bar()` where
+                // `bar(): Unit`). Identity needs it just as much as the structural form: without the
+                // `getstatic`, `g() === g()` pushes NOTHING for each operand, and the backend then sees
+                // a `Ty::Unit` that is neither a reference nor a JVM scalar.
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::RefEq | BinOp::RefNe) {
                     if lt == Ty::Unit {
                         l = self.unit_value_after_effect(l);
                     }

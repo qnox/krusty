@@ -19498,6 +19498,22 @@ impl<'a> Checker<'a> {
         matches!(t, Ty::Obj(n, _) if self.syms.class_by_type_name(n).is_some_and(|c| c.value_field.is_some()))
     }
 
+    /// True if `t` is an operand kotlinc forbids on either side of `===`/`!==`: an unsigned type or a
+    /// `@JvmInline value` class (both inline classes, whose boxed identity is not stable). Nullability
+    /// makes no difference — kotlinc rejects `VC? === VC?` too.
+    ///
+    /// The value-class query must be FEDERATED. `ty_is_value_class` reads `syms.classes`, which holds
+    /// only source/module classes, so a classpath inline class (`kotlin.time.Duration`, `kotlin.Result`,
+    /// anything from a dependency) slips through — and since such a type reaches the backend as its
+    /// unboxed carrier (`Duration` → `Ty::Long`), the emitter then compares two carriers, or boxes one
+    /// as `java.lang.Long` against the other's `Duration` box, with no diagnostic at all.
+    fn identity_prohibited_operand(&self, t: Ty) -> bool {
+        let t = t.non_null();
+        t.is_unsigned()
+            || self.ty_is_value_class(t)
+            || self.syms.libraries.value_underlying(t).is_some()
+    }
+
     fn value_class_uses_type_parameter_storage(&self, ty: Ty) -> bool {
         let Ty::Obj(internal, _) = ty.non_null() else {
             return false;
@@ -25983,6 +25999,24 @@ impl<'a> Checker<'a> {
                 let is_prim_wrapper = |t: Ty| t.nullable_primitive().is_some();
                 if lt == Ty::String || rt == Ty::String {
                     self.diags.error(span, "krusty: referential equality (=== / !==) on String operands is not supported".to_string());
+                    Ty::Error
+                } else if self.identity_prohibited_operand(lt)
+                    || self.identity_prohibited_operand(rt)
+                {
+                    // kotlinc: "identity equality for arguments of types 'X' and 'Y' is prohibited."
+                    // An unsigned type or a `@JvmInline value` class has no stable boxed identity, so
+                    // kotlinc makes `===` on one a hard ERROR (not the "unstable because of implicit
+                    // boxing" warning a plain primitive operand gets). Mirror that: the operand rides in
+                    // its unboxed underlying primitive, so the backend would otherwise box it through
+                    // `box-impl` and emit an `if_acmp*` for a program kotlinc refuses to compile.
+                    self.diags.error(
+                        span,
+                        format!(
+                            "identity equality for arguments of types '{}' and '{}' is prohibited.",
+                            lt.source_name(),
+                            rt.source_name()
+                        ),
+                    );
                     Ty::Error
                 } else if is_prim_wrapper(lt) || is_prim_wrapper(rt) {
                     // A nullable-primitive wrapper (`Int?`/`Double?`) compared with `===`/`!==`: boxed
