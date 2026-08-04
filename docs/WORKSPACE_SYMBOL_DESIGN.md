@@ -288,7 +288,15 @@ rank orders instead of renumbering them.
   transition budget bounds adversarial wildcard backtracking. The budget is owned by the whole
   request and is spent across every project segment, live layer, ranking rung, and translated query;
   resetting it at any inner loop would multiply the bound by attacker-controlled index structure.
-  No new index structure.
+  No new index structure for the source layers.
+
+  The dependency layer narrows two orders rather than one, because a classpath class can be nested
+  and a nested class has two source-visible names: `Map.Entry` and the bare `Entry`. A wildcard is
+  verified against whichever spelling the order it came from holds, so `Entry*` and `Ent?y` reach
+  `Map.Entry` exactly as `Entry` does. The leaf order is skipped for a `*`-opening pattern, where a
+  whole name provably answers for its own leaf. Whole names carry the response and the leaves take
+  a reserved floor: on a real classpath they outnumber whole names several times over, so an even
+  share would spend a response on classes that merely enclose the queried name.
 - **Keyboard layout** — a ЙЦУКЕН→QWERTY positional table applied to the *query*; search both forms
   and union. The explicit mapping touches Cyrillic characters only, so ordinary qualified-query
   punctuation does not spuriously create a translated query. ~200 bytes, zero index cost.
