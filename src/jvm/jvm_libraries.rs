@@ -2406,8 +2406,8 @@ const CONTINUATION_PARAM_DESCRIPTOR: &str = "Lkotlin/coroutines/Continuation;";
 /// once is not a shape kotlinc emits, and guessing between them would align a caller's arguments to
 /// the wrong slots. Its representation facts are still valid, so retain those while reporting no
 /// continuation position and let the caller stay conservative if its value count does not align.
-fn method_parameter_layout(descriptor: &str) -> Option<crate::runtime::PlatformMethodLayout> {
-    let (params, _) = crate::jvm::names::parse_method_descriptor(descriptor)?;
+fn method_layout(descriptor: &str) -> Option<crate::runtime::PlatformMethodLayout> {
+    let (params, ret) = crate::jvm::names::parse_method_descriptor(descriptor)?;
     let mut found = params
         .iter()
         .enumerate()
@@ -2423,6 +2423,13 @@ fn method_parameter_layout(descriptor: &str) -> Option<crate::runtime::PlatformM
             .map(|p| p.starts_with('L') || p.starts_with('['))
             .collect(),
         continuation_slot,
+        // Only an object return names a class. A primitive carrier (`I`, `J`, ...), array (`[...`),
+        // or `V` makes no reference-class claim, which keeps a carrier-returning call from reading as
+        // an already boxed value.
+        return_class: ret
+            .strip_prefix('L')
+            .and_then(|ret| ret.strip_suffix(';'))
+            .map(type_name),
     })
 }
 
@@ -3873,19 +3880,11 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         Some(method_descriptor(params, ret))
     }
 
-    fn descriptor_parameter_layout(
+    fn descriptor_method_layout(
         &self,
         descriptor: &str,
     ) -> Option<crate::runtime::PlatformMethodLayout> {
-        method_parameter_layout(descriptor)
-    }
-
-    fn descriptor_return_class(&self, descriptor: &str) -> Option<TypeName> {
-        // Only an object return names a class: a primitive carrier (`I`, `J`, …), an array (`[…`)
-        // and `V` all answer `None`, which is what keeps a carrier-returning call from reading as a
-        // value that is already boxed.
-        let (_, ret) = super::names::parse_method_descriptor(descriptor)?;
-        Some(type_name(ret.strip_prefix('L')?.strip_suffix(';')?))
+        method_layout(descriptor)
     }
 
     fn function_reference_impl_type(&self) -> Option<Ty> {
@@ -4329,8 +4328,8 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, method_parameter_layout, parse_class_gsig, parse_concrete_field_gsig,
-        parse_field_gsig, parse_method_desc, parse_method_gsig,
+        desc_to_ty, method_layout, parse_class_gsig, parse_concrete_field_gsig, parse_field_gsig,
+        parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::SemanticPlatform;
     use crate::symbol_source::SymbolSource;
@@ -4342,38 +4341,37 @@ mod tests {
     #[test]
     fn descriptor_layout_reports_representation_and_one_continuation_from_one_parse() {
         // `withLock$default` — the continuation sits BEFORE the mask/marker tail, not at the end.
-        let layout = method_parameter_layout(
+        let layout = method_layout(
             "(Lkotlinx/coroutines/sync/Mutex;Ljava/lang/Object;Lkotlin/jvm/functions/Function0;\
                  Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;",
         )
         .expect("valid descriptor");
         assert_eq!(layout.continuation_slot, Some(3));
+        assert_eq!(layout.return_class, Some(type_name("java/lang/Object")));
         assert_eq!(
             layout.reference_slots,
             vec![true, true, true, true, false, true]
         );
         // A plain suspend method's trailing continuation.
         assert_eq!(
-            method_parameter_layout("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;")
+            method_layout("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;")
                 .and_then(|layout| layout.continuation_slot),
             Some(1)
         );
         assert_eq!(
-            method_parameter_layout("(ILjava/lang/String;)V")
+            method_layout("(ILjava/lang/String;)V")
                 .expect("valid descriptor")
                 .continuation_slot,
             None
         );
         // Two of them: no position is derivable, so the caller must not be handed a guess.
         assert_eq!(
-            method_parameter_layout(
-                "(Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)V"
-            )
-            .expect("the parameter representations remain readable")
-            .continuation_slot,
+            method_layout("(Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)V")
+                .expect("the parameter representations remain readable")
+                .continuation_slot,
             None
         );
-        assert!(method_parameter_layout("not a descriptor").is_none());
+        assert!(method_layout("not a descriptor").is_none());
     }
 
     #[test]
@@ -4802,19 +4800,19 @@ mod tests {
     /// unsigned value becomes a reference, and its carrier-returning siblings (`constructor-impl`,
     /// `unbox-impl`) must answer `None` or a value still in its primitive slot would read as boxed.
     #[test]
-    fn descriptor_return_class_names_only_an_object_return() {
-        use crate::runtime::TargetRuntime;
-        let libs = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(Vec::new()),
-        ));
+    fn descriptor_method_layout_names_only_an_object_return_class() {
         assert_eq!(
-            libs.descriptor_return_class("(I)Lkotlin/UInt;"),
+            method_layout("(I)Lkotlin/UInt;").and_then(|layout| layout.return_class),
             Some(type_name("kotlin/UInt"))
         );
         for carrier in ["(I)I", "()I", "(Lkotlin/UInt;)V", "(I)[Ljava/lang/String;"] {
-            assert_eq!(libs.descriptor_return_class(carrier), None, "{carrier}");
+            assert_eq!(
+                method_layout(carrier).and_then(|layout| layout.return_class),
+                None,
+                "{carrier}"
+            );
         }
         // A descriptor the platform cannot read is not a claim about anything.
-        assert_eq!(libs.descriptor_return_class("nonsense"), None);
+        assert!(method_layout("nonsense").is_none());
     }
 }

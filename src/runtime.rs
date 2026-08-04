@@ -38,17 +38,19 @@ pub struct PlatformField {
     pub descriptor: String,
 }
 
-/// Provider-owned interpretation of an already-spelled method descriptor's parameter list.
+/// Provider-owned interpretation of an already-spelled method descriptor.
 ///
-/// Common lowering needs both facts together when it validates a call boundary: representation says
-/// whether a boxed value may occupy each physical slot, while `continuation_slot` identifies the one
-/// runtime-supplied CPS value that is present in the descriptor but appended later by the backend.
-/// Keeping them in one result makes the provider parse its descriptor once and prevents two queries
-/// from disagreeing about the same physical parameter list.
+/// Common lowering needs all three facts together when it validates a call boundary: parameter
+/// representation says whether a boxed value may occupy each physical slot, `continuation_slot`
+/// identifies the runtime-supplied CPS value appended later by the backend, and `return_class`
+/// identifies a concrete reference representation left by a call. Keeping them in one result makes
+/// the provider parse its descriptor once and prevents independent queries from disagreeing about one
+/// physical method signature.
 #[derive(Clone, Debug)]
 pub struct PlatformMethodLayout {
     pub reference_slots: Vec<bool>,
     pub continuation_slot: Option<usize>,
+    pub return_class: Option<TypeName>,
 }
 
 /// Platform construction plan for a Kotlin range value expression. `elem` is the semantic element
@@ -135,7 +137,7 @@ pub trait TargetRuntime {
         None
     }
 
-    /// Interpret the parameters of an already-spelled platform method `descriptor` in one pass.
+    /// Interpret an already-spelled platform method `descriptor` in one pass.
     ///
     /// Common lowering needs this to check its own work: a callee's descriptor is emitted VERBATIM
     /// while arguments are coerced to the callable's declared parameter types, and the two can
@@ -145,19 +147,10 @@ pub trait TargetRuntime {
     /// be aligned without reparsing or a second provider contract. `None` means the descriptor itself
     /// cannot be read and leaves the decision to platform gates; an absent/ambiguous continuation is
     /// represented by `layout.continuation_slot == None` while retaining the trustworthy slot kinds.
-    fn descriptor_parameter_layout(&self, _descriptor: &str) -> Option<PlatformMethodLayout> {
-        None
-    }
-
-    /// The class named by an already-spelled platform method `descriptor`'s RETURN, when that return
-    /// is a reference to a class rather than a primitive carrier, an array, or nothing at all.
-    ///
-    /// The return-position companion to [`TargetRuntime::descriptor_reference_params`], and the same
-    /// division of labour: common lowering asks WHAT a call leaves on the stack instead of parsing a
-    /// target's descriptor spelling itself. It needs the class and not just "is a reference" because
-    /// the question it answers is whether a value is already in a specific platform BOX
-    /// (`Lkotlin/UInt;`), which no boolean can distinguish from any other object.
-    fn descriptor_return_class(&self, _descriptor: &str) -> Option<TypeName> {
+    /// `layout.return_class` names only a concrete object return: a primitive carrier, array, or void
+    /// return has no class claim. Common lowering needs the class rather than a reference boolean to
+    /// distinguish a specific value-class box from an arbitrary object.
+    fn descriptor_method_layout(&self, _descriptor: &str) -> Option<PlatformMethodLayout> {
         None
     }
 

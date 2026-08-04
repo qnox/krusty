@@ -1542,10 +1542,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference?* — which the checker's `Ty` cannot answer, since a value class and its carrier share one
   `Ty` on both sides of a box. Lowering answers it with a **representation query**,
   `lowered_reference_class`: the class a lowered node leaves on the stack, read off the node's own type
-  (a callee's descriptor return, asked of the platform via `TargetRuntime::descriptor_return_class`; a
+  (a callee's descriptor return, read from the provider's single `PlatformMethodLayout`; a
   cast's type operand; a field's declared type) and followed through the nodes that carry a value
-  unchanged (a block's value, a `when` whose branches agree). It is not a match on the node that
-  PRODUCED the value: a box that is cast or carried out of a block is still a box, and boxing it again
+  unchanged (a block's value, a `when` whose branches agree, a reference-to-reference coercion). A
+  primitive-to-reference coercion does NOT claim its target class: the backend chooses a wrapper from
+  the source carrier, and a broad target such as `Any` cannot prove which class was produced. It is not
+  a match on the node that PRODUCED the value: a box that is cast or carried out of a block is still a box, and boxing it again
   would push a `Lkotlin/UInt;` at the `(I)` its own factory declares — the very `VerifyError` this
   section is about. The query is deliberately partial and one-sided: `None` means "a primitive carrier,
   OR a shape it cannot derive", so an unknown node keeps exactly the behaviour it had before that shape
@@ -1577,10 +1579,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the earlier claim that it shifts positions was wrong; no such call was observed. Any shape the
   alignment cannot line up now declines whenever a box is on the stack at all, rather than skipping: a
   count mismatch is "no position is known", never "nothing to check".
-  The runtime provider returns reference/primitive positions and the unambiguous runtime-supplied
-  continuation position together as one `PlatformMethodLayout`; JVM descriptor syntax remains outside
-  common lowering, and the descriptor is parsed once rather than by independent representation and
-  continuation queries that could disagree.
+  The runtime provider returns reference/primitive parameter positions, the unambiguous
+  runtime-supplied continuation position, and the concrete object return class together as one
+  `PlatformMethodLayout`; JVM descriptor syntax remains outside common lowering, and the descriptor is
+  parsed once rather than by independent parameter, continuation, and return queries that could
+  disagree.
 
   Aligning that second shape surfaced a separate miscompile, now also declined
   (`gate:unthreaded-continuation-slot`): an unsigned VALUE PARAMETER mangles the JVM name (`libU` →

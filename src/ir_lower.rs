@@ -5958,7 +5958,7 @@ impl<'a> Lower<'a> {
         // above is the one thing that can put a reference in it.
         self.check_unsigned_boxes_fit_descriptor(
             self.runtime
-                .descriptor_parameter_layout(&member.descriptor)
+                .descriptor_method_layout(&member.descriptor)
                 .map(|layout| layout.reference_slots),
             Some(recv),
             &args,
@@ -6096,9 +6096,7 @@ impl<'a> Lower<'a> {
         // SUSPEND callable that is the normal `$default` shape — the plain suspend descriptor has
         // already had its trailing continuation stripped, but a `$default` one spells it BEFORE the
         // mask/marker tail, so it survives and the backend appends the value at emit time.
-        let descriptor_layout = self
-            .runtime
-            .descriptor_parameter_layout(&callable.descriptor);
+        let descriptor_layout = self.runtime.descriptor_method_layout(&callable.descriptor);
         let continuation = descriptor_layout
             .as_ref()
             .filter(|layout| layout.reference_slots.len() == args.len() + 1)
@@ -27813,15 +27811,24 @@ fn lowered_reference_class(
             let first = classes.next()??;
             classes.all(|class| class == Some(first)).then_some(first)
         }
-        // A cast or a representation coercion RETYPES its operand: the type operand is the answer,
-        // whatever the operand underneath it was. `is`/`!is` are excluded — they yield a boolean, and
-        // so is `as?`, which the backend emits NOTHING for (the null-or-cast shape is built out of a
-        // `when` over a plain `Cast`, so the arms above already cover it).
+        // A cast RETYPES its operand and therefore proves the verifier-visible reference class.
+        // `is`/`!is` are excluded because they yield a boolean; so is `as?`, whose null-or-cast shape
+        // is built from a `when` over a plain `Cast` and is already covered by the arms above.
         IrExpr::TypeOp {
-            op: IrTypeOp::Cast | IrTypeOp::CastNonNull | IrTypeOp::ImplicitCoercion,
+            op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
             type_operand,
             ..
         } => type_operand.obj_internal(),
+        // A reference-to-reference coercion emits no representation change, so preserve a class that
+        // was already proved by the operand. Do NOT claim the target class for primitive-to-reference:
+        // the backend selects a wrapper from the SOURCE carrier (`UInt` boxes differently from `Int`),
+        // and the target may merely be `Any`. Target syntax alone is therefore not evidence of the
+        // physical class. A primitive target likewise unboxes and leaves no reference.
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } => type_operand.obj_internal().and_then(|_| of(*arg)),
         IrExpr::GetStatic(index) => ir.statics.get(*index as usize)?.ty.obj_internal(),
         IrExpr::GetField { class, index, .. } => ir
             .classes
@@ -27852,7 +27859,9 @@ fn lowered_reference_class(
             } => ret.obj_internal(),
             Callee::Static { descriptor, .. }
             | Callee::Special { descriptor, .. }
-            | Callee::Virtual { descriptor, .. } => runtime.descriptor_return_class(descriptor),
+            | Callee::Virtual { descriptor, .. } => runtime
+                .descriptor_method_layout(descriptor)
+                .and_then(|layout| layout.return_class),
             // An intrinsic named by Kotlin FqName has no signature in the IR at all.
             Callee::External(_) => None,
         },
@@ -28063,9 +28072,19 @@ mod tests {
             ty.boxed_ref().filter(|_| ty.is_unsigned())
         }
 
-        fn descriptor_return_class(&self, descriptor: &str) -> Option<TypeName> {
+        fn descriptor_method_layout(
+            &self,
+            descriptor: &str,
+        ) -> Option<crate::runtime::PlatformMethodLayout> {
             let ret = descriptor.split_once(')')?.1;
-            Some(type_name(ret.strip_prefix('L')?.strip_suffix(';')?))
+            Some(crate::runtime::PlatformMethodLayout {
+                reference_slots: Vec::new(),
+                continuation_slot: None,
+                return_class: ret
+                    .strip_prefix('L')
+                    .and_then(|ret| ret.strip_suffix(';'))
+                    .map(type_name),
+            })
         }
     }
 
@@ -28111,12 +28130,13 @@ mod tests {
             type_operand: Ty::obj("kotlin/UInt"),
         });
 
-        // A coercion INTO the box — how an unsigned value reaches a reference position.
-        let coerced_operand = ir.add_expr(IrExpr::Const(IrConst::Int(5)));
+        // A reference-to-reference coercion changes only the logical view (`UInt` → `Any`), not the
+        // physical box. Following the operand is what preserves its more precise representation.
+        let coerced_operand = unsigned_box(&mut ir);
         let coerced = ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: coerced_operand,
-            type_operand: Ty::obj("kotlin/UInt"),
+            type_operand: Ty::obj("kotlin/Any"),
         });
 
         let (left, right) = (unsigned_box(&mut ir), unsigned_box(&mut ir));
@@ -28141,7 +28161,7 @@ mod tests {
             (direct, "the box itself"),
             (block, "a block whose value is the box"),
             (cast, "a cast of the box"),
-            (coerced, "a coercion into the box"),
+            (coerced, "a reference coercion carrying the box"),
             (when, "a `when` whose every branch is the box"),
             (nested, "a block whose value is a cast of the box"),
         ] {
@@ -28186,6 +28206,15 @@ mod tests {
         // A READ of a local is deliberately unanswered, however the local was declared: value indices
         // are scoped and re-used, so no per-index table can be trusted here (see the walk's docs).
         let local_read = ir.add_expr(IrExpr::GetValue(7));
+        // A primitive-to-reference coercion does produce some box, but its TARGET is not proof of
+        // which one: the backend chooses from the source carrier. Hand-built `Int -> kotlin/UInt` IR,
+        // for example, would physically box `java/lang/Integer`, so the query must not echo the target.
+        let raw_int = ir.add_expr(IrExpr::Const(IrConst::Int(5)));
+        let unproved_coercion = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: raw_int,
+            type_operand: Ty::obj("kotlin/UInt"),
+        });
 
         for (expr, what) in [
             (carrier_call, "a carrier-returning call"),
@@ -28194,6 +28223,10 @@ mod tests {
             (intrinsic, "an intrinsic with no signature in the IR"),
             (instance_of, "an `is` test against the box"),
             (local_read, "a read of a local"),
+            (
+                unproved_coercion,
+                "a primitive coercion whose target does not prove its wrapper",
+            ),
         ] {
             assert_eq!(
                 lowered_reference_class(&ir, &UnsignedBoxRuntime, expr).and_then(|class| {
