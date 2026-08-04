@@ -29,7 +29,7 @@ impl Fixture {
     fn new() -> Option<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
 
-        let stdlib = common::stdlib_jar()?;
+        let stdlib = common::stdlib_jar();
         let epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()?
@@ -66,7 +66,10 @@ impl Fixture {
         )];
         let (java_output, _) = common::javac_compile(&java_sources, &[])?;
         let java_root = java_output.parent()?.to_path_buf();
-        let jdk = common::java_home().map(|home| PathBuf::from(format!("{home}/lib/modules")));
+        let jdk = Some({
+            let home = common::java_home();
+            PathBuf::from(format!("{home}/lib/modules"))
+        });
         Some(Fixture {
             _roots: vec![root, FixtureRoot(java_root)],
             classpath: vec![stdlib, output, java_output],

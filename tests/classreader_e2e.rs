@@ -10,7 +10,10 @@ use krusty::jvm::classreader::{parse_class, JavaNullability};
 use super::common;
 
 fn javac() -> Option<PathBuf> {
-    common::java_home().map(|home| PathBuf::from(home).join("bin/javac"))
+    Some({
+        let home = common::java_home();
+        PathBuf::from(home).join("bin/javac")
+    })
 }
 
 #[test]

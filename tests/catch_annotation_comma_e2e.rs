@@ -4,14 +4,8 @@ use super::common;
 
 #[test]
 fn catch_parameter_annotation_and_trailing_comma() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let src = "annotation class Marker\n\
         fun a(s: String): Int = try { s.toInt() } catch (@Marker e: NumberFormatException) { -1 }\n\
         fun b(s: String): Int = try { s.toInt() } catch (e: NumberFormatException,) { -2 }\n\
@@ -23,7 +17,7 @@ fn catch_parameter_annotation_and_trailing_comma() {
         \x20 return \"OK\"\n\
         }\n";
     let cp = vec![sl.clone()];
-    let classes = common::compile_in_process(src, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(src, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile catch with annotation / trailing comma");
     match common::run_box(&classes, "MainKt", &cp) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),

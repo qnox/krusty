@@ -5,10 +5,7 @@
 use super::common;
 #[test]
 fn nested_class_dotted_extension_receiver_compiles_and_runs() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = std::env::var("JAVA_HOME")
         .ok()
         .filter(|v| !v.is_empty())

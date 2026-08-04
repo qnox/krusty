@@ -7,11 +7,9 @@ fn run(src: &str) -> Option<String> {
 }
 
 fn diagnostics(src: &str) -> Vec<String> {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return vec!["<skip: no stdlib>".to_string()];
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    common::front_end_diagnostics(src, &[stdlib], jdk.as_deref())
+    common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
 }
 
 #[test]

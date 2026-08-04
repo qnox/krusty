@@ -7,14 +7,8 @@ use super::common;
 
 #[test]
 fn classpath_data_class_copy_with_omitted_fields() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib(
         "datacopy",
         "package lib\ndata class Rec(val a: String, val b: String, val n: Int)\n",
@@ -33,7 +27,7 @@ fn classpath_data_class_copy_with_omitted_fields() {
         \x20 if (r4.a != \"a\" || r4.b != \"b\" || r4.n != 1) return \"fail e1c: ${r4.a},${r4.b},${r4.n}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile classpath data-class copy");
     match common::run_box(&classes, "MainKt", &[libout, sl]) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),

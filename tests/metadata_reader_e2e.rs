@@ -15,7 +15,7 @@ use krusty::types::{type_name, Ty};
 use std::rc::Rc;
 
 fn cp() -> Option<Classpath> {
-    let sl = common::stdlib_jar()?;
+    let sl = common::stdlib_jar();
     Some(Classpath::new(vec![sl]))
 }
 
@@ -108,10 +108,7 @@ fn result_get_or_throw_resolves_as_inline_extension() {
     // PUBLIC per @Metadata with an extension receiver of `kotlin/Result`. It must resolve as an inline
     // extension on a `Result` receiver — found at the erased `Object` rung, disambiguated by the
     // @Metadata receiver. (Byte-equal codegen additionally needs value-class param erasure.)
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("no stdlib jar; skipping");
-        return;
-    };
+    let sl = common::stdlib_jar();
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![sl])));
     // `getOrThrow` lives in `kotlin/ResultKt` (package `kotlin`); an unqualified extension resolves only
     // through the import scope, so put `kotlin` in scope (matching a file that has `Result` in scope).
@@ -148,10 +145,7 @@ fn result_get_or_throw_resolves_as_inline_extension() {
 
 #[test]
 fn result_get_or_null_resolves_as_nullable_metadata_member() {
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("no stdlib jar; skipping");
-        return;
-    };
+    let sl = common::stdlib_jar();
     let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![sl])));
     use krusty::symbol_resolver::{SymRecv, Symbol};
     let m = krusty::symbol_resolver::SymbolResolver::new(&libs)

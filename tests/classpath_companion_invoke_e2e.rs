@@ -15,12 +15,8 @@ const LIB: &str = "package lib\n\
 
 #[test]
 fn classpath_companion_invoke_factory() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(lo) = common::compile_lib("companion_invoke", LIB) else {
         return;
     };
@@ -29,7 +25,8 @@ fn classpath_companion_invoke_factory() {
             val id = Id(\"x\")\n\
             return if (id.v == \"id-x\") \"OK\" else \"F:\" + id.v\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[lo, sl, jdk.clone()], Some(&jdk));
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[lo, sl, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

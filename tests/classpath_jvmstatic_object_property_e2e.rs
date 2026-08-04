@@ -33,15 +33,9 @@ fn jvmstatic_object_property_read() {
 /// `@JvmStatic val`, so `withContext(Dispatchers.IO)` reported `unresolved reference 'IO'`.
 #[test]
 fn coroutines_dispatchers_members_resolve() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(coroutines) = common::coroutines_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let coroutines = common::coroutines_jar();
     const SRC: &str = "import kotlinx.coroutines.Dispatchers\n\
         fun box(): String {\n\
         \x20 val io = Dispatchers.IO\n\
@@ -51,7 +45,7 @@ fn coroutines_dispatchers_members_resolve() {
         \x20 return \"OK\"\n\
         }\n";
     let classpath = [stdlib, coroutines, jdk.clone()];
-    let out = common::compile_and_run_box(SRC, "Main", &classpath, Some(&jdk))
+    let out = common::compile_and_run_box(SRC, "Main", &classpath, Some(jdk.as_path()))
         .expect("Dispatchers members should compile + run");
     assert_eq!(out, "OK");
 }

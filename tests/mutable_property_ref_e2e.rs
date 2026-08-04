@@ -5,9 +5,9 @@
 use super::common;
 
 fn run(main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
-    common::compile_and_run_box(main, "Main", &[sl, jdk.clone()], Some(&jdk))
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    common::compile_and_run_box(main, "Main", &[sl, jdk.clone()], Some(jdk.as_path()))
 }
 
 #[test]
@@ -266,4 +266,32 @@ fn generic_toplevel_function_ref() {
     const MAIN: &str = "fun <T> id(x: T): T = x\n\
         fun box(): String = \"OK\".let(::id)\n";
     assert_eq!(run(MAIN).expect("generic top-level function ref"), "OK");
+}
+
+#[test]
+fn property_reference_get_reports_the_property_type() {
+    // A property reference is `KProperty0<V>` / `KProperty1<T, V>`, NOT the raw class: `get()` must
+    // report the property's own type so a member read on the result resolves. While the reference
+    // type was raw, `get()` came back as the erased upper bound and `p.get().value` was an
+    // "unresolved reference" — even though the emitted bytecode was already correct (annotating the
+    // result with its type compiled fine). Covers the bound, unbound, and implicit-`this` forms.
+    const MAIN: &str = "data class Box(val value: String)\n\
+        class H(val m: Box) {\n\
+        \x20 fun viaThis(): String = (::m).get().value\n\
+        }\n\
+        val top = Box(\"t\")\n\
+        var topVar = Box(\"v\")\n\
+        fun box(): String {\n\
+        \x20 val h = H(Box(\"m\"))\n\
+        \x20 if ((h::m).get().value != \"m\") return \"f1\"\n\
+        \x20 if ((H::m).get(h).value != \"m\") return \"f2\"\n\
+        \x20 if ((::top).get().value != \"t\") return \"f3\"\n\
+        \x20 if ((::topVar).get().value != \"v\") return \"f4\"\n\
+        \x20 if (h.viaThis() != \"m\") return \"f5\"\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    let Some(out) = run(MAIN) else {
+        return;
+    };
+    assert_eq!(out, "OK");
 }

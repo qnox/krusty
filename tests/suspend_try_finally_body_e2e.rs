@@ -6,15 +6,9 @@ use super::common;
 
 #[test]
 fn suspend_try_finally_body_runs() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(coro) = common::coroutines_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
     // `d` is a (trivially) suspending call so the try body suspends and is flattened.
     //   normal():   log "a" then value d(n)=7, then finally "f"        -> "af", r=7
     //   thrown():   log "b", throw, finally "F" runs, caught outside    -> "bF", caught
@@ -34,7 +28,8 @@ fn suspend_try_finally_body_runs() {
             if (a == 7 && caught && log.toString() == \"afbF\") \"OK\"\n\
             else \"F a=$a caught=$caught log=$log\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(&jdk));
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

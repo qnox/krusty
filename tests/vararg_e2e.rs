@@ -14,7 +14,7 @@ if (sum() != 0) return \"f2\"\n\
 if (concat(\"a\", \"b\", \"c\") != \"abc\") return \"f3\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "V");
+    common::expect_box_ok_with_stdlib(src, "V");
 }
 
 #[test]

@@ -18,11 +18,9 @@ use super::common;
 /// Run the front end with stdlib + JDK on the classpath. If the toolchain is unavailable, return a
 /// sentinel so the "non-empty" assertions still hold (the test effectively skips).
 fn diags(src: &str) -> Vec<String> {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return vec!["<skip: no stdlib>".into()];
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    common::front_end_diagnostics(src, &[stdlib], jdk.as_deref())
+    common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
 }
 
 /// Run the front end with NO classpath — for parse-level errors that need no library symbols.
@@ -123,8 +121,21 @@ fn increment_on_string_variable() {
 
 #[test]
 fn companion_property_custom_accessor() {
+    // A FIELD-LESS custom-accessor companion property is supported (it lowers to `getX`/`setX` on
+    // `C$Companion`, kotlinc's own layout), so this must type-check clean — it guards that feature
+    // against regressing back to a rejection.
     let d = diags("class C { companion object { val x: Int get() = 5 } }\nfun box(): Int = 0");
-    assert_rejected(&d, "companion-object property custom accessor");
+    let real: Vec<&String> = d.iter().filter(|m| !m.is_empty()).collect();
+    assert!(
+        real.is_empty() || d.iter().any(|m| m.contains("<skip")),
+        "expected a computed companion property to type-check clean, got: {real:?}"
+    );
+    // An accessor over a real BACKING FIELD still is not: it would be emitted as the default static
+    // accessor with the body ignored, so the front end must keep rejecting it.
+    let d = diags(
+        "class C { companion object { val x: Int = 1\n    get() = field + 1 } }\nfun box(): Int = 0",
+    );
+    assert_rejected(&d, "companion-object backing-field accessor");
 }
 
 #[test]

@@ -27,14 +27,8 @@ fun box(): String {
 
 #[test]
 fn diverging_property_initializer_runs() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping diverging_init_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping diverging_init_e2e: no kotlin-stdlib jar found");
-        return;
-    };
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
 
     // Sanity: the checker accepts it (with the stdlib classpath).
     let mut d = DiagSink::new();
@@ -55,10 +49,10 @@ fn diverging_property_initializer_runs() {
     );
 
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(SRC, "Div", &[stdlib], Some(&jdk)) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(
+        common::expect_box_run(SRC, "Div", &[stdlib], Some(&jdk)),
+        "OK"
+    );
 }
 
 #[test]

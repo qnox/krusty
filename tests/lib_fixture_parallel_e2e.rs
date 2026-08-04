@@ -2,9 +2,6 @@ use super::common;
 
 #[test]
 fn concurrent_compile_lib_calls_with_one_tag_get_separate_scratch_dirs() {
-    if common::stdlib_jar().is_none() {
-        return;
-    }
     let outs: Vec<Option<(usize, std::path::PathBuf)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..3usize)
             .map(|i| {

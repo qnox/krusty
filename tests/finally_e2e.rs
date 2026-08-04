@@ -15,7 +15,7 @@ val r = try { mark(\"e\") } finally { mark(\"f\") }\n\
 if (r != 1) return \"fr\"\n\
 return if (log == \"abcdef\") \"OK\" else log\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "F");
+    common::expect_box_ok_with_stdlib(src, "F");
 }
 
 /// A `return` inside both the `try` body and the `finally`: the finally's `return` overrides the
@@ -31,5 +31,5 @@ fun box(): String {\n\
 val r = foo()\n\
 return if (r == 1 && log == \"DoneFinally\") \"OK\" else \"r=\" + r + \" log=\" + log\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "F");
+    common::expect_box_ok_with_stdlib(src, "F");
 }

@@ -141,8 +141,8 @@ fun box(): String {
 /// leak application identifiers and couple tests to a real declaration spelling.
 #[test]
 fn suspend_lambda_rejects_selected_suspend_inline_without_name_leakage() {
-    let stdlib = common::stdlib_jar().expect("the e2e toolchain must provide kotlin-stdlib");
-    let jdk = common::jdk_modules().expect("the e2e toolchain must provide JDK modules");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let source = r#"
 import kotlin.coroutines.*
 

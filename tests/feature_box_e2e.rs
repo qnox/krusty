@@ -18,12 +18,8 @@ fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
 
 #[test]
 fn lambda_shadowed_outer_var_does_not_allocate_ref_cell() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(java_home) = common::java_home() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let java_home = common::java_home();
     let jdk = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
     let src = r#"
 fun eval(f: () -> Int): Int = f()
@@ -39,11 +35,12 @@ fun box(): String {
     return if (x == 2) "OK" else "x=$x"
 }
 "#;
-    let Some(classes) =
-        common::compile_in_process(src, "ShadowCell", std::slice::from_ref(&stdlib), Some(&jdk))
-    else {
-        return;
-    };
+    let classes = common::expect_compile_in_process(
+        src,
+        "ShadowCell",
+        std::slice::from_ref(&stdlib),
+        Some(&jdk),
+    );
     let box_class = common::find_box_class(&classes).expect("box class");
     assert_eq!(
         common::run_box(&classes, &box_class, &[stdlib]).as_deref(),
@@ -537,8 +534,7 @@ fun box(): String {
     ),
     // No-lambda stdlib `@InlineOnly` extensions on a primitive receiver — `Char.isDigit()`/`isLetter()`/
     // `uppercaseChar()`/… inline their real body (`Character.isDigit(this)`/`toUpperCase(this)`). Accepted
-    // only for a non-unsigned primitive receiver + primitive/`String` return (an unsigned return like
-    // `toUShort(): UShort` is rejected — krusty can't model it, so it skips rather than miscompiling).
+    // only for a non-unsigned primitive receiver + primitive/`String` return.
     (
         "PrimitiveInlineExtension",
         r#"
@@ -3950,10 +3946,7 @@ fn feature_snippets_run_impl() {
     if !std::path::Path::new(&javac).exists() {
         return;
     }
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping feature_box_e2e: no kotlin-stdlib jar found");
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let stdlib = stdlib.to_str().unwrap().to_string();
     let jdk_modules = format!("{java_home}/lib/modules");
     let work = std::env::temp_dir().join(format!("krusty_feat_{}", std::process::id()));

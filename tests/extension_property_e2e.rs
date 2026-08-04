@@ -773,9 +773,7 @@ fn same_precedence_extension_properties_are_ambiguous() {
 
 #[test]
 fn member_extension_classpath_members() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     const CASES: &[(&str, &str)] = &[
         (
@@ -868,8 +866,11 @@ fn member_extension_classpath_members() {
     ];
 
     for &(case, source) in CASES {
-        let diagnostics =
-            common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), jdk.as_deref());
+        let diagnostics = common::front_end_diagnostics(
+            source,
+            std::slice::from_ref(&stdlib),
+            Some(jdk.as_path()),
+        );
         assert!(
             diagnostics.is_empty(),
             "{case}: unexpected diagnostics: {diagnostics:?}"

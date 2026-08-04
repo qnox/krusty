@@ -36,12 +36,8 @@ use super::common::BackendOutcome;
 /// file skip. Only "krusty emitted a class file, and the JVM rejects it" fails. A front-end
 /// rejection fails too: these are backend tests and must not pass through a parse/type error.
 fn expect_emitted_box_verifies(src: &str, stem: &str) {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     let cp = std::slice::from_ref(&stdlib);
     match common::backend_outcome_in_process(src, stem, cp, Some(&jdk)) {
         None => panic!("{stem}: the front end rejected the source; this is a backend test"),

@@ -5,19 +5,27 @@
 
 use super::common;
 
+/// Raw compile for the rejection test below. Toolchain access is fail-fast in the shared harness, so
+/// `None` has one meaning here: the compiler deliberately declined the source.
 fn classes(src: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_in_process(src, "P", &[stdlib], Some(&jdk))
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    common::compile_in_process(src, "P", &[stdlib], Some(jdk.as_path()))
+}
+
+/// Positive form: a declined source panics with its front-end diagnostics instead of becoming a
+/// silent pass. Provisioning failures likewise come from the shared fail-fast accessors.
+fn expect_classes(src: &str) -> Vec<(String, Vec<u8>)> {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    common::expect_compile_in_process(src, "P", &[stdlib], Some(jdk.as_path()))
 }
 
 #[test]
 fn integral_bounded_type_param_specializes_to_primitive_descriptor() {
     let src =
         "fun <T : Int> idi(t: T): T = t\nfun box(): String = if (idi(3) == 3) \"OK\" else \"no\"\n";
-    let Some(cs) = classes(src) else {
-        return; // toolchain unavailable
-    };
+    let cs = expect_classes(src);
     // The facade `PKt` must declare `idi` with the specialized primitive descriptor `(I)I`.
     let pkt = cs
         .iter()
@@ -35,7 +43,7 @@ fn integral_bounded_type_param_specializes_to_primitive_descriptor() {
     );
     // And it runs.
     if let Some(box_class) = common::find_box_class(&cs) {
-        let stdlib = common::stdlib_jar().unwrap();
+        let stdlib = common::stdlib_jar();
         assert_eq!(
             common::run_box(&cs, &box_class, &[stdlib]).as_deref(),
             Some("OK")
@@ -46,7 +54,7 @@ fn integral_bounded_type_param_specializes_to_primitive_descriptor() {
 #[test]
 fn char_bounded_type_param_runs() {
     let src = "fun <T : Char> idc(c: T): T = c\nfun box(): String = if (idc('K') == 'K') \"OK\" else \"no\"\n";
-    let Some(cs) = classes(src) else { return };
+    let cs = expect_classes(src);
     let pkt = cs
         .iter()
         .find(|(n, _)| n.ends_with("PKt"))
@@ -60,9 +68,6 @@ fn double_bounded_type_param_is_rejected() {
     // A floating-point bound is NOT specializable (boxed vs primitive `==` differ on -0.0/NaN) — krusty
     // must reject it (compile fails → None), so the test skips rather than miscompiles, like the unsigned
     // and value bounds. (kotlinc would specialize it; we conservatively decline until it's sound.)
-    if common::java_home().is_none() || common::stdlib_jar().is_none() {
-        return;
-    }
     let src = "fun <T : Double> idd(d: T): T = d\nfun box(): String = if (idd(1.0) == 1.0) \"OK\" else \"no\"\n";
     assert!(
         classes(src).is_none(),

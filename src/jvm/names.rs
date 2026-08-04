@@ -204,6 +204,9 @@ pub fn type_descriptor(ty: Ty) -> String {
         Ty::Double => "D".into(),
         Ty::Boolean => "Z".into(),
         Ty::Char => "C".into(),
+        // An unsigned type erases to the signed primitive it is an inline class over.
+        Ty::UByte => "B".into(),
+        Ty::UShort => "S".into(),
         Ty::UInt => "I".into(),
         Ty::ULong => "J".into(),
         Ty::String => obj_desc("kotlin/String"),
@@ -229,6 +232,8 @@ pub fn type_descriptor(ty: Ty) -> String {
         ),
         Ty::Nullable(inner) => match *inner {
             Ty::Unit => obj_desc("kotlin/Unit"),
+            Ty::UByte => obj_desc("kotlin/UByte"),
+            Ty::UShort => obj_desc("kotlin/UShort"),
             Ty::UInt => obj_desc("kotlin/UInt"),
             Ty::ULong => obj_desc("kotlin/ULong"),
             other => type_descriptor(other.boxed_ref().unwrap_or(other)),

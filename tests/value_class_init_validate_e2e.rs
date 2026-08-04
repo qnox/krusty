@@ -38,7 +38,8 @@ fn value_class_init_validates_via_classpath_sealed() {
         \x20 if (SlugRules.MAX != 63) return \"fail const\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("vc_init_validate", LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    let Some(out) = common::expect_box_run_against("vc_init_validate", LIB, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
 }

@@ -17,5 +17,5 @@ do { only += 1 } while (false)\n\
 if (only != 1) return \"f3\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "D");
+    common::expect_box_ok_with_stdlib(SRC, "D");
 }

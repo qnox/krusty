@@ -53,9 +53,7 @@ fn ksp_generates_java_apt_generates_class_ksp_sees_it() {
         eprintln!("skipping: JDK unavailable");
         return;
     };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let mut host = KspHost::new();
     host.register(Box::new(BridgeProcessor));
 

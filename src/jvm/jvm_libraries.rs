@@ -1082,6 +1082,25 @@ impl JvmLibraries {
     /// mapping (`to_jvm_internal`) the emitter uses for the call owner, so resolution and codegen stay
     /// byte-consistent. Members/return types erase to the JVM forms (`get(int)Object`, etc.).
     fn build_library_type(&self, internal_name: TypeName) -> Option<LibraryType> {
+        // `kotlin.reflect.KFunction0` … `KFunction22` are COMPILER-SYNTHESIZED, exactly like
+        // `kotlin.FunctionN`: they exist in no jar, and the `kotlin/reflect` builtins declare only the
+        // arity-less `KFunction`. Build the shape kotlinc gives them — `KFunction<R>` for the reflection
+        // members (`returnType`, `name`, …) plus `FunctionN` so the value is invocable — instead of
+        // reporting `import kotlin.reflect.KFunction0` as an unresolved reference. A declaration typed
+        // with one erases to `Lkotlin/reflect/KFunction;` (see `jvm_class_map::to_jvm_internal`).
+        if let Some(arity) = crate::types::kfunction_arity(internal_name) {
+            let mut shape =
+                (*self.resolve_type_name(type_name(crate::types::KFUNCTION_INTERNAL))?).clone();
+            let mut supertypes = crate::types::TypeNameList::new();
+            supertypes.push(crate::types::KFUNCTION_INTERNAL);
+            supertypes.push(&format!("kotlin/Function{arity}"));
+            shape.supertypes = supertypes;
+            shape.type_params = (0..arity)
+                .map(|index| format!("P{}", index + 1))
+                .chain(std::iter::once("R".to_string()))
+                .collect();
+            return Some(shape);
+        }
         {
             let internal = &internal_name.render();
             let ci = match self.cp.find(internal) {
@@ -1134,6 +1153,10 @@ impl JvmLibraries {
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
             let meta_fns = metadata::class_functions(&ci);
+            // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
+            // source-level shape survives (a receiver function type erases to `FunctionN` in both the
+            // descriptor and the `Signature`).
+            let ctor_param_lists = metadata::class_constructor_params(&ci);
             for m in &ci.methods {
                 if m.is_bridge()
                     && ci.methods.iter().any(|target| {
@@ -1206,12 +1229,44 @@ impl JvmLibraries {
                         metadata.is_suspend(),
                     );
                 }
-                member.set_suspend(member_metadata.is_some_and(metadata::MetaFn::is_suspend));
+                // A member EXTENSION is deliberately excluded from `aligned_member_metadata`: its
+                // metadata parameter list omits the receiver the JVM method leads with, so the shared
+                // alignment cannot line the two up. Match it separately, by the exact descriptor it
+                // records. The two facts recovered are ones no descriptor can carry — that the first
+                // parameter is a RECEIVER rather than a value, and whether the member is `operator`.
+                let member_extension_metadata = meta_fns.iter().find(|function| {
+                    function.is_extension()
+                        && function.jvm_name == m.name
+                        && function.jvm_desc == Some(m.descriptor.as_str())
+                });
+                let semantic_metadata = member_metadata.or(member_extension_metadata);
+                if let Some(metadata) = member_extension_metadata {
+                    // Normalize the callable's SOURCE identity at the provider boundary. A value-class
+                    // parameter may mangle the JVM method name, but downstream overload selection must
+                    // see the Kotlin declaration name and must not grow a classpath-only name branch.
+                    // The physical spelling remains on the opaque member handle for emission.
+                    if metadata.jvm_name != metadata.kotlin_name {
+                        member.physical_name = Some(metadata.jvm_name.clone());
+                        member.name = metadata.kotlin_name.clone();
+                    }
+                    // JVM `Signature` sees the extension receiver as an ordinary leading parameter;
+                    // Kotlin metadata represents it as the receiver attribute. Prefer that normalized
+                    // semantic shape so generic inference is identical to a module declaration.
+                    if metadata.generic_sig.is_some() {
+                        member.generic_sig = metadata.generic_sig.clone();
+                    }
+                }
+                member.set_suspend(semantic_metadata.is_some_and(metadata::MetaFn::is_suspend));
+                member.set_is_member_extension(member_extension_metadata.is_some());
+                member.set_is_operator(
+                    member_metadata.is_some_and(metadata::MetaFn::is_operator)
+                        || member_extension_metadata.is_some_and(metadata::MetaFn::is_operator),
+                );
                 let value_arity = member
                     .params
                     .len()
                     .saturating_sub(usize::from(member.suspend()));
-                if let Some(metadata) = member_metadata {
+                if let Some(metadata) = semantic_metadata {
                     member.visibility = metadata.visibility;
                     member.set_ret_nullable(metadata.ret_nullable());
                 }
@@ -1219,7 +1274,7 @@ impl JvmLibraries {
                 // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
                 // result — keeping the erased type as `physical_ret` for the emitter.
                 if member.suspend() {
-                    if let Some(f) = member_metadata {
+                    if let Some(f) = semantic_metadata {
                         member.physical_ret = member.ret;
                         let logical = metadata_return_info(f.ret_class, f.ret_nullable())
                             .apply(member.physical_ret);
@@ -1243,6 +1298,7 @@ impl JvmLibraries {
                     member.set_ret_nullable(true);
                 }
                 member.call_sig = member_metadata
+                    .or(member_extension_metadata)
                     .map(metadata::MetaFn::member_call_sig)
                     .unwrap_or_else(|| {
                         let vararg_index = m
@@ -1255,6 +1311,57 @@ impl JvmLibraries {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
                 if m.name == "<init>" {
+                    // A constructor is NOT in `class_functions`, so the shared member alignment above
+                    // left its receiver-function marks unrestored: `DslBase(init: Scope.() -> Unit)`
+                    // read as a plain `(Scope) -> Unit` and no lambda argument bound `this`. Restore
+                    // them from the class's `@Metadata` CONSTRUCTOR records, matched by source arity
+                    // (the same evidence `ctor_named_params` uses for names/defaults).
+                    //
+                    // Arity is the ONLY alignment available here, so it must also be the test of
+                    // whether the record belongs to THIS `<init>`. With two constructors of the same
+                    // arity the record cannot be attributed, and stamping one's marks on both rewrites
+                    // an ordinary `(Cfg) -> Unit` parameter into a receiver function type — which makes
+                    // a valid call to the OTHER constructor unresolvable. Mark only when the arity
+                    // identifies exactly one record; an ambiguous class keeps the erased reading.
+                    let unique_record = {
+                        let mut same_arity = ctor_param_lists
+                            .iter()
+                            .filter(|params| params.recv_fun.len() == member.params.len());
+                        match (same_arity.next(), same_arity.next()) {
+                            (Some(params), None) => Some(params),
+                            _ => None,
+                        }
+                    };
+                    if let (Some(gsig), Some(recv_fun)) = (
+                        member.generic_sig.as_mut(),
+                        unique_record
+                            .map(|params| params.recv_fun.clone())
+                            .filter(|marks| marks.iter().any(|&is_receiver| is_receiver)),
+                    ) {
+                        mark_receiver_fun_params(gsig, &recv_fun, false);
+                        // Publish the recovered shape the two ways constructor resolution reads it:
+                        // the parameter TYPE (overload/lambda matching walks `params`) and the call
+                        // sig's per-parameter receiver flags. Only a receiver-function parameter is
+                        // replaced — every other parameter keeps its descriptor-derived erasure, so
+                        // constructor selection is unchanged for them.
+                        let generic = member.generic_sig.as_ref().map(|g| g.params.clone());
+                        if let Some(generic) = generic.filter(|g| g.len() == member.params.len()) {
+                            for (param, shape) in member.params.iter_mut().zip(&generic) {
+                                if matches!(shape.non_null(), Ty::Fun(sig) if sig.has_receiver) {
+                                    *param = *shape;
+                                }
+                            }
+                        }
+                        member.call_sig.lambda_receiver_params = recv_fun;
+                        member.call_sig.lambda_receivers = member
+                            .params
+                            .iter()
+                            .map(|param| match param.non_null() {
+                                Ty::Fun(sig) if sig.has_receiver => sig.params.first().copied(),
+                                _ => None,
+                            })
+                            .collect();
+                    }
                     // The ctor's generic signature (decoded above, marks restored) lets the resolver infer a
                     // construction's type arguments (`Pair(1, 2)` → `<Int, Int>`) without spelling backend
                     // signature strings. Re-parsing the raw attribute here would drop the receiver marks.
@@ -2472,10 +2579,37 @@ impl SymbolSource for JvmLibraries {
                     let ret_ty = mp
                         .ret_class
                         .map_or(Ty::obj("kotlin/Any"), kotlin_type_name_to_ty);
-                    let ty = mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name);
-                    let Some((getter_params, getter_ret)) = parse_method_desc(&getter.desc) else {
+                    // `Ty::obj_name` is deliberate for a value-class-typed property (the logical class,
+                    // not its collapsed underlying). It is wrong only for a Kotlin PRIMITIVE, which it
+                    // keeps as the boxed class while the getter returns the unboxed form — the property's
+                    // declared type and its getter's return then disagreed ("return type mismatch:
+                    // expected 'Boolean', actual 'Boolean'").
+                    let ty = if ret_ty.is_jvm_scalar() {
+                        ret_ty
+                    } else {
+                        mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
+                    };
+                    let Some((mut getter_params, getter_ret)) = parse_method_desc(&getter.desc)
+                    else {
                         continue;
                     };
+                    // On a `@JvmInline value class` every member is realized as a STATIC `-impl` whose
+                    // FIRST parameter is the CARRIER — the receiver, not a value parameter
+                    // (`kotlin/Result.isSuccess` is `isSuccess-impl(Ljava/lang/Object;)Z`). Dropping it
+                    // presents the same zero-parameter accessor an ordinary class exposes; the
+                    // value-class pass already routes such a member's `dispatch_receiver` through the
+                    // unboxed carrier. Without this the accessor was rejected as "takes an argument"
+                    // and the property read reported as an unresolved reference.
+                    // NOT the value class's own sole property: that one IS the carrier (`Result.value`),
+                    // reached as the underlying value itself rather than through a computed `-impl`
+                    // accessor, and rerouting it breaks the box/unbox boundary.
+                    let carrier_receiver = getter_params.len() == 1
+                        && metadata::class_inline(&ci).is_some_and(|inline| {
+                            inline.property_name.as_deref() != Some(mp.name.as_str())
+                        });
+                    if carrier_receiver {
+                        getter_params.clear();
+                    }
                     if !getter_params.is_empty() {
                         continue;
                     }
@@ -3041,6 +3175,16 @@ impl SymbolSource for JvmLibraries {
                 // This keeps overload identity precise without a classpath-only reverse-name table.
                 let function_renames = self.mapped_collection_function_renames(cn);
                 for m in &t.members {
+                    // A member extension has TWO receivers: the declaring class supplies the implicit
+                    // dispatch receiver and the method's first JVM parameter is the extension receiver.
+                    // It is therefore not an ordinary member of `receiver`, even though both shapes are
+                    // encoded as instance methods in the class file. The dedicated semantic
+                    // member-extension query consumes this declaration; exposing it here as well would
+                    // incorrectly accept `scope.invoke("x", body)` and create two resolution paths for
+                    // the same declaration.
+                    if m.is_member_extension() {
+                        continue;
+                    }
                     // The name this member is visible under in the receiver's SOURCE scope. Normally
                     // its own; for a Java method that a renamed builtin covers, the KOTLIN name
                     // INSTEAD of the JVM one — so `ArrayList.remove(int)` answers `removeAt` and is
@@ -3337,6 +3481,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         self.static_field_name(internal, name)
     }
 
+    fn top_level_static_field(
+        &self,
+        package: TypeName,
+        name: &str,
+    ) -> Option<crate::libraries::StaticFieldRef> {
+        // A top-level `const val` is a `public static final` field on the package FACADE that carries
+        // the declaration (`kotlin.math.PI` → `kotlin/math/MathKt.PI`). Which facade that is, is a
+        // platform fact, so the scan lives here rather than in the resolver.
+        self.cp
+            .package_facades_name(package)
+            .into_iter()
+            .find_map(|facade| self.static_field_name(facade, name))
+    }
+
     fn static_field_name(
         &self,
         internal: TypeName,
@@ -3427,8 +3585,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
 
     fn value_underlying(&self, ty: Ty) -> Option<Ty> {
         match ty {
-            Ty::UInt => Some(Ty::Int),
-            Ty::ULong => Some(Ty::Long),
+            u if u.is_unsigned() => u.scalar_value_repr(),
             _ => self.value_underlying_name(ty.obj_internal()?),
         }
     }
@@ -3493,7 +3650,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         })
     }
 
-    fn property_reference_type(&self, arity: usize, mutable: bool) -> Option<Ty> {
+    fn property_reference_type(&self, arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty> {
         let internal = match (arity, mutable) {
             (0, false) => "kotlin/reflect/KProperty0",
             (0, true) => "kotlin/reflect/KMutableProperty0",
@@ -3501,6 +3658,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
             (1, true) => "kotlin/reflect/KMutableProperty1",
             _ => return None,
         };
+        // `KProperty0<V>` / `KProperty1<T, V>`: carrying the arguments is what lets `get()` report
+        // the property's type rather than the erased `Object` upper bound. An argument list of the
+        // wrong length (or one that could not be determined) leaves the reference raw, as before.
+        if args.len() == arity + 1 && !args.contains(&Ty::Error) {
+            return Some(Ty::obj_args(internal, args));
+        }
         Some(Ty::obj(internal))
     }
 
@@ -3727,8 +3890,8 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
             Ty::Double => "kotlin/jvm/internal/Ref$DoubleRef",
             Ty::Boolean => "kotlin/jvm/internal/Ref$BooleanRef",
             Ty::Char => "kotlin/jvm/internal/Ref$CharRef",
-            Ty::Byte => "kotlin/jvm/internal/Ref$ByteRef",
-            Ty::Short => "kotlin/jvm/internal/Ref$ShortRef",
+            Ty::Byte | Ty::UByte => "kotlin/jvm/internal/Ref$ByteRef",
+            Ty::Short | Ty::UShort => "kotlin/jvm/internal/Ref$ShortRef",
             _ => "kotlin/jvm/internal/Ref$ObjectRef",
         };
         Some(Ty::obj(internal))
@@ -3857,11 +4020,14 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 
         match op {
             RuntimeOp::UnsignedBox | RuntimeOp::UnsignedUnbox => {
-                let (owner, prim, repr) = match ty {
-                    Ty::UInt => ("kotlin/UInt", "I", Ty::Int),
-                    Ty::ULong => ("kotlin/ULong", "J", Ty::Long),
-                    _ => return None,
-                };
+                // Every unsigned type boxes through its OWN inline class (`kotlin/UByte`, …) over the
+                // signed primitive it erases to — one row derived from the `Ty`, not a per-type table.
+                if !ty.is_unsigned() {
+                    return None;
+                }
+                let owner = &ty.kotlin_class_internal()?.render();
+                let prim = crate::jvm::names::type_descriptor(ty);
+                let repr = ty.scalar_value_repr()?;
                 match op {
                     RuntimeOp::UnsignedBox => callable(
                         owner,

@@ -10,14 +10,8 @@ use super::common;
 
 #[test]
 fn classpath_synthetic_ctor_and_nested_type_resolution() {
-    let Some(jdk) = common::jdk_modules() else {
-        eprintln!("skipping: no JDK modules");
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     // A classpath library exercising each synthetic/nested shape.
     let Some(libout) = common::compile_libs(
         "synctor",
@@ -63,7 +57,7 @@ fn classpath_synthetic_ctor_and_nested_type_resolution() {
         \x20 if (c4.a != 5 || c4.b != 9 || c4.c != \"q\") return \"fail e4b: ${c4.a},${c4.b},${c4.c}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(&jdk))
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
         .expect("krusty failed to compile classpath synthetic-ctor/nested resolution");
     match common::run_box(&classes, "MainKt", &[libout, sl]) {
         Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),

@@ -8,7 +8,7 @@ use super::common;
 /// Compile `src` (stem `stem`) against kotlin-stdlib + JDK modules and run its `box()`, asserting
 /// "OK". Skips (returns) when the toolchain / stdlib / JDK isn't provisioned so the suite still runs.
 fn run_ok(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 // --- inline fun taking a lambda, called with different lambdas -----------------------------------

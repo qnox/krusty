@@ -493,6 +493,26 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 emit_expr(ir, *value, inst)
             )
         }
+        // A `vararg` argument pack is a JS array literal; a spread entry contributes its elements
+        // rather than itself, which is exactly JS's own `...` spread. (The JVM backend needs the
+        // platform `SpreadBuilder` for the same node; JS has the operation natively.)
+        IrExpr::Vararg {
+            elements, spreads, ..
+        } => {
+            let items: Vec<String> = elements
+                .iter()
+                .enumerate()
+                .map(|(index, &element)| {
+                    let value = emit_expr(ir, element, inst);
+                    if spreads.get(index).copied().unwrap_or(false) {
+                        format!("...{value}")
+                    } else {
+                        value
+                    }
+                })
+                .collect();
+            format!("[{}]", items.join(", "))
+        }
         // The JS backend covers a subset of the IR. A node it cannot represent must NOT masquerade as a
         // value: `undefined` silently compiles a wrong program (a property read read back as `undefined`
         // instead of the value, with no error anywhere). JS has no compile step of its own, so the honest

@@ -37,11 +37,9 @@ class Inventory {\n\
         items.add(item)\n\
     }\n\
 }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], jdk.as_deref());
+    let diagnostics = common::front_end_diagnostics(SRC, &[stdlib], Some(jdk.as_path()));
     assert!(
         diagnostics
             .iter()

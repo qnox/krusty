@@ -112,8 +112,8 @@ impl IrConst {
     pub fn zero_for_value_type(ty: Ty) -> IrConst {
         match ty {
             Ty::Boolean => IrConst::Boolean(false),
-            Ty::Byte => IrConst::Byte(0),
-            Ty::Short => IrConst::Short(0),
+            Ty::Byte | Ty::UByte => IrConst::Byte(0),
+            Ty::Short | Ty::UShort => IrConst::Short(0),
             Ty::Int | Ty::UInt => IrConst::Int(0),
             Ty::Long | Ty::ULong => IrConst::Long(0),
             Ty::Float => IrConst::Float(0.0),
@@ -278,6 +278,15 @@ pub enum IrExpr {
     },
     /// Read an instance field (`IrGetField`): `receiver.<fields[index]>` of class `class`.
     GetField {
+        receiver: ExprId,
+        class: ClassId,
+        index: u32,
+    },
+    /// The RAW value of a `lateinit` backing field, WITHOUT the throw-if-null guard every ordinary
+    /// read of one carries. Exists so `::prop.isInitialized` can test the field a normal read would
+    /// reject; lowering compares it against null, which is what kotlinc emits (no reflection, no
+    /// `KProperty` value).
+    LateinitInitialized {
         receiver: ExprId,
         class: ClassId,
         index: u32,
@@ -1313,6 +1322,14 @@ pub struct IrFile {
     /// before the CPS rewrite, so a function that is both `suspend` and value-class-typed reports the
     /// fully declared signature here rather than the half-lowered one.
     pub vc_declared_sigs: std::collections::HashMap<u32, (String, Vec<Ty>, Ty)>,
+    /// Each `suspend fun` whose LOGICAL return is a NON-NULL `@JvmInline value class` → that class's
+    /// internal name, recorded by the value-class pass as it boxes the function's tail. A CPS return
+    /// is `Object`, so the value crosses the resume boundary in its BOXED form (`X.box-impl`) — the
+    /// erasure that turns `X` into its underlying type everywhere else would otherwise leave the
+    /// coroutine pass with no way to know which class to `checkcast` + `unbox-impl` on the resume
+    /// side. Value-class knowledge stays in the value-class pass; this records only the erasure it
+    /// deliberately did NOT apply, which the coroutine pass must undo per suspension.
+    pub suspend_boxed_value_class_returns: std::collections::HashMap<u32, TypeName>,
     /// `ExprId` of each direct call to a `suspend fun` → the callee's LOGICAL return type (the source
     /// return, before CPS erasure to `Object`). Recorded by ir_lower from the resolver
     /// (`flags.suspend`), so the coroutine pass recognizes a suspend call to ANOTHER file or a classpath
@@ -1417,6 +1434,14 @@ pub struct IrFile {
     /// BOXED there — the value-class pass reads this to type such a slot as the boxed value class (so
     /// `it.getOrThrow()` unboxes it), without the lowerer probing value-class-ness itself.
     pub lambda_own_params_from: std::collections::HashMap<u32, u32>,
+    /// Lifted-lambda function id → the DECLARED parameter types and return type of the user
+    /// `fun interface` method the lambda was SAM-converted to. Absent for a plain `FunctionN` lambda,
+    /// whose `invoke` slots are all generic. The distinction only matters to a target that erases
+    /// some declared types away (the JVM's value classes): a generic slot carries a value class
+    /// BOXED, while a slot the SAM method spells as the value class itself carries the erased
+    /// underlying — so the lambda's impl method must match whichever the interface actually declares.
+    /// The lowerer records the declaration; deciding what erases is the backend pass's job.
+    pub lambda_sam_signature: std::collections::HashMap<u32, (Vec<Ty>, Ty)>,
 }
 
 /// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
@@ -1780,7 +1805,9 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
             f(*value);
         }
         IrExpr::Variable { init, .. } => init.iter().for_each(|&i| f(i)),
-        IrExpr::GetField { receiver, .. } | IrExpr::PropertyRead { receiver, .. } => f(*receiver),
+        IrExpr::GetField { receiver, .. }
+        | IrExpr::LateinitInitialized { receiver, .. }
+        | IrExpr::PropertyRead { receiver, .. } => f(*receiver),
         IrExpr::Call {
             args,
             dispatch_receiver,

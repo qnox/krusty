@@ -2,9 +2,9 @@ use super::common;
 
 fn run_source_files_against(tag: &str, library: &str, sources: &[(&str, &str)]) -> Option<String> {
     let dependency = common::compile_lib(tag, library)?;
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
-    common::compile_and_run_box_files(sources, &[dependency, stdlib], Some(&jdk))
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    common::compile_and_run_box_files(sources, &[dependency, stdlib], Some(jdk.as_path()))
 }
 
 fn source_file_diagnostics_against(
@@ -13,12 +13,12 @@ fn source_file_diagnostics_against(
     sources: &[&str],
 ) -> Option<Vec<String>> {
     let dependency = common::compile_lib(tag, library)?;
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     Some(common::front_end_diagnostics_files(
         sources,
         &[dependency, stdlib],
-        Some(&jdk),
+        Some(jdk.as_path()),
     ))
 }
 
@@ -136,9 +136,12 @@ fn extension_function_and_property_can_share_a_name() {
         }
     "#;
 
-    if let Some(output) = common::run_box_against("classpath_shared_callable_name", library, main) {
-        assert_eq!(output, "OK");
-    }
+    let Some(output) =
+        common::expect_box_run_against("classpath_shared_callable_name", library, main)
+    else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(output, "OK");
 }
 
 #[test]
@@ -156,10 +159,13 @@ fn classpath_callable_references_resolve_reflection_targets() {
         import fixtures.Marker
         import fixtures.Sample
         import fixtures.isTagged
+        import kotlin.reflect.KFunction0
 
         class PrivateSample {
             private fun reveal(): String = "OK"
-            fun reference(): () -> String = ::reveal
+            // `KFunction0`, not `() -> String`: the plain function type has no `returnType` member, so
+            // the assertion below would not be valid Kotlin (kotlinc rejects it too).
+            fun reference(): KFunction0<String> = ::reveal
         }
 
         fun box(): String {
@@ -176,11 +182,14 @@ fn classpath_callable_references_resolve_reflection_targets() {
         }
     "#;
 
-    if let Some(output) =
-        common::run_box_against_with_reflect("classpath_extension_reflection", library, main)
-    {
-        assert_eq!(output, "OK");
-    }
+    let Some(output) = common::expect_box_run_against_with_reflect(
+        "classpath_extension_reflection",
+        library,
+        main,
+    ) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(output, "OK");
 }
 
 #[test]

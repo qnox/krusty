@@ -31,7 +31,7 @@ fn data_object_tostring_is_the_bare_simple_name() {
         \x20   if (render(TopLevel) != \"TopLevel\") return \"f4:\" + render(TopLevel)\n\
         \x20   return \"OK\"\n\
         }\n";
-    common::assert_box_ok_with_stdlib(src, "DataObject");
+    common::expect_box_ok_with_stdlib(src, "DataObject");
 }
 
 #[test]
@@ -54,5 +54,5 @@ fn data_object_cases_are_matchable_and_distinct() {
         \x20   if (S.A.hashCode() != S.A.hashCode()) return \"f3\"\n\
         \x20   return \"OK\"\n\
         }\n";
-    common::assert_box_ok_with_stdlib(src, "DataObjectWhen");
+    common::expect_box_ok_with_stdlib(src, "DataObjectWhen");
 }

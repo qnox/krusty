@@ -1,10 +1,10 @@
 use super::common;
 
 fn run(main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
-    let coro = common::coroutines_jar()?;
-    common::compile_and_run_box(main, "Main", &[sl, coro, jdk.clone()], Some(&jdk))
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    common::compile_and_run_box(main, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()))
 }
 
 #[test]
@@ -43,18 +43,15 @@ fn withlock_lambda_without_suspension_still_runs() {
 
 #[test]
 fn withlock_lambda_with_suspend_and_nonlocal_return_compiles() {
-    let (Some(stdlib), Some(coro), Some(jdk)) = (
-        common::stdlib_jar(),
-        common::coroutines_jar(),
-        common::jdk_modules(),
-    ) else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    let jdk = common::jdk_modules();
     const SRC: &str = "import kotlinx.coroutines.sync.Mutex\n\
          import kotlinx.coroutines.sync.withLock\n\
          suspend fun make(): String = \"x\"\n\
          suspend fun f(m: Mutex, s: String?): String = m.withLock { s?.let { return@withLock it }; make() }\n";
-    let rejected = common::backend_rejects_in_process(SRC, "S", &[stdlib, coro], Some(&jdk));
+    let rejected =
+        common::backend_rejects_in_process(SRC, "S", &[stdlib, coro], Some(jdk.as_path()));
     assert_eq!(
         rejected,
         Some(false),

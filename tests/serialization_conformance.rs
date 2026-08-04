@@ -151,7 +151,7 @@ fn runtime_jars() -> Option<(PathBuf, PathBuf, PathBuf)> {
     // reliably reaches the modules-2 cache (common::stdlib_jar's type-alias scan can miss it).
     let core = locate("kotlinx-serialization-core-jvm")?;
     let json = locate("kotlinx-serialization-json-jvm")?;
-    let std = locate("kotlin-stdlib-2").or_else(common::stdlib_jar)?;
+    let std = locate("kotlin-stdlib-2").unwrap_or_else(common::stdlib_jar);
     Some((core, json, std))
 }
 

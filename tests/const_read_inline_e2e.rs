@@ -28,10 +28,8 @@ fn const_read_is_inlined_no_getstatic_in_box() {
     // reference in box's code. We assert box() parses and the class has the ConstantValue field.
     let sl = common::stdlib_jar();
     let jh = common::java_home();
-    let jdk = jh
-        .as_ref()
-        .map(|h| std::path::PathBuf::from(format!("{h}/lib/modules")));
-    let cp: Vec<std::path::PathBuf> = sl.into_iter().collect();
+    let jdk = Some(std::path::PathBuf::from(format!("{jh}/lib/modules")));
+    let cp: Vec<std::path::PathBuf> = vec![sl];
     let classes = common::compile_in_process(
         "const val X = \"OK\"\nfun box(): String = X\n",
         "Main",

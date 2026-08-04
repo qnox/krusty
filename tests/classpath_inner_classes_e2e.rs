@@ -19,14 +19,12 @@ fn copies_referenced_classpath_inner_class_metadata() {
                 .find(|entry| entry.inner == "dep/Outer$Nested")
         })
         .expect("dependency self entry");
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let Some(classes) = common::compile_in_process(
         "package app\nfun nested(value: Any) = value is dep.Outer.Nested\n",
         "Use",
         &[lib, stdlib],
-        common::jdk_modules().as_deref(),
+        Some(common::jdk_modules().as_path()),
     ) else {
         panic!("compile");
     };

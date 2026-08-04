@@ -192,7 +192,7 @@ fun box(): String = A().test()
         let cp = krusty::toolchain::classpath_jars_for(src);
         let jdk = common::jdk_modules();
         assert_eq!(
-            common::backend_outcome_in_process(src, stem, &cp, jdk.as_deref()),
+            common::backend_outcome_in_process(src, stem, &cp, Some(jdk.as_path())),
             Some(common::BackendOutcome::Emitted),
             "{stem}: valid omitted vararg must reach backend emission"
         );

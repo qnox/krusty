@@ -24,7 +24,9 @@ fn named_copy_selects_most_derived_override() {
         \x20 val result = update(Child(\"new\", 1, 2), Child(\"old\", 3, 4), 5)\n\
         \x20 return if (result.a == \"old\" && result.b == 3L && result.c == 5L) \"OK\" else \"fail\"\n\
         }\n";
-    if let Some(output) = common::run_box_against("classpath_copy_override", HIERARCHY, main) {
-        assert_eq!(output.trim(), "OK");
-    }
+    let Some(output) = common::expect_box_run_against("classpath_copy_override", HIERARCHY, main)
+    else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(output.trim(), "OK");
 }

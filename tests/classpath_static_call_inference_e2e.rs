@@ -2,12 +2,8 @@ use super::common;
 
 #[test]
 fn property_type_from_a_classpath_static_call() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let java = [
         (
             "Item.java".into(),
@@ -77,11 +73,11 @@ fn property_type_from_a_classpath_static_call() {
             return "OK"
         }
     "#;
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(&jdk))
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
         .unwrap_or_else(|| {
             panic!(
                 "{:?}",
-                common::front_end_diagnostics(source, &classpath, Some(&jdk))
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
             )
         });
     let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
@@ -93,12 +89,8 @@ fn property_type_from_a_classpath_static_call() {
 
 #[test]
 fn class_literal_binds_nested_java_generic_returns() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let java = [
         (
             "Record.java".into(),
@@ -164,11 +156,11 @@ fn class_literal_binds_nested_java_generic_returns() {
             return "OK"
         }
     "#;
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(&jdk))
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
         .unwrap_or_else(|| {
             panic!(
                 "{:?}",
-                common::front_end_diagnostics(source, &classpath, Some(&jdk))
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
             )
         });
     let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
@@ -181,7 +173,8 @@ fn class_literal_binds_nested_java_generic_returns() {
                 .orElse("fallback")
                 .length
     "#;
-    let diagnostics = common::front_end_diagnostics(invalid_source, &classpath, Some(&jdk));
+    let diagnostics =
+        common::front_end_diagnostics(invalid_source, &classpath, Some(jdk.as_path()));
     assert!(
         diagnostics
             .iter()
@@ -196,12 +189,8 @@ fn class_literal_binds_nested_java_generic_returns() {
 
 #[test]
 fn generic_extension_property_keeps_nullability_and_kotlin_collection_type() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     let Some(library) = common::compile_lib(
         "generic_extension_property",
         r#"
@@ -233,11 +222,11 @@ fn generic_extension_property_keeps_nullability_and_kotlin_collection_type() {
             return "OK"
         }
     "#;
-    let output = common::compile_and_run_box(source, "Main", &classpath, Some(&jdk))
+    let output = common::compile_and_run_box(source, "Main", &classpath, Some(jdk.as_path()))
         .unwrap_or_else(|| {
             panic!(
                 "{:?}",
-                common::front_end_diagnostics(source, &classpath, Some(&jdk))
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
             )
         });
     assert_eq!(output.trim(), "OK");

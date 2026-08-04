@@ -8,7 +8,7 @@ use super::common;
 /// Compile `src` (which must define `fun box(): String`) and assert it returns "OK".
 /// Skips silently (returns) when the JVM/stdlib toolchain isn't provisioned.
 fn run_ok(src: &str, stem: &str) {
-    common::assert_box_ok_with_stdlib(src, stem);
+    common::expect_box_ok_with_stdlib(src, stem);
 }
 
 #[test]

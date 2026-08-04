@@ -2,12 +2,8 @@ use super::common;
 
 #[test]
 fn generic_static_field_binds_generic_call_result_at_runtime() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
 
     let sources = [
         (
@@ -47,9 +43,10 @@ fn generic_static_field_binds_generic_call_result_at_runtime() {
                       return Fields.PAYLOAD.value().message()\n\
                   }\n";
     let classpath = [classes, stdlib];
-    let result = common::compile_and_run_box(source, "Main", &classpath, Some(&jdk))
+    let result = common::compile_and_run_box(source, "Main", &classpath, Some(jdk.as_path()))
         .unwrap_or_else(|| {
-            let diagnostics = common::front_end_diagnostics(source, &classpath, Some(&jdk));
+            let diagnostics =
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
             panic!("compile/run failed: {diagnostics:?}");
         });
     if let Some(root) = root {

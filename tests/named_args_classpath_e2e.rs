@@ -19,10 +19,7 @@ fn named_args_to_classpath_top_level_fn_reorder_and_run() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     // 1. A library with a plain (non-inline) top-level function, compiled by the real kotlinc so its
@@ -66,9 +63,7 @@ fn unknown_named_args_on_classpath_callables_are_rejected_canonically() {
     ) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let classpath = vec![libout, stdlib];
     let cases = [
         "import lib.top\nfun bad(): Int = top(z = 1)",
@@ -77,8 +72,11 @@ fn unknown_named_args_on_classpath_callables_are_rejected_canonically() {
         "import lib.Outer\nfun bad(): Outer.Inner = Outer.Inner(z = 1)",
     ];
     for source in cases {
-        let diagnostics =
-            common::front_end_diagnostics(source, &classpath, common::jdk_modules().as_deref());
+        let diagnostics = common::front_end_diagnostics(
+            source,
+            &classpath,
+            Some(common::jdk_modules().as_path()),
+        );
         assert_eq!(
             diagnostics,
             ["no parameter with name 'z' found."],
@@ -93,10 +91,7 @@ fn classpath_top_level_named_args_preserve_source_eval_order() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     let Some(libout) = common::compile_lib(
@@ -137,10 +132,7 @@ fn classpath_reordered_named_args_with_trailing_lambda() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     let Some(libout) = common::compile_lib(
@@ -177,10 +169,7 @@ fn named_args_to_classpath_member_fn_reorder_and_run() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     // A library CLASS with an instance method, compiled by kotlinc so its `@Metadata` carries the
@@ -240,10 +229,7 @@ fn named_args_to_classpath_extension_fn_reorder_and_run() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     // A library top-level EXTENSION function, compiled by kotlinc so its `@Metadata` carries the source
@@ -296,10 +282,7 @@ fn named_args_to_classpath_extension_fn_omitted_default_uses_slots() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     let Some(libout) = common::compile_lib(
@@ -332,10 +315,7 @@ fn implicit_receiver_classpath_extension_default_uses_slots() {
         eprintln!("skipping: set JAVA_HOME");
         return;
     };
-    let Some(stdlib_path) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
+    let stdlib_path = common::stdlib_jar();
     let jdk_modules = std::path::PathBuf::from(format!("{java_home}/lib/modules"));
 
     let Some(libout) = common::compile_lib(

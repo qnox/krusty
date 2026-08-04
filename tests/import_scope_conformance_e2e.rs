@@ -33,7 +33,8 @@ fn unimported_top_level_function_is_unresolved() {
 fn imported_top_level_function_resolves_and_runs() {
     let main = "import mylib.provide\n\
         fun box(): String = provide()\n";
-    let Some(out) = common::run_box_against("scope_tl_pos", LIB, main) else {
+    // A rejected source must FAIL here, not skip: the toolchain is the only legitimate `None`.
+    let Some(out) = common::expect_box_run_against("scope_tl_pos", LIB, main) else {
         return;
     };
     assert_eq!(
@@ -58,7 +59,7 @@ fn unimported_extension_is_unresolved() {
 fn imported_extension_resolves_and_runs() {
     let main = "import mylib.tagged\n\
         fun box(): String = if (\"O\".tagged() == \"O!\") \"OK\" else \"NO\"\n";
-    let Some(out) = common::run_box_against("scope_ext_pos", LIB, main) else {
+    let Some(out) = common::expect_box_run_against("scope_ext_pos", LIB, main) else {
         return;
     };
     assert_eq!(out, "OK", "an imported extension resolves and runs");

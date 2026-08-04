@@ -30,9 +30,7 @@ fn classpath_typealias_ctor_and_type_position() {
         \x20 if (c.get() != 3) return \"fail alias-chain: ${c.get()}\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("typealias", LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    common::expect_box_ok_against("typealias", LIB, main);
 }
 
 #[test]
@@ -45,9 +43,7 @@ fn classpath_typealias_visibility_is_enforced() {
     let Some(libout) = common::compile_lib("typealias_visibility", VISIBILITY_LIB) else {
         return;
     };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let cp = [libout.clone(), stdlib];
     let diagnostics = common::front_end_diagnostics(
@@ -58,7 +54,7 @@ fn classpath_typealias_visibility_is_enforced() {
          fun internalValue(): Any = InternalAlias()\n\
          fun privateValue(): Any = PrivateAlias()\n",
         &cp,
-        jdk.as_deref(),
+        Some(jdk.as_path()),
     );
 
     assert!(diagnostics

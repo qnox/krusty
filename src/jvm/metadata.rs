@@ -1403,8 +1403,8 @@ fn type_parameter_context(
     })
 }
 
-/// Build the metadata-primary [`GenericSig`] for a function: `formals` = the function's + enclosing
-/// class's type-parameter names; `receiver` = the EXTENSION's `receiver_type`, or — for a member — the
+/// Build the metadata-primary [`GenericSig`] for a function: `formals` = the function's own declared
+/// type-parameter names; `receiver` = the EXTENSION's `receiver_type`, or — for a member — the
 /// declaring class parameterized by its own type parameters (`Box<T>`), or `None` for a top-level
 /// function; `params` = the source VALUE parameters (no receiver, no synthetic `suspend` Continuation);
 /// `ret` = the return type. Receiver is an ATTRIBUTE, uniform for member and extension: at the
@@ -1416,9 +1416,9 @@ fn build_generic_sig(
     pf: &ParsedFunction,
     records: &[Rec],
     d2: &[String],
+    class_tparams: &[(u64, String)],
     class_receiver: Option<(&str, &[(u64, String)])>,
 ) -> Option<GenericSig> {
-    let class_tparams = class_receiver.map(|(_, tps)| tps).unwrap_or(&[]);
     let context = type_parameter_context(class_tparams, &pf.type_params, records, d2)?;
     let receiver = if let Some(rb) = &pf.receiver_body {
         // An EXTENSION: its `receiver_type` is the receiver gsig node (`T`, `Ch`, `List<T>`, …).
@@ -1471,9 +1471,15 @@ fn build_generic_sig(
             parse_type_gsig_bounded(rb, records, d2, &context.names, &context.erasure_bounds)
         })
         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+    // Enclosing class parameters belong in the DECODING context because a member extension may use
+    // one in its receiver/value/return shape. They do not become function formals: consumers render
+    // `formals` after `fun`, accept explicit method type arguments from it, and bind owner parameters
+    // from the applied dispatch type. Keeping the inherited prefix here would turn every method of
+    // `Class<E>` into a fictitious `fun <E>` and allow call inference to overwrite the owner's `E`.
+    let inherited = class_tparams.len();
     Some(GenericSig {
-        formals: context.formals,
-        formal_bounds: context.formal_bounds,
+        formals: context.formals[inherited..].to_vec(),
+        formal_bounds: context.formal_bounds[inherited..].to_vec(),
         receiver,
         params,
         ret,
@@ -1924,10 +1930,29 @@ pub fn decode_metadata(
         d2,
         methods,
     };
+    // A class-body extension may use an ENCLOSING class parameter as its extension receiver
+    // (`class Scope<T> { fun T.f() }`). Function metadata stores only the parameter id; decoding it
+    // without the containing Class.type_parameter table silently widens the receiver to `Any` and
+    // turns its physical leading parameter into an apparent value parameter. Recover the names once
+    // at the metadata boundary and give every class function the complete semantic context.
+    let class_tparams = if k == Some(1) {
+        type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
+            .into_iter()
+            .filter_map(parse_type_param)
+            .filter_map(|parameter| {
+                Some((
+                    parameter.id,
+                    resolve_string(ctx.records, ctx.d2, parameter.name_id as usize)?,
+                ))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     KotlinMeta {
         class_visibility: (k == Some(1)).then(|| class_visibility(&ctx)),
-        class_functions: decode_functions(&ctx, 9).into(),
-        package_functions: decode_functions(&ctx, 3).into(),
+        class_functions: decode_functions(&ctx, 9, &class_tparams).into(),
+        package_functions: decode_functions(&ctx, 3, &[]).into(),
         class_properties: decode_properties(&ctx, 10).into(),
         package_properties: decode_properties(&ctx, 4).into(),
         type_aliases: type_aliases(&ctx, this_class),
@@ -1960,7 +1985,7 @@ fn class_visibility(ctx: &MetaCtx<'_>) -> crate::types::Visibility {
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
 /// `@Metadata` message into [`MetaFn`]s. The single metadata-primary function reader.
-fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
+fn decode_functions(ctx: &MetaCtx, fn_field: u64, class_tparams: &[(u64, String)]) -> Vec<MetaFn> {
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
@@ -2078,7 +2103,7 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64) -> Vec<MetaFn> {
                     // `Signature`-derived gsig (extension: receiver at `params[0]`; member/top-level: value
                     // params only) so it is a drop-in replacement; the uniform member-receiver synthesis is
                     // a later step (`class_receiver = None` here keeps a member's params value-only).
-                    let generic_sig = build_generic_sig(&pf, records, d2, None);
+                    let generic_sig = build_generic_sig(&pf, records, d2, class_tparams, None);
                     let contract = pf.contract_body.as_deref().and_then(|body| {
                         let tparams = type_parameter_context(&[], &pf.type_params, records, d2)
                             .map(|c| c.names)
@@ -2257,6 +2282,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                 let mut cp = Pb { b: cbody, i: 0 };
                 let mut names = Vec::new();
                 let mut defaults = Vec::new();
+                let mut recv_fun = Vec::new();
                 let mut vararg = None;
                 while !cp.at_end() {
                     let Some(ct) = cp.varint() else { break };
@@ -2271,11 +2297,28 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                             let mut nid = 0u64;
                             let mut vflags = 0u64;
                             let mut is_vararg = false;
+                            let mut is_recv_fun = false;
                             while !vp.at_end() {
                                 let Some(vt) = vp.varint() else { break };
                                 match (vt >> 3, vt & 7) {
                                     (1, 0) => vflags = vp.varint().unwrap_or(0), // ValueParameter.flags
                                     (2, 0) => nid = vp.varint().unwrap_or(0), // ValueParameter.name
+                                    (3, 2) => {
+                                        // ValueParameter.type — a RECEIVER function type (`Recv.() -> R`)
+                                        // carries the `@ExtensionFunctionType` type annotation, which the
+                                        // `Function1` erasure in the `<init>` descriptor/`Signature` loses.
+                                        let Some(len) = vp.varint() else { break };
+                                        let Some(tb) = vp.bytes(len as usize) else {
+                                            break;
+                                        };
+                                        is_recv_fun =
+                                            parse_type_recv_fun(tb).0.iter().copied().any(|id| {
+                                                resolve_class_name(records, d2, id as usize)
+                                                    .is_some_and(|name| {
+                                                        name == "kotlin/ExtensionFunctionType"
+                                                    })
+                                            });
+                                    }
                                     (4, 2) => {
                                         let Some(len) = vp.varint() else { break };
                                         is_vararg = true;
@@ -2294,6 +2337,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                                 resolve_string(records, d2, nid as usize).unwrap_or_default(),
                             );
                             defaults.push(vflags & DECLARES_DEFAULT_VALUE_BIT != 0);
+                            recv_fun.push(is_recv_fun);
                             if is_vararg {
                                 vararg = Some(names.len() - 1);
                             }
@@ -2308,6 +2352,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<ParamList> {
                 out.push(ParamList {
                     names,
                     defaults,
+                    recv_fun,
                     vararg,
                 });
             }

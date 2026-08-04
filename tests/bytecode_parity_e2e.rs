@@ -10,18 +10,14 @@ use std::process::Command;
 
 use super::common;
 
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
-
-fn java_home() -> Option<String> {
-    env("KRUSTY_REF_JAVA_HOME").or_else(|| env("JAVA_HOME"))
+fn java_home() -> String {
+    common::java_home()
 }
 
 /// Compile `src` with the krusty binary into a fresh dir; return the dir (or `None` if javap/JAVA_HOME
 /// is unavailable — the test then skips).
 fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)> {
-    let jh = java_home()?;
+    let jh = java_home();
     if !std::path::Path::new(&format!("{jh}/bin/javap")).exists() {
         return None;
     }
@@ -45,11 +41,11 @@ fn krusty_compile(name: &str, src: &str) -> Option<(std::path::PathBuf, String)>
 /// Like [`krusty_compile`] but with the kotlin stdlib on the classpath (for collection/library types).
 /// `None` if javap/`JAVA_HOME`/the stdlib jar is unavailable — the test then skips.
 fn krusty_compile_stdlib(name: &str, src: &str) -> Option<(std::path::PathBuf, String)> {
-    let jh = java_home()?;
+    let jh = java_home();
     if !std::path::Path::new(&format!("{jh}/bin/javap")).exists() {
         return None;
     }
-    let stdlib = common::stdlib_jar()?;
+    let stdlib = common::stdlib_jar();
     let dir = std::env::temp_dir().join(format!("krusty_bcp_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -311,12 +307,8 @@ fn data_class_copy_null_checks_nonnull_reference_params() {
 
 #[test]
 fn classpath_interface_override_is_not_final() {
-    let Some(jh) = java_home() else {
-        return;
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jh = java_home();
+    let jdk = common::jdk_modules();
     let Some(libdir) = common::compile_lib(
         "cpiface",
         "package p\ninterface Port { fun handle(s: String): String }\n",
@@ -326,7 +318,7 @@ fn classpath_interface_override_is_not_final() {
     let src = "import p.Port\n\
         class Adapter : Port { override fun handle(s: String): String = s + \"!\" }\n\
         fun box() = \"OK\"\n";
-    let classes = common::compile_in_process(src, "Main", &[libdir], Some(&jdk))
+    let classes = common::compile_in_process(src, "Main", &[libdir], Some(jdk.as_path()))
         .expect("krusty should compile the adapter");
     let dir = std::env::temp_dir().join(format!("krusty_cpiface_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -725,7 +717,7 @@ fn diff_refs() -> Option<&'static std::collections::HashMap<String, (String, Str
         std::sync::OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let jh = java_home()?;
+            let jh = java_home();
             let cases = diff_cases();
             let dir = std::env::temp_dir().join(format!("krusty_diff_{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
@@ -857,7 +849,7 @@ fn for_in_local_array_does_not_copy_array_to_temp() {
     let Some((dir, _jh)) = krusty_compile("shapert", src) else {
         return;
     };
-    let jh = java_home().unwrap();
+    let jh = java_home();
     let d = javap(&jh, &dir.join("BKt.class"));
     let _ = fs::remove_dir_all(&dir);
     // The array reference is stored once (the `val a`); a redundant loop copy would be a 2nd astore of

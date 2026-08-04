@@ -106,7 +106,8 @@ fun box(): String {\n\
     if (\"abc\".twiceLength() != 6) return \"dependent\"\n\
     return \"OK\"\n\
 }\n";
-    if let Some(out) = common::run_box_against("reference_range_bounds", LIB, MAIN) {
-        assert_eq!(out, "OK");
-    }
+    let Some(out) = common::expect_box_run_against("reference_range_bounds", LIB, MAIN) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out, "OK");
 }

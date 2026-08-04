@@ -35,14 +35,19 @@ fun box(): String {
 "#;
 
 /// Compile `src` in-process (kotlin-stdlib + JDK jimage on the classpath) and run `DestrKt.box()` on
-/// the shared persistent JVM. `None` means the environment is unavailable (skip) or krusty couldn't
-/// emit (unsupported IR) — never a test failure, matching the suite's other e2e tests.
+/// the shared persistent JVM. `None` means ONLY that the environment is unavailable; a source krusty
+/// declines panics with its front-end diagnostics rather than passing as a skip.
 fn run_box(_tag: &str, src: &str) -> Option<String> {
     // The data class emits `Intrinsics` references, so kotlin-stdlib must be on the classpath. The
     // jimage (`<jdk>/lib/modules`) is the compile-time bootclasspath so collection supertypes resolve.
-    let stdlib = common::stdlib_jar()?;
-    let jdk_modules = common::jdk_modules()?;
-    common::compile_and_run_box(src, "Destr", &[stdlib], Some(&jdk_modules))
+    let stdlib = common::stdlib_jar();
+    let jdk_modules = common::jdk_modules();
+    Some(common::expect_box_run(
+        src,
+        "Destr",
+        &[stdlib],
+        Some(jdk_modules.as_path()),
+    ))
 }
 
 #[test]

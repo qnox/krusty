@@ -12,10 +12,10 @@
 use super::common;
 
 fn run(main: &str) -> Option<String> {
-    let jdk = common::jdk_modules()?;
-    let sl = common::stdlib_jar()?;
-    let coro = common::coroutines_jar()?;
-    common::compile_and_run_box(main, "Main", &[sl, coro, jdk.clone()], Some(&jdk))
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
+    common::compile_and_run_box(main, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()))
 }
 
 #[test]

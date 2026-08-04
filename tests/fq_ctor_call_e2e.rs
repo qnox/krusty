@@ -25,7 +25,8 @@ fn fully_qualified_constructor_call() {
         \x20 if (q.x != 7 || q.y != 9) return \"fail positional-omit\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    if let Some(out) = common::run_box_against("fq_ctor", LIB, main) {
-        assert_eq!(out.trim(), "OK", "box() = {out:?}");
-    }
+    let Some(out) = common::expect_box_run_against("fq_ctor", LIB, main) else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
 }

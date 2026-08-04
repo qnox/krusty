@@ -8,15 +8,9 @@ use super::common;
 
 #[test]
 fn suspend_withlock_nonlocal_return_runs() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
-    let Some(coro) = common::coroutines_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
+    let coro = common::coroutines_jar();
     // getOrCreate exercises all three `return@withLock` paths across calls with different repo state:
     //   r1 empty:          first()/second() null -> `return@withLock create(key)` (SUSPENDS in the tail)
     //   r1 after create:   first() non-null      -> first nested `?.let` returns non-locally
@@ -44,7 +38,8 @@ fn suspend_withlock_nonlocal_return_runs() {
             if (created == \"x\" && fromFirst == \"x\" && fromSecond == \"z\") \"OK\"\n\
             else \"F created=$created fromFirst=$fromFirst fromSecond=$fromSecond\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(&jdk));
+    let out =
+        common::compile_and_run_box(MAIN, "Main", &[sl, coro, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

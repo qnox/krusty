@@ -14,8 +14,8 @@ fn expect_ok(src: &str, stem: &str) {
 
 /// The checker's diagnostics for `src`, or `None` when the toolchain is unprovisioned.
 fn diags(src: &str) -> Option<Vec<String>> {
-    let stdlib = common::stdlib_jar()?;
-    let jdk = common::jdk_modules()?;
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     Some(common::front_end_diagnostics(src, &[stdlib], Some(&jdk)))
 }
 

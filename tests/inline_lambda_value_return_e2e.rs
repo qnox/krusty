@@ -6,12 +6,8 @@ use super::common;
 
 #[test]
 fn inline_lambda_value_labeled_return_runs() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     //   pick(5):  it>0 -> return@let "pos"          => "pos"
     //   pick(-1): fall through to "nonpos"          => "nonpos"
     //   grade(90): return@run early                 => "A"
@@ -23,7 +19,7 @@ fn inline_lambda_value_labeled_return_runs() {
             val ok = pick(5) == \"pos\" && pick(-1) == \"nonpos\" && grade(90) == \"A\" && grade(50) == \"F\"\n\
             return if (ok) \"OK\" else \"F ${pick(5)} ${pick(-1)} ${grade(90)} ${grade(50)}\"\n\
         }\n";
-    let out = common::compile_and_run_box(MAIN, "Main", &[sl, jdk.clone()], Some(&jdk));
+    let out = common::compile_and_run_box(MAIN, "Main", &[sl, jdk.clone()], Some(jdk.as_path()));
     assert_eq!(
         out.as_deref(),
         Some("OK"),

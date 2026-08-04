@@ -1363,23 +1363,39 @@ impl<'a> Parser<'a> {
                             t.name.clone()
                         }
                     } else if self.at(TokenKind::Ident) {
-                        let mut name = self.text().to_string();
-                        self.bump();
-                        while self.at(TokenKind::Dot) {
-                            self.bump();
-                            if self.at(TokenKind::Ident) {
-                                name.push('.');
-                                name.push_str(self.text());
-                                self.bump();
-                            } else {
-                                break;
+                        // Parse the target as a full type — a dotted FQN and its type ARGUMENTS alike.
+                        // Discarding the arguments made `typealias IntList = List<Int>` an alias for a
+                        // raw `List`, so `for (x in xs)` handed back the erased bound.
+                        let t = self.parse_type();
+                        let tparam_names: Option<Vec<String>> = alias_targs
+                            .iter()
+                            .map(|a| {
+                                (a.fun_params.is_empty()
+                                    && a.targs.is_empty()
+                                    && !a.name.is_empty()
+                                    && a.name != "<fun>"
+                                    && a.name != "*")
+                                    .then(|| a.name.clone())
+                            })
+                            .collect();
+                        // An alias whose target carries type arguments expands STRUCTURALLY, through
+                        // the same pass and substitution the function-type aliases use. A bare
+                        // `typealias A = Foo` keeps the name map, which the constructor-alias
+                        // registration and the classifier lookups are keyed by.
+                        if let Some(tparam_names) = tparam_names {
+                            if !alias.is_empty() && !t.targs.is_empty() {
+                                self.file.type_alias_fun.push((
+                                    alias.clone(),
+                                    tparam_names,
+                                    t.clone(),
+                                ));
                             }
                         }
-                        // Skip any remaining tokens on this line (e.g. generic args).
+                        // Skip any remaining tokens on this line.
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
                         }
-                        name
+                        t.name.clone()
                     } else {
                         while !self.at(TokenKind::Newline) && !self.at(TokenKind::Eof) {
                             self.bump();
@@ -2603,16 +2619,25 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse an optional generic constraint clause `where T : Bound, U : Bound2` after a function or
-    /// class signature. Constraints are *erased* (krusty erases type parameters to `Object`), but a
-    /// primitive bound is rejected for the same reason as an inline bound — kotlinc specializes it
+    /// class signature, returning the `(type parameter, bound)` pairs it declares.
+    ///
+    /// A `where` bound is the SAME constraint as the inline `<T : Bound>` form — Kotlin offers both
+    /// spellings, and the second is required once a parameter has more than one bound. The pairs join
+    /// the declaration's `type_param_bounds` so every consumer (erasure, member resolution on a value
+    /// of the parameter's type) sees one list regardless of spelling; previously the clause was parsed
+    /// for its diagnostics and then discarded, so `where T : Named` resolved no members at all while
+    /// `<T : Named>` did.
+    ///
+    /// A primitive bound is rejected for the same reason as an inline bound — kotlinc specializes it
     /// (see `parse_type_params`). `where` may sit on a following line, so newlines are skipped only
     /// when the clause is actually present (otherwise the position is restored).
-    fn parse_where_clause(&mut self) {
+    fn parse_where_clause(&mut self) -> Vec<(String, TypeRef)> {
+        let mut bounds: Vec<(String, TypeRef)> = Vec::new();
         let save = self.i;
         self.skip_newlines();
         if !(self.at(TokenKind::Ident) && self.text() == "where") {
             self.i = save;
-            return;
+            return bounds;
         }
         self.bump(); // 'where'
                      // Track per-name FUNCTION-TYPE bounds: an intersection (`where T : () -> Unit,
@@ -2651,6 +2676,8 @@ impl<'a> Parser<'a> {
                             | crate::types::Ty::Double
                             | crate::types::Ty::Boolean
                             | crate::types::Ty::Char
+                            | crate::types::Ty::UByte
+                            | crate::types::Ty::UShort
                             | crate::types::Ty::UInt
                             | crate::types::Ty::ULong
                     )
@@ -2661,11 +2688,15 @@ impl<'a> Parser<'a> {
                             .to_string(),
                     );
                 }
+                if !tp_name.is_empty() {
+                    bounds.push((tp_name.clone(), bound));
+                }
             }
             if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
+        bounds
     }
 
     fn parse_qualified_name(&mut self) -> String {
@@ -2696,7 +2727,7 @@ impl<'a> Parser<'a> {
         // Annotations consumed by `skip_decl_prefix` before this function, attached here (mirrors how
         // classes take them) so function-annotation plugins can see them; otherwise they are discarded.
         let annotations = self.take_pending_annotations();
-        let _ = self.take_pending_annotation_args(); // a function decl doesn't carry annotation args yet
+        let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
         self.bump(); // 'fun'
                      // `fun interface` is a SAM/functional interface declaration — not a regular function.
@@ -2732,6 +2763,7 @@ impl<'a> Parser<'a> {
                 flags: FdFlags::default(),
                 visibility: Visibility::Public,
                 annotations,
+                annotation_args,
                 decl_line: 0, // filled by the parser post-pass
                 body_close_line: 0,
             };
@@ -2765,7 +2797,10 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        self.parse_where_clause();
+        // A `where` bound is the same constraint as the inline `<T : Bound>` form; join them so every
+        // consumer sees one list.
+        let mut type_param_bounds = type_param_bounds;
+        type_param_bounds.extend(self.parse_where_clause());
         let signature_end = self.t[self.i.saturating_sub(1)].span.hi;
         // A `=`-body or block body may sit on a following line (`fun f(): T\n{ … }`). Skip plain line
         // breaks to find it, restoring the position if what follows is neither — an abstract/no-body
@@ -2804,6 +2839,7 @@ impl<'a> Parser<'a> {
                 .with_is_tailrec(is_tailrec),
             visibility: Visibility::Public,
             annotations,
+            annotation_args,
             decl_line: 0, // filled by the parser post-pass
             body_close_line: 0,
         }
@@ -3170,8 +3206,9 @@ impl<'a> Parser<'a> {
         let (supertypes, base_class, base_type_args, base_args, delegations, delegation_exprs) =
             self.parse_supertypes();
         // `class Derived<T> : Base<T>() where T : I1, T : I2` — generic constraints after the
-        // supertype list, before the body.
-        self.parse_where_clause();
+        // supertype list, before the body. Same constraint as the inline form; one joined list.
+        let mut type_param_bounds = type_param_bounds;
+        type_param_bounds.extend(self.parse_where_clause());
         // Optional class body: member `fun`s, body properties (`val`/`var`), and `init { }` blocks.
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
@@ -3672,7 +3709,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
-        let (type_params, _, _, _) = if self.at(TokenKind::Lt) {
+        let (type_params, _, _, type_param_bounds) = if self.at(TokenKind::Lt) {
             self.parse_type_params()
         } else {
             (
@@ -3683,8 +3720,10 @@ impl<'a> Parser<'a> {
             )
         };
         let (supertypes, _base, _base_type_args, _base_args, _, _) = self.parse_supertypes();
-        // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the body.
-        self.parse_where_clause();
+        // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the
+        // body. Same constraint as the inline form; one joined list.
+        let mut type_param_bounds = type_param_bounds;
+        type_param_bounds.extend(self.parse_where_clause());
         let mut methods = Vec::new();
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut companion_methods: Vec<FunDecl> = Vec::new();
@@ -4718,6 +4757,8 @@ impl<'a> Parser<'a> {
                                 | crate::types::Ty::Double
                                 | crate::types::Ty::Boolean
                                 | crate::types::Ty::Char
+                                | crate::types::Ty::UByte
+                                | crate::types::Ty::UShort
                                 | crate::types::Ty::UInt
                                 | crate::types::Ty::ULong
                         ) && !t.is_specializable_bound()
@@ -6751,6 +6792,7 @@ impl<'a> Parser<'a> {
             // per-label self-recursion here would be an unguarded, un-grown stack path — a long
             // machine-generated label chain must degrade like any other deep nesting, and after
             // this loop the re-entry cannot reach this branch again (the next token is no label).
+            let mut labels = Vec::new();
             while self.at(TokenKind::Ident)
                 && !matches!(self.text(), "this" | "super")
                 && self
@@ -6758,10 +6800,13 @@ impl<'a> Parser<'a> {
                     .get(self.i + 1)
                     .is_some_and(|t| t.kind == TokenKind::At)
             {
+                labels.push(self.text().to_string());
                 self.bump(); // label name
                 self.bump(); // '@'
             }
-            return self.parse_prefix();
+            let labelled = self.parse_prefix();
+            self.record_lambda_labels(labelled, labels);
+            return labelled;
         }
         let unop = match self.kind() {
             TokenKind::Minus => Some(UnOp::Neg),
@@ -6811,10 +6856,41 @@ impl<'a> Parser<'a> {
         self.parse_postfix(primary)
     }
 
+    /// Whether the cursor sits on a chain of `label@` prefixes ending in `{` — a LABELLED TRAILING
+    /// LAMBDA. `this`/`super` are excluded: `this@Outer` is a labelled RECEIVER, not a label prefix.
+    fn at_labelled_trailing_lambda(&self) -> bool {
+        let mut i = self.i;
+        let mut seen = false;
+        while self.t.get(i).is_some_and(|t| t.kind == TokenKind::Ident)
+            && self.t.get(i + 1).is_some_and(|t| t.kind == TokenKind::At)
+            && !matches!(self.t[i].text(self.src), "this" | "super")
+        {
+            seen = true;
+            i += 2;
+        }
+        seen && self.t.get(i).is_some_and(|t| t.kind == TokenKind::LBrace)
+    }
+
+    /// Record the explicit label of `expr` when it is a lambda literal. On any other expression a
+    /// label is a semantic no-op; on a lambda it REPLACES the implicit callee-name label that a
+    /// `return@…` inside the body targets. A chain (`a@ b@ { … }`) keeps the INNERMOST label — the one
+    /// written closest to the lambda — since the table holds one label per lambda.
+    fn record_lambda_labels(&mut self, expr: ExprId, labels: Vec<String>) {
+        if labels.is_empty() || !matches!(self.file.expr(expr), Expr::Lambda { .. }) {
+            return;
+        }
+        for label in labels {
+            self.file.lambda_labels.insert(expr.0, label);
+        }
+    }
+
     fn parse_postfix(&mut self, mut lhs: ExprId) -> ExprId {
         // Explicit type arguments parsed just before a call paren (`foo<Int>(…)`), attached to the
         // call once it is built so a constructor instantiation (`ArrayList<Int>()`) keeps its args.
         let mut pending_targs: Vec<TypeRef> = Vec::new();
+        // Labels consumed just before a trailing lambda (`run outer@{ … }`), attached to the lambda
+        // once it is parsed so a `return@outer` inside it finds its target.
+        let mut pending_lambda_labels: Vec<String> = Vec::new();
         loop {
             // A postfix chain may continue on a following line: Kotlin treats a newline before `.` or
             // `?.` as part of the selector chain, not a statement terminator (`x\n  .foo()\n  .bar()`).
@@ -7038,8 +7114,27 @@ impl<'a> Parser<'a> {
                 // Trailing lambda: `expr { … }` / `recv.m(args) { … }` → append the lambda as the
                 // last call argument (same line only, to avoid swallowing an unrelated block).
                 TokenKind::LBrace if self.no_trailing_lambda => break,
+                // A trailing lambda may carry an explicit LABEL (`run outer@{ … }`, `xs.sumOf s@{ … }`)
+                // naming it as the target of a `return@outer` inside. Consume the label chain here so
+                // the `{` still attaches to the call; without it the callee stayed a bare name and the
+                // labelled block became a separate statement ("unresolved reference 'run'").
+                TokenKind::Ident
+                    if !self.no_trailing_lambda && self.at_labelled_trailing_lambda() =>
+                {
+                    while self.at(TokenKind::Ident)
+                        && self
+                            .t
+                            .get(self.i + 1)
+                            .is_some_and(|t| t.kind == TokenKind::At)
+                    {
+                        pending_lambda_labels.push(self.text().to_string());
+                        self.bump(); // label name
+                        self.bump(); // '@'
+                    }
+                }
                 TokenKind::LBrace => {
                     let lambda = self.parse_lambda();
+                    self.record_lambda_labels(lambda, std::mem::take(&mut pending_lambda_labels));
                     let lspan = self.file.expr_spans[lhs.0 as usize];
                     let end = self.t[self.i.saturating_sub(1)].span;
                     let old = lhs;

@@ -21,5 +21,5 @@ fun box(): String {\n\
     if (q.get().value != \"second\") return \"Fail set: ${q.get()}\"\n\
     return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(SRC, "PropRefKt");
+    common::expect_box_ok_with_stdlib(SRC, "PropRefKt");
 }

@@ -16,7 +16,7 @@ if (firstOf(\"X\", \"Y\") != \"X\") return \"f2\"\n\
 if (eval { \"Z\" } != \"Z\") return \"f3\"\n\
 return id(\"OK\")\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "G");
+    common::expect_box_ok_with_stdlib(src, "G");
 }
 
 /// A property declared as a class type parameter (`class Box<T>(val x: T)`) erases to `Object`, but a
@@ -37,7 +37,7 @@ if (p.a != 7) return \"f3\"\n\
 if (p.b != \"hi\") return \"f4\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "G");
+    common::expect_box_ok_with_stdlib(src, "G");
 }
 
 /// A value class specialized through an erased generic PROPERTY boundary must remain a safe skip
@@ -77,7 +77,7 @@ val s: String = bi.map { it.toString() }\n\
 if (s != \"21\") return \"f3\"\n\
 return \"OK\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "G");
+    common::expect_box_ok_with_stdlib(src, "G");
 }
 
 /// A NON-inline top-level generic higher-order function (`fun <T, R> transform(x: T, f: (T) -> R): R`)
@@ -94,5 +94,5 @@ val r: String = transform(Item(\"k\")) { it.name }\n\
 val n: Int = transform(listOf(1, 2, 3)) { it.size }\n\
 return if (r == \"k\" && n == 3) \"OK\" else \"FAIL: $r/$n\"\n\
 }\n";
-    common::assert_box_ok_with_stdlib(src, "G");
+    common::expect_box_ok_with_stdlib(src, "G");
 }

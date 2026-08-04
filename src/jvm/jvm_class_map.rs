@@ -225,6 +225,8 @@ pub fn kotlin_prim_to_wrapper(internal: &str) -> Option<&'static str> {
         "kotlin/Boolean" => "java/lang/Boolean",
         "kotlin/Char" => "java/lang/Character",
         // An unsigned type's boxed form is its own inline-class wrapper (`kotlin/UInt`), not a `java/lang/*`.
+        "kotlin/UByte" => "kotlin/UByte",
+        "kotlin/UShort" => "kotlin/UShort",
         "kotlin/UInt" => "kotlin/UInt",
         "kotlin/ULong" => "kotlin/ULong",
         _ => return None,
@@ -275,6 +277,11 @@ pub fn to_jvm_internal(internal: &str) -> &str {
     // `kotlin/Number`, `kotlin/Enum`, …), since they are keyed by their full internal name here.
     if let Some(j) = kotlin_builtin_to_jvm(internal) {
         return j;
+    }
+    // A synthesized `kotlin.reflect.KFunction{N}` (no such class exists) erases to the arity-less
+    // `kotlin/reflect/KFunction`, exactly as kotlinc emits it.
+    if crate::types::kfunction_arity(crate::types::type_name(internal)).is_some() {
+        return crate::types::KFUNCTION_INTERNAL;
     }
     TYPE_MAP
         .iter()

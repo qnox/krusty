@@ -7,14 +7,9 @@ use super::common;
 
 #[test]
 fn nullable_parenthesized_function_type_param_compiles_and_runs() {
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping: no kotlin-stdlib jar");
-        return;
-    };
-    let java_home = std::env::var("JAVA_HOME").ok().filter(|v| !v.is_empty());
-    let jdk = java_home
-        .as_ref()
-        .map(|jh| std::path::PathBuf::from(format!("{jh}/lib/modules")));
+    let stdlib = common::stdlib_jar();
+    let java_home = common::java_home();
+    let jdk = Some(std::path::PathBuf::from(format!("{java_home}/lib/modules")));
 
     // `block: (() -> Unit)? = null` — a nullable function-type parameter with a default.
     let src = "fun run0(block: (() -> Unit)? = null): Int = if (block == null) 0 else 1\n\

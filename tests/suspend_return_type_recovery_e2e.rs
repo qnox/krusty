@@ -71,12 +71,8 @@ fn suspend_nullable_reference_return_matches_declared() {
 #[test]
 fn suspend_return_recovery_compiles_end_to_end() {
     // The recovered types must also LOWER (not just type-check) — compile the bodies to bytecode.
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(sl) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let sl = common::stdlib_jar();
     let Some(libout) = common::compile_lib("susp_ret", LIB) else {
         return;
     };
@@ -92,7 +88,7 @@ fn suspend_return_recovery_compiles_end_to_end() {
         ),
     ] {
         assert!(
-            common::compile_in_process(main, "Main", &cp, Some(&jdk)).is_some(),
+            common::compile_in_process(main, "Main", &cp, Some(jdk.as_path())).is_some(),
             "{tag}: suspend return recovery should compile end-to-end"
         );
     }

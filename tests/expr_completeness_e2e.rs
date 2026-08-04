@@ -3,8 +3,10 @@
 
 use super::common;
 
+/// `None` means ONLY that the toolchain isn't provisioned; a source the front end REJECTS panics
+/// with its diagnostics instead of skipping as a silent pass.
 fn run(src: &str) -> Option<String> {
-    common::compile_and_run_with_stdlib(src, "P")
+    common::expect_box_run_with_stdlib(src, "P")
 }
 
 #[test]

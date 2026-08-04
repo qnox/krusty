@@ -2,9 +2,7 @@ use super::common;
 
 #[test]
 fn mapped_number_conversions_use_jdk_members_without_stdlib() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
     let source = r#"
         import java.util.concurrent.atomic.AtomicInteger
 
@@ -23,7 +21,7 @@ fn mapped_number_conversions_use_jdk_members_without_stdlib() {
         }
     "#;
 
-    let Some(output) = common::compile_and_run_box(source, "Main", &[], Some(&jdk)) else {
+    let Some(output) = common::compile_and_run_box(source, "Main", &[], Some(jdk.as_path())) else {
         panic!("compile/run returned None");
     };
     assert_eq!(output, "OK");

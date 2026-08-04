@@ -68,12 +68,8 @@ fn remove_on_a_concrete_java_class_takes_the_element_overload() {
 
 #[test]
 fn same_shaped_java_method_outside_the_collection_hierarchy_keeps_its_name() {
-    let Some(jdk) = common::jdk_modules() else {
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
     // Descriptor equality alone is insufficient: this method deliberately has the same
     // `(I)Object` shape as `java.util.List.remove(int)`, but its class does not realize the mapped
     // `MutableList.removeAt` obligation. The provider-derived rename must therefore leave `remove`
@@ -178,12 +174,8 @@ fn remove_at_override_satisfies_the_java_util_abstract() {
 fn java_only_members_are_not_in_the_kotlin_scope() {
     // The members the JVM class declares and the Kotlin API does not. Each of these compiled before the
     // scope came from the builtins declaration; kotlinc reports every one as unresolved.
-    let Some(stdlib) = common::stdlib_jar() else {
-        panic!("no kotlin-stdlib jar");
-    };
-    let Some(jdk) = common::jdk_modules() else {
-        panic!("no jdk modules");
-    };
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
     for (member, source) in [
         ("stream", "fun f(l: List<Int>) { l.stream() }"),
         ("getFirst", "fun f(l: List<Int>) { l.getFirst() }"),

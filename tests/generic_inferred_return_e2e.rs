@@ -10,14 +10,8 @@ use super::common;
 
 #[test]
 fn generic_param_inferred_return_keeps_override() {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping generic_inferred_return_e2e: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping generic_inferred_return_e2e: no kotlin-stdlib jar found");
-        return;
-    };
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
     let src = "fun <T : Number> show(x: T) = x.toString()\n\
 fun box(): String {\n\
 val s = show(7)\n\

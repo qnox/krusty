@@ -97,11 +97,9 @@ fn constructor_delegation_requires_spread_for_an_array_vararg_argument() {
     const SRC: &str = "class A(vararg val values: Int) {\n\
         \x20 constructor(values: IntArray, marker: Boolean): this(values)\n\
         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let diagnostics =
-        common::front_end_diagnostics(SRC, &[stdlib], common::jdk_modules().as_deref());
+        common::front_end_diagnostics(SRC, &[stdlib], Some(common::jdk_modules().as_path()));
     assert!(
         diagnostics
             .iter()
@@ -117,11 +115,9 @@ fn constructor_delegation_cycle_is_diagnosed() {
         \x20 constructor(value: String): this(value.isNotEmpty())\n\
         \x20 constructor(value: Boolean): this(if (value) 1 else 0)\n\
         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let diagnostics =
-        common::front_end_diagnostics(SRC, &[stdlib], common::jdk_modules().as_deref());
+        common::front_end_diagnostics(SRC, &[stdlib], Some(common::jdk_modules().as_path()));
     assert!(
         diagnostics
             .iter()
@@ -169,11 +165,9 @@ fn ambiguous_this_delegation_is_diagnosed() {
         \x20 constructor(value: Right): this()\n\
         \x20 constructor(value: Both, tag: Int): this(value)\n\
         }\n";
-    let Some(stdlib) = common::stdlib_jar() else {
-        return;
-    };
+    let stdlib = common::stdlib_jar();
     let diagnostics =
-        common::front_end_diagnostics(SRC, &[stdlib], common::jdk_modules().as_deref());
+        common::front_end_diagnostics(SRC, &[stdlib], Some(common::jdk_modules().as_path()));
     assert!(
         diagnostics
             .iter()

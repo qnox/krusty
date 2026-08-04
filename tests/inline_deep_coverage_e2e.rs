@@ -25,18 +25,10 @@ use std::path::PathBuf;
 /// Compile `src` (stem `stem`) against kotlin-stdlib + JDK modules and run its `box()`, asserting
 /// "OK". Skips (returns) when the toolchain / stdlib / JDK isn't provisioned so the suite still runs.
 fn run_ok(src: &str, stem: &str) {
-    let Some(java_home) = common::java_home() else {
-        eprintln!("skipping inline_deep_coverage_e2e::{stem}: set JAVA_HOME");
-        return;
-    };
-    let Some(stdlib) = common::stdlib_jar() else {
-        eprintln!("skipping inline_deep_coverage_e2e::{stem}: no kotlin-stdlib jar found");
-        return;
-    };
+    let java_home = common::java_home();
+    let stdlib = common::stdlib_jar();
     let jdk = PathBuf::from(format!("{java_home}/lib/modules"));
-    let Some(out) = common::compile_and_run_box(src, stem, &[stdlib], Some(&jdk)) else {
-        return;
-    };
+    let out = common::expect_box_run(src, stem, &[stdlib], Some(&jdk));
     assert_eq!(out, "OK", "{stem} produced wrong box() result");
 }
 
