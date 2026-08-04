@@ -1538,6 +1538,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recovery, which turns the miscompile back into a clean skip.
   `tests/unsigned_classpath_call_e2e.rs` asserts the backend contract directly (a decline passes; an
   EMITTED class that does not verify and run fails), so it keeps holding whichever way a shape is handled.
+  The net compares POSITIONS, so the lowered values have to be lined up with the descriptor slots first
+  (`align_call_values_to_slots`). Two shapes carry a slot no lowered value fills, and both were measured
+  over the box corpus and the full e2e suite rather than assumed:
+  - a value class's members are realized as mangled `-impl` STATICS whose descriptor spells the receiver
+    as the LEADING parameter (`kotlin/Result.getOrNull-impl:(Ljava/lang/Object;)…`) while the receiver
+    travels beside the arguments — the corpus hits this over a hundred times. The receiver is checked
+    with the arguments there, since a value-class owner is exactly where the lowerer boxes it;
+  - a `suspend` `$default` synthetic spells the CPS `Continuation` BEFORE the `int mask` + `Object`
+    marker (`withLock$default(Mutex, Object, Function0, Continuation, int, Object)`) and the backend
+    appends it at emit time. The plain suspend descriptor has already had its TRAILING continuation
+    stripped, so only the `$default` form needs this.
+  A packed vararg needs no reconciliation — the array is emitted before the values reach the check — so
+  the earlier claim that it shifts positions was wrong; no such call was observed. Any shape the
+  alignment cannot line up now declines whenever a box is on the stack at all, rather than skipping: a
+  count mismatch is "no position is known", never "nothing to check".
+  The runtime provider returns reference/primitive positions and the unambiguous runtime-supplied
+  continuation position together as one `PlatformMethodLayout`; JVM descriptor syntax remains outside
+  common lowering, and the descriptor is parsed once rather than by independent representation and
+  continuation queries that could disagree.
+
+  Aligning that second shape surfaced a separate miscompile, now also declined
+  (`gate:unthreaded-continuation-slot`): an unsigned VALUE PARAMETER mangles the JVM name (`libU` →
+  `libU-OzbTU-A`), krusty looks suspend-ness up under that name while `@Metadata` records the SOURCE
+  name, and the callable comes back marked non-suspend — so nothing threads the `Continuation` its
+  descriptor still spells and the emitted `invokestatic` is one argument short. BOTH call forms hit
+  it, the `$default` synthetic and the plain mangled method, so the test is the UNFILLED slot (the
+  descriptor has one parameter more than the call has values, and that parameter is a `Continuation`)
+  rather than `$default`-ness. A non-suspend callee that declares a `Continuation` parameter of its
+  own fills every slot and is untouched. Recovering the mangled-name suspend lookup would let these
+  shapes emit again; until then they skip instead of failing verification.
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
