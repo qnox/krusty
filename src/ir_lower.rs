@@ -16436,19 +16436,33 @@ impl<'a> Lower<'a> {
         let mut slot_temp: Vec<Option<u32>> = vec![None; n];
         let mut vararg_temp: Vec<(u32, bool)> = Vec::new();
         let mut prelude = Vec::new();
+        // A positional argument takes the next parameter NOT bound by name (`f(a = 1, "x")` is
+        // legal Kotlin), so pre-compute the name-bound slots and skip them.
+        let named_slot = |index: usize| {
+            names.get(index).and_then(Option::as_ref).map(|name| {
+                target
+                    .call_sig
+                    .param_names
+                    .iter()
+                    .position(|parameter| parameter == name)
+            })
+        };
+        let mut name_bound = vec![false; n];
+        for index in 0..args.len() {
+            if let Some(slot) = named_slot(index) {
+                let slot = slot?;
+                if slot >= n || name_bound[slot] {
+                    return None;
+                }
+                name_bound[slot] = true;
+            }
+        }
         let mut positional = 0usize;
         for (index, &argument) in args.iter().enumerate() {
             let is_spread = self.afile.is_spread_arg(argument);
-            let (slot, want) = match names.get(index).and_then(Option::as_ref) {
-                Some(name) => {
-                    let slot = target
-                        .call_sig
-                        .param_names
-                        .iter()
-                        .position(|parameter| parameter == name)?;
-                    if slot >= n || slot_temp[slot].is_some() {
-                        return None;
-                    }
+            let (slot, want) = match named_slot(index) {
+                Some(slot) => {
+                    let slot = slot?;
                     if slot == vararg {
                         // A vararg can only be NAMED in spread form (`f(s = *arr)`).
                         if !is_spread {
@@ -16459,13 +16473,24 @@ impl<'a> Lower<'a> {
                         (Some(slot), ir_params[slot])
                     }
                 }
-                None if positional < vararg => {
-                    let slot = positional;
-                    positional += 1;
-                    (Some(slot), ir_params[slot])
+                None => {
+                    while positional < vararg && name_bound[positional] {
+                        positional += 1;
+                    }
+                    if positional < vararg {
+                        let slot = positional;
+                        positional += 1;
+                        (Some(slot), ir_params[slot])
+                    } else {
+                        (None, if is_spread { array_ir } else { element_ir })
+                    }
                 }
-                None => (None, if is_spread { array_ir } else { element_ir }),
             };
+            if let Some(slot) = slot {
+                if slot_temp[slot].is_some() {
+                    return None;
+                }
+            }
             let value = self.lower_arg(argument, &want)?;
             let temp = self.fresh_value();
             prelude.push(self.emit_variable(temp, want, Some(value)));

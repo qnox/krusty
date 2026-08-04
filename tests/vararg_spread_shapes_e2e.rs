@@ -156,6 +156,46 @@ fn source_named_single_element_vararg_prohibited() {
 }
 
 #[test]
+fn source_named_in_position_before_positional_vararg() {
+    // A named argument in its OWN position followed by positionals is legal Kotlin: the
+    // positional counter must skip name-bound parameters or `"x"` lands on `a` and reports a
+    // false type mismatch.
+    const SRC: &str =
+        "fun ok2(a: Int, vararg s: String): String = a.toString() + s.joinToString(\"\")\n\
+        fun ok3(a: Int, b: Int = 0, vararg s: String): String =\n\
+        \x20 a.toString() + b + s.joinToString(\"\")\n\
+        fun box(): String {\n\
+        \x20 val xs = arrayOf(\"z\")\n\
+        \x20 if (ok2(a = 1, \"x\", \"y\") != \"1xy\") return \"F1:\" + ok2(a = 1, \"x\", \"y\")\n\
+        \x20 if (ok3(1, b = 2, *xs) != \"12z\") return \"F2:\" + ok3(1, b = 2, *xs)\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SRC, "named_in_position")
+            .expect("strict helper always returns Some"),
+        "OK"
+    );
+}
+
+#[test]
+fn source_named_spread_wrong_element_type_rejected() {
+    // `s = *ints` on a `String` vararg is kotlinc's compile-time mismatch — accepting it
+    // produces an `ArrayStoreException` inside the spread builder at runtime.
+    const SRC: &str = "fun topd(vararg s: String, flag: Boolean = false): String =\n\
+        \x20 s.joinToString(\"\") + flag\n\
+        fun bad(ints: Array<Int>): String = topd(s = *ints)\n";
+    let Some(diagnostics) = common::checker_diags_with_stdlib(SRC) else {
+        return;
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("argument type mismatch")),
+        "ill-typed named spread must be a compile-time mismatch: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn source_top_level_named_after_spread() {
     // A plain-name call mixing a spread with a trailing named argument: previously diverted to
     // the name-only spread lowering, which bailed the file.

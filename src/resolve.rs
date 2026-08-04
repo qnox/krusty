@@ -17052,18 +17052,35 @@ impl<'a> Checker<'a> {
             .then_some(function.params.len() - 1);
         // A NAMED argument maps to its parameter by label (`topd("O", "K", flag = true)` — the
         // positional elements pack into the vararg, the label binds the trailing parameter). An
-        // unknown label declines the mapping so the labelled diagnostics path reports it.
+        // unknown label declines the mapping so the labelled diagnostics path reports it. A
+        // positional argument takes the next parameter NOT bound by name — Kotlin allows a named
+        // argument in its own position followed by positionals (`f(a = 1, "x")`), so the counter
+        // must skip name-bound slots or the positional lands on an already-taken parameter.
+        let named_slot = |argument: usize| {
+            names
+                .and_then(|names| names.get(argument))
+                .and_then(Option::as_ref)
+                .map(|name| {
+                    function
+                        .params
+                        .iter()
+                        .position(|parameter| &parameter.name == name)
+                })
+        };
+        let mut name_bound = vec![false; function.params.len()];
+        for argument in 0..argument_count {
+            if let Some(slot) = named_slot(argument) {
+                name_bound[slot?] = true;
+            }
+        }
         let mut positional = 0usize;
         let mapping = (0..argument_count)
             .map(|argument| {
-                if let Some(name) = names
-                    .and_then(|names| names.get(argument))
-                    .and_then(Option::as_ref)
-                {
-                    return function
-                        .params
-                        .iter()
-                        .position(|parameter| &parameter.name == name);
+                if let Some(slot) = named_slot(argument) {
+                    return slot;
+                }
+                while positional < vararg && name_bound[positional] {
+                    positional += 1;
                 }
                 Some(if positional < vararg {
                     let parameter = positional;
@@ -20869,8 +20886,15 @@ impl<'a> Checker<'a> {
     /// kotlinc's diagnostic pair: the array-type mismatch AND the named-form prohibition.
     fn expect_named_vararg_arg(&mut self, argument: ExprId, actual: Ty, array: Ty) {
         // A SPREAD's expression may be typed by the array or by its element depending on the
-        // path that typed it; its fit is the spread channel's check, not this one.
+        // path that typed it — compare against the matching form so `s = *ints` on a `String`
+        // vararg is the compile-time mismatch kotlinc reports, not an `ArrayStoreException`.
         if self.file.is_spread_arg(argument) {
+            let expected = if actual.non_null().array_elem().is_some() {
+                array
+            } else {
+                array.array_elem().unwrap_or(array)
+            };
+            self.expect_assignable(expected, actual, self.span(argument), "argument");
             return;
         }
         self.expect_assignable(array, actual, self.span(argument), "argument");
