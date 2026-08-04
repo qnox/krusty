@@ -9808,9 +9808,12 @@ impl<'a> Emitter<'a> {
                         code.push_int(elements.len() as i32, self.cw);
                         let init = self.cw.methodref(builder, "<init>", "(I)V");
                         code.invokespecial(init, 1, 0);
+                        // `[builder, builder]` stays live across each element (the `dup` is the `add`
+                        // receiver), so a branchy element must frame them — see `emit_value_over`.
+                        let held = self.held_pair(builder);
                         for (index, &element) in elements.iter().enumerate() {
                             code.dup();
-                            self.emit_value(element, code);
+                            self.emit_value_over(element, &held, code);
                             if spreads.get(index).copied().unwrap_or(false) {
                                 let add_spread = self.cw.methodref(
                                     "kotlin/jvm/internal/PrimitiveSpreadBuilder",
@@ -9836,9 +9839,10 @@ impl<'a> Emitter<'a> {
                         let init = self.cw.methodref(builder, "<init>", "(I)V");
                         code.invokespecial(init, 1, 0);
                         let box_elem = boxed_prim_of(et);
+                        let held = self.held_pair(builder);
                         for (index, &element) in elements.iter().enumerate() {
                             code.dup();
-                            self.emit_value(element, code);
+                            self.emit_value_over(element, &held, code);
                             let method = if spreads.get(index).copied().unwrap_or(false) {
                                 self.cw
                                     .methodref(builder, "addSpread", "(Ljava/lang/Object;)V")
@@ -9878,10 +9882,14 @@ impl<'a> Emitter<'a> {
                 // A boxed-primitive element array (`arrayOf(1,2,3)` → `Integer[]`): box each primitive
                 // value before the `aastore` (mirrors `kotlin/Array.set`).
                 let box_elem = boxed_prim_of(et);
+                // `[array, array, index]` stays live across each element — a branchy one must frame
+                // them (see `emit_value_over`).
+                let array_v = self.verif_single(ir_ty_to_jvm(array_type));
+                let held = [array_v.clone(), array_v, VerifType::Integer];
                 for (i, &el) in elements.iter().enumerate() {
                     code.dup();
                     code.push_int(i as i32, self.cw);
-                    self.emit_value(el, code);
+                    self.emit_value_over(el, &held, code);
                     if let Some(p) = box_elem {
                         box_prim_free(self.cw, code, p);
                     }
@@ -10111,7 +10119,11 @@ impl<'a> Emitter<'a> {
                 let arr = recv.unwrap();
                 let elem = self.array_elem(arr);
                 self.emit_value(arr, code);
-                self.emit_value(args[0], code);
+                // The array stays live under the index (and, for `set`, under the value too): a branchy
+                // subscript must frame it — see `emit_value_over`.
+                let arr_ty = self.value_ty(arr);
+                let arr_v = self.verif_single(arr_ty);
+                self.emit_value_over(args[0], &[arr_v], code);
                 let (op, w) = array_load_op(elem);
                 code.array_load(op, w);
                 // A boxed primitive array (`Array<Int>` = `Integer[]`): `a[i]` is an unboxed `Int`, so
@@ -10124,8 +10136,12 @@ impl<'a> Emitter<'a> {
                 let arr = recv.unwrap();
                 let elem = self.array_elem(arr);
                 self.emit_value(arr, code);
-                self.emit_value(args[0], code);
-                self.emit_value(args[1], code);
+                let arr_ty = self.value_ty(arr);
+                let arr_v = self.verif_single(arr_ty);
+                self.emit_value_over(args[0], std::slice::from_ref(&arr_v), code);
+                let idx_ty = self.value_ty(args[0]);
+                let idx_v = self.verif_single(idx_ty);
+                self.emit_value_over(args[1], &[arr_v, idx_v], code);
                 // Boxed primitive array: box the primitive value before the `aastore`.
                 if let Some(p) = boxed_prim_of(elem) {
                     box_prim_free(self.cw, code, p);
@@ -10485,6 +10501,33 @@ impl<'a> Emitter<'a> {
                 self.emit_value(o, code);
             }
         }
+    }
+
+    /// Emit `e` as a value while `held` operand-stack entries (bottom-first) are ALREADY pushed below
+    /// it — the array being filled element-wise by a `Vararg`, the `SpreadBuilder` an element is
+    /// `add`ed to, the receiver+index of an `Array.set`. Those positions can't spill to a temp the way
+    /// `emit_operands` does (the store instruction needs its operands underneath), so the held entries
+    /// are handed to `frame` through `pending_stack` instead: a stack-map frame must type the FULL
+    /// operand stack the verifier sees, not just what the sub-expression itself leaves.
+    ///
+    /// Without this a branchy element (`listOf(x == y, x != y)`) records `stack = []` at its merge
+    /// label while the verifier sees `[array, array, int]` there. The class file is emitted fine and
+    /// only fails at link time with "Inconsistent stackmap frames at branch target N".
+    fn emit_value_over(&mut self, e: u32, held: &[VerifType], code: &mut CodeBuilder) {
+        if held.is_empty() || !self.records_frame(e) {
+            self.emit_value(e, code);
+            return;
+        }
+        self.pending_stack.extend_from_slice(held);
+        self.emit_value(e, code);
+        self.pending_stack
+            .truncate(self.pending_stack.len() - held.len());
+    }
+
+    /// The two `[receiver, receiver]` stack entries a `new C; dup` / `dup`-then-call sequence holds.
+    fn held_pair(&mut self, owner: &str) -> [VerifType; 2] {
+        let v = self.verif_single(Ty::obj(owner));
+        [v.clone(), v]
     }
 
     fn emit_virtual_operands(
