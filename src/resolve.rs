@@ -34117,9 +34117,21 @@ impl<'a> Checker<'a> {
                             trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
                         };
                         let candidates = self.source_constructor_candidates(&declaration, &cls);
-                        let Some(selected) =
+                        // A classifier and a same-named top-level function can share one name
+                        // (the `fun UnscaledGapsY(…): UnscaledGapsY` factory idiom): when NO
+                        // constructor is applicable — an interface has none at all — kotlinc
+                        // binds the call to the function, so decline the construction and let
+                        // ordinary function resolution below take it. An APPLICABLE constructor
+                        // keeps precedence exactly as kotlinc's does (an abstract class's
+                        // matching constructor still errors rather than yielding to the factory).
+                        let interface_factory =
+                            cls.is_interface() && self.same_named_callable_exists(&fname);
+                        let selected = if interface_factory {
+                            None
+                        } else {
                             self.select_source_constructor(&arguments, &candidates)
-                        else {
+                        };
+                        if selected.is_none() {
                             // `Type { … }` / `Type(x)` where no constructor is applicable but the
                             // COMPANION declares `operator fun invoke`: kotlinc picks the operator, so
                             // the call is a factory, not a construction.
@@ -34128,81 +34140,86 @@ impl<'a> Checker<'a> {
                             {
                                 return ret;
                             }
-                            if !self.report_source_constructor_mapping_error(
-                                call,
-                                args,
-                                &arguments,
-                                &candidates,
-                                &declaration.name,
-                            ) && !self.call_already_has_argument_diagnostic(call, args)
+                            if !interface_factory && !self.same_named_callable_exists(&fname) {
+                                if !self.report_source_constructor_mapping_error(
+                                    call,
+                                    args,
+                                    &arguments,
+                                    &candidates,
+                                    &declaration.name,
+                                ) && !self.call_already_has_argument_diagnostic(call, args)
+                                {
+                                    self.diags
+                                        .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                                }
+                                return self.ctor_result_name(call, cls.internal_name());
+                            }
+                        }
+                        if let Some(selected) = selected {
+                            // Candidate matching already checked the concrete shell of a generic function
+                            // parameter. Do not then re-check its erased type here: `(Int) -> T` may have
+                            // become `(Int) -> Any`, and that erasure would reject a nullable return that is
+                            // precisely the evidence used to infer `T`. Fully concrete parameters still use
+                            // the ordinary assignability diagnostic below.
+                            for (index, (&argument, &expected)) in
+                                args.iter().zip(&selected.argument_types).enumerate()
                             {
-                                self.diags
-                                    .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                                let constraint = selected
+                                    .argument_slots
+                                    .get(index)
+                                    .and_then(|&slot| selected.parameter_constraints.get(slot))
+                                    .copied()
+                                    .unwrap_or_default();
+                                if constraint != ConstructorParameterConstraint::Concrete {
+                                    continue;
+                                }
+                                self.expect_assignable(
+                                    expected,
+                                    self.expr_types[argument.0 as usize],
+                                    self.span(argument),
+                                    "constructor argument",
+                                );
                             }
-                            return self.ctor_result_name(call, cls.internal_name());
-                        };
-                        // Candidate matching already checked the concrete shell of a generic function
-                        // parameter. Do not then re-check its erased type here: `(Int) -> T` may have
-                        // become `(Int) -> Any`, and that erasure would reject a nullable return that is
-                        // precisely the evidence used to infer `T`. Fully concrete parameters still use
-                        // the ordinary assignability diagnostic below.
-                        for (index, (&argument, &expected)) in
-                            args.iter().zip(&selected.argument_types).enumerate()
-                        {
-                            let constraint = selected
-                                .argument_slots
-                                .get(index)
-                                .and_then(|&slot| selected.parameter_constraints.get(slot))
-                                .copied()
-                                .unwrap_or_default();
-                            if constraint != ConstructorParameterConstraint::Concrete {
-                                continue;
-                            }
-                            self.expect_assignable(
-                                expected,
-                                self.expr_types[argument.0 as usize],
-                                self.span(argument),
-                                "constructor argument",
+                            let primary = matches!(
+                                &selected.target,
+                                ResolvedCtorDelegationTarget::ThisPrimary { .. }
+                            );
+                            let params = selected.target.params().to_vec();
+                            let inferred = if primary && selected.vararg.is_none() {
+                                let mut slots = vec![None; params.len()];
+                                for (&argument, &slot) in args.iter().zip(&selected.argument_slots)
+                                {
+                                    slots[slot] = Some(argument);
+                                }
+                                self.expect_source_constructor_args(
+                                    call,
+                                    &cls,
+                                    &params,
+                                    args,
+                                    &arg_tys,
+                                    Some(&slots),
+                                )
+                            } else {
+                                Vec::new()
+                            };
+                            self.resolved_constructors.insert(
+                                call,
+                                ResolvedConstructor::Source {
+                                    primary,
+                                    params,
+                                    argument_slots: selected.argument_slots,
+                                    argument_types: selected.argument_types,
+                                    omitted: selected.omitted,
+                                    vararg: selected.vararg,
+                                    default_masks: selected.default_masks,
+                                },
+                            );
+                            return self.ctor_result_name_with_inferred(
+                                call,
+                                cls.internal_name(),
+                                inferred,
                             );
                         }
-                        let primary = matches!(
-                            &selected.target,
-                            ResolvedCtorDelegationTarget::ThisPrimary { .. }
-                        );
-                        let params = selected.target.params().to_vec();
-                        let inferred = if primary && selected.vararg.is_none() {
-                            let mut slots = vec![None; params.len()];
-                            for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
-                                slots[slot] = Some(argument);
-                            }
-                            self.expect_source_constructor_args(
-                                call,
-                                &cls,
-                                &params,
-                                args,
-                                &arg_tys,
-                                Some(&slots),
-                            )
-                        } else {
-                            Vec::new()
-                        };
-                        self.resolved_constructors.insert(
-                            call,
-                            ResolvedConstructor::Source {
-                                primary,
-                                params,
-                                argument_slots: selected.argument_slots,
-                                argument_types: selected.argument_types,
-                                omitted: selected.omitted,
-                                vararg: selected.vararg,
-                                default_masks: selected.default_masks,
-                            },
-                        );
-                        return self.ctor_result_name_with_inferred(
-                            call,
-                            cls.internal_name(),
-                            inferred,
-                        );
                     }
                     if let Some(internal) = scoped_nested_internal
                         .filter(|internal| self.syms.class_by_type_name(*internal).is_none())

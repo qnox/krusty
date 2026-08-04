@@ -590,6 +590,8 @@ mod interface_default_property_e2e;
 mod interface_delegation_e2e;
 #[path = "interface_delegation_expr_e2e.rs"]
 mod interface_delegation_expr_e2e;
+#[path = "interface_factory_function_e2e.rs"]
+mod interface_factory_function_e2e;
 #[path = "interface_supertype_members_e2e.rs"]
 mod interface_supertype_members_e2e;
 #[path = "internal_classpath_access_e2e.rs"]
