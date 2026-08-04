@@ -2,7 +2,7 @@
 //! suspend decorator). No generic erasure is involved, so the CPS override directly implements the
 //! supertype method — no bridge is needed, and it must compile + verify + dispatch correctly through the
 //! supertype. Production hit: an engine class implementing a ~20-method suspend interface.
-//! Needs the JVM toolchain + kotlin-stdlib + coroutines; skips otherwise.
+//! Requires the JVM toolchain + kotlin-stdlib + coroutines; missing provisioning is a test failure.
 use super::common;
 
 fn run_box(src: &str, tag: &str) -> Option<String> {
@@ -14,13 +14,6 @@ fn run_box(src: &str, tag: &str) -> Option<String> {
 
 #[test]
 fn suspend_member_overriding_nongeneric_interface() {
-    if false /* toolchain gate panics */
-        || false /* toolchain gate panics */
-        || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
         interface Engine { suspend fun run(x: Int): Int }\n\
         class Base : Engine { override suspend fun run(x: Int): Int = x * 10 }\n\
@@ -43,13 +36,6 @@ fn suspend_override_needing_generic_bridge_is_skipped_not_miscompiled() {
     // A suspend member reached through a GENERIC ancestor (`A<T>`) via a raw-looking intermediate
     // (`B : A<String>`) DOES need an erasure bridge, which the coroutine lowering can't fix up. krusty
     // must SKIP the file (emit nothing runnable) rather than emit a broken bridge → `AbstractMethodError`.
-    if false /* toolchain gate panics */
-        || false /* toolchain gate panics */
-        || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     const SRC: &str = "interface A<T> { suspend fun f(x: T): T }\n\
         interface B : A<String>\n\
         class C : B { override suspend fun f(x: String): String = x }\n\

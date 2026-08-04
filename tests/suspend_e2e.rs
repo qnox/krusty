@@ -1122,7 +1122,8 @@ public class M {\n\
 
 /// Compile a suspend snippet with krusty (stdlib + coroutines + JDK modules) and run its
 /// `fun box(): String = runBlocking { … }` on the shared box runner — the same harness the other
-/// `suspend … runBlocking { }` behavioural tests use. `None` if the toolchain isn't provisioned.
+/// `suspend … runBlocking { }` behavioural tests use. Toolchain access is fail-fast; `None` therefore
+/// means the compiler declined the source, which each behavioral caller treats as a failure.
 fn run_suspend_box(src: &str, tag: &str) -> Option<String> {
     let sl = common::stdlib_jar();
     let coro = common::coroutines_jar();
@@ -1137,13 +1138,6 @@ fn suspend_unit_fn_bare_early_return() {
     // must `areturn Unit.INSTANCE` — emitting a void `return` (as the bare `Return(None)` did) yields
     // "Method expects a return value" at load. Production hit: an invitation-accepting service method
     // (`… ?: return`, `if (status != PENDING) return`). proc(b,true) leaves v=0; proc(b,false) sets v=1.
-    if false /* toolchain gate panics */
-        || false /* toolchain gate panics */
-        || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
         class B { var v: Int = 0 }\n\
         suspend fun leaf(): Int = 1\n\
@@ -1172,13 +1166,6 @@ fn suspend_in_catch_body_spills_exception() {
     // field and restored per-state, exactly like any local live across a suspension. compute(sb,false) =
     // risky(7) + "cfg".length(3) = 10 with sb "R"; compute(sb,true) rethrows the original
     // IllegalStateException("boom") after running the catch's suspend, with sb "R[boomC]".
-    if false /* toolchain gate panics */
-        || false /* toolchain gate panics */
-        || false
-    /* toolchain gate panics */
-    {
-        return; // toolchain not provisioned
-    }
     const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
         suspend fun setup(): String = \"cfg\"\n\
         suspend fun tick(sb: StringBuilder, t: String): Int { sb.append(t); return t.length }\n\
@@ -1219,13 +1206,6 @@ fn suspend_return_when_with_suspending_branches() {
     // including an `else -> throw` divergent arm. Desugars to `val tmp; when (k) { … tmp = v }; return
     // tmp`, each branch flattened as a suspending `when`-statement arm. handle(0) = "a5" with sb "A!";
     // handle(1) = null with sb "B"; handle(2) = "c" with sb "C".
-    if false /* toolchain gate panics */
-        || false /* toolchain gate panics */
-        || false
-    /* toolchain gate panics */
-    {
-        return; // toolchain not provisioned
-    }
     const SRC: &str = "import kotlinx.coroutines.runBlocking\n\
         suspend fun leafA(sb: StringBuilder, n: Int): String { sb.append(\"A\"); return \"a\" + n }\n\
         suspend fun leafB(sb: StringBuilder): String? { sb.append(\"B\"); return null }\n\

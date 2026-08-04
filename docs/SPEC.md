@@ -4314,7 +4314,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   considered member `invoke` and top-level extension `invoke`, never a member extension — it now
   selects member-extension candidates in an explicit operator-only mode (a non-`operator fun
   Recv.invoke` stays rejected by call syntax), and the lowerer emits the recorded
-  `ModuleMemberExtension` for a call whose callee is an arbitrary expression (the literal `"case"`).
+  origin-neutral `MemberExtension` target for a call whose callee is an arbitrary expression (the
+  literal `"case"`).
   Tests:
   `invoke_operator_extension_e2e::member_extension_invoke_in_super_ctor_receiver_lambda` (runs),
   `…::named_super_ctor_lambda_uses_its_mapped_parameter_type`,

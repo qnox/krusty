@@ -73,11 +73,6 @@ fn run_two(a: &str, b: &str) -> Option<String> {
 
 #[test]
 fn cross_file_companion_function_call_runs() {
-    if false /* toolchain gate panics */ || false
-    /* toolchain gate panics */
-    {
-        return;
-    }
     // `Job` (file A) has a `companion object` with functions; file B calls them qualified across the
     // module boundary. Must emit `getstatic Job.Companion; invokevirtual Job$Companion.fn` and run.
     let a = "class Job(val id: String) {\n\

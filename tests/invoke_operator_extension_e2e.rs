@@ -184,6 +184,150 @@ fn classpath_member_extension_resolves_in_a_plain_receiver_lambda() {
     assert_eq!(output, "OK");
 }
 
+/// The dispatch hierarchy is semantic input, not a source-origin boundary. A member extension
+/// inherited entirely inside a dependency must remain visible when the receiver lambda is typed as
+/// the subclass; stopping the walk at the first classpath classifier loses the base declaration.
+#[test]
+fn inherited_classpath_member_extension_uses_the_common_dispatch_hierarchy() {
+    const LIB: &str = r#"
+        package api
+
+        open class BaseScope {
+            val seen = mutableListOf<String>()
+            operator fun String.invoke() {
+                seen.add(this)
+            }
+        }
+        class DerivedScope : BaseScope()
+    "#;
+    const MAIN: &str = r#"
+        import api.DerivedScope
+
+        fun box(): String {
+            val configure: DerivedScope.() -> Unit = { "inherited"() }
+            val scope = DerivedScope()
+            configure(scope)
+            return if (scope.seen == listOf("inherited")) "OK" else "fail: ${scope.seen}"
+        }
+    "#;
+
+    let Some(output) = common::expect_box_run_against("invoke_classpath_inherited", LIB, MAIN)
+    else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The enclosing dispatch type's arguments bind the member extension's declared receiver before
+/// applicability is tested (`GenericScope<String>` turns its `T.invoke` into `String.invoke`). This
+/// exercises the provider-neutral generic signature rather than a descriptor-only classpath fallback.
+#[test]
+fn generic_classpath_dispatch_binds_its_member_extension_receiver() {
+    const LIB: &str = r#"
+        package api
+
+        class GenericScope<T> {
+            operator fun T.invoke(): String = toString()
+        }
+    "#;
+    const MAIN: &str = r#"
+        import api.GenericScope
+
+        fun box(): String {
+            val configure: GenericScope<String>.() -> String = { "OK"() }
+            return configure(GenericScope<String>())
+        }
+    "#;
+
+    let Some(output) =
+        common::expect_box_run_against("invoke_classpath_generic_dispatch", LIB, MAIN)
+    else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(output, "OK");
+}
+
+/// Suspension discovery must consume the capability carried by the selected member-extension target.
+/// If that flag is ignored, lowering emits the dependency's CPS call inside an ordinary closure method
+/// with no state-machine continuation to pass, even though semantic resolution succeeded.
+#[test]
+fn suspend_classpath_member_extension_is_a_suspension_point() {
+    const LIB: &str = r#"
+        package api
+
+        class SuspendScope {
+            suspend operator fun String.invoke(): String = this
+        }
+    "#;
+    const MAIN: &str = r#"
+        import api.SuspendScope
+        import kotlin.coroutines.Continuation
+        import kotlin.coroutines.CoroutineContext
+        import kotlin.coroutines.EmptyCoroutineContext
+        import kotlin.coroutines.startCoroutine
+
+        private var answer = "not completed"
+
+        fun runNow(block: suspend () -> String): String {
+            answer = "not completed"
+            block.startCoroutine(object : Continuation<String> {
+                override val context: CoroutineContext get() = EmptyCoroutineContext
+                override fun resumeWith(result: Result<String>) {
+                    answer = result.getOrThrow()
+                }
+            })
+            return answer
+        }
+
+        fun box(): String = runNow {
+            val configure: suspend SuspendScope.() -> String = { "OK"() }
+            configure(SuspendScope())
+        }
+    "#;
+
+    let Some(output) = common::expect_box_run_against("invoke_classpath_suspend_member", LIB, MAIN)
+    else {
+        return; // toolchain not provisioned
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The common member-extension shape must not infer physical continuation presence from `suspend`.
+/// Source providers already expose source value parameters, whereas a JVM provider may retain its
+/// trailing continuation; dropping the last slot by flag alone erases `suffix` only for source and
+/// recreates the provider-specific behavior this path is meant to eliminate.
+#[test]
+fn source_suspend_member_extension_keeps_its_value_parameters() {
+    const SRC: &str = r#"
+        import kotlin.coroutines.Continuation
+        import kotlin.coroutines.CoroutineContext
+        import kotlin.coroutines.EmptyCoroutineContext
+        import kotlin.coroutines.startCoroutine
+
+        private var answer = "not completed"
+
+        fun runNow(block: suspend () -> String): String {
+            answer = "not completed"
+            block.startCoroutine(object : Continuation<String> {
+                override val context: CoroutineContext get() = EmptyCoroutineContext
+                override fun resumeWith(result: Result<String>) {
+                    answer = result.getOrThrow()
+                }
+            })
+            return answer
+        }
+
+        class SuspendScope {
+            suspend fun String.decorate(suffix: String): String = this + suffix
+            suspend fun result(): String = "O".decorate("K")
+        }
+
+        fun box(): String = runNow { SuspendScope().result() }
+    "#;
+
+    assert_eq!(run(SRC).expect("source suspend member extension"), "OK");
+}
+
 /// The `operator` modifier is not in the class file — only in `@Metadata` — so recovering a classpath
 /// member extension must recover that flag too, or call syntax would accept a plain member extension.
 #[test]
@@ -217,6 +361,44 @@ fn non_operator_classpath_member_extension_is_not_used_by_call_syntax() {
             .iter()
             .any(|diagnostic| diagnostic.contains("expression is not callable")),
         "expected 'expression is not callable', got: {diagnostics:?}"
+    );
+}
+
+/// A JVM class file encodes a member extension as an ordinary instance method whose first parameter
+/// is the extension receiver. That physical coincidence must not put a second, invalid source spelling
+/// into the class's member scope: the declaration is callable only with the dispatch receiver implicit
+/// and the extension receiver in the normal receiver position.
+#[test]
+fn classpath_member_extension_is_not_exposed_as_an_ordinary_dispatch_member() {
+    const LIB: &str = r#"
+        package api
+
+        class SpecScope {
+            operator fun String.invoke(body: () -> Unit) {
+                body()
+            }
+        }
+    "#;
+    const MAIN: &str = r#"
+        import api.SpecScope
+
+        fun box(): String {
+            val scope = SpecScope()
+            scope.invoke("not-an-extension-position") {}
+            return "FAIL"
+        }
+    "#;
+
+    let Some(diagnostics) =
+        common::checker_diags_against("invoke_classpath_not_plain_member", LIB, MAIN)
+    else {
+        return; // toolchain not provisioned
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("unresolved reference 'invoke'")),
+        "the physical instance method must not leak into ordinary Kotlin member scope: {diagnostics:?}"
     );
 }
 

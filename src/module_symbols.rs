@@ -71,7 +71,7 @@ impl<'a> ModuleSymbols<'a> {
     }
 
     fn type_shape_for(&self, c: &'a FrontendClassSig) -> LibraryType {
-        let members = c
+        let mut members: Vec<LibraryMember> = c
             .methods
             .iter()
             .flat_map(|(n, sigs)| {
@@ -79,6 +79,25 @@ impl<'a> ModuleSymbols<'a> {
                     .map(move |s| lib_member(n, s, c.internal_name(), c.is_interface()))
             })
             .collect();
+        // Class-body extensions are declarations of the classifier just like ordinary methods, even
+        // though their source call shape has a second (extension) receiver. Put them in the shared type
+        // shape and mark that distinction explicitly, so a consumer of the federated SymbolSource never
+        // has to ask whether this classifier came from the current module or a dependency. The leading
+        // receiver in `params` mirrors the physical instance-method ABI used by compiled providers.
+        for (name, overloads) in &c.member_ext_funs {
+            for extension in overloads {
+                let mut member = lib_member(
+                    name,
+                    extension.signature(),
+                    c.internal_name(),
+                    c.is_interface(),
+                );
+                member.params.insert(0, extension.receiver_ty());
+                member.set_is_member_extension(true);
+                member.set_is_operator(extension.signature().is_operator());
+                members.push(member);
+            }
+        }
         let companion: Vec<LibraryMember> = c
             .static_methods
             .iter()
@@ -187,7 +206,10 @@ impl<'a> ModuleSymbols<'a> {
             value_companion_fns: Vec::new(),
             value_underlying: None,
             alias_target: None,
-            type_params: Vec::new(),
+            // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can
+            // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in
+            // exactly the same way for source and decoded metadata.
+            type_params: c.tparam_names.clone(),
             sealed_subclasses,
             enum_entries,
             enum_entries_accessor,

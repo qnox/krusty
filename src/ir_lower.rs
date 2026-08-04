@@ -7305,12 +7305,13 @@ impl<'a> Lower<'a> {
             if name != "$dispatch" && name != "this" {
                 return None;
             }
-            let compatible = ty.obj_internal() == Some(owner)
-                || ty.obj_internal().is_some_and(|internal| {
-                    self.syms
-                        .supertype_internal_names(&internal.render())
-                        .contains(&owner)
-                });
+            // The selected declaration may be inherited from any symbol provider. Ask the federated
+            // semantic hierarchy whether the in-scope dispatch value is assignable to that owner;
+            // walking only `SymbolTable`'s source classes stops at a dependency boundary and makes an
+            // inherited classpath extension type-check successfully but disappear during lowering.
+            let compatible = self
+                .syms
+                .is_assignable_across_sources(*ty, Ty::obj_name(owner));
             compatible.then_some(*value)
         })
     }
@@ -7350,14 +7351,14 @@ impl<'a> Lower<'a> {
     }
 
     /// Lower a selected class-body extension call.
-    fn lower_module_member_extension_call(
+    fn lower_member_extension_call(
         &mut self,
         extension_value: u32,
         target: &ResolvedCall,
         args: &[AstExprId],
         call_expr: AstExprId,
     ) -> Option<u32> {
-        let ResolvedCall::ModuleMemberExtension {
+        let ResolvedCall::MemberExtension {
             extension_receiver,
             params,
             physical_params,
@@ -7376,18 +7377,17 @@ impl<'a> Lower<'a> {
         )?;
         let extension_value =
             self.spill_receiver_before_args(extension_value, *extension_receiver, &mut prelude);
-        let call =
-            self.emit_module_member_extension_call(extension_value, target, &mut provided)?;
+        let call = self.emit_member_extension_call(extension_value, target, &mut provided)?;
         Some(self.wrap_arg_prelude(call, prelude))
     }
 
-    fn emit_module_member_extension_call(
+    fn emit_member_extension_call(
         &mut self,
         extension_value: u32,
         target: &ResolvedCall,
         provided: &mut [Option<u32>],
     ) -> Option<u32> {
-        let ResolvedCall::ModuleMemberExtension {
+        let ResolvedCall::MemberExtension {
             owner,
             physical_receiver,
             name,
@@ -9036,11 +9036,11 @@ impl<'a> Lower<'a> {
             }
             DestructureComponentTarget::MemberExtension(target) => {
                 let ret = match target.as_ref() {
-                    ResolvedCall::ModuleMemberExtension { ret, .. } => *ret,
+                    ResolvedCall::MemberExtension { ret, .. } => *ret,
                     _ => return None,
                 };
                 let mut provided = [];
-                let call = self.emit_module_member_extension_call(recv, &target, &mut provided)?;
+                let call = self.emit_member_extension_call(recv, &target, &mut provided)?;
                 Some((call, ret))
             }
             DestructureComponentTarget::IndexedGet(m) => {
@@ -16465,14 +16465,14 @@ impl<'a> Lower<'a> {
             }
         }
         if let Some(
-            target @ ResolvedCall::ModuleMemberExtension {
+            target @ ResolvedCall::MemberExtension {
                 extension_receiver, ..
             },
         ) = self.info.resolved_calls.get(&e).cloned()
         {
             if extension_receiver == this_ty {
                 let extension = self.emit_get_value(this_v);
-                return self.lower_module_member_extension_call(extension, &target, args, e);
+                return self.lower_member_extension_call(extension, &target, args, e);
             }
         }
         // The checker resolved this as a MODULE member and recorded the argument→parameter mapping in
@@ -20987,12 +20987,12 @@ impl<'a> Lower<'a> {
                 if !matches!(self.afile.expr(callee), Expr::Name(_) | Expr::Member { .. })
                     && matches!(
                         self.info.resolved_calls.get(&e),
-                        Some(ResolvedCall::ModuleMemberExtension { .. })
+                        Some(ResolvedCall::MemberExtension { .. })
                     ) =>
             {
                 let target = self.info.resolved_calls.get(&e).cloned()?;
                 let extension = self.expr(callee)?;
-                self.lower_module_member_extension_call(extension, &target, &args, e)?
+                self.lower_member_extension_call(extension, &target, &args, e)?
             }
             Expr::Call { .. }
                 if matches!(
@@ -25714,11 +25714,9 @@ impl<'a> Lower<'a> {
         let t = {
             let rt = self.recv_ty(receiver).non_null();
             let module_target = self.info.resolved_calls.get(&e).cloned();
-            if let Some(target @ ResolvedCall::ModuleMemberExtension { .. }) =
-                module_target.as_ref()
-            {
+            if let Some(target @ ResolvedCall::MemberExtension { .. }) = module_target.as_ref() {
                 let extension = self.expr(receiver)?;
-                self.lower_module_member_extension_call(extension, target, &args, e)?
+                self.lower_member_extension_call(extension, target, &args, e)?
             } else if let Some(
                 resolved @ ResolvedCall::ModuleMember {
                     name: target,

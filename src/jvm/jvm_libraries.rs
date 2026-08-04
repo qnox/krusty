@@ -1229,7 +1229,6 @@ impl JvmLibraries {
                         metadata.is_suspend(),
                     );
                 }
-                member.set_suspend(member_metadata.is_some_and(metadata::MetaFn::is_suspend));
                 // A member EXTENSION is deliberately excluded from `aligned_member_metadata`: its
                 // metadata parameter list omits the receiver the JVM method leads with, so the shared
                 // alignment cannot line the two up. Match it separately, by the exact descriptor it
@@ -1240,6 +1239,24 @@ impl JvmLibraries {
                         && function.jvm_name == m.name
                         && function.jvm_desc == Some(m.descriptor.as_str())
                 });
+                let semantic_metadata = member_metadata.or(member_extension_metadata);
+                if let Some(metadata) = member_extension_metadata {
+                    // Normalize the callable's SOURCE identity at the provider boundary. A value-class
+                    // parameter may mangle the JVM method name, but downstream overload selection must
+                    // see the Kotlin declaration name and must not grow a classpath-only name branch.
+                    // The physical spelling remains on the opaque member handle for emission.
+                    if metadata.jvm_name != metadata.kotlin_name {
+                        member.physical_name = Some(metadata.jvm_name.clone());
+                        member.name = metadata.kotlin_name.clone();
+                    }
+                    // JVM `Signature` sees the extension receiver as an ordinary leading parameter;
+                    // Kotlin metadata represents it as the receiver attribute. Prefer that normalized
+                    // semantic shape so generic inference is identical to a module declaration.
+                    if metadata.generic_sig.is_some() {
+                        member.generic_sig = metadata.generic_sig.clone();
+                    }
+                }
+                member.set_suspend(semantic_metadata.is_some_and(metadata::MetaFn::is_suspend));
                 member.set_is_member_extension(member_extension_metadata.is_some());
                 member.set_is_operator(
                     member_metadata.is_some_and(metadata::MetaFn::is_operator)
@@ -1249,7 +1266,7 @@ impl JvmLibraries {
                     .params
                     .len()
                     .saturating_sub(usize::from(member.suspend()));
-                if let Some(metadata) = member_metadata {
+                if let Some(metadata) = semantic_metadata {
                     member.visibility = metadata.visibility;
                     member.set_ret_nullable(metadata.ret_nullable());
                 }
@@ -1257,7 +1274,7 @@ impl JvmLibraries {
                 // the LOGICAL return from `@Metadata` (`Int`, not `Object`) so a caller unboxes the suspension
                 // result — keeping the erased type as `physical_ret` for the emitter.
                 if member.suspend() {
-                    if let Some(f) = member_metadata {
+                    if let Some(f) = semantic_metadata {
                         member.physical_ret = member.ret;
                         let logical = metadata_return_info(f.ret_class, f.ret_nullable())
                             .apply(member.physical_ret);
@@ -3158,6 +3175,16 @@ impl SymbolSource for JvmLibraries {
                 // This keeps overload identity precise without a classpath-only reverse-name table.
                 let function_renames = self.mapped_collection_function_renames(cn);
                 for m in &t.members {
+                    // A member extension has TWO receivers: the declaring class supplies the implicit
+                    // dispatch receiver and the method's first JVM parameter is the extension receiver.
+                    // It is therefore not an ordinary member of `receiver`, even though both shapes are
+                    // encoded as instance methods in the class file. The dedicated semantic
+                    // member-extension query consumes this declaration; exposing it here as well would
+                    // incorrectly accept `scope.invoke("x", body)` and create two resolution paths for
+                    // the same declaration.
+                    if m.is_member_extension() {
+                        continue;
+                    }
                     // The name this member is visible under in the receiver's SOURCE scope. Normally
                     // its own; for a Java method that a renamed builtin covers, the KOTLIN name
                     // INSTEAD of the JVM one — so `ArrayList.remove(int)` answers `removeAt` and is
