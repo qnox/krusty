@@ -4614,7 +4614,7 @@ fn ast_literal_const(file: &ast::File, e: AstExprId, ty: Ty) -> Option<crate::ir
         Expr::IntLit(v) => match ty {
             Ty::Byte => IrConst::Byte(*v as i8),
             Ty::Short => IrConst::Short(*v as i16),
-            Ty::Char => IrConst::Char(char::from_u32(*v as u32)?),
+            Ty::Char => IrConst::Char(*v as u16),
             _ => IrConst::Int(*v as i32),
         },
         Expr::LongLit(v) => IrConst::Long(*v),
@@ -8931,7 +8931,19 @@ impl<'a> Lower<'a> {
         // a declaration-wide name scan would both conflate overloads and miss receiver syntax.
         // Function-value/operator invokes additionally use their dedicated checked lowering below.
         let callees = std::cell::RefCell::new(Vec::new());
-        collect_calls(self.afile, body, &callees, descend_nested_bodies);
+        let stmts = std::cell::RefCell::new(Vec::new());
+        collect_call_sites(self.afile, body, &callees, &stmts, descend_nested_bodies);
+        // A CONVENTION call (`b[i]`, `b += x`, `a < b`) desugars to a call the AST never spells as
+        // one. Its selected target is recorded against the index/operator expression — or, for a
+        // compound assignment, against the statement — so ask those tables before the call scan
+        // below, which only understands `Expr::Call` shapes.
+        if stmts
+            .borrow()
+            .iter()
+            .any(|&s| self.info.convention_stmt_suspends(s))
+        {
+            return true;
+        }
         let module_symbols = crate::module_symbols::ModuleSymbols::new(self.syms);
         callees.into_inner().into_iter().any(|call| {
             // Resolved call metadata below is provider-neutral and is the primary source of truth.
@@ -8946,12 +8958,9 @@ impl<'a> Lower<'a> {
                     .iter()
                     .any(|member| member.suspend())
             };
-            if self
-                .info
-                .resolved_calls
-                .get(&call)
-                .is_some_and(ResolvedCall::is_suspend)
-            {
+            // Covers the ordinary `Expr::Call` target AND the convention forms, whose selected
+            // operator is recorded against the index/operator expression instead.
+            if self.info.convention_call_suspends(call) {
                 return true;
             }
             // The checker's `Invoke` lowering carries suspend-ness reliably (the receiver's static
@@ -9067,13 +9076,20 @@ impl<'a> Lower<'a> {
     /// for local, module, member, extension, and classpath targets without exposing any target name.
     fn body_calls_suspend_inline(&self, body: AstExprId) -> bool {
         let calls = std::cell::RefCell::new(Vec::new());
-        collect_calls(self.afile, body, &calls, true);
-        calls.into_inner().into_iter().any(|call| {
-            self.info
-                .resolved_calls
-                .get(&call)
-                .is_some_and(ResolvedCall::is_suspend_inline)
-        })
+        let stmts = std::cell::RefCell::new(Vec::new());
+        collect_call_sites(self.afile, body, &calls, &stmts, true);
+        // Ask the same centralized convention-target query as suspension discovery. Looking only in
+        // `resolved_calls` handles plain/index/safe calls but misses arithmetic/unary targets stored in
+        // `resolved_operator_calls` and statement forms such as `plusAssign`; that mismatch promoted
+        // the lambda to a state machine, then let it emit an unspliceable direct call from a state.
+        stmts
+            .into_inner()
+            .into_iter()
+            .any(|stmt| self.info.convention_stmt_is_suspend_inline(stmt))
+            || calls
+                .into_inner()
+                .into_iter()
+                .any(|call| self.info.convention_call_is_suspend_inline(call))
     }
 
     fn lower_suspend_lambda(
@@ -16573,6 +16589,8 @@ impl<'a> Lower<'a> {
                 parameter,
                 owner,
                 source,
+                // Selected call capabilities drive coroutine CLASSIFICATION, not emission.
+                capabilities: _,
             } => {
                 let recv_key = receiver.erased_recv();
                 let selected_params = vec![parameter];
@@ -16613,6 +16631,7 @@ impl<'a> Lower<'a> {
                 owner,
                 parameter,
                 interface,
+                capabilities: _,
             } => {
                 let r = self.expr(lhs)?;
                 let a = self.lower_arg(rhs, &parameter)?;
@@ -16634,7 +16653,10 @@ impl<'a> Lower<'a> {
                     vec![a],
                 ))
             }
-            CompoundAssignmentTarget::LibraryExtension(c) => {
+            CompoundAssignmentTarget::LibraryExtension {
+                callable: c,
+                capabilities: _,
+            } => {
                 if c.params.len() == 2 {
                     let r = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
                     let a = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
@@ -19188,7 +19210,7 @@ impl<'a> Lower<'a> {
                         Some(n) if n.matches("kotlin/Float") => IrConst::Float(0.0),
                         Some(n) if n.matches("kotlin/Double") => IrConst::Double(0.0),
                         Some(n) if n.matches("kotlin/Boolean") => IrConst::Boolean(false),
-                        Some(n) if n.matches("kotlin/Char") => IrConst::Char('\0'),
+                        Some(n) if n.matches("kotlin/Char") => IrConst::Char(0),
                         _ => IrConst::Int(0), // Int/Short/Byte
                     }
                 };
@@ -21350,8 +21372,10 @@ impl<'a> Lower<'a> {
                     // `Char.MAX_VALUE`/`MIN_VALUE` read back as an integer ConstantValue, but the
                     // constant's type is `Char` — emit a `Char` const so it boxes to `Character` (not
                     // `Integer`) in a vararg/generic position.
+                    // (`Char.MIN_HIGH_SURROGATE` and friends are lone surrogates — legal code units
+                    // that are NOT valid code points, so the value stays a raw `u16`.)
                     crate::libraries::LibConst::Int(v) if lc.ty == Ty::Char => {
-                        IrConst::Char(char::from_u32(v as u32).unwrap_or('\0'))
+                        IrConst::Char(v as u16)
                     }
                     crate::libraries::LibConst::Int(v) => IrConst::Int(v),
                     crate::libraries::LibConst::Long(v) => IrConst::Long(v),
@@ -21542,88 +21566,26 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // A class `compareTo(o): Int` drives relational operators.
+            // Every non-builtin relational convention is emitted from the checker's exact selected
+            // `compareTo` target. Source/classpath members and extensions therefore share argument
+            // adaptation, suspend marking, and inline capability handling; lowering never reselects by
+            // receiver class or declaration name.
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
-                // A user `compareTo` EXTENSION on a nullable primitive (`Long?.compareTo`): the
-                // checker typed the comparison Boolean through it (the builtin needs a non-null
-                // receiver). Call it and compare its Int result with 0. The boxed-wrapper key can
-                // never be produced by a non-null primitive operand, so this cannot shadow the
-                // builtin comparison. Nullable-primitive ONLY, matching the checker's gate (a
-                // nullable REFERENCE erases to the non-null form's key).
-                if lty.nullable_primitive().is_some() {
-                    if let Some(selected) =
-                        self.info.resolved_operator_call(e, "compareTo").cloned()
-                    {
-                        let l = self.expr(lhs)?;
-                        let (cmp, ret) = self.lower_selected_op_call(
-                            l,
-                            lty,
-                            "compareTo",
-                            &[rhs],
-                            selected,
-                            Some(e),
-                        )?;
-                        if ret != Ty::Int {
-                            return None;
-                        }
-                        let zero = self.emit_const(IrConst::Int(0));
-                        return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
+                if let Some(selected) = self.info.resolved_operator_call(e, "compareTo").cloned() {
+                    let l = self.expr(lhs)?;
+                    let (cmp, ret) = self.lower_selected_op_call(
+                        l,
+                        lty,
+                        "compareTo",
+                        &[rhs],
+                        selected,
+                        Some(e),
+                    )?;
+                    if ret != Ty::Int {
+                        return None;
                     }
-                    if let Some(fid) = self.unique_ext_fun_id_by_arity(lty, "compareTo", 1) {
-                        let params = self.ir.functions[fid as usize].params.clone();
-                        if params.len() == 2 {
-                            let l = self.lower_arg(lhs, &params[0])?;
-                            let r = self.lower_arg(rhs, &params[1])?;
-                            let cmp = self.emit_local_call(fid, vec![l, r]);
-                            let zero = self.emit_const(IrConst::Int(0));
-                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                        }
-                    }
-                }
-                if let Some(internal) = self.recv_ty(lhs).obj_internal().map(|s| s.to_string()) {
-                    if let Some((class, index, mfid, _)) =
-                        self.resolve_method(&internal, "compareTo")
-                    {
-                        let params = self.ir.functions[mfid as usize].params.clone();
-                        if let [param] = params.as_slice() {
-                            let l = self.expr(lhs)?;
-                            let r = self.lower_arg(rhs, param)?;
-                            let cmp = self.emit_method_call(class, index, l, vec![Some(r)]);
-                            let zero = self.emit_const(IrConst::Int(0));
-                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                        }
-                    }
-                    // A CLASSPATH `Comparable` type (`class Money : Comparable<Money>` compiled
-                    // separately): `compareTo` is a classpath member, not user IR. The checker records
-                    // the selected member on the binary expression; lowering only emits that target.
-                    let lt = self.recv_ty(lhs);
-                    let rt = self.info.ty(rhs);
-                    // Reference right operand only — matches the checker guard (a primitive arg to an
-                    // erased generic `Comparable.compareTo(Object)` would need a box not applied here).
-                    if rt.is_reference() {
-                        if let Some(resolved) =
-                            self.info.resolved_member(e).cloned().filter(|resolved| {
-                                resolved.member.name == "compareTo" && resolved.ret == Ty::Int
-                            })
-                        {
-                            let l = self.expr(lhs)?;
-                            let param = resolved.member.params.first().copied().unwrap_or(rt);
-                            let r = self.lower_arg(rhs, &ty_to_ir(param))?;
-                            let owner_fallback = lt
-                                .kotlin_class_internal()
-                                .unwrap_or_else(crate::types::wk::any);
-                            let cmp = self.emit_library_member_call(
-                                l,
-                                owner_fallback,
-                                resolved.member,
-                                resolved.ret,
-                                resolved.suspend,
-                                vec![r],
-                            )?;
-                            let zero = self.emit_const(IrConst::Int(0));
-                            return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
-                        }
-                    }
+                    let zero = self.emit_const(IrConst::Int(0));
+                    return Some(self.emit_primitive_bin_op(bin_to_ir(op)?, cmp, zero));
                 }
             }
             // A library operator function on a reference receiver (`list + x` → `CollectionsKt.plus(list,
@@ -23704,7 +23666,7 @@ impl<'a> Lower<'a> {
                 && matches!(name.as_str(), "trimIndent" | "trimMargin")
                 && !self.info.resolved_calls.contains_key(&e)
             {
-                if let Some(s) = const_string_value(self.afile, receiver) {
+                if let Some(s) = self.afile.const_string_value(receiver) {
                     let folded = if name == "trimIndent" {
                         trim_indent(&s)
                     } else {
@@ -24895,13 +24857,6 @@ fn is_when_test(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e), Expr::Is { .. } | Expr::InRange { .. })
 }
 
-/// Const-fold an annotation argument expression to a String: a string literal, a `const val` name, or a
-/// string template whose interpolations are themselves const-foldable (`"$prefix.bar"` with
-/// `const val prefix = "foo"` → `"foo.bar"`). `None` for anything not statically a string.
-fn const_string_value(file: &ast::File, e: AstExprId) -> Option<String> {
-    const_string_value_d(file, e, 0)
-}
-
 /// `String.trimIndent()`: split into lines, drop the common minimal indentation of the non-blank
 /// lines from every line, and omit a blank FIRST or LAST line — matching `kotlin.text.trimIndent`.
 fn trim_indent(s: &str) -> String {
@@ -24944,48 +24899,6 @@ fn trim_margin(s: &str, margin: &str) -> String {
         }
     }
     out.join("\n")
-}
-
-/// `depth` bounds the recursion through `const val` references so a cyclic chain
-/// (`const val a = b; const val b = a`) terminates with `None` instead of overflowing the stack.
-fn const_string_value_d(file: &ast::File, e: AstExprId, depth: u32) -> Option<String> {
-    if depth > 32 {
-        return None;
-    }
-    match file.expr(e) {
-        Expr::StringLit(s) => Some(s.clone()),
-        Expr::CharLit(c) => Some(c.to_string()),
-        Expr::Name(n) => top_level_const_string_d(file, n, depth + 1),
-        Expr::Template(parts) => {
-            let mut out = String::new();
-            for p in parts {
-                match p {
-                    TemplatePart::Str(s) => out.push_str(s),
-                    TemplatePart::Expr(x) => {
-                        out.push_str(&const_string_value_d(file, *x, depth + 1)?)
-                    }
-                }
-            }
-            Some(out)
-        }
-        _ => None,
-    }
-}
-
-/// The string value of a top-level property `name` whose initializer const-folds to a string
-/// (`const val prefix = "foo"`), or `None`. (krusty's parser doesn't currently retain the `const`
-/// modifier on a top-level `val`, so this matches any top-level property with a foldable string init —
-/// safe, since only literals/foldable templates fold.)
-fn top_level_const_string_d(file: &ast::File, name: &str, depth: u32) -> Option<String> {
-    if depth > 32 {
-        return None;
-    }
-    file.decls.iter().find_map(|&d| match file.decl(d) {
-        Decl::Property(p) if p.name == name => p
-            .init
-            .and_then(|i| const_string_value_d(file, i, depth + 1)),
-        _ => None,
-    })
 }
 
 /// `(property_name, serial_name)` for each primary-constructor property carrying `@SerialName("…")`
@@ -25662,39 +25575,55 @@ fn outer_local_access_stmt(
     }
 }
 
-/// Collect every `Call` expr in `e` (incl. nested) — to resolve a call's suspend-ness via its `Invoke`
-/// lowering (a suspend function value / invoke operator) or the checker-selected [`ResolvedCall`].
-/// Retaining expression identity, rather than only callee text, is what keeps overload selection exact.
-fn collect_calls(
+/// Every expression and statement in `e` (incl. nested) that MAY carry a checker-selected call
+/// target: the `Expr::Call` and `Expr::SafeCall` nodes, plus the CONVENTION forms that desugar to a
+/// call without ever being spelled as one (`b[i]`, `a + b`, `a < b`, `-a`, `a..b`, `x in r`, `a++`,
+/// and the compound assignment `b += x`, which is a STATEMENT).
+///
+/// Retaining expression identity, rather than only callee text, is what keeps overload selection
+/// exact. Both sinks are then looked up in the checker's resolved-target tables by id, so
+/// over-collecting is harmless — a node with no recorded target simply never matches.
+fn collect_call_sites(
     file: &ast::File,
     e: AstExprId,
-    out: &std::cell::RefCell<Vec<AstExprId>>,
+    exprs: &std::cell::RefCell<Vec<AstExprId>>,
+    stmts: &std::cell::RefCell<Vec<ast::StmtId>>,
     descend_nested_bodies: bool,
 ) {
     // Enforce the execution boundary at the recursive entry, not only in the expression-child
     // callback. A lambda can be reached directly from a statement (`val task = { pause() }`) or can
     // itself be a function's expression body; both routes bypass the child callback that first tried
     // to implement this rule. Treating every entry uniformly prevents a deferred lambda body from
-    // being charged to the ordinary function which merely allocates it.
+    // being charged to the ordinary function which merely allocates it. The full suspend-lambda scan
+    // opts in to descending; the file-level caller-context gate stops here.
     if !descend_nested_bodies && matches!(file.expr(e), ast::Expr::Lambda { .. }) {
         return;
     }
-    if matches!(file.expr(e), ast::Expr::Call { .. }) {
-        out.borrow_mut().push(e);
+    if matches!(
+        file.expr(e),
+        ast::Expr::Call { .. }
+            | ast::Expr::SafeCall { .. }
+            | ast::Expr::Index { .. }
+            | ast::Expr::Binary { .. }
+            | ast::Expr::Unary { .. }
+            | ast::Expr::IncDec { .. }
+            | ast::Expr::InRange { .. }
+            | ast::Expr::RangeTo { .. }
+    ) {
+        exprs.borrow_mut().push(e);
     }
     file.any_child_expr(
         e,
         &mut |c| {
-            // A lambda executes in its own function/coroutine context. The full suspend-lambda scan
-            // opts in to descending; the file-level caller-context gate stops here.
-            collect_calls(file, c, out, descend_nested_bodies);
+            collect_call_sites(file, c, exprs, stmts, descend_nested_bodies);
             false
         },
         &mut |s| {
-            // A local function likewise owns its call context and is checked/lowered separately.
+            stmts.borrow_mut().push(s);
+            // A local function owns its own call context and is checked/lowered separately.
             if descend_nested_bodies || !matches!(file.stmt(s), Stmt::LocalFun(_)) {
                 file.any_child_stmt(s, &mut |c| {
-                    collect_calls(file, c, out, descend_nested_bodies);
+                    collect_call_sites(file, c, exprs, stmts, descend_nested_bodies);
                     false
                 });
             }

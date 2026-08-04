@@ -1531,7 +1531,7 @@ impl<'a> SemanticClassifier<'a> {
             modifiers = match target {
                 CompoundAssignmentTarget::Member { .. } => 0,
                 CompoundAssignmentTarget::SourceExtension { .. } => HighlightModifiers::STATIC,
-                CompoundAssignmentTarget::LibraryExtension(_) => {
+                CompoundAssignmentTarget::LibraryExtension { .. } => {
                     HighlightModifiers::DEFAULT_LIBRARY
                 }
             };

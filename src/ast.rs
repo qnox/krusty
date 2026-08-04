@@ -108,7 +108,9 @@ pub enum Expr {
     FloatLit(f32),
     BoolLit(bool),
     StringLit(String),
-    CharLit(char),
+    /// A `Char` literal, held as its UTF-16 code UNIT (see `IrConst::Char`). Not a Rust `char`: a
+    /// lone surrogate (`'\uD800'`) is a legal Kotlin `Char` but not a legal Unicode scalar value.
+    CharLit(u16),
     NullLit,
     Name(String),
     /// `operand!!` — not-null assertion (throws NPE if null, else the value).
@@ -1385,6 +1387,61 @@ impl File {
         id
     }
 
+    /// Evaluate the narrow AST-only string-constant language shared by lowering and native plugins.
+    ///
+    /// Keeping this traversal on [`File`] gives both consumers one definition of which syntax is
+    /// accepted: string literals, `Char` literals that have a Unicode-scalar spelling, templates made
+    /// entirely from accepted parts, and top-level property references whose initializer is accepted.
+    /// This is deliberately not a general Kotlin constant evaluator; unsupported syntax returns
+    /// `None`, and each caller owns its own fallback or diagnostic policy.
+    ///
+    /// A Kotlin `Char` is a UTF-16 code unit, while Rust `String` can contain only Unicode scalar
+    /// values. Consequently a lone surrogate cannot be represented here and returns `None` instead
+    /// of being replaced or corrupted. Recursion through property references is bounded so malformed
+    /// or cyclic input cannot overflow the compiler stack.
+    pub(crate) fn const_string_value(&self, expression: ExprId) -> Option<String> {
+        self.const_string_value_at_depth(expression, 0)
+    }
+
+    fn const_string_value_at_depth(&self, expression: ExprId, depth: u32) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
+        match self.expr(expression) {
+            Expr::StringLit(value) => Some(value.clone()),
+            Expr::CharLit(unit) => char::from_u32(*unit as u32).map(|c| c.to_string()),
+            Expr::Name(name) => self.top_level_const_string_at_depth(name, depth + 1),
+            Expr::Template(parts) => {
+                let mut value = String::new();
+                for part in parts {
+                    match part {
+                        TemplatePart::Str(text) => value.push_str(text),
+                        TemplatePart::Expr(expression) => value
+                            .push_str(&self.const_string_value_at_depth(*expression, depth + 1)?),
+                    }
+                }
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+
+    fn top_level_const_string_at_depth(&self, name: &str, depth: u32) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
+        self.decls
+            .iter()
+            .find_map(|&declaration| match self.decl(declaration) {
+                Decl::Property(property) if property.name == name => {
+                    property.init.and_then(|initializer| {
+                        self.const_string_value_at_depth(initializer, depth + 1)
+                    })
+                }
+                _ => None,
+            })
+    }
+
     /// Whether `declaration` is the synthetic class structurally owned by an anonymous-object
     /// construction in this file.
     ///
@@ -1836,7 +1893,11 @@ impl File {
             Expr::FloatLit(v) => out.push_str(&format!("{v}f")),
             Expr::BoolLit(b) => out.push_str(if *b { "true" } else { "false" }),
             Expr::StringLit(s) => out.push_str(&format!("{s:?}")),
-            Expr::CharLit(c) => out.push_str(&format!("'{c}'")),
+            // A code unit that is not a scalar value (a lone surrogate) has no `char` to print.
+            Expr::CharLit(c) => match char::from_u32(*c as u32) {
+                Some(c) => out.push_str(&format!("'{c}'")),
+                None => out.push_str(&format!("'\\u{c:04X}'")),
+            },
             Expr::NullLit => out.push_str("null"),
             Expr::Name(n) => out.push_str(n),
             Expr::NotNull { operand } => {
@@ -2333,5 +2394,15 @@ mod tests {
         assert!(file.expr_uses_name(block, "target"));
         assert!(file.expr_uses_name(block, "value"));
         assert!(!file.expr_uses_name(block, "missing"));
+    }
+
+    #[test]
+    fn const_string_value_renders_scalar_char_and_rejects_surrogate() {
+        let mut file = File::default();
+        let dollar = file.add_expr(Expr::CharLit(b'$' as u16), span());
+        let surrogate = file.add_expr(Expr::CharLit(0xD800), span());
+
+        assert_eq!(file.const_string_value(dollar).as_deref(), Some("$"));
+        assert_eq!(file.const_string_value(surrogate), None);
     }
 }
