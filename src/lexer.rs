@@ -5,7 +5,7 @@
 //! `TokenKind::Unknown` with a diagnostic, so later stages can still make progress.
 
 use crate::diag::{DiagSink, Span};
-use crate::token::{keyword, Token, TokenKind};
+use crate::token::{decode_char_literal_content, keyword, Token, TokenKind};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 pub fn lex(src: &str, diags: &mut DiagSink) -> Vec<Token> {
@@ -872,6 +872,15 @@ impl<'a> Lexer<'a> {
         }
         if self.i < self.b.len() {
             self.i += 1; // closing quote
+
+            // The literal is closed, so its content is known. Validate through the token-layer
+            // decoder that the parser also uses: malformed text must be diagnosed HERE, before a
+            // parser recovery value can hide truncation, without maintaining a second escape list.
+            let inner = &self.s[lo as usize + 1..self.i - 1];
+            if let Err(error) = decode_char_literal_content(inner) {
+                self.diags
+                    .error(Span::new(lo, self.i as u32), error.message());
+            }
         } else {
             self.diags.error(
                 Span::new(lo, self.i as u32),
