@@ -231,3 +231,118 @@ fn generic_extension_property_keeps_nullability_and_kotlin_collection_type() {
         });
     assert_eq!(output.trim(), "OK");
 }
+
+#[test]
+fn java_generic_member_binds_lambda_param_from_receiver_type_argument() {
+    // The intellij `ActionContextElement` shape: a lambda passed to a Java generic member
+    // (`JBIterable<T>.filterMap(Function<? super T, ? extends R>)`) must type `it` from the
+    // RECEIVER's type argument (`JBIterable<Component>` → `it: Component`), or an overload like
+    // `ClientProperty.get(Component, Key<T>)` is unreachable inside it. The member's generic
+    // signature spelled the wildcard argument as the CLASS formal `T`, but only the return type
+    // was bound from the receiver — the parameter side fell back to `Any`, and the call failed
+    // with "unresolved Java static 'ClientProperty.get' for given argument types".
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let java = [
+        (
+            "Component.java".into(),
+            r#"
+                package fixtures;
+                public class Component {
+                    private final String name;
+                    public Component(String name) { this.name = name; }
+                    public String getName() { return name; }
+                }
+            "#
+            .into(),
+        ),
+        (
+            "Key.java".into(),
+            r#"
+                package fixtures;
+                public final class Key<T> {
+                    private final String name;
+                    private Key(String name) { this.name = name; }
+                    public static <T> Key<T> create(String name) { return new Key<T>(name); }
+                }
+            "#
+            .into(),
+        ),
+        (
+            "ClientProperty.java".into(),
+            r#"
+                package fixtures;
+                public final class ClientProperty {
+                    public static Object get(Component component, Object key) { return null; }
+                    public static <T> T get(Component component, Key<T> key) { return null; }
+                }
+            "#
+            .into(),
+        ),
+        (
+            "JBIterable.java".into(),
+            r#"
+                package fixtures;
+                import java.util.function.Function;
+                public class JBIterable<T> {
+                    public <R> JBIterable<R> filterMap(Function<? super T, ? extends R> fun) { return new JBIterable<R>(); }
+                    public T first() { return null; }
+                    public <R> R convert(T value, R fallback) { return fallback; }
+                }
+            "#
+            .into(),
+        ),
+    ];
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        return;
+    };
+    let root = library.parent().map(std::path::Path::to_path_buf);
+    let classpath = vec![library, stdlib];
+    let source = r#"
+        import fixtures.ClientProperty
+        import fixtures.Component
+        import fixtures.JBIterable
+        import fixtures.Key
+
+        class ActionContextElement(val name: String)
+
+        private val KEY = Key.create<ActionContextElement>("K")
+
+        fun create(component: Component?, items: JBIterable<Component>): ActionContextElement? {
+            // Next iteration: `R` is not yet inferred from the lambda BODY through the Java SAM
+            // parameter (the wildcard decodes as `Obj(java/util/function/Function, …)`, which never
+            // unifies with the lambda's function type), so `.first()?.name` on the chained result
+            // still reports `unresolved reference 'name'.` — kotlinc infers `R` there.
+            val parent = items
+                .filterMap { ClientProperty.get(it, KEY) }
+                .first()
+            return parent
+        }
+
+        // A method whose params mix the CLASS formal (`T value`) and a METHOD formal (`R fallback`)
+        // must still infer `R` from the argument — binding the class formal from the receiver must
+        // not erase the method formal to `Any` (`label.length` would not resolve).
+        fun convertLabel(items: JBIterable<Component>): Int {
+            val label = items.convert(Component("c"), "OK")
+            return label.length
+        }
+
+        fun box(): String {
+            if (create(null, JBIterable<Component>()) != null) return "create"
+            if (convertLabel(JBIterable<Component>()) != 2) return "convert"
+            return "OK"
+        }
+    "#;
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
+            )
+        });
+    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output.trim(), "OK");
+}

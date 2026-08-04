@@ -19,7 +19,7 @@ use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
     RangeConstruction, RuntimeCtor, RuntimeOp,
 };
-use crate::symbol_resolver::{ty_subst, ty_subst_all};
+use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
@@ -2034,6 +2034,26 @@ fn has_free_ty_params(ty: Ty) -> bool {
     }
 }
 
+/// Whether `ty` mentions a type parameter that is NOT one of the member's own `formals` — a CLASS
+/// formal the caller must bind from the receiver's type arguments (`JBIterable<T>.filterMap`
+/// mentioning the class's `T` inside a wildcard SAM parameter).
+fn mentions_owner_ty_param(ty: Ty, formals: &[String]) -> bool {
+    match ty {
+        Ty::TyParam(name, _) => !formals.iter().any(|formal| formal.as_str() == name),
+        Ty::Fun(sig) => {
+            sig.params
+                .iter()
+                .any(|param| mentions_owner_ty_param(*param, formals))
+                || mentions_owner_ty_param(sig.ret, formals)
+        }
+        Ty::Obj(_, args) => args
+            .iter()
+            .any(|arg| mentions_owner_ty_param(*arg, formals)),
+        Ty::Nullable(inner) => mentions_owner_ty_param(*inner, formals),
+        _ => false,
+    }
+}
+
 fn parse_concrete_field_gsig(signature: &str, erased_descriptor: &str) -> Option<Ty> {
     let (ty, has_free) = parse_field_gsig(signature, erased_descriptor, None)?;
     (!has_free).then_some(ty)
@@ -3227,7 +3247,39 @@ impl SymbolSource for JvmLibraries {
                         // decoded signature is what preserves and binds its type parameters. Re-parsing
                         // `m.signature` here would therefore lose facts in the former case and fail to
                         // produce any signature in the latter.
-                        let generic_sig = m.generic_sig.clone();
+                        //
+                        // A member gsig without a declared receiver (every Java `Signature`-decoded
+                        // one) references the CLASS's type formals free — `JBIterable<T>.filterMap`
+                        // spells its SAM parameter `Function<? super T, ? extends R>`. Bind those
+                        // class formals from the receiver's type arguments up front, exactly as the
+                        // return recovery below does, so a lambda parameter typed through the wildcard
+                        // sees the concrete argument (`Component`) instead of the erased `Any`
+                        // fallback. Method formals stay free for call-site inference.
+                        let generic_sig = m.generic_sig.clone().map(|signature| {
+                            if signature.receiver.is_some()
+                                || !signature.params.iter().any(|param| {
+                                    mentions_owner_ty_param(*param, &signature.formals)
+                                })
+                            {
+                                return signature;
+                            }
+                            let bindings = self.member_receiver_bindings_name(
+                                receiver,
+                                cn,
+                                &signature.formals,
+                            );
+                            if bindings.is_empty() {
+                                return signature;
+                            }
+                            GenericSig {
+                                params: signature
+                                    .params
+                                    .iter()
+                                    .map(|param| ty_subst_keep_unbound(*param, &bindings))
+                                    .collect(),
+                                ..signature
+                            }
+                        });
                         // A `suspend fun` member's physical method appends a `Continuation` parameter
                         // and erases its return to `Object`; present the LOGICAL signature (drop the
                         // continuation, recover the real return from the `Continuation<T>` type

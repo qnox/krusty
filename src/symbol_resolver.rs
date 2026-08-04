@@ -535,6 +535,41 @@ pub(crate) fn ty_subst_all(sigs: &[Ty], binds: &GSigBinds) -> Vec<Ty> {
     sigs.iter().map(|s| ty_subst(*s, binds)).collect()
 }
 
+/// Realize a signature `Ty` under the current bindings, keeping an UNBOUND type variable free —
+/// unlike [`ty_subst`], which erases it to `Any`. For binding ONLY the class formals of a member
+/// signature from the applied receiver while its method formals stay open for call-site inference;
+/// used by the JVM member walk to pre-bind class formals. Callers that want the final use-time
+/// realization (unbound → `Any`) should use [`ty_subst`] instead.
+pub(crate) fn ty_subst_keep_unbound(sig: Ty, binds: &GSigBinds) -> Ty {
+    match sig {
+        Ty::TyParam(n, _) => binds.get(n).copied().unwrap_or(sig),
+        Ty::Fun(fsig) => {
+            let params = fsig
+                .params
+                .iter()
+                .map(|param| ty_subst_keep_unbound(*param, binds))
+                .collect();
+            let ret = ty_subst_keep_unbound(fsig.ret, binds);
+            Ty::fun_with_shape(
+                params,
+                ret,
+                fsig.context_count,
+                fsig.has_receiver,
+                fsig.suspend,
+            )
+        }
+        Ty::Nullable(inner) => Ty::nullable(ty_subst_keep_unbound(*inner, binds)),
+        Ty::Obj(internal, args) if !args.is_empty() => {
+            let args = args
+                .iter()
+                .map(|arg| ty_subst_keep_unbound(*arg, binds))
+                .collect::<Vec<_>>();
+            Ty::obj_args_name(internal, &args)
+        }
+        _ => sig,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ClasspathSamSignature {
     pub params: Vec<Ty>,
