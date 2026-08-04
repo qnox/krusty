@@ -14,11 +14,11 @@ use crate::ast::{
 use crate::frontend::{
     classifier_over_default, function_import_scope, qualified_path, typeref_leaf,
     AnonymousObjectCapture, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
-    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendSymbols,
-    FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget,
-    LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall,
-    ResolvedConstructor, ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
+    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendClassSig,
+    FrontendSymbols, FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind,
+    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda,
+    ResolvedCall, ResolvedConstructor, ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall,
+    ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -838,7 +838,7 @@ fn lower_file_at_reporting_impl(
             // An `inner class` captures the enclosing instance: a synthetic `this$0` field of the outer
             // type, prepended as the first constructor-parameter field.
             let inner_outer: Option<String> = c.inner_of.as_ref().map(|o| class_internal(file, o));
-            let class_sig = syms.classes.get(&c.name)?;
+            let class_sig = syms.class_by_internal(&internal)?;
             let resolved_prop_ty = |name: &str| {
                 class_sig
                     .props
@@ -948,8 +948,7 @@ fn lower_file_at_reporting_impl(
                     let (_, _, gv_ret, _, _) =
                         lo.delegate_getvalue_info(p.delegate.unwrap(), di)?;
                     let prop_ty = syms
-                        .classes
-                        .get(&c.name)
+                        .class_by_internal(&internal)
                         .and_then(|cs| {
                             cs.props
                                 .iter()
@@ -1360,7 +1359,7 @@ fn lower_file_at_reporting_impl(
             let mut method_fids = Vec::new();
             for (mi, m) in c.methods.iter().enumerate() {
                 // Ordinary and extension overloads occupy separate signature tables.
-                let class_sig = syms.classes.get(&c.name)?;
+                let class_sig = syms.class_by_internal(&internal)?;
                 let extension_receiver = if m.receiver.is_some() {
                     let overload_idx = c.methods[..mi]
                         .iter()
@@ -1633,7 +1632,7 @@ fn lower_file_at_reporting_impl(
                 .enumerate()
                 .filter(|(_, p)| is_member_ext_prop(p))
             {
-                let sig = member_extension_property_plan(syms, c, pi)?;
+                let sig = member_extension_property_plan(syms, &internal, c, pi)?;
                 // Only the concrete shape: a receiver/return mentioning a class type parameter's own
                 // type erases through bounds the read/write handoff doesn't carry, and a value-class
                 // receiver/return needs the boxed/mangled form — both stay gated (skip, never
@@ -1714,8 +1713,7 @@ fn lower_file_at_reporting_impl(
             // instance method that calls the delegate's `getValue`/`setValue`. Bodies built in pass 2.
             for p in c.body_props.iter().filter(|p| p.delegate.is_some()) {
                 let prop_ty = syms
-                    .classes
-                    .get(&c.name)
+                    .class_by_internal(&internal)
                     .and_then(|cs| {
                         cs.props
                             .iter()
@@ -2219,7 +2217,7 @@ fn lower_file_at_reporting_impl(
                 // `AbstractMethodError`. Verify each overriding method matches exactly; otherwise (or for a
                 // classpath interface, whose methods aren't checked here) skip the file — never miscompile.
                 let mut comp_ifaces = Vec::new();
-                let csig0 = syms.classes.get(&c.name)?;
+                let csig0 = syms.class_by_internal(&internal)?;
                 for st in &c.companion_supertypes {
                     let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface()));
                     if !is_file_iface {
@@ -2337,7 +2335,7 @@ fn lower_file_at_reporting_impl(
                     field_annotations: Vec::new(),
                     runtime_retained: false,
                 });
-                let csig = syms.classes.get(&c.name)?;
+                let csig = syms.class_by_internal(&internal)?;
                 let mut cmethods: HashMap<String, Vec<(u32, u32, Ty)>> = HashMap::new();
                 let mut cmethod_fids = Vec::new();
                 for (mi, m) in c.companion_methods.iter().enumerate() {
@@ -3098,7 +3096,7 @@ fn lower_file_at_reporting_impl(
                     }
                     // A member extension has dispatch `this` at slot 0 and extension `this` at slot 1.
                     let dispatch_v = lo.fresh_value();
-                    let class_sig = syms.classes.get(&c.name)?;
+                    let class_sig = syms.class_by_internal(&internal)?;
                     let extension_signature = if m.receiver.is_some() {
                         Some(
                             class_sig
@@ -3205,7 +3203,7 @@ fn lower_file_at_reporting_impl(
                     .enumerate()
                     .filter(|(_, p)| is_member_ext_prop(p))
                 {
-                    let sig = member_extension_property_plan(syms, c, pi)?;
+                    let sig = member_extension_property_plan(syms, &internal, c, pi)?;
                     let (receiver_ir, ret_ir) = sig.ir_types(p);
                     // Link the accessor by name AND parameter list: a plain computed property of the
                     // same name registers `getX()` first, and receiver overloads share `getX` —
@@ -3473,7 +3471,10 @@ fn lower_file_at_reporting_impl(
                         let this_v = lo.fresh_value();
                         lo.scope
                             .push(("this".to_string(), this_v, Ty::obj(&comp_fq)));
-                        let sig = syms.classes.get(&c.name)?.static_methods.get(&m.name)?;
+                        let sig = syms
+                            .class_by_internal(&internal)?
+                            .static_methods
+                            .get(&m.name)?;
                         for (p, t) in m.params.iter().zip(&sig.params) {
                             let v = lo.fresh_value();
                             lo.scope.push((p.name.clone(), v, *t));
@@ -4443,8 +4444,7 @@ fn lower_file_at_reporting_impl(
                             // member is declared on the enum itself, OR on an implemented interface
                             // (`enum class E : I { A { override fun … } }`).
                             let sig = match syms
-                                .classes
-                                .get(&c.name)
+                                .class_by_internal(&internal)
                                 .and_then(|cs| cs.method(&bm.name))
                             {
                                 Some(s) => s.clone(),
@@ -5454,6 +5454,7 @@ impl MemberExtensionPropertyPlan {
 /// pass 1 from registering one overload while pass 2 links and overwrites another overload's body.
 fn member_extension_property_plan(
     symbols: &FrontendSymbols,
+    internal: &str,
     class: &ast::ClassDecl,
     property_index: usize,
 ) -> Option<MemberExtensionPropertyPlan> {
@@ -5463,8 +5464,7 @@ fn member_extension_property_plan(
         .filter(|candidate| candidate.name == property.name && candidate.receiver.is_some())
         .count();
     let signature = symbols
-        .classes
-        .get(&class.name)?
+        .class_by_internal(internal)?
         .member_ext_props(&property.name)
         .get(overload_index)?;
     Some(MemberExtensionPropertyPlan {
@@ -5608,6 +5608,33 @@ struct RecordedImplicitPropertyWrite {
 enum IncDecSite {
     Statement(ast::StmtId),
     Expression(AstExprId),
+}
+
+/// How the common checker-slot consumer fills a parameter that has no source argument. Keeping the
+/// policy explicit lets module/source/classpath call sites share argument evaluation and vararg
+/// packing without confusing three different ABI meanings of an empty slot: unsupported, a
+/// `$default` placeholder (except for its non-null vararg array), or a source constant default.
+#[derive(Clone, Copy)]
+enum OmittedSlotPolicy<'a> {
+    Reject,
+    DefaultPlaceholders {
+        vararg: Option<usize>,
+    },
+    SourceDefaults {
+        values: &'a [Option<CtorDefaultValue>],
+        semantic_params: &'a [Ty],
+    },
+}
+
+#[derive(Clone, Copy)]
+struct LoweredVarargContribution {
+    temp: u32,
+    /// An explicit `*array`: merge/copy it through the platform spread builder.
+    spread: bool,
+    /// A named whole-array value (`items = values`): pass the sole array through directly. This is
+    /// distinct from both a plain element and `*values`; storing the array as one element produces
+    /// an `ArrayStoreException`, while treating it as a spread changes the call's copy semantics.
+    whole_array: bool,
 }
 
 pub(crate) struct Lower<'a> {
@@ -5953,7 +5980,17 @@ impl<'a> Lower<'a> {
             }
             _ => recv,
         };
-        self.check_unsigned_boxes_fit_descriptor(&member.descriptor, &args)?;
+        // The receiver is checked with the arguments: a member of a value class is realized as a
+        // mangled `-impl` static whose descriptor spells it as the leading parameter, and the box
+        // above is the one thing that can put a reference in it.
+        self.check_unsigned_boxes_fit_descriptor(
+            self.runtime
+                .descriptor_method_layout(&member.descriptor)
+                .map(|layout| layout.reference_slots),
+            Some(recv),
+            &args,
+            None,
+        )?;
         let interface = member.is_interface() || self.library_type_is_interface(owner);
         // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
         // the pushed receiver into a continuation spill slot (an unnamed temp local in its
@@ -6082,7 +6119,37 @@ impl<'a> Lower<'a> {
         record_suspend: bool,
     ) -> Option<u32> {
         let logical_ret = callable.ret;
-        self.check_unsigned_boxes_fit_descriptor(&callable.descriptor, &args)?;
+        // A descriptor that spells a CPS `Continuation` the lowered arguments do not fill. For a
+        // SUSPEND callable that is the normal `$default` shape — the plain suspend descriptor has
+        // already had its trailing continuation stripped, but a `$default` one spells it BEFORE the
+        // mask/marker tail, so it survives and the backend appends the value at emit time.
+        let descriptor_layout = self.runtime.descriptor_method_layout(&callable.descriptor);
+        let continuation = descriptor_layout
+            .as_ref()
+            .filter(|layout| layout.reference_slots.len() == args.len() + 1)
+            .and_then(|layout| layout.continuation_slot);
+        // For a callable NOT marked suspend, nothing will thread it, so the emitted `invokestatic` is
+        // an argument SHORT: it links and fails verification. The record is wrong rather than the
+        // call — an unsigned value parameter mangles the JVM name (`libU` → `libU-OzbTU-A`) and the
+        // suspend lookup, keyed by that name, misses the `@Metadata` entry under the SOURCE name.
+        // Both call forms reach this: the `$default` synthetic and the plain mangled method, which is
+        // why the test is the UNFILLED slot rather than `$default`-ness. A non-suspend callee that
+        // takes a `Continuation` as an ordinary parameter fills every slot and is untouched.
+        // Declining keeps the wrong record out of a class file; recovering the lookup would let the
+        // shape emit again.
+        if continuation.is_some() && !callable.suspend {
+            return self.bail("gate:unthreaded-continuation-slot");
+        }
+        // The singleton receiver of an imported object member is a static field READ, so it is not a
+        // descriptor slot; the emitter decides a leading receiver by COUNT, and an unfilled slot here
+        // reaches `check_unsigned_boxes_fit_descriptor` as `None` — its conservative path — rather
+        // than as a wrong position.
+        self.check_unsigned_boxes_fit_descriptor(
+            descriptor_layout.map(|layout| layout.reference_slots),
+            None,
+            &args,
+            continuation,
+        )?;
         // A member of an `object` / `companion object` brought into scope by `import Owner.name`: its
         // realization is an INSTANCE invoke on the singleton, not a facade static. Resolution recorded
         // exactly which field holds it (a plain object's `INSTANCE`, or the outer class's field for a
@@ -6144,23 +6211,21 @@ impl<'a> Lower<'a> {
     }
 
     /// The unsigned value class a LOWERED expression already holds in its BOXED form, as the carrier
-    /// `Ty` that box wraps (`kotlin/UInt.box-impl(…)` → `Ty::UInt`).
+    /// `Ty` that box wraps (a node leaving a `kotlin/UInt` on the stack → `Ty::UInt`).
     ///
-    /// A question about REPRESENTATION, not about the declared type. krusty carries an unsigned value
-    /// in the JVM primitive slot of its carrier, and the inline-class factory `X."box-impl"` is the
-    /// only thing that puts the boxed class on the stack — so reading it back off the lowered node is
-    /// exact, where the checker's `Ty` (still `UInt` on both sides of a box) cannot tell them apart.
+    /// A question about REPRESENTATION, not about the declared type: krusty carries an unsigned value
+    /// in the JVM primitive slot of its carrier, and the checker's `Ty` is `UInt` on both sides of a
+    /// box, so only the lowered node can say which one is on the stack. It is answered from the CLASS
+    /// the node leaves there ([`lowered_reference_class`]) rather than from one node shape — a box is
+    /// still a box after being cast or produced as a block's value, and boxing a second time would
+    /// push a `kotlin/UInt` where the descriptor spells `I`.
     fn lowered_unsigned_box(&self, expr: u32) -> Option<Ty> {
-        let IrExpr::Call {
-            callee: Callee::Static { owner, name, .. },
-            ..
-        } = &self.ir.exprs[expr as usize]
-        else {
-            return None;
-        };
-        (name == "box-impl")
-            .then(|| self.runtime.unsigned_integer_carrier_for_box_type(*owner))
-            .flatten()
+        self.runtime
+            .unsigned_integer_carrier_for_box_type(lowered_reference_class(
+                &self.ir,
+                self.runtime,
+                expr,
+            )?)
     }
 
     /// Decline the file unless every BOXED unsigned argument lands in a descriptor slot that actually
@@ -6174,19 +6239,51 @@ impl<'a> Lower<'a> {
     /// disagreement from reaching a class file; it is a net, not the mechanism any supported shape
     /// relies on.
     ///
-    /// Positions are compared only when the counts line up: a `$default` mask, an appended
-    /// `Continuation`, and a packed vararg all shift them, and none of those shapes can put a box
-    /// where a carrier belongs. A descriptor the platform cannot read is left to its own gates —
-    /// lowering asks which slots are references rather than parsing a target spelling itself.
-    fn check_unsigned_boxes_fit_descriptor(&self, descriptor: &str, args: &[u32]) -> Option<()> {
-        let Some(reference_slot) = self.runtime.descriptor_reference_params(descriptor) else {
+    /// Positions come from [`align_call_values_to_slots`], which reconciles the two shapes whose
+    /// descriptor carries a slot the lowered arguments do not: a value class's mangled `-impl`
+    /// member (the receiver is the LEADING parameter) and a `suspend` `$default` synthetic (the CPS
+    /// `Continuation` sits before the mask/marker tail, and the backend appends it). Any shape it
+    /// cannot line up falls back to declining whenever a box is on the stack at all, so no call
+    /// skips the check. `slot_is_reference` is `None` for a descriptor the platform cannot read,
+    /// which is left to its own gates — lowering asks which slots are references rather than parsing
+    /// a target spelling itself, and takes the answer PARSED so a caller that already needed the
+    /// slots does not pay for a second read.
+    ///
+    /// The RECEIVER is checked alongside the arguments: it is a descriptor slot exactly for the
+    /// `-impl` shape, and `emit_library_member_call` boxes it for a value-class owner — the same
+    /// disagreement, one position to the left.
+    fn check_unsigned_boxes_fit_descriptor(
+        &self,
+        slot_is_reference: Option<Vec<bool>>,
+        receiver: Option<u32>,
+        args: &[u32],
+        continuation_slot: Option<usize>,
+    ) -> Option<()> {
+        let Some(slot_is_reference) = slot_is_reference else {
             return Some(());
         };
-        if reference_slot.len() != args.len() {
-            return Some(());
-        }
-        let fits = std::iter::zip(args, reference_slot)
-            .all(|(&a, is_ref)| is_ref || self.lowered_unsigned_box(a).is_none());
+        let boxed = |value: u32| self.lowered_unsigned_box(value).is_some();
+        let Some(slots) = align_call_values_to_slots(
+            slot_is_reference,
+            receiver.is_some(),
+            args.len(),
+            continuation_slot,
+        ) else {
+            // An alignment this function does not model: no position is trustworthy, so the only
+            // sound answer is to decline whenever a box is on the stack at all. A call that carries
+            // none is unaffected, which is why the fallback costs nothing on every shape observed —
+            // it exists so an unmodelled shape cannot silently skip the check.
+            return match receiver.into_iter().chain(args.iter().copied()).any(boxed) {
+                true => self.bail("gate:unsigned-box-in-erased-slot"),
+                false => Some(()),
+            };
+        };
+        let receiver_fits = match (slots.receiver, receiver) {
+            (Some(is_reference), Some(receiver)) => is_reference || !boxed(receiver),
+            _ => true,
+        };
+        let fits = receiver_fits
+            && std::iter::zip(args, slots.args).all(|(&a, is_reference)| is_reference || !boxed(a));
         if !fits {
             return self.bail("gate:unsigned-box-in-erased-slot");
         }
@@ -8154,7 +8251,33 @@ impl<'a> Lower<'a> {
             .class_names
             .get(name)
             .map(TypeName::render)
-            .or_else(|| self.syms.classes.get(name).map(|c| c.internal()))
+            .or_else(|| self.module_class_named(name).map(|c| c.internal()))
+    }
+
+    /// The MODULE class a bare classifier name binds to in THIS file: an explicit import naming a
+    /// module class first, then a same-package declaration — mirrors the checker's
+    /// `module_class_named` (the class map keys on internal names, so a same-simple-name class in
+    /// another package never answers). The import arm is classifier-first: a nested source class
+    /// shadows the identical package path. An import naming no module classifier (a classpath type,
+    /// or a FUNCTION like `import lib.Foo`) falls through to the same-package arm.
+    fn module_class_named(&self, name: &str) -> Option<&FrontendClassSig> {
+        let explicit_candidates = self
+            .afile
+            .imports
+            .iter()
+            .filter(|import| import.rsplit('.').next() == Some(name))
+            .flat_map(|import| {
+                crate::names::nested_internal_name_candidates(&import.replace('.', "/"))
+                    .into_iter()
+                    .rev()
+            })
+            .filter_map(|candidate| existing_type_name(&candidate));
+        self.syms.source_class_binding(
+            self.file_index,
+            explicit_candidates,
+            type_name(&class_internal(self.afile, name)),
+            name,
+        )
     }
 
     /// Lower construction of a classpath (non-IR) class — `RuntimeException("x")`, `StringBuilder()`.
@@ -10417,8 +10540,11 @@ impl<'a> Lower<'a> {
         // symbol handoff, not the resolver implementation that originally populated it.
         let mut properties: Vec<(TypeName, String, String, Option<String>, Ty)> = Vec::new();
         let mut seen_ifaces: std::collections::HashSet<TypeName> = std::collections::HashSet::new();
-        let mut queue = vec![existing_type_name(&iface_internal)
-            .or_else(|| self.syms.classes.get(iface_name).map(|c| c.internal_name()))?];
+        let mut queue = vec![existing_type_name(&iface_internal).or_else(|| {
+            self.syms
+                .class_by_internal(&class_internal(file, iface_name))
+                .map(|c| c.internal_name())
+        })?];
         while let Some(cur) = queue.pop() {
             if !seen_ifaces.insert(cur) {
                 continue;
@@ -11738,7 +11864,15 @@ impl<'a> Lower<'a> {
             }
             let named = self.afile.call_arg_names.contains_key(&call.0);
             let (lowered_args, prelude) = if named {
-                self.lower_module_vararg_named_args(call, args, target, &ir_params, vararg)?
+                let slots = self.info.resolved_call_arg_slots.get(&call)?.clone();
+                self.lower_source_slot_args(
+                    args,
+                    &slots,
+                    &ir_params,
+                    &target.params,
+                    Some(vararg),
+                    &target.param_default_values,
+                )?
             } else if vararg + 1 < ir_params.len() {
                 (
                     self.lower_non_last_vararg_args(call, args, &ir_params, vararg)?,
@@ -11960,89 +12094,6 @@ impl<'a> Lower<'a> {
         } else {
             Some((self.lower_args(args, params)?, Vec::new()))
         }
-    }
-
-    fn lower_source_extension_args(
-        &mut self,
-        function: u32,
-        call: AstExprId,
-        args: &[AstExprId],
-        params: &[Ty],
-        vararg_index: Option<usize>,
-    ) -> Option<(Vec<u32>, Vec<u32>)> {
-        let slots = self.info.resolved_call_arg_slots.get(&call)?.clone();
-        self.lower_source_extension_slot_args(function, args, &slots, params, vararg_index)
-    }
-
-    /// The slot map stores ONE expression per parameter, so a vararg's second and later elements
-    /// are not in it: every argument absent from `slots` belongs to the vararg slot (the checker
-    /// mapped all others), and the slot's value is the packed array — spread-aware, in source
-    /// order. Omitted defaulted parameters inline their (constant) default expressions.
-    fn lower_source_extension_slot_args(
-        &mut self,
-        function: u32,
-        args: &[AstExprId],
-        slots: &[Option<AstExprId>],
-        params: &[Ty],
-        vararg_index: Option<usize>,
-    ) -> Option<(Vec<u32>, Vec<u32>)> {
-        if slots.len() != params.len() {
-            return None;
-        }
-        let defaults = self.ir.fn_params.get(&function)?.defaults.as_ref()?.clone();
-        let mut slot_temp = vec![None; params.len()];
-        let mut vararg_temp: Vec<(u32, bool)> = Vec::new();
-        let mut prelude = Vec::new();
-        for &argument in args {
-            let index = slots.iter().position(|slot| *slot == Some(argument));
-            let packs = match (index, vararg_index) {
-                (Some(index), Some(vararg)) => index == vararg,
-                (None, Some(_)) => true,
-                (None, None) => return None,
-                _ => false,
-            };
-            if packs {
-                let array = *params.get(vararg_index?)?;
-                let element = array.array_elem().unwrap_or(array);
-                let is_spread = self.afile.is_spread_arg(argument);
-                let want = if is_spread { array } else { element };
-                let value = self.lower_arg(argument, &want)?;
-                let temp = self.fresh_value();
-                prelude.push(self.emit_variable(temp, want, Some(value)));
-                vararg_temp.push((temp, is_spread));
-                continue;
-            }
-            let index = index?;
-            let value = self.lower_arg(argument, &params[index])?;
-            let temp = self.fresh_value();
-            prelude.push(self.emit_variable(temp, params[index], Some(value)));
-            slot_temp[index] = Some(temp);
-        }
-        let mut lowered = Vec::with_capacity(params.len());
-        for (index, temp) in slot_temp.into_iter().enumerate() {
-            if let Some(temp) = temp {
-                lowered.push(self.emit_get_value(temp));
-                continue;
-            }
-            if vararg_index == Some(index) {
-                let (temps, spreads): (Vec<_>, Vec<_>) = vararg_temp.iter().copied().unzip();
-                let elements = temps
-                    .into_iter()
-                    .map(|temp| self.emit_get_value(temp))
-                    .collect();
-                lowered.push(self.emit_vararg_with_spreads(params[index], elements, spreads));
-                continue;
-            }
-            let default = defaults
-                .get(index + 1)
-                .and_then(|default| *default)
-                .map(|default| self.ir.exprs[default as usize].clone())?;
-            let IrExpr::Const(constant) = default else {
-                return None;
-            };
-            lowered.push(self.emit_const(constant));
-        }
-        Some((lowered, prelude))
     }
 
     /// The receiver's class type for member access. The checker types a bare `object` name as
@@ -13842,6 +13893,7 @@ impl<'a> Lower<'a> {
                 source,
                 vararg,
                 vararg_index,
+                param_default_values,
                 inline,
                 suspend,
             } => {
@@ -13884,69 +13936,29 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     let receiver_value = self.coerce_argument_value(recv_v, recv_ty, params[0])?;
-                    // The vararg's VALUE-parameter position, recorded by the checker — a vararg
-                    // need not be last (`fun B.segd(vararg s: String, flag: Boolean = false)`), and
-                    // a sibling file's declaration is not in this file's AST to re-derive it from.
-                    let vararg_value_index = vararg_index;
                     let (arguments, mut prelude) = match source_expr {
-                        // Any omission — or ANY vararg call — takes the slot path: a fully-mapped
-                        // named vararg call still stores only the FIRST element at the vararg slot,
-                        // and the plain slot-order lowering would pass that element where the
-                        // descriptor spells the array (a VerifyError, not a diagnostic).
-                        Some(call)
-                            if self.info.resolved_call_arg_slots.get(&call).is_some_and(
-                                |slots| vararg || slots.iter().any(Option::is_none),
-                            ) =>
-                        {
-                            self.lower_source_extension_args(
-                                fid,
-                                call,
-                                args,
-                                &params[1..],
-                                vararg.then_some(vararg_value_index).flatten(),
-                            )?
-                        }
-                        Some(call)
-                            if vararg && !self.info.resolved_call_arg_slots.contains_key(&call) =>
-                        {
-                            let value_params = &params[1..];
-                            let vararg_slot = vararg_value_index?;
-                            if vararg_slot + 1 == value_params.len() {
-                                (
-                                    self.lower_call_args_vararg(
-                                        args,
-                                        value_params,
-                                        true,
-                                        vararg_slot,
-                                    )?,
-                                    Vec::new(),
-                                )
-                            } else {
-                                // Non-final vararg, unnamed call: every argument from the vararg
-                                // slot on packs into it; the trailing (necessarily defaulted)
-                                // parameters are omitted. Synthesize the slot map the shared
-                                // slot lowering consumes.
-                                let mut slots: Vec<Option<AstExprId>> =
-                                    vec![None; value_params.len()];
-                                for (index, &argument) in args.iter().enumerate().take(vararg_slot)
-                                {
-                                    slots[index] = Some(argument);
-                                }
-                                if let Some(&first_vararg) = args.get(vararg_slot) {
-                                    slots[vararg_slot] = Some(first_vararg);
-                                }
-                                self.lower_source_extension_slot_args(
-                                    fid,
+                        Some(call) => match self.info.resolved_call_arg_slots.get(&call).cloned() {
+                            // A vararg or omission consumes the selected semantic slots through the
+                            // same core for local and sibling declarations. In particular, the value
+                            // stored at a vararg slot is an ELEMENT, never the descriptor's array.
+                            Some(slots) if vararg || slots.iter().any(Option::is_none) => self
+                                .lower_source_slot_args(
                                     args,
                                     &slots,
-                                    value_params,
-                                    Some(vararg_slot),
-                                )?
+                                    &params[1..],
+                                    &selected_params,
+                                    vararg.then_some(vararg_index).flatten(),
+                                    &param_default_values,
+                                )?,
+                            Some(_) => {
+                                self.lower_call_args_in_slot_order(call, args, &params[1..])?
                             }
-                        }
-                        Some(call) => {
-                            self.lower_call_args_in_slot_order(call, args, &params[1..])?
-                        }
+                            // The checker records slots for every source vararg call. A missing
+                            // record is stale/incomplete semantic input, so decline instead of
+                            // rebuilding a provider-specific positional map in the backend.
+                            None if vararg => return None,
+                            None => (self.lower_args(args, &params[1..])?, Vec::new()),
+                        },
                         None if args.len() == params.len() - 1 => {
                             (self.lower_args(args, &params[1..])?, Vec::new())
                         }
@@ -13980,29 +13992,20 @@ impl<'a> Lower<'a> {
                     self.coerce_argument_value(recv_v, recv_ty, physical_receiver)?;
                 let params = tys_to_ir(&selected_params);
                 let (arguments, mut prelude) = match source_expr {
-                    Some(call)
-                        if vararg && !self.info.resolved_call_arg_slots.contains_key(&call) =>
-                    {
-                        // The fixed prefix ends AT the recorded vararg position, which need not be
-                        // the last parameter. A NON-final vararg's trailing parameters are only
-                        // reachable by name and must default — that shape needs the `$default`
-                        // stub this sibling-facade arm does not emit, so decline (skip, never a
-                        // wrong-slot pack).
-                        let n_fixed = vararg_index?;
-                        if n_fixed + 1 != params.len() {
-                            return None;
-                        }
-                        (
-                            self.lower_call_args_vararg(args, &params, true, n_fixed)?,
-                            Vec::new(),
-                        )
-                    }
-                    // A slot-mapped vararg call: this sibling-facade arm's slot lowering is
-                    // vararg-unaware, so decline (skip, never a wrong-slot pack).
-                    Some(_) if vararg => {
-                        return None;
-                    }
-                    Some(call) => self.lower_call_args_in_slot_order(call, args, &params)?,
+                    Some(call) => match self.info.resolved_call_arg_slots.get(&call).cloned() {
+                        Some(slots) if vararg || slots.iter().any(Option::is_none) => self
+                            .lower_source_slot_args(
+                                args,
+                                &slots,
+                                &params,
+                                &selected_params,
+                                vararg.then_some(vararg_index).flatten(),
+                                &param_default_values,
+                            )?,
+                        Some(_) => self.lower_call_args_in_slot_order(call, args, &params)?,
+                        None if vararg => return None,
+                        None => (self.lower_args(args, &params)?, Vec::new()),
+                    },
                     None if args.len() == params.len() => {
                         (self.lower_args(args, &params)?, Vec::new())
                     }
@@ -15864,10 +15867,13 @@ impl<'a> Lower<'a> {
             source_args,
             slots,
             params,
-            fill_omitted,
             None,
             None,
-            None,
+            if fill_omitted {
+                OmittedSlotPolicy::DefaultPlaceholders { vararg: None }
+            } else {
+                OmittedSlotPolicy::Reject
+            },
         )
     }
 
@@ -15886,10 +15892,39 @@ impl<'a> Lower<'a> {
             source_args,
             slots,
             params,
-            fill_omitted,
-            None,
             None,
             vararg_index,
+            if fill_omitted {
+                OmittedSlotPolicy::DefaultPlaceholders { vararg: None }
+            } else {
+                OmittedSlotPolicy::Reject
+            },
+        )
+    }
+
+    /// Consume checker-owned slots for a source callable. The same operation handles local and
+    /// sibling-facade functions/extensions: arguments evaluate once in source order, a selected
+    /// vararg packs once, and only file-independent defaults from the selected signature may fill
+    /// omissions. No AST label or declaration-origin probe participates in binding here.
+    fn lower_source_slot_args(
+        &mut self,
+        source_args: &[AstExprId],
+        slots: &[Option<AstExprId>],
+        physical_params: &[Ty],
+        semantic_params: &[Ty],
+        vararg_index: Option<usize>,
+        defaults: &[Option<CtorDefaultValue>],
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        self.lower_call_slot_args_source_order_with_element(
+            source_args,
+            slots,
+            physical_params,
+            None,
+            vararg_index,
+            OmittedSlotPolicy::SourceDefaults {
+                values: defaults,
+                semantic_params,
+            },
         )
     }
 
@@ -15910,10 +15945,11 @@ impl<'a> Lower<'a> {
             source_args,
             slots,
             params,
-            true,
             None,
-            vararg_index,
             None,
+            OmittedSlotPolicy::DefaultPlaceholders {
+                vararg: vararg_index,
+            },
         )
     }
 
@@ -15956,22 +15992,20 @@ impl<'a> Lower<'a> {
             .filter_map(|(index, slot)| slot.is_none().then_some(index))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn lower_call_slot_args_source_order_with_element(
         &mut self,
         source_args: &[AstExprId],
         slots: &[Option<AstExprId>],
         params: &[Ty],
-        fill_omitted: bool,
         elem_prim: Option<Ty>,
-        omitted_vararg: Option<usize>,
         vararg_pack: Option<usize>,
+        omitted: OmittedSlotPolicy<'_>,
     ) -> Option<(Vec<u32>, Vec<u32>)> {
         if slots.len() != params.len() {
             return None;
         }
         let mut slot_temp: Vec<Option<u32>> = vec![None; params.len()];
-        let mut vararg_temp: Vec<(u32, bool)> = Vec::new();
+        let mut vararg_temp: Vec<LoweredVarargContribution> = Vec::new();
         let mut prelude = Vec::new();
         for &arg in source_args {
             let slot_idx = slots.iter().position(|slot| *slot == Some(arg));
@@ -15988,12 +16022,26 @@ impl<'a> Lower<'a> {
                 let array = *params.get(vararg_pack?)?;
                 let element = array.array_elem().unwrap_or(array);
                 let is_spread = self.afile.is_spread_arg(arg);
-                let want = if is_spread { array } else { element };
+                // A named vararg may bind the whole array without `*` (`items = values`). Consume the
+                // checker-selected form directly: comparing `Ty` here is unsound for generic calls,
+                // where inference can retain different type arguments for the expression and selected
+                // parameter even though both erase to the same JVM array. The semantic marker is shared
+                // by every callable origin and prevents lowering from rediscovering labels or types.
+                let whole_array = self.info.resolved_whole_array_vararg_args.contains(&arg);
+                let want = if is_spread || whole_array {
+                    array
+                } else {
+                    element
+                };
                 let ir_ty = ty_to_ir(want);
                 let value = self.lower_arg(arg, &ir_ty)?;
                 let tmp = self.fresh_value();
                 prelude.push(self.emit_variable(tmp, ir_ty, Some(value)));
-                vararg_temp.push((tmp, is_spread));
+                vararg_temp.push(LoweredVarargContribution {
+                    temp: tmp,
+                    spread: is_spread,
+                    whole_array,
+                });
                 continue;
             }
             let slot_idx = slot_idx?;
@@ -16022,23 +16070,52 @@ impl<'a> Lower<'a> {
             match tmp {
                 Some(tmp) => lowered.push(self.emit_get_value(tmp)),
                 None if vararg_pack == Some(i) => {
-                    let (temps, spreads): (Vec<_>, Vec<_>) = vararg_temp.iter().copied().unzip();
-                    let elements = temps
-                        .into_iter()
-                        .map(|temp| self.emit_get_value(temp))
-                        .collect();
-                    lowered.push(self.emit_vararg_with_spreads(
-                        ty_to_ir(params[i]),
-                        elements,
-                        spreads,
-                    ));
+                    let whole_array = match vararg_temp.as_slice() {
+                        [contribution] if contribution.whole_array => Some(contribution.temp),
+                        _ => None,
+                    };
+                    if let Some(temp) = whole_array {
+                        lowered.push(self.emit_get_value(temp));
+                    } else {
+                        // A whole-array named binding is exclusive by the call-mapping rules. If
+                        // stale semantic input ever combines one with elements, decline rather than
+                        // storing an array inside its own element array.
+                        if vararg_temp.iter().any(|item| item.whole_array) {
+                            return None;
+                        }
+                        let elements = vararg_temp
+                            .iter()
+                            .map(|item| self.emit_get_value(item.temp))
+                            .collect();
+                        let spreads = vararg_temp.iter().map(|item| item.spread).collect();
+                        lowered.push(self.emit_vararg_with_spreads(
+                            ty_to_ir(params[i]),
+                            elements,
+                            spreads,
+                        ));
+                    }
                 }
-                None if omitted_vararg == Some(i) => {
-                    let array = self.emit_vararg(ty_to_ir(params[i]), Vec::new());
-                    lowered.push(array);
-                }
-                None if fill_omitted => lowered.push(self.zero_placeholder(params[i])),
-                None => return None,
+                None => match omitted {
+                    OmittedSlotPolicy::Reject => return None,
+                    OmittedSlotPolicy::DefaultPlaceholders { vararg } if vararg == Some(i) => {
+                        let array = self.emit_vararg(ty_to_ir(params[i]), Vec::new());
+                        lowered.push(array);
+                    }
+                    OmittedSlotPolicy::DefaultPlaceholders { .. } => {
+                        lowered.push(self.zero_placeholder(params[i]));
+                    }
+                    OmittedSlotPolicy::SourceDefaults {
+                        values,
+                        semantic_params,
+                    } => {
+                        let default = values.get(i).and_then(Option::as_ref)?;
+                        let semantic = *semantic_params.get(i)?;
+                        if !default.fills_param_ty(semantic) {
+                            return None;
+                        }
+                        lowered.push(ctor_default_to_ir(&mut self.ir, self.runtime, default)?);
+                    }
+                },
             }
         }
         Some((lowered, prelude))
@@ -16452,118 +16529,6 @@ impl<'a> Lower<'a> {
             out.push(self.emit_vararg_with_spreads(array_param, elements, spreads));
         }
         Some(out)
-    }
-
-    /// Lower a NAMED call to a module top-level `vararg` function (`topd("O", "K", flag = true)`):
-    /// positional arguments from the vararg slot on pack into its array (spread-aware), labels bind
-    /// their parameters, and an omitted trailing parameter inlines its recorded default value.
-    /// Arguments evaluate in SOURCE order into temps (the prelude) so reordering stays observable.
-    fn lower_module_vararg_named_args(
-        &mut self,
-        call: AstExprId,
-        args: &[AstExprId],
-        target: &ResolvedModuleTopLevelCall,
-        ir_params: &[Ty],
-        vararg: usize,
-    ) -> Option<(Vec<u32>, Vec<u32>)> {
-        let names = self.afile.call_arg_names.get(&call.0).cloned()?;
-        let n = ir_params.len();
-        let array_ir = ir_params[vararg];
-        let element_ir = ty_to_ir(target.params.get(vararg)?.array_elem()?);
-        let mut slot_temp: Vec<Option<u32>> = vec![None; n];
-        let mut vararg_temp: Vec<(u32, bool)> = Vec::new();
-        let mut prelude = Vec::new();
-        // A positional argument takes the next parameter NOT bound by name (`f(a = 1, "x")` is
-        // legal Kotlin), so pre-compute the name-bound slots and skip them.
-        let named_slot = |index: usize| {
-            names.get(index).and_then(Option::as_ref).map(|name| {
-                target
-                    .call_sig
-                    .param_names
-                    .iter()
-                    .position(|parameter| parameter == name)
-            })
-        };
-        let mut name_bound = vec![false; n];
-        for index in 0..args.len() {
-            if let Some(slot) = named_slot(index) {
-                let slot = slot?;
-                if slot >= n || name_bound[slot] {
-                    return None;
-                }
-                name_bound[slot] = true;
-            }
-        }
-        let mut positional = 0usize;
-        for (index, &argument) in args.iter().enumerate() {
-            let is_spread = self.afile.is_spread_arg(argument);
-            let (slot, want) = match named_slot(index) {
-                Some(slot) => {
-                    let slot = slot?;
-                    if slot == vararg {
-                        // A vararg can only be NAMED in spread form (`f(s = *arr)`).
-                        if !is_spread {
-                            return None;
-                        }
-                        (None, array_ir)
-                    } else {
-                        (Some(slot), ir_params[slot])
-                    }
-                }
-                None => {
-                    while positional < vararg && name_bound[positional] {
-                        positional += 1;
-                    }
-                    if positional < vararg {
-                        let slot = positional;
-                        positional += 1;
-                        (Some(slot), ir_params[slot])
-                    } else {
-                        (None, if is_spread { array_ir } else { element_ir })
-                    }
-                }
-            };
-            if let Some(slot) = slot {
-                if slot_temp[slot].is_some() {
-                    return None;
-                }
-            }
-            let value = self.lower_arg(argument, &want)?;
-            let temp = self.fresh_value();
-            prelude.push(self.emit_variable(temp, want, Some(value)));
-            match slot {
-                Some(slot) => slot_temp[slot] = Some(temp),
-                None => vararg_temp.push((temp, is_spread)),
-            }
-        }
-        let mut lowered = Vec::with_capacity(n);
-        for (slot, temp) in slot_temp.into_iter().enumerate() {
-            if slot == vararg {
-                let (temps, spreads): (Vec<_>, Vec<_>) = vararg_temp.iter().copied().unzip();
-                let elements = temps
-                    .into_iter()
-                    .map(|temp| self.emit_get_value(temp))
-                    .collect();
-                lowered.push(self.emit_vararg_with_spreads(array_ir, elements, spreads));
-                continue;
-            }
-            if let Some(temp) = temp {
-                lowered.push(self.emit_get_value(temp));
-                continue;
-            }
-            if !target.call_sig.param_has_default(slot) {
-                return None;
-            }
-            let default = target
-                .param_default_values
-                .get(slot)
-                .and_then(|value| value.as_ref())?;
-            if !default.fills_param_ty(target.params[slot]) {
-                return None;
-            }
-            lowered.push(ctor_default_to_ir(&mut self.ir, self.runtime, default)?);
-        }
-        Some((lowered, prelude))
     }
 
     fn lower_non_last_vararg_args(
@@ -17184,9 +17149,7 @@ impl<'a> Lower<'a> {
             }
             InheritedNestedClassifier::Ambiguous => InheritedNestedClassifier::Ambiguous,
             InheritedNestedClassifier::NotFound => self
-                .syms
-                .classes
-                .get(name)
+                .module_class_named(name)
                 .map(|class| class.internal_name())
                 .or_else(|| self.syms.class_names.get_class(name))
                 .map_or(
@@ -17261,9 +17224,7 @@ impl<'a> Lower<'a> {
         // the checker — an in-scope type name shadows a package path.
         if let Some((outer, rest)) = name.split_once('.') {
             let base = self
-                .syms
-                .classes
-                .get(outer)
+                .module_class_named(outer)
                 .map(|c| c.internal())
                 .or_else(|| {
                     self.syms
@@ -17368,7 +17329,7 @@ impl<'a> Lower<'a> {
         } else if self.contains_class(&class_internal(self.afile, &r.name)) {
             // A nested class by source name (`Outer.Inner` → `Outer$Inner`).
             Ty::obj(&class_internal(self.afile, &r.name))
-        } else if let Some(cs) = self.syms.classes.get(&r.name) {
+        } else if let Some(cs) = self.module_class_named(&r.name) {
             Ty::obj(&cs.internal())
         } else if let Some(internal) = self.syms.class_names.get(&r.name) {
             // A classpath / built-in mapped type (`Number`, `CharSequence`, `Runnable`, a Java class) —
@@ -21710,7 +21671,7 @@ impl<'a> Lower<'a> {
                 result_ty.obj_internal().is_some_and(|i| self
                     .syms
                     .classes
-                    .get(i.render().rsplit('/').next().unwrap_or(""))
+                    .get(&i)
                     .is_some_and(|c| c.value_field.is_some()))
             );
             if member_diverges
@@ -21728,7 +21689,7 @@ impl<'a> Lower<'a> {
             } else if result_ty.non_null().obj_internal().is_some_and(|i| {
                 self.syms
                     .classes
-                    .get(i.render().rsplit('/').next().unwrap_or(""))
+                    .get(&i)
                     .is_some_and(|c| c.value_field.is_some())
             }) {
                 // A nullable VALUE-CLASS result (`a?.foo()` : `Z?`): the member returns the unboxed
@@ -22320,7 +22281,7 @@ impl<'a> Lower<'a> {
             // declares a supertype get a registered `C$Companion` ClassSig (checked here); a local of
             // the same name shadows it.
             if self.lookup(&n).is_none() {
-                if let Some(cls) = self.syms.classes.get(&n) {
+                if let Some(cls) = self.module_class_named(&n) {
                     let cls_internal = cls.internal();
                     let comp_internal = format!("{cls_internal}$Companion");
                     if self.syms.class_by_internal(&comp_internal).is_some() {
@@ -22336,7 +22297,7 @@ impl<'a> Lower<'a> {
             // A SAME-MODULE `object` referenced as a value (`val h = Helper`): not on the classpath
             // and not a local — read its singleton via `getstatic <internal>.INSTANCE`.
             if self.lookup(&n).is_none() {
-                if let Some(cls) = self.syms.classes.get(&n) {
+                if let Some(cls) = self.module_class_named(&n) {
                     if cls.is_object() {
                         let internal = cls.internal();
                         return Some(self.emit_external_static_field(
@@ -22670,7 +22631,7 @@ impl<'a> Lower<'a> {
             if name == "Companion" {
                 if let Expr::Name(rn) = self.afile.expr(receiver).clone() {
                     if self.lookup(&rn).is_none() {
-                        if let Some(cls) = self.syms.classes.get(&rn) {
+                        if let Some(cls) = self.module_class_named(&rn) {
                             let cls_internal = cls.internal();
                             let comp_internal = format!("{cls_internal}$Companion");
                             if self.syms.class_by_internal(&comp_internal).is_some() {
@@ -24438,10 +24399,19 @@ impl<'a> Lower<'a> {
                         return None;
                     }
                     // A NAMED call (`topd("O", "K", flag = true)`): labels bind their parameters,
-                    // the positional run packs the vararg, omitted defaults inline.
+                    // the selected slots pack the vararg, and source constants fill omissions.
+                    // The lowerer never re-maps labels: the checker already selected this exact
+                    // callable and recorded how each source argument binds.
                     if self.afile.call_arg_names.contains_key(&e.0) {
-                        let (lowered, prelude) =
-                            self.lower_module_vararg_named_args(e, &args, &target, &params, fixed)?;
+                        let slots = self.info.resolved_call_arg_slots.get(&e)?.clone();
+                        let (lowered, prelude) = self.lower_source_slot_args(
+                            &args,
+                            &slots,
+                            &params,
+                            &target.params,
+                            Some(fixed),
+                            &target.param_default_values,
+                        )?;
                         let call = self.emit_local_call(fid, lowered);
                         return Some(self.wrap_arg_prelude(call, prelude));
                     }
@@ -26195,7 +26165,12 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                         self.lower_call_slot_args_source_order_with_element(
-                            &args, &slots, &mparams, false, elem_prim, None, None,
+                            &args,
+                            &slots,
+                            &mparams,
+                            elem_prim,
+                            None,
+                            OmittedSlotPolicy::Reject,
                         )?
                     } else {
                         let mut lowered = Vec::new();
@@ -28070,6 +28045,109 @@ struct ResolvedSourceConstructorPlan<'a> {
     slot_prims: &'a [Option<Ty>],
 }
 
+/// The class a LOWERED node leaves on the stack, where the IR alone determines it.
+///
+/// This is lowering's representation query: it answers what is PHYSICALLY on the stack, which the
+/// checker's `Ty` cannot — a value class and its carrier share one `Ty` on both sides of a box. It
+/// is deliberately partial. `None` means "a primitive carrier, OR a shape this cannot derive", never
+/// "definitely not a reference", so every caller must treat `None` as the conservative answer and
+/// `Some` as a claim. That asymmetry is what lets the walk grow: a shape it does not know keeps
+/// exactly the behaviour it had before the shape was added.
+///
+/// Nothing here enumerates a value's PROVENANCE (which helper produced it). It reads the type off
+/// each node — the descriptor of a call, the type operand of a cast, a field's declared type — so a
+/// value stays recognisable after being cast or carried out of a block, which a match on the
+/// producing node's shape cannot do.
+///
+/// The `Some` is the class as LOWERING knows it, which is not always the class the emitted method
+/// signature ends up naming: the value-class pass rewrites an `IrFunction::ret` afterwards, so a
+/// `Callee::Local` returning a `@JvmInline` class answers with that class while the compiled method
+/// returns its erased underlying. The answer is exact only for classes those later passes leave
+/// alone, which is what the sole caller ([`Lower::lowered_unsigned_box`]) needs — it compares against
+/// the unsigned box names, and `ir_ty_to_jvm` keeps those as references. A future caller asking about
+/// any other class must check that assumption for itself.
+///
+/// A `GetValue` is deliberately NOT answered. Its type lives on the declaring `IrExpr::Variable`,
+/// which is reachable only through a value-index table, and value indices are per-declaration-body
+/// and re-used — they restart at ~25 sites, are saved/restored around three nested bodies, and one
+/// coroutine temp is declared under the enclosing body's numbering. A per-index table therefore
+/// cannot be made sound without first making those scopes explicit, and an entry surviving into the
+/// wrong scope would claim a box for a carrier — skipping a required box, which is precisely the
+/// `VerifyError` this query exists to prevent. Conservative beats clever here.
+fn lowered_reference_class(
+    ir: &IrFile,
+    runtime: &dyn TargetRuntime,
+    expr: ExprId,
+) -> Option<TypeName> {
+    let of = |e: ExprId| lowered_reference_class(ir, runtime, e);
+    match ir.expr(expr) {
+        // Nodes that pass a value THROUGH: what they leave on the stack is what produced it.
+        IrExpr::Block { value, .. } => of((*value)?),
+        // Only when every branch agrees — a `when` whose arms leave different classes has no single
+        // answer, and its stack type is the emitter's business rather than lowering's.
+        IrExpr::When { branches } => {
+            let mut classes = branches.iter().map(|&(_, body)| of(body));
+            let first = classes.next()??;
+            classes.all(|class| class == Some(first)).then_some(first)
+        }
+        // A cast RETYPES its operand and therefore proves the verifier-visible reference class.
+        // `is`/`!is` are excluded because they yield a boolean; so is `as?`, whose null-or-cast shape
+        // is built from a `when` over a plain `Cast` and is already covered by the arms above.
+        IrExpr::TypeOp {
+            op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
+            type_operand,
+            ..
+        } => type_operand.obj_internal(),
+        // A reference-to-reference coercion emits no representation change, so preserve a class that
+        // was already proved by the operand. Do NOT claim the target class for primitive-to-reference:
+        // the backend selects a wrapper from the SOURCE carrier (`UInt` boxes differently from `Int`),
+        // and the target may merely be `Any`. Target syntax alone is therefore not evidence of the
+        // physical class. A primitive target likewise unboxes and leaves no reference.
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } => type_operand.obj_internal().and_then(|_| of(*arg)),
+        IrExpr::GetStatic(index) => ir.statics.get(*index as usize)?.ty.obj_internal(),
+        IrExpr::GetField { class, index, .. } => ir
+            .classes
+            .get(*class as usize)?
+            .fields
+            .get(*index as usize)?
+            .ty
+            .obj_internal(),
+        IrExpr::New { internal, .. } => Some(*internal),
+        IrExpr::MethodCall { class, index, .. } => {
+            let function = *ir
+                .classes
+                .get(*class as usize)?
+                .methods
+                .get(*index as usize)?;
+            ir.functions.get(function as usize)?.ret.obj_internal()
+        }
+        IrExpr::Call { callee, .. } => match callee {
+            Callee::Local(function) | Callee::LocalDefault(function) => {
+                ir.functions.get(*function as usize)?.ret.obj_internal()
+            }
+            Callee::CrossFile { ret, .. } => ret.obj_internal(),
+            // A callee carrying `Ty`s answers from them; one carrying a verbatim platform descriptor
+            // is read by the platform, never parsed here.
+            Callee::Virtual {
+                params: Some((_, ret)),
+                ..
+            } => ret.obj_internal(),
+            Callee::Static { descriptor, .. }
+            | Callee::Special { descriptor, .. }
+            | Callee::Virtual { descriptor, .. } => runtime
+                .descriptor_method_layout(descriptor)
+                .and_then(|layout| layout.return_class),
+            // An intrinsic named by Kotlin FqName has no signature in the IR at all.
+            Callee::External(_) => None,
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn ty_to_ir(t: Ty) -> Ty {
     t
 }
@@ -28207,6 +28285,61 @@ fn bin_to_ir(op: BinOp) -> Option<IrBinOp> {
     })
 }
 
+/// Which descriptor slots a call's LOWERED values occupy, in the order those values are pushed.
+struct CallValueSlots {
+    /// Whether the RECEIVER's own descriptor slot holds a reference, when the descriptor spells one
+    /// at all. `None` for an ordinary instance call, whose receiver is off the descriptor.
+    receiver: Option<bool>,
+    /// Whether each value argument's slot holds a reference, in argument order.
+    args: Vec<bool>,
+}
+
+/// Line a call's lowered values up with the descriptor slots they land in.
+///
+/// A callee's descriptor is emitted VERBATIM, but the value list the lowerer builds is not always
+/// one-per-slot. Two shapes carry a descriptor slot no lowered value fills:
+///
+/// - a value class's members are realized as mangled `-impl` STATICS, whose descriptor spells the
+///   receiver as the LEADING parameter (`kotlin/Result.getOrNull-impl(Ljava/lang/Object;)…`) while
+///   the receiver travels beside the arguments, not in them;
+/// - a `suspend` `$default` synthetic spells the CPS `Continuation` BEFORE the mask/marker tail
+///   (`withLock$default(Mutex, Object, Function0, Continuation, int, Object)`), and the backend
+///   appends it — so `continuation_slot` names a position the caller never lowered.
+///
+/// A packed vararg and a non-suspend `$default` need no reconciliation: the vararg array is emitted
+/// before the values reach here, and the `$default` mask and marker are pushed as ordinary values.
+///
+/// Returns `None` when the counts still disagree — an unmodelled shape, or one whose synthetic tail
+/// is wider than a single mask word. Callers must treat that as "no position is known", never as
+/// "nothing to check".
+fn align_call_values_to_slots(
+    mut slot_is_reference: Vec<bool>,
+    has_receiver: bool,
+    arg_count: usize,
+    continuation_slot: Option<usize>,
+) -> Option<CallValueSlots> {
+    if let Some(slot) = continuation_slot {
+        if slot >= slot_is_reference.len() {
+            return None;
+        }
+        slot_is_reference.remove(slot);
+    }
+    if slot_is_reference.len() == arg_count {
+        return Some(CallValueSlots {
+            receiver: None,
+            args: slot_is_reference,
+        });
+    }
+    if has_receiver && slot_is_reference.len() == arg_count + 1 {
+        let receiver = slot_is_reference.remove(0);
+        return Some(CallValueSlots {
+            receiver: Some(receiver),
+            args: slot_is_reference,
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -28216,6 +28349,171 @@ mod tests {
     impl TargetRuntime for UnsignedBoxRuntime {
         fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
             ty.boxed_ref().filter(|_| ty.is_unsigned())
+        }
+
+        fn descriptor_method_layout(
+            &self,
+            descriptor: &str,
+        ) -> Option<crate::runtime::PlatformMethodLayout> {
+            let ret = descriptor.split_once(')')?.1;
+            Some(crate::runtime::PlatformMethodLayout {
+                reference_slots: Vec::new(),
+                continuation_slot: None,
+                return_class: ret
+                    .strip_prefix('L')
+                    .and_then(|ret| ret.strip_suffix(';'))
+                    .map(type_name),
+            })
+        }
+    }
+
+    /// A `Callee::Static` with a verbatim descriptor — the shape every classpath call has.
+    fn static_call(ir: &mut IrFile, name: &str, descriptor: &str) -> ExprId {
+        ir.add_expr(IrExpr::Call {
+            callee: Callee::Static {
+                owner: type_name("kotlin/UInt"),
+                name: name.to_string(),
+                descriptor: descriptor.to_string(),
+                inline: InlineKind::None,
+            },
+            dispatch_receiver: None,
+            args: vec![],
+        })
+    }
+
+    /// `kotlin/UInt.box-impl(I)` — the node the receiver-boxing branch must not box a second time.
+    fn unsigned_box(ir: &mut IrFile) -> ExprId {
+        static_call(ir, "box-impl", "(I)Lkotlin/UInt;")
+    }
+
+    /// The representation query behind that branch must recognise a box wherever it reaches the call,
+    /// not only when the box node IS the receiver. Every case below is the same `kotlin/UInt` value; a
+    /// query that saw only the producing node would answer `None` for all but the first and box it
+    /// again, pushing a `Lkotlin/UInt;` at a descriptor that spells `I`.
+    #[test]
+    fn an_unsigned_box_stays_recognisable_through_the_nodes_that_carry_it() {
+        let mut ir = IrFile::with_package(None);
+
+        let direct = unsigned_box(&mut ir);
+
+        let inner = unsigned_box(&mut ir);
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![],
+            value: Some(inner),
+        });
+
+        let operand = unsigned_box(&mut ir);
+        let cast = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: operand,
+            type_operand: Ty::obj("kotlin/UInt"),
+        });
+
+        // A reference-to-reference coercion changes only the logical view (`UInt` → `Any`), not the
+        // physical box. Following the operand is what preserves its more precise representation.
+        let coerced_operand = unsigned_box(&mut ir);
+        let coerced = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: coerced_operand,
+            type_operand: Ty::obj("kotlin/Any"),
+        });
+
+        let (left, right) = (unsigned_box(&mut ir), unsigned_box(&mut ir));
+        let when = ir.add_expr(IrExpr::When {
+            branches: vec![(Some(direct), left), (None, right)],
+        });
+
+        // The box reached through two carriers at once, which is what a real receiver looks like
+        // after a safe call spills it: `{ …; (kotlin/UInt) box-impl(x) }`.
+        let nested_operand = unsigned_box(&mut ir);
+        let nested_cast = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: nested_operand,
+            type_operand: Ty::obj("kotlin/UInt"),
+        });
+        let nested = ir.add_expr(IrExpr::Block {
+            stmts: vec![],
+            value: Some(nested_cast),
+        });
+
+        for (expr, what) in [
+            (direct, "the box itself"),
+            (block, "a block whose value is the box"),
+            (cast, "a cast of the box"),
+            (coerced, "a reference coercion carrying the box"),
+            (when, "a `when` whose every branch is the box"),
+            (nested, "a block whose value is a cast of the box"),
+        ] {
+            assert_eq!(
+                UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(
+                    lowered_reference_class(&ir, &UnsignedBoxRuntime, expr)
+                        .unwrap_or_else(|| panic!("{what} leaves a reference on the stack"))
+                ),
+                Some(Ty::UInt),
+                "{what}"
+            );
+        }
+    }
+
+    /// The other half of the contract: a CARRIER must never read as a box, or the receiver-boxing
+    /// branch would skip a box the `invokevirtual` requires. Anything the walk cannot derive answers
+    /// `None` too, which is the same conservative side.
+    #[test]
+    fn a_carrier_never_reads_as_an_unsigned_box() {
+        let mut ir = IrFile::with_package(None);
+
+        // `kotlin/UInt.constructor-impl(I)I` — an unsigned helper whose result is the raw carrier.
+        let carrier_call = static_call(&mut ir, "constructor-impl", "(I)I");
+        let literal = ir.add_expr(IrExpr::Const(IrConst::Int(5)));
+        // A `when` that mixes representations has no single answer.
+        let boxed = unsigned_box(&mut ir);
+        let mixed = ir.add_expr(IrExpr::When {
+            branches: vec![(Some(literal), boxed), (None, carrier_call)],
+        });
+        // An intrinsic named only by Kotlin FqName carries no signature at all.
+        let intrinsic = ir.add_expr(IrExpr::Call {
+            callee: Callee::External("kotlin/UInt.toString".to_string()),
+            dispatch_receiver: Some(carrier_call),
+            args: vec![],
+        });
+        // `is UInt` yields a BOOLEAN, however unsigned its type operand looks.
+        let instance_of = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg: boxed,
+            type_operand: Ty::obj("kotlin/UInt"),
+        });
+        // A READ of a local is deliberately unanswered, however the local was declared: value indices
+        // are scoped and re-used, so no per-index table can be trusted here (see the walk's docs).
+        let local_read = ir.add_expr(IrExpr::GetValue(7));
+        // A primitive-to-reference coercion does produce some box, but its TARGET is not proof of
+        // which one: the backend chooses from the source carrier. Hand-built `Int -> kotlin/UInt` IR,
+        // for example, would physically box `java/lang/Integer`, so the query must not echo the target.
+        let raw_int = ir.add_expr(IrExpr::Const(IrConst::Int(5)));
+        let unproved_coercion = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: raw_int,
+            type_operand: Ty::obj("kotlin/UInt"),
+        });
+
+        for (expr, what) in [
+            (carrier_call, "a carrier-returning call"),
+            (literal, "a constant"),
+            (mixed, "a `when` mixing a box and a carrier"),
+            (intrinsic, "an intrinsic with no signature in the IR"),
+            (instance_of, "an `is` test against the box"),
+            (local_read, "a read of a local"),
+            (
+                unproved_coercion,
+                "a primitive coercion whose target does not prove its wrapper",
+            ),
+        ] {
+            assert_eq!(
+                lowered_reference_class(&ir, &UnsignedBoxRuntime, expr).and_then(|class| {
+                    UnsignedBoxRuntime.unsigned_integer_carrier_for_box_type(class)
+                }),
+                None,
+                "{what}"
+            );
         }
     }
 
@@ -28250,5 +28548,65 @@ mod tests {
             )),
             None
         );
+    }
+
+    /// The ordinary shape: one lowered value per descriptor slot, receiver off the descriptor.
+    #[test]
+    fn positional_call_values_line_up_slot_for_slot() {
+        // `maxOf-J1ME1BU:(II)I` — both slots are erased unsigned carriers.
+        let slots = align_call_values_to_slots(vec![false, false], false, 2, None)
+            .expect("equal counts line up");
+        assert_eq!(slots.receiver, None);
+        assert_eq!(slots.args, vec![false, false]);
+    }
+
+    /// A value class's member is a mangled `-impl` STATIC: the receiver is the descriptor's LEADING
+    /// parameter, so it must be checked as a slot of its own and the arguments must shift past it.
+    /// Comparing only when the counts matched left `kotlin/Result.getOrNull-impl` — the shape the box
+    /// corpus hits over a hundred times — checking nothing at all.
+    #[test]
+    fn value_class_impl_receiver_takes_the_leading_slot() {
+        // `kotlin/Result.getOrNull-impl:(Ljava/lang/Object;)Ljava/lang/Object;` with no arguments.
+        let slots = align_call_values_to_slots(vec![true], true, 0, None)
+            .expect("the extra leading slot is the receiver");
+        assert_eq!(slots.receiver, Some(true));
+        assert!(slots.args.is_empty());
+        // A mangled `-impl` on an unsigned carrier spells that receiver slot as the PRIMITIVE it
+        // rides in; a boxed receiver there is exactly what the gate has to catch.
+        let slots = align_call_values_to_slots(vec![false, true], true, 1, None)
+            .expect("the extra leading slot is the receiver");
+        assert_eq!(slots.receiver, Some(false));
+        assert_eq!(slots.args, vec![true]);
+        // Without a receiver to spend it on, the extra slot stays unexplained.
+        assert!(align_call_values_to_slots(vec![true], false, 0, None).is_none());
+    }
+
+    /// A `suspend` `$default` synthetic spells the CPS `Continuation` between the value parameters
+    /// and the mask/marker tail, and the backend appends it — so the slot has no lowered value, and
+    /// every value after it sits one position to the right of where a naive zip would put it.
+    #[test]
+    fn suspend_default_continuation_is_not_an_argument_slot() {
+        // `MutexKt.withLock$default:(Mutex, Object, Function0, Continuation, int, Object)Object` —
+        // five lowered values (receiver, owner, action, mask, marker) over six slots.
+        let descriptor = vec![true, true, true, true, false, true];
+        let slots = align_call_values_to_slots(descriptor.clone(), false, 5, Some(3))
+            .expect("dropping the continuation slot lines the rest up");
+        assert_eq!(slots.receiver, None);
+        // The mask `int` is the one primitive slot, and it must land on the mask VALUE (index 3),
+        // not on the action lambda it would have been compared against unaligned.
+        assert_eq!(slots.args, vec![true, true, true, false, true]);
+        // The same descriptor without the continuation removed does not line up — which is what
+        // made this shape skip the check entirely.
+        assert!(align_call_values_to_slots(descriptor, false, 5, None).is_none());
+    }
+
+    /// A shape the alignment does not model reports NO alignment rather than a wrong one. The caller
+    /// turns that into "decline if any box is on the stack", so a skip is never silent.
+    #[test]
+    fn unmodelled_shapes_report_no_alignment() {
+        // Two unexplained slots: a wider `$default` mask, a synthetic tail, anything else.
+        assert!(align_call_values_to_slots(vec![true, false, true], true, 1, None).is_none());
+        // A continuation slot the descriptor does not have is a malformed record, not an alignment.
+        assert!(align_call_values_to_slots(vec![true, true], false, 1, Some(7)).is_none());
     }
 }

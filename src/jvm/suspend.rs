@@ -32,7 +32,7 @@ use crate::ir::{
 };
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const I32_MIN: i32 = i32::MIN;
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
@@ -192,7 +192,8 @@ pub fn lower_suspend(
         // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
         if let (Some(b), None) = (body, forward) {
-            hoist_suspensions(ir, b, &suspend_set, &orig_rets);
+            let mut value_types = function_value_types(ir, fid, b);
+            hoist_suspensions(ir, b, &suspend_set, &orig_rets, &mut value_types);
         }
         // Desugar `return <suspend call>` (incl. an `= <suspend call>` expression body) into
         // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
@@ -203,9 +204,11 @@ pub fn lower_suspend(
             desugar_value_when(ir, b, &suspend_set, &ret_ty);
             // The value-`try`/`when` desugars bind each branch's value to a local, which can leave a
             // suspension NESTED in that bound value (`v = Sub(mk().tag)`) — a position the FIRST
-            // hoist pass (which ran before the desugars) never saw. Hoist again; already-normalized
-            // statements pass through unchanged.
-            hoist_suspensions(ir, b, &suspend_set, &orig_rets);
+            // hoist pass (which ran before the desugars) never saw. Hoist again with a FRESH
+            // value-type map (the desugars declared new locals); already-normalized statements pass
+            // through unchanged.
+            let mut value_types = function_value_types(ir, fid, b);
+            hoist_suspensions(ir, b, &suspend_set, &orig_rets, &mut value_types);
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
         let has_susp =
@@ -884,6 +887,7 @@ fn hoist_when_cond_suspensions(
     when_expr: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
     out: &mut Vec<ExprId>,
 ) -> Option<ExprId> {
     let IrExpr::When { branches } = ir.exprs[when_expr as usize].clone() else {
@@ -900,7 +904,7 @@ fn hoist_when_cond_suspensions(
         .into_iter()
         .map(|(cond, body)| {
             (
-                cond.map(|c| hoist_expr(ir, c, suspend_set, orig_rets, &mut prelude)),
+                cond.map(|c| hoist_expr(ir, c, suspend_set, orig_rets, value_types, &mut prelude)),
                 body,
             )
         })
@@ -911,20 +915,28 @@ fn hoist_when_cond_suspensions(
     }))
 }
 
-fn hoist_suspensions(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, orig_rets: &[Ty]) {
+fn hoist_suspensions(
+    ir: &mut IrFile,
+    b: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
     };
     let mut out: Vec<ExprId> = Vec::with_capacity(stmts.len());
     for s in stmts {
-        hoist_stmt(ir, s, suspend_set, orig_rets, &mut out);
+        hoist_stmt(ir, s, suspend_set, orig_rets, value_types, &mut out);
     }
     // A block's TAIL VALUE that is an `if`/`when` EXPRESSION (a lambda's tail expression, `runBlocking { …;
     // if (susp()) a else b }`) — hoist a suspension in its CONDITIONS to a preceding temp, exactly as a
     // `return if (susp()) …` statement above, so the flattener never meets a condition-suspending When it
     // can't model.
-    let new_value = value
-        .map(|v| hoist_when_cond_suspensions(ir, v, suspend_set, orig_rets, &mut out).unwrap_or(v));
+    let new_value = value.map(|v| {
+        hoist_when_cond_suspensions(ir, v, suspend_set, orig_rets, value_types, &mut out)
+            .unwrap_or(v)
+    });
     ir.exprs[b as usize] = IrExpr::Block {
         stmts: out,
         value: new_value,
@@ -937,6 +949,7 @@ fn hoist_stmt(
     stmt: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
     out: &mut Vec<ExprId>,
 ) {
     // Statements the flattener handles directly keep their suspension in place.
@@ -957,7 +970,9 @@ fn hoist_stmt(
             let new_branches: Branches = branches
                 .into_iter()
                 .map(|(cond, body)| {
-                    let nc = cond.map(|c| hoist_expr(ir, c, suspend_set, orig_rets, &mut prelude));
+                    let nc = cond.map(|c| {
+                        hoist_expr(ir, c, suspend_set, orig_rets, value_types, &mut prelude)
+                    });
                     (nc, body)
                 })
                 .collect();
@@ -974,7 +989,7 @@ fn hoist_stmt(
         // the flattener meets a `Return(When{cond suspends})` it can't model and bails. (Only the condition
         // is hoisted; a branch VALUE that suspends stays for the flattener / a later skip.)
         IrExpr::Return(Some(v)) if when_cond_suspends(ir, *v, suspend_set) => {
-            let nw = hoist_when_cond_suspensions(ir, *v, suspend_set, orig_rets, out)
+            let nw = hoist_when_cond_suspensions(ir, *v, suspend_set, orig_rets, value_types, out)
                 .expect("guard ensured a condition suspends");
             let nr = ir.add_expr(IrExpr::Return(Some(nw)));
             out.push(nr);
@@ -987,7 +1002,7 @@ fn hoist_stmt(
             // not one in an argument. Recurse into the body block (in place); nested loops recurse too.
             let body = *body;
             if matches!(ir.exprs[body as usize], IrExpr::Block { .. }) {
-                hoist_suspensions(ir, body, suspend_set, orig_rets);
+                hoist_suspensions(ir, body, suspend_set, orig_rets, value_types);
             }
             out.push(stmt);
             return;
@@ -996,7 +1011,7 @@ fn hoist_stmt(
         // scope block, etc. Recurse so a suspension buried in a call argument inside it (or its nested
         // loops) is hoisted to a preceding bound temp before the flattener sees it.
         IrExpr::Block { value: None, .. } => {
-            hoist_suspensions(ir, stmt, suspend_set, orig_rets);
+            hoist_suspensions(ir, stmt, suspend_set, orig_rets, value_types);
             out.push(stmt);
             return;
         }
@@ -1013,7 +1028,7 @@ fn hoist_stmt(
                 stmts: ns,
                 value: None,
             };
-            hoist_suspensions(ir, stmt, suspend_set, orig_rets);
+            hoist_suspensions(ir, stmt, suspend_set, orig_rets, value_types);
             out.push(stmt);
             return;
         }
@@ -1029,7 +1044,7 @@ fn hoist_stmt(
                 .chain(*finally)
                 .collect();
             for b in blocks {
-                hoist_suspensions(ir, b, suspend_set, orig_rets);
+                hoist_suspensions(ir, b, suspend_set, orig_rets, value_types);
             }
             out.push(stmt);
             return;
@@ -1049,7 +1064,7 @@ fn hoist_stmt(
             // re-bind `a` to the When with the hoisted condition. A branch VALUE that suspends stays for
             // the flattener's `stmt_cond_suspension` (`val a = when { … -> susp() }`), which this arm still
             // routes to (`hoist_when_cond_suspensions` returns `None`) when the condition doesn't suspend.
-            match hoist_when_cond_suspensions(ir, i, suspend_set, orig_rets, out) {
+            match hoist_when_cond_suspensions(ir, i, suspend_set, orig_rets, value_types, out) {
                 Some(nw) => {
                     let nv = ir.add_expr(IrExpr::Variable {
                         index,
@@ -1070,7 +1085,7 @@ fn hoist_stmt(
         _ => {}
     }
     // Hoist suspensions in the statement's unconditional sub-expressions.
-    let new_stmt = hoist_expr(ir, stmt, suspend_set, orig_rets, out);
+    let new_stmt = hoist_expr(ir, stmt, suspend_set, orig_rets, value_types, out);
     out.push(new_stmt);
 }
 
@@ -1082,6 +1097,7 @@ fn hoist_expr(
     e: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
     prelude: &mut Vec<ExprId>,
 ) -> ExprId {
     if is_suspension_point(ir, e, suspend_set) {
@@ -1090,17 +1106,19 @@ fn hoist_expr(
             IrExpr::Call { args, .. } => {
                 let na: Vec<ExprId> = args
                     .iter()
-                    .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
+                    .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, value_types, prelude))
                     .collect();
                 if let IrExpr::Call { args, .. } = &mut ir.exprs[e as usize] {
                     *args = na;
                 }
             }
             IrExpr::MethodCall { receiver, args, .. } => {
-                let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+                let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
                 let na: Vec<Option<ExprId>> = args
                     .iter()
-                    .map(|&a| a.map(|x| hoist_expr(ir, x, suspend_set, orig_rets, prelude)))
+                    .map(|&a| {
+                        a.map(|x| hoist_expr(ir, x, suspend_set, orig_rets, value_types, prelude))
+                    })
                     .collect();
                 if let IrExpr::MethodCall {
                     receiver: r,
@@ -1129,14 +1147,45 @@ fn hoist_expr(
             init: Some(e),
             named: false,
         });
+        value_types.insert(tmp, ty);
         prelude.push(var);
         return ir.add_expr(IrExpr::GetValue(tmp));
     }
     match ir.exprs[e as usize].clone() {
         // Unconditional value nodes: recurse, rewriting children.
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-            let nl = hoist_expr(ir, lhs, suspend_set, orig_rets, prelude);
-            let nr = hoist_expr(ir, rhs, suspend_set, orig_rets, prelude);
+            // Hoisting a suspension out of the right operand must not leapfrog evaluation of the
+            // left operand. In `effect() + await()`, rewriting only the suspension to a preceding
+            // temp produces `val r = await(); effect() + r`, reversing Kotlin's left-to-right order.
+            // Bind the complete left value first whenever the right subtree suspends. This rule is
+            // based solely on ordered IR operands and their semantic value type; it does not depend
+            // on the call's source spelling, package, or provider.
+            let rhs_suspends = expr_calls_suspend(ir, rhs, suspend_set);
+            // If both operands contain a suspension, moving the right one ahead of the left would be
+            // wrong and no single prelude can preserve the conditional state structure. Keep the
+            // binary expression intact so the state-machine validator declines the unsupported shape.
+            if expr_calls_suspend(ir, lhs, suspend_set) && rhs_suspends {
+                return e;
+            }
+            let mut nl = hoist_expr(ir, lhs, suspend_set, orig_rets, value_types, prelude);
+            if rhs_suspends && operand_needs_snapshot(ir, nl) {
+                let Some(ty) = hoisted_value_ty(ir, nl, orig_rets, value_types) else {
+                    // An untyped/unmodeled left value cannot be materialized safely. Leave this shape
+                    // for the existing backend-decline path instead of guessing a verifier type.
+                    return e;
+                };
+                let tmp = max_value_index(ir) + 1;
+                let bound = ir.add_expr(IrExpr::Variable {
+                    index: tmp,
+                    ty,
+                    init: Some(nl),
+                    named: false,
+                });
+                value_types.insert(tmp, ty);
+                prelude.push(bound);
+                nl = ir.add_expr(IrExpr::GetValue(tmp));
+            }
+            let nr = hoist_expr(ir, rhs, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PrimitiveBinOp {
                 op,
                 lhs: nl,
@@ -1145,7 +1194,7 @@ fn hoist_expr(
             e
         }
         IrExpr::PrimitiveNeg { operand, ty } => {
-            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, prelude);
+            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PrimitiveNeg { operand, ty };
             e
         }
@@ -1154,7 +1203,7 @@ fn hoist_expr(
         IrExpr::StringConcat(parts) => {
             let np: Vec<ExprId> = parts
                 .iter()
-                .map(|&p| hoist_expr(ir, p, suspend_set, orig_rets, prelude))
+                .map(|&p| hoist_expr(ir, p, suspend_set, orig_rets, value_types, prelude))
                 .collect();
             ir.exprs[e as usize] = IrExpr::StringConcat(np);
             e
@@ -1164,7 +1213,7 @@ fn hoist_expr(
             arg,
             type_operand,
         } => {
-            let na = hoist_expr(ir, arg, suspend_set, orig_rets, prelude);
+            let na = hoist_expr(ir, arg, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::TypeOp {
                 op,
                 arg: na,
@@ -1179,7 +1228,7 @@ fn hoist_expr(
             named,
         } => {
             if let Some(i) = init {
-                let ni = hoist_expr(ir, i, suspend_set, orig_rets, prelude);
+                let ni = hoist_expr(ir, i, suspend_set, orig_rets, value_types, prelude);
                 ir.exprs[e as usize] = IrExpr::Variable {
                     index,
                     ty,
@@ -1190,7 +1239,7 @@ fn hoist_expr(
             e
         }
         IrExpr::SetValue { var, value } => {
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::SetValue { var, value: nv };
             e
         }
@@ -1203,8 +1252,8 @@ fn hoist_expr(
             index,
             value,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::SetField {
                 receiver: nr,
                 class,
@@ -1214,7 +1263,7 @@ fn hoist_expr(
             e
         }
         IrExpr::Return(Some(v)) => {
-            let nv = hoist_expr(ir, v, suspend_set, orig_rets, prelude);
+            let nv = hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::Return(Some(nv));
             e
         }
@@ -1226,8 +1275,8 @@ fn hoist_expr(
             elem,
             value,
         } => {
-            let nh = hoist_expr(ir, holder, suspend_set, orig_rets, prelude);
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            let nh = hoist_expr(ir, holder, suspend_set, orig_rets, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::RefSet {
                 holder: nh,
                 elem,
@@ -1245,10 +1294,11 @@ fn hoist_expr(
             dispatch_receiver,
             args,
         } => {
-            let nr = dispatch_receiver.map(|r| hoist_expr(ir, r, suspend_set, orig_rets, prelude));
+            let nr = dispatch_receiver
+                .map(|r| hoist_expr(ir, r, suspend_set, orig_rets, value_types, prelude));
             let na: Vec<ExprId> = args
                 .iter()
-                .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
+                .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, value_types, prelude))
                 .collect();
             ir.exprs[e as usize] = IrExpr::Call {
                 callee,
@@ -1263,10 +1313,12 @@ fn hoist_expr(
             receiver,
             args,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
             let na: Vec<Option<ExprId>> = args
                 .iter()
-                .map(|&a| a.map(|x| hoist_expr(ir, x, suspend_set, orig_rets, prelude)))
+                .map(|&a| {
+                    a.map(|x| hoist_expr(ir, x, suspend_set, orig_rets, value_types, prelude))
+                })
                 .collect();
             ir.exprs[e as usize] = IrExpr::MethodCall {
                 class,
@@ -1303,7 +1355,7 @@ fn hoist_expr(
             }
             let na: Vec<ExprId> = args
                 .iter()
-                .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
+                .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, value_types, &mut *prelude))
                 .collect();
             ir.exprs[e as usize] = IrExpr::New {
                 internal,
@@ -1318,7 +1370,7 @@ fn hoist_expr(
             class,
             index,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::GetField {
                 receiver: nr,
                 class,
@@ -1335,7 +1387,7 @@ fn hoist_expr(
             field,
             operation,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PropertyRead {
                 receiver: nr,
                 owner,
@@ -1356,8 +1408,8 @@ fn hoist_expr(
             interface,
             operation,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PropertyWrite {
                 receiver: nr,
                 owner,
@@ -1378,7 +1430,7 @@ fn hoist_expr(
         IrExpr::Block {
             stmts,
             value: Some(v),
-        } if stmts.is_empty() => hoist_expr(ir, v, suspend_set, orig_rets, prelude),
+        } if stmts.is_empty() => hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude),
         // A non-suspending block prelude can move with its suspending value without reordering effects.
         IrExpr::Block {
             stmts,
@@ -1389,12 +1441,141 @@ fn hoist_expr(
             && expr_calls_suspend(ir, v, suspend_set) =>
         {
             prelude.extend(stmts);
-            hoist_expr(ir, v, suspend_set, orig_rets, prelude)
+            hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude)
         }
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
         // flattener, which restructures it or skips the file).
         _ => e,
     }
+}
+
+/// Whether evaluating an operand before a later suspension has an observable action/value read that
+/// must be materialized. Constants and ordinary local/parameter reads may be left in the residual
+/// expression: an externally mutable captured local is represented as `RefGet`, not `GetValue`, and
+/// therefore takes the conservative snapshot path. Pure primitive/type wrappers inherit the answer
+/// from their children; calls, properties, fields, reference cells, and unknown nodes snapshot.
+fn operand_needs_snapshot(ir: &IrFile, expression: ExprId) -> bool {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Const(_)
+        | IrExpr::GetValue(_)
+        | IrExpr::GetStatic(_)
+        | IrExpr::ExternalStaticField { .. }
+        | IrExpr::UnitInstance => false,
+        IrExpr::PrimitiveBinOp { lhs, rhs, .. } => {
+            operand_needs_snapshot(ir, *lhs) || operand_needs_snapshot(ir, *rhs)
+        }
+        IrExpr::PrimitiveNeg { operand, .. }
+        | IrExpr::TypeOp { arg: operand, .. }
+        | IrExpr::NotNullAssert { operand } => operand_needs_snapshot(ir, *operand),
+        _ => true,
+    }
+}
+
+/// The semantic JVM value type needed when suspend normalization materializes an already-evaluated
+/// expression into a temporary. This is deliberately an IR-identity query: it reads the selected
+/// callee/field/type node and never re-resolves a source name. Keep the surface narrow to shapes that
+/// can appear as primitive-binary operands; returning `None` makes an unexpected lowering shape an
+/// internal invariant failure instead of emitting a temp with a guessed verification type.
+fn hoisted_value_ty(
+    ir: &IrFile,
+    expression: ExprId,
+    orig_rets: &[Ty],
+    value_types: &HashMap<u32, Ty>,
+) -> Option<Ty> {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Const(constant) => Some(match constant {
+            IrConst::Boolean(_) => Ty::Boolean,
+            IrConst::Int(_) => Ty::Int,
+            IrConst::Long(_) => Ty::Long,
+            IrConst::Double(_) => Ty::Double,
+            IrConst::Float(_) => Ty::Float,
+            IrConst::Char(_) => Ty::Char,
+            IrConst::String(_) => Ty::String,
+            IrConst::Short(_) => Ty::Short,
+            IrConst::Byte(_) => Ty::Byte,
+            IrConst::Null => Ty::Null,
+        }),
+        // Value indices are local to one function. Looking through the complete arena can find a
+        // declaration with the same numeric index in an unrelated method and poison the verifier type
+        // of the new temp. The caller supplies the current function's parameter/local environment.
+        IrExpr::GetValue(index) => value_types.get(index).copied(),
+        IrExpr::Call { callee, .. } => match callee {
+            Callee::Local(function) | Callee::LocalDefault(function) => {
+                orig_rets.get(*function as usize).copied()
+            }
+            Callee::CrossFile { ret, .. } => Some(*ret),
+            Callee::Static { descriptor, .. } | Callee::Special { descriptor, .. } => {
+                crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
+            }
+            Callee::Virtual {
+                descriptor, params, ..
+            } => params.as_ref().map(|(_, ret)| *ret).or_else(|| {
+                crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
+            }),
+            Callee::External(_) => None,
+        },
+        IrExpr::MethodCall { class, index, .. } => ir
+            .classes
+            .get(*class as usize)
+            .and_then(|class| class.methods.get(*index as usize))
+            .and_then(|function| orig_rets.get(*function as usize))
+            .copied(),
+        IrExpr::PrimitiveBinOp { op, lhs, .. } => Some(match op {
+            IrBinOp::Lt
+            | IrBinOp::Le
+            | IrBinOp::Gt
+            | IrBinOp::Ge
+            | IrBinOp::Eq
+            | IrBinOp::Ne
+            | IrBinOp::RefEq
+            | IrBinOp::RefNe
+            | IrBinOp::And
+            | IrBinOp::Or => Ty::Boolean,
+            _ => hoisted_value_ty(ir, *lhs, orig_rets, value_types)?,
+        }),
+        IrExpr::PrimitiveNeg { ty, .. }
+        | IrExpr::TypeOp {
+            type_operand: ty, ..
+        } => Some(*ty),
+        _ => None,
+    }
+}
+
+/// Snapshot the semantic types in one function's value-index namespace before suspend hoisting.
+/// `IrFile::exprs` is a module-wide arena while `GetValue(n)` is function-local, so any type query
+/// based on a global scan is inherently ambiguous. Nested lambda bodies own another namespace and are
+/// deliberately skipped; only their capture expressions still belong to the enclosing function.
+fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
+    fn collect(ir: &IrFile, expression: ExprId, out: &mut HashMap<u32, Ty>) {
+        match &ir.exprs[expression as usize] {
+            IrExpr::Variable {
+                index, ty, init, ..
+            } => {
+                out.entry(*index).or_insert(*ty);
+                if let Some(init) = init {
+                    collect(ir, *init, out);
+                }
+            }
+            IrExpr::Lambda { captures, .. } => {
+                for &capture in captures {
+                    collect(ir, capture, out);
+                }
+            }
+            _ => for_each_child(&ir.exprs, expression, &mut |child| collect(ir, child, out)),
+        }
+    }
+
+    let function = &ir.functions[fid as usize];
+    let receiver_offset = u32::from(function.dispatch_receiver.is_some());
+    let mut out = HashMap::new();
+    if let Some(receiver) = function.dispatch_receiver {
+        out.insert(0, Ty::obj_name(receiver));
+    }
+    for (index, ty) in function.params.iter().copied().enumerate() {
+        out.insert(receiver_offset + index as u32, ty);
+    }
+    collect(ir, body, &mut out);
+    out
 }
 
 /// For a same-file suspend call, the callee `FunId` — used to recover the callee's LOGICAL return type
@@ -2443,7 +2624,8 @@ fn build_lambda_state_machine(
     // flattener meets it as a bound-local suspension typed by the callee's logical return.
     normalize_block_inits(ir, b);
     split_unit_conditional_returns(ir, b, orig_rets.get(fid as usize) == Some(&Ty::Unit));
-    hoist_suspensions(ir, b, &suspend_set, orig_rets);
+    let mut value_types = function_value_types(ir, fid, b);
+    hoist_suspensions(ir, b, &suspend_set, orig_rets, &mut value_types);
     // A `suspendCoroutineUninterceptedOrReturn { c -> … }` block reads its continuation parameter:
     // bind it to the lambda machine itself (`this` = value-index 0) so `c.resume(v)` re-enters
     // THIS machine at the resume label.
