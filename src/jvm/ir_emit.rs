@@ -10833,6 +10833,12 @@ impl<'a> Emitter<'a> {
 
     fn emit_compare(&mut self, op: IrBinOp, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
         let lt = self.value_ty(lhs);
+        // Whether either side is the `null` literal, computed UP FRONT so the referential-identity arm
+        // below doesn't claim a null comparison (a `null` literal's type is a reference, so `a === null`
+        // would otherwise emit `aconst_null; if_acmpne` instead of kotlinc's single-operand `ifnonnull`).
+        // `emit_compare_branch` orders it the same way for the same reason.
+        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
+        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
         // Referential identity (`===`/`!==`) on *reference* operands: compare the two object refs
         // directly with `if_acmp*` (never the structural `Intrinsics.areEqual` the `Eq`/`Ne` reference
         // path uses below). On *primitive* operands Kotlin's `===` is just value `==`, so those fall
@@ -10840,22 +10846,18 @@ impl<'a> Emitter<'a> {
         if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe)
             && lt.is_reference()
             && self.value_ty(rhs).is_reference()
+            && !lhs_null
+            && !rhs_null
         {
             self.emit_operands(&[lhs, rhs], code);
-            let t = code.new_label();
-            let end = code.new_label();
-            self.frame(t, vec![], code);
+            let f = code.new_label();
+            self.frame(f, vec![], code);
             if op == IrBinOp::RefEq {
-                code.if_acmpeq(t)
+                code.if_acmpne(f)
             } else {
-                code.if_acmpne(t)
+                code.if_acmpeq(f)
             }
-            code.push_int(0, self.cw);
-            self.frame(end, vec![VerifType::Integer], code);
-            code.goto(end);
-            code.bind(t);
-            code.push_int(1, self.cw);
-            code.bind(end);
+            self.materialize_cmp_bool(f, code);
             return;
         }
         let op = match op {
@@ -10863,30 +10865,23 @@ impl<'a> Emitter<'a> {
             IrBinOp::RefNe => IrBinOp::Ne,
             o => o,
         };
-        // `x == null` / `x != null`: compare against null directly with `ifnull`/`ifnonnull` (kotlinc's
-        // bytecode), regardless of the operand's static value type. `Intrinsics.areEqual` below is only
-        // for two reference operands neither of which is the `null` literal — and a plain `if_icmp*` on
-        // a reference (what the numeric path would emit) is only accepted by the verifier when no
-        // stackmap frame pins the operand types, so it must not be relied on.
-        let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
-        let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
+        // `x == null` / `x != null` (and `===`/`!==`, remapped just above): compare against null directly
+        // with `ifnull`/`ifnonnull` (kotlinc's bytecode), regardless of the operand's static value type.
+        // `Intrinsics.areEqual` below is only for two reference operands neither of which is the `null`
+        // literal — and a plain `if_icmp*` on a reference (what the numeric path would emit) is only
+        // accepted by the verifier when no stackmap frame pins the operand types, so it must not be
+        // relied on.
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) && (lhs_null || rhs_null) {
             let operand = if lhs_null { rhs } else { lhs };
             self.emit_value(operand, code);
-            let t = code.new_label();
-            let end = code.new_label();
-            self.frame(t, vec![], code);
+            let f = code.new_label();
+            self.frame(f, vec![], code);
             if op == IrBinOp::Eq {
-                code.ifnull(t)
+                code.ifnonnull(f)
             } else {
-                code.ifnonnull(t)
+                code.ifnull(f)
             }
-            code.push_int(0, self.cw);
-            self.frame(end, vec![VerifType::Integer], code);
-            code.goto(end);
-            code.bind(t);
-            code.push_int(1, self.cw);
-            code.bind(end);
+            self.materialize_cmp_bool(f, code);
             return;
         }
         // Kotlin `==`/`!=` on reference operands is structural (`a?.equals(b)`), realized by the
@@ -10911,58 +10906,85 @@ impl<'a> Emitter<'a> {
             }
             return;
         }
-        self.emit_operands(&[lhs, rhs], code);
-        // Long/Double/Float compare to a 3-way result, then test against 0 with `if_icmp*`. For float
-        // types `>`/`>=` use the `*l` variant (NaN → -1) and `<`/`<=` the `*g` variant (NaN → +1), so a
-        // NaN operand makes the comparison false either way — matching kotlinc.
-        let nan_l = matches!(op, IrBinOp::Gt | IrBinOp::Ge);
-        match lt {
-            Ty::Long => {
-                code.lcmp();
-                code.push_int(0, self.cw);
-            }
-            Ty::Double => {
-                if nan_l {
-                    code.dcmpl();
-                } else {
-                    code.dcmpg();
+        // Numeric. Mirrors `emit_compare_branch`'s operand handling — the ONLY difference is that the
+        // fused branch here goes to a `false` arm that materializes the 0/1 boolean.
+        //
+        // `Long`/`Double`/`Float` compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, whose result is already
+        // -1/0/1 relative to zero: the test is then the SINGLE-operand `ifeq`/`ifne`/`iflt`/… family, not
+        // a materialized `iconst_0` plus a two-operand `if_icmp*` (kotlinc's shape; see docs/SPEC.md).
+        // The int category gets the same treatment when one side is the literal `0`.
+        let int_cat = !matches!(lt, Ty::Long | Ty::Double | Ty::Float);
+        let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
+        // Zero on the RIGHT fuses for every operator. Zero on the LEFT fuses only for `==`/`!=`, which
+        // are symmetric: kotlinc does NOT mirror the ORDERING operators, so `0 < x` stays the
+        // two-operand `iconst_0; iload x; if_icmpge` rather than becoming `iload x; ifle`. Mirroring
+        // them would be shorter but would open a fresh parity gap, which is the opposite of the point.
+        // (`emit_compare_branch` does mirror them — see docs/SPEC.md, recorded as a branch-position
+        // divergence rather than changed here, since that path is not what this is fixing.)
+        let cmp0_int = if int_cat && zero(rhs) {
+            self.emit_value(lhs, code);
+            Some(op)
+        } else if int_cat && zero(lhs) && matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
+            // `swap_cmp` is the identity on `Eq`/`Ne`; the operand order simply doesn't matter.
+            self.emit_value(rhs, code);
+            Some(op)
+        } else {
+            self.emit_operands(&[lhs, rhs], code);
+            None
+        };
+        if !int_cat {
+            // For float types `>`/`>=` use the `*l` variant (NaN → -1) and `<`/`<=` the `*g` variant
+            // (NaN → +1), so a NaN operand makes the comparison false either way — matching kotlinc.
+            let nan_l = matches!(op, IrBinOp::Gt | IrBinOp::Ge);
+            match lt {
+                Ty::Long => code.lcmp(),
+                Ty::Double => {
+                    if nan_l {
+                        code.dcmpl()
+                    } else {
+                        code.dcmpg()
+                    }
                 }
-                code.push_int(0, self.cw);
-            }
-            Ty::Float => {
-                if nan_l {
-                    code.fcmpl();
-                } else {
-                    code.fcmpg();
+                Ty::Float => {
+                    if nan_l {
+                        code.fcmpl()
+                    } else {
+                        code.fcmpg()
+                    }
                 }
-                code.push_int(0, self.cw);
+                _ => unreachable!("int_cat is false only for Long/Double/Float"),
             }
-            _ => {}
         }
-        let t = code.new_label();
-        let end = code.new_label();
-        self.frame(t, vec![], code);
-        match op {
-            IrBinOp::Lt => code.if_icmplt(t),
-            IrBinOp::Le => code.if_icmple(t),
-            IrBinOp::Gt => code.if_icmpgt(t),
-            IrBinOp::Ge => code.if_icmpge(t),
-            IrBinOp::Eq => code.if_icmpeq(t),
-            IrBinOp::Ne => code.if_icmpne(t),
-            _ => unreachable!(),
+        let f = code.new_label();
+        self.frame(f, vec![], code);
+        // Branch to the `false` arm, i.e. on the NEGATED comparison (`jt = false`). A 3-way compare left
+        // -1/0/1, so it tests against zero exactly like a fused `x <op> 0` does.
+        match cmp0_int {
+            Some(o) => cmp0_branch(o, false, f, code),
+            None if !int_cat => cmp0_branch(op, false, f, code),
+            None => icmp_branch(op, false, f, code),
         }
-        // The `if_icmp*` popped both operands — this is the height on BOTH merge paths (the `t`
-        // branch and the fall-through). The 0/1 booleans below each leave exactly one value, so the
-        // tracker must be reset to this height at `bind(t)`; otherwise the linear counter carries the
-        // fall-through's `push 0` past the `goto`, drifting `cur_stack` +1 (harmless for max_stack, but
-        // it makes `stack_height()` over-report, which the branchy-inline baseline check relies on).
+        self.materialize_cmp_bool(f, code);
+    }
+
+    /// Tail of a value-position comparison: the caller has emitted a conditional branch to `f` taken
+    /// exactly when the comparison is FALSE. Fall through to `iconst_1`, jump over the `iconst_0` the
+    /// `f` arm pushes — kotlinc's polarity (`if_icmpne; iconst_1; goto; iconst_0`), which keeps the
+    /// null, referential and numeric arms byte-identical to it at no extra instruction cost.
+    fn materialize_cmp_bool(&mut self, f: Label, code: &mut CodeBuilder) {
+        // The branch popped its operands — this is the height on BOTH merge paths (the `f` branch and
+        // the fall-through). The 0/1 booleans below each leave exactly one value, so the tracker must be
+        // reset to this height at `bind(f)`; otherwise the linear counter carries the fall-through's
+        // `push 1` past the `goto`, drifting `cur_stack` +1 (harmless for max_stack, but it makes
+        // `stack_height()` over-report, which the branchy-inline baseline check relies on).
         let merged = code.stack_height().max(0) as u16;
-        code.push_int(0, self.cw);
+        let end = code.new_label();
+        code.push_int(1, self.cw);
         self.frame(end, vec![VerifType::Integer], code);
         code.goto(end);
-        code.bind(t);
+        code.bind(f);
         code.set_stack(merged);
-        code.push_int(1, self.cw);
+        code.push_int(0, self.cw);
         code.bind(end);
     }
 
@@ -11127,13 +11149,13 @@ impl<'a> Emitter<'a> {
         if int_cat && zero(rhs) {
             self.emit_value(lhs, code);
             self.frame(target, vec![], code);
-            self.cmp0_branch(op, jt, target, code);
+            cmp0_branch(op, jt, target, code);
             return;
         }
         if int_cat && zero(lhs) {
             self.emit_value(rhs, code);
             self.frame(target, vec![], code);
-            self.cmp0_branch(swap_cmp(op), jt, target, code);
+            cmp0_branch(swap_cmp(op), jt, target, code);
             return;
         }
         // int-category fuses to `if_icmp*`; Long/Double/Float → 3-way compare then single-operand `if*`.
@@ -11160,45 +11182,9 @@ impl<'a> Emitter<'a> {
         }
         self.frame(target, vec![], code);
         if !int_cat {
-            self.cmp0_branch(op, jt, target, code);
+            cmp0_branch(op, jt, target, code);
         } else {
-            match (op, jt) {
-                (Lt, true) => code.if_icmplt(target),
-                (Lt, false) => code.if_icmpge(target),
-                (Le, true) => code.if_icmple(target),
-                (Le, false) => code.if_icmpgt(target),
-                (Gt, true) => code.if_icmpgt(target),
-                (Gt, false) => code.if_icmple(target),
-                (Ge, true) => code.if_icmpge(target),
-                (Ge, false) => code.if_icmplt(target),
-                (Eq, true) => code.if_icmpeq(target),
-                (Eq, false) => code.if_icmpne(target),
-                (Ne, true) => code.if_icmpne(target),
-                (Ne, false) => code.if_icmpeq(target),
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    /// A single-operand compare-to-zero branch (`ifeq`/`ifne`/`iflt`/`ifle`/`ifgt`/`ifge`) to `target`,
-    /// taken when `(value <op> 0) == jt`. Used for `x <op> 0` and for the 3-way `lcmp`/`dcmp*`/`fcmp*`
-    /// result tested against 0.
-    fn cmp0_branch(&self, op: IrBinOp, jt: bool, target: Label, code: &mut CodeBuilder) {
-        use IrBinOp::*;
-        match (op, jt) {
-            (Lt, true) => code.iflt(target),
-            (Lt, false) => code.ifge(target),
-            (Le, true) => code.ifle(target),
-            (Le, false) => code.ifgt(target),
-            (Gt, true) => code.ifgt(target),
-            (Gt, false) => code.ifle(target),
-            (Ge, true) => code.ifge(target),
-            (Ge, false) => code.iflt(target),
-            (Eq, true) => code.ifeq(target),
-            (Eq, false) => code.ifne(target),
-            (Ne, true) => code.ifne(target),
-            (Ne, false) => code.ifeq(target),
-            _ => unreachable!(),
+            icmp_branch(op, jt, target, code);
         }
     }
 
@@ -12277,6 +12263,50 @@ fn swap_cmp(op: IrBinOp) -> IrBinOp {
         Gt => Lt,
         Ge => Le,
         o => o,
+    }
+}
+
+/// A single-operand compare-to-zero branch (`ifeq`/`ifne`/`iflt`/`ifle`/`ifgt`/`ifge`) to `target`,
+/// taken when `(value <op> 0) == jt`. Used for `x <op> 0` and for the 3-way `lcmp`/`dcmp*`/`fcmp*`
+/// result tested against 0, which is already -1/0/1.
+fn cmp0_branch(op: IrBinOp, jt: bool, target: Label, code: &mut CodeBuilder) {
+    use IrBinOp::*;
+    match (op, jt) {
+        (Lt, true) => code.iflt(target),
+        (Lt, false) => code.ifge(target),
+        (Le, true) => code.ifle(target),
+        (Le, false) => code.ifgt(target),
+        (Gt, true) => code.ifgt(target),
+        (Gt, false) => code.ifle(target),
+        (Ge, true) => code.ifge(target),
+        (Ge, false) => code.iflt(target),
+        (Eq, true) => code.ifeq(target),
+        (Eq, false) => code.ifne(target),
+        (Ne, true) => code.ifne(target),
+        (Ne, false) => code.ifeq(target),
+        _ => unreachable!(),
+    }
+}
+
+/// A two-operand int-category comparison branch (`if_icmplt`/`if_icmpge`/…) to `target`, taken when
+/// `(a <op> b) == jt`. The `jt = false` rows are the negated operator, which is how a value-position
+/// comparison reaches its `false` arm.
+fn icmp_branch(op: IrBinOp, jt: bool, target: Label, code: &mut CodeBuilder) {
+    use IrBinOp::*;
+    match (op, jt) {
+        (Lt, true) => code.if_icmplt(target),
+        (Lt, false) => code.if_icmpge(target),
+        (Le, true) => code.if_icmple(target),
+        (Le, false) => code.if_icmpgt(target),
+        (Gt, true) => code.if_icmpgt(target),
+        (Gt, false) => code.if_icmple(target),
+        (Ge, true) => code.if_icmpge(target),
+        (Ge, false) => code.if_icmplt(target),
+        (Eq, true) => code.if_icmpeq(target),
+        (Eq, false) => code.if_icmpne(target),
+        (Ne, true) => code.if_icmpne(target),
+        (Ne, false) => code.if_icmpeq(target),
+        _ => unreachable!(),
     }
 }
 
