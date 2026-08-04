@@ -871,7 +871,12 @@ impl<'a> Lexer<'a> {
             }
         }
         if self.i < self.b.len() {
+            // The literal is closed, so its content is known: reject anything that is not exactly
+            // one UTF-16 code unit before `unquote_char` truncates it to one (`src/parser.rs`).
             self.i += 1; // closing quote
+            if let Some(msg) = char_lit_error(&self.b[lo as usize + 1..self.i - 1]) {
+                self.diags.error(Span::new(lo, self.i as u32), msg);
+            }
         } else {
             self.diags.error(
                 Span::new(lo, self.i as u32),
@@ -1224,6 +1229,54 @@ impl<'a> Lexer<'a> {
             .get(after)
             .is_some_and(|next| *next == b'{' || *next == b'`' || is_ident_start_at(self.b, after))
             .then_some((after - required, after))
+    }
+}
+
+/// The diagnostic for a closed `Char` literal whose content (the bytes BETWEEN the quotes) is not
+/// exactly one UTF-16 code unit, or `None` when it is well formed.
+///
+/// A Kotlin `Char` is one UTF-16 code unit, so a literal holds exactly one *element*: one BMP
+/// character, or one escape from Kotlin's fixed set (`\n \t \r \b \\ \' \" \$` and `\uXXXX`; there
+/// is no `\0`). kotlinc splits the failures by how the content STARTS, which this mirrors: content
+/// beginning with a backslash must be exactly one valid escape or it is an escape error, while
+/// content beginning with a plain character is counted instead. An astral-plane character is two
+/// code units, so it lands in the counting arm — matching kotlinc, which reports it as "too many
+/// characters" rather than as an encoding complaint.
+///
+/// A lone surrogate written as `\uD83D` is ACCEPTED: it is one code unit, and kotlinc takes it. The
+/// check therefore never asks whether the result is well-formed UTF-16. A raw TAB is accepted too;
+/// only CR and LF are barred from a literal's body, and by the GRAMMAR rather than by the count — a
+/// bare LF is one code unit, so counting alone would let it through.
+fn char_lit_error(inner: &[u8]) -> Option<&'static str> {
+    /// Kotlin's escape set for a `Char`, less `\u`, which carries its own 4-hex-digit payload.
+    const SIMPLE_ESCAPES: &[u8] = b"ntrb\\'\"$";
+    // A literal never spans a line. The scan does run past a newline looking for the closing quote,
+    // so this also covers an unterminated literal that found one further down the file: kotlinc
+    // reports the same message there, on the opening line.
+    if inner.contains(&b'\n') || inner.contains(&b'\r') {
+        return Some("incorrect character literal");
+    }
+    match inner.first() {
+        None => Some("empty character literal"),
+        Some(b'\\') => {
+            let valid = match inner.get(1) {
+                Some(b'u') => inner.len() == 6 && inner[2..].iter().all(u8::is_ascii_hexdigit),
+                Some(c) => inner.len() == 2 && SIMPLE_ESCAPES.contains(c),
+                // Unreachable: the scan consumes a backslash together with the byte after it, so a
+                // lone `\` means the quote that followed it was eaten and the literal came out
+                // unterminated. kotlinc calls `'\'` an unsupported escape; krusty calls it
+                // unterminated — both reject it.
+                None => false,
+            };
+            (!valid).then_some("unsupported escape sequence")
+        }
+        // UTF-8 encodes every BMP character in at most three bytes and every astral one in four, so
+        // "one code unit" is "one character, encoded in at most three bytes".
+        Some(_) => {
+            let first = char_at(inner, 0).map_or(inner.len(), char::len_utf8);
+            (first != inner.len() || first > 3)
+                .then_some("too many characters in a character literal")
+        }
     }
 }
 
