@@ -823,8 +823,42 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Expr::CharLit` is a `u16` and `unquote_char` takes a `\uXXXX` escape verbatim, so a *source* literal
   `'\uD800'` keeps its code unit too (it used to fold to NUL by the same round-trip). A `char` that
   reaches either from a code POINT truncates with the JVM's own `i2c`, since a well-formed `Char`
-  literal is always in the BMP. Tests: `CharSurrogateConst` and `CharSurrogateLiteral` in
-  `tests/feature_box_e2e.rs`.
+  literal is always in the BMP. The code unit survives every encoding a `Char` constant reaches: a
+  primary-constructor DEFAULT keeps it through both fill paths (the same-class path lowers the
+  default's AST `Expr::CharLit`; a subclass's `: B()` fills the base's `super(…)` args from the
+  file-independent `resolve::CtorDefaultValue::Char`, which is a `u16` for the same reason), and an
+  ANNOTATION ARGUMENT is written as an `element_value` tagged `'C'` over a `CONSTANT_Integer` holding
+  the raw code unit. Tests: `CharSurrogateConst`, `CharSurrogateLiteral`, `CharSurrogateCtorDefault`,
+  `CharSurrogateWhen`, and `CharSurrogateAnnotationArg` in `tests/feature_box_e2e.rs`, plus
+  `cross_file_super_ctor_char_defaults_keep_utf16_code_units` in
+  `tests/cross_file_ctor_default_e2e.rs` for the sibling-file handoff.
+- **A `Char` literal that is not exactly one UTF-16 code unit is REJECTED in the lexer.** The `i2c`
+  truncation above is correct only because a *well-formed* literal is in the BMP, so the ill-formed ones
+  have to be diagnosed rather than truncated: `const val E = '😀'` used to compile silently to
+  `'\uF600'` — `unquote_char` truncates a code POINT to 16 bits, so U+1F600 landed on U+F600, not even on
+  a surrogate half. A literal holds exactly one *element* — one BMP character, or one escape from
+  Kotlin's set (`\n \t \r \b \\ \' \" \$` and `\uXXXX`; there is **no** `\0`, unlike C, and kotlinc
+  rejects `'\0'`) — and never spans a line. kotlinc splits the failures by how the content STARTS, which
+  krusty mirrors: `''` is `empty character literal`; content holding a raw CR or LF is `incorrect
+  character literal` (a bare LF *is* one code unit, so the grammar bars it, not the count — and because
+  the scan runs past a newline hunting the closing quote, this also covers an unterminated literal that
+  found one further down); content beginning with a backslash must be exactly one valid escape or it is
+  `unsupported escape sequence` (`'\0'`, `'\q'`, `'\u12'`, and the two-escape spelling of a surrogate
+  pair, `'\uD83D\uDE00'`); anything else that is not one BMP character is `too many characters in a
+  character literal` (`'ab'`, `'a\n'`, and a raw astral character — two code units, so it lands in the
+  counting arm, not an encoding complaint). A LONE surrogate written as an escape (`'\uD83D'`) stays
+  legal — it is one code unit — so the check never asks whether the result is well-formed UTF-16; a raw
+  TAB stays legal too, since only CR and LF are excluded. The check belongs in the lexer because it needs
+  nothing but the literal's own text, and sitting beside `unterminated character literal` it cannot be
+  missed by a parser path that never reads the token; it therefore also covers a literal inside a string
+  template, the `${'$'}` idiom's path. Two knowingly-unclosed edges: `'\'` is `unterminated character
+  literal` where kotlinc says `unsupported escape sequence` (both reject), and string literals are
+  unchanged — `unescape_chunk` still accepts `"\0"`, which kotlinc rejects. The sibling truncation in
+  `ast_literal_const` (`Ty::Char => IrConst::Char(*v as u16)` for an `IntLit`) needs no diagnostic:
+  `val c: Char = 128000` is already rejected upstream with the same `initializer type mismatch` kotlinc
+  reports, so no source reaches it. Validation and decoding are one token-layer contract used by
+  both lexer and parser; this avoids separate escape tables drifting while keeping the diagnostic at
+  the lexer boundary. Tests: `tests/char_literal_diagnostics_e2e.rs`.
 - **A `Char` constant folded into a string renders as the CHARACTER, not its code unit.** The constant
   string evaluator behind the `trimIndent`/`trimMargin` fold accepts a `Char` (`${'$'}` is the idiomatic
   way to write a literal `$` in a template), so it must spell the character out. A code unit that is not
