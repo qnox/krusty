@@ -5943,6 +5943,33 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Preserve source evaluation order when an already-lowered value must survive a later
+    /// suspending operand. Coroutine lowering moves the later operand into a resume block; leaving
+    /// the earlier expression nested in the eventual operation would move (and potentially repeat)
+    /// its evaluation as well. Materialize it once in the spill scope and return the reload plus the
+    /// declaration that must wrap the final operation.
+    ///
+    /// This is intentionally independent of call origin and operation kind. Ordinary virtual calls
+    /// and intrinsic/static rewrites have the same ordering contract, so keeping the rule here avoids
+    /// separate member/classpath/unsigned copies drifting on the suspension predicate or slot shape.
+    fn spill_value_before_suspending_operands(
+        &mut self,
+        value: u32,
+        value_ty: Ty,
+        later_operands: &[u32],
+    ) -> (u32, Option<u32>) {
+        if !self.cur_fn_suspend
+            || !later_operands
+                .iter()
+                .any(|&operand| self.ir_subtree_suspends(operand))
+        {
+            return (value, None);
+        }
+        let slot = self.fresh_value();
+        let declaration = self.emit_named_variable(slot, ty_to_ir(value_ty), Some(value));
+        (self.emit_get_value(slot), Some(declaration))
+    }
+
     fn propagate_suspend_source_line(&mut self, e: u32, line: u32) {
         let mut pending = Vec::new();
         crate::ir::for_each_child(&self.ir.exprs, e, &mut |child| pending.push(child));
@@ -5997,34 +6024,21 @@ impl<'a> Lower<'a> {
             None,
         )?;
         let interface = member.is_interface() || self.library_type_is_interface(owner);
-        // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
-        // the pushed receiver into a continuation spill slot (an unnamed temp local in its
-        // bytecode). Mirror it with a temp in the spill scope: `val tmp = recv; tmp.m(<arg>)`.
-        if self.cur_fn_suspend && args.iter().any(|&a| self.ir_subtree_suspends(a)) {
-            let rv = self.fresh_value();
-            let decl = self.emit_named_variable(rv, ty_to_ir(Ty::obj_name(owner)), Some(recv));
-            let recv_g = self.emit_get_value(rv);
-            let call = self.emit_virtual_call(
-                owner,
-                member.name,
-                member.descriptor,
-                interface,
-                recv_g,
-                args,
-            );
-            if suspend {
-                self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
-            }
-            self.record_call_declared_ret(call, declared_ret);
-            return Some(self.emit_block(vec![decl], Some(call)));
-        }
+        // kotlinc pushes the receiver BEFORE evaluating arguments. Route the suspension boundary
+        // through the common ordering helper so virtual calls and intrinsic/static rewrites cannot
+        // disagree about when an already-evaluated receiver needs a continuation spill.
+        let (recv, recv_spill) =
+            self.spill_value_before_suspending_operands(recv, Ty::obj_name(owner), &args);
         let call =
             self.emit_virtual_call(owner, member.name, member.descriptor, interface, recv, args);
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
         self.record_call_declared_ret(call, declared_ret);
-        Some(call)
+        Some(match recv_spill {
+            Some(declaration) => self.emit_block(vec![declaration], Some(call)),
+            None => call,
+        })
     }
 
     /// Pack expanded member arguments into the physical trailing array.
@@ -25938,7 +25952,11 @@ impl<'a> Lower<'a> {
                         let r = if same_type {
                             self.expr(arg)?
                         } else {
-                            self.lower_arg(arg, &Ty::obj("kotlin/Any"))?
+                            // `equals` declares `other: Any?`. Nullability erases from the JVM
+                            // descriptor but remains part of the semantic callable/argument model;
+                            // keeping it here prevents the lowering contract from claiming that the
+                            // literal-null case is flowing into a non-null parameter.
+                            self.lower_arg(arg, &Ty::nullable(Ty::obj("kotlin/Any")))?
                         };
                         // kotlinc evaluates the RECEIVER first. When the ARGUMENT suspends, everything
                         // after the suspension point moves into the resume block — so a receiver left
@@ -25946,20 +25964,15 @@ impl<'a> Lower<'a> {
                         // with a side effect runs in the wrong order. Spill it to a temp local first
                         // (an unnamed slot in kotlinc's bytecode), the same fix and the same condition
                         // `emit_library_member_call` applies to the shapes that still reach it.
-                        let spill =
-                            (self.cur_fn_suspend && self.ir_subtree_suspends(r)).then(|| {
-                                let rv = self.fresh_value();
-                                let decl = self.emit_named_variable(rv, ty_to_ir(rty), Some(l));
-                                (decl, self.emit_get_value(rv))
-                            });
-                        let l = spill.map_or(l, |(_, get)| get);
+                        let (l, recv_spill) =
+                            self.spill_value_before_suspending_operands(l, rty, &[r]);
                         let value = if same_type {
                             self.emit_primitive_bin_op(IrBinOp::Eq, l, r)
                         } else {
                             self.runtime_call(RuntimeOp::UnsignedEquals, rty, vec![l, r])?
                         };
-                        return Some(match spill {
-                            Some((decl, _)) => self.emit_block(vec![decl], Some(value)),
+                        return Some(match recv_spill {
+                            Some(declaration) => self.emit_block(vec![declaration], Some(value)),
                             None => value,
                         });
                     }

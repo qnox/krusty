@@ -4136,7 +4136,10 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                     RuntimeOp::UnsignedEquals => callable(
                         owner,
                         "equals-impl",
-                        vec![ty, Ty::obj("kotlin/Any")],
+                        // Kotlin declares `equals(other: Any?)`. The descriptor still erases the
+                        // nullable reference to `Object`; retain nullability in the semantic row so
+                        // target-independent lowering and JVM realization describe the same call.
+                        vec![ty, Ty::nullable(Ty::obj("kotlin/Any"))],
                         Ty::Boolean,
                         Ty::Boolean,
                         format!("({prim}Ljava/lang/Object;)Z"),

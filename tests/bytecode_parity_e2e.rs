@@ -1277,25 +1277,48 @@ fun box(): String {\n  val a = p(2)\n  return if (a.equals(null)) \"f\" else \"O
     }
 }
 
-/// Both unsigned `equals` lowerings evaluate the RECEIVER before the argument, and must keep doing so
-/// when the argument SUSPENDS. Neither reaches `emit_library_member_call`, which is where the receiver
-/// spill lives — so each has to spill for itself: everything after a suspension point moves into the
-/// resume block, and a receiver left as a plain operand is re-evaluated there, AFTER the argument.
+/// An ordinary virtual call and both unsigned `equals` rewrites evaluate the RECEIVER before the
+/// argument, and must keep doing so when the argument SUSPENDS. Coroutine lowering moves everything
+/// after the suspension point into the resume block; a receiver left as a nested operand is therefore
+/// re-evaluated there, AFTER the argument. All three routes share the same spill helper so origin and
+/// operation shape cannot grow independent evaluation-order rules.
 ///
 /// Asserted on instruction ORDER inside the state machine (`p()` before `s()`), which is what a
-/// side-effecting receiver observes; kotlinc emits the same order via its own unnamed spill slot.
+/// side-effecting receiver observes, and on exactly one invocation of each function so duplicated
+/// evaluation cannot hide behind the first matching instruction. kotlinc emits the same order via its
+/// own unnamed spill slot.
 #[test]
-fn unsigned_equals_evaluates_receiver_before_a_suspending_argument() {
-    for (name, arg_fn, arg_call) in [
+fn member_and_unsigned_equals_evaluate_receiver_before_a_suspending_argument() {
+    for (name, receiver_ty, receiver_value, arg_fn, arg_call) in [
+        // The ordinary virtual-member path that originally owned the receiver-spill rule …
+        (
+            "member_suspend_any",
+            "String",
+            "\"x\"",
+            "suspend fun s(): Any? = null",
+            "s()",
+        ),
         // The `equals-impl` path (argument is `Any`) …
-        ("ueq_suspend_any", "suspend fun s(): Any = \"x\"", "s()"),
+        (
+            "ueq_suspend_any",
+            "UInt",
+            "1u",
+            "suspend fun s(): Any = \"x\"",
+            "s()",
+        ),
         // … and the same-type fold, which is a bare primitive compare with no call to hang the
         // receiver off at all.
-        ("ueq_suspend_same", "suspend fun s(): UInt = 1u", "s()"),
+        (
+            "ueq_suspend_same",
+            "UInt",
+            "1u",
+            "suspend fun s(): UInt = 1u",
+            "s()",
+        ),
     ] {
         let src = format!(
             "var log: String = \"\"\n\
-fun p(): UInt {{ log = log + \"p\"; return 1u }}\n\
+fun p(): {receiver_ty} {{ log = log + \"p\"; return {receiver_value} }}\n\
 {arg_fn}\n\
 suspend fun t(): Boolean = p().equals({arg_call})\n"
         );
@@ -1311,11 +1334,25 @@ suspend fun t(): Boolean = p().equals({arg_call})\n"
             .unwrap_or_else(|| panic!("{name}: no suspend `t` in the dump:\n{d}"))
             .1;
         let recv = body
-            .find("Method p:()I")
+            // The ordinary member case returns a reference while unsigned cases return their
+            // primitive carrier. Match only the selected helper name/empty parameter list: the
+            // return descriptor is deliberately varied by this table.
+            .find("Method p:()")
             .unwrap_or_else(|| panic!("{name}: `t` never calls the receiver `p()`:\n{d}"));
         let arg = body
             .find("Method s:(Lkotlin/coroutines/Continuation;)")
             .unwrap_or_else(|| panic!("{name}: `t` never calls the suspending `s()`:\n{d}"));
+        assert_eq!(
+            body.matches("Method p:()").count(),
+            1,
+            "{name}: the receiver `p()` must be evaluated exactly once:\n{d}"
+        );
+        assert_eq!(
+            body.matches("Method s:(Lkotlin/coroutines/Continuation;)")
+                .count(),
+            1,
+            "{name}: the argument `s()` must be evaluated exactly once:\n{d}"
+        );
         assert!(
             recv < arg,
             "{name}: the receiver `p()` must be evaluated BEFORE the suspending argument `s()` \
