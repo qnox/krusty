@@ -38,6 +38,34 @@ fn classpath_value_class_param_member_resolves_mangled() {
     }
 }
 
+/// Operator invocation must carry the selected declaration's return fact just like an explicitly
+/// named member call. The generic value class below erases its carrier to `Object`, so logical and
+/// physical types cannot classify the result: a real box read from a generic slot has the identical
+/// JVM shape. Only `Factory.invoke`'s declared, pre-substitution return proves that the `String` left
+/// by the mangled method is the unboxed `TokenBox<String>` carrier. Without that fact the consumer
+/// emits `checkcast TokenBox; unbox-impl` over the `String` and fails at runtime.
+#[test]
+fn operator_invoke_uses_declared_value_class_return() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let Some(libout) = common::compile_lib(
+        "vcoperatorreturn",
+        "package lib\n\
+         @JvmInline value class TokenBox<T>(val value: T)\n\
+         class Factory { operator fun invoke(): TokenBox<String> = TokenBox(\"OK\") }\n",
+    ) else {
+        return;
+    };
+    let cp = vec![libout.clone(), stdlib.clone()];
+    let main = "import lib.Factory\nfun box(): String = Factory()().value\n";
+    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
+        .expect("krusty failed to compile an operator with a declared value-class return");
+    match common::run_box(&classes, "MainKt", &[libout, stdlib]) {
+        Some(output) => assert_eq!(output.trim(), "OK", "box() = {output:?}"),
+        None => eprintln!("skipping: box runner unavailable"),
+    }
+}
+
 /// A COMPUTED member property of a classpath `@JvmInline value class` is realized as a STATIC
 /// `-impl` accessor whose sole parameter is the receiver's carrier
 /// (`val isFreezing: Boolean` → `isFreezing-impl(I)Z`, `val label: String` → `getLabel-impl(I)`).

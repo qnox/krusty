@@ -1276,6 +1276,10 @@ pub struct IrFile {
     /// `-<hash>` mangling). Recorded by the value-class pass BEFORE erasure; read by `emit_default_stub`
     /// (signature + box-on-fill + unbox-on-delegate) AND the `$default` CALL site (boxed arg + descriptor).
     pub default_stub_boxed_params: std::collections::HashMap<u32, Vec<(usize, crate::types::Ty)>>,
+    /// The subset declared in this MODULE's SOURCE (this file or a sibling). Whether such a class ends up
+    /// carrying an `@Metadata` record is decided by its own emit, so a record here cannot assume it does —
+    /// unlike a CLASSPATH value class, whose value-class-ness is itself decoded from that record.
+    pub module_source_value_classes: std::collections::HashSet<TypeName>,
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: std::collections::HashSet<TypeName>,
@@ -1415,6 +1419,18 @@ pub struct IrFile {
     /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
+    /// Call `ExprId` → the callee's DECLARED (un-erased, pre-substitution) return type, forwarded
+    /// verbatim from the resolved library member's `declared_ret`. `ir_lower` records it with NO
+    /// value-class reasoning of its own; the value-class pass reads it to decide the RESULT's
+    /// representation, exactly as `ext_call_source_receiver` does for the receiver.
+    ///
+    /// The distinction it carries cannot be recovered from the descriptor: a value class returned by
+    /// declaration (`A.create(): A<String>`, whose mangled method hands back the erased carrier) and
+    /// the same value class arriving BOXED out of a generic slot (`List<TokenBox>.get`) both
+    /// spell `()Ljava/lang/Object;`. The declaration separates them — `create` declares `A`, `get`
+    /// declares the type parameter `E` (never recorded, since it is not a class). Only NON-NULL
+    /// declared returns are recorded: a nullable value class really is boxed.
+    pub call_declared_ret: std::collections::HashMap<u32, Ty>,
     /// Stable property-operation identity → the declaration's semantic value type before
     /// use-site generic substitution. Resolution knows this fact uniformly for every source owner;
     /// recording it here lets a backend derive the physical accessor boundary without asking whether
