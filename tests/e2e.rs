@@ -708,6 +708,8 @@ mod member_default_implicit_receiver_e2e;
 mod member_extension_default_args_e2e;
 #[path = "member_extension_function_e2e.rs"]
 mod member_extension_function_e2e;
+#[path = "member_extension_in_lambda_e2e.rs"]
+mod member_extension_in_lambda_e2e;
 #[path = "member_extension_nested_hof_e2e.rs"]
 mod member_extension_nested_hof_e2e;
 #[path = "member_extension_property_e2e.rs"]
@@ -1030,6 +1032,8 @@ mod suspend_receiver_lambda_e2e;
 mod suspend_return_type_recovery_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_try_catch_shapes_e2e.rs"]
+mod suspend_try_catch_shapes_e2e;
 #[path = "suspend_try_finally_body_e2e.rs"]
 mod suspend_try_finally_body_e2e;
 #[path = "suspend_try_finally_e2e.rs"]

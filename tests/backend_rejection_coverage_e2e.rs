@@ -95,8 +95,11 @@ fn suspend_return_in_try_rejected() {
 }
 
 #[test]
-fn suspend_try_as_expression_rejected() {
-    assert!(rejects(
+fn suspend_try_as_expression_accepted() {
+    // Previously rejected; the value-`try` desugar now rewrites the locally-BOUND form too
+    // (`val x = try { … }` targets the bound local). Behavioral coverage:
+    // `suspend_try_catch_shapes_e2e` (incl. the bound form's exception-type filtering).
+    assert!(!rejects(
         "suspend fun d(): Int = 1\n\
          suspend fun f(): Int { val x = try { d() } catch (e: Exception) { 0 }; return x }\n"
     ));
@@ -333,4 +336,28 @@ fn projected_generic_extension_receiver_with_concrete_inference_is_accepted() {
         common::compile_and_run_with_stdlib(source, "ProjectedExtension").as_deref(),
         Some("OK")
     );
+}
+
+#[test]
+fn suspend_ctor_arg_after_side_effect_accepted() {
+    // Constructors now use the shared ordered-operand planner: `g()` is snapshotted before `d()`
+    // is hoisted, preserving Kotlin's left-to-right evaluation instead of requiring a
+    // constructor-specific rejection. Runtime order is pinned by `suspend_try_catch_shapes_e2e`.
+    assert!(!rejects(
+        "class S(val a: Int, val b: Int)\n\
+         var log = 0\n\
+         fun g(): Int { log += 1; return log }\n\
+         suspend fun d(): Int = 1\n\
+         suspend fun f(): Int { val s = S(g(), d()); return s.a + s.b }\n"
+    ));
+}
+
+#[test]
+fn suspend_ctor_single_arg_accepted() {
+    // The one-argument case remains a direct instance of the same generic operand rule.
+    assert!(!rejects(
+        "class S(val a: Int)\n\
+         suspend fun d(): Int = 1\n\
+         suspend fun f(): Int { val s = S(d()); return s.a }\n"
+    ));
 }
