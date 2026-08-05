@@ -20,6 +20,8 @@ mod anon_fun_statement_e2e;
 mod anon_object_capture_e2e;
 #[path = "anon_object_capture_member_e2e.rs"]
 mod anon_object_capture_member_e2e;
+#[path = "anon_object_outer_this_e2e.rs"]
+mod anon_object_outer_this_e2e;
 #[path = "anonymous_function_e2e.rs"]
 mod anonymous_function_e2e;
 #[path = "apt_host_e2e.rs"]

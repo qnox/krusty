@@ -444,6 +444,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
     let fq_name = fq_name.into();
     crate::ir::IrClass {
         fq_name: fq_name.into(),
+        is_inner_class: false,
         is_value: false,
         is_data: false,
         decl_line: 0,
@@ -455,6 +456,7 @@ pub(crate) fn synthetic_class(fq_name: impl Into<String>) -> crate::ir::IrClass 
         ctor_param_count: 0,
         ctor_args: Vec::new(),
         init_body: None,
+        pre_super_param_fields: Vec::new(),
         explicit_param_stores: false,
         methods: Vec::new(),
         is_interface: false,
