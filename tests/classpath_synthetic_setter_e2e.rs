@@ -1,8 +1,8 @@
 //! Java synthetic-property WRITES with a hierarchy-overridden setter: when a JavaBean `setX` is
-//! declared at several rungs of the receiver's supertype chain (e.g. `JComponent.setFont`,
-//! `Container.setFont`, `Component.setFont`), kotlinc still synthesizes the mutable property and
-//! binds the MOST-DERIVED override. krusty used to count every override as a separate candidate and
-//! refuse the "ambiguous" set, misreporting `'val' cannot be reassigned.` on a legal write.
+//! declared at several rungs of the receiver's supertype chain, kotlinc still synthesizes the
+//! mutable property and binds the MOST-DERIVED override. krusty used to count every override as a
+//! separate candidate and refuse the "ambiguous" set, misreporting `'val' cannot be reassigned.` on
+//! a legal write.
 
 use super::common;
 
@@ -45,24 +45,69 @@ fn overridden_java_setter_accepts_synthetic_property_write() {
     );
 }
 
-/// The original find: `javax.swing.JLabel.font` — `setFont` is declared on `JComponent`,
-/// `Container`, AND `Component` (three rungs). kotlinc accepts `label.font = …`; krusty reported
-/// `'val' cannot be reassigned.`
+/// A getter and setter that merely share a bean NAME do not form a Kotlin synthetic `var`: their
+/// value types must agree. Keep this next to the override regression because selecting the nearest
+/// setter only AFTER validating the getter/setter pair is the semantic boundary. In particular, a
+/// lone mismatched setter must not bypass the type filter just because there is no overload to
+/// disambiguate against; doing so makes the checker invent a writable `Int` property whose read type
+/// is `String`.
 #[test]
-fn swing_font_write_uses_hierarchy_overridden_setter() {
-    const SOURCE: &str = "import javax.swing.JLabel\n\
-        import java.awt.Font\n\
-        fun box(): String {\n\
-        \x20 val label = JLabel(\"x\")\n\
-        \x20 label.font = Font(\"Dialog\", 0, 12)\n\
-        \x20 return if (label.font.size == 12) \"OK\" else \"fail\"\n\
+fn mismatched_java_getter_and_setter_do_not_form_a_mutable_property() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let source = "package fixtures;\n\
+        public class Mismatch {\n\
+        \x20 public String getValue() { return \"read\"; }\n\
+        \x20 public void setValue(int value) {}\n\
         }\n";
-    let Some(diagnostics) = common::checker_diags_with_stdlib(SOURCE) else {
+    let Some((classes, _root)) =
+        common::javac_compile(&[("Mismatch.java".into(), source.into())], &[])
+    else {
         return;
     };
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    assert_eq!(
-        common::expect_box_run_with_stdlib(SOURCE, "Main").expect("toolchain provisioned"),
-        "OK"
+    let consumer = "import fixtures.Mismatch\n\
+        fun write(target: Mismatch) {\n\
+        \x20 target.value = 7\n\
+        }\n";
+    let diagnostics =
+        common::front_end_diagnostics(consumer, &[classes, stdlib], Some(jdk.as_path()));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("cannot be reassigned")),
+        "a mismatched JavaBean pair must remain read-only: {diagnostics:?}"
+    );
+}
+
+/// Setter discovery must obey the same access context as an ordinary member call. A public getter
+/// with a protected setter is a readable synthetic property, but not a writable one outside the Java
+/// declaration. Keeping the inaccessible setter in the candidate set would make checking succeed
+/// and leave the JVM to reject the emitted call with `IllegalAccessError`.
+#[test]
+fn inaccessible_java_setter_does_not_form_a_mutable_property() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let source = "package fixtures;\n\
+        public class ReadOnly {\n\
+        \x20 private int value;\n\
+        \x20 public int getValue() { return value; }\n\
+        \x20 protected void setValue(int value) { this.value = value; }\n\
+        }\n";
+    let Some((classes, _root)) =
+        common::javac_compile(&[("ReadOnly.java".into(), source.into())], &[])
+    else {
+        return;
+    };
+    let consumer = "import fixtures.ReadOnly\n\
+        fun write(target: ReadOnly) {\n\
+        \x20 target.value = 7\n\
+        }\n";
+    let diagnostics =
+        common::front_end_diagnostics(consumer, &[classes, stdlib], Some(jdk.as_path()));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("cannot be reassigned")),
+        "an inaccessible Java setter must leave the synthetic property read-only: {diagnostics:?}"
     );
 }
