@@ -4105,7 +4105,7 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         };
 
         match op {
-            RuntimeOp::UnsignedBox | RuntimeOp::UnsignedUnbox => {
+            RuntimeOp::UnsignedBox | RuntimeOp::UnsignedUnbox | RuntimeOp::UnsignedEquals => {
                 // Every unsigned type boxes through its OWN inline class (`kotlin/UByte`, …) over the
                 // signed primitive it erases to — one row derived from the `Ty`, not a per-type table.
                 if !ty.is_unsigned() {
@@ -4130,6 +4130,19 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                         ty,
                         repr,
                         format!("(){prim}"),
+                    ),
+                    // The compiled form of `override fun equals(other: Any?)` on the inline class: the
+                    // receiver is the CARRIER in a primitive slot, so nothing boxes to make the call.
+                    RuntimeOp::UnsignedEquals => callable(
+                        owner,
+                        "equals-impl",
+                        // Kotlin declares `equals(other: Any?)`. The descriptor still erases the
+                        // nullable reference to `Object`; retain nullability in the semantic row so
+                        // target-independent lowering and JVM realization describe the same call.
+                        vec![ty, Ty::nullable(Ty::obj("kotlin/Any"))],
+                        Ty::Boolean,
+                        Ty::Boolean,
+                        format!("({prim}Ljava/lang/Object;)Z"),
                     ),
                     _ => unreachable!(),
                 }

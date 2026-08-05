@@ -17,10 +17,12 @@
 //! is a fully supported type there. What was wrong was the representation of a value at a call
 //! boundary, which no signature-level check can see.
 //!
-//! Both now emit kotlinc's shapes, and a SAME-TYPE `a.equals(b)` no longer reaches the member call
-//! at all — it folds to a carrier compare (kotlinc's intrinsic; the shape is pinned in
-//! `bytecode_parity_e2e`). The boxed receiver still carries every other argument type, which is what
-//! `unsigned_equals_keeps_value_class_semantics_across_argument_types` exercises.
+//! Both now emit kotlinc's shapes, and `a.equals(b)` no longer reaches the member call at ANY argument
+//! type — a same-type argument folds to a carrier compare (kotlinc's intrinsic) and every other one
+//! goes to the static `equals-impl`, whose receiver slot is the carrier. Both shapes are pinned in
+//! `bytecode_parity_e2e`; what
+//! `unsigned_equals_keeps_value_class_semantics_across_argument_types` exercises here is that the
+//! rerouting did not change what `equals` ANSWERS across the argument types.
 //!
 //! The contract pinned here is the backend's, not the feature's. Declining the file is always a
 //! legal outcome; claiming success and writing a class that fails verification is not. So
@@ -102,9 +104,10 @@ fn unsigned_min_of_emits_verifiable_bytecode() {
     );
 }
 
-/// `a.equals(b)`. A same-type pair folds to a carrier compare (kotlinc's intrinsic — shape pinned in
-/// `bytecode_parity_e2e`); any other argument stays an `invokevirtual kotlin/UInt.equals(Object)Z`,
-/// whose receiver must be the BOXED value class. Both paths are exercised here.
+/// `a.equals(b)`. A same-type pair folds to a carrier compare (kotlinc's intrinsic); any other
+/// argument reaches the static `kotlin/UInt."equals-impl":(ILjava/lang/Object;)Z`, whose receiver
+/// slot is the carrier — so neither path boxes the receiver. Both shapes are pinned in
+/// `bytecode_parity_e2e`; both are exercised here for what they ANSWER.
 #[test]
 fn unsigned_equals_call_emits_verifiable_bytecode() {
     expect_emitted_box_verifies(
@@ -345,9 +348,10 @@ fn narrow_unsigned_types_stay_declined_or_correct() {
 }
 
 /// The `equals` intrinsic must not change what `equals` MEANS. kotlinc folds only the same-type case
-/// to a carrier compare; every other argument still goes through the value class's own equality,
-/// which is what makes a cross-carrier comparison answer `false` (a `UInt` is never a `ULong`, even
-/// when the carriers hold the same bits).
+/// to a carrier compare; every other argument still goes through the value class's own equality —
+/// `equals-impl`, which tests the argument's runtime class first. That is what makes a cross-carrier
+/// comparison answer `false` (a `UInt` is never a `ULong`, even when the carriers hold the same bits),
+/// a `null` argument answer `false`, and a boxed-but-equal one answer `true`.
 #[test]
 fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
     expect_emitted_box_verifies(
@@ -360,6 +364,11 @@ fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
     val anyA: Any = a\n\
     if (!a.equals(anyA)) return \"f any-eq\"\n\
     if (a.equals(\"4294967295\")) return \"f any-ne\"\n\
+    val na: UInt? = a\n\
+    if (!a.equals(na)) return \"f nullable-eq\"\n\
+    if (a.equals(null)) return \"f null\"\n\
+    val i: Int = -1\n\
+    if (a.equals(i)) return \"f signed-carrier\"\n\
     return \"OK\"\n\
 }\n",
         "UEqualsSemantics",
@@ -372,9 +381,24 @@ fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
     if (!a.equals(a)) return \"f same-eq\"\n\
     val anyA: Any = a\n\
     if (!a.equals(anyA)) return \"f any-eq\"\n\
+    val na: ULong? = a\n\
+    if (!a.equals(na)) return \"f nullable-eq\"\n\
+    val l: Long = -1L\n\
+    if (a.equals(l)) return \"f signed-carrier\"\n\
     return \"OK\"\n\
 }\n",
         "ULongEqualsSemantics",
+    );
+    // The narrow pair carries the same contract on its own `B`/`S` carrier.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val a: UByte = 200.toUByte()\n\
+    val anyA: Any = a\n\
+    if (!a.equals(anyA)) return \"f any-eq\"\n\
+    if (a.equals(200.toUShort())) return \"f cross-carrier\"\n\
+    return \"OK\"\n\
+}\n",
+        "UByteEqualsSemantics",
     );
 }
 
