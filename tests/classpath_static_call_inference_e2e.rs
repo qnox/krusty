@@ -594,6 +594,186 @@ fn null_literal_into_a_primitive_parameter_still_fails() {
     }
 }
 
+#[test]
+fn java_typevar_return_keeps_platform_nullability() {
+    // The intellij `ActionUtil` shape: a Java method returning its own TYPE VARIABLE
+    // (`public <T> T getClientProperty(Key<T> key)`) binds `T` to the Kotlin NON-NULL type the
+    // call site supplies (`Key<Boolean>` → `Boolean`). kotlinc types the result as the PLATFORM
+    // `T!`, so a null check on it is legal and smart-casts inside the branch; krusty substituted
+    // the binding's exact non-null type and rejected `was != null` with
+    // "operator '!=' cannot be applied to 'Boolean' and 'Null'.". A plain Java reference return
+    // (`String getName()`) already carries platform nullability — only the type-variable
+    // substitution lost it.
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let java = [
+        (
+            "Key.java".into(),
+            r#"
+                package fixtures;
+                public final class Key<T> {
+                    private final String name;
+                    private Key(String name) { this.name = name; }
+                    public static <T> Key<T> create(String name) { return new Key<T>(name); }
+                }
+            "#
+            .into(),
+        ),
+        (
+            "Presentation.java".into(),
+            r#"
+                package fixtures;
+                public final class Presentation {
+                    @SuppressWarnings("unchecked")
+                    public <T> T getClientProperty(Key<T> key) { return null; }
+                    public <T> void putClientProperty(Key<T> key, T value) { }
+                    public String getName() { return null; }
+                    public Boolean getFlag() { return null; }
+                }
+            "#
+            .into(),
+        ),
+        (
+            "Lists.java".into(),
+            r#"
+                package fixtures;
+                public final class Lists {
+                    public <T> T first(java.util.List<T> list) { return list.get(0); }
+                }
+            "#
+            .into(),
+        ),
+    ];
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        return;
+    };
+    let root = library.parent().map(std::path::Path::to_path_buf);
+    let classpath = vec![library, stdlib];
+    let source = r#"
+        import fixtures.Key
+        import fixtures.Lists
+        import fixtures.Presentation
+
+        private val KEY: Key<Boolean> = Key.create("K")
+
+        fun box(): String {
+            val p = Presentation()
+            // Java returns null here: the platform-typed result must compile the null check AND
+            // skip the branch (the smart-cast `!was` inside the branch must type as Boolean).
+            val was = p.getClientProperty(KEY)
+            if (was != null && !was) return "typevar"
+            // The declared-reference controls keep their existing platform behavior.
+            val n = p.getName()
+            if (n != null && n.isEmpty()) return "name"
+            val f = p.getFlag()
+            if (f != null && !f) return "flag"
+            // Call-site inference from ARGUMENTS (`List<String>` → `T = String`): the result
+            // stays a String inside the branch.
+            val s = Lists().first(listOf("x"))
+            if (s != null && s.length != 1) return "first"
+            // The same argument inference with a PRIMITIVE binding (`List<Boolean>` → `T = Boolean`)
+            // gets the platform treatment too.
+            val b = Lists().first(listOf(true))
+            if (b != null && !b) return "firstBool"
+            // A platform result also compares against a Boolean/Int LITERAL (kotlinc unboxes the
+            // `T!` operand): `getClientProperty(...) == false` / `first(...) == 1`. The Java side
+            // returns null/`1`, so neither branch is taken.
+            if (p.getClientProperty(KEY) == false) return "eqFalse"
+            if (Lists().first(listOf(1)) != 1) return "eqInt"
+            // kotlinc also admits a null argument INTO an unannotated Java type-variable
+            // parameter (the platform `T!` parameter of `putClientProperty`).
+            p.putClientProperty(KEY, null)
+            return "OK"
+        }
+    "#;
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
+            )
+        });
+    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output.trim(), "OK");
+}
+
+#[test]
+fn java_static_typevar_return_keeps_platform_nullability() {
+    // The static twin of `java_typevar_return_keeps_platform_nullability`: a Java STATIC generic
+    // method (`public static <T> T identity(T t)`) binds its type variable through the
+    // companion-static return substitution (and the package top-level static index), which carried
+    // no platform fact — `Statics.identity(true)` typed as the exact non-null `Boolean` and
+    // rejected `b != null` with "operator '!=' cannot be applied to 'Boolean' and 'Null'.".
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let java = [(
+        "Statics.java".into(),
+        r#"
+                package fixtures;
+                public final class Statics {
+                    public static <T> T identity(T t) { return t; }
+                }
+            "#
+        .into(),
+    )];
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        return;
+    };
+    let root = library.parent().map(std::path::Path::to_path_buf);
+    let classpath = vec![library, stdlib];
+    let source = r#"
+        import fixtures.Statics
+
+        fun box(): String {
+            // Primitive binding (`T = Boolean`): the platform result null-checks and smart-casts.
+            // Java returns the argument (`true`), so the branch is skipped.
+            val b = Statics.identity(true)
+            if (b != null && !b) return "prim"
+            // Reference binding (`T = String`): unchanged — still a String inside the branch.
+            val s = Statics.identity("x")
+            if (s != null && s.length != 1) return "ref"
+            return "OK"
+        }
+    "#;
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
+            )
+        });
+    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output.trim(), "OK");
+}
+
+#[test]
+fn kotlin_non_null_return_still_rejects_null_check() {
+    // Negative pin: a KOTLIN (non-platform) non-null return must STILL reject `!= null` with the
+    // existing message — the platform treatment above applies to Java type-variable returns only.
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let classpath = vec![stdlib];
+    let source = r#"
+        fun nonNull(): Boolean = true
+
+        fun bad(): Boolean = nonNull() != null
+    "#;
+    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message
+                .contains("operator '!=' cannot be applied to 'Boolean' and 'Null'.")),
+        "a Kotlin non-null Boolean return must keep rejecting `!= null`, got {diagnostics:?}"
+    );
+}
+
 // The lightweight signature inferer's `null` literal arm also admits a bare
 // `val x = null` (typed `Nothing?`, as kotlinc accepts) where it previously
 // reported "cannot infer the type of property 'x'".

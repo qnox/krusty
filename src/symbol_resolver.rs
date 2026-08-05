@@ -684,6 +684,40 @@ fn bind_gsig_return(
     ty_subst(gsig.ret, &binds)
 }
 
+/// kotlinc types an UNANNOTATED Java method's type-variable return as the PLATFORM `T!`: the method
+/// may return null whatever non-null type `T` binds to at the call site (`<T> T getClientProperty(
+/// Key<T>)` with a `Key<Boolean>` argument → `Boolean!`), so a null check on the result stays legal
+/// and smart-casts inside the branch. Substituting the binding's EXACT type (`Boolean`) loses that —
+/// a plain Java reference return never does, since it decodes as a reference type from the start.
+/// Recover the platform shape for a PRIMITIVE substituted result by lifting it to the boxed reference
+/// form a DECLARED boxed-primitive Java return carries (`Boolean` → the platform's wrapper type,
+/// spelled through the platform's own library-value form so the core never names it) — emission,
+/// unboxing, and null checks then treat the result exactly like `Boolean getFlag()`. Only a
+/// METHOD-declared type variable is lifted (one bound fresh at the call site); a CLASS formal's
+/// return keeps the receiver-bound exact type it already had (`HashMap<String, Int>.put` stays
+/// `Int`). Kotlin `@Metadata` members (`java_platform` unset) keep their exact return, and a Java
+/// method whose signature return mentions no type variable (`int compare(T, T)`) keeps its genuine
+/// primitive. Shared by the instance-member, companion-static, and top-level-static return binding —
+/// the same substitution loses the platform nullability on every one of them.
+fn java_platform_typevar_ret(
+    lib: &dyn SemanticPlatform,
+    java_platform: bool,
+    generic_sig: Option<&GenericSig>,
+    ret: Ty,
+) -> Ty {
+    if !java_platform {
+        return ret;
+    }
+    let method_typevar_return =
+        generic_sig.is_some_and(|gsig| crate::types::ty_mentions_param(gsig.ret, &gsig.formals));
+    if !method_typevar_return {
+        return ret;
+    }
+    ret.boxed_ref()
+        .map(|boxed| lib.library_value_form(boxed))
+        .unwrap_or(ret)
+}
+
 fn bind_member_return(gsig: &GenericSig, receiver: Ty, args: &[Ty], provider_ret: Ty) -> Ty {
     let mut binds = GSigBinds::new();
     if let Some(declared_receiver) = gsig.receiver {
@@ -2446,7 +2480,11 @@ impl<'a> SymbolResolver<'a> {
                 ty_subst(gsig.ret, &binds)
             })
             .unwrap_or(*ret);
-        let ret_ty = o.ret.apply(if o.flags.suspend { c.ret } else { ret_ty });
+        let ret_ty = o.ret.apply(if o.flags.suspend {
+            c.ret
+        } else {
+            java_platform_typevar_ret(self.lib, o.java_platform, o.generic_sig.as_ref(), ret_ty)
+        });
 
         crate::trace_compiler!(
             "resolve",
@@ -3674,6 +3712,14 @@ fn resolve_companion_name(
                 unify_ty(parameter, argument.ty(), &mut binds);
             }
             member.ret = merge_specialized_return(member.ret, ty_subst(gsig.ret, &binds));
+            // A JAVA static's type-variable return carries the same platform nullability as an
+            // instance member's (`Statics.identity(true)` → `Boolean!`).
+            member.ret = java_platform_typevar_ret(
+                lib,
+                member.java_platform(),
+                member.generic_sig.as_ref(),
+                member.ret,
+            );
         }
         member
     })
@@ -3884,7 +3930,12 @@ fn resolve_instance_member(
         .as_ref()
         .map(|gsig| bind_member_return(gsig, recv, &arg_tys, o.callable.ret))
         .unwrap_or(o.callable.ret);
-    let ret = o.ret.apply(ret);
+    let ret = o.ret.apply(java_platform_typevar_ret(
+        lib,
+        o.java_platform,
+        o.generic_sig.as_ref(),
+        ret,
+    ));
     let member = o.member_with_return(o.callable.ret);
     Some(ResolvedMember {
         ret,

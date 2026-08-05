@@ -30,7 +30,7 @@ pub struct GenericSig {
 /// Bit-packed boolean flags for a [`LibraryMember`], collapsing `ret_nullable`/`is_interface`/
 /// `suspend`/`is_operator`/`is_extension` into one byte. Read through the `LibraryMember` accessors of the same
 /// names; mutated through the matching `set_*` methods; built with the `with_*` chain. Headroom for
-/// three more flags.
+/// two more flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LmFlags(u8);
 
@@ -47,6 +47,11 @@ impl LmFlags {
     /// descriptor distinguishes that from an ordinary member taking a parameter of the same type, and
     /// a call site must know which, since only a member extension needs its dispatch receiver in scope.
     const IS_EXTENSION: u8 = 1 << 4;
+    /// The member was decoded from JAVA bytecode without Kotlin `@Metadata`, so its unannotated types
+    /// are PLATFORM types: a type-variable return stays null-checkable (`T!`) even when the call site
+    /// binds `T` to a Kotlin non-null type. Kotlin `@Metadata` members keep their exact declared
+    /// nullability and never carry this bit.
+    const JAVA_PLATFORM: u8 = 1 << 5;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -81,6 +86,10 @@ impl LmFlags {
     #[inline]
     pub const fn with_is_extension(self, on: bool) -> Self {
         self.with(Self::IS_EXTENSION, on)
+    }
+    #[inline]
+    pub const fn with_java_platform(self, on: bool) -> Self {
+        self.with(Self::JAVA_PLATFORM, on)
     }
 }
 
@@ -387,6 +396,10 @@ impl LibraryMember {
         self.flags.has(LmFlags::IS_EXTENSION)
     }
     #[inline]
+    pub fn java_platform(&self) -> bool {
+        self.flags.has(LmFlags::JAVA_PLATFORM)
+    }
+    #[inline]
     pub fn set_ret_nullable(&mut self, on: bool) {
         self.flags = self.flags.with_ret_nullable(on);
     }
@@ -403,6 +416,10 @@ impl LibraryMember {
     }
     pub fn set_is_member_extension(&mut self, on: bool) {
         self.flags = self.flags.with_is_extension(on);
+    }
+    #[inline]
+    pub fn set_java_platform(&mut self, on: bool) {
+        self.flags = self.flags.with_java_platform(on);
     }
 
     pub fn owner_name(&self) -> Option<String> {
@@ -1103,6 +1120,10 @@ pub struct FunctionInfo {
     /// overload instead of making consumers parse backend signature strings after selection.
     pub generic_sig: Option<GenericSig>,
     pub projected_return_hazard: bool,
+    /// The declaration came from JAVA bytecode without Kotlin `@Metadata` ([`LibraryMember::java_platform`]):
+    /// an unannotated type-variable return is a PLATFORM type (`T!`), so a null check stays legal even
+    /// when the call site binds the variable to a Kotlin non-null type.
+    pub java_platform: bool,
     /// The source-level call shape (defaults, named params, lambda param types, vararg) the checker needs
     /// beyond the erased descriptor. `Default` (empty) when the source doesn't provide it.
     pub call_sig: CallSig,
@@ -1169,6 +1190,7 @@ impl FunctionInfo {
             overload_rank: 0,
             generic_sig: None,
             projected_return_hazard: false,
+            java_platform: false,
             call_sig: CallSig::default(),
             context_count: 0,
             source_key: None,

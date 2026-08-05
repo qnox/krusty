@@ -261,6 +261,13 @@ impl JvmLibraries {
                 generic_sig,
                 call_sig,
                 context_count,
+                // A static on a class WITHOUT Kotlin `@Metadata` is a Java declaration: its
+                // unannotated type-variable return is a PLATFORM type (`T!`), the same fact the
+                // member decode stamps on instance members.
+                java_platform: self
+                    .cp
+                    .find_name(c.owner)
+                    .is_some_and(|ci| !ci.meta.is_present()),
                 flags: FnFlags {
                     inline: inline_kind,
                     suspend,
@@ -1201,6 +1208,10 @@ impl JvmLibraries {
                 });
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                // A class WITHOUT Kotlin `@Metadata` is a Java declaration: its unannotated types are
+                // PLATFORM types, a fact the call site needs to keep a type-variable return
+                // null-checkable (`T!`) when the variable binds to a Kotlin non-null type.
+                member.set_java_platform(is_java);
                 if let Some(java_nullable) = platform_nullable_params.clone() {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
@@ -3451,6 +3462,7 @@ impl SymbolSource for JvmLibraries {
                             overload_rank: descriptor_narrowing(&m.descriptor) as u32,
                             generic_sig,
                             call_sig,
+                            java_platform: m.java_platform(),
                             flags: FnFlags {
                                 inline: m.inline,
                                 suspend,

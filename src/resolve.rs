@@ -25708,8 +25708,14 @@ impl<'a> Checker<'a> {
                 // A nullable-primitive wrapper (`Int?`/`Double?`) compares with its primitive (`a == 5.0`):
                 // the lowerer null-checks the wrapper, then UNBOXES it and does a primitive `==` (`dcmp`/
                 // `fcmp` for Float/Double — IEEE-754, so `-0.0 == 0.0`, `NaN != NaN`), never boxed `equals`.
-                let wrapper_vs_prim =
-                    |w: Ty, p: Ty| w.nullable_primitive().map_or(false, |pw| pw == p);
+                let wrapper_vs_prim = |w: Ty, p: Ty| {
+                    // A nullable-primitive wrapper (`Int?`) or a PLATFORM wrapper (a Java method's
+                    // boxed-primitive result, `Integer!` — carried as the `java/lang/*` wrapper `Obj`)
+                    // compares with its primitive: the lowerer null-checks/unboxes the wrapper first.
+                    w.nullable_primitive()
+                        .or_else(|| self.syms.libraries.boxed_primitive(w))
+                        .map_or(false, |pw| pw == p)
+                };
                 let is_unit = |t: Ty| t.non_null() == Ty::Unit;
                 let has_boxable_value_equality = |t: Ty| {
                     matches!(
