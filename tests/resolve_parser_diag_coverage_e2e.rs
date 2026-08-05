@@ -108,6 +108,29 @@ fn companion_member_collides_with_instance() {
     assert_rejected(&d, "companion member collides with instance member");
 }
 
+#[test]
+fn companion_method_default_arity_overlap_stays_rejected() {
+    // Different declaration lengths are not necessarily different CALL shapes. The instance method
+    // accepts zero arguments through its default, so an unqualified `f()` inside the class would fit
+    // both it and the companion fallback. Keep the conservative gate until lexical receiver ranking
+    // can distinguish two same-arity families instead of letting the name-only companion arm win.
+    let d = diags(
+        "class C { fun f(value: Int = 1): Int = value\ncompanion object { fun f(): Int = 2 } }\nfun box(): Int = 0",
+    );
+    assert_rejected(&d, "companion member collides with instance member");
+}
+
+#[test]
+fn companion_method_vararg_arity_overlap_stays_rejected() {
+    // A vararg contributes no minimum, even when a defaulted fixed parameter precedes it. Comparing
+    // only `params.len()` (two versus zero), or treating the vararg as one required value, would allow
+    // this pair even though the same zero-argument call can reach both callable families.
+    let d = diags(
+        "class C { fun f(prefix: Int = 1, vararg value: Int): Int = prefix + value.size\ncompanion object { fun f(): Int = 2 } }\nfun box(): Int = 0",
+    );
+    assert_rejected(&d, "companion member collides with instance member");
+}
+
 // ===========================================================================
 // Unsupported-feature rejections (resolve.rs "krusty: ...")
 // ===========================================================================
