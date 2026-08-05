@@ -980,6 +980,60 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   folds to one interned literal, so `A.b === B.b`), which krusty does not model yet — it emits such a
   const as a runtime concatenation (a fresh object), so it can't reproduce String identity without
   miscompiling.
+- **A MIXED reference/primitive `===`/`!==` boxes the primitive side and compares refs.** `a === 0`
+  (`a: Comparable<Int>`) or `a === b` (`a: Any`, `b: Int`) is legal Kotlin — kotlinc accepts it with only
+  a warning ("identity equality for arguments of types 'Any' and 'Int' can be unstable because of
+  implicit boxing") and emits `aload_0; iload_1; Integer.valueOf; if_acmp*`. krusty matches: unless BOTH
+  operands of a `RefEq`/`RefNe` are JVM scalars, the shared classifier
+  (`emit_non_structural_compare_branch`, which serves value and branch position alike) takes the
+  reference route and boxes the primitive operand in place with its wrapper's `valueOf` — so the two
+  consumers cannot drift apart. The predicate is "not both scalars"
+  (`identity_compares_refs`) rather than "either is a reference" because `is_reference()` is a
+  LANGUAGE-level query that misses types which are still references on the JVM — `Ty::Unit`, whose value
+  is the `kotlin/Unit.INSTANCE` singleton, and `Ty::Null`. Boxing is per operand, not once at the end: a
+  `Long`/`Double` left operand occupies two stack words, so a boxed right operand could not be swapped
+  past it. Only a pair of same-typed plain primitives is a value comparison and remaps to `Eq`/`Ne`;
+  unlike primitive types (`Int === Long`, `Int === Char`, `Float === Double`) are rejected at the
+  semantic boundary, matching kotlinc, before the emitter can select an incompatible JVM comparison
+  family from one operand.
+  Requiring BOTH operands to be references (the earlier condition) dropped a mixed pair into the numeric
+  tail, where the int-vs-wide category was derived as "not `Long`/`Double`/`Float`" — which classifies
+  every reference type as int-category. The result was an int branch on an object ref (`aload_0; ifne`,
+  `aload_0; iload_1; if_icmpne`): a class file that is emitted successfully and fails only at class
+  load, so **a compile-only assertion cannot catch it** — `VerifyError: Bad type on operand stack` /
+  `Type 'java/lang/Object' … is not assignable to integer`. That categorization now goes through
+  `numeric_cmp_int_category`, which asserts both operands are JVM scalars, so a future reference leaking
+  into `emit_numeric_compare_branch` fails loudly instead of emitting unverifiable bytecode.
+  `MixedRefPrimIdentity`/`MixedRefPrimIdentityGeneric` in `tests/feature_box_e2e.rs` (they RUN on a JVM;
+  the expected results ride on the wrapper caches — `Integer`/`Long` cache -128..127, `Character`
+  caches the ASCII range used by the fixture, `1000` is outside the integer cache, and
+  `Double.valueOf` never caches).
+- **A `Unit` operand of `===`/`!==` materializes `kotlin/Unit.INSTANCE`**, exactly as it already did for
+  `==`/`!=` — the lowerer's `unit_value_after_effect` gate covers all four operators. A `Unit`-typed call
+  leaves nothing on the stack, so without the `getstatic` each operand of `g() === g()` pushes NOTHING
+  and the `if_acmp*` reads an empty stack (`VerifyError: Operand stack underflow`); the backend also saw
+  a `Ty::Unit` that is neither `is_reference()` nor `is_jvm_scalar()`. Every call to a `Unit` function
+  yields the same singleton, so identity holds. Byte-compatible with kotlinc. `UnitIdentity` in
+  `tests/feature_box_e2e.rs`.
+- **A primitive compared against the `null` literal boxes before `ifnull`/`ifnonnull`.** `x === null` for
+  `x: Int` is legal Kotlin — kotlinc warns "condition is always 'false'" and folds the expression to
+  `iconst_0`. krusty keeps the comparison and boxes the operand (`iload_0; Integer.valueOf; ifnonnull`),
+  since the single-operand null branch tests a REFERENCE and `iload_0; ifnonnull` is the same
+  int-under-a-reference-branch VerifyError. Same constant answer as kotlinc, verifiable, but not its
+  folded form — krusty does not model the constant fold. (`x == null` on a primitive never reaches the
+  backend: the front end rejects it, matching kotlinc's `==` typing.) `PrimitiveVsNullIdentity` in
+  `tests/feature_box_e2e.rs`.
+- **`===`/`!==` with an unsigned or `@JvmInline value class` operand is rejected** — kotlinc makes this a
+  hard ERROR, not the implicit-boxing warning above ("identity equality for arguments of types 'Any' and
+  'UInt' is prohibited"), because an inline class has no stable boxed identity. It applies to either
+  side, to two operands of the same value class, and through nullability (`VC? === VC?`). krusty mirrors
+  the error rather than boxing through `box-impl`, which would emit an `if_acmp*` for a program kotlinc
+  refuses to compile. The value-class query is FEDERATED: module symbols publish their `value_field`
+  through the same provider-neutral classifier shape as decoded dependency metadata, and the checker
+  asks that common resolver once. A dependency inline class can otherwise reach the backend as its
+  unboxed carrier, so an unrejected `a === b` silently compares two scalar carriers or boxes one as an
+  unrelated JVM wrapper. No source/classpath branch is part of the identity policy.
+  `referential_equality_on_a_value_class_operand` in `tests/resolve_parser_diag_coverage_e2e.rs`.
 - `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
   — the exact helper kotlinc's JVM backend emits (`backend.jvm/.../intrinsics/Equals.kt`), so the
