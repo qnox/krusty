@@ -3999,25 +3999,45 @@ fn resolve_property_setter(
     // No `@Metadata` property: a JAVA accessor pair (`isX`/`getX` + `setX(v)`) IS a synthetic
     // property (spec § Java synthetic properties). Kotlin only synthesizes a property when the
     // GETTER exists, so require the read to resolve; then take the single-argument `void` member
-    // setter — preferring the overload whose parameter matches the getter's type, and refusing an
-    // ambiguous remainder (conservative: kotlinc pairs accessors per matching type).
+    // setter — requiring the parameter to match the getter's type, then selecting the MOST-DERIVED
+    // override (the same setter redeclared by a base and derived class is one Kotlin setter, not an
+    // ambiguity), and refusing a genuinely ambiguous remainder. Every rule is applied to the whole
+    // candidate set, including a singleton, so correctness cannot depend on whether another overload
+    // happened to be present.
     let getter = resolve_property_member(lib, recv, property, member_access)?;
     let setter_name = crate::names::property_setter_name(property);
-    let mut setters = lib
+    let setters = lib
         .member_overloads(recv, &setter_name)
         .overloads
         .into_iter()
-        .filter(|o| o.kind == FnKind::Member)
-        .map(|o| o.callable)
-        .filter(|c| c.params.len() == 1 && c.ret == Ty::Unit && !c.name.contains('-'))
+        // Setter lookup is member lookup, so apply the same access-context predicate used by an
+        // ordinary call. The JVM provider exposes protected declarations for legal subclass sites;
+        // treating that provider surface as globally callable would turn a public getter plus an
+        // inaccessible protected setter into a writable property and emit an illegal call.
+        .filter(|o| {
+            o.kind == FnKind::Member
+                && member_visible(member_access, o.visibility, o.callable.owner_type())
+        })
+        .filter(|o| {
+            o.callable.params.len() == 1
+                && o.callable.ret == Ty::Unit
+                && !o.callable.name.contains('-')
+                // Getter/setter TYPE agreement defines whether a JavaBean pair is a Kotlin synthetic
+                // `var`; it is not merely an overload tie-break. Otherwise `String getValue()` plus
+                // `void setValue(int)` invents one property with different read/write types.
+                && o.callable.params[0] == getter.ret.non_null()
+        })
         .collect::<Vec<_>>();
-    if setters.len() > 1 {
-        setters.retain(|c| c.params[0] == getter.ret.non_null());
-    }
-    match setters.as_slice() {
-        [_] => setters.pop(),
-        _ => None,
-    }
+    // `receiver_rank` is the provider-neutral member-MRO order already consumed by ordinary call
+    // selection. Use that common fact for every set size, then demand one candidate at the winning
+    // rung; malformed or genuinely ambiguous duplicates remain read-only rather than becoming an
+    // arbitrary call target.
+    let nearest_rank = setters.iter().map(|setter| setter.receiver_rank).min()?;
+    let mut nearest = setters
+        .into_iter()
+        .filter(|setter| setter.receiver_rank == nearest_rank);
+    let setter = nearest.next()?;
+    nearest.next().is_none().then_some(setter.callable)
 }
 
 fn select_instance_info(

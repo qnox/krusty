@@ -224,6 +224,8 @@ mod classpath_super_ctor_args_e2e;
 mod classpath_suspend_receiver_lambda_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
+#[path = "classpath_synthetic_setter_e2e.rs"]
+mod classpath_synthetic_setter_e2e;
 #[path = "classpath_top_level_property_e2e.rs"]
 mod classpath_top_level_property_e2e;
 #[path = "classpath_type_ref_e2e.rs"]
