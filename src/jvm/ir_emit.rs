@@ -2020,8 +2020,9 @@ pub fn emit_all(
 
 /// Like [`emit_all`], but with explicit per-file [`EmitOptions`] (class version, source name) and a
 /// caller-owned [`EmitRun`] the caller inspects after a `None` return (the inline-bail reason). Every
-/// shipping-bytes path uses this — the CLI backend, `survey` and the conformance corpus — so
-/// `-jvm-target`, the `SourceFile` name and the inner-class resolver reach every emitted class.
+/// shipping-bytes path uses this — the CLI backend, `survey`, the conformance corpus and the
+/// in-process test helpers — so `-jvm-target`, the `SourceFile` name and the inner-class resolver reach
+/// every emitted class.
 pub fn emit_all_with_opts(
     ir: &IrFile,
     facade: &str,
