@@ -2788,14 +2788,45 @@ impl<'a> SymbolResolver<'a> {
         args: &[Ty],
         slots: &[usize],
     ) -> Option<Vec<(usize, usize)>> {
+        crate::trace_compiler!(
+            "resolve",
+            "named_default_arg_mapping {} params={params:?} args={args:?} slots={slots:?} ctx={}",
+            info.callable.name,
+            info.context_count
+        );
         if slots.len() != args.len() || info.context_count != 0 {
             return None;
         }
         let sig = &info.call_sig;
         let mut mapping = Vec::with_capacity(args.len());
         for (argument, (&parameter, argument_ty)) in slots.iter().zip(args).enumerate() {
-            let declared = params.get(parameter)?;
-            if !arg_fits_platform(self.lib, declared, argument_ty) {
+            let declared = *params.get(parameter)?;
+            // `params` are descriptor-erased; the base function's metadata nullability rides
+            // `platform_nullable_params` (a `$default` synthetic borrows its base's metadata facts,
+            // so the flags are present and slot-aligned here too). Widen by the SLOT the label
+            // selected — `f(message = null)` on `message: String?` otherwise fails the fit check
+            // against the erased non-null `String`.
+            let declared = if sig
+                .platform_nullable_params
+                .get(parameter)
+                .copied()
+                .unwrap_or(false)
+                && declared.is_reference()
+                && (argument_ty.is_nullable() || *argument_ty == Ty::Null)
+            {
+                Ty::nullable(declared)
+            } else {
+                declared
+            };
+            // Applicability is a SOURCE question, exactly as the positional `default_arg_mapping`
+            // above reads it: `arg_fits_or_subtype`, not the platform-only shape check — the latter
+            // rejects `null` into the (widened) `String?` and every subtype argument. A lambda
+            // argument (`Ty::Fun`) against an erased `kotlin/jvm/functions/FunctionN` parameter is
+            // the one shape source assignability doesn't pair; admit it by arity like every other
+            // overload family does.
+            if !self.arg_fits_or_subtype(&declared, argument_ty)
+                && !fun_arg_matches(self.lib, &declared, argument_ty, false)
+            {
                 return None;
             }
             mapping.push((parameter, argument));
@@ -3023,6 +3054,28 @@ impl<'a> SymbolResolver<'a> {
             // belongs to `sourceName-<hash>`, and only that one.
             if callable.signature.is_none() {
                 callable.signature = base.and_then(|candidate| candidate.callable.signature);
+            }
+            // Publish the params platform-nullability-applied, exactly as `pick_top_level` does for
+            // the direct path: the checker validates each argument against `c.params`, so a widening
+            // the mapping accepted must survive into the returned callable or the argument check
+            // re-rejects `null` against the erased non-null spelling. The mapping is the slot truth
+            // — widen by it, not by position.
+            for &(param_i, arg_i) in &mapping {
+                let Some(parameter) = callable.params.get_mut(param_i) else {
+                    continue;
+                };
+                if o.call_sig
+                    .platform_nullable_params
+                    .get(param_i)
+                    .copied()
+                    .unwrap_or(false)
+                    && parameter.is_reference()
+                    && args
+                        .get(arg_i)
+                        .is_some_and(|a| a.is_nullable() || *a == Ty::Null)
+                {
+                    *parameter = Ty::nullable(*parameter);
+                }
             }
             record_default_vararg_slot(&mut callable, o.call_sig.vararg_index, params, args);
             Some(callable)

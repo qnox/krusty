@@ -30167,13 +30167,11 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Score a mapped call's slots against the candidate's parameters. At the vararg slot the
-    /// ELEMENT form (a positional first element) and the ARRAY form (a spread, or the named
-    /// whole-array assignment) both score — the slot map keeps element-form arguments.
     /// Slot-driven form of `apply_platform_call_parameter_nullability`: widen a metadata-nullable
     /// reference parameter to `T?` when the argument MAPPED TO ITS SLOT is null/nullable. The
     /// positional helper zips params with args by position, which is wrong once named arguments
-    /// reorder or skip slots.
+    /// reorder or skip slots. Metadata never marks a Kotlin vararg's array type nullable, so the
+    /// vararg slot needs no element-form special case here.
     fn widen_platform_nullable_slot_params(
         &self,
         params: &[Ty],
@@ -30199,6 +30197,9 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
+    /// Score a mapped call's slots against the candidate's parameters. At the vararg slot the
+    /// ELEMENT form (a positional first element) and the ARRAY form (a spread, or the named
+    /// whole-array assignment) both score — the slot map keeps element-form arguments.
     fn call_slot_score_vararg(
         &self,
         params: &[Ty],
@@ -31389,16 +31390,41 @@ impl<'a> Checker<'a> {
                                     Err(()) => return Ty::Error,
                                 }
                             }
-                            if let Some(mut c) = self
-                                .resolver_in_scope(&pkg_scope)
-                                .resolve_symbol(
-                                    crate::symbol_resolver::SymRecv::TopLevel,
-                                    &name,
-                                    &selected_arg_tys,
-                                    &targs,
-                                )
-                                .and_then(crate::symbol_resolver::Symbol::top_level_call)
-                            {
+                            // A labelled call that OMITS a parameter (`pkg.fw(message = null) { … }`
+                            // with `tag` defaulting) is not positional: `selected_arg_tys` is
+                            // compacted to the arguments actually written, so the positional
+                            // resolution below would measure them against the wrong declarations.
+                            // Route it through the named `$default` resolution the bare-name
+                            // (`import`ed) channel already uses, slots deciding what each argument
+                            // is checked against.
+                            let named_omitting_slots = resolved_slots.as_ref().and_then(|slots| {
+                                let filled: Vec<usize> = slots
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(parameter, argument)| argument.map(|_| parameter))
+                                    .collect();
+                                (filled.len() < slots.len()).then_some(filled)
+                            });
+                            let named_resolved = named_omitting_slots.as_ref().and_then(|slots| {
+                                self.resolver_in_scope(&pkg_scope)
+                                    .resolve_top_level_named_default_callable(
+                                        &name,
+                                        &selected_arg_tys,
+                                        slots,
+                                        &targs,
+                                        expected,
+                                    )
+                            });
+                            if let Some(mut c) = named_resolved.or_else(|| {
+                                self.resolver_in_scope(&pkg_scope)
+                                    .resolve_symbol(
+                                        crate::symbol_resolver::SymRecv::TopLevel,
+                                        &name,
+                                        &selected_arg_tys,
+                                        &targs,
+                                    )
+                                    .and_then(crate::symbol_resolver::Symbol::top_level_call)
+                            }) {
                                 if c.owner_package_matches_name(pkg_scope[0]) {
                                     crate::trace_compiler!(
                                         "resolve",
