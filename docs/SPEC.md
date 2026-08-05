@@ -3369,13 +3369,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   MULTIPLE bounds on one parameter (`where T : Comparable<T>, T : Named`) were initially left open
   and have since landed — see "A type parameter carries every bound" below. Kotlin gives
   such a parameter the INTERSECTION of its bounds and resolves members from all of them, while the JVM
-  erasure takes ONE; `Ty::TyParam` carries a single bound, so only that one's members resolve. An
-  attempt to carry the later bounds beside the erasure and keep the parameter's identity
+  erasure takes ONE; at the time `Ty::TyParam` carried a single bound, so only that one's members
+  resolved. An attempt to carry the later bounds by re-tagging the parameter's identity
   (`Ty::TyParam(name, first_bound)` in place of the bare erasure) was REVERTED: the checker and lowerer
   match structurally on `Ty::Obj` in many places, so a parameter that stops being an `Obj` stops
   resolving source-declared members (`resolve.rs`'s `matches!(rt, Ty::Obj(..))` module-member gate) and
-  stops being assignable to its own bound — both shapes that worked before. A real fix needs an
-  intersection the type model can express, not a re-tagged erasure. Note also that the erasure is NOT
+  stops being assignable to its own bound — both shapes that worked before. The fix that landed keeps
+  the extra bounds BESIDE the untouched erasure, not in a re-tagged one. Note also that the erasure is NOT
   simply the first declared bound: kotlinc hoists a CLASS bound ahead of interface bounds regardless of
   order (`where T : Named, T : Base` erases to `Base`), and writes `<T extends Base & Named>` in the
   generic signature where krusty writes only the first.

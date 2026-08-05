@@ -3413,6 +3413,10 @@ impl SymbolSource for JvmLibraries {
                             // member's `@Metadata` return type — which preserves it at every nesting
                             // level — under the same-JVM-internal guard, so `.add(…)` on a declared
                             // `MutableList` (or on its `MutableSet` element) return still resolves.
+                            // Ordinary and suspend members must not grow separate metadata/JVM merge
+                            // policies: both arms overlay through the same guarded projection; only
+                            // the way each obtains `base` differs (Continuation generic argument
+                            // here, ordinary generic signature below).
                             let base = self
                                 .cp
                                 .metadata_member_ret_ty_name(
@@ -3464,7 +3468,8 @@ impl SymbolSource for JvmLibraries {
                             // both spell `java/util/List`) at every nesting level; the member's
                             // `@Metadata` return type preserves it — for a FUNCTION and for a
                             // property GETTER (which is not a metadata function) alike. Overlay the
-                            // metadata classifiers under the same-JVM-internal guard, per level.
+                            // metadata classifiers under the same-JVM-internal guard, per level —
+                            // the same projection the suspend arm applies.
                             let base = recovered.unwrap_or(m.ret);
                             self.cp
                                 .metadata_member_ret_ty_name(
@@ -4440,8 +4445,8 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, method_layout, parse_class_gsig, parse_concrete_field_gsig, parse_field_gsig,
-        parse_method_desc, parse_method_gsig,
+        desc_to_ty, method_layout, overlay_metadata_collection_names, parse_class_gsig,
+        parse_concrete_field_gsig, parse_field_gsig, parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::SemanticPlatform;
     use crate::symbol_source::SymbolSource;
@@ -4640,6 +4645,47 @@ mod tests {
         assert_eq!(
             libs.canonical_source_type_name(type_name("kotlin/collections/MutableList")),
             type_name("kotlin/collections/MutableList")
+        );
+    }
+
+    #[test]
+    fn metadata_collection_projection_changes_only_the_matching_outer_classifier() {
+        let element = Ty::obj("fixture/Element");
+        let recovered = Ty::obj_args("kotlin/collections/List", &[element]);
+
+        assert_eq!(
+            overlay_metadata_collection_names(recovered, Ty::obj("kotlin/collections/MutableList"),),
+            Ty::obj_args("kotlin/collections/MutableList", &[element]),
+            "metadata owns mutability while the recovered signature keeps its generic argument",
+        );
+        assert_eq!(
+            overlay_metadata_collection_names(recovered, Ty::obj("kotlin/collections/MutableSet")),
+            recovered,
+            "a classifier from another erased collection family must not replace the return",
+        );
+        assert_eq!(
+            overlay_metadata_collection_names(recovered, Ty::obj("fixture/MutableList")),
+            recovered,
+            "a similarly named application class must not trigger the Kotlin collection rule",
+        );
+    }
+
+    #[test]
+    fn metadata_collection_projection_descends_into_matching_type_arguments() {
+        let inner_base = Ty::obj_args("kotlin/collections/Set", &[Ty::String]);
+        let recovered = Ty::obj_args("kotlin/collections/List", &[inner_base]);
+        let meta = Ty::obj_args(
+            "kotlin/collections/MutableList",
+            &[Ty::obj_args("kotlin/collections/MutableSet", &[Ty::String])],
+        );
+
+        assert_eq!(
+            overlay_metadata_collection_names(recovered, meta),
+            Ty::obj_args(
+                "kotlin/collections/MutableList",
+                &[Ty::obj_args("kotlin/collections/MutableSet", &[Ty::String])],
+            ),
+            "each nesting level recovers its declared mutability under the same guard",
         );
     }
 
