@@ -31654,11 +31654,25 @@ impl<'a> Checker<'a> {
                 // PATH (its leftmost segment is not a value in scope), and `helper` is a top-level function
                 // of that package (compiled to `a/b/<File>Kt`). Resolve it by name among the classpath
                 // top-level overloads and confirm the owning facade sits in the receiver's package.
+                //
+                // The dotted shape alone is not proof: a VALUE chain rooted at a classifier
+                // (`CommandLineEnvCustomizer.EP_NAME.extensionList.forEach { … }` — a companion-rooted
+                // receiver feeding a lambda-taking member call) spells the same `a.b.c.d(…)`, and this
+                // branch would then type the arguments eagerly with no expectation, binding the lambda's
+                // parameters as `Any` and recording spurious diagnostics before the member-call path
+                // below types them for real. Only a path whose scope actually DECLARES a top-level
+                // `name` can be an FQ call (every resolution below draws from that same pool, so an
+                // empty pool makes the whole branch a side-effect-only no-op) — skip it otherwise.
                 if let Some(root) = self.dotted_root(receiver) {
                     if !self.value_root_shadows_classifier(&root)
                         && self.classifier_receiver_internal(receiver).is_none()
                     {
-                        if let Some(pkg) = qualified_path(self.file, receiver) {
+                        if let Some(pkg) = qualified_path(self.file, receiver).filter(|pkg| {
+                            !self
+                                .resolver_in_scope(&[type_name(pkg)])
+                                .top_level_candidates(&name)
+                                .is_empty()
+                        }) {
                             let arg_tys = self.arg_tys(args);
                             let targs: Vec<Ty> = self
                                 .file
