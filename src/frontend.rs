@@ -1979,7 +1979,7 @@ mod tests {
             analysis
                 .symbols
                 .classes
-                .get("Child")
+                .get(&crate::types::type_name("consumer/Child"))
                 .expect("consumer class")
                 .ctor_params,
             [Ty::obj("support/Parent$Category")]
