@@ -8394,7 +8394,7 @@ impl<'a> Lower<'a> {
             let physical_ret = c.physical_ret;
             let logical_ret = c.ret;
             let call_inline = c.inline.can_inline();
-            let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
+            let erased_generic_ret = self.substituted_ret_needs_coercion(logical_ret, physical_ret);
             let suspend = c.suspend;
             let call = self.emit_reified_library_static_call(e, c, a, suspend, None)?;
             return Some(if call_inline || erased_generic_ret {
@@ -8451,21 +8451,7 @@ impl<'a> Lower<'a> {
         let call_inline = c.inline.can_inline();
         let physical_ret = c.physical_ret;
         let logical_ret = c.ret;
-        // A BOUNDED type parameter's return erases to its BOUND, not to `Object`, so the erased-top
-        // test alone misses it (`fun <T : Comparable<T>> clampMax(…): T` erases to `Comparable`, and
-        // `clampMax(10, 7) != 7` left the boxed value on the stack where an `int` was expected — a
-        // VerifyError). A SCALAR logical result behind a REFERENCE physical one takes the same
-        // substituted-result coercion: the value on the stack is boxed and the use site wants the
-        // primitive. (This is the call-site half of the rule `coerce_erased_call_result` already
-        // applies once reached; the gate here was the narrower test.) UNSIGNED is excluded — its box
-        // is `kotlin/UInt`, not `Integer`, so the plain unbox `coerce_erased_call_result` emits would
-        // `checkcast` to the wrong wrapper (a live bug on the erased-top path already; not widened
-        // here). `coerce_erased_call_result` still decides what to emit.
-        let erased_generic_ret = logical_ret != physical_ret
-            && (physical_ret.is_erased_top()
-                || (self.has_scalar_value_repr(logical_ret)
-                    && !logical_ret.is_unsigned()
-                    && physical_ret.is_reference()));
+        let erased_generic_ret = self.substituted_ret_needs_coercion(logical_ret, physical_ret);
         let suspend = c.suspend;
         // Through the COMMON reified boundary (`emit_reified_library_static_call`), like the
         // bare-name top-level and extension origins: a `<reified T>` inline callee spelled fully
@@ -8770,6 +8756,34 @@ impl<'a> Lower<'a> {
             }
         }
         v
+    }
+
+    /// The substituted logical CALL result needs a coercion back out of the callee's erased
+    /// return: an erased-top physical return (`Object`), a SCALAR logical result behind a
+    /// reference physical one (the value is boxed and the use site wants the primitive; UNSIGNED
+    /// is excluded — its box is `kotlin/UInt`, not `Integer`, so the plain unbox would `checkcast`
+    /// the wrong wrapper), or a REFERENCE logical result whose erased CLASS is stricter than the
+    /// physical one — a BOUNDED type parameter erases to its BOUND, not to `Object`
+    /// (`fun <T : Throwable> fw(…): T` physically returns `Throwable`), and without the
+    /// `checkcast` the value lands in a stricter local slot (`VerifyError`). The ERASED-class
+    /// compare (not `Ty` equality) keeps a same-class generic refinement (`listOf<Int>():
+    /// List<Int>` over `List`) cast-free, matching kotlinc, and a VALUE-CLASS logical return is
+    /// excluded — its physical value is the unboxed underlying, which the class cast would break
+    /// over. ONE predicate on purpose: the FQ plain, FQ packed-vararg and bare-name top-level
+    /// arms all gate on it, and hand-spelled copies drift (the reference-refinement case was
+    /// missing from every copy, a live VerifyError).
+    fn substituted_ret_needs_coercion(&self, logical: Ty, physical: Ty) -> bool {
+        logical != physical
+            && (physical.is_erased_top()
+                || (self.has_scalar_value_repr(logical)
+                    && !logical.is_unsigned()
+                    && physical.is_reference())
+                || (logical.is_reference()
+                    && !logical.is_erased_top()
+                    && physical.is_reference()
+                    && self.value_class_underlying(logical.non_null()).is_none()
+                    && logical.non_null().obj_internal().is_some()
+                    && logical.non_null().obj_internal() != physical.non_null().obj_internal()))
     }
 
     fn coerce_erased_call_result(
@@ -24956,23 +24970,12 @@ impl<'a> Lower<'a> {
                 // null must stay a legal value until a primitive/non-null use site demands it.
                 if call_inline {
                     self.coerce_erased_call_result(e, call, &call_phys, true)
-                } else if call_log != call_phys
-                    && (call_phys.is_erased_top()
-                        || (self.has_scalar_value_repr(call_log)
-                            && !call_log.is_unsigned()
-                            && call_phys.is_reference()))
-                {
+                } else if self.substituted_ret_needs_coercion(call_log, call_phys) {
                     // A NON-inline classpath top-level fn with an ERASED generic return
                     // (`runBlocking<T> { … }`, whose `$default` returns `Object`): the checker
                     // substituted the concrete result type (`T = Ch`/`Int`), so `checkcast`/unbox
                     // the `Object` result to it — else it lands boxed in a stricter slot
-                    // (`VerifyError`). A BOUNDED type parameter erases to its BOUND rather than to
-                    // `Object` (`fun <T : Comparable<T>> clampMax(…): T` → `Comparable`), so the
-                    // erased-top test alone misses it; a SCALAR logical result behind a REFERENCE
-                    // physical one is the same situation — the value on the stack is boxed and the
-                    // use site wants the primitive. UNSIGNED is excluded: its box is `kotlin/UInt`,
-                    // not `Integer`, so the unbox would `checkcast` the wrong wrapper. A concrete
-                    // return whose logical and physical types agree keeps the raw call, unchanged.
+                    // (`VerifyError`). See `substituted_ret_needs_coercion` for the full gate.
                     self.coerce_erased_call_result(e, call, &call_phys, true)
                 } else {
                     call
