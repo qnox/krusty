@@ -22,11 +22,7 @@ fn member_extension_fun_called_in_lambda() {
         \x20 return if (r.map { it.id } == listOf(\"a\", \"b\")) \"OK\" else \"F:\" + r\n\
         }\n";
     let out = common::expect_box_run_with_stdlib(SRC, "MemberExtFunInLambda");
-    assert_eq!(
-        out.as_deref(),
-        Some("OK"),
-        "member ext fun via lambda param"
-    );
+    assert_eq!(out, "OK", "member ext fun via lambda param");
 }
 
 #[test]
@@ -42,11 +38,7 @@ fn member_extension_property_read_in_lambda() {
         \x20 return if (r == listOf(\"t:x\")) \"OK\" else \"F:\" + r\n\
         }\n";
     let out = common::expect_box_run_with_stdlib(SRC, "MemberExtPropReadInLambda");
-    assert_eq!(
-        out.as_deref(),
-        Some("OK"),
-        "member ext property read in lambda"
-    );
+    assert_eq!(out, "OK", "member ext property read in lambda");
 }
 
 #[test]
@@ -64,11 +56,7 @@ fn member_extension_property_write_in_lambda() {
         \x20 return if (ms[0].slot == \"m:y\") \"OK\" else \"F:\" + ms[0].slot\n\
         }\n";
     let out = common::expect_box_run_with_stdlib(SRC, "MemberExtPropWriteInLambda");
-    assert_eq!(
-        out.as_deref(),
-        Some("OK"),
-        "member ext property write in lambda"
-    );
+    assert_eq!(out, "OK", "member ext property write in lambda");
 }
 
 #[test]
@@ -87,7 +75,7 @@ fn inherited_member_extension_called_in_lambda() {
         \x20 return if (r == listOf(\"r:z\")) \"OK\" else \"F:\" + r\n\
         }\n";
     let out = common::expect_box_run_with_stdlib(SRC, "InheritedMemberExtInLambda");
-    assert_eq!(out.as_deref(), Some("OK"), "inherited member ext in lambda");
+    assert_eq!(out, "OK", "inherited member ext in lambda");
 }
 
 #[test]
@@ -105,9 +93,5 @@ fn member_extension_in_non_inline_closure() {
         \x20 return if (r == \"n:q\") \"OK\" else \"F:\" + r\n\
         }\n";
     let out = common::expect_box_run_with_stdlib(SRC, "MemberExtNonInlineClosure");
-    assert_eq!(
-        out.as_deref(),
-        Some("OK"),
-        "member ext in non-inline closure"
-    );
+    assert_eq!(out, "OK", "member ext in non-inline closure");
 }

@@ -15,14 +15,11 @@ use super::common;
 /// Single-compilation box run: everything lives in one source, cross-referencing declarations (which
 /// still drives the checker/`types` resolution heavily).
 ///
-/// STRICT, and returns no `Option`: `stdlib_jar` / `jdk_modules` are fail-fast, and
-/// [`common::expect_box_run`] panics with the front-end diagnostics when krusty declines the source.
-/// There is no skip path a rejection could hide behind — every test below asserts on the box output
-/// directly, so a source krusty stops accepting fails loudly instead of reading as a pass.
+/// STRICT, and returns no `Option`: the shared stdlib helper owns fail-fast toolchain lookup and
+/// panics with front-end diagnostics when krusty declines the source. There is no skip path a
+/// rejection could hide behind — every test below asserts on the box output directly.
 fn run(src: &str, stem: &str) -> String {
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    common::expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()))
+    common::expect_box_run_with_stdlib(src, stem)
 }
 
 /// Compile `lib_src` with krusty (emitting `@Metadata`), persist its classfiles to a fresh classpath
