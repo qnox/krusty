@@ -255,18 +255,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `box()` returns a wrong answer instead of failing. (Before this was fixed the files happened to die
   at emit with no labelled reason, which is a refusal, but an accidental and unattributable one.)
   A convention suspension now behaves exactly like its longhand form, including where the
-  state-machine pass still declines one: a suspension inside an `if` CONDITION, or on a safe call's
-  short-circuiting branch, reaches the same labelled `SkipReason::Suspend` either way.
-  A `suspend` EXTENSION operator is a separate, unrelated restriction — the file declaring it is
-  refused whole by `gate:extension-suspend-fn`, so a sibling-file call has no callee to link against
-  and the module does not compile
+  state-machine pass still declines one: on a safe call's short-circuiting branch, or in the
+  CONDITION of an `if`/`when` used as an EXPRESSION whose value is stored into a CAPTURED variable,
+  it reaches the same labelled `SkipReason::Suspend` either way. That second boundary needs BOTH
+  halves, which is why neither alone names it: the same suspending condition compiles when the
+  `if` is a STATEMENT (`if (less()) { r = 7 } else { r = 9 }`), when the expression's value lands in
+  a LOCAL (`val x = if (less()) 7 else 9; r = x`), and when it is returned from a suspend FUNCTION
+  rather than assigned inside a suspend LAMBDA (`suspend fun drive(): Int = if (less()) 7 else 9`,
+  and the `&&` shape in the short-circuit entry below).
+  A `suspend` EXTENSION operator is NOT a separate restriction. `gate:extension-suspend-fn` is
+  retired (see the two `suspend fun` extension entries below); the declaring file compiles, and a
+  sibling-file convention call links against the real CPS entry point exactly like a same-file one.
+  Every convention runs both same-file and cross-file — indexed read `b[i]` and store `b[i] = v`,
+  binary `b + i`, in-place `b += i`, unary `-b`, relational `a < b`, and `x in b`.
+  The one shape that still declines is the `if`/`when`-EXPRESSION boundary above, and it is about
+  neither extensions nor conventions: `r = if (a < b) 7 else 9` inside a `suspend { … }` reaches
+  `SkipReason::Suspend`, and so does the identical `r = if (less()) 7 else 9` written with a plain
+  `suspend fun` call and no operator at all — same-file as well as cross-file. The convention is
+  incidental. kotlinc compiles and runs every shape named here, refused ones included; for the two
+  refused above it answers `7`
   (`tests/coroutine_intrinsics_e2e.rs::suspend_operator_get_convention_is_a_suspension_point`,
   `::suspend_operator_plus_convention_is_a_suspension_point`,
   `::suspend_operator_plus_assign_convention_is_a_suspension_point`,
   `::suspend_operator_compare_to_convention_is_a_suspension_point`,
   `::suspend_call_behind_a_safe_call_is_seen_as_a_suspension`,
-  `tests/cross_file_inline_call_e2e.rs::suspend_operator_extension_file_stops_at_the_extension_gate`
-  and the three `::suspend_operator_*_convention_cross_file_still_rejects` guards).
+  `::suspend_in_an_if_expression_into_a_captured_var_skips_without_a_convention` and its two
+  disambiguating controls `::suspend_in_an_if_statement_condition_into_a_captured_var_runs`,
+  `::suspend_in_an_if_expression_into_a_local_runs`;
+  `tests/cross_file_inline_call_e2e.rs::suspend_operator_get_convention_cross_file_executes`,
+  `::suspend_operator_plus_assign_convention_cross_file_executes`,
+  `::suspend_operator_compare_to_convention_cross_file_runs_outside_an_if_condition`,
+  `::suspend_operator_compare_to_convention_cross_file_still_skips_in_an_if_condition`;
+  and in `tests/suspend_operator_convention_cross_file_e2e.rs` the five
+  `::suspend_*_cross_file_executes` guards plus `::compare_to_and_contains_cross_file_execute`).
 - **`suspend fun` — async resume + parameters live across a suspension.** Two correctness items the
   synchronous-completion tests couldn't reach. (1) The suspend-call sequence emits
   `when(result == COROUTINE_SUSPENDED) { return result }` before storing the synchronous value; its
@@ -485,14 +506,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Object`) and threads call sites like any other static suspend call. The only thing missing was the
   registration — pass 1b's extension branch never pushed the `FunId` into `ir.suspend_funs`, so the
   pass saw neither the declaration nor its call sites (the call site then kept its pre-CPS arity: "call
-  arity mismatch"). Registering it there retires the blanket `gate:extension-suspend-fn` file skip.
+  arity mismatch"). Registering it there dropped the BLANKET form of the `gate:extension-suspend-fn`
+  file skip, leaving two narrower skips behind the same label.
   Proven: `suspend fun Counter.next()` suspending on `bump(base)` → 42
-  (`tests/feature_coverage_s_e2e.rs::suspend_extension_function_on_user_type`). Two extension shapes
-  still skip. (1) An extension body that suspends on a MEMBER of its receiver: a member suspension
-  resumes against the machine's `this`, which an extension has not got — its receiver is a parameter
-  slot — so the resumed call would target the wrong instance. Fixed: see the next entry. (2) An
-  `inline suspend` extension. Fixed: see the entry below — `gate:extension-suspend-fn` is now retired
-  outright.
+  (`tests/feature_coverage_s_e2e.rs::suspend_extension_function_on_user_type`). Those two shapes were
+  (1) an extension body that suspends on a MEMBER of its receiver: a member suspension resumes against
+  the machine's `this`, which an extension has not got — its receiver is a parameter slot — so the
+  resumed call would target the wrong instance (fixed by the "`suspend` EXTENSION called through an
+  explicit receiver" entry ABOVE, which retires the separate label
+  `gate:extension-suspend-fn-member-suspension`); and (2) an `inline suspend` extension (fixed by the
+  SIBLING-FILE entry immediately below). Both are closed, so no `gate:extension-suspend-fn` skip of
+  any shape remains — the label does not exist in `src/` and declaring a `suspend` extension no
+  longer refuses its file, in longhand or through an operator convention (see the
+  operator-convention suspension entry near the top of this section, and the "OPERATOR CONVENTION is
+  a suspension point" entry below).
 - **`suspend fun` — a SIBLING-FILE `suspend` extension call is a suspension point, and `inline` does
   not change that.** `inline suspend fun Int.plusOne()` was gated on the assumption that the body is
   SPLICED at its call sites, where the splice and the CPS rewrite would not compose. It is not: krusty
@@ -531,11 +558,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `suspending_operator_exprs` / `suspending_operator_stmts`. Lowering needed one addition beyond the
   shared `ModuleExtension` arm (`lower_op_call`/`lower_stmt_op_call` already route through it):
   `CompoundAssignmentTarget` dropped the flag entirely, so `Member`/`SourceExtension` now carry
-  `suspend` and all three `lower_plus_assign` arms register the node. Not every convention is reached
-  yet — a cross-file `operator fun Box.compareTo`/`invoke`/`contains` is refused by the front end
-  (`operator cannot be applied to 'Box' and 'Box'`) with or WITHOUT `suspend`, so that gap is a
-  resolution one and stays loud. Proven:
-  `tests/suspend_operator_convention_cross_file_e2e.rs` (one test per convention).
+  `suspend` and all three `lower_plus_assign` arms register the node. A cross-file
+  `operator fun Box.compareTo` and `contains` are reached too, with and without `suspend` — `a < b`
+  and `x in b` both resolve and run across the file boundary. `invoke` is the one convention still
+  out of reach cross-file: `a()` against an `operator fun Box.invoke` declared in a sibling file is
+  refused — with NO diagnostic without `suspend`, and as "unresolved function 'a'" with it — while
+  the same declaration reached from its own file emits and runs. So the residual gap is `invoke`
+  alone, it is a cross-file RESOLUTION gap rather than a suspend one, and only its `suspend`
+  spelling is loud. Proven:
+  `tests/suspend_operator_convention_cross_file_e2e.rs` (one test per convention, plus
+  `::compare_to_and_contains_cross_file_execute` and
+  `::invoke_convention_cross_file_is_the_residual_gap`).
 - **`suspend fun` returning a `@JvmInline value class` — the result crosses the CPS boundary BOXED.**
   A CPS return is `Object`, so a non-null value-class result cannot ride in its erased underlying form:
   kotlinc emits `X.box-impl` before the `areturn` and `checkcast X` + `X.unbox-impl()` on the resume
