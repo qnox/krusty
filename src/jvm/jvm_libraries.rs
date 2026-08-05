@@ -2081,26 +2081,6 @@ fn has_free_ty_params(ty: Ty) -> bool {
     }
 }
 
-/// Whether `ty` mentions a type parameter that is NOT one of the member's own `formals` — a CLASS
-/// formal the caller must bind from the receiver's type arguments (`JBIterable<T>.filterMap`
-/// mentioning the class's `T` inside a wildcard SAM parameter).
-fn mentions_owner_ty_param(ty: Ty, formals: &[String]) -> bool {
-    match ty {
-        Ty::TyParam(name, _) => !formals.iter().any(|formal| formal.as_str() == name),
-        Ty::Fun(sig) => {
-            sig.params
-                .iter()
-                .any(|param| mentions_owner_ty_param(*param, formals))
-                || mentions_owner_ty_param(sig.ret, formals)
-        }
-        Ty::Obj(_, args) => args
-            .iter()
-            .any(|arg| mentions_owner_ty_param(*arg, formals)),
-        Ty::Nullable(inner) => mentions_owner_ty_param(*inner, formals),
-        _ => false,
-    }
-}
-
 fn parse_concrete_field_gsig(signature: &str, erased_descriptor: &str) -> Option<Ty> {
     let (ty, has_free) = parse_field_gsig(signature, erased_descriptor, None)?;
     (!has_free).then_some(ty)
@@ -3376,21 +3356,14 @@ impl SymbolSource for JvmLibraries {
                         // `m.signature` here would therefore lose facts in the former case and fail to
                         // produce any signature in the latter.
                         //
-                        // A member gsig without a declared receiver (every Java `Signature`-decoded
-                        // one) references the CLASS's type formals free — `JBIterable<T>.filterMap`
-                        // spells its SAM parameter `Function<? super T, ? extends R>`. Bind those
-                        // class formals from the receiver's type arguments up front, exactly as the
-                        // return recovery below does, so a lambda parameter typed through the wildcard
-                        // sees the concrete argument (`Component`) instead of the erased `Any`
-                        // fallback. Method formals stay free for call-site inference.
+                        // A member signature can mention its OWNER's type variables in its value
+                        // parameters, including under a function/SAM argument. Bind those variables
+                        // from the applied dispatch type before call-site inference, exactly as return
+                        // recovery below does. This is deliberately independent of whether the
+                        // provider represented a receiver in `GenericSig`: metadata signatures carry
+                        // one while a raw JVM `Signature` cannot, but both describe the same semantic
+                        // need. The partial substitution policy leaves the member's own formals open.
                         let generic_sig = m.generic_sig.clone().map(|signature| {
-                            if signature.receiver.is_some()
-                                || !signature.params.iter().any(|param| {
-                                    mentions_owner_ty_param(*param, &signature.formals)
-                                })
-                            {
-                                return signature;
-                            }
                             let bindings = self.member_receiver_bindings_name(
                                 receiver,
                                 cn,
