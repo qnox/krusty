@@ -84,10 +84,10 @@ fn implements_stdlib_nested_interface() {
 
 #[test]
 fn coroutine_context_nested_supertypes_resolve_on_the_frontend() {
-    // The intellij find (`ActionContextElement`): `CoroutineContext.Element` + `CoroutineContext.Key`
-    // as supertypes of a class AND its companion. The full shape additionally extends an abstract
-    // classpath base, which hits a SEPARATE IR-backend gate — pin here that the FRONT END resolves
-    // both nested supertypes without the "supertype could not be resolved" diagnostic.
+    // A synthetic compound header: `CoroutineContext.Element` + `CoroutineContext.Key` are
+    // supertypes of a class AND its companion. The shape additionally extends an abstract library
+    // base, which hits a SEPARATE IR-backend gate — pin here that the provider-neutral FRONT END
+    // resolves both nested supertypes without the "supertype could not be resolved" diagnostic.
     const SRC: &str = "import kotlin.coroutines.AbstractCoroutineContextElement\n\
         import kotlin.coroutines.CoroutineContext\n\
         class Elem(val name: String) : AbstractCoroutineContextElement(Elem), CoroutineContext.Element {\n\
