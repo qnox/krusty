@@ -1072,6 +1072,26 @@ impl Ty {
         !matches!(self, Ty::Unit | Ty::Error)
     }
 
+    /// Whether an otherwise-structured type contains an unresolved component.
+    ///
+    /// Resolution deliberately preserves generic/function structure around [`Ty::Error`] so later
+    /// diagnostics can name the failing nested `TypeRef`: `List<Missing>` is an `Obj` whose argument
+    /// is `Error`, and `(Missing) -> String` is a `Fun` whose parameter is `Error`. Consumers that
+    /// check only `ty == Ty::Error` silently miss both shapes. Keep the recursion here as the single
+    /// semantic predicate instead of teaching individual expression forms about every `Ty` variant.
+    pub fn contains_error(self) -> bool {
+        match self {
+            Ty::Error => true,
+            Ty::Obj(_, arguments) => arguments.iter().copied().any(Ty::contains_error),
+            Ty::Fun(signature) => {
+                signature.params.iter().copied().any(Ty::contains_error)
+                    || signature.ret.contains_error()
+            }
+            Ty::Nullable(inner) => inner.contains_error(),
+            _ => false,
+        }
+    }
+
     /// True for the signed integral types whose Kotlin range overload yields `IntRange`.
     pub fn is_int_range_operand(self) -> bool {
         matches!(self, Ty::Byte | Ty::Short | Ty::Int)
@@ -1476,6 +1496,18 @@ mod tests {
         let t = Ty::nullable(Ty::Int);
         assert!(t.is_nullable());
         assert_eq!(t.non_null(), Ty::Int);
+    }
+
+    #[test]
+    fn contains_error_descends_through_semantic_type_shapes() {
+        // Generic and function resolvers intentionally retain their outer type around an erroneous
+        // nested reference. The shared predicate must see both without declaring resolved bottom or
+        // scalar types erroneous.
+        assert!(Ty::obj_args("demo/Box", &[Ty::Error]).contains_error());
+        assert!(Ty::fun(vec![Ty::Error], Ty::String).contains_error());
+        assert!(Ty::fun(vec![Ty::String], Ty::Error).contains_error());
+        assert!(!Ty::obj_args("demo/Box", &[Ty::Nothing]).contains_error());
+        assert!(!Ty::String.contains_error());
     }
 
     #[test]

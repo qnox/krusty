@@ -272,7 +272,46 @@ pub fn adapted_ref_arity(vararg: bool, required: usize, param_count: usize) -> u
     }
 }
 
+/// Whether a callable whose source-level arity is described by `minimum`/`param_count` can accept
+/// `supplied` arguments. The result is intentionally type- and receiver-neutral: overload scoring,
+/// lexical-scope fallback, and declaration safety gates all need the same answer before they inspect
+/// argument types or choose a physical owner.
+///
+/// `minimum` is the number of non-default, non-vararg values a call must supply. Defaults make every
+/// arity through `param_count` potentially callable (named-argument mapping performs the finer
+/// per-position validation later), and a vararg removes the upper bound. Carrying the normalized
+/// minimum explicitly matters for `f(prefix: Int = 0, vararg rest: String)`: a required-count that
+/// includes the vararg is one, but the true minimum is zero.
+fn callable_accepts_arity(
+    vararg: bool,
+    minimum: usize,
+    param_count: usize,
+    supplied: usize,
+) -> bool {
+    supplied >= minimum && (vararg || supplied <= param_count)
+}
+
 impl Signature {
+    /// Whether this signature can accept an argument COUNT, before argument mapping and type scoring.
+    ///
+    /// Prefer the complete per-parameter default map when available: it handles a non-trailing
+    /// default without pretending that a later required parameter vanished. Older/provider
+    /// signatures may only carry the precomputed `required` count, which remains the conservative
+    /// fallback used before the default map was added.
+    fn accepts_arity(&self, supplied: usize) -> bool {
+        let minimum = if self.param_defaults.len() == self.params.len() {
+            let required = required_arity(self.params.len(), &self.param_defaults);
+            required.saturating_sub(usize::from(
+                self.vararg_index
+                    .and_then(|index| self.param_defaults.get(index))
+                    .is_some_and(|default| !*default),
+            ))
+        } else {
+            adapted_ref_arity(self.vararg(), self.required, self.params.len())
+        };
+        callable_accepts_arity(self.vararg(), minimum, self.params.len(), supplied)
+    }
+
     fn set_inferred_return(&mut self, ret: Ty) -> bool {
         let changed = self.ret != ret
             || self
@@ -458,7 +497,8 @@ pub enum CtorDefaultValue {
     Bool(bool),
     /// A UTF-16 code unit, matching `ast::Expr::CharLit` / `IrConst::Char`.
     Char(u16),
-    Str(String),
+    /// A UTF-16 code-unit sequence, matching `ast::Expr::StringLit` / `IrConst::String`.
+    Str(crate::kt_string::KtString),
     Null,
     /// An `object` singleton default (`= EmptyCoroutineContext`) — read as `getstatic <internal>.INSTANCE`.
     Object(String),
@@ -662,6 +702,24 @@ impl ClassFlags {
     pub const fn with_annotation(self, on: bool) -> Self {
         self.with(Self::ANNOTATION, on)
     }
+}
+
+/// One source of truth for declaration-level classifier flags. The same packed value seeds the
+/// all-files header index and is later installed on the complete `ClassSig`, preventing early
+/// inference and final checking from classifying a declaration differently.
+fn source_class_flags(class: &ClassDecl) -> ClassFlags {
+    ClassFlags::default()
+        .with_interface(class.is_interface())
+        .with_object(class.is_object())
+        .with_abstract(class.is_abstract())
+        .with_fun_interface(class.is_fun_interface)
+        .with_sealed(class.is_sealed())
+        .with_final(class.is_final())
+        .with_has_abstract_members(
+            class.methods.iter().any(|method| method.is_abstract())
+                || class.body_props.iter().any(|property| property.is_abstract),
+        )
+        .with_annotation(class.is_annotation())
 }
 
 #[derive(Clone, Debug)]
@@ -1143,7 +1201,9 @@ fn folded_integer_literal(file: &File, expression: ExprId) -> Option<i32> {
 
 /// Combine an already-computed runtime type with syntax-only call-argument provenance.
 fn call_arg_kind(file: &File, expression: ExprId, ty: Ty) -> CallArgKind {
-    if matches!(file.expr(expression), Expr::Lambda { .. }) {
+    if file.is_spread_arg(expression) {
+        CallArgKind::Spread(ty)
+    } else if matches!(file.expr(expression), Expr::Lambda { .. }) {
         CallArgKind::LambdaLiteral(ty)
     } else if let Some(value) = folded_integer_literal(file, expression) {
         CallArgKind::integer_literal(ty, value)
@@ -1642,9 +1702,17 @@ pub struct SymbolTable {
         HashMap<TopLevelFunctionConflictKey, TopLevelFunctionConflictCandidates>,
     /// Declared classes by JVM internal name (e.g. `pkg/Point`, `pkg/Outer$Inner`) — two classes
     /// sharing a SIMPLE name in different packages are distinct entries, so member lookup on one
-    /// never evicts the other. `typealias` copies are the one exception: they key on the alias's
-    /// simple name so constructor-call paths that only have the alias spelling still find a sig.
+    /// never evicts the other. This is a strict invariant: source aliases live in the separate
+    /// declaration-keyed alias index below and never introduce a differently shaped key here.
     pub classes: HashMap<TypeName, ClassSig>,
+    /// Declaration-header facts keyed by classifier identity, available before full signatures are
+    /// collected. Forward property inference may need to classify a later-file source singleton; this
+    /// identity table avoids both source-order dependence and the old global simple-name object set.
+    source_class_headers: HashMap<TypeName, ClassFlags>,
+    /// Source `typealias` bindings by declaring file and alias spelling. An alias is a name-resolution
+    /// edge to a classifier identity, not another class declaration; keeping it separate prevents a
+    /// simple alias key from corrupting the internal-name invariant of [`Self::classes`].
+    source_class_aliases: HashMap<(u32, String), TypeName>,
     anonymous_object_types: HashMap<(u32, DeclId), TypeName>,
     anonymous_object_captures: HashMap<(u32, DeclId), Vec<AnonymousObjectCapture>>,
     anonymous_object_capture_discovered: std::collections::HashSet<(u32, DeclId)>,
@@ -1662,10 +1730,10 @@ pub struct SymbolTable {
     /// name but must emit the annotated one, and the callee's AST is out of its reach — so the name
     /// is recorded here, where the collect pass can see every file. Absent = the two agree.
     pub toplevel_jvm_names: HashMap<(u32, u32), String>,
-    /// Simple names declared as `object` singletons (accessed via `Name.member`).
-    pub objects: std::collections::HashSet<String>,
-    /// Declared `enum` types (simple name → entry names), accessed via `Name.ENTRY`.
-    pub enums: HashMap<String, Vec<String>>,
+    /// Declared enum entries by classifier identity, accessed via `Name.ENTRY`. Object identity is
+    /// already carried by `ClassSig::is_object`; duplicating it in a simple-name set made the two
+    /// sources disagree for cross-package homonyms.
+    pub enums: HashMap<TypeName, Vec<String>>,
     /// Static values by resolved classifier identity. Pre-indexed before signature inference so enum
     /// initializers do not depend on source declaration order or collide across packages.
     pub static_classifier_values: HashMap<TypeName, HashMap<String, Ty>>,
@@ -1719,6 +1787,8 @@ impl Default for SymbolTable {
             conflicting_top_level_key_by_source: HashMap::new(),
             conflicting_top_level_candidates: HashMap::new(),
             classes: HashMap::new(),
+            source_class_headers: HashMap::new(),
+            source_class_aliases: HashMap::new(),
             anonymous_object_types: HashMap::new(),
             anonymous_object_captures: HashMap::new(),
             anonymous_object_capture_discovered: std::collections::HashSet::new(),
@@ -1727,7 +1797,6 @@ impl Default for SymbolTable {
             context_prop_names: std::collections::HashSet::new(),
             computed_props: std::collections::HashSet::new(),
             toplevel_jvm_names: HashMap::new(),
-            objects: std::collections::HashSet::new(),
             enums: HashMap::new(),
             static_classifier_values: HashMap::new(),
             libraries: Box::new(EmptySymbolSource),
@@ -1788,6 +1857,10 @@ impl SymbolTable {
         for class in self.classes.values_mut() {
             class.source_file += offset;
         }
+        self.source_class_aliases = std::mem::take(&mut self.source_class_aliases)
+            .into_iter()
+            .map(|((file, alias), internal)| ((file + offset, alias), internal))
+            .collect();
         self.conflicting_top_level_key_by_source =
             std::mem::take(&mut self.conflicting_top_level_key_by_source)
                 .into_iter()
@@ -1866,12 +1939,6 @@ impl SymbolTable {
     pub fn insert_class(&mut self, sig: ClassSig) -> Option<ClassSig> {
         let internal = sig.internal;
         self.classes.insert(internal, sig)
-    }
-
-    /// Insert a `typealias` copy under the ALIAS's simple name — the one deliberate exception to
-    /// internal-name keying, so constructor-call paths that only have the alias spelling find a sig.
-    pub fn insert_class_alias(&mut self, alias: String, sig: ClassSig) -> Option<ClassSig> {
-        self.classes.insert(type_name(&alias), sig)
     }
 
     pub fn insert_class_sig(&mut self, internal: TypeName, sig: ClassSig) -> Option<ClassSig> {
@@ -1963,6 +2030,69 @@ impl SymbolTable {
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.get(&internal)
+    }
+
+    /// Resolve one source file's alias spelling to its target module class. The returned class still
+    /// comes from the canonical internal-name table; aliases never manufacture duplicate signatures.
+    pub fn source_class_alias(&self, file: u32, alias: &str) -> Option<&ClassSig> {
+        self.source_class_aliases
+            .get(&(file, alias.to_string()))
+            .and_then(|internal| self.classes.get(internal))
+    }
+
+    /// Select a module class from a file's already-normalized name-resolution candidates.
+    ///
+    /// Both checker and lowerer have file-specific syntax views, but class-table lookup semantics are
+    /// identical: an explicit imported classifier wins, then the same-package identity, then a source
+    /// alias edge. Centralizing that identity selection prevents either consumer from growing a
+    /// file/module/classpath-specific fallback or accidentally querying [`Self::classes`] by spelling.
+    pub fn source_class_binding<I>(
+        &self,
+        file: u32,
+        explicit_candidates: I,
+        same_package: TypeName,
+        alias: &str,
+    ) -> Option<&ClassSig>
+    where
+        I: IntoIterator<Item = TypeName>,
+    {
+        self.source_class_identity(file, explicit_candidates, same_package, alias)
+            .and_then(|internal| self.classes.get(&internal))
+    }
+
+    /// Select the semantic classifier identity even while its complete `ClassSig` is still being
+    /// collected. This is the declaration-header twin of [`Self::source_class_binding`]; both use the
+    /// same precedence and alias edges, so early inference cannot grow its own import/package branch.
+    fn source_class_identity<I>(
+        &self,
+        file: u32,
+        explicit_candidates: I,
+        same_package: TypeName,
+        alias: &str,
+    ) -> Option<TypeName>
+    where
+        I: IntoIterator<Item = TypeName>,
+    {
+        let known = |internal: &TypeName| {
+            self.source_class_headers.contains_key(internal) || self.classes.contains_key(internal)
+        };
+        explicit_candidates
+            .into_iter()
+            .find(|internal| known(internal))
+            .or_else(|| known(&same_package).then_some(same_package))
+            .or_else(|| {
+                self.source_class_aliases
+                    .get(&(file, alias.to_string()))
+                    .copied()
+            })
+    }
+
+    fn source_class_is_object(&self, internal: TypeName) -> bool {
+        self.classes.get(&internal).is_some_and(ClassSig::is_object)
+            || self
+                .source_class_headers
+                .get(&internal)
+                .is_some_and(|flags| flags.has(ClassFlags::OBJECT))
     }
 
     /// Find the source declaration that owns a member property across the complete module hierarchy.
@@ -2525,15 +2655,9 @@ impl SymbolTable {
         )
     }
 
-    /// The source enum entry names for the class with this INTERNAL name, matching the
-    /// source-spelling `enums` key to the exact internal (`pkg/E` / `pkg/Outer$E`), so a
-    /// same-simple-name enum in another package cannot supply the entries.
+    /// The source enum entry names for this classifier identity.
     pub fn enum_entries_of(&self, internal: TypeName) -> Option<&Vec<String>> {
-        self.enums.iter().find_map(|(name, entries)| {
-            let mangled = name.replace('.', "$");
-            (internal.matches(&mangled) || internal.render().ends_with(&format!("/{mangled}")))
-                .then_some(entries)
-        })
+        self.enums.get(&internal)
     }
 
     /// The source spelling (`Wrapper`, `Outer.Inner` for a nested class) of a MODULE class's internal
@@ -3467,14 +3591,9 @@ pub fn pick_overload(sigs: &[Signature], arg_tys: &[Ty]) -> Option<usize> {
     if sigs.len() == 1 {
         return Some(0);
     }
-    let arity_ok = |s: &Signature| {
-        if s.vararg() {
-            arg_tys.len() + 1 >= s.params.len()
-        } else {
-            arg_tys.len() >= s.required && arg_tys.len() <= s.params.len()
-        }
-    };
-    let cands: Vec<usize> = (0..sigs.len()).filter(|&i| arity_ok(&sigs[i])).collect();
+    let cands: Vec<usize> = (0..sigs.len())
+        .filter(|&i| sigs[i].accepts_arity(arg_tys.len()))
+        .collect();
     if cands.len() <= 1 {
         return cands.first().copied();
     }
@@ -4539,16 +4658,17 @@ fn collect_signatures_with_cp_impl(
 
     // Pass 2: resolve signatures/properties against the now-complete type universe.
     let mut table = SymbolTable::default();
-    // Pre-seed object names and enum static values from ALL files so lightweight initializer
-    // inference is independent of declaration order.
+    // Pre-seed identity-keyed declaration headers and enum static values from ALL files so lightweight
+    // initializer inference is independent of declaration order. These are the exact flags later moved
+    // onto each canonical `ClassSig`, not a parallel simple-name object index.
     for file in files {
         for &d in &file.decls {
             if let Decl::Class(c) = file.decl(d) {
-                if c.is_object() {
-                    table.objects.insert(c.name.clone());
-                }
+                let internal = type_name(&class_internal(file, &c.name));
+                table
+                    .source_class_headers
+                    .insert(internal, source_class_flags(c));
                 if c.is_enum() {
-                    let internal = type_name(&class_internal(file, &c.name));
                     for entry in &c.enum_entries {
                         table
                             .static_classifier_values
@@ -4635,7 +4755,7 @@ fn collect_signatures_with_cp_impl(
                                     })
                                     .unwrap_or_default();
                                 let t = infer_lit_ty_scoped(
-                                    file,
+                                    InferenceSource(file, i as u32),
                                     *e,
                                     &class_names,
                                     &fun_rets,
@@ -5325,7 +5445,7 @@ fn collect_signatures_with_cp_impl(
                                 Some(r) => ty_of_ref(r, &class_names, &btp, diags),
                                 None => {
                                     let dt = infer_lit_ty_scoped(
-                                        file,
+                                        InferenceSource(file, i as u32),
                                         de,
                                         &class_names,
                                         &fun_rets,
@@ -5347,7 +5467,7 @@ fn collect_signatures_with_cp_impl(
                                 (Some(r), _) => ty_of_ref(r, &class_names, &btp, diags),
                                 (None, Some(FunBody::Expr(g))) if !c.is_value => {
                                     let inferred = infer_lit_ty_scoped(
-                                        file,
+                                        InferenceSource(file, i as u32),
                                         *g,
                                         &class_names,
                                         &fun_rets,
@@ -5376,10 +5496,10 @@ fn collect_signatures_with_cp_impl(
                                 }
                                 (None, _) => bp
                                     .init
-                                    .map(|i| {
+                                    .map(|expression| {
                                         infer_lit_ty_scoped(
-                                            file,
-                                            i,
+                                            InferenceSource(file, i as u32),
+                                            expression,
                                             &class_names,
                                             &fun_rets,
                                             &property_scope,
@@ -5398,7 +5518,7 @@ fn collect_signatures_with_cp_impl(
                                 .or_else(|| {
                                     bp.init.map(|init| {
                                         infer_lit_ty_scoped(
-                                            file,
+                                            InferenceSource(file, i as u32),
                                             init,
                                             &class_names,
                                             &fun_rets,
@@ -5587,10 +5707,10 @@ fn collect_signatures_with_cp_impl(
                                 Some(r) => ty_of_ref(r, &class_names, &bctp, diags),
                                 None => bp
                                     .init
-                                    .map(|i| {
+                                    .map(|expression| {
                                         infer_lit_ty_scoped(
-                                            file,
-                                            i,
+                                            InferenceSource(file, i as u32),
+                                            expression,
                                             &class_names,
                                             &fun_rets,
                                             &[],
@@ -5702,7 +5822,7 @@ fn collect_signatures_with_cp_impl(
                                         .collect();
                                     scope.extend(props.iter().cloned());
                                     let t = infer_lit_ty_scoped(
-                                        file,
+                                        InferenceSource(file, i as u32),
                                         *e,
                                         &class_names,
                                         &local_rets,
@@ -5908,12 +6028,9 @@ fn collect_signatures_with_cp_impl(
                             }],
                         );
                     }
-                    if c.is_object() {
-                        table.objects.insert(c.name.clone());
-                    }
                     if c.is_enum() {
                         table.enums.insert(
-                            c.name.clone(),
+                            type_name(&internal),
                             c.enum_entries.iter().map(|e| e.name.clone()).collect(),
                         );
                     }
@@ -6039,7 +6156,7 @@ fn collect_signatures_with_cp_impl(
                                         // object, static-classifier, and cycle-guard behavior while
                                         // adding the companion properties as the lexical value scope.
                                         let t = infer_lit_ty_scoped(
-                                            file,
+                                            InferenceSource(file, i as u32),
                                             *e,
                                             &class_names,
                                             &fun_rets,
@@ -6276,18 +6393,7 @@ fn collect_signatures_with_cp_impl(
                                 })
                                 .collect(),
                             methods,
-                            flags: ClassFlags::default()
-                                .with_interface(c.is_interface())
-                                .with_object(c.is_object())
-                                .with_abstract(c.is_abstract())
-                                .with_fun_interface(c.is_fun_interface)
-                                .with_sealed(c.is_sealed())
-                                .with_final(c.is_final())
-                                .with_has_abstract_members(
-                                    c.methods.iter().any(|method| method.is_abstract())
-                                        || c.body_props.iter().any(|property| property.is_abstract),
-                                )
-                                .with_annotation(c.is_annotation()),
+                            flags: source_class_flags(c),
                             inner_of: inner_of_ref,
                             static_methods,
                             companion_fun_names,
@@ -6433,7 +6539,7 @@ fn collect_signatures_with_cp_impl(
                                 .map(|r| ty_of_ref(r, &class_names, &ptp, diags))
                                 .or_else(|| match &p.getter {
                                     Some(FunBody::Expr(g)) => Some(infer_lit_ty_scoped(
-                                        file,
+                                        InferenceSource(file, i as u32),
                                         *g,
                                         &class_names,
                                         &fun_rets,
@@ -6531,7 +6637,7 @@ fn collect_signatures_with_cp_impl(
                             (Some(r), _) => ty_of_ref(r, &class_names, &Default::default(), diags),
                             (None, Some(FunBody::Expr(g))) if is_computed => {
                                 infer_top_level_property_expr(
-                                    file,
+                                    InferenceSource(file, i as u32),
                                     *g,
                                     &class_names,
                                     &fun_rets,
@@ -6542,10 +6648,10 @@ fn collect_signatures_with_cp_impl(
                             }
                             (None, _) => p
                                 .init
-                                .map(|i| {
+                                .map(|expression| {
                                     infer_top_level_property_expr(
-                                        file,
-                                        i,
+                                        InferenceSource(file, i as u32),
+                                        expression,
                                         &class_names,
                                         &fun_rets,
                                         &context_scope,
@@ -6656,17 +6762,18 @@ fn collect_signatures_with_cp_impl(
         }
     }
 
-    // Add ClassSig aliases so that `typealias Bar = Foo` allows `Bar(...)` constructor calls.
-    // The copy keys on the ALIAS's simple name (the class map itself keys on internal names);
-    // the target resolves through `class_names`, whose per-name binding the import pass built.
-    for (alias, target) in &alias_map {
-        if !table.classes.contains_key(&type_name(alias)) {
-            if let Some(cs) = class_names
-                .get(target)
-                .and_then(|internal| table.classes.get(&internal))
-                .cloned()
+    // Retain source aliases as per-file name-resolution edges. A copied `ClassSig` under a simple
+    // alias key would violate the class table's internal-name invariant and make hierarchy walks,
+    // module providers, and direct lookups disagree about the same table.
+    for (file_index, file) in files.iter().enumerate() {
+        for (alias, _) in &file.type_aliases {
+            if let Some(internal) = file_class_names[file_index]
+                .get_class(alias)
+                .filter(|internal| table.classes.contains_key(internal))
             {
-                table.insert_class_alias(alias.clone(), cs);
+                table
+                    .source_class_aliases
+                    .insert((file_index as u32, alias.clone()), internal);
             }
         }
     }
@@ -7685,7 +7792,7 @@ fn infer_lit_ty(
     let env = InferEnv {
         up: &|_, _| None,
         inferring: &inferring,
-        is_object: &|_| false,
+        module_object: &|_| None,
         static_classifier_value: &|_, _| None,
     };
     infer_lit_ty_p(file, e, class_names, fun_rets, &[], src, &env)
@@ -7785,20 +7892,27 @@ struct InferEnv<'a> {
     /// Expression-body ids currently on the inference stack — a companion method whose inferred return
     /// recurses back to itself (`a()=C.b(); b()=C.a()`) yields `Error` (skip) instead of looping.
     inferring: &'a std::cell::RefCell<std::collections::HashSet<u32>>,
-    /// True if a simple name is a SAME-MODULE `object` (`val h = Helper`) — the library source can't
-    /// see it, so the `Name` arm's classpath object-check misses it; this closes that gap.
-    is_object: &'a dyn Fn(&str) -> bool,
+    /// Resolve a source spelling to the SAME-MODULE `object` identity (`val h = Helper`). Returning the
+    /// identity—not only a boolean—is essential for explicit imports and package homonyms: the global
+    /// class-name projection cannot recover which singleton value the file actually bound.
+    module_object: &'a dyn Fn(&str) -> Option<TypeName>,
     /// Resolve a static value declared by a same-module classifier. The lightweight inferer receives
     /// only the external platform source, so source enum entries need this module-table bridge.
     static_classifier_value: &'a dyn Fn(TypeName, &str) -> Option<Ty>,
 }
+
+/// Source identity for lightweight signature inference. The AST and its module file index are one
+/// semantic context: alias/import edges are file-scoped, so passing either independently invites a
+/// mismatched lookup and needlessly widens every inference helper's argument list.
+#[derive(Clone, Copy)]
+struct InferenceSource<'a>(&'a File, u32);
 
 /// Infer an eager top-level initializer or expression getter against the same value scope. Named
 /// context parameters come first because lightweight name resolution is first-match; they therefore
 /// shadow module properties just as they do in the real checker. Module properties follow so nested
 /// expressions such as `holder.value` and `a.compareTo(b)` do not need call-site-specific branches.
 fn infer_top_level_property_expr(
-    file: &File,
+    source: InferenceSource<'_>,
     expression: ExprId,
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
@@ -7816,7 +7930,15 @@ fn infer_top_level_property_expr(
                 .map(|(name, (ty, is_var, _))| (name.clone(), *ty, *is_var)),
         )
         .collect::<Vec<_>>();
-    infer_lit_ty_scoped(file, expression, class_names, fun_rets, &props, src, table)
+    infer_lit_ty_scoped(
+        source,
+        expression,
+        class_names,
+        fun_rets,
+        &props,
+        src,
+        table,
+    )
 }
 
 /// A member computed getter whose first-pass inference hit `Error`, kept for the post-walk retry
@@ -7866,7 +7988,7 @@ fn finish_member_computed_getter_inference(
                 }
             }
             let inferred = infer_lit_ty_scoped(
-                &files[entry.file_index],
+                InferenceSource(&files[entry.file_index], entry.file_index as u32),
                 entry.getter,
                 &entry.class_names,
                 fun_rets,
@@ -7962,7 +8084,7 @@ fn finish_top_level_computed_property_inference(
                     .map(|(parameter, ty)| (parameter.name.clone(), *ty, false))
                     .collect::<Vec<_>>();
                 let inferred = infer_top_level_property_expr(
-                    file,
+                    InferenceSource(file, file_index as u32),
                     *getter,
                     &file_class_names[file_index],
                     fun_rets,
@@ -8031,7 +8153,7 @@ fn finish_top_level_computed_property_inference(
 /// Infer a declaration initializer's type with a fresh cycle-guard, using `table` to resolve
 /// module-local class properties — the common entry used by signature collection.
 fn infer_lit_ty_scoped(
-    file: &File,
+    source: InferenceSource<'_>,
     e: ExprId,
     class_names: &ClassNames,
     fun_rets: &HashMap<String, Ty>,
@@ -8039,8 +8161,33 @@ fn infer_lit_ty_scoped(
     src: &dyn SemanticPlatform,
     table: &SymbolTable,
 ) -> Ty {
+    let InferenceSource(file, file_index) = source;
     let up = |recv: Ty, name: &str| table.applied_member_prop_ty(recv, name);
-    let is_object = |name: &str| table.objects.contains(name);
+    // Resolve through the same file-aware module binding used by checking/lowering, then read
+    // object-ness from the canonical class signature. `ClassNames::get_class(name)` is a global
+    // simple-name projection and cannot represent an explicit source import when packages contain
+    // homonyms. Candidate spelling remains a syntax concern here; selection stays centralized.
+    let module_object = |name: &str| {
+        let explicit_candidates = file
+            .imports
+            .iter()
+            .filter(|import| import.rsplit('.').next() == Some(name))
+            .flat_map(|import| {
+                nested_internal_name_candidates(&import.replace('.', "/"))
+                    .into_iter()
+                    .rev()
+            })
+            .filter_map(|candidate| existing_type_name(&candidate))
+            .collect::<Vec<_>>();
+        table
+            .source_class_identity(
+                file_index,
+                explicit_candidates.iter().copied(),
+                type_name(&class_internal(file, name)),
+                name,
+            )
+            .filter(|internal| table.source_class_is_object(*internal))
+    };
     let static_classifier_value = |internal: TypeName, name: &str| {
         table
             .static_classifier_values
@@ -8052,7 +8199,7 @@ fn infer_lit_ty_scoped(
     let env = InferEnv {
         up: &up,
         inferring: &inferring,
-        is_object: &is_object,
+        module_object: &module_object,
         static_classifier_value: &static_classifier_value,
     };
     infer_lit_ty_p(file, e, class_names, fun_rets, props, src, &env)
@@ -8176,8 +8323,8 @@ fn infer_lit_ty_p(
                     .filter(|internal| {
                         src.resolve_type_name(*internal)
                             .is_some_and(|t| t.is_object())
-                            || (env.is_object)(n)
                     })
+                    .or_else(|| (env.module_object)(n))
                     .map(Ty::obj_name)
             })
             .unwrap_or(Ty::Error),
@@ -9593,6 +9740,13 @@ pub struct TypeInfo {
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    /// Plain named arguments that the selected call mapping bound as an ENTIRE vararg array. This is
+    /// a semantic call fact, not something lowering may infer by comparing instantiated `Ty` values:
+    /// generic inference can represent the call-site array and selected parameter with different type
+    /// arguments even though they share the same erased JVM array. Treating such an argument as an
+    /// element nests the array and can fail only at runtime. Expression ids are file-unique, so the
+    /// selected argument itself is a provider-neutral handoff for every callable origin.
+    pub resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// Extension callables the checker resolved for a SYNTHESIZED call that has no source-call `ExprId` —
     /// a destructuring `componentN`, a `for`-loop `iterator`, a `+=` `plusAssign` — keyed by the receiver
     /// expression's `ExprId` (the destructured value / iterable / assignment target) and the operator
@@ -9671,6 +9825,14 @@ pub enum ResolvedCall {
         owner: Option<TypeName>,
         source: Option<(u32, u32)>,
         vararg: bool,
+        /// The vararg's VALUE-parameter position. A vararg need not be last
+        /// (`fun B.segd(vararg s: String, flag: Boolean = false)`), and the lowerer must not
+        /// re-derive the position from a declaration it may not have (a sibling file's).
+        vararg_index: Option<usize>,
+        /// File-independent source defaults, parallel to `params`. The selected call carries these
+        /// beside its vararg slot so lowering consumes one semantic record for same-file and sibling-
+        /// file extensions; it must not recover defaults by probing a declaration's physical origin.
+        param_default_values: Vec<Option<CtorDefaultValue>>,
         /// Selected callable capabilities. Carrying the complete semantic facts, rather than only a
         /// derived `requires_splice` bit, lets safety gates distinguish `suspend inline` from ordinary
         /// inline calls and keeps those gates independent of declaration name and symbol origin.
@@ -11212,6 +11374,7 @@ fn make_checker<'a>(
         resolved_library_companion_consts: HashMap::new(),
         resolved_enum_entries: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
+        resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         synthetic_ext_calls: HashMap::new(),
         delegate_getvalue_targets: HashMap::new(),
         super_ctor_params: HashMap::new(),
@@ -12211,6 +12374,30 @@ fn preinfer_module_returns_impl(files: &[File], syms: &mut SymbolTable, diags: &
     diags.set_file(saved);
 }
 
+/// Whether two source callables accept at least one common argument COUNT.
+///
+/// This is the declaration-side companion of [`Signature::accepts_arity`]. It deliberately asks
+/// about source call shape, not JVM owner/name or raw parameter-vector equality: defaults and varargs
+/// can make declarations of different lengths overlap. Per-parameter named mapping and type scoring
+/// happen only after lexical scope has selected a callable family, so an overlap must remain guarded
+/// wherever that scope selection cannot yet distinguish two families.
+fn source_callable_arities_overlap(left: &FunDecl, right: &FunDecl) -> bool {
+    let shape = |function: &FunDecl| {
+        let vararg = function.params.iter().any(|parameter| parameter.is_vararg);
+        let minimum = function
+            .params
+            .iter()
+            .filter(|parameter| parameter.default.is_none() && !parameter.is_vararg)
+            .count();
+        (vararg, minimum, function.params.len())
+    };
+    let (left_vararg, left_minimum, left_count) = shape(left);
+    let (right_vararg, right_minimum, right_count) = shape(right);
+    let candidate = left_minimum.max(right_minimum);
+    callable_accepts_arity(left_vararg, left_minimum, left_count, candidate)
+        && callable_accepts_arity(right_vararg, right_minimum, right_count, candidate)
+}
+
 fn check_file_at_impl_mode(
     file: &File,
     file_index: u32,
@@ -13038,9 +13225,12 @@ fn check_file_at_impl_mode(
                     // A plain companion property hoists to a static field on the outer class, so a
                     // companion PROPERTY whose name collides with an instance member would duplicate
                     // a field (kotlinc separates them via the nested Companion class). Reject (skip).
-                    // Companion METHODS are emitted on `C$Companion`, so they collide only with a
-                    // same-arity instance method (the shape a `@JvmStatic` forwarder could not
-                    // coexist with); a different-arity same-named pair is legal Kotlin and JVM.
+                    // Companion METHODS are emitted on `C$Companion`, so a same-NAME method on the
+                    // outer instance is physically legal. The remaining guard is semantic: the
+                    // checker currently consults the unqualified companion fallback before its
+                    // implicit instance receiver, so the two families must not accept the same call
+                    // arity or it could bind the wrong owner. Compare the complete callable arity
+                    // RANGE (defaults/varargs included), not raw parameter-vector length.
                     let inst_names: std::collections::HashSet<&str> = cl
                         .props
                         .iter()
@@ -13055,11 +13245,11 @@ fn check_file_at_impl_mode(
                         }
                     }
                     for cm in &cl.companion_methods {
-                        let same_arity_instance = cl
+                        let overlapping_instance = cl
                             .methods
                             .iter()
-                            .any(|m| m.name == cm.name && m.params.len() == cm.params.len());
-                        if same_arity_instance {
+                            .any(|m| m.name == cm.name && source_callable_arities_overlap(m, cm));
+                        if overlapping_instance {
                             c.diags.error(cl.span, format!("krusty: companion member '{}' collides with an instance member (unsupported)", cm.name));
                         }
                     }
@@ -13320,6 +13510,7 @@ fn check_file_at_impl_mode(
         resolved_library_companion_consts,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_whole_array_vararg_args,
         synthetic_ext_calls,
         delegate_getvalue_targets,
         context_args,
@@ -13472,6 +13663,7 @@ fn check_file_at_impl_mode(
         resolved_library_companion_consts,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_whole_array_vararg_args,
         synthetic_ext_calls,
         delegate_getvalue_targets,
         context_args,
@@ -13825,6 +14017,7 @@ struct Checker<'a> {
     resolved_library_companion_consts: HashMap<ExprId, crate::libraries::LibraryConst>,
     resolved_enum_entries: HashMap<ExprId, TypeName>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     synthetic_ext_calls: HashMap<(ExprId, String), crate::libraries::LibraryCallable>,
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     /// Implicit context arguments per call (see [`TypeInfo::context_args`]).
@@ -14304,11 +14497,8 @@ impl<'a> Checker<'a> {
         params: &[Ty],
     ) -> bool {
         let arg_names = self.file.call_arg_names.get(&call.0).cloned();
-        if arg_names.is_none() && selected.call_sig.vararg {
-            self.expect_call_args(params, true, args, arg_tys);
-            return true;
-        }
         if arg_names.is_some()
+            || selected.call_sig.vararg
             || (arg_tys.len() != params.len()
                 && selected.call_sig.can_map_omitted_args(params.len()))
         {
@@ -14324,14 +14514,63 @@ impl<'a> Checker<'a> {
                     return false;
                 }
             };
+            // Every argument the mapper left out of `slots` is a vararg ELEMENT beyond the first
+            // (the slot map stores one expression per parameter): the argument at the vararg slot
+            // and each unmapped one checks against the element type — or the ARRAY for a spread.
+            let vararg_expected = |this: &Self, argument: ExprId, array: Ty| {
+                if this.file.is_spread_arg(argument) {
+                    array
+                } else {
+                    array.array_elem().unwrap_or(array)
+                }
+            };
+            let named_argument = |argument: ExprId| {
+                args.iter().position(|&a| a == argument).is_some_and(|i| {
+                    arg_names
+                        .as_ref()
+                        .and_then(|names| names.get(i))
+                        .and_then(Option::as_ref)
+                        .is_some()
+                })
+            };
             for (index, argument) in slots.iter().enumerate() {
                 if let Some(argument) = argument {
+                    if selected.call_sig.vararg_index == Some(index) && named_argument(*argument) {
+                        self.expect_named_vararg_arg(
+                            *argument,
+                            self.expr_types[argument.0 as usize],
+                            params[index],
+                        );
+                        continue;
+                    }
+                    let expected = if selected.call_sig.vararg_index == Some(index) {
+                        vararg_expected(self, *argument, params[index])
+                    } else {
+                        params[index]
+                    };
                     self.expect_assignable(
-                        params[index],
+                        expected,
                         self.expr_types[argument.0 as usize],
                         self.span(*argument),
                         "argument",
                     );
+                }
+            }
+            if let Some(array) = selected
+                .call_sig
+                .vararg_index
+                .and_then(|index| params.get(index).copied())
+            {
+                for &argument in args {
+                    if !slots.contains(&Some(argument)) {
+                        let expected = vararg_expected(self, argument, array);
+                        self.expect_assignable(
+                            expected,
+                            self.expr_types[argument.0 as usize],
+                            self.span(argument),
+                            "argument",
+                        );
+                    }
                 }
             }
             self.resolved_call_arg_slots.insert(call, slots);
@@ -15087,12 +15326,29 @@ impl<'a> Checker<'a> {
                 // `T` bound by this call). `call_sig.lambda_receivers` is the weaker fallback: a callable
                 // with no generic signature records only the receiver's CLASS, so preferring it would
                 // shape the lambda against a raw `Config` and lose the binding.
-                overload
+                //
+                // An EXTENSION's call sig deliberately carries no receiver-lambda marks (see
+                // `CallSig::metadata_extension`), so the semantic parameter type is the authority for
+                // it: a `Ty::Fun` whose `has_receiver` is set marks the parameter just as the call-sig
+                // flag does. Only a CONCRETE receiver derives the mark — a type-parameter receiver
+                // (`T.() -> R`, the scope functions) is already bound by extension resolution's own
+                // lambda channel, and marking it here re-checks the block through this second channel,
+                // where labeled `this` lowering has different ownership (`run { this@C.bar() }` bailed).
+                let receiver_fun_param = overload
                     .call_sig
                     .lambda_receiver_params
                     .get(parameter)
                     .copied()
                     .unwrap_or(false)
+                    || matches!(
+                        semantic.params.get(parameter).map(|ty| ty.non_null()),
+                        Some(Ty::Fun(sig)) if sig.has_receiver
+                            && sig
+                                .params
+                                .get(sig.context_count)
+                                .is_some_and(|receiver| !receiver.is_ty_param())
+                    );
+                receiver_fun_param
                     .then(|| {
                         let context_count = overload
                             .call_sig
@@ -16182,6 +16438,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: selected.source_key,
                     vararg: selected.call_sig.vararg,
+                    vararg_index: selected.call_sig.vararg_index,
+                    param_default_values: sig.param_default_values.clone(),
                     inline,
                     suspend,
                 },
@@ -16869,9 +17127,15 @@ impl<'a> Checker<'a> {
                 &value_signature,
                 trailing_lambda,
             ) {
-                Ok(slots) => {
-                    mapped.push((self.call_slot_score(value_params, &slots), slots, candidate))
-                }
+                Ok(slots) => mapped.push((
+                    self.call_slot_score_vararg(
+                        value_params,
+                        &slots,
+                        candidate.call_sig.vararg_index,
+                    ),
+                    slots,
+                    candidate,
+                )),
                 Err(error) => failures.push((error, candidate)),
             }
         }
@@ -17012,9 +17276,7 @@ impl<'a> Checker<'a> {
         function: &FunDecl,
         argument_count: usize,
     ) -> Option<(usize, Vec<usize>)> {
-        if self.file.call_arg_names.contains_key(&call.0) {
-            return None;
-        }
+        let names = self.file.call_arg_names.get(&call.0);
         let vararg = function
             .params
             .iter()
@@ -17023,17 +17285,49 @@ impl<'a> Checker<'a> {
             && self.file.call_has_trailing_lambda.contains(&call.0)
             && argument_count > 0)
             .then_some(function.params.len() - 1);
+        // A NAMED argument maps to its parameter by label (`topd("O", "K", flag = true)` — the
+        // positional elements pack into the vararg, the label binds the trailing parameter). An
+        // unknown label declines the mapping so the labelled diagnostics path reports it. A
+        // positional argument takes the next parameter NOT bound by name — Kotlin allows a named
+        // argument in its own position followed by positionals (`f(a = 1, "x")`), so the counter
+        // must skip name-bound slots or the positional lands on an already-taken parameter.
+        let named_slot = |argument: usize| {
+            names
+                .and_then(|names| names.get(argument))
+                .and_then(Option::as_ref)
+                .map(|name| {
+                    function
+                        .params
+                        .iter()
+                        .position(|parameter| &parameter.name == name)
+                })
+        };
+        let mut name_bound = vec![false; function.params.len()];
+        for argument in 0..argument_count {
+            if let Some(slot) = named_slot(argument) {
+                name_bound[slot?] = true;
+            }
+        }
+        let mut positional = 0usize;
         let mapping = (0..argument_count)
             .map(|argument| {
-                if argument < vararg {
-                    argument
+                if let Some(slot) = named_slot(argument) {
+                    return slot;
+                }
+                while positional < vararg && name_bound[positional] {
+                    positional += 1;
+                }
+                Some(if positional < vararg {
+                    let parameter = positional;
+                    positional += 1;
+                    parameter
                 } else if argument + 1 == argument_count {
                     trailing.unwrap_or(vararg)
                 } else {
                     vararg
-                }
+                })
             })
-            .collect();
+            .collect::<Option<Vec<usize>>>()?;
         Some((vararg, mapping))
     }
 
@@ -18765,13 +19059,18 @@ impl<'a> Checker<'a> {
             .and_then(|internal| self.syms.classes.get(&internal))
     }
 
-    /// Whether the companion body being checked declares its OWN static property `name` — the
-    /// companion's members shadow same-named top-level properties inside the companion body.
+    /// Whether the companion body currently being checked declares its own static property `name`.
+    ///
+    /// `companion_of` names the enclosing source declaration, so resolve it through the exact
+    /// same-package identity rather than a global simple-name map. The companion member shadows a
+    /// same-named file property for both reads and writes; reads already use this owner's
+    /// `static_props` before file scope, while unsupported own-property writes use this predicate to
+    /// reject instead of silently falling through to the file property.
     fn companion_own_static_property(&self, name: &str) -> bool {
         self.companion_of
             .as_deref()
             .and_then(|class| self.same_package_class(class))
-            .is_some_and(|companion| companion.static_props.contains_key(name))
+            .is_some_and(|owner| owner.static_props.contains_key(name))
     }
 
     /// The MODULE source class an unqualified classifier name binds to in this file: an explicit
@@ -18782,22 +19081,26 @@ impl<'a> Checker<'a> {
     /// module class, so the same-package arm still answers; the caller's `imported_type_name` /
     /// `class_names` arms resolve the classpath side.
     fn module_class_named(&self, name: &str) -> Option<&ClassSig> {
-        if let Some(fq) = self.imports.get(name) {
-            // Fold interning and class lookup into ONE find_map: `existing_type_name` only proves
-            // the string was interned (incidental probes intern `$`-spellings without a class behind
-            // them), so stopping there would drop a valid package-path import binding.
-            if let Some(sig) = nested_internal_name_candidates(fq)
-                .into_iter()
-                .rev()
-                .find_map(|candidate| {
-                    existing_type_name(&candidate)
-                        .and_then(|internal| self.syms.classes.get(&internal))
-                })
-            {
-                return Some(sig);
-            }
-        }
-        self.same_package_class(name)
+        let explicit_candidates = self
+            .imports
+            .get(name)
+            .into_iter()
+            .flat_map(|fq| nested_internal_name_candidates(fq).into_iter().rev())
+            .filter_map(|candidate| existing_type_name(&candidate));
+        self.syms.source_class_binding(
+            self.file_index,
+            explicit_candidates,
+            type_name(&class_internal(self.file, name)),
+            name,
+        )
+    }
+
+    /// The module classifier bound by `name`, narrowed to a singleton object. This keeps lookup and
+    /// classification on the same resolved `ClassSig`; a parallel simple-name set cannot preserve
+    /// identity across packages.
+    fn module_object_named(&self, name: &str) -> Option<&ClassSig> {
+        self.module_class_named(name)
+            .filter(|class| class.is_object())
     }
 
     fn scoped_classifier_name(&self, name: &str) -> InheritedNestedClassifier {
@@ -18911,10 +19214,8 @@ impl<'a> Checker<'a> {
         let internal = self
             .enclosing_nested_type_name(name)
             .or_else(|| self.module_class_named(name).map(ClassSig::internal_name))?;
-        let declaration = self.syms.class_simple_name(internal)?;
         self.syms
-            .enums
-            .get(&declaration)?
+            .enum_entries_of(internal)?
             .iter()
             .any(|candidate| candidate == entry)
             .then_some(internal)
@@ -20805,18 +21106,38 @@ impl<'a> Checker<'a> {
     /// T)` accepts `f(a, b)` with `a, b: T`); a single array argument is also accepted (a spread). For a
     /// non-`vararg` list the arguments match positionally.
     fn expect_call_args(&mut self, params: &[Ty], vararg: bool, args: &[ExprId], arg_tys: &[Ty]) {
-        if vararg && !params.is_empty() {
-            let n_fixed = params.len() - 1;
+        self.expect_call_args_at(
+            params,
+            vararg.then(|| params.len().saturating_sub(1)),
+            args,
+            arg_tys,
+        );
+    }
+
+    /// [`Self::expect_call_args`] with an EXPLICIT vararg slot: a vararg followed by defaulted
+    /// parameters (`fun f(vararg s: String, flag: Boolean = false)`) packs every positional
+    /// argument from the slot on, so the trailing parameters must not be matched positionally.
+    fn expect_call_args_at(
+        &mut self,
+        params: &[Ty],
+        vararg_index: Option<usize>,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+    ) {
+        if let Some(n_fixed) = vararg_index.filter(|&slot| slot < params.len()) {
             let array_param = params[n_fixed];
             let elem = array_param.array_elem().unwrap_or(array_param);
             for (i, a) in arg_tys.iter().enumerate() {
                 if i >= args.len() {
                     break;
                 }
-                // A lone argument already OF the array type is a spread/pass-through, not an element.
+                // A lone argument already OF the array type is a spread/pass-through, not an
+                // element; an explicit SPREAD (`*xs`) contributes its whole array in any position.
                 let expected = if i < n_fixed {
                     params[i]
-                } else if arg_tys.len() - n_fixed == 1 && *a == array_param {
+                } else if self.file.is_spread_arg(args[i])
+                    || (arg_tys.len() - n_fixed == 1 && *a == array_param)
+                {
                     array_param
                 } else {
                     elem
@@ -20834,6 +21155,38 @@ impl<'a> Checker<'a> {
     /// against the SAM method parameters here, at the common call-argument seam; import/member/vararg
     /// paths must not each reimplement the conversion or accidentally compare `FunctionN` to the Java
     /// interface type.
+    /// Check a NAMED argument bound to a vararg parameter. The named form takes the WHOLE array —
+    /// a spread (`s = *arr`) or an array-typed value (`parts = values`); a single element gets
+    /// kotlinc's diagnostic pair: the array-type mismatch AND the named-form prohibition.
+    fn expect_named_vararg_arg(&mut self, argument: ExprId, actual: Ty, array: Ty) {
+        // A SPREAD's expression may be typed by the array or by its element depending on the
+        // path that typed it — compare against the matching form so `s = *ints` on a `String`
+        // vararg is the compile-time mismatch kotlinc reports, not an `ArrayStoreException`.
+        if self.file.is_spread_arg(argument) {
+            let expected = if actual.non_null().array_elem().is_some() {
+                array
+            } else {
+                array.array_elem().unwrap_or(array)
+            };
+            self.expect_assignable(expected, actual, self.span(argument), "argument");
+            return;
+        }
+        // Reaching this helper means the selected argument mapper bound a PLAIN NAMED argument to
+        // the vararg parameter. Kotlin defines that form as the whole array. Preserve that decision
+        // explicitly for lowering even when diagnostics below reject its type: successful callers
+        // must not depend on equality between generic-inference representations, while rejected files
+        // never lower. Centralizing the record here covers source, sibling-module, and dependency
+        // candidates without teaching any provider-specific lowerer about labels.
+        self.resolved_whole_array_vararg_args.insert(argument);
+        self.expect_assignable(array, actual, self.span(argument), "argument");
+        if actual != Ty::Error && !self.receiver_is_assignable(actual, array) {
+            self.diags.error(
+                self.span(argument),
+                "assigning single elements to varargs in named form is prohibited.".to_string(),
+            );
+        }
+    }
+
     fn expect_call_arg(&mut self, expected: Ty, argument: ExprId, actual: Ty) {
         if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
             if let Some(sam) =
@@ -22817,6 +23170,8 @@ impl<'a> Checker<'a> {
                         owner,
                         source: selected.source_key,
                         vararg: selected.call_sig.vararg,
+                        vararg_index: selected.call_sig.vararg_index,
+                        param_default_values: sig.param_default_values.clone(),
                         inline,
                         suspend,
                     },
@@ -22958,11 +23313,28 @@ impl<'a> Checker<'a> {
         let t = {
             let ot = self.expr(operand);
             let tt = self.resolve_ty(&ty);
+            // A function target with concrete parameter/return types carries information that JVM
+            // `instanceof FunctionN` cannot test. Kotlin rejects that ERASED check before any
+            // unresolved nested classifier (whereas `as (Missing) -> R` still reports `Missing`).
+            // `typeref_leaf` normalizes arrow and named function spellings to the same `Ty::Fun`, so
+            // use that semantic identity for the category decision. The one source-level distinction
+            // that survives separately is intentional: a named `FunctionN<*, ...>` is runtime-
+            // checkable by arity and Kotlin permits it. The parser marks stars while resolving them to
+            // their ordinary `Any?` bound, avoiding both spelling-specific name tests and source-text
+            // recovery here.
+            let runtime_checkable_star_function =
+                !ty.targs.is_empty() && ty.targs.iter().all(TypeRef::is_star_projection);
+            if matches!(tt.non_null(), Ty::Fun(_)) && !runtime_checkable_star_function {
+                self.diags.error(
+                    self.span(e),
+                    "krusty: 'is' on this type is not supported".to_string(),
+                );
+                return Ty::Error;
+            }
             // An UNRESOLVED target reads exactly as kotlinc reports it — `unresolved reference
             // 'T'.` at the failing type's span — never as a compiler-specific "not supported"
             // rejection (the operand check below already exempts an Error operand the same way).
-            if tt == Ty::Error {
-                self.report_unresolved_type_ref(&ty);
+            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
                 return Ty::Error;
             }
             // `instanceof` needs a reference operand and a *known* target. An unresolved target
@@ -23008,9 +23380,12 @@ impl<'a> Checker<'a> {
     /// way kotlinc does. When the LEAF name itself is unresolvable (`Missing<T>`) name it — the
     /// outer failure is primary, and kotlinc reports it first; only when the leaf resolves on its
     /// own does a nested type carry the failure (`Array<Missing>` reports `Missing` at its own
-    /// span). Re-resolving a nested type here records only resolved-classifier facts; the Error
-    /// path itself emits nothing, so this can't double-report.
-    fn report_unresolved_type_ref(&mut self, r: &TypeRef) {
+    /// span). Returns whether it actually reported an unresolved classifier: a fully resolved target
+    /// may still be `Ty::Error` because its SHAPE is unsupported (`Array` without an element,
+    /// `Array<Nothing>`), and that must fall through to the existing supported-shape diagnostic.
+    /// Re-resolving a nested type here records only resolved-classifier facts; the Error path itself
+    /// emits nothing, so this cannot double-report.
+    fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
         // Probe the leaf WITHOUT its nested types. `Array` is exempt from the probe: its element
         // lives in `arg`, so stripping it would hit the raw-Array Error arm even though the
         // builtin name resolves.
@@ -23021,23 +23396,25 @@ impl<'a> Checker<'a> {
             leaf.fun_params = Vec::new();
             self.resolve_ty(&leaf) != Ty::Error
         };
-        if leaf_resolves {
-            // Nested positions in source order: function-type parameters, the `Array<T>` element
-            // / function return (`arg`), then class type arguments.
-            let nested = r
-                .fun_params
-                .iter()
-                .chain(r.arg.iter().map(|arg| &**arg))
-                .chain(r.targs.iter());
-            for part in nested {
-                if self.resolve_ty(part) == Ty::Error {
-                    self.report_unresolved_type_ref(part);
-                    return;
-                }
+        if !leaf_resolves {
+            self.diags
+                .error(r.span, format!("unresolved reference '{}'.", r.name));
+            return true;
+        }
+        // Nested positions in source order: function-type parameters, the `Array<T>` element /
+        // function return (`arg`), then class type arguments. `contains_error` matters here: an
+        // ordinary generic or function type keeps its outer shape around an unresolved component.
+        let nested = r
+            .fun_params
+            .iter()
+            .chain(r.arg.iter().map(|arg| &**arg))
+            .chain(r.targs.iter());
+        for part in nested {
+            if self.resolve_ty(part).contains_error() && self.report_unresolved_type_ref(part) {
+                return true;
             }
         }
-        self.diags
-            .error(r.span, format!("unresolved reference '{}'.", r.name));
+        false
     }
 
     fn expr_inner_as(&mut self, e: ExprId, operand: ExprId, ty: TypeRef, nullable: bool) -> Ty {
@@ -23046,8 +23423,7 @@ impl<'a> Checker<'a> {
             let tt = self.resolve_ty(&ty);
             // Same kotlinc parity as `is`: an unresolved cast target is `unresolved reference
             // 'T'.`, never a compiler-specific "not supported" rejection.
-            if tt == Ty::Error {
-                self.report_unresolved_type_ref(&ty);
+            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
                 return Ty::Error;
             }
             if ty.nullable()
@@ -23859,20 +24235,18 @@ impl<'a> Checker<'a> {
                         return self.set(e, ty);
                     }
                 }
-                if self.syms.objects.contains(&n) {
+                if let Some(cls) = self.module_object_named(&n) {
                     // A bare `object` name used as a value (`val x = Foo`, or a self-reference
                     // `object Foo { … Foo … }`) — its type is the singleton, read as `Foo.INSTANCE`
                     // by lowering. Resolved here so an object can refer to itself in its own body.
-                    if let Some(cls) = self.module_class_named(&n) {
-                        return self.set(e, Ty::obj(&cls.internal()));
-                    }
+                    return self.set(e, Ty::obj(&cls.internal()));
                 }
                 // A class NAME with a typed `companion object` used as a VALUE (`val c: I = C`): its
                 // value is the companion instance (`C.Companion`), typed as `C$Companion` — which the
                 // collect pass registered with the companion's supertypes, so it is assignable to them.
                 // Lowering reads `getstatic C.Companion`. (Only classes whose companion declares a
                 // supertype get a `C$Companion` ClassSig; a plain companion isn't a first-class value.)
-                if !self.syms.objects.contains(&n) {
+                if self.module_object_named(&n).is_none() {
                     if let Some(cls) = self.module_class_named(&n) {
                         let comp_internal = format!("{}$Companion", cls.internal());
                         if self.syms.class_by_internal(&comp_internal).is_some() {
@@ -24113,50 +24487,42 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // A comparison whose left operand isn't a source/classpath `Obj` handled above still
-            // desugars to `a.compareTo(b) < 0`. Two shapes reach here: `String` (a `Ty` of its own,
-            // never `Ty::Obj`, though `java.lang.String` implements `Comparable`), and a source
-            // `enum class`, whose `compareTo` is INHERITED from `java.lang.Enum` rather than declared
-            // (so `method_of_name` finds nothing). Resolve the member through the library set and
-            // record it, exactly as the classpath-`Comparable` path above does.
+            // A source `enum class` compares through the `compareTo` it INHERITS from
+            // `java.lang.Enum`, which no member lookup on the enum itself reports — so the selected-
+            // target block above finds nothing whenever the enum's `Comparable` supertype is not on
+            // the classpath (a build without kotlin-stdlib resolves `Comparable` from the builtins
+            // fallback, which carries no member). Resolve `compareTo` on the supertype instead — the
+            // parameter is the erased `Enum`, so lowering casts the right operand to it, exactly as
+            // kotlinc does.
             //
-            // Reference right operand only: an erased `Comparable<T>.compareTo` takes `Object`, so a
-            // primitive argument would need a box this path doesn't apply.
+            // This records into `resolved_operator_calls`, the SAME map the block above writes and
+            // the only one lowering reads (`ir_lower`'s relational arm). Recorded in `resolved_calls`
+            // instead, the checker typed the comparison `Boolean` while lowering found no target and
+            // fell through to the primitive `if_icmp*` on two enum references — a class file that
+            // compiles and then fails to load with `VerifyError: Bad type on operand stack`.
+            //
+            // The two operand tests carry the whole admissibility rule. `is_enum_type` starts from
+            // `obj_internal`, which is `None` for `Ty::Nullable` and `Ty::Error`, so a left operand
+            // that reaches here is a non-null object (or a type parameter bounded by one); `lt == rt`
+            // then pins the right operand to the same thing. A nullable operand is therefore rejected
+            // by this arm declining, not by a guard of its own — `a: Color?` reports "operator cannot
+            // be applied to 'Color?' and 'Color?'", which is what kotlinc reports too. That matters
+            // because `a > b` DEREFERENCES the argument: admitting a nullable one would emit a call
+            // that NPEs inside the callee.
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
-                && rt != Ty::Error
-                && rt.is_reference()
+                && lt == rt
+                && self.is_enum_type(lt)
             {
-                if let Some(member) = self
-                    .resolve_instance_member(lt, "compareTo", &[rt])
-                    // `a > b` desugars to `a.compareTo(b)`, which DEREFERENCES the argument — kotlinc
-                    // rejects a nullable one ("argument type mismatch"), and accepting it here would
-                    // emit a call that NPEs inside the callee.
-                    .filter(|_| !rt.is_nullable())
+                let enum_ty = Ty::obj_name(crate::types::wk::java_enum());
+                if let Some(member) = self.resolve_instance_member(enum_ty, "compareTo", &[enum_ty])
                 {
                     if member.ret == Ty::Int {
-                        crate::trace_compiler!(
-                            "resolve",
-                            "compareTo drives comparison on {:?}",
-                            lt
+                        crate::trace_compiler!("resolve", "enum compareTo drives comparison");
+                        self.resolved_operator_calls.insert(
+                            (e, SyntheticOperatorCall::CompareTo),
+                            ResolvedCall::Member(member),
                         );
-                        self.resolved_calls.insert(e, ResolvedCall::Member(member));
                         return self.set(e, Ty::Boolean);
-                    }
-                }
-                // A source `enum class` compares through the `compareTo` it INHERITS from
-                // `java.lang.Enum`, which no member lookup on the enum itself reports. Resolve it on
-                // the supertype instead — the parameter is the erased `Enum`, so lowering casts the
-                // right operand to it, exactly as kotlinc does.
-                if lt == rt && self.is_enum_type(lt) {
-                    let enum_ty = Ty::obj_name(crate::types::wk::java_enum());
-                    if let Some(member) =
-                        self.resolve_instance_member(enum_ty, "compareTo", &[enum_ty])
-                    {
-                        if member.ret == Ty::Int {
-                            crate::trace_compiler!("resolve", "enum compareTo drives comparison");
-                            self.resolved_calls.insert(e, ResolvedCall::Member(member));
-                            return self.set(e, Ty::Boolean);
-                        }
                     }
                 }
             }
@@ -24256,14 +24622,14 @@ impl<'a> Checker<'a> {
                         .dotted_root(receiver)
                         .is_some_and(|r| !self.value_root_shadows_classifier(&r))
                     {
-                        if let Some(entries) = self.syms.enums.get(&path) {
-                            if entries.iter().any(|en| en == &name) {
-                                let internal = self
-                                    .module_class_named(&path)
-                                    .map(ClassSig::internal_name)
-                                    .unwrap_or_else(|| type_name(&path.replace('.', "$")));
-                                self.resolved_enum_entries.insert(e, internal);
-                                return self.set(e, Ty::obj_name(internal));
+                        if let Some(internal) =
+                            self.module_class_named(&path).map(ClassSig::internal_name)
+                        {
+                            if let Some(entries) = self.syms.enum_entries_of(internal) {
+                                if entries.iter().any(|en| en == &name) {
+                                    self.resolved_enum_entries.insert(e, internal);
+                                    return self.set(e, Ty::obj_name(internal));
+                                }
                             }
                         }
                     }
@@ -24326,10 +24692,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // `ObjectName.prop` — a property on a singleton `object`.
-                    if self.syms.objects.contains(&en) {
-                        if let Some((ty, _)) =
-                            self.module_class_named(&en).and_then(|c| c.prop(&name))
-                        {
+                    if let Some(object) = self.module_object_named(&en) {
+                        if let Some((ty, _)) = object.prop(&name) {
                             return self.set(e, ty);
                         }
                     }
@@ -24997,7 +25361,8 @@ impl<'a> Checker<'a> {
                     }
                     // unbound `Type::m` (skip objects: `O::m` is bound to the singleton, which
                     // emit doesn't model — it would be miscompiled as unbound).
-                    if !self.value_root_shadows_classifier(&rn) && !self.syms.objects.contains(&rn)
+                    if !self.value_root_shadows_classifier(&rn)
+                        && self.module_object_named(&rn).is_none()
                     {
                         if let Some(cls) = self.module_class_named(&rn).cloned() {
                             if let Some(sig) = cls.method(&name).cloned() {
@@ -25106,7 +25471,9 @@ impl<'a> Checker<'a> {
                     // Object/singleton method reference `O::m` → BOUND to the singleton instance,
                     // so its arity is the method's own args (the receiver is captured, not a param).
                     // The lowering captures `O.INSTANCE`.
-                    if !self.value_root_shadows_classifier(&rn) && self.syms.objects.contains(&rn) {
+                    if !self.value_root_shadows_classifier(&rn)
+                        && self.module_object_named(&rn).is_some()
+                    {
                         if let Some(cls) = self.module_class_named(&rn).cloned() {
                             if let Some(sig) = cls.method(&name).cloned() {
                                 if sig.requires_all_args() {
@@ -25464,6 +25831,8 @@ impl<'a> Checker<'a> {
                 owner,
                 source: selected.source_key,
                 vararg: selected.call_sig.vararg,
+                vararg_index: selected.call_sig.vararg_index,
+                param_default_values: sig.param_default_values.clone(),
                 inline,
                 suspend,
             },
@@ -26715,7 +27084,13 @@ impl<'a> Checker<'a> {
                     // answer, and score cannot tell `pick(value: Any)` from
                     // `pick(value: CharSequence)` — it would silently take whichever came first.
                     if let [entry] = candidates.as_slice() {
-                        let score = self.call_slot_score(&entry.1, &entry.2).unwrap_or(0);
+                        let score = self
+                            .call_slot_score_vararg(
+                                &entry.1,
+                                &entry.2,
+                                entry.0.call_sig.vararg_index,
+                            )
+                            .unwrap_or(0);
                         if best_mapped.as_ref().is_none_or(|(best, _)| score > *best) {
                             best_mapped = Some((score, entry.clone()));
                         }
@@ -26805,7 +27180,29 @@ impl<'a> Checker<'a> {
             return Some(Ty::Error);
         }
         let (fi, _params, slots, callable, selection_params) = selected?;
-        for (&argument, &parameter) in args.iter().zip(&selection_params) {
+        let call_names = self.file.call_arg_names.get(&call.0).cloned();
+        let vararg_array = fi
+            .call_sig
+            .vararg_index
+            .and_then(|index| fi.extension_value_params().get(index).copied());
+        for (index, (&argument, &parameter)) in args.iter().zip(&selection_params).enumerate() {
+            let named = call_names
+                .as_ref()
+                .and_then(|names| names.get(index))
+                .and_then(Option::as_ref)
+                .is_some();
+            let named_vararg = named
+                && vararg_array.is_some()
+                && fi
+                    .call_sig
+                    .vararg_index
+                    .is_some_and(|vararg| slots.get(vararg).copied() == Some(Some(argument)));
+            if let (true, Some(array)) = (named_vararg, vararg_array) {
+                // The named form takes the whole array; an element gets kotlinc's
+                // mismatch + prohibition pair.
+                self.expect_named_vararg_arg(argument, self.expr_types[argument.0 as usize], array);
+                continue;
+            }
             self.expect_assignable(
                 parameter,
                 self.expr_types[argument.0 as usize],
@@ -26843,6 +27240,8 @@ impl<'a> Checker<'a> {
                     owner,
                     source: fi.source_key,
                     vararg: fi.call_sig.vararg,
+                    vararg_index: fi.call_sig.vararg_index,
+                    param_default_values: signature.param_default_values,
                     inline,
                     suspend,
                 },
@@ -29496,7 +29895,7 @@ impl<'a> Checker<'a> {
                         .map(|slot| slot.map_or(Ty::Error, |a| self.expr_types[a.0 as usize]))
                         .collect::<Vec<_>>(),
                 );
-                let score = self.call_slot_score(&params, &slots);
+                let score = self.call_slot_score_vararg(&params, &slots, o.call_sig.vararg_index);
                 Some((score, o, params, slots))
             })
             .collect();
@@ -29740,7 +30139,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn call_slot_score(&self, params: &[Ty], slots: &[Option<ExprId>]) -> Option<usize> {
+    /// Score a mapped call's slots against the candidate's parameters. At the vararg slot the
+    /// ELEMENT form (a positional first element) and the ARRAY form (a spread, or the named
+    /// whole-array assignment) both score — the slot map keeps element-form arguments.
+    fn call_slot_score_vararg(
+        &self,
+        params: &[Ty],
+        slots: &[Option<ExprId>],
+        vararg_index: Option<usize>,
+    ) -> Option<usize> {
         if params.len() != slots.len() {
             return None;
         }
@@ -29749,14 +30156,24 @@ impl<'a> Checker<'a> {
             let Some(arg) = slot else { continue };
             let aty = self.expr_types[arg.0 as usize];
             let argument = call_arg_kind(self.file, *arg, aty);
-            if aty != Ty::Error
+            // At the vararg slot the ELEMENT form (a positional first element) and the ARRAY form
+            // (a spread, or the named whole-array assignment `parts = values`) are both admissible.
+            let expected = if vararg_index == Some(i)
+                && !argument.is_spread()
                 && !self.receiver_is_assignable(aty, params[i])
-                && !argument.adapts_integer_literal_to(params[i])
-                && !self.erased_function_param_fits(params[i], aty)
+            {
+                params[i].array_elem().unwrap_or(params[i])
+            } else {
+                params[i]
+            };
+            if aty != Ty::Error
+                && !self.receiver_is_assignable(aty, expected)
+                && !argument.adapts_integer_literal_to(expected)
+                && !self.erased_function_param_fits(expected, aty)
             {
                 return None;
             }
-            score += if params[i] == aty { 4 } else { 1 };
+            score += if expected == aty { 4 } else { 1 };
         }
         Some(score)
     }
@@ -29826,13 +30243,12 @@ impl<'a> Checker<'a> {
         let (owner_path, member) = full.rsplit_once('/')?;
         // A SAME-FILE object with a member of this name — dispatch on its singleton exactly like a
         // classpath object (`getstatic Obj.INSTANCE; invoke`).
-        if self.syms.objects.contains(owner_path) {
-            if let Some(cls) =
-                existing_type_name(owner_path).and_then(|internal| self.syms.classes.get(&internal))
-            {
-                if cls.methods.contains_key(member) {
-                    return Some((cls.internal_name(), member.to_string()));
-                }
+        if let Some(cls) = existing_type_name(owner_path)
+            .and_then(|internal| self.syms.class_by_type_name(internal))
+            .filter(|class| class.is_object())
+        {
+            if cls.methods.contains_key(member) {
+                return Some((cls.internal_name(), member.to_string()));
             }
         }
         let owner = self.nested_internal_name(owner_path)?;
@@ -31263,19 +31679,21 @@ impl<'a> Checker<'a> {
                 }
                 // `EnumName.values()` / `EnumName.valueOf(s)` — synthetic static enum methods.
                 if let Expr::Name(en) = self.file.expr(receiver).clone() {
-                    if !self.value_root_shadows_classifier(&en) && self.syms.enums.contains_key(&en)
-                    {
-                        let internal = self
-                            .module_class_named(&en)
-                            .map(ClassSig::internal)
-                            .unwrap_or(en.clone());
+                    let source_enum = (!self.value_root_shadows_classifier(&en))
+                        .then(|| {
+                            self.module_class_named(&en)
+                                .map(ClassSig::internal_name)
+                                .filter(|internal| self.syms.enum_entries_of(*internal).is_some())
+                        })
+                        .flatten();
+                    if let Some(internal) = source_enum {
                         if name == "values" && args.is_empty() {
-                            return Ty::array(Ty::obj(&internal));
+                            return Ty::array(Ty::obj_name(internal));
                         }
                         if let ("valueOf", [arg]) = (name.as_str(), args) {
                             let at = self.expr(*arg);
                             self.expect_assignable(Ty::String, at, self.span(*arg), "argument");
-                            return Ty::obj(&internal);
+                            return Ty::obj_name(internal);
                         }
                     }
                 }
@@ -33808,10 +34226,13 @@ impl<'a> Checker<'a> {
                     // and from an INSTANCE member of the companion's own class. A companion's members
                     // are in scope throughout the class body in Kotlin, so `fun describe() = tag()`
                     // binds the companion's `tag` exactly as a call from a companion member does; both
-                    // spellings reach the same static. The arm only binds when the signature's arity
-                    // accepts the call: a same-named instance method of a DIFFERENT arity (legal once
-                    // the collision gate narrowed) keeps priority on the dispatch receiver, exactly as
-                    // the lowerer's arity-aware instance-member attempt runs first.
+                    // spellings reach the same static. Do not capture an argument count this signature
+                    // cannot accept: a different-arity instance member is legal, and the ordinary
+                    // implicit-receiver path below must get its chance. The same `Signature` arity
+                    // contract drives overload selection, so defaults/varargs cannot drift here.
+                    // Resolve the owning class to its semantic internal name before indexing the
+                    // module class table; reducing it back to a simple name would reintroduce the
+                    // cross-package collision that this table's identity contract prevents.
                     let companion_owner = self
                         .companion_of
                         .as_deref()
@@ -33825,12 +34246,8 @@ impl<'a> Checker<'a> {
                             .and_then(|c| c.static_methods.get(&fname))
                             .cloned()
                         {
-                            let min_arity =
-                                adapted_ref_arity(sig.vararg(), sig.required, sig.params.len());
-                            let arity_accepts = args.len() >= min_arity
-                                && (sig.vararg() || args.len() <= sig.params.len());
-                            if arity_accepts {
-                                self.expect_call_args(&sig.params, false, args, &arg_tys);
+                            if sig.accepts_arity(args.len()) {
+                                self.expect_call_args(&sig.params, sig.vararg(), args, &arg_tys);
                                 return sig.ret;
                             }
                         }
@@ -34509,11 +34926,35 @@ impl<'a> Checker<'a> {
                                     .iter()
                                     .filter(|&&parameter| parameter == vararg)
                                     .count();
+                                let call_names = self.file.call_arg_names.get(&call.0).cloned();
                                 for (argument, &parameter) in mapping.iter().enumerate() {
                                     let physical = ctx_count + parameter;
+                                    let named = call_names
+                                        .as_ref()
+                                        .and_then(|names| names.get(argument))
+                                        .and_then(Option::as_ref)
+                                        .is_some();
+                                    if parameter == vararg && named {
+                                        // The named form takes the whole array; an element gets
+                                        // kotlinc's mismatch + prohibition pair.
+                                        self.expect_named_vararg_arg(
+                                            args[argument],
+                                            arg_tys[argument],
+                                            array,
+                                        );
+                                        continue;
+                                    }
+                                    // A vararg argument checks against the ELEMENT type; the ARRAY
+                                    // form is admitted for a spread or a sole pass-through whose
+                                    // actual type IS the array (a spread of a forwarded vararg is
+                                    // typed by its element here, so the actual decides).
                                     let expected = if parameter == vararg
-                                        && !(vararg_arguments == 1 && arg_tys[argument] == array)
+                                        && arg_tys[argument] == array
+                                        && (self.file.is_spread_arg(args[argument])
+                                            || vararg_arguments == 1)
                                     {
+                                        array
+                                    } else if parameter == vararg {
                                         element
                                     } else {
                                         params[physical]
@@ -34576,6 +35017,14 @@ impl<'a> Checker<'a> {
                                     );
                                 }
                             }
+                        }
+                        // A named/trailing-lambda vararg call already passed through the common
+                        // slot mapper above. Preserve that exact semantic handoff just as the
+                        // non-vararg arm does; formerly this vararg branch type-checked through a
+                        // separate per-argument map and then discarded `mapped_slots`, forcing the
+                        // backend to parse labels again to know which values to pack.
+                        if let Some(slots) = mapped_slots {
+                            self.resolved_call_arg_slots.insert(call, slots);
                         }
                     } else if let Some(slots) = mapped_slots {
                         for (i, slot) in slots.iter().enumerate() {
@@ -36345,6 +36794,53 @@ mod tests {
     use crate::features::LangFeatures;
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
+
+    #[test]
+    fn callable_arity_contract_handles_defaults_and_varargs() {
+        // One shared count contract feeds overload filtering, the unqualified-companion fallback,
+        // and the declaration overlap gate. Pin both bounded defaults and the mixed
+        // default-before-vararg shape: the latter's true minimum is zero, not the one syntactic
+        // non-default parameter contributed by the vararg declaration itself.
+        assert!(!callable_accepts_arity(false, 1, 2, 0));
+        assert!(callable_accepts_arity(false, 1, 2, 1));
+        assert!(callable_accepts_arity(false, 1, 2, 2));
+        assert!(!callable_accepts_arity(false, 1, 2, 3));
+
+        assert!(callable_accepts_arity(true, 0, 2, 0));
+        assert!(callable_accepts_arity(true, 0, 2, 7));
+    }
+
+    #[test]
+    fn source_aliases_do_not_break_internal_class_table_keys() {
+        // A source alias is a file-scoped binding edge to `sample/Record`, never a second class entry
+        // keyed by the alias spelling. This invariant lets direct lookup, hierarchy traversal, module
+        // symbol projection, and lowering all use the same map without an alias-only branch.
+        let mut diagnostics = DiagSink::new();
+        let file = parse_file(
+            "package sample\nclass Record(val value: Int)\ntypealias LocalRecord = Record",
+            &mut diagnostics,
+        );
+        let symbols = collect_signatures(&[file], &mut diagnostics);
+
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+        assert!(symbols
+            .classes
+            .iter()
+            .all(|(internal, signature)| *internal == signature.internal_name()));
+        // The forward-reference header index is keyed by those same identities and is generated by
+        // the same flag function as the completed signature; it must never become a second, divergent
+        // classification table while making source-order-independent inference possible.
+        assert!(symbols.classes.iter().all(|(internal, signature)| {
+            symbols.source_class_headers.get(internal) == Some(&signature.flags)
+        }));
+        assert_eq!(
+            symbols
+                .source_class_alias(0, "LocalRecord")
+                .map(ClassSig::internal_name),
+            Some(type_name("sample/Record"))
+        );
+        assert!(!symbols.classes.contains_key(&type_name("LocalRecord")));
+    }
 
     #[test]
     fn receiver_lambda_expectation_survives_an_erased_provider_parameter() {
@@ -38213,6 +38709,7 @@ fun box(): String {
                         inline: crate::libraries::InlineKind::None,
                         visibility: crate::types::Visibility::Public,
                         call_sig: CallSig::default(),
+                        declared_ret: None,
                     };
                     vec![
                         member(
@@ -40315,7 +40812,7 @@ fun box(): String {
             .iter()
             .map(|slot| {
                 slot.map(|arg| match files[0].expr(arg) {
-                    Expr::StringLit(v) => v.clone(),
+                    Expr::StringLit(v) => v.to_lossy(),
                     Expr::IntLit(v) => v.to_string(),
                     other => panic!("unexpected argument expression in slot: {other:?}"),
                 })
