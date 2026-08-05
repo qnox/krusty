@@ -51,8 +51,18 @@ argument, member, initializer, or assignment location is a test failure.
 
 `just test` is equivalent. When `just` is available, the harness provisions the matching Kotlin
 compiler and codegen/box corpus, exports `KRUSTY_KOTLINC` and `KRUSTY_KOTLIN_BOX_DIR`, builds the test
-binaries once with Cargo's `gate` profile, runs the internally parallel conformance binary alone, then
-runs the remaining test binaries in slow-first parallel order.
+binaries once with Cargo's `gate` profile, runs the conformance binary alone in two single-threaded
+passes (box corpus, then everything else), then the internally parallel e2e binary alone, then the
+remaining small test binaries in parallel.
+
+Each scheduled invocation owns its log. An unfiltered binary keeps the plain `<binary>.log` name; a
+filtered invocation appends an `@<filter-slug>` derived by `run_label`, so the two conformance logs are
+`conformance-<hash>@kotlin_codegen_box_conformance.log` and
+`conformance-<hash>@skip-kotlin_codegen_box_conformance.log`. Scheduling-only
+`--test-threads=<count>` arguments do not change identity. Because slugging is deliberately lossy,
+`run_one` adds `#2`, `#3`, and so on if a derived name is already present instead of overwriting an
+earlier run. The failure report reads the exact invocation's log, and the timing table lists each
+invocation separately because each is a separate process with its own wall time.
 
 CI builds the conformance test binary once and runs that artifact against every version in
 `kotlin-versions`. `KRUSTY_LANGUAGE_VERSION`, `KRUSTY_KOTLINC`, and `KRUSTY_KOTLIN_BOX_DIR` select the

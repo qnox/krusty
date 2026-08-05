@@ -497,7 +497,8 @@ pub enum CtorDefaultValue {
     Bool(bool),
     /// A UTF-16 code unit, matching `ast::Expr::CharLit` / `IrConst::Char`.
     Char(u16),
-    Str(String),
+    /// A UTF-16 code-unit sequence, matching `ast::Expr::StringLit` / `IrConst::String`.
+    Str(crate::kt_string::KtString),
     Null,
     /// An `object` singleton default (`= EmptyCoroutineContext`) — read as `getstatic <internal>.INSTANCE`.
     Object(String),
@@ -4500,25 +4501,33 @@ fn collect_signatures_with_cp_impl(
             collect_file_type_names(file, &mut names);
             names.extend(imap.keys().cloned());
             for name in names {
-                let explicit = imap.get(&name);
+                // `collect_file_type_names` deliberately combines ordinary `TypeRef` spellings with
+                // supertype/delegation fields that the parser stores in JVM-like slash form. Normalize
+                // that representation ONCE before selecting any provider: explicit imports,
+                // same-package source declarations, module classifiers, and library classifiers must
+                // all see the same Kotlin source spelling. Keep `name` unchanged below as the binding
+                // key because later consumers query `class_names` with the original AST spelling.
+                let source_name = name.replace('/', ".");
+                let explicit = imap.get(&source_name);
                 let explicit_source =
                     explicit.and_then(|path| source_classifier_from_path(path, &user_defined));
                 let same_package_source = explicit
                     .is_none()
-                    .then(|| type_name(&class_internal(file, &name)))
+                    .then(|| type_name(&class_internal(file, &source_name)))
                     .filter(|candidate| user_defined.contains(&candidate.render()));
                 let full = explicit_source
                     .or(same_package_source)
                     .or_else(|| {
-                        resolve_name_against_imports_name(&name, &imap, &levels, &*libraries)
+                        resolve_name_against_imports_name(&source_name, &imap, &levels, &*libraries)
                     })
                     .or_else(|| {
                         // A dotted name may be the fully-qualified path of a SOURCE class in this
-                        // module (`pkg1.Cls`, `pkg1.Outer.Inner`) — source shadows the classpath.
-                        // Some positions (supertypes, delegation specs) arrive already
-                        // internalized (`pkg1/Cls`), so accept '/' too.
-                        if name.contains('.') || name.contains('/') {
-                            source_classifier_from_path(&name.replace('.', "/"), &user_defined)
+                        // module (`pkg1.Cls`, `pkg1.Outer.Inner`) — source shadows the library.
+                        if source_name.contains('.') {
+                            source_classifier_from_path(
+                                &source_name.replace('.', "/"),
+                                &user_defined,
+                            )
                         } else {
                             None
                         }
@@ -4527,7 +4536,7 @@ fn collect_signatures_with_cp_impl(
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
                         // or a nested type under a resolvable outer prefix.
                         resolve_dotted_classpath_type(
-                            &name,
+                            &source_name,
                             &class_names,
                             &imap,
                             &wilds,
@@ -19055,6 +19064,20 @@ impl<'a> Checker<'a> {
             .and_then(|internal| self.syms.classes.get(&internal))
     }
 
+    /// Whether the companion body currently being checked declares its own static property `name`.
+    ///
+    /// `companion_of` names the enclosing source declaration, so resolve it through the exact
+    /// same-package identity rather than a global simple-name map. The companion member shadows a
+    /// same-named file property for both reads and writes; reads already use this owner's
+    /// `static_props` before file scope, while unsupported own-property writes use this predicate to
+    /// reject instead of silently falling through to the file property.
+    fn companion_own_static_property(&self, name: &str) -> bool {
+        self.companion_of
+            .as_deref()
+            .and_then(|class| self.same_package_class(class))
+            .is_some_and(|owner| owner.static_props.contains_key(name))
+    }
+
     /// The MODULE source class an unqualified classifier name binds to in this file: an explicit
     /// import naming a module class wins (kotlinc), then a same-package declaration. The import arm
     /// is classifier-first, like `resolve_name_against_imports_name` — a nested source class shadows
@@ -23295,6 +23318,30 @@ impl<'a> Checker<'a> {
         let t = {
             let ot = self.expr(operand);
             let tt = self.resolve_ty(&ty);
+            // A function target with concrete parameter/return types carries information that JVM
+            // `instanceof FunctionN` cannot test. Kotlin rejects that ERASED check before any
+            // unresolved nested classifier (whereas `as (Missing) -> R` still reports `Missing`).
+            // `typeref_leaf` normalizes arrow and named function spellings to the same `Ty::Fun`, so
+            // use that semantic identity for the category decision. The one source-level distinction
+            // that survives separately is intentional: a named `FunctionN<*, ...>` is runtime-
+            // checkable by arity and Kotlin permits it. The parser marks stars while resolving them to
+            // their ordinary `Any?` bound, avoiding both spelling-specific name tests and source-text
+            // recovery here.
+            let runtime_checkable_star_function =
+                !ty.targs.is_empty() && ty.targs.iter().all(TypeRef::is_star_projection);
+            if matches!(tt.non_null(), Ty::Fun(_)) && !runtime_checkable_star_function {
+                self.diags.error(
+                    self.span(e),
+                    "krusty: 'is' on this type is not supported".to_string(),
+                );
+                return Ty::Error;
+            }
+            // An UNRESOLVED target reads exactly as kotlinc reports it — `unresolved reference
+            // 'T'.` at the failing type's span — never as a compiler-specific "not supported"
+            // rejection (the operand check below already exempts an Error operand the same way).
+            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
+                return Ty::Error;
+            }
             // `instanceof` needs a reference operand and a *known* target. An unresolved target
             // (`Number`, a value class, `Nothing`, …) must not silently become `Object` (which
             // would make the test always true) — reject so the file is cleanly skipped. A primitive
@@ -23334,10 +23381,56 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
+    /// Report an expression-position type operand (`is`/`as` target) that failed to resolve, the
+    /// way kotlinc does. When the LEAF name itself is unresolvable (`Missing<T>`) name it — the
+    /// outer failure is primary, and kotlinc reports it first; only when the leaf resolves on its
+    /// own does a nested type carry the failure (`Array<Missing>` reports `Missing` at its own
+    /// span). Returns whether it actually reported an unresolved classifier: a fully resolved target
+    /// may still be `Ty::Error` because its SHAPE is unsupported (`Array` without an element,
+    /// `Array<Nothing>`), and that must fall through to the existing supported-shape diagnostic.
+    /// Re-resolving a nested type here records only resolved-classifier facts; the Error path itself
+    /// emits nothing, so this cannot double-report.
+    fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
+        // Probe the leaf WITHOUT its nested types. `Array` is exempt from the probe: its element
+        // lives in `arg`, so stripping it would hit the raw-Array Error arm even though the
+        // builtin name resolves.
+        let leaf_resolves = r.name == "Array" || {
+            let mut leaf = r.clone();
+            leaf.arg = None;
+            leaf.targs = Vec::new();
+            leaf.fun_params = Vec::new();
+            self.resolve_ty(&leaf) != Ty::Error
+        };
+        if !leaf_resolves {
+            self.diags
+                .error(r.span, format!("unresolved reference '{}'.", r.name));
+            return true;
+        }
+        // Nested positions in source order: function-type parameters, the `Array<T>` element /
+        // function return (`arg`), then class type arguments. `contains_error` matters here: an
+        // ordinary generic or function type keeps its outer shape around an unresolved component.
+        let nested = r
+            .fun_params
+            .iter()
+            .chain(r.arg.iter().map(|arg| &**arg))
+            .chain(r.targs.iter());
+        for part in nested {
+            if self.resolve_ty(part).contains_error() && self.report_unresolved_type_ref(part) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn expr_inner_as(&mut self, e: ExprId, operand: ExprId, ty: TypeRef, nullable: bool) -> Ty {
         let t = {
             let ot = self.expr(operand);
             let tt = self.resolve_ty(&ty);
+            // Same kotlinc parity as `is`: an unresolved cast target is `unresolved reference
+            // 'T'.`, never a compiler-specific "not supported" rejection.
+            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
+                return Ty::Error;
+            }
             if ty.nullable()
                 && !nullable
                 && ty
@@ -24147,10 +24240,6 @@ impl<'a> Checker<'a> {
                         return self.set(e, ty);
                     }
                 }
-                if self.companion_of.is_some() && self.syms.props.contains_key(&n) {
-                    self.diags.error(self.span(e), "krusty: top-level property access from a companion member is not supported".to_string());
-                    return self.set(e, Ty::Error);
-                }
                 if let Some(cls) = self.module_object_named(&n) {
                     // A bare `object` name used as a value (`val x = Foo`, or a self-reference
                     // `object Foo { … Foo … }`) — its type is the singleton, read as `Foo.INSTANCE`
@@ -24403,50 +24492,42 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // A comparison whose left operand isn't a source/classpath `Obj` handled above still
-            // desugars to `a.compareTo(b) < 0`. Two shapes reach here: `String` (a `Ty` of its own,
-            // never `Ty::Obj`, though `java.lang.String` implements `Comparable`), and a source
-            // `enum class`, whose `compareTo` is INHERITED from `java.lang.Enum` rather than declared
-            // (so `method_of_name` finds nothing). Resolve the member through the library set and
-            // record it, exactly as the classpath-`Comparable` path above does.
+            // A source `enum class` compares through the `compareTo` it INHERITS from
+            // `java.lang.Enum`, which no member lookup on the enum itself reports — so the selected-
+            // target block above finds nothing whenever the enum's `Comparable` supertype is not on
+            // the classpath (a build without kotlin-stdlib resolves `Comparable` from the builtins
+            // fallback, which carries no member). Resolve `compareTo` on the supertype instead — the
+            // parameter is the erased `Enum`, so lowering casts the right operand to it, exactly as
+            // kotlinc does.
             //
-            // Reference right operand only: an erased `Comparable<T>.compareTo` takes `Object`, so a
-            // primitive argument would need a box this path doesn't apply.
+            // This records into `resolved_operator_calls`, the SAME map the block above writes and
+            // the only one lowering reads (`ir_lower`'s relational arm). Recorded in `resolved_calls`
+            // instead, the checker typed the comparison `Boolean` while lowering found no target and
+            // fell through to the primitive `if_icmp*` on two enum references — a class file that
+            // compiles and then fails to load with `VerifyError: Bad type on operand stack`.
+            //
+            // The two operand tests carry the whole admissibility rule. `is_enum_type` starts from
+            // `obj_internal`, which is `None` for `Ty::Nullable` and `Ty::Error`, so a left operand
+            // that reaches here is a non-null object (or a type parameter bounded by one); `lt == rt`
+            // then pins the right operand to the same thing. A nullable operand is therefore rejected
+            // by this arm declining, not by a guard of its own — `a: Color?` reports "operator cannot
+            // be applied to 'Color?' and 'Color?'", which is what kotlinc reports too. That matters
+            // because `a > b` DEREFERENCES the argument: admitting a nullable one would emit a call
+            // that NPEs inside the callee.
             if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
-                && rt != Ty::Error
-                && rt.is_reference()
+                && lt == rt
+                && self.is_enum_type(lt)
             {
-                if let Some(member) = self
-                    .resolve_instance_member(lt, "compareTo", &[rt])
-                    // `a > b` desugars to `a.compareTo(b)`, which DEREFERENCES the argument — kotlinc
-                    // rejects a nullable one ("argument type mismatch"), and accepting it here would
-                    // emit a call that NPEs inside the callee.
-                    .filter(|_| !rt.is_nullable())
+                let enum_ty = Ty::obj_name(crate::types::wk::java_enum());
+                if let Some(member) = self.resolve_instance_member(enum_ty, "compareTo", &[enum_ty])
                 {
                     if member.ret == Ty::Int {
-                        crate::trace_compiler!(
-                            "resolve",
-                            "compareTo drives comparison on {:?}",
-                            lt
+                        crate::trace_compiler!("resolve", "enum compareTo drives comparison");
+                        self.resolved_operator_calls.insert(
+                            (e, SyntheticOperatorCall::CompareTo),
+                            ResolvedCall::Member(member),
                         );
-                        self.resolved_calls.insert(e, ResolvedCall::Member(member));
                         return self.set(e, Ty::Boolean);
-                    }
-                }
-                // A source `enum class` compares through the `compareTo` it INHERITS from
-                // `java.lang.Enum`, which no member lookup on the enum itself reports. Resolve it on
-                // the supertype instead — the parameter is the erased `Enum`, so lowering casts the
-                // right operand to it, exactly as kotlinc does.
-                if lt == rt && self.is_enum_type(lt) {
-                    let enum_ty = Ty::obj_name(crate::types::wk::java_enum());
-                    if let Some(member) =
-                        self.resolve_instance_member(enum_ty, "compareTo", &[enum_ty])
-                    {
-                        if member.ret == Ty::Int {
-                            crate::trace_compiler!("resolve", "enum compareTo drives comparison");
-                            self.resolved_calls.insert(e, ResolvedCall::Member(member));
-                            return self.set(e, Ty::Boolean);
-                        }
                     }
                 }
             }
@@ -29785,8 +29866,21 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
             .into_iter()
             .filter(|o| o.kind == crate::libraries::FnKind::Member)
-            .filter(|o| o.call_sig.has_param_names())
             .filter_map(|o| {
+                // A candidate with NO recorded parameter names cannot be slot-mapped, but an
+                // UNLABELLED call may match it directly — a zero-parameter overload (`any()` next
+                // to `any(classifier)`), or a Java member without `-parameters`. Route such a call
+                // to the direct member path instead of letting a sibling overload's mapping error
+                // reject it. A LABELLED call can never bind a no-names candidate, and deferring it
+                // would starve the sibling's slot mapping and hand the labels to the label-blind
+                // positional fallback (`tag(value = 3, prefix = "v")` silently swapped) — drop the
+                // candidate without deferring so the labelled sibling still resolves via slots.
+                if !o.call_sig.has_param_names() {
+                    if arg_names.is_none() {
+                        direct_candidate = true;
+                    }
+                    return None;
+                }
                 let params = o.callable.params.clone();
                 if arg_names.is_none() && o.call_sig.vararg && args.len() != params.len() {
                     direct_candidate = true;
@@ -36043,9 +36137,16 @@ impl<'a> Checker<'a> {
                         self.set_local_narrow(&name, narrow.then_some(vt));
                     }
                 }
-                None if self.companion_of.is_some() && self.syms.props.contains_key(&name) => {
-                    // A top-level property write from a companion member targets the wrong class.
-                    self.diags.error(self.file.stmt_spans[s.0 as usize], "krusty: top-level property access from a companion member is not supported".to_string());
+                None if self.companion_own_static_property(&name)
+                    && self.syms.props.contains_key(&name) =>
+                {
+                    // The companion's OWN property shadows the same-named top-level one, so Kotlin
+                    // binds this write to the companion's member — a write krusty can't emit yet.
+                    // Reject loudly rather than silently write the top-level `var`.
+                    self.diags.error(
+                        self.file.stmt_spans[s.0 as usize],
+                        "krusty: write to a companion's own property from a companion member is not supported".to_string(),
+                    );
                 }
                 None => {
                     let span = self.file.stmt_spans[s.0 as usize];
@@ -38626,6 +38727,7 @@ fun box(): String {
                         inline: crate::libraries::InlineKind::None,
                         visibility: crate::types::Visibility::Public,
                         call_sig: CallSig::default(),
+                        declared_ret: None,
                     };
                     vec![
                         member(
@@ -40728,7 +40830,7 @@ fun box(): String {
             .iter()
             .map(|slot| {
                 slot.map(|arg| match files[0].expr(arg) {
-                    Expr::StringLit(v) => v.clone(),
+                    Expr::StringLit(v) => v.to_lossy(),
                     Expr::IntLit(v) => v.to_string(),
                     other => panic!("unexpected argument expression in slot: {other:?}"),
                 })

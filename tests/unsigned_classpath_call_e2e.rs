@@ -17,10 +17,12 @@
 //! is a fully supported type there. What was wrong was the representation of a value at a call
 //! boundary, which no signature-level check can see.
 //!
-//! Both now emit kotlinc's shapes, and a SAME-TYPE `a.equals(b)` no longer reaches the member call
-//! at all — it folds to a carrier compare (kotlinc's intrinsic; the shape is pinned in
-//! `bytecode_parity_e2e`). The boxed receiver still carries every other argument type, which is what
-//! `unsigned_equals_keeps_value_class_semantics_across_argument_types` exercises.
+//! Both now emit kotlinc's shapes, and `a.equals(b)` no longer reaches the member call at ANY argument
+//! type — a same-type argument folds to a carrier compare (kotlinc's intrinsic) and every other one
+//! goes to the static `equals-impl`, whose receiver slot is the carrier. Both shapes are pinned in
+//! `bytecode_parity_e2e`; what
+//! `unsigned_equals_keeps_value_class_semantics_across_argument_types` exercises here is that the
+//! rerouting did not change what `equals` ANSWERS across the argument types.
 //!
 //! The contract pinned here is the backend's, not the feature's. Declining the file is always a
 //! legal outcome; claiming success and writing a class that fails verification is not. So
@@ -102,9 +104,10 @@ fn unsigned_min_of_emits_verifiable_bytecode() {
     );
 }
 
-/// `a.equals(b)`. A same-type pair folds to a carrier compare (kotlinc's intrinsic — shape pinned in
-/// `bytecode_parity_e2e`); any other argument stays an `invokevirtual kotlin/UInt.equals(Object)Z`,
-/// whose receiver must be the BOXED value class. Both paths are exercised here.
+/// `a.equals(b)`. A same-type pair folds to a carrier compare (kotlinc's intrinsic); any other
+/// argument reaches the static `kotlin/UInt."equals-impl":(ILjava/lang/Object;)Z`, whose receiver
+/// slot is the carrier — so neither path boxes the receiver. Both shapes are pinned in
+/// `bytecode_parity_e2e`; both are exercised here for what they ANSWER.
 #[test]
 fn unsigned_equals_call_emits_verifiable_bytecode() {
     expect_emitted_box_verifies(
@@ -211,29 +214,34 @@ fun box(): String {\n\
 
 /// An unsigned VALUE PARAMETER mangles the `suspend` function's JVM name (`libU` → `libU-OzbTU-A`),
 /// and the `$default` synthetic is named from the mangled form. krusty looks suspend-ness up under
-/// that JVM name, `@Metadata` records the SOURCE name, and the callable comes back marked
-/// non-suspend — so the coroutine pass never threads the `Continuation` its descriptor still spells,
-/// and the emitted `invokestatic` is one argument short. That links and fails verification, which is
-/// the outcome this whole file exists to rule out.
+/// that JVM name. Suspend-ness therefore has to come from the metadata declaration selected by JVM
+/// name AND descriptor shape, alongside the call facts already projected from that declaration.
+/// Keyed on the source name alone it missed the mangled method, while indexing every suspend source
+/// name would leak the flag to an ordinary overload. On the miss, the callable came back non-suspend,
+/// the coroutine pass never threaded the `Continuation` the descriptor still spells, and the emitted
+/// `invokestatic` was one argument short — a class that links and fails verification, which is the
+/// outcome this whole file exists to rule out.
 ///
-/// The unfilled continuation slot is visible at the call site, so the file is declined instead. BOTH
-/// call forms are covered: the `$default` synthetic (an argument omitted) and the plain mangled
-/// method (every argument supplied) fail the same way, so the decline cannot key on `$default`.
-///
-/// The underlying gap is the mangled-name suspend lookup, not the argument shape — recovering it
-/// would make these shapes EMIT, which the contract here already allows.
+/// BOTH call forms are covered: the `$default` synthetic (an argument omitted) and the plain mangled
+/// method (every argument supplied) missed the same way, so the fix cannot key on `$default`. Both
+/// must EMIT and produce the callee's real answer — a decline would hide a silent regression back to
+/// the name-keyed miss.
 #[test]
-fn suspend_call_with_an_unthreaded_continuation_declines() {
+fn mangled_suspend_classpath_call_threads_its_continuation() {
     let stdlib = common::stdlib_jar();
     let Some(lib) = common::compile_libs(
         "UMangledSuspendLib",
         &[(
             "Lib.kt",
             "package lib\n\
+import kotlin.coroutines.Continuation\n\
 fun mark(): String = \"!\"\n\
+fun libU(c: Continuation<Unit>): String = \"plain\"\n\
 suspend fun libU(t: UInt, s: String = mark()): String = \"$t$s\"\n",
         )],
     ) else {
+        // kotlinc unavailable: the fixture cannot be built, and no stdlib declaration has this shape.
+        // A fixture kotlinc REJECTS panics inside the helper rather than skipping.
         return;
     };
     let cp = [lib, stdlib];
@@ -247,7 +255,12 @@ fun box(): String {{\n\
     var out = \"\"\n\
     val body: suspend () -> Unit = {{ out = {call} }}\n\
     body.startCoroutine(Continuation(EmptyCoroutineContext) {{ it.getOrThrow() }})\n\
-    return if (out == \"7!\") \"OK\" else \"bad: $out\"\n\
+    // The source-name sibling is NOT suspend. A name-wide flag would incorrectly classify it from\n\
+    // the mangled declaration above and strip its ordinary trailing Continuation parameter, making\n\
+    // this legal call unresolvable. The metadata fact must follow the selected JVM name and\n\
+    // descriptor rather than leak across an overload family.\n\
+    val plain = libU(Continuation(EmptyCoroutineContext) {{ _ -> }})\n\
+    return if (out == \"7!\" && plain == \"plain\") \"OK\" else \"bad: $out/$plain\"\n\
 }}\n"
         )
     };
@@ -258,20 +271,18 @@ fun box(): String {{\n\
         ("UMangledSuspendPlain", "libU(7u, \"!\")"),
     ] {
         let src = body(call);
-        // Name the decline exhaustively: any OTHER outcome means this shape is being skipped by an
-        // unrelated gate and the unthreaded continuation is back to reaching the backend unnoticed.
-        match common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)) {
-            Some(BackendOutcome::LowerBail(reason)) => assert_eq!(
-                reason, "gate:unthreaded-continuation-slot",
-                "{stem}: the unfilled continuation slot is what must decline this call"
-            ),
-            // Recovering the mangled-name suspend lookup makes the call correct; then it must run.
-            Some(BackendOutcome::Emitted) => {}
-            other => {
-                panic!("{stem}: expected the continuation decline or a correct emit, got {other:?}")
-            }
-        }
-        expect_emitted_box_verifies_on(&src, stem, &cp);
+        assert_eq!(
+            common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)),
+            Some(BackendOutcome::Emitted),
+            "{stem}: the mangled JVM name names a suspend function; thread its continuation"
+        );
+        // Not just verifiable: the coroutine has to actually run and hand back the callee's string,
+        // which is what proves the continuation reached the callee rather than merely filling a slot.
+        assert_eq!(
+            common::compile_and_run_box(&src, stem, &cp, Some(&jdk)),
+            Some("OK".to_string()),
+            "{stem}"
+        );
     }
 }
 
@@ -345,9 +356,10 @@ fn narrow_unsigned_types_stay_declined_or_correct() {
 }
 
 /// The `equals` intrinsic must not change what `equals` MEANS. kotlinc folds only the same-type case
-/// to a carrier compare; every other argument still goes through the value class's own equality,
-/// which is what makes a cross-carrier comparison answer `false` (a `UInt` is never a `ULong`, even
-/// when the carriers hold the same bits).
+/// to a carrier compare; every other argument still goes through the value class's own equality —
+/// `equals-impl`, which tests the argument's runtime class first. That is what makes a cross-carrier
+/// comparison answer `false` (a `UInt` is never a `ULong`, even when the carriers hold the same bits),
+/// a `null` argument answer `false`, and a boxed-but-equal one answer `true`.
 #[test]
 fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
     expect_emitted_box_verifies(
@@ -360,6 +372,11 @@ fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
     val anyA: Any = a\n\
     if (!a.equals(anyA)) return \"f any-eq\"\n\
     if (a.equals(\"4294967295\")) return \"f any-ne\"\n\
+    val na: UInt? = a\n\
+    if (!a.equals(na)) return \"f nullable-eq\"\n\
+    if (a.equals(null)) return \"f null\"\n\
+    val i: Int = -1\n\
+    if (a.equals(i)) return \"f signed-carrier\"\n\
     return \"OK\"\n\
 }\n",
         "UEqualsSemantics",
@@ -372,9 +389,24 @@ fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
     if (!a.equals(a)) return \"f same-eq\"\n\
     val anyA: Any = a\n\
     if (!a.equals(anyA)) return \"f any-eq\"\n\
+    val na: ULong? = a\n\
+    if (!a.equals(na)) return \"f nullable-eq\"\n\
+    val l: Long = -1L\n\
+    if (a.equals(l)) return \"f signed-carrier\"\n\
     return \"OK\"\n\
 }\n",
         "ULongEqualsSemantics",
+    );
+    // The narrow pair carries the same contract on its own `B`/`S` carrier.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val a: UByte = 200.toUByte()\n\
+    val anyA: Any = a\n\
+    if (!a.equals(anyA)) return \"f any-eq\"\n\
+    if (a.equals(200.toUShort())) return \"f cross-carrier\"\n\
+    return \"OK\"\n\
+}\n",
+        "UByteEqualsSemantics",
     );
 }
 

@@ -504,17 +504,30 @@ fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
     }
 }
 
-/// Realize a signature `Ty` under the current bindings — a bound type variable substitutes to its
-/// binding, an unbound one erases to `Any`; a class substitutes its carried type arguments in place.
-pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
+/// What the shared substitution walk does with a type parameter absent from the supplied bindings.
+/// Keeping this as an explicit policy prevents the recursive handling of functions, nullability, and
+/// nested class arguments from drifting between partial and final signature realization.
+#[derive(Clone, Copy)]
+enum UnboundTyParam {
+    /// Final call-site realization: an unresolved variable has only its erased top type available.
+    EraseToAny,
+    /// Partial realization: leave method variables open while owner variables are being pre-bound.
+    Preserve,
+}
+
+fn ty_subst_with_unbound_policy(sig: Ty, binds: &GSigBinds, unbound: UnboundTyParam) -> Ty {
     match sig {
-        Ty::TyParam(n, _) => binds
-            .get(n)
-            .copied()
-            .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+        Ty::TyParam(n, _) => binds.get(n).copied().unwrap_or_else(|| match unbound {
+            UnboundTyParam::EraseToAny => Ty::obj("kotlin/Any"),
+            UnboundTyParam::Preserve => sig,
+        }),
         Ty::Fun(fsig) => {
-            let params = ty_subst_all(&fsig.params, binds);
-            let ret = ty_subst(fsig.ret, binds);
+            let params = fsig
+                .params
+                .iter()
+                .map(|param| ty_subst_with_unbound_policy(*param, binds, unbound))
+                .collect();
+            let ret = ty_subst_with_unbound_policy(fsig.ret, binds, unbound);
             Ty::fun_with_shape(
                 params,
                 ret,
@@ -523,16 +536,35 @@ pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
                 fsig.suspend,
             )
         }
-        Ty::Nullable(inner) => Ty::nullable(ty_subst(*inner, binds)),
+        Ty::Nullable(inner) => Ty::nullable(ty_subst_with_unbound_policy(*inner, binds, unbound)),
         Ty::Obj(internal, args) if !args.is_empty() => {
-            Ty::obj_args_name(internal, &ty_subst_all(args, binds))
+            let args = args
+                .iter()
+                .map(|arg| ty_subst_with_unbound_policy(*arg, binds, unbound))
+                .collect::<Vec<_>>();
+            Ty::obj_args_name(internal, &args)
         }
         _ => sig,
     }
 }
 
+/// Realize a signature `Ty` under the current bindings — a bound type variable substitutes to its
+/// binding, an unbound one erases to `Any`; a class substitutes its carried type arguments in place.
+pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
+    ty_subst_with_unbound_policy(sig, binds, UnboundTyParam::EraseToAny)
+}
+
 pub(crate) fn ty_subst_all(sigs: &[Ty], binds: &GSigBinds) -> Vec<Ty> {
     sigs.iter().map(|s| ty_subst(*s, binds)).collect()
+}
+
+/// Realize a signature `Ty` under the current bindings, keeping an UNBOUND type variable free —
+/// unlike [`ty_subst`], which erases it to `Any`. For binding ONLY the class formals of a member
+/// signature from the applied receiver while its method formals stay open for call-site inference;
+/// used by the JVM member walk to pre-bind class formals. Callers that want the final use-time
+/// realization (unbound → `Any`) should use [`ty_subst`] instead.
+pub(crate) fn ty_subst_keep_unbound(sig: Ty, binds: &GSigBinds) -> Ty {
+    ty_subst_with_unbound_policy(sig, binds, UnboundTyParam::Preserve)
 }
 
 #[derive(Clone, Debug)]
@@ -3999,25 +4031,45 @@ fn resolve_property_setter(
     // No `@Metadata` property: a JAVA accessor pair (`isX`/`getX` + `setX(v)`) IS a synthetic
     // property (spec § Java synthetic properties). Kotlin only synthesizes a property when the
     // GETTER exists, so require the read to resolve; then take the single-argument `void` member
-    // setter — preferring the overload whose parameter matches the getter's type, and refusing an
-    // ambiguous remainder (conservative: kotlinc pairs accessors per matching type).
+    // setter — requiring the parameter to match the getter's type, then selecting the MOST-DERIVED
+    // override (the same setter redeclared by a base and derived class is one Kotlin setter, not an
+    // ambiguity), and refusing a genuinely ambiguous remainder. Every rule is applied to the whole
+    // candidate set, including a singleton, so correctness cannot depend on whether another overload
+    // happened to be present.
     let getter = resolve_property_member(lib, recv, property, member_access)?;
     let setter_name = crate::names::property_setter_name(property);
-    let mut setters = lib
+    let setters = lib
         .member_overloads(recv, &setter_name)
         .overloads
         .into_iter()
-        .filter(|o| o.kind == FnKind::Member)
-        .map(|o| o.callable)
-        .filter(|c| c.params.len() == 1 && c.ret == Ty::Unit && !c.name.contains('-'))
+        // Setter lookup is member lookup, so apply the same access-context predicate used by an
+        // ordinary call. The JVM provider exposes protected declarations for legal subclass sites;
+        // treating that provider surface as globally callable would turn a public getter plus an
+        // inaccessible protected setter into a writable property and emit an illegal call.
+        .filter(|o| {
+            o.kind == FnKind::Member
+                && member_visible(member_access, o.visibility, o.callable.owner_type())
+        })
+        .filter(|o| {
+            o.callable.params.len() == 1
+                && o.callable.ret == Ty::Unit
+                && !o.callable.name.contains('-')
+                // Getter/setter TYPE agreement defines whether a JavaBean pair is a Kotlin synthetic
+                // `var`; it is not merely an overload tie-break. Otherwise `String getValue()` plus
+                // `void setValue(int)` invents one property with different read/write types.
+                && o.callable.params[0] == getter.ret.non_null()
+        })
         .collect::<Vec<_>>();
-    if setters.len() > 1 {
-        setters.retain(|c| c.params[0] == getter.ret.non_null());
-    }
-    match setters.as_slice() {
-        [_] => setters.pop(),
-        _ => None,
-    }
+    // `receiver_rank` is the provider-neutral member-MRO order already consumed by ordinary call
+    // selection. Use that common fact for every set size, then demand one candidate at the winning
+    // rung; malformed or genuinely ambiguous duplicates remain read-only rather than becoming an
+    // arbitrary call target.
+    let nearest_rank = setters.iter().map(|setter| setter.receiver_rank).min()?;
+    let mut nearest = setters
+        .into_iter()
+        .filter(|setter| setter.receiver_rank == nearest_rank);
+    let setter = nearest.next()?;
+    nearest.next().is_none().then_some(setter.callable)
 }
 
 fn select_instance_info(
@@ -5148,6 +5200,36 @@ mod tests {
     use crate::types::type_name;
 
     #[test]
+    fn partial_and_final_substitution_share_the_recursive_type_walk() {
+        // Owner binding happens before method inference. Exercise every recursive carrier here so
+        // adding a new substitution shape cannot make the partial path preserve structure differently
+        // from the final path: the ONLY intended policy difference is the unbound method variable.
+        let any = Ty::obj("kotlin/Any");
+        let owner = Ty::ty_param("Owner", any);
+        let method = Ty::ty_param("Method", any);
+        let signature = Ty::nullable(Ty::fun(
+            vec![Ty::obj_args("fixtures/Box", &[owner]), method],
+            Ty::obj_args("fixtures/Result", &[method]),
+        ));
+        let bindings = GSigBinds::from([("Owner".to_string(), Ty::String)]);
+
+        assert_eq!(
+            ty_subst_keep_unbound(signature, &bindings),
+            Ty::nullable(Ty::fun(
+                vec![Ty::obj_args("fixtures/Box", &[Ty::String]), method],
+                Ty::obj_args("fixtures/Result", &[method]),
+            ))
+        );
+        assert_eq!(
+            ty_subst(signature, &bindings),
+            Ty::nullable(Ty::fun(
+                vec![Ty::obj_args("fixtures/Box", &[Ty::String]), any],
+                Ty::obj_args("fixtures/Result", &[any]),
+            ))
+        );
+    }
+
+    #[test]
     fn inferred_generic_binding_joins_null_with_the_non_null_element_type() {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let mut inferred = GSigBinds::new();
@@ -5397,6 +5479,7 @@ mod tests {
             contract: None,
             generic_sig: None,
             singleton_dispatch: None,
+            declared_ret: None,
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),

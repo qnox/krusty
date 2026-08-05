@@ -361,6 +361,23 @@ pub fn lower_value_classes(
     if under.is_empty() {
         return true;
     }
+    // Publish only the distinction the existing unified value-class lookup cannot answer: which
+    // resolved value classes belong to this source module. `IrFile::is_value_class_name` already
+    // recognizes same-file and external/module declarations, so copying `under` into a second public
+    // name table would create two semantic authorities that can drift. The metadata writer combines
+    // that existing lookup with this origin subset when deciding whether a downstream reader can see
+    // the value-class record.
+    ir.module_source_value_classes = under
+        .keys()
+        .copied()
+        .filter(|fq_name| {
+            module_value_classes.contains_key(fq_name)
+                || ir
+                    .classes
+                    .iter()
+                    .any(|c| c.is_value && c.fq_name == *fq_name)
+        })
+        .collect();
 
     // A semantic property operation deliberately keeps the Kotlin property name. For an owner compiled
     // from another source file there is no classfile for the emitter to inspect, so record the JVM
@@ -1832,7 +1849,7 @@ pub fn lower_value_classes(
             fields: &orig_fields,
             slots,
             under: &under,
-            logical: &ir.logical_types,
+            types: CallTypes::of(ir),
             physical: &ir.physical_types,
             field_getters: &field_getters,
         };
@@ -2199,7 +2216,7 @@ pub fn lower_value_classes(
             fields: &orig_fields,
             slots,
             under: &under,
-            logical: &ir.logical_types,
+            types: CallTypes::of(ir),
             physical: &ir.physical_types,
             field_getters: &field_getters,
         };
@@ -3319,7 +3336,7 @@ struct ReprCtx<'a> {
     fields: &'a [Vec<Ty>],
     slots: &'a HashMap<u32, Ty>,
     under: &'a Under,
-    logical: &'a HashMap<u32, Ty>,
+    types: CallTypes<'a>,
     physical: &'a HashMap<u32, Ty>,
     field_getters: &'a FieldGetters,
 }
@@ -3332,7 +3349,7 @@ impl ReprCtx<'_> {
             self.fields,
             self.slots,
             self.under,
-            self.logical,
+            self.types,
             self.physical,
             self.field_getters,
             id,
@@ -3428,6 +3445,42 @@ fn operand_nonnull(
     }
 }
 
+/// The two per-expression type facts lowering hands the representation analysis. They always travel
+/// together, and neither alone can classify a value-class result: `logical` says WHICH value class a
+/// coerced read has after substitution, `declared` says whether the callee RETURNS one by declaration
+/// (so the physical result is its erased carrier) rather than merely producing one out of a generic
+/// slot (where it is a box). `List<TokenBox>.get` and `A.create(): A<String>` agree on the
+/// first and differ only on the second.
+#[derive(Clone, Copy)]
+struct CallTypes<'a> {
+    logical: &'a HashMap<u32, Ty>,
+    declared: &'a HashMap<u32, Ty>,
+}
+
+impl<'a> CallTypes<'a> {
+    fn of(ir: &'a IrFile) -> Self {
+        CallTypes {
+            logical: &ir.logical_types,
+            declared: &ir.call_declared_ret,
+        }
+    }
+
+    fn get(&self, id: &u32) -> Option<&Ty> {
+        self.logical.get(id)
+    }
+
+    /// The value class this call returns BY DECLARATION — so its physical result is already the erased
+    /// carrier and must not be unboxed again. `None` when the callee declares no class return, or
+    /// declares one that is not a value class here.
+    fn declared_value_class(&self, id: u32, under: &Under) -> Option<TypeName> {
+        self.declared
+            .get(&id)?
+            .non_null()
+            .obj_internal()
+            .filter(|fq| under.contains_key(fq))
+    }
+}
+
 fn repr_of_ty(t: &Ty, under: &Under) -> Repr {
     if let Some(fq_name) = t.non_null().obj_internal() {
         let nullable = t.is_nullable();
@@ -3467,7 +3520,7 @@ fn repr(
     fields: &[Vec<Ty>],
     slots: &HashMap<u32, Ty>,
     under: &Under,
-    logical: &HashMap<u32, Ty>,
+    types: CallTypes<'_>,
     physical: &HashMap<u32, Ty>,
     field_getters: &FieldGetters,
     id: ExprId,
@@ -3536,7 +3589,7 @@ fn repr(
                 fields,
                 slots,
                 under,
-                logical,
+                types,
                 physical,
                 field_getters,
                 *arg,
@@ -3567,7 +3620,7 @@ fn repr(
             fields,
             slots,
             under,
-            logical,
+            types,
             physical,
             field_getters,
             *operand,
@@ -3581,7 +3634,7 @@ fn repr(
             fields,
             slots,
             under,
-            logical,
+            types,
             physical,
             field_getters,
             *v,
@@ -3599,7 +3652,7 @@ fn repr(
                     fields,
                     slots,
                     under,
-                    logical,
+                    types,
                     physical,
                     field_getters,
                     *v,
@@ -3620,7 +3673,17 @@ fn repr(
         // `Object` = `Result`'s underlying → the UNBOXED value class; a generic `decode(): TO = IC` returns
         // `Object` ≠ `IC`'s `double` underlying → a BOXED value class (it sat in a type-parameter slot).
         IrExpr::Call { callee, .. } => {
-            let Some(t) = logical.get(&id) else {
+            // A callee that returns a value class BY DECLARATION hands back its erased CARRIER: that is
+            // the whole classpath value-class RETURN ABI (`fun make(): K` → `make-<hash>()
+            // Ljava/lang/String;`), and it holds whatever the underlying erases to — so it settles the
+            // `Object`-underlying cases the descriptor comparison below cannot. Checked FIRST for
+            // exactly that reason: `A.create(): A<String>` and `List<TokenBox>.get` both spell
+            // `()Ljava/lang/Object;`, and only the declaration says the first is a carrier and the
+            // second a box. Nullable declared returns are never recorded (they really are boxed).
+            if let Some(declared) = types.declared_value_class(id, under) {
+                return Repr::Unboxed(declared);
+            }
+            let Some(t) = types.get(&id) else {
                 return Repr::NotVc;
             };
             let Some(x) = t
@@ -3762,7 +3825,7 @@ fn prop_access(
             rets,
             slots,
             under,
-            &ir.logical_types,
+            CallTypes::of(ir),
             &ir.physical_types,
             field_getters,
             receiver,
@@ -3800,7 +3863,7 @@ fn is_boxed_vc(
     rets: &[Ty],
     slots: &HashMap<u32, Ty>,
     under: &Under,
-    logical: &HashMap<u32, Ty>,
+    types: CallTypes<'_>,
     physical: &HashMap<u32, Ty>,
     field_getters: &FieldGetters,
     id: ExprId,
@@ -3871,7 +3934,7 @@ fn is_boxed_vc(
             type_operand,
         } => {
             is_x(type_operand)
-                && !matches!(repr(exprs, rets, fields, slots, under, logical, physical, field_getters, *arg), Repr::Unboxed(c) if c == x)
+                && !matches!(repr(exprs, rets, fields, slots, under, types, physical, field_getters, *arg), Repr::Unboxed(c) if c == x)
         }
         IrExpr::NotNullAssert { operand } => is_boxed_vc(
             exprs,
@@ -3880,7 +3943,7 @@ fn is_boxed_vc(
             rets,
             slots,
             under,
-            logical,
+            types,
             physical,
             field_getters,
             *operand,
@@ -3896,7 +3959,7 @@ fn is_boxed_vc(
                 rets,
                 slots,
                 under,
-                logical,
+                types,
                 physical,
                 field_getters,
                 *r,
@@ -3917,7 +3980,7 @@ fn is_boxed_vc(
             rets,
             slots,
             under,
-            logical,
+            types,
             physical,
             field_getters,
             *arg,
@@ -3930,7 +3993,7 @@ fn is_boxed_vc(
             rets,
             slots,
             under,
-            logical,
+            types,
             physical,
             field_getters,
             *v,
@@ -3998,7 +4061,7 @@ fn unbox_tail(
                 rets,
                 slots,
                 under,
-                &ir.logical_types,
+                CallTypes::of(ir),
                 &ir.physical_types,
                 field_getters,
                 id,
@@ -4086,7 +4149,7 @@ fn box_ref_tail(
                 rets,
                 slots,
                 under,
-                &ir.logical_types,
+                CallTypes::of(ir),
                 &ir.physical_types,
                 field_getters,
                 id,
@@ -4196,7 +4259,7 @@ fn box_nullable_vc_tail(
                         fields,
                         slots,
                         under,
-                        &ir.logical_types,
+                        CallTypes::of(ir),
                         &ir.physical_types,
                         field_getters,
                         id,
@@ -4210,7 +4273,7 @@ fn box_nullable_vc_tail(
                     rets,
                     slots,
                     under,
-                    &ir.logical_types,
+                    CallTypes::of(ir),
                     &ir.physical_types,
                     field_getters,
                     id,
@@ -4522,8 +4585,11 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             index: 0,
         })
     };
-    let str_const =
-        |ir: &mut IrFile, s: String| ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(s)));
+    let str_const = |ir: &mut IrFile, s: String| {
+        ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
+            crate::kt_string::KtString::from(s),
+        )))
+    };
     let ret_block = |ir: &mut IrFile, v: ExprId| {
         let r = ir.add_expr(IrExpr::Return(Some(v)));
         ir.add_expr(IrExpr::Block {

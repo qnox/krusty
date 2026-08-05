@@ -19,7 +19,7 @@ use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
     RangeConstruction, RuntimeCtor, RuntimeOp,
 };
-use crate::symbol_resolver::{ty_subst, ty_subst_all};
+use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
@@ -77,6 +77,23 @@ pub struct JvmLibraries {
     cp: std::rc::Rc<Classpath>,
 }
 
+/// The declaration-level return fact shared by both classpath member construction loops. Keep this
+/// normalization at the metadata boundary: ordinary descriptor members and source-name aliases for
+/// mangled members must not disagree about whether the later value-class representation pass may see
+/// a declared return.
+///
+/// Nullable returns are genuine boxes, and suspend descriptors return the CPS `Object` regardless of
+/// the declared type (including primitive-underlying value classes, which the callee boxes). In both
+/// cases recording the classifier as an erased carrier would be unsound, so neither is handed off.
+/// Value-class identification itself intentionally remains downstream; probing it while a classpath
+/// type is being built can recursively re-enter type resolution on cyclic class graphs.
+fn metadata_declared_nonnull_nonsuspend_return(function: &super::metadata::MetaFn) -> Option<Ty> {
+    function
+        .ret_class
+        .filter(|_| !function.ret_nullable() && !function.is_suspend())
+        .map(Ty::obj_name)
+}
+
 impl JvmLibraries {
     /// The TOP-LEVEL (receiver-less) function overloads of `name` declared in package `pkg` —
     /// `listOf`/`run`/`println`/… each with its inline/`@InlineOnly` flags and logical
@@ -111,45 +128,24 @@ impl JvmLibraries {
             }
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
-            // Suspend-ness lives on the SOURCE function's `@Metadata`; a `$default` synthetic is not in
-            // metadata, so detect it via the stripped `meta_name` — otherwise a suspend function's
-            // `withLock$default` keeps its `Continuation` param and no normal call shape resolves.
-            let suspend = self.cp.is_suspend_method_name(c.owner, meta_name);
-            // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
-            // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
-            // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
-            let descriptor = if suspend {
-                strip_continuation_param(&c.descriptor)
-            } else {
-                c.descriptor.clone()
-            };
-            let Some((mut params, physical_ret)) = parse_method_desc_with_field_params(&descriptor)
+            let Some((mut params, physical_ret)) =
+                parse_method_desc_with_field_params(&c.descriptor)
             else {
                 continue;
             };
             if is_default && params.len() >= 2 {
+                // A `$default` synthetic appends mask/marker slots that do not identify the source
+                // overload. Remove that ABI tail BEFORE metadata alignment: otherwise the mask of a
+                // two-parameter overload can prefix-match a real third `Int` parameter and make the
+                // longer sibling win. A suspend Continuation precedes this tail and deliberately
+                // remains for the selected metadata declaration to classify and trim generically.
                 params.truncate(params.len() - 2);
             }
-            // The CPS `Continuation` is emit-only — never part of the function signature `@Metadata`
-            // records. For a non-`$default` suspend method it is trailing and already gone (stripped
-            // from `descriptor` above); a `$default` synthetic spells it before the mask/marker, so it
-            // survived into the logical params. Drop it here so the params ARE the source signature and
-            // align against metadata; the emit `descriptor` keeps the physical CPS form.
-            if suspend
-                && params
-                    .last()
-                    .and_then(|p| p.obj_internal())
-                    .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"))
-            {
-                params.pop();
-            }
-            // Drop any SYNTHETIC trailing params the JVM descriptor appends beyond the `@Metadata`
-            // SOURCE signature — a `@Composable` method's trailing `(Composer, int)` (a `suspend`
-            // Continuation is already removed above). `@Metadata` records only the source
-            // `value_parameter`s, so its count bounds the source params; keep the descriptor's
-            // leading params (their exact types — an extension receiver, a vararg array) and
-            // truncate the trailing synthetics. A normal function's metadata count equals the
-            // descriptor's param count, so this is a no-op for it (no regression).
+            // Select metadata ONCE from the JVM name and descriptor-derived parameter shape. A
+            // `$default` synthetic has no entry of its own, so its suffix and mask/marker ABI tail are
+            // normalized first; a value-class-mangled name stays intact and matches `MetaFn.jvm_name`.
+            // Suspend-ness is one fact on that exact callable, beside arity/default/return facts —
+            // never a name-wide lookup that can leak to an ordinary same-named sibling.
             let meta = self.cp.metadata_call_facts_name(
                 c.owner,
                 meta_name,
@@ -158,6 +154,20 @@ impl JvmLibraries {
                 false,
                 &|name| self.value_underlying_name(name),
             );
+            let suspend = meta.suspend;
+            // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
+            // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
+            // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
+            let descriptor = if suspend {
+                strip_continuation_param(&c.descriptor)
+            } else {
+                c.descriptor.clone()
+            };
+            // Drop any SYNTHETIC trailing params the JVM descriptor appends beyond the `@Metadata`
+            // SOURCE signature — a CPS Continuation, `$default` mask/marker, or `@Composable`
+            // `(Composer, int)` tail. The descriptor-aligned fact reports the source prefix from the
+            // same declaration that supplied `suspend`; ordinary methods with a Continuation parameter
+            // keep it because it is part of THEIR aligned source arity.
             if let Some(keep) = meta.kept_params {
                 if keep < params.len() {
                     params.truncate(keep);
@@ -205,7 +215,13 @@ impl JvmLibraries {
                     None => physical_ret,
                 }
             } else {
-                physical_ret
+                // A value-class RETURN erases to its underlying in the descriptor exactly like a
+                // parameter does, and unlike `suspend` it has no continuation type argument to recover
+                // it from — so without this a non-suspend top-level function declared `(): Duration`
+                // reads back as `Long` and every member access on its result fails to resolve. The
+                // callable keeps `physical_ret`/`descriptor` erased below, which is what tells the
+                // value-class pass the result is ALREADY the carrier and must not be unboxed again.
+                meta.value_class_ret.unwrap_or(physical_ret)
             };
             // A value-class parameter erases to its underlying in the descriptor. Resolution compares
             // the ARGUMENT's Kotlin type against these, so a `Duration`/`Tag` argument matches nothing
@@ -234,6 +250,10 @@ impl JvmLibraries {
                 context_count,
                 contract,
                 generic_sig: generic_sig_for_callable.clone().map(Box::new),
+                // The DECLARED value-class return, when `@Metadata` says the descriptor return is that
+                // class's erased carrier. This is the fact the value-class pass needs and the
+                // descriptor cannot supply; it is already computed for `ret` above.
+                declared_ret: meta.value_class_ret,
                 ..LibraryCallable::library(
                     c.owner,
                     c.name.clone(),
@@ -1201,6 +1221,18 @@ impl JvmLibraries {
                 });
                 let mut member =
                     LibraryMember::new(m.name.clone(), params, ret, m.descriptor.clone());
+                // The DECLARED return classifier, verbatim (see `LibraryMember::declared_ret`). Taken
+                // from the metadata this member was already aligned against, so no extra decode; a
+                // NULLABLE declared return stays `None` because it is genuinely boxed.
+                //
+                // A `suspend` member is excluded: CPS makes its descriptor return `Object` whatever it
+                // declares, so the descriptor no longer witnesses that the result is the erased
+                // carrier — and for a PRIMITIVE-underlying value class it is not (kotlinc's
+                // `make-<hash>(Continuation)Ljava/lang/Object;` hands back `M.box-impl(I)LM;`, a BOX).
+                // Claiming the fact there would repr a boxed value as unboxed. Without it the member
+                // falls back to the descriptor comparison, which classifies this case correctly.
+                member.declared_ret =
+                    member_metadata.and_then(metadata_declared_nonnull_nonsuspend_return);
                 if let Some(java_nullable) = platform_nullable_params.clone() {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
@@ -1450,6 +1482,14 @@ impl JvmLibraries {
                 member.set_ret_nullable(mf.ret_nullable());
                 member.set_suspend(mf.is_suspend());
                 member.call_sig = mf.member_call_sig();
+                // The DECLARED return classifier, verbatim and un-substituted — recorded with no
+                // value-class probing (which is unsafe on this path: it runs inside `resolve_type_name`'s
+                // type build and would recurse on cyclic class graphs). A NULLABLE declared return is
+                // deliberately excluded: a nullable value class really is BOXED, so it must keep the
+                // ordinary boxed handling. The value-class pass decides what the classifier means.
+                // `suspend` excluded for the reason given at the descriptor-loop site above: CPS
+                // erases the descriptor return to `Object`, which stops witnessing the carrier.
+                member.declared_ret = metadata_declared_nonnull_nonsuspend_return(mf);
                 crate::trace_compiler!(
                     "resolve",
                     "mangled member {}.{} jvm={} logical_params={:?}",
@@ -2155,6 +2195,43 @@ fn suspend_return_from_gsig(
             }
         }
         _ => None,
+    }
+}
+
+/// Overlay the `@Metadata`-declared collection classifiers onto a JVM-signature-derived type, level
+/// by level. The signature erases read-only vs mutable (`List`/`MutableList` both spell
+/// `java/util/List`) at EVERY nesting depth; the metadata type preserves it. At each level the
+/// metadata classifier replaces the signature's name ONLY when the shared builtin-erasure table says
+/// it is a Kotlin collection sibling mapping to the same JVM internal — guaranteeing the same
+/// collection family and arity —
+/// and the walk descends into type arguments only when the two classifiers agree (sibling or
+/// identical) with matching arity, so a divergent classifier (stale metadata) never forms an
+/// arity-mismatched or misaligned type. The base keeps its structure, primitives, and nullability;
+/// only names are taken from metadata.
+fn overlay_metadata_collection_names(base: Ty, meta: Ty) -> Ty {
+    // Nullability lives on the base (the resolution pipeline applies it separately); look through a
+    // metadata `T?` to its classifier.
+    let meta = meta.non_null();
+    let (Ty::Obj(base_name, base_args), Ty::Obj(meta_name, meta_args)) = (base, meta) else {
+        return base;
+    };
+    let sibling = super::jvm_class_map::is_kotlin_collection_type_name(meta_name)
+        && super::jvm_class_map::type_names_map_to_same_jvm_internal(meta_name, base_name);
+    if !sibling && base_name != meta_name {
+        return base;
+    }
+    let name = if sibling { meta_name } else { base_name };
+    if !base_args.is_empty() && base_args.len() == meta_args.len() {
+        let merged: Vec<Ty> = base_args
+            .iter()
+            .zip(meta_args.iter())
+            .map(|(&base_arg, &meta_arg)| overlay_metadata_collection_names(base_arg, meta_arg))
+            .collect();
+        Ty::obj_args_name(name, &merged)
+    } else {
+        // No arguments to align (a raw erased base) or an arity mismatch: the outer classifier is
+        // still sound to take, the arguments stay the base's own.
+        Ty::obj_args_name(name, base_args)
     }
 }
 
@@ -3271,7 +3348,32 @@ impl SymbolSource for JvmLibraries {
                         // decoded signature is what preserves and binds its type parameters. Re-parsing
                         // `m.signature` here would therefore lose facts in the former case and fail to
                         // produce any signature in the latter.
-                        let generic_sig = m.generic_sig.clone();
+                        //
+                        // A member signature can mention its OWNER's type variables in its value
+                        // parameters, including under a function/SAM argument. Bind those variables
+                        // from the applied dispatch type before call-site inference, exactly as return
+                        // recovery below does. This is deliberately independent of whether the
+                        // provider represented a receiver in `GenericSig`: metadata signatures carry
+                        // one while a raw JVM `Signature` cannot, but both describe the same semantic
+                        // need. The partial substitution policy leaves the member's own formals open.
+                        let generic_sig = m.generic_sig.clone().map(|signature| {
+                            let bindings = self.member_receiver_bindings_name(
+                                receiver,
+                                cn,
+                                &signature.formals,
+                            );
+                            if bindings.is_empty() {
+                                return signature;
+                            }
+                            GenericSig {
+                                params: signature
+                                    .params
+                                    .iter()
+                                    .map(|param| ty_subst_keep_unbound(*param, &bindings))
+                                    .collect(),
+                                ..signature
+                            }
+                        });
                         // A `suspend fun` member's physical method appends a `Continuation` parameter
                         // and erases its return to `Object`; present the LOGICAL signature (drop the
                         // continuation, recover the real return from the `Continuation<T>` type
@@ -3298,6 +3400,18 @@ impl SymbolSource for JvmLibraries {
                             &m.descriptor,
                             &|name| self.value_underlying_name(name),
                         );
+                        // A metadata FUNCTION's structured return comes from the already-aligned call
+                        // facts, keeping overload selection single-sourced. A property GETTER has no
+                        // metadata-function record, so only that shape consults the property-signature
+                        // fallback. Do this once before the plain/suspend split so both paths consume
+                        // the identical semantic return projection.
+                        let metadata_ret = match member_facts.as_ref() {
+                            Some(facts) => facts.declared_ret,
+                            None => {
+                                self.cp
+                                    .metadata_property_ret_ty_name(cn, meta_name, &m.descriptor)
+                            }
+                        };
                         let member_ret_metadata = suspend.then(|| {
                             member_facts
                                 .as_ref()
@@ -3327,30 +3441,15 @@ impl SymbolSource for JvmLibraries {
                             // `suspend_return_from_gsig` canonicalized a collection return to its
                             // READ-ONLY Kotlin form (the JVM signature erases read-only vs mutable).
                             // Recover the EXACT source form (`List` vs `MutableList`, …) from the
-                            // member's `@Metadata` return classifier — which preserves it — keeping the
-                            // gsig's (already-canonicalized) type arguments, so `.add(…)` on a declared
-                            // `MutableList` return still resolves.
-                            let base = match (base, member_ret_metadata.and_then(|m| m.class)) {
-                                // Override the outer name ONLY when the metadata classifier is the SAME
-                                // JVM collection as the gsig-recovered base — i.e. its read-only/mutable
-                                // sibling (`List`/`MutableList` both erase to `java/util/List`). This
-                                // guarantees the same collection family and arity, so keeping the gsig's
-                                // type arguments is sound; a divergent classifier (stale metadata) is
-                                // ignored rather than forming an arity-mismatched type.
-                                (Ty::Obj(base_name, args), Some(Ty::Obj(meta_cls, _)))
-                                    if meta_cls.starts_with("kotlin/collections/")
-                                        && super::jvm_class_map::type_names_map_to_same_jvm_internal(
-                                            meta_cls,
-                                            base_name,
-                                        ) =>
-                                {
-                                    Ty::obj_args_name(meta_cls, args)
-                                }
-                                (Ty::Obj(base_name, args), Some(Ty::Obj(_, _))) => {
-                                    Ty::obj_args_name(base_name, args)
-                                }
-                                (b, _) => b,
-                            };
+                            // member's `@Metadata` return type — which preserves it at every nesting
+                            // level — under the same-JVM-internal guard, so `.add(…)` on a declared
+                            // `MutableList` (or on its `MutableSet` element) return still resolves.
+                            // Ordinary and suspend members must not grow separate metadata/JVM merge
+                            // policies: both arms overlay through the same guarded projection; only
+                            // the way each obtains `base` differs (Continuation generic argument
+                            // here, ordinary generic signature below).
+                            let base = metadata_ret
+                                .map_or(base, |meta| overlay_metadata_collection_names(base, meta));
                             crate::trace_compiler!(
                                 "suspend",
                                 "suspend return {cn}.{}: gsig={:?} base={:?} nullable={}",
@@ -3389,7 +3488,15 @@ impl SymbolSource for JvmLibraries {
                                 m.ret,
                                 generic_sig.is_some()
                             );
-                            recovered.unwrap_or(m.ret)
+                            // The JVM signature erases read-only vs mutable (`List`/`MutableList`
+                            // both spell `java/util/List`) at every nesting level; the member's
+                            // `@Metadata` return type preserves it — for a FUNCTION and for a
+                            // property GETTER (which is not a metadata function) alike. Overlay the
+                            // metadata classifiers under the same-JVM-internal guard, per level —
+                            // the same projection the suspend arm applies.
+                            let base = recovered.unwrap_or(m.ret);
+                            metadata_ret
+                                .map_or(base, |meta| overlay_metadata_collection_names(base, meta))
                         };
                         let call_sig = member_facts
                             .as_ref()
@@ -3417,6 +3524,12 @@ impl SymbolSource for JvmLibraries {
                             inline: m.inline,
                             suspend,
                             signature: m.signature.clone(),
+                            // Preserve the declaration-level return recovered when the class member
+                            // was aligned with metadata. This overload view is the common input to
+                            // instance-member selection (named calls and operator `invoke` alike);
+                            // rebuilding a callable without the fact makes a later specialized
+                            // `Object` return indistinguishable from a genuinely boxed generic slot.
+                            declared_ret: m.declared_ret,
                             // Whether the dispatch owner is an interface is the MEMBER's fact here.
                             // For a mapped builtin resolved with no JDK on the classpath the JVM
                             // owner (`java/util/List`) has no class file, so the call site cannot
@@ -4058,7 +4171,7 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         };
 
         match op {
-            RuntimeOp::UnsignedBox | RuntimeOp::UnsignedUnbox => {
+            RuntimeOp::UnsignedBox | RuntimeOp::UnsignedUnbox | RuntimeOp::UnsignedEquals => {
                 // Every unsigned type boxes through its OWN inline class (`kotlin/UByte`, …) over the
                 // signed primitive it erases to — one row derived from the `Ty`, not a per-type table.
                 if !ty.is_unsigned() {
@@ -4083,6 +4196,19 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                         ty,
                         repr,
                         format!("(){prim}"),
+                    ),
+                    // The compiled form of `override fun equals(other: Any?)` on the inline class: the
+                    // receiver is the CARRIER in a primitive slot, so nothing boxes to make the call.
+                    RuntimeOp::UnsignedEquals => callable(
+                        owner,
+                        "equals-impl",
+                        // Kotlin declares `equals(other: Any?)`. The descriptor still erases the
+                        // nullable reference to `Object`; retain nullability in the semantic row so
+                        // target-independent lowering and JVM realization describe the same call.
+                        vec![ty, Ty::nullable(Ty::obj("kotlin/Any"))],
+                        Ty::Boolean,
+                        Ty::Boolean,
+                        format!("({prim}Ljava/lang/Object;)Z"),
                     ),
                     _ => unreachable!(),
                 }
@@ -4337,8 +4463,8 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, method_layout, parse_class_gsig, parse_concrete_field_gsig, parse_field_gsig,
-        parse_method_desc, parse_method_gsig,
+        desc_to_ty, method_layout, overlay_metadata_collection_names, parse_class_gsig,
+        parse_concrete_field_gsig, parse_field_gsig, parse_method_desc, parse_method_gsig,
     };
     use crate::libraries::SemanticPlatform;
     use crate::symbol_source::SymbolSource;
@@ -4537,6 +4663,47 @@ mod tests {
         assert_eq!(
             libs.canonical_source_type_name(type_name("kotlin/collections/MutableList")),
             type_name("kotlin/collections/MutableList")
+        );
+    }
+
+    #[test]
+    fn metadata_collection_projection_changes_only_the_matching_outer_classifier() {
+        let element = Ty::obj("fixture/Element");
+        let recovered = Ty::obj_args("kotlin/collections/List", &[element]);
+
+        assert_eq!(
+            overlay_metadata_collection_names(recovered, Ty::obj("kotlin/collections/MutableList"),),
+            Ty::obj_args("kotlin/collections/MutableList", &[element]),
+            "metadata owns mutability while the recovered signature keeps its generic argument",
+        );
+        assert_eq!(
+            overlay_metadata_collection_names(recovered, Ty::obj("kotlin/collections/MutableSet")),
+            recovered,
+            "a classifier from another erased collection family must not replace the return",
+        );
+        assert_eq!(
+            overlay_metadata_collection_names(recovered, Ty::obj("fixture/MutableList")),
+            recovered,
+            "a similarly named application class must not trigger the Kotlin collection rule",
+        );
+    }
+
+    #[test]
+    fn metadata_collection_projection_descends_into_matching_type_arguments() {
+        let inner_base = Ty::obj_args("kotlin/collections/Set", &[Ty::String]);
+        let recovered = Ty::obj_args("kotlin/collections/List", &[inner_base]);
+        let meta = Ty::obj_args(
+            "kotlin/collections/MutableList",
+            &[Ty::obj_args("kotlin/collections/MutableSet", &[Ty::String])],
+        );
+
+        assert_eq!(
+            overlay_metadata_collection_names(recovered, meta),
+            Ty::obj_args(
+                "kotlin/collections/MutableList",
+                &[Ty::obj_args("kotlin/collections/MutableSet", &[Ty::String])],
+            ),
+            "each nesting level recovers its declared mutability under the same guard",
         );
     }
 
