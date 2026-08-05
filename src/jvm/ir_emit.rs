@@ -10820,10 +10820,24 @@ impl<'a> Emitter<'a> {
     /// op would be live on the stack across that frame), evaluate all ops into temps first, then load
     /// them — keeping the stack empty while each frame-recording op runs.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
+        self.emit_operands_adapted(ops, code, |_, _, _| {});
+    }
+
+    /// Frame-safe operand sequencing with one representation adapter applied immediately after each
+    /// value is pushed. Keeping the adapter inside the shared spill/load loop is essential for
+    /// category-changing bridges such as primitive boxing: a wide left operand cannot be repaired
+    /// after a right operand has landed above it, and a branchy right operand still requires both
+    /// source expressions to be evaluated with an empty stack. Consumers supply only the boundary
+    /// adapter; evaluation order, frame safety, temporary ownership, and cleanup remain centralized.
+    fn emit_operands_adapted<F>(&mut self, ops: &[u32], code: &mut CodeBuilder, mut adapt: F)
+    where
+        F: FnMut(&mut Self, Ty, &mut CodeBuilder),
+    {
         if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
             let temps = self.spill_to_temps(ops, code);
             for &(slot, t, _) in &temps {
                 load(t, slot, code);
+                adapt(self, t, code);
             }
             for &(_, _, key) in &temps {
                 self.slots.remove(&key);
@@ -10831,8 +10845,15 @@ impl<'a> Emitter<'a> {
         } else {
             for &o in ops {
                 self.emit_value(o, code);
+                adapt(self, self.value_ty(o), code);
             }
         }
+    }
+
+    /// Adapter for an operand that must occupy an erased/reference comparison slot. Reference values
+    /// are already in the required representation; [`box_prim_free`] changes only JVM scalars.
+    fn box_scalar_operand(&mut self, ty: Ty, code: &mut CodeBuilder) {
+        box_prim_free(self.cw, code, ty);
     }
 
     /// Emit `e` as a value while `held` operand-stack entries (bottom-first) are ALREADY pushed below
@@ -10865,6 +10886,17 @@ impl<'a> Emitter<'a> {
     fn held_pair(&mut self, owner: &str) -> [VerifType; 2] {
         let v = self.verif_single(Ty::obj(owner));
         [v.clone(), v]
+    }
+
+    /// Push the two operands of a referential `===`/`!==` that compares object refs, BOXING whichever
+    /// side is a primitive right where it lands — kotlinc's shape for a mixed pair (`aload_0; iload_1;
+    /// Integer.valueOf; if_acmpne`), which it accepts with only an "identity equality … can be unstable
+    /// because of implicit boxing" warning. Boxing has to happen per operand rather than once at the
+    /// end: a `Long`/`Double` left operand occupies two stack words, so a boxed right operand cannot be
+    /// swapped past it. The shared adapted-operand path owns evaluation order, frame-aware spilling,
+    /// and temporary cleanup; identity supplies only the primitive-to-reference adapter.
+    fn emit_identity_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
+        self.emit_operands_adapted(&[lhs, rhs], code, Self::box_scalar_operand);
     }
 
     fn emit_virtual_operands(
@@ -11390,14 +11422,14 @@ impl<'a> Emitter<'a> {
         // path below doesn't claim a null comparison (a `null` literal's type is a reference).
         let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
         let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
-        // Referential identity (`===`/`!==`) on two non-null references → `if_acmpeq`/`if_acmpne`.
+        // Referential identity (`===`/`!==`) on two non-null references — or on a mixed reference/
+        // primitive pair, whose primitive side boxes first — → `if_acmpeq`/`if_acmpne`.
         if matches!(op, RefEq | RefNe)
-            && lt.is_reference()
-            && self.value_ty(rhs).is_reference()
+            && identity_compares_refs(lt, self.value_ty(rhs))
             && !lhs_null
             && !rhs_null
         {
-            self.emit_operands(&[lhs, rhs], code);
+            self.emit_identity_operands(lhs, rhs, code);
             self.frame(target, vec![], code);
             if (op == RefEq) == jt {
                 code.if_acmpeq(target);
@@ -11413,7 +11445,11 @@ impl<'a> Emitter<'a> {
         };
         if matches!(op, Eq | Ne) && (lhs_null || rhs_null) {
             let operand = if lhs_null { rhs } else { lhs };
-            self.emit_value(operand, code);
+            // A physical primitive arises here only for identity (`x === null`/`x !== null`): kotlinc
+            // accepts that with an always-false/true warning, whereas structural `x == null` is
+            // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
+            // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
+            self.emit_operands_adapted(&[operand], code, Self::box_scalar_operand);
             self.frame(target, vec![], code);
             if (op == Eq) == jt {
                 code.ifnull(target);
@@ -11461,7 +11497,7 @@ impl<'a> Emitter<'a> {
         // Numeric. A comparison against the integer literal `0` uses the single-operand compare-to-zero
         // branch (`ifeq`/`iflt`/… — kotlinc's form), saving the `iconst_0`. Only the int category; the
         // others compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, which already tests the result vs 0.
-        let int_cat = !matches!(lt, Ty::Long | Ty::Double | Ty::Float);
+        let int_cat = numeric_cmp_int_category(lt, self.value_ty(rhs));
         let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
         let cmp0_int = if int_cat && zero(rhs) {
             self.emit_value(lhs, code);
@@ -12299,6 +12335,41 @@ fn push_zero(t: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
 
 fn is_jvm_int_category(t: Ty) -> bool {
     matches!(t, Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char)
+}
+
+/// True when a `RefEq`/`RefNe` between `lt` and `rt` must compare OBJECT REFERENCES (`if_acmp*`).
+/// Only a pair of JVM SCALARS is a value comparison (Kotlin's `===` on two primitives is just `==`,
+/// remapped to `Eq`/`Ne`); everything else rides in a reference slot. Two references compare as-is,
+/// and a mixed reference/primitive pair boxes its primitive side first (kotlinc's "unstable because
+/// of implicit boxing" case).
+///
+/// Phrased as "not both scalars" rather than "either is a reference" because `is_reference()` is a
+/// LANGUAGE-level query and misses types that are nonetheless references on the JVM: `Ty::Unit` (whose
+/// value is the `kotlin/Unit.INSTANCE` singleton) and `Ty::Null`. Testing for references directly left
+/// `g() === g()` and `x === null` in the numeric tail, which is exactly the int-branch-on-a-reference
+/// bug this predicate exists to prevent.
+fn identity_compares_refs(lt: Ty, rt: Ty) -> bool {
+    !(lt.is_jvm_scalar() && rt.is_jvm_scalar())
+}
+
+/// The int-vs-wide category of a numeric comparison's operands: `true` for the int-category primitives
+/// that fuse to `if_icmp*`/compare-to-zero, `false` for `Long`/`Double`/`Float`, which compare 3-way
+/// through `lcmp`/`dcmp*`/`fcmp*` first.
+///
+/// Deriving this as a bare "not `Long`/`Double`/`Float`" swept every REFERENCE type into the int
+/// category, so a mixed reference/primitive `===` that slipped past the identity path emitted an int
+/// branch on an object ref — a class file that is written out fine and only fails at verification
+/// (`VerifyError: Bad type on operand stack`). Reference operands must be handled by the identity /
+/// null / `Intrinsics.areEqual` paths before the numeric tail, so reaching here with one is an emitter
+/// bug: assert rather than silently emit unverifiable bytecode. `Unit`/`Nothing` are neither, and
+/// likewise never reach a numeric comparison.
+fn numeric_cmp_int_category(lt: Ty, rt: Ty) -> bool {
+    assert!(
+        lt.is_jvm_scalar() && rt.is_jvm_scalar(),
+        "numeric comparison reached with a non-scalar operand ({lt:?} vs {rt:?}) — \
+         reference shapes belong on the identity/null/areEqual paths"
+    );
+    !matches!(lt, Ty::Long | Ty::Double | Ty::Float)
 }
 
 fn array_store_op(elem: Ty) -> (u8, i32) {
