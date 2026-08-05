@@ -104,8 +104,10 @@ fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
 
 /// Per-file emission configuration passed explicitly down the emit callgraph and stamped onto every
 /// `ClassWriter` (via [`new_writer`]) so synthetic serializer/companion/DefaultImpls classes inherit
-/// it too. The `Default` is v52 with no `SourceFile`; only the CLI-driven backend path overrides those
-/// (`-jvm-target`, the source `.kt` name).
+/// it too. The `Default` is v52 with no `SourceFile`; every path that claims to emit the bytes krusty
+/// SHIPS — the CLI, `survey`, the conformance corpus and the in-process test helpers — builds its
+/// options through [`crate::jvm::backend::shipping_emit_options`] instead, which supplies the source
+/// `.kt` name and the inner-class resolver (and, from the CLI, `-jvm-target`).
 #[derive(Clone)]
 pub struct EmitOptions {
     /// Class-file major version to emit (default v52; `-jvm-target 25` ⇒ v69).
@@ -119,10 +121,13 @@ pub struct EmitOptions {
     /// Byte-verified vs kotlinc for a plain `val`/`var`-property class and a `data class` (its IS_DATA
     /// flag + synthesized `componentN`/`copy`/`equals`/`hashCode`/`toString`); a shape that is not
     /// verified declines individually and emits no metadata, so this never writes an unverified
-    /// payload (one did break kotlin-reflect on a box-corpus case). The CLI backend turns this ON —
-    /// without it a krusty-compiled CLASS carries nothing a second krusty compilation can read. It
-    /// stays OFF in this `Default` so [`emit_all`]'s output is unchanged for callers that want the
-    /// pre-class-metadata bytes.
+    /// payload (one did break kotlin-reflect on a box-corpus case). ON in this `Default`, and ON in
+    /// [`crate::jvm::backend::shipping_emit_options`] — without it a krusty-compiled CLASS carries
+    /// nothing a second krusty compilation can read (the facade metadata describes top-level
+    /// declarations only). There is no `EmitOptions` value that means "the pre-class-metadata bytes"
+    /// by default; a caller that wants those either sets `KRUSTY_NO_CLASS_METADATA` (which only the
+    /// shipping constructor consults, for bisecting) or constructs `EmitOptions` explicitly with this
+    /// field `false`.
     pub emit_class_metadata: bool,
     pub inner_class_resolver: Option<InnerClassResolver>,
 }
@@ -1992,11 +1997,15 @@ pub fn emit_all(
     bodies: &dyn MethodBodies,
     metadata: Option<&KotlinMetadata>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    // Default: no per-class `@Metadata` — krusty-core emit is byte-identical to before (the
-    // `bytecode_parity_e2e` gate compares classes byte-for-byte vs kotlinc, so the default path must
-    // stay untouched). A caller that needs cross-module class metadata (krusty-compose's LibraryBinary
-    // modules) uses [`emit_all_with_class_meta`]. The run accumulators are discarded here (callers that
-    // need the inline-bail reason use `emit_all_with_opts` with their own `EmitRun`).
+    // [`EmitOptions::default`]: per-class `@Metadata` ON, as on the shipping path — what this default
+    // lacks is the `SourceFile`, the inner-class resolver and any `-jvm-target` class version, so it is
+    // NOT the artifact `krusty -d …` writes. A caller that must emit the shipping bytes (the
+    // byte-identity gates, the conformance corpus, `survey`) goes through
+    // [`crate::jvm::backend::shipping_emit_options`] and the `emit_all_with_opts*` entry points; a
+    // caller that must attach a per-class `@Metadata` it computed elsewhere uses
+    // [`emit_all_with_class_meta`], which this passes a provider returning `None` for every class. The
+    // run accumulators are discarded here (callers that need the inline-bail reason use
+    // `emit_all_with_opts` with their own `EmitRun`).
     let run = EmitRun::default();
     let empty_continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
     let env = EmitEnv {
@@ -2010,8 +2019,10 @@ pub fn emit_all(
 }
 
 /// Like [`emit_all`], but with explicit per-file [`EmitOptions`] (class version, source name) and a
-/// caller-owned [`EmitRun`] the caller inspects after a `None` return (the inline-bail reason). The CLI
-/// backend uses this so `-jvm-target` and the `SourceFile` name reach every emitted class.
+/// caller-owned [`EmitRun`] the caller inspects after a `None` return (the inline-bail reason). Every
+/// shipping-bytes path uses this — the CLI backend, `survey`, the conformance corpus and the
+/// in-process test helpers — so `-jvm-target`, the `SourceFile` name and the inner-class resolver reach
+/// every emitted class.
 pub fn emit_all_with_opts(
     ir: &IrFile,
     facade: &str,

@@ -620,8 +620,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   makes this reach every caller: the in-process test harness previously built its own `EmitOptions`
   from `Default`, which silently omitted both the class metadata AND the `SourceFile` stamp — so a
   test could pass on an artifact `krusty -d …` never writes. The CLI backend and `compile_in_process`
-  now share that one constructor; `EmitOptions::default()` remains the pre-class-metadata shape for a
-  caller that wants it, and `KRUSTY_NO_CLASS_METADATA` restores facade-only output for bisecting.
+  now share that one constructor. `EmitOptions::default()` is NOT a pre-class-metadata escape hatch —
+  its `emit_class_metadata` is `true` as well; what it lacks next to the shipping configuration is the
+  `SourceFile`, the inner-class resolver and the `-jvm-target` class version, so a caller that reaches
+  for it still gets class metadata and still is not emitting shipping bytes. The two supported ways to
+  get facade-only output are `KRUSTY_NO_CLASS_METADATA` (consulted by `shipping_emit_options` only,
+  for bisecting) and constructing `EmitOptions` explicitly with `emit_class_metadata: false`.
   A **`data object` synthesizes no `copy`/`componentN`** — it is a singleton, so kotlinc gives it
   `equals`/`hashCode`/`toString` only. krusty's METHOD emission already agreed, but the constant-pool
   seeder and the metadata builder both keyed on `is_data` alone, so switching the annotation on made a
