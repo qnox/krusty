@@ -101,19 +101,47 @@ impl SourceFallbackPlatform {
 
     fn public_source_static_field(&self, internal: TypeName, name: &str) -> Option<StaticFieldRef> {
         self.public_source_type_name(internal)?;
-        let ty = self
+        if let Some(ty) = self
             .symbols
             .static_classifier_values
-            .get(&internal)?
-            .get(name)
-            .copied()?;
+            .get(&internal)
+            .and_then(|values| values.get(name))
+            .copied()
+        {
+            return Some(StaticFieldRef {
+                owner: internal,
+                name: name.to_string(),
+                // `static_classifier_values` contains enum entries, whose JVM field type is the enum
+                // itself. Dependency sources use their source internal name as their physical JVM name.
+                descriptor: format!("L{};", internal.render()),
+                ty,
+                constant: None,
+            });
+        }
+        // A companion property is a static field on the OUTER class in the source ABI — the same
+        // `getstatic C.prop` the checker records for an in-module `C.prop` read — so project it as a
+        // static field exactly as a compiled provider's `static_field` would. A FIELD-LESS
+        // custom-accessor property (`val X get() = …`) has no static: it lowers to `getX`/`setX` on
+        // the synthesized `C$Companion`.
+        let class = self.symbols.class_by_type_name(internal)?;
+        if class.computed_static_props.contains(name) {
+            return None;
+        }
+        let &(ty, visibility, _) = class.static_props.get(name)?;
+        // Cross-module reads see PUBLIC companion statics only: an `internal` one is module-scoped
+        // (kotlinc rejects the dependent module's read), matching the `public_functions` /
+        // `public_properties` filters the merged callables already apply.
+        if visibility != Visibility::Public {
+            return None;
+        }
         Some(StaticFieldRef {
             owner: internal,
             name: name.to_string(),
-            // `static_classifier_values` contains enum entries, whose JVM field type is the enum
-            // itself. Dependency sources use their source internal name as their physical JVM name.
-            descriptor: format!("L{};", internal.render()),
+            descriptor: source_static_descriptor(ty),
             ty,
+            // A `const val` resolves here without its VALUE (`static_props` does not record one), so
+            // const-fold contexts do not fold a fallback `const` the way the jar path folds one
+            // served through `companion_consts`. TODO: close that parity gap if folding is needed.
             constant: None,
         })
     }
@@ -134,6 +162,28 @@ impl SourceFallbackPlatform {
             SourceTypeAccess::Absent => platform_field(),
             SourceTypeAccess::Declared(_) | SourceTypeAccess::HiddenByOwner(_) => None,
         }
+    }
+}
+
+/// The JVM field descriptor a dependency-source companion static is emitted with. Dependency
+/// sources use their source internal name as their physical JVM name (the enum-entry projection
+/// above does the same); an unsigned type stores as the signed primitive it is an inline class
+/// over, and anything without a primitive descriptor is an object field.
+fn source_static_descriptor(ty: Ty) -> String {
+    match ty.non_null() {
+        Ty::Boolean => "Z".into(),
+        Ty::Byte | Ty::UByte => "B".into(),
+        Ty::Char => "C".into(),
+        Ty::Short | Ty::UShort => "S".into(),
+        Ty::Int | Ty::UInt => "I".into(),
+        Ty::Long | Ty::ULong => "J".into(),
+        Ty::Float => "F".into(),
+        Ty::Double => "D".into(),
+        Ty::String => "Ljava/lang/String;".into(),
+        other => other
+            .obj_internal()
+            .map(|internal| format!("L{};", internal.render()))
+            .unwrap_or_else(|| "Ljava/lang/Object;".into()),
     }
 }
 
