@@ -7534,10 +7534,11 @@ fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::Ha
     *out = cell.into_inner();
 }
 
-/// Names reassigned (`=`/`++`/`--`) INSIDE a nested lambda within `e`. A closure that writes a captured
-/// `var` (possibly to null) could run between a narrowing assignment and a later read, so such a `var`
-/// must never be flow-narrowed (soundness for [`Local::narrowed`]). Mirrors [`collect_all_reassigned`]
-/// but only collects once the traversal has descended into a lambda body.
+/// Names reassigned (`=`/`++`/`--`) INSIDE a nested lambda or local function within `e`. A
+/// closure that writes a captured `var` (possibly to null) could run between a narrowing
+/// assignment and a later read, so such a `var` must never be flow-narrowed (soundness for
+/// [`Local::narrowed`]). Mirrors [`collect_all_reassigned`] but only collects once the traversal
+/// has descended into a closure body.
 fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
     let cell = std::cell::RefCell::new(std::mem::take(out));
     fn ce(
@@ -7572,6 +7573,10 @@ fn collect_closure_reassigned(file: &File, e: ExprId, out: &mut std::collections
         in_closure: bool,
         cell: &std::cell::RefCell<std::collections::HashSet<String>>,
     ) {
+        // A LOCAL FUNCTION body is a closure too (`any_child_stmt` descends into it): it can run
+        // after the var changed, so a write inside it invalidates flow narrowings exactly like a
+        // lambda write (kotlinc: "mutated in a capturing closure").
+        let in_closure = in_closure || matches!(file.stmt(s), Stmt::LocalFun(_));
         if in_closure {
             if let Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } = file.stmt(s) {
                 cell.borrow_mut().insert(name.clone());
@@ -11075,6 +11080,11 @@ struct Local {
     /// smart-casts subsequent reads to `Int`). Separate from the declared `ty`, which still governs
     /// what may be ASSIGNED (a later `x = null` stays legal). `None` = read as the declared type.
     narrowed: Option<Ty>,
+    /// Set only on a `var` SMART-CAST shadow (see [`Self::declare_var_narrowing_shadow`]): `ty` holds
+    /// the narrowed read type while this holds the DECLARED type — what a write to the var targets
+    /// and what the binding restores to when the cast ends (a write, a loop back-edge, or a closure
+    /// boundary). `None` on every ordinary binding.
+    declared: Option<Ty>,
 }
 
 #[derive(Clone)]
@@ -11243,6 +11253,7 @@ fn make_checker<'a>(
         fn_reassigned: std::collections::HashSet::new(),
         fn_closure_reassigned: std::collections::HashSet::new(),
         narrow_active: false,
+        var_shadow_active: false,
         expr_depth: 0,
         allow_lambda_mutation: false,
         symbolic_signature_inference: false,
@@ -13935,6 +13946,9 @@ struct Checker<'a> {
     /// True while any [`Local::narrowed`] flow-narrowing is set — a cheap guard so the common (no
     /// narrowing) path skips the scope walk in [`Self::clear_local_narrows`] on every push/pop.
     narrow_active: bool,
+    /// True while any `var` smart-cast shadow ([`Self::declare_var_narrowing_shadow`]) may be live —
+    /// the same cheap guard for [`Self::clear_var_narrow_shadows`] at loop/closure entries.
+    var_shadow_active: bool,
     /// Current type-checking recursion depth — guards against a stack overflow on a pathologically
     /// deep expression; past the limit, the expression types as `Error` (the file is skipped).
     expr_depth: u32,
@@ -17696,6 +17710,7 @@ impl<'a> Checker<'a> {
                 is_var,
                 origin,
                 narrowed: None,
+                declared: None,
             },
         );
     }
@@ -17711,8 +17726,70 @@ impl<'a> Checker<'a> {
                 is_var: false,
                 origin: ReceiverFnValueOrigin::Local,
                 narrowed: None,
+                declared: None,
             },
         );
+    }
+
+    /// Shadow a local `var` with its smart-cast type (`if (d is T) …`) for the guarded region.
+    /// Reads resolve to the narrowed `ty` exactly like the `val` shadow (and likewise survive
+    /// nested blocks), but the binding stays a `var`: `declared` remembers the type a later WRITE
+    /// targets, and the write restores it ([`Self::stmt_assign`]). The cast also ends where the
+    /// value could change behind the checker's back — a loop back-edge or a closure boundary
+    /// ([`Self::clear_var_narrow_shadows`]) — because the body is checked only once.
+    fn declare_var_narrowing_shadow(&mut self, name: &str, ty: Ty) {
+        let Some(local) = self.lookup(name) else {
+            return;
+        };
+        let declared = local.declared.unwrap_or(local.ty);
+        self.var_shadow_active = true;
+        self.scopes.last_mut().unwrap().insert(
+            name.to_string(),
+            Local {
+                ty,
+                is_var: true,
+                origin: ReceiverFnValueOrigin::Local,
+                narrowed: None,
+                declared: Some(declared),
+            },
+        );
+    }
+
+    /// End every active `var` smart-cast shadow, restoring each binding's declared type. Called at
+    /// loop-body and closure entries: across a back-edge or a deferred call the proven type no
+    /// longer holds, and a re-proof inside the body re-narrows normally. Soundness over precision —
+    /// the same trade [`Self::clear_local_narrows`] makes at scope boundaries. The clear is
+    /// deliberately COARSER than kotlinc's dataflow: ANY lambda or local function in the guarded
+    /// region ends the cast (even a read-only capture, an inline `run { … }`, or one created
+    /// before the var is ever written) — sound false-negatives, never a miscompile.
+    fn clear_var_narrow_shadows(&mut self) {
+        if !self.var_shadow_active {
+            return;
+        }
+        self.var_shadow_active = false;
+        for scope in self.scopes.iter_mut() {
+            for local in scope.values_mut() {
+                if let Some(declared) = local.declared.take() {
+                    local.ty = declared;
+                    local.narrowed = None;
+                }
+            }
+        }
+    }
+
+    /// End the `var` smart-cast shadow of the innermost `name` binding, restoring its declared
+    /// type; no-op for an ordinary binding. Called when the var is WRITTEN — the proof the shadow
+    /// was built on no longer describes the value stored from that point on.
+    fn restore_var_narrow_shadow(&mut self, name: &str) {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(local) = scope.get_mut(name) {
+                if let Some(declared) = local.declared.take() {
+                    local.ty = declared;
+                    local.narrowed = None;
+                }
+                return;
+            }
+        }
     }
 
     fn scoped_properties(&self, owner: TypeName) -> Vec<ScopedProperty> {
@@ -20001,6 +20078,21 @@ impl<'a> Checker<'a> {
         self.stable_path_ty(path).is_some()
     }
 
+    /// Whether a path names a LOCAL `var` that an `is`-proof can still narrow soundly: kotlinc
+    /// smart-casts a local variable when no closure writes it (a deferred write could reset it
+    /// between the check and a later read). The narrowing is applied as a `var` smart-cast shadow
+    /// ([`Self::declare_var_narrowing_shadow`]), which a write, a loop back-edge, or a closure
+    /// boundary ends — so it never survives the point where it stops holding.
+    fn smartcastable_local_var(&self, path: &NarrowPath) -> bool {
+        path.segments.is_empty()
+            && path.root != "this"
+            && self.lookup(&path.root).is_some_and(|local| {
+                local.is_var
+                    && matches!(local.origin, ReceiverFnValueOrigin::Local)
+                    && !self.fn_closure_reassigned.contains(&path.root)
+            })
+    }
+
     /// Narrowings from a `!= null`/`== null` proof on `operand`: the operand's whole ACCESS PATH
     /// (`a.b != null` proves `a.b` non-null) — and, for a SAFE-CALL chain (`a?.b?.c != null`),
     /// every prefix too, since a non-null safe-call result means every link held (kotlinc narrows
@@ -20076,8 +20168,11 @@ impl<'a> Checker<'a> {
         let Some(path) = self.expr_access_path(operand) else {
             return out;
         };
-        // Only stable values smart-cast soundly — a `var`/computed property could change.
-        if !self.path_is_stable(&path) {
+        // Only stable values smart-cast soundly — a computed property could change. A root-only
+        // LOCAL `var` no closure writes smart-casts too (kotlinc's rule): a write to the var ends
+        // the cast (the assignment handler's `restore_var_narrow_shadow`), and loop/closure
+        // boundaries drop it (`clear_var_narrow_shadows`).
+        if !self.path_is_stable(&path) && !self.smartcastable_local_var(&path) {
             return out;
         }
         let tt = self.resolve_ty_no_diag(&ty);
@@ -20212,7 +20307,14 @@ impl<'a> Checker<'a> {
                     ty,
                 );
             }
-            self.declare_narrowing_shadow(&root, ty);
+            // A `var` cannot be shadowed by an immutable narrowing binding — a reassignment
+            // inside the guarded region must still write it. Shadow it with a binding that keeps
+            // `is_var` and the declared write type instead ([`Self::declare_var_narrowing_shadow`]).
+            if self.lookup(&root).is_some_and(|local| local.is_var) {
+                self.declare_var_narrowing_shadow(&root, ty);
+            } else {
+                self.declare_narrowing_shadow(&root, ty);
+            }
         } else {
             self.record_path_narrowing(path.clone(), ty);
             // Alias: a proof on `this.p` also narrows the BARE `p` read form (same property).
@@ -22932,6 +23034,9 @@ impl<'a> Checker<'a> {
                 .get(&e.0)
                 .cloned()
                 .unwrap_or_default();
+            // A `var` smart-cast does not flow into a closure: the lambda can run after the var
+            // changed. A re-proof inside the body re-narrows normally.
+            self.clear_var_narrow_shadows();
             self.push_scope();
             for (i, name) in bind_names.iter().enumerate() {
                 let pty = decl_types
@@ -27631,6 +27736,9 @@ impl<'a> Checker<'a> {
             if let Some(receiver) = extension_receiver {
                 self.mark_receiver_lambda(e, receiver);
             }
+            // A `var` smart-cast does not flow into a closure: the lambda can run after the var
+            // changed. A re-proof inside the body re-narrows normally.
+            self.clear_var_narrow_shadows();
             let prev_this = self.this_ty;
             let prev_this_gen = self.this_gen;
             let prev_extension_receiver = self.this_extension_receiver;
@@ -27713,6 +27821,9 @@ impl<'a> Checker<'a> {
             } else {
                 vec![]
             };
+            // A `var` smart-cast does not flow into a closure: the lambda can run after the var
+            // changed. A re-proof inside the body re-narrows normally.
+            self.clear_var_narrow_shadows();
             self.push_scope();
             for (i, name) in bind_names.iter().enumerate() {
                 let pty = param_types.get(i).copied().unwrap_or(Ty::obj("kotlin/Any"));
@@ -35974,6 +36085,11 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(e, label) => self.stmt_return(s, e, label),
             Stmt::While { cond, body, label } => {
+                // A `var` smart-cast from OUTSIDE the loop flows into neither the condition (it
+                // re-executes every iteration, after the body may have written the var) nor the
+                // body (the back-edge can carry a reassigned value). The condition's OWN
+                // narrowing is computed and applied below, after the clear.
+                self.clear_var_narrow_shadows();
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
@@ -35986,6 +36102,7 @@ impl<'a> Checker<'a> {
                 self.pop_scope();
             }
             Stmt::DoWhile { body, cond, label } => {
+                self.clear_var_narrow_shadows();
                 self.check_loop_body(body, &label);
                 let ct = self.expr(cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "do-while condition");
@@ -36252,6 +36369,10 @@ impl<'a> Checker<'a> {
         // miscompiled).
         let span = self.file.stmt_spans[s.0 as usize];
         let target_span = self.assignment_target_span(s);
+        // Reads the NARROWED type through a `var` smart-cast shadow on purpose: `inc`/`dec`
+        // resolves on the smart-cast type exactly as kotlinc resolves it on the cast receiver,
+        // and `x++` cannot widen the stored value beyond the narrowed type (sound; the write
+        // stays inside the cast). Only plain `=` ends the cast (`stmt_assign`).
         let local = self.lookup(&name).map(|local| (local.ty, local.is_var));
         let implicit_property = local
             .is_none()
@@ -36322,7 +36443,11 @@ impl<'a> Checker<'a> {
         if self.try_in_place_assignment(s, value) {
             return;
         }
-        let local = self.lookup(&name).map(|local| (local.ty, local.is_var));
+        // A write through a `var` smart-cast shadow targets the DECLARED type (`declared`), not
+        // the narrowed read type: `var d: Any; if (d is String) { d = 42 }` stays legal.
+        let local = self
+            .lookup(&name)
+            .map(|local| (local.declared.unwrap_or(local.ty), local.is_var));
         let implicit_property = local
             .is_none()
             .then(|| self.implicit_property_write(&name))
@@ -36375,6 +36500,9 @@ impl<'a> Checker<'a> {
                     // reassignment that is nullable (or the var is closure-written) clears any
                     // prior narrowing so a later read widens back to the declared type.
                     if is_var {
+                        // The write ends any smart-cast shadow on the var: later reads start
+                        // from the declared type again, then re-narrow from the assigned value.
+                        self.restore_var_narrow_shadow(&name);
                         let narrow = lty.is_nullable()
                             && !vt.is_nullable()
                             && !matches!(vt, Ty::Null | Ty::Error)
@@ -36792,6 +36920,8 @@ impl<'a> Checker<'a> {
         });
         self.push_scope();
         self.declare(&name, elem, true); // loop variable (mutated by the lowering)
+                                         // A `var` smart-cast from OUTSIDE the loop does not flow into the body (back-edge).
+        self.clear_var_narrow_shadows();
         self.check_loop_body(body, &label);
         self.pop_scope();
     }
@@ -36827,6 +36957,8 @@ impl<'a> Checker<'a> {
         };
         self.push_scope();
         self.declare(&name, elem, false);
+        // A `var` smart-cast from OUTSIDE the loop does not flow into the body (back-edge).
+        self.clear_var_narrow_shadows();
         self.check_loop_body(body, &label);
         self.pop_scope();
     }
@@ -36843,6 +36975,9 @@ impl<'a> Checker<'a> {
             return;
         }
         // Collect outer local names (everything currently in scope that isn't one of f's params).
+        // A `var` smart-cast does not flow into a closure: the local function can run after the
+        // var changed, so captures record the DECLARED type (the clear below restores it).
+        self.clear_var_narrow_shadows();
         let own_params: std::collections::HashSet<String> =
             f.params.iter().map(|p| p.name.clone()).collect();
         let outer_names: std::collections::HashSet<String> = self

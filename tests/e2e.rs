@@ -964,6 +964,8 @@ mod shadowed_method_tparam_e2e;
 mod short_circuit_e2e;
 #[path = "smartcast_and_e2e.rs"]
 mod smartcast_and_e2e;
+#[path = "smartcast_generic_iface_member_e2e.rs"]
+mod smartcast_generic_iface_member_e2e;
 #[path = "source_fallback_companion_props_e2e.rs"]
 mod source_fallback_companion_props_e2e;
 #[path = "spread_in_annotation_e2e.rs"]
