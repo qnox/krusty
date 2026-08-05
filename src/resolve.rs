@@ -34222,6 +34222,21 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // An otherwise UN-SHAPED lambda is postponed only when this bare name semantically
+                // denotes a constructible classifier and no top-level callable competes for it. The
+                // classifier lookup is federated, so source/module/dependency origin does not enter
+                // the rule. Ordinary functions and extensions keep their established eager fallback
+                // (notably zero-parameter lambdas whose empty parameter vector is a real shape).
+                let defer_unshaped_constructor_lambdas = has_lambda_argument
+                    && !self.lexical_value_declares(&fname)
+                    && !self.same_named_callable_exists(&fname)
+                    && self
+                        .classifier_internal_name(&fname)
+                        .and_then(|internal| self.resolved_type_name(internal))
+                        .is_some_and(|classifier| {
+                            !classifier.constructors.is_empty()
+                                || classifier.value_underlying.is_some()
+                        });
                 // Diagnostics from typing the arguments below are provisional while `fname` may name a
                 // class: if no constructor accepts them, a companion `operator fun invoke` re-types
                 // them against ITS signature and this pass's complaints never applied.
@@ -34518,12 +34533,11 @@ impl<'a> Checker<'a> {
                                 return elem;
                             }
                         }
-                        // A lambda that no earlier candidate supplied an expectation for remains a
-                        // PROBE until selection. Constructor, function, and invoke candidates then
-                        // compete on the same literal provenance without an origin-specific eager
-                        // check binding its parameters to `Any`; the winning path performs its first
-                        // real check. Already-typed lambdas retain their selected expectation.
-                        if matches!(self.file.expr(a), Expr::Lambda { .. })
+                        // A constructor lambda that no earlier semantic shape supplied remains a
+                        // PROBE until selection. The classifier decision above is provider-neutral;
+                        // other callables retain their established argument checking and lowering.
+                        if defer_unshaped_constructor_lambdas
+                            && matches!(self.file.expr(a), Expr::Lambda { .. })
                             && self.expr_types[a.0 as usize] == Ty::Error
                         {
                             return self.lambda_probe_ty(a).unwrap_or(Ty::Error);
