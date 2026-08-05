@@ -79,6 +79,9 @@ pub struct PlatformRangeCtor {
 pub enum RuntimeOp {
     UnsignedBox,
     UnsignedUnbox,
+    /// The value class's OWN equality against an arbitrary reference — the static
+    /// `equals-impl(<carrier>, Object)`, which takes the receiver UNBOXED.
+    UnsignedEquals,
     UnsignedCompare,
     UnsignedDivide,
     UnsignedRemainder,
