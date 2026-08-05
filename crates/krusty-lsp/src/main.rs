@@ -851,7 +851,7 @@ impl krusty_lsp::Analysis for WorkerHost {
             return Vec::new();
         };
         // The immutable snapshot owns both module relations and the component-indexed source-root
-        // relation. Keep every production classification on that shared relation; unwrapping the
+        // relation. Keep every classification decision on that shared relation; unwrapping the
         // model here would silently restore an O(files × roots) scan during neighborhood indexing.
         let open_modules: std::collections::HashSet<usize> = open_uris
             .iter()

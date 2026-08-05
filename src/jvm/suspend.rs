@@ -1983,9 +1983,12 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
         // the raw erased `Object` (COROUTINE_SUSPENDED or the boxed value): erase `ret` so the emitter
         // does NOT unbox it — a tail-forward `areturn`s it verbatim, and the flattener re-applies the
         // logical coercion from `ir.suspend_calls` when it binds the resume value.
-        IrExpr::InvokeFunction { args, ret, .. } => {
+        IrExpr::InvokeFunction {
+            args, params, ret, ..
+        } => {
             *ret = object_ty();
             args.push(cont);
+            params.push(continuation_ty());
         }
         _ => {}
     }

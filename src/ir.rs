@@ -393,9 +393,13 @@ pub enum IrExpr {
     CurrentContinuation,
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
+    /// `params` retains the semantic Kotlin parameter types through backend carrier lowering so an
+    /// adapter can distinguish equal carriers with different wrappers (`UInt` versus `Int`) without
+    /// rediscovering the signature from the expression that produced `func`.
     InvokeFunction {
         func: ExprId,
         args: Vec<ExprId>,
+        params: Vec<Ty>,
         ret: Ty,
     },
     /// The not-null assertion `operand!!` — yields `operand`, throwing if it is null. On the JVM this

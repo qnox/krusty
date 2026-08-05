@@ -1000,7 +1000,7 @@ public class M {\n\
 fn suspend_try_catch_with_branch_in_nonsuspending_catch_runs() {
     // A BRANCH (`?.`/elvis/`if`) in a suspend try's NON-suspending CATCH body: the catch emits
     // entirely inside its handler state, so its branch temps are ordinary state-local declarations
-    // (the shape a production service's drift-check method uses). It must compile AND run —
+    // (the reduced regression combines all three). It must compile AND run —
     // loading the class verifies the handler frames. (A branchy catch that itself SUSPENDS is still
     // skipped — its branch temps would span resume states.)
     let _jh = {

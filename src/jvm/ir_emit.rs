@@ -4000,7 +4000,11 @@ fn emit_prop_ref_class(c: &crate::ir::IrClass, facade: &str, opts: &EmitOptions)
     }
     .emit_get(&mut cw, &mut get, getter_ret);
     if getter_ret.is_jvm_scalar() {
-        box_prim_free(&mut cw, &mut get, getter_ret);
+        box_prim_free(
+            &mut cw,
+            &mut get,
+            semantic_scalar_adapter(pr.prop_ty, getter_ret),
+        );
     }
     get.areturn();
     finish_code::<0x0001>(
@@ -4110,7 +4114,11 @@ fn emit_bound_prop_ref_class(
     }
     .emit_get(&mut cw, &mut get, getter_ret);
     if getter_ret.is_jvm_scalar() {
-        box_prim_free(&mut cw, &mut get, getter_ret);
+        box_prim_free(
+            &mut cw,
+            &mut get,
+            semantic_scalar_adapter(pr.prop_ty, getter_ret),
+        );
     }
     get.areturn();
     finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
@@ -4184,7 +4192,11 @@ fn emit_toplevel_prop_ref_class(
     let gref = cw.methodref(&owner, &pr.getter_name, &getter_desc);
     get.invokestatic(gref, 0, slot_words(prop_jvm) as i32);
     if prop_jvm.is_jvm_scalar() {
-        box_prim_free(&mut cw, &mut get, prop_jvm);
+        box_prim_free(
+            &mut cw,
+            &mut get,
+            semantic_scalar_adapter(pr.prop_ty, prop_jvm),
+        );
     }
     get.areturn();
     finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
@@ -4196,11 +4208,12 @@ fn emit_toplevel_prop_ref_class(
         let mut set = CodeBuilder::new(2);
         set.aload(1);
         if prop_jvm.is_jvm_scalar() {
+            let adapter = semantic_scalar_adapter(pr.prop_ty, prop_jvm);
             let wref = cw.class_ref(
-                crate::jvm::jvm_class_map::wrapper_internal(prop_jvm).unwrap_or("java/lang/Object"),
+                crate::jvm::jvm_class_map::wrapper_internal(adapter).unwrap_or("java/lang/Object"),
             );
             set.checkcast(wref);
-            unbox_prim(&mut cw, &mut set, prop_jvm);
+            unbox_prim(&mut cw, &mut set, adapter);
         } else if let Some(internal) = checkcast_internal(prop_jvm) {
             let cref = cw.class_ref(&internal);
             set.checkcast(cref);
@@ -4460,11 +4473,12 @@ fn emit_func_ref_class(
         inv.aload(1 + k as u16);
         let jt = ir_ty_to_jvm(pt);
         if jt.is_jvm_scalar() {
+            let adapter = semantic_scalar_adapter(*pt, jt);
             let wref = cw.class_ref(
-                crate::jvm::jvm_class_map::wrapper_internal(jt).unwrap_or("java/lang/Object"),
+                crate::jvm::jvm_class_map::wrapper_internal(adapter).unwrap_or("java/lang/Object"),
             );
             inv.checkcast(wref);
-            unbox_prim(&mut cw, &mut inv, jt);
+            unbox_prim(&mut cw, &mut inv, adapter);
         } else if let Some(internal) = checkcast_internal(jt) {
             let cref = cw.class_ref(&internal);
             inv.checkcast(cref);
@@ -4487,7 +4501,7 @@ fn emit_func_ref_class(
                 stack_prefix,
             );
         } else if jt.is_jvm_scalar() && target_jt.is_reference() {
-            box_prim_free(&mut cw, &mut inv, jt);
+            box_prim_free(&mut cw, &mut inv, semantic_scalar_adapter(*pt, jt));
         }
         call_arg_words += slot_words(target_jt) as i32;
     }
@@ -4552,7 +4566,14 @@ fn emit_func_ref_class(
         );
         inv.invokestatic(bi, slot_words(target_ret_jvm) as i32, 1);
     } else if target_ret_jvm.is_jvm_scalar() {
-        box_prim_free(&mut cw, &mut inv, target_ret_jvm);
+        // `invoke` returns `Object` regardless of the target descriptor. Preserve the function
+        // reference's semantic return while selecting that wrapper; the target carrier alone cannot
+        // distinguish `UInt` from `Int`.
+        box_prim_free(
+            &mut cw,
+            &mut inv,
+            semantic_scalar_adapter(fr.ret_ty, target_ret_jvm),
+        );
     }
     inv.areturn();
     finish_code::<0x0001>(&mut cw, "invoke", &invoke_desc, &mut inv, 1 + arity);
@@ -4873,6 +4894,27 @@ fn box_prim_free(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
     };
     let m = cw.methodref(cls, meth, desc);
     code.invokestatic(m, slot_words(t) as i32, 1);
+}
+
+/// Select the scalar whose box/unbox adapter owns a reference boundary before reducing that scalar
+/// to its JVM carrier. Signed scalars are their carriers, but an unsigned scalar is an inline class:
+/// `UInt` uses `kotlin/UInt.box-impl`/`unbox-impl` even though values inside a method use the same
+/// `int` slots as `Int`. Keeping this choice in one helper prevents property, lambda, function-reference,
+/// or future generic-boundary paths from each rediscovering unsigned wrappers after `ir_ty_to_jvm`
+/// has intentionally erased the distinction.
+fn semantic_scalar_adapter(semantic: Ty, carrier: Ty) -> Ty {
+    let semantic = semantic.non_null();
+    // Adapter selection must not CREATE a second boundary. Nullable scalars and other expressions
+    // can already be represented by a wrapper reference when they reach a generic consumer. In that
+    // case the carrier is the authority and this helper is deliberately a no-op; choosing the
+    // non-null semantic scalar would try to feed that existing reference into another `box-impl` or
+    // `valueOf`. Only a physical scalar crossing into/out of a reference slot needs semantic wrapper
+    // identity.
+    if carrier.is_jvm_scalar() && semantic.is_jvm_scalar() {
+        semantic
+    } else {
+        carrier
+    }
 }
 
 /// Unbox a wrapper on the stack to the primitive `t` (free-function form for the bridge emitter).
@@ -7089,6 +7131,7 @@ impl<'a> Emitter<'a> {
                 }
                 let cap_tys = jvm_tys(&impl_f.params[..n_cap]);
                 let lam_tys = jvm_tys(&impl_f.params[n_cap..]);
+                let lam_semantic_tys = &impl_f.params[n_cap..];
                 let impl_ret = ir_ty_to_jvm(&impl_f.ret);
                 // Each capture binds to the caller's actual slot (a mutable capture writes through).
                 let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(captures.len());
@@ -7140,7 +7183,14 @@ impl<'a> Emitter<'a> {
                 for j in (0..arity).rev() {
                     let jt = lam_tys[j];
                     if jt.is_jvm_scalar() {
-                        unbox_prim(self.cw, &mut scratch, jt);
+                        // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter
+                        // from the lambda's semantic parameter before using the physical carrier for
+                        // the local slot; otherwise `UInt` is mistaken for boxed `Int` here.
+                        unbox_prim(
+                            self.cw,
+                            &mut scratch,
+                            semantic_scalar_adapter(lam_semantic_tys[j], jt),
+                        );
                     } else if let Some(internal) = checkcast_internal(jt) {
                         let ci = self.cw.class_ref(&internal);
                         scratch.checkcast(ci);
@@ -7152,7 +7202,13 @@ impl<'a> Emitter<'a> {
                 }
                 self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
                 if impl_ret.is_jvm_scalar() {
-                    box_prim_free(self.cw, &mut scratch, impl_ret);
+                    // The erased `invoke` result is `Object`, so reverse the same semantic adapter
+                    // choice after the inline body leaves its physical carrier on the stack.
+                    box_prim_free(
+                        self.cw,
+                        &mut scratch,
+                        semantic_scalar_adapter(impl_f.ret, impl_ret),
+                    );
                 }
                 scratch.link(); // patch the lambda body's own branch operands before reading its bytes
                 let lam_fr = scratch.resolved_frames(); // branchy predicate body → its own frames
@@ -7435,7 +7491,14 @@ impl<'a> Emitter<'a> {
         for j in (0..fr.arity as usize).rev() {
             let jt = param_tys[j];
             if jt.is_jvm_scalar() {
-                unbox_prim(self.cw, scratch, jt);
+                // A callable reference is another `FunctionN` operand of the unified inline host.
+                // Its erased argument is boxed according to the reference's semantic parameter,
+                // independently of which primitive carrier the target method descriptor uses.
+                unbox_prim(
+                    self.cw,
+                    scratch,
+                    semantic_scalar_adapter(fr.param_tys[j], jt),
+                );
             } else if let Some(internal) = checkcast_internal(jt) {
                 let ci = self.cw.class_ref(&internal);
                 scratch.checkcast(ci);
@@ -7478,7 +7541,12 @@ impl<'a> Emitter<'a> {
                     .copied()
                     .filter(|ty| ty.is_jvm_scalar())
                 {
-                    unbox_prim(self.cw, scratch, primitive);
+                    let semantic = fr.target_param_tys.first().copied().unwrap_or(primitive);
+                    unbox_prim(
+                        self.cw,
+                        scratch,
+                        semantic_scalar_adapter(semantic, primitive),
+                    );
                 } else if let Some(internal) = target_param_tys
                     .first()
                     .copied()
@@ -7520,7 +7588,11 @@ impl<'a> Emitter<'a> {
                     stack_prefix,
                 );
             } else if jt.is_jvm_scalar() && target_jt.is_reference() {
-                box_prim_free(self.cw, scratch, *jt);
+                box_prim_free(
+                    self.cw,
+                    scratch,
+                    semantic_scalar_adapter(fr.param_tys[k], *jt),
+                );
             }
             call_desc.push_str(&type_descriptor(target_jt));
             call_arg_words += slot_words(target_jt) as i32;
@@ -7579,7 +7651,13 @@ impl<'a> Emitter<'a> {
             );
             scratch.invokestatic(bi, slot_words(ret_jvm) as i32, 1);
         } else if ret_jvm.is_jvm_scalar() {
-            box_prim_free(self.cw, scratch, ret_jvm);
+            // The synthesized `FunctionN` result is erased `Object`; choose its wrapper from the
+            // function reference's semantic return, not the referenced target's carrier descriptor.
+            box_prim_free(
+                self.cw,
+                scratch,
+                semantic_scalar_adapter(fr.ret_ty, ret_jvm),
+            );
         }
         scratch.link();
         let frames = scratch.resolved_frames();
@@ -7614,7 +7692,14 @@ impl<'a> Emitter<'a> {
             scratch.invokevirtual(gref, 0, slot_words(prop_jvm) as i32);
         }
         if prop_jvm.is_jvm_scalar() {
-            box_prim_free(self.cw, scratch, prop_jvm);
+            // A property reference participates in the same erased `FunctionN` result boundary as
+            // a lambda or callable reference, so retain the declared property type through adapter
+            // selection before using its JVM carrier for the actual getter call.
+            box_prim_free(
+                self.cw,
+                scratch,
+                semantic_scalar_adapter(pr.prop_ty, prop_jvm),
+            );
         }
         scratch.link();
         let frames = scratch.resolved_frames();
@@ -8339,9 +8424,20 @@ impl<'a> Emitter<'a> {
         }
         let source = self.value_ty(value);
         if source.is_jvm_scalar() && !target.is_jvm_scalar() && target.is_reference() {
-            box_prim_free(self.cw, code, source);
+            // The property operation retains the substituted Kotlin type even when the selected
+            // field/accessor descriptor is erased. Use it to choose the wrapper before the carrier
+            // loses unsigned identity (`UInt` must enter an `Object` slot as `kotlin/UInt`).
+            box_prim_free(
+                self.cw,
+                code,
+                semantic_scalar_adapter(*operation.ty, source),
+            );
         } else if !source.is_jvm_scalar() && target.is_jvm_scalar() {
-            unbox_prim(self.cw, code, target);
+            unbox_prim(
+                self.cw,
+                code,
+                semantic_scalar_adapter(*operation.ty, target),
+            );
         } else {
             self.narrow_on_stack(source, &target, code);
         }
@@ -8761,9 +8857,12 @@ impl<'a> Emitter<'a> {
         // bridged: box, unbox, or narrow.
         let logical = ir_ty_to_jvm(ty);
         if physical.is_jvm_scalar() && !logical.is_jvm_scalar() && logical.is_reference() {
-            box_prim_free(self.cw, code, physical);
+            box_prim_free(self.cw, code, semantic_scalar_adapter(*ty, physical));
         } else if !physical.is_jvm_scalar() && logical.is_jvm_scalar() {
-            unbox_prim(self.cw, code, logical);
+            // `ty` is the substituted semantic result and `logical` its JVM carrier. Choosing the
+            // adapter from `logical` alone turns `UInt` into `Integer`; retain the semantic type until
+            // after the `Object` boundary has been bridged.
+            unbox_prim(self.cw, code, semantic_scalar_adapter(*ty, logical));
         } else if exact_field
             && physical.is_reference()
             && logical.is_reference()
@@ -10193,7 +10292,12 @@ impl<'a> Emitter<'a> {
                 let f = self.cw.fieldref(cls, "element", fdesc);
                 code.putfield(f, slot_words(ir_ty_to_jvm(elem)) as i32);
             }
-            IrExpr::InvokeFunction { func, args, ret } => {
+            IrExpr::InvokeFunction {
+                func,
+                args,
+                params,
+                ret,
+            } => {
                 let n = args.len();
                 if args.iter().any(|&a| self.records_frame(a)) {
                     // A branchy argument can't run with the function value on the stack — its merge
@@ -10203,19 +10307,24 @@ impl<'a> Emitter<'a> {
                     all.extend(args.iter().copied());
                     let temps = self.spill_to_temps(&all, code);
                     load(temps[0].1, temps[0].0, code);
-                    for &(slot, t, _) in &temps[1..] {
+                    for (i, &(slot, t, _)) in temps[1..].iter().enumerate() {
                         load(t, slot, code);
-                        box_prim_free(self.cw, code, t);
+                        let semantic = params.get(i).copied().unwrap_or(t);
+                        box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, t));
                     }
                     for &(_, _, key) in &temps {
                         self.slots.remove(&key);
                     }
                 } else {
                     self.emit_value(*func, code);
-                    for &arg in args {
+                    for (i, &arg) in args.iter().enumerate() {
                         self.emit_value(arg, code);
                         let at = self.value_ty(arg);
-                        box_prim_free(self.cw, code, at); // box a primitive arg to its wrapper (an Object)
+                        let semantic = params.get(i).copied().unwrap_or(at);
+                        // `FunctionN` parameters are erased `Object`, but wrapper selection is a
+                        // semantic operation. Retaining `params` on the IR node prevents an unsigned
+                        // argument from being boxed as the signed wrapper of its shared carrier.
+                        box_prim_free(self.cw, code, semantic_scalar_adapter(semantic, at));
                     }
                 }
                 let iface = format!("kotlin/jvm/functions/Function{n}");
@@ -10224,30 +10333,30 @@ impl<'a> Emitter<'a> {
                     .interface_methodref(&iface, "invoke", &sam_descriptor(n as u8));
                 code.invokeinterface(m, n as i32, 1);
                 // The interface returns `Object`; cast/unbox to the function's declared return type.
+                // Select a scalar adapter from that semantic return before `ir_ty_to_jvm` reduces an
+                // unsigned type to its signed carrier. This is the common consumer for real lambdas,
+                // callable references, and property references, independent of which producer object
+                // supplied the `FunctionN` implementation.
                 let rt = ir_ty_to_jvm(ret);
-                match rt {
-                    Ty::Int
-                    | Ty::Long
-                    | Ty::Double
-                    | Ty::Float
-                    | Ty::Boolean
-                    | Ty::Char
-                    | Ty::Byte
-                    | Ty::Short => unbox_prim(self.cw, code, rt),
-                    Ty::Unit | Ty::Nothing => code.pop(),
-                    Ty::String => {
-                        let ci = self.cw.class_ref("java/lang/String");
-                        code.checkcast(ci);
+                if rt.is_jvm_scalar() {
+                    unbox_prim(self.cw, code, semantic_scalar_adapter(*ret, rt));
+                } else {
+                    match rt {
+                        Ty::Unit | Ty::Nothing => code.pop(),
+                        Ty::String => {
+                            let ci = self.cw.class_ref("java/lang/String");
+                            code.checkcast(ci);
+                        }
+                        _ if rt.is_array() => {
+                            let ci = self.cw.class_ref(&type_descriptor(rt));
+                            code.checkcast(ci);
+                        }
+                        Ty::Obj(internal, _) => {
+                            let ci = self.cw.class_ref(&internal.render());
+                            code.checkcast(ci);
+                        }
+                        _ => {}
                     }
-                    _ if rt.is_array() => {
-                        let ci = self.cw.class_ref(&type_descriptor(rt));
-                        code.checkcast(ci);
-                    }
-                    Ty::Obj(internal, _) => {
-                        let ci = self.cw.class_ref(&internal.render());
-                        code.checkcast(ci);
-                    }
-                    _ => {}
                 }
             }
             _ => {}

@@ -119,7 +119,12 @@ fn referenced_class_names(ir: &IrFile) -> Vec<TypeName> {
         match e {
             IrExpr::TypeOp { type_operand, .. } => collect_obj_names(*type_operand, &mut out),
             IrExpr::Variable { ty, .. } => collect_obj_names(*ty, &mut out),
-            IrExpr::InvokeFunction { ret, .. } => collect_obj_names(*ret, &mut out),
+            IrExpr::InvokeFunction { params, ret, .. } => {
+                params
+                    .iter()
+                    .for_each(|ty| collect_obj_names(*ty, &mut out));
+                collect_obj_names(*ret, &mut out);
+            }
             IrExpr::PropertyRead { owner, ty, .. } | IrExpr::PropertyWrite { owner, ty, .. } => {
                 // Semantic property nodes replaced realization-shaped calls, so both the declaring
                 // owner (needed to recognize a value class's sole-property identity read) and logical

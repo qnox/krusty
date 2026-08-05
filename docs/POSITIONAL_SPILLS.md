@@ -1,7 +1,7 @@
 # Positional continuation spills (kotlinc parity) — design
 
-The last downstream RED_ABI family (10 files) is continuation **field-count** divergence.
-Decoded from a production service's `link` method bytecode (kotlinc 2.4):
+A reduced coroutine fixture exposes continuation **field-count** divergence. Comparing its kotlinc
+2.4 bytecode with krusty's output gives the following provider-neutral model:
 
 ## kotlinc's model
 
@@ -12,7 +12,7 @@ Decoded from a production service's `link` method bytecode (kotlinc 2.4):
 - Each **resume arm** restores exactly its own suspension's list (getfield → checkcast → store).
   There is no loop-top restore-all.
 - Field count = **max in-scope count over suspensions** (per kind). Different variables REUSE the
-  same `L$N` in different states: `link()` s1 = 4 params → `L$0..3`; s2 = params + `existing` +
+  same `L$N` in different states: state 1 = 4 params → `L$0..3`; state 2 = params + `existing` +
   `updated` → `L$4`,`L$5`; s3 = params + `existing` + `linked` → `L$4`,`L$5` again.
   kotlinc: 6 fields; krusty's one-field-per-variable union: 7 → RED_ABI.
 
@@ -45,12 +45,11 @@ Decoded from a production service's `link` method bytecode (kotlinc 2.4):
 
 ## Verification loop
 
-- Repro: the link-service file → `$link$1` must have exactly `L$0..L$5` (see
-  `/tmp/abidiff.py` in the downstream worktree, or javap field diff).
+- Repro: the reduced fixture's continuation must have exactly `L$0..L$5`; inspect the emitted
+  fields with `javap` so the assertion depends only on bytecode, not a source-system name or path.
 - `./run-tests.sh --test conformance kotlin_codegen_box_conformance -- --test-threads=1`
   (JAVA_HOME required) after every stage — the corpus is the never-miscompile detector.
-- Gate: `./gradlew <module>:krustyVerify -Pkrusty.binary=…` in the downstream
-  worktree; target 96 → 106 GREEN.
+- Gate: run the repository's conformance and ABI comparison checks after each stage.
 
 ## Endgame (remaining 7 files, ±1-3 slots)
 
@@ -67,10 +66,9 @@ unnamed stack temps never get slots. krusty should therefore:
    inclusion in `ScopeWalk::snapshot`) — kotlinc-shaped code has no crossing temps once the splice
    locals are named; a krusty-only crossing temp would then fail loudly in the box corpus rather
    than silently diverge.
-3. One service is a different shape: private ctor-properties in a class WITH a companion
+3. One fixture is a different shape: private ctor-properties in a class WITH a companion
    keep public getters (kt504 guard); kotlinc emits instance `access$get<X>$p` bridges instead —
    extend the existing facade-bridge machinery to instance properties.
 
-Verify per file against the kc `putfield L$*` dumps (javap -c) before/after each site change;
-files: the seven remaining downstream services (a mix of over-spill, under-spill, and the
-getter-bridge shape above).
+Verify each reduced fixture against the kotlinc `putfield L$*` dumps (`javap -c`) before and after
+each site change, covering over-spill, under-spill, and the getter-bridge shape above.

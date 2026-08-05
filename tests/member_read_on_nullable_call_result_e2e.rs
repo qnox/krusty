@@ -1,9 +1,10 @@
 //! A direct member read on the RESULT of a cross-file call whose return type is nullable
-//! (`repo.findById(id)!!.builtIn`, or a `require(x != null)`-smart-cast local) — the shape a production role-management
-//! service's delete method uses. krusty does not propagate a `!!` / smart-cast narrowing to a
-//! call-result LOCAL's read site, so the receiver type stayed `Foo?`; `lower_member_read_on` then matched
-//! only `Ty::Obj` (non-null) and resolved no member, so the file bailed. It now resolves against the
-//! non-null receiver type (the value is a valid reference at runtime; krusty does not enforce null-safety).
+//! (`repo.find(id)!!.name`, or a `require(x != null)`-smart-cast local). krusty does not propagate a
+//! `!!` / smart-cast narrowing to a call-result LOCAL's read site, so the receiver type stayed
+//! nullable; `lower_member_read_on` then matched only `Ty::Obj` (non-null) and resolved no member, so
+//! the file bailed. It now resolves against the non-null receiver type (the value is a valid reference
+//! at runtime; krusty does not enforce null-safety). The example intentionally describes only the
+//! language shape and carries no source-system, domain, file, or concrete class identity.
 use super::common;
 
 const LIB: &str = "package lib\n\
