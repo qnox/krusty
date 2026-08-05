@@ -24307,10 +24307,21 @@ impl<'a> Checker<'a> {
                     self.syms
                         .libraries
                         .top_level_static_field(type_name(package), member)
+                        .or_else(|| {
+                            // `import pkg.Class.STATIC_FIELD` — the import parent is a CLASSIFIER,
+                            // not a package facade (the qualified-read rung answers `C.FIELD`
+                            // this same way). Trailing path segments may be NESTED classes, so
+                            // resolve the parent as a classifier and read the static field off
+                            // it; one lookup, origin-blind.
+                            let owner = self.nested_internal_name(package)?;
+                            self.resolver().static_field(owner, member)
+                        })
                 }) {
-                    // A CLASSPATH top-level `const val` reached by name (`import kotlin.math.PI`). A
-                    // `const` has no accessor, so it is absent from the property namespace that models
-                    // properties by their accessors; the platform answers with the field that holds it.
+                    // An imported STATIC FIELD reached by name: a top-level `const val` on the
+                    // package facade (`import kotlin.math.PI`) or a static member of a class
+                    // (`import p.PlatformDataKeys.TREE_EXPANDER`). A `const` has no accessor, so it
+                    // is absent from the property namespace that models properties by their
+                    // accessors; the platform answers with the field that holds it.
                     // `record_external_static_field` inlines the literal when the field carries a
                     // `ConstantValue`, which is what kotlinc does at every use site.
                     self.record_external_static_field(Some(e), field)
