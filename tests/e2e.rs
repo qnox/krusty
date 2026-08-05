@@ -264,6 +264,8 @@ mod companion_e2e;
 mod companion_member_read_e2e;
 #[path = "companion_non_const_prop_e2e.rs"]
 mod companion_non_const_prop_e2e;
+#[path = "companion_rooted_lambda_chain_e2e.rs"]
+mod companion_rooted_lambda_chain_e2e;
 #[path = "companion_supertype_e2e.rs"]
 mod companion_supertype_e2e;
 #[path = "companion_supertype_type_args_e2e.rs"]
