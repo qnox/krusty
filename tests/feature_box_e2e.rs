@@ -1198,8 +1198,9 @@ fun box(): String {
     // operand instead produces a class file that only fails at VERIFICATION time, so this snippet has
     // to RUN. Both operand orders, both value and branch position, and the `=== 0` literal shape (which
     // takes the compare-to-zero fast path in the branch emitter) are covered. The observable results
-    // come from the wrapper caches: `Integer`/`Long`/`Character` cache -128..127 (so `7` boxes to the
-    // same instance twice), `1000` is outside the cache, and `Double.valueOf` never caches.
+    // come from the wrapper caches: `Integer`/`Long` cache -128..127, `Character` caches the ASCII
+    // value used below (so the small values box to the same instances), `1000` is outside the integer
+    // cache, and `Double.valueOf` never caches.
     (
         "MixedRefPrimIdentity",
         r#"
@@ -1218,6 +1219,11 @@ fun box(): String {
     if (r2 != "y") return "f8:$r2"
     val l: Any = 7L
     if (!(l === 7L)) return "f9"
+    // The right branch records stack-map frames. The emitter must spill the wide primitive left
+    // operand, then reload and box each operand in order; attempting to box only after both reloads
+    // cannot move the two-slot `long` past the reference above it.
+    val chooseCached = small === 7
+    if (!(7L === if (chooseCached) l else (8L as Any))) return "f9b"
     val c: Any = 'a'
     if (!(c === 'a')) return "f10"
     val bb: Any = true

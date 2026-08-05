@@ -198,7 +198,11 @@ impl<'a> ModuleSymbols<'a> {
             // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
             companion_object: None,
             value_companion_fns: Vec::new(),
-            value_underlying: None,
+            // `LibraryType` is the provider-neutral classifier shape consumed by the federated
+            // resolver. Preserve source value-class metadata here just as a classpath provider
+            // does, so every downstream query (identity diagnostics included) can use the common
+            // `SymbolSource::is_value_name` contract instead of branching on symbol provenance.
+            value_underlying: c.value_field.as_ref().map(|(_, ty)| *ty),
             alias_target: None,
             // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can
             // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in
@@ -1054,6 +1058,22 @@ mod tests {
             .expect("source enum shape should retain its synthetic entries accessor");
         assert_eq!(entries.name, "<enum-entries-accessor>");
         assert_eq!(entries.descriptor, "()Lkotlin/enums/EnumEntries;");
+    }
+
+    #[test]
+    fn type_shapes_include_value_class_metadata() {
+        let mut symbols = FrontendSymbols::default();
+        let mut id = class("sample/Id");
+        id.value_field = Some(("raw".to_string(), Ty::Int));
+        symbols.classes.insert(type_name("sample/Id"), id);
+
+        let source = ModuleSymbols::new(&symbols);
+        let shape = source.resolve_type_name(type_name("sample/Id")).unwrap();
+        assert_eq!(shape.value_underlying, Some(Ty::Int));
+        assert!(
+            source.is_value_name(type_name("sample/Id")),
+            "the common SymbolSource query must recognize source value classes without a provider-specific fallback"
+        );
     }
 
     #[test]

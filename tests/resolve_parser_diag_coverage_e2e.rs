@@ -187,10 +187,11 @@ fn referential_equality_on_a_value_class_operand() {
          fun box(): Int { val a = VC(1); val b = VC(1); val c = a === b; return 0 }",
     );
     assert_rejected(&d, "referential equality on two value-class operands");
-    // A CLASSPATH inline class (`kotlin.time.Duration`) must be caught too. The source-only
-    // `syms.classes` lookup misses it, and such a type reaches the backend as its unboxed carrier
-    // (`Duration` → `Ty::Long`), so an unrejected `===` silently compares carriers — or boxes one as
-    // `java.lang.Long` against the other's `Duration` box — and answers `false` for the same value.
+    // A dependency inline class (`kotlin.time.Duration`) must be caught by the SAME semantic query.
+    // Such a type reaches the backend as its unboxed carrier (`Duration` → `Ty::Long`), so an
+    // unrejected `===` silently compares carriers or boxes one as an unrelated JVM wrapper. Keeping
+    // source value metadata in the provider-neutral classifier shape makes this regression exercise
+    // the federated resolver instead of an identity-specific source/classpath branch.
     let d = diags(
         "import kotlin.time.Duration\n\
          fun box(a: Duration, b: Duration): Int { val c = a === b; return 0 }",
@@ -205,6 +206,35 @@ fn referential_equality_on_a_value_class_operand() {
         assert!(
             d.iter().any(|m| m.contains("is prohibited")),
             "expected kotlinc's \"is prohibited\" wording, got: {d:?}"
+        );
+    }
+}
+
+#[test]
+fn referential_equality_on_mismatched_primitive_types() {
+    // Plain primitives of the SAME type may use `===` (with kotlinc's warning) and lower as value
+    // equality. Different primitive types are a hard error: they have neither object identity nor a
+    // shared scalar comparison domain. Pin all JVM comparison families so the emitter can never be
+    // asked to choose an int/long/float/double operation from only one mismatched operand.
+    for (source, description) in [
+        (
+            "fun bad(a: Int, b: Long): Boolean = a === b",
+            "referential equality between Int and Long",
+        ),
+        (
+            "fun bad(a: Int, b: Char): Boolean = a === b",
+            "referential equality between Int and Char",
+        ),
+        (
+            "fun bad(a: Float, b: Double): Boolean = a === b",
+            "referential equality between Float and Double",
+        ),
+    ] {
+        let d = diags(source);
+        assert_rejected(&d, description);
+        assert!(
+            d.iter().any(|m| m.contains("is prohibited")),
+            "expected the identity-prohibition diagnostic for {description}, got: {d:?}"
         );
     }
 }

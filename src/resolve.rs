@@ -19493,25 +19493,31 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// True if `t` is a `@JvmInline value class` reference type (carries a `value_field`).
+    /// True if `t` names a `@JvmInline value class`, independent of which symbol provider owns it.
+    ///
+    /// Keep this as the single checker-level semantic query. The module provider exports its
+    /// `value_field` through the same `LibraryType::value_underlying` shape as decoded dependencies,
+    /// so callers must not pair a source-table lookup with a separate classpath fallback. Besides
+    /// duplicating policy, that split would fail to recognize value classes supplied by any future
+    /// provider added to the federated resolver.
     fn ty_is_value_class(&self, t: Ty) -> bool {
-        matches!(t, Ty::Obj(n, _) if self.syms.class_by_type_name(n).is_some_and(|c| c.value_field.is_some()))
+        t.non_null()
+            .kotlin_class_internal()
+            .is_some_and(|name| self.resolver().is_value_name(name))
     }
 
     /// True if `t` is an operand kotlinc forbids on either side of `===`/`!==`: an unsigned type or a
     /// `@JvmInline value` class (both inline classes, whose boxed identity is not stable). Nullability
     /// makes no difference — kotlinc rejects `VC? === VC?` too.
     ///
-    /// The value-class query must be FEDERATED. `ty_is_value_class` reads `syms.classes`, which holds
-    /// only source/module classes, so a classpath inline class (`kotlin.time.Duration`, `kotlin.Result`,
-    /// anything from a dependency) slips through — and since such a type reaches the backend as its
-    /// unboxed carrier (`Duration` → `Ty::Long`), the emitter then compares two carriers, or boxes one
-    /// as `java.lang.Long` against the other's `Duration` box, with no diagnostic at all.
+    /// The value-class query goes through the federated resolver, whose source already composes the
+    /// current module and dependencies. This rule must not reconstruct separate source/classpath
+    /// probes: provider origin does not change identity semantics, and a new provider must inherit the
+    /// rejection automatically. Without the federated query an external inline class can reach the
+    /// backend as its unboxed carrier and be compared or boxed as the unrelated signed JVM scalar.
     fn identity_prohibited_operand(&self, t: Ty) -> bool {
         let t = t.non_null();
-        t.is_unsigned()
-            || self.ty_is_value_class(t)
-            || self.syms.libraries.value_underlying(t).is_some()
+        t.is_unsigned() || self.ty_is_value_class(t)
     }
 
     fn value_class_uses_type_parameter_storage(&self, ty: Ty) -> bool {
@@ -20903,18 +20909,16 @@ impl<'a> Checker<'a> {
         //    former types the `set` argument as a zero-parameter function (box
         //    `callableReference/property/extensionPropertyWithExtensionType.kt`).
         //  * A VALUE-class-typed property has a `@JvmName`-mangled accessor (`getZ-<hash>`) that the
-        //    reference class does not spell. BOTH flavours must be tested: `ty_is_value_class` sees
-        //    only a SOURCE value class, so a CLASSPATH one — `UInt`, and every other stdlib
-        //    `@JvmInline` — needs the provider's `value_underlying` probe. Without that second arm
-        //    `class H(val u: UInt)` typed `(h::u).get()` as `UInt` while the reference still returned
-        //    an erased `Integer`, and the read threw `ClassCastException` instead of skipping.
+        //    reference class does not spell. `ty_is_value_class` uses the federated symbol shape, so
+        //    this one test covers source declarations, stdlib types such as `UInt`, dependency
+        //    metadata, and future providers. Without it, `(h::u).get()` can be typed as `UInt` while
+        //    the reference still returns an erased `Integer`, causing `ClassCastException`.
         //  * A property typed as a function WITH a receiver (or context parameters) is not realized
         //    as a plain `FunctionN` there.
         let realizable = |&t: &Ty| {
             let t = t.non_null();
             !t.mentions_ty_param()
                 && !self.ty_is_value_class(t)
-                && self.syms.libraries.value_underlying(t).is_none()
                 && !matches!(t, Ty::Fun(sig) if sig.has_receiver || sig.context_count > 0)
         };
         let args: &[Ty] = if args.iter().all(realizable) {
@@ -23527,8 +23531,7 @@ impl<'a> Checker<'a> {
             // (`as? Int`) that nullable form is the boxed wrapper (`Int?`). A plain `x as T` keeps `T`.
             // A value/inline-class target keeps `T` (non-null): its nullable boxed form isn't modeled,
             // and a member access on the cast result must see the unboxed value-class type.
-            let is_value =
-                self.ty_is_value_class(tt) || self.syms.libraries.value_underlying(tt).is_some();
+            let is_value = self.ty_is_value_class(tt);
             if nullable && !is_value {
                 Ty::nullable(tt)
             } else {
@@ -26002,13 +26005,20 @@ impl<'a> Checker<'a> {
                     Ty::Error
                 } else if self.identity_prohibited_operand(lt)
                     || self.identity_prohibited_operand(rt)
+                    // Two plain scalar operands use value comparison, but Kotlin permits that form
+                    // only when their semantic types agree. Letting unlike scalars through would make
+                    // the backend select its JVM comparison family from the left operand alone: e.g.
+                    // `Int === Long` could emit an int-category branch over an int and a two-slot long.
+                    // Reject at the semantic boundary, matching the reference compiler, while leaving
+                    // mixed reference/scalar identity to the object path that boxes the scalar.
+                    || (lt.is_jvm_scalar() && rt.is_jvm_scalar() && lt != rt)
                 {
                     // kotlinc: "identity equality for arguments of types 'X' and 'Y' is prohibited."
-                    // An unsigned type or a `@JvmInline value` class has no stable boxed identity, so
-                    // kotlinc makes `===` on one a hard ERROR (not the "unstable because of implicit
-                    // boxing" warning a plain primitive operand gets). Mirror that: the operand rides in
-                    // its unboxed underlying primitive, so the backend would otherwise box it through
-                    // `box-impl` and emit an `if_acmp*` for a program kotlinc refuses to compile.
+                    // An unsigned/value-class operand has no stable boxed identity, and two unlike
+                    // scalar types do not share an identity-comparison domain. kotlinc makes either a
+                    // hard ERROR (not the "unstable because of implicit boxing" warning a compatible
+                    // plain primitive gets). Reject before lowering so the backend never compares an
+                    // unboxed value-class carrier or mismatched JVM scalar categories.
                     self.diags.error(
                         span,
                         format!(

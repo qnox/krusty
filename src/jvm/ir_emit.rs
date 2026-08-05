@@ -10820,10 +10820,24 @@ impl<'a> Emitter<'a> {
     /// op would be live on the stack across that frame), evaluate all ops into temps first, then load
     /// them — keeping the stack empty while each frame-recording op runs.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
+        self.emit_operands_adapted(ops, code, |_, _, _| {});
+    }
+
+    /// Frame-safe operand sequencing with one representation adapter applied immediately after each
+    /// value is pushed. Keeping the adapter inside the shared spill/load loop is essential for
+    /// category-changing bridges such as primitive boxing: a wide left operand cannot be repaired
+    /// after a right operand has landed above it, and a branchy right operand still requires both
+    /// source expressions to be evaluated with an empty stack. Consumers supply only the boundary
+    /// adapter; evaluation order, frame safety, temporary ownership, and cleanup remain centralized.
+    fn emit_operands_adapted<F>(&mut self, ops: &[u32], code: &mut CodeBuilder, mut adapt: F)
+    where
+        F: FnMut(&mut Self, Ty, &mut CodeBuilder),
+    {
         if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
             let temps = self.spill_to_temps(ops, code);
             for &(slot, t, _) in &temps {
                 load(t, slot, code);
+                adapt(self, t, code);
             }
             for &(_, _, key) in &temps {
                 self.slots.remove(&key);
@@ -10831,8 +10845,15 @@ impl<'a> Emitter<'a> {
         } else {
             for &o in ops {
                 self.emit_value(o, code);
+                adapt(self, self.value_ty(o), code);
             }
         }
+    }
+
+    /// Adapter for an operand that must occupy an erased/reference comparison slot. Reference values
+    /// are already in the required representation; [`box_prim_free`] changes only JVM scalars.
+    fn box_scalar_operand(&mut self, ty: Ty, code: &mut CodeBuilder) {
+        box_prim_free(self.cw, code, ty);
     }
 
     /// Emit `e` as a value while `held` operand-stack entries (bottom-first) are ALREADY pushed below
@@ -10872,33 +10893,10 @@ impl<'a> Emitter<'a> {
     /// Integer.valueOf; if_acmpne`), which it accepts with only an "identity equality … can be unstable
     /// because of implicit boxing" warning. Boxing has to happen per operand rather than once at the
     /// end: a `Long`/`Double` left operand occupies two stack words, so a boxed right operand cannot be
-    /// swapped past it. Otherwise identical to `emit_operands` (same branchy-operand spill).
+    /// swapped past it. The shared adapted-operand path owns evaluation order, frame-aware spilling,
+    /// and temporary cleanup; identity supplies only the primitive-to-reference adapter.
     fn emit_identity_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        let ops = [lhs, rhs];
-        if self.records_frame(rhs) {
-            let temps = self.spill_to_temps(&ops, code);
-            for &(slot, t, _) in &temps {
-                load(t, slot, code);
-                box_prim_free(self.cw, code, t);
-            }
-            for &(_, _, key) in &temps {
-                self.slots.remove(&key);
-            }
-        } else {
-            for o in ops {
-                self.emit_value(o, code);
-                box_prim_free(self.cw, code, self.value_ty(o));
-            }
-        }
-    }
-
-    /// Box the just-pushed operand of a comparison against the `null` literal if it is a primitive.
-    /// `x == null` / `x === null` on a primitive `x` is legal Kotlin — kotlinc warns "condition is
-    /// always 'false'" and folds the whole thing to `iconst_0`. krusty keeps the single-operand
-    /// `ifnull`/`ifnonnull` form, so the operand has to occupy a reference slot: `iload_0; ifnonnull`
-    /// is a reference branch testing an int (`VerifyError: Bad type on operand stack`).
-    fn box_against_null(&mut self, operand: u32, code: &mut CodeBuilder) {
-        box_prim_free(self.cw, code, self.value_ty(operand));
+        self.emit_operands_adapted(&[lhs, rhs], code, Self::box_scalar_operand);
     }
 
     fn emit_virtual_operands(
@@ -11447,8 +11445,11 @@ impl<'a> Emitter<'a> {
         };
         if matches!(op, Eq | Ne) && (lhs_null || rhs_null) {
             let operand = if lhs_null { rhs } else { lhs };
-            self.emit_value(operand, code);
-            self.box_against_null(operand, code);
+            // A physical primitive arises here only for identity (`x === null`/`x !== null`): kotlinc
+            // accepts that with an always-false/true warning, whereas structural `x == null` is
+            // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
+            // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
+            self.emit_operands_adapted(&[operand], code, Self::box_scalar_operand);
             self.frame(target, vec![], code);
             if (op == Eq) == jt {
                 code.ifnull(target);

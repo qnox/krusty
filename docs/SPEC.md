@@ -992,7 +992,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   LANGUAGE-level query that misses types which are still references on the JVM — `Ty::Unit`, whose value
   is the `kotlin/Unit.INSTANCE` singleton, and `Ty::Null`. Boxing is per operand, not once at the end: a
   `Long`/`Double` left operand occupies two stack words, so a boxed right operand could not be swapped
-  past it. Only a pair of primitives is a value comparison and remaps to `Eq`/`Ne`.
+  past it. Only a pair of same-typed plain primitives is a value comparison and remaps to `Eq`/`Ne`;
+  unlike primitive types (`Int === Long`, `Int === Char`, `Float === Double`) are rejected at the
+  semantic boundary, matching kotlinc, before the emitter can select an incompatible JVM comparison
+  family from one operand.
   Requiring BOTH operands to be references (the earlier condition) dropped a mixed pair into the numeric
   tail, where the int-vs-wide category was derived as "not `Long`/`Double`/`Float`" — which classifies
   every reference type as int-category. The result was an int branch on an object ref (`aload_0; ifne`,
@@ -1002,8 +1005,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `numeric_cmp_int_category`, which asserts both operands are JVM scalars, so a future reference leaking
   into `emit_numeric_compare_branch` fails loudly instead of emitting unverifiable bytecode.
   `MixedRefPrimIdentity`/`MixedRefPrimIdentityGeneric` in `tests/feature_box_e2e.rs` (they RUN on a JVM;
-  the expected results ride on the wrapper caches — `Integer`/`Long`/`Character` cache -128..127, `1000`
-  is outside it, and `Double.valueOf` never caches).
+  the expected results ride on the wrapper caches — `Integer`/`Long` cache -128..127, `Character`
+  caches the ASCII range used by the fixture, `1000` is outside the integer cache, and
+  `Double.valueOf` never caches).
 - **A `Unit` operand of `===`/`!==` materializes `kotlin/Unit.INSTANCE`**, exactly as it already did for
   `==`/`!=` — the lowerer's `unit_value_after_effect` gate covers all four operators. A `Unit`-typed call
   leaves nothing on the stack, so without the `getstatic` each operand of `g() === g()` pushes NOTHING
@@ -1024,11 +1028,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   'UInt' is prohibited"), because an inline class has no stable boxed identity. It applies to either
   side, to two operands of the same value class, and through nullability (`VC? === VC?`). krusty mirrors
   the error rather than boxing through `box-impl`, which would emit an `if_acmp*` for a program kotlinc
-  refuses to compile. The value-class query must be FEDERATED (`syms.libraries.value_underlying`
-  alongside the source-only `ty_is_value_class`): a CLASSPATH inline class — `kotlin.time.Duration`,
-  `kotlin.Result`, anything from a dependency — reaches the backend as its unboxed carrier
-  (`Duration` → `Ty::Long`), so an unrejected `a === b` silently compares two `long` carriers, or boxes
-  one as `java.lang.Long` against the other's `Duration` box and answers `false` for the same object.
+  refuses to compile. The value-class query is FEDERATED: module symbols publish their `value_field`
+  through the same provider-neutral classifier shape as decoded dependency metadata, and the checker
+  asks that common resolver once. A dependency inline class can otherwise reach the backend as its
+  unboxed carrier, so an unrejected `a === b` silently compares two scalar carriers or boxes one as an
+  unrelated JVM wrapper. No source/classpath branch is part of the identity policy.
   `referential_equality_on_a_value_class_operand` in `tests/resolve_parser_diag_coverage_e2e.rs`.
 - `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
