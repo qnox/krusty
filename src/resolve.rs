@@ -23296,6 +23296,21 @@ impl<'a> Checker<'a> {
         let t = {
             let ot = self.expr(operand);
             let tt = self.resolve_ty(&ty);
+            // A function target carries concrete parameter/return types that JVM `instanceof
+            // FunctionN` cannot test. Kotlin rejects that ERASED check before any unresolved nested
+            // classifier (whereas `as (Missing) -> R` still reports `Missing`). Inspect the resolved
+            // semantic type, not the arrow parser fields: `typeref_leaf` deliberately normalizes both
+            // `(P) -> R` and `Function1<P, R>` to `Ty::Fun`, and the operator must treat those
+            // equivalent spellings consistently. Keep the whole shape on the loud unsupported path
+            // instead of accepting an always-erased test or manufacturing the cast operator's
+            // unresolved diagnostic.
+            if matches!(tt.non_null(), Ty::Fun(_)) {
+                self.diags.error(
+                    self.span(e),
+                    "krusty: 'is' on this type is not supported".to_string(),
+                );
+                return Ty::Error;
+            }
             // An UNRESOLVED target reads exactly as kotlinc reports it — `unresolved reference
             // 'T'.` at the failing type's span — never as a compiler-specific "not supported"
             // rejection (the operand check below already exempts an Error operand the same way).

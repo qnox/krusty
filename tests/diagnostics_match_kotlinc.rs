@@ -137,8 +137,6 @@ fn errors_match_kotlinc_in_text_and_location() {
         // Ordinary generic arguments retain an outer `Ty::Obj`; nested Error detection must inspect
         // that semantic shape instead of relying on `outer == Ty::Error`.
         "fun f(p: Any) = p is List<DefinitelyAbsentClassifier>",
-        // Function types retain `Ty::Fun` around erroneous parameters for the same reason.
-        "fun f(p: Any) = p is (DefinitelyAbsentClassifier) -> String",
         // When the OUTER name is the unresolvable one it is named first, not its type argument.
         "fun f(p: Any) = p is DefinitelyAbsentClassifier<String>",
         // A nullable unresolved target resolves to the same reference diagnostic.
@@ -146,6 +144,8 @@ fn errors_match_kotlinc_in_text_and_location() {
         // The `as` sibling reports identically.
         "fun f(p: Any) = p as DefinitelyAbsentClassifier",
         "fun f(p: Any) = p as List<DefinitelyAbsentClassifier>",
+        // Casts permit an erased function shape, so an unresolved parameter remains the primary
+        // diagnostic. (`is` is different and is pinned by the unsupported-shape test below.)
         "fun f(p: Any) = p as (DefinitelyAbsentClassifier) -> String",
     ];
 
@@ -198,6 +198,14 @@ fn resolved_but_unsupported_is_as_shapes_are_not_called_unresolved() {
         "fun f(p: Any) = p is Array<Nothing>",
         "fun f(p: Any) = p as Array",
         "fun f(p: Any) = p as Array<Nothing>",
+        // Kotlin rejects an arrow-function `is` as an erased-type check before it diagnoses a nested
+        // classifier. Krusty does not render that frontend message yet, but it must reject loudly and
+        // must not pretend the cast operator's unresolved-reference precedence applies here.
+        "fun f(p: Any) = p is (DefinitelyAbsentClassifier) -> String",
+        // The shared type resolver normalizes a named functional interface to the same semantic
+        // `Ty::Fun` shape. Pin that representation-level invariant so parser spelling cannot select a
+        // different diagnostic path.
+        "fun f(p: Any) = p is Function1<DefinitelyAbsentClassifier, String>",
     ] {
         let diagnostics = common::front_end_diagnostics(source, &[], None);
         assert!(
