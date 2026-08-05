@@ -8286,27 +8286,16 @@ impl<'a> Emitter<'a> {
     /// to ask, so it falls back to the JVM convention kotlinc itself follows: `get<Name>()`.
     fn emit_property_read(&mut self, operation: PropertyOperation<'_>, code: &mut CodeBuilder) {
         use crate::jvm::inline::PropertyAccess;
-        if let Some(field) = operation.field {
-            let access = PropertyAccess::Field {
-                owner: field.owner.render(),
-                name: field.name.clone(),
-                descriptor: field.descriptor.clone(),
-                is_static: false,
-            };
+        if let Some((access, exact_field)) = self.selected_local_property_read_access(
+            operation.owner,
+            operation.name,
+            operation.field,
+        ) {
             return self.emit_realized_property_read(
                 operation.receiver,
                 access,
                 operation.ty,
-                true,
-                code,
-            );
-        }
-        if let Some(access) = self.declared_property_read_access(operation.owner, operation.name) {
-            return self.emit_realized_property_read(
-                operation.receiver,
-                access,
-                operation.ty,
-                false,
+                exact_field,
                 code,
             );
         }
@@ -8767,6 +8756,65 @@ impl<'a> Emitter<'a> {
             && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
     }
 
+    /// Select the property-read realization available directly from semantic IR: an exact field target
+    /// recorded by resolution wins, otherwise a declaration emitted by this compilation supplies its own
+    /// field/accessor/bridge realization. `None` deliberately means the external bytecode-provider path
+    /// must decide. The boolean records the exact-field case because its erased descriptor may require a
+    /// post-read narrowing cast. Both bytecode emission and frame analysis consume this helper; duplicating
+    /// the precedence here would let them disagree about whether the inline `lateinit` guard exists.
+    fn selected_local_property_read_access(
+        &self,
+        owner: &str,
+        name: &str,
+        field: Option<&crate::libraries::InstanceFieldRef>,
+    ) -> Option<(crate::jvm::inline::PropertyAccess, bool)> {
+        use crate::jvm::inline::PropertyAccess;
+        if let Some(field) = field {
+            return Some((
+                PropertyAccess::Field {
+                    owner: field.owner.render(),
+                    name: field.name.clone(),
+                    descriptor: field.descriptor.clone(),
+                    is_static: false,
+                },
+                true,
+            ));
+        }
+        self.declared_property_read_access(owner, name)
+            .map(|access| (access, false))
+    }
+
+    /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
+    /// field carries the inline uninitialized guard, so the read emission and [`Self::records_frame`]
+    /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
+    fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
+        self.ir
+            .classes
+            .iter()
+            .find(|c| c.fq_name_matches(owner))
+            .and_then(|c| c.fields.iter().find(|f| f.name == name))
+            .is_some_and(|f| f.is_lateinit())
+    }
+
+    /// Does this property read realize as a DIRECT FIELD load of a `lateinit` backing field — the one
+    /// read shape that emits the guard INLINE rather than hiding it inside a getter body? Mirrors the
+    /// realization [`Self::emit_property_read`] picks through
+    /// [`Self::selected_local_property_read_access`]. Everything past that helper is an external-provider
+    /// property, whose owner is not a class being emitted here.
+    fn lateinit_direct_field_read(
+        &self,
+        owner: &str,
+        name: &str,
+        field: Option<&crate::libraries::InstanceFieldRef>,
+    ) -> bool {
+        use crate::jvm::inline::PropertyAccess;
+        let Some((access, _)) = self.selected_local_property_read_access(owner, name, field) else {
+            return false;
+        };
+        matches!(&access, PropertyAccess::Field { owner, name, .. }
+            if self.is_lateinit_field(owner, name))
+    }
+
     /// Emit one already-chosen realization of a property read: push the receiver (or drop it, when the
     /// realization takes none), perform the field load or accessor call, and bridge the physical result to
     /// the property read's Kotlin type.
@@ -8795,13 +8843,7 @@ impl<'a> Emitter<'a> {
                 is_static,
             } => {
                 let jt = ty_from_field_descriptor(&descriptor);
-                let lateinit = self
-                    .ir
-                    .classes
-                    .iter()
-                    .find(|c| c.fq_name_matches(&owner))
-                    .and_then(|c| c.fields.iter().find(|f| f.name == name))
-                    .is_some_and(|f| f.is_lateinit());
+                let lateinit = self.is_lateinit_field(&owner, &name);
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
                     code.getstatic(fref, slot_words(jt) as i32);
@@ -10797,8 +10839,27 @@ impl<'a> Emitter<'a> {
                         .any(|a| a.map_or(false, |x| self.records_frame(x)))
             }
             IrExpr::New { args, .. } => args.iter().any(|&a| self.records_frame(a)),
-            IrExpr::GetField { receiver, .. } | IrExpr::PropertyRead { receiver, .. } => {
+            // A `lateinit` FIELD read carries its own uninitialized guard (`dup; ifnonnull L; ldc name;
+            // invokestatic throwUninitializedPropertyAccessException; L:`), whose join records a frame
+            // typing only the field value — so an operand already on the stack must be spilled first. A
+            // read through a getter records nothing here: the guard lives inside the accessor body.
+            IrExpr::GetField {
+                receiver,
+                class,
+                index,
+            } => {
                 self.records_frame(*receiver)
+                    || self.ir.classes[*class as usize].fields[*index as usize].is_lateinit()
+            }
+            IrExpr::PropertyRead {
+                receiver,
+                owner,
+                name,
+                field,
+                ..
+            } => {
+                self.records_frame(*receiver)
+                    || self.lateinit_direct_field_read(&owner.render(), name, field.as_deref())
             }
             IrExpr::SetField {
                 receiver, value, ..
@@ -12001,15 +12062,19 @@ impl<'a> Emitter<'a> {
                 ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].ty)
             }
             IrExpr::PropertyRead {
-                owner, name, ty, ..
+                owner,
+                name,
+                ty,
+                field,
+                ..
             } => {
                 // What the read leaves on the stack is what its REALIZATION leaves — a `Unit` property is
                 // stored as a `Lkotlin/Unit;` field but read through a `()V` accessor, and only the chosen
                 // access says which. Consult the same source the emit does.
                 let owner = owner.render();
                 let void_accessor = self
-                    .declared_property_read_access(&owner, name)
-                    .is_some_and(|access| {
+                    .selected_local_property_read_access(&owner, name, field.as_deref())
+                    .is_some_and(|(access, _)| {
                         matches!(access, crate::jvm::inline::PropertyAccess::Accessor {
                             ref descriptor, ..
                         } if descriptor.ends_with(")V"))
