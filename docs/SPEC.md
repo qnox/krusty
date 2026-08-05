@@ -5463,3 +5463,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   substitution into each `splice_unified` attempt. This keeps default-slotting, intrinsic behavior,
   reification, and module/classpath origin orthogonal. Test:
   `tests/fq_targ_trailing_lambda_e2e.rs`.
+
+- **A classpath top-level NON-FINAL vararg accepts named/trailing-lambda trailing parameters.**
+  `fun assembleNc(vararg parts: String, block: () -> String)` called as
+  `assembleNc("a", "b", block = { … })`, `assembleNc(block = { … })` (empty vararg), or
+  `assembleNc("a", "b") { … }` resolves and runs (kotlinc 2.4 accepts all three). The labelled
+  form is compacted by the slot map into parameter order (one argument per filled slot, unmapped
+  middle arguments = further vararg elements), so the type-only shape selector
+  (`vararg_parameter_shape_at`) admits a non-final vararg in two forms: trailing parameters all
+  OMITTED (each declares a default — the pre-existing rule) or FILLED 1:1 by the last arguments.
+  The selected callable carries `vararg_index` even without a recovered generic element (no
+  last-parameter-is-array heuristic can find a non-final slot); the checker checks the vararg
+  slot's argument against the ELEMENT type unless it is already the array (spread pass-through),
+  and lowering packs via the slot map (labelled) or `lower_non_last_vararg_args` (trailing
+  lambda). Tests: `tests/classpath_nonfinal_vararg_named_e2e.rs` (box case runtime-verified,
+  output `abx`).
