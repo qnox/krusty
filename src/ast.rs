@@ -439,6 +439,11 @@ impl TrFlags {
     const IN_PROJECTION: u8 = 1 << 4;
     const OUT_PROJECTION: u8 = 1 << 5;
     const IMPORT: u8 = 1 << 6;
+    // Parsing still represents `*` as its semantic upper bound (`Any?`) for ordinary type
+    // resolution, but an `is FunctionN<*, ...>` check must distinguish that runtime-checkable
+    // projection from an explicitly written `Any?`. Preserve the source distinction in the last
+    // available flag bit instead of recovering it from source text in individual consumers.
+    const STAR_PROJECTION: u8 = 1 << 7;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -481,6 +486,10 @@ impl TrFlags {
     #[inline]
     pub const fn with_import(self, on: bool) -> Self {
         self.with(Self::IMPORT, on)
+    }
+    #[inline]
+    pub const fn with_star_projection(self, on: bool) -> Self {
+        self.with(Self::STAR_PROJECTION, on)
     }
 }
 
@@ -531,6 +540,10 @@ impl TypeRef {
     #[inline]
     pub fn is_import(&self) -> bool {
         self.flags.has(TrFlags::IMPORT)
+    }
+    #[inline]
+    pub fn is_star_projection(&self) -> bool {
+        self.flags.has(TrFlags::STAR_PROJECTION)
     }
     #[inline]
     pub fn set_nullable(&mut self, on: bool) {

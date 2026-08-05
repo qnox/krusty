@@ -23296,6 +23296,30 @@ impl<'a> Checker<'a> {
         let t = {
             let ot = self.expr(operand);
             let tt = self.resolve_ty(&ty);
+            // A function target with concrete parameter/return types carries information that JVM
+            // `instanceof FunctionN` cannot test. Kotlin rejects that ERASED check before any
+            // unresolved nested classifier (whereas `as (Missing) -> R` still reports `Missing`).
+            // `typeref_leaf` normalizes arrow and named function spellings to the same `Ty::Fun`, so
+            // use that semantic identity for the category decision. The one source-level distinction
+            // that survives separately is intentional: a named `FunctionN<*, ...>` is runtime-
+            // checkable by arity and Kotlin permits it. The parser marks stars while resolving them to
+            // their ordinary `Any?` bound, avoiding both spelling-specific name tests and source-text
+            // recovery here.
+            let runtime_checkable_star_function =
+                !ty.targs.is_empty() && ty.targs.iter().all(TypeRef::is_star_projection);
+            if matches!(tt.non_null(), Ty::Fun(_)) && !runtime_checkable_star_function {
+                self.diags.error(
+                    self.span(e),
+                    "krusty: 'is' on this type is not supported".to_string(),
+                );
+                return Ty::Error;
+            }
+            // An UNRESOLVED target reads exactly as kotlinc reports it — `unresolved reference
+            // 'T'.` at the failing type's span — never as a compiler-specific "not supported"
+            // rejection (the operand check below already exempts an Error operand the same way).
+            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
+                return Ty::Error;
+            }
             // `instanceof` needs a reference operand and a *known* target. An unresolved target
             // (`Number`, a value class, `Nothing`, …) must not silently become `Object` (which
             // would make the test always true) — reject so the file is cleanly skipped. A primitive
@@ -23335,10 +23359,56 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
+    /// Report an expression-position type operand (`is`/`as` target) that failed to resolve, the
+    /// way kotlinc does. When the LEAF name itself is unresolvable (`Missing<T>`) name it — the
+    /// outer failure is primary, and kotlinc reports it first; only when the leaf resolves on its
+    /// own does a nested type carry the failure (`Array<Missing>` reports `Missing` at its own
+    /// span). Returns whether it actually reported an unresolved classifier: a fully resolved target
+    /// may still be `Ty::Error` because its SHAPE is unsupported (`Array` without an element,
+    /// `Array<Nothing>`), and that must fall through to the existing supported-shape diagnostic.
+    /// Re-resolving a nested type here records only resolved-classifier facts; the Error path itself
+    /// emits nothing, so this cannot double-report.
+    fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
+        // Probe the leaf WITHOUT its nested types. `Array` is exempt from the probe: its element
+        // lives in `arg`, so stripping it would hit the raw-Array Error arm even though the
+        // builtin name resolves.
+        let leaf_resolves = r.name == "Array" || {
+            let mut leaf = r.clone();
+            leaf.arg = None;
+            leaf.targs = Vec::new();
+            leaf.fun_params = Vec::new();
+            self.resolve_ty(&leaf) != Ty::Error
+        };
+        if !leaf_resolves {
+            self.diags
+                .error(r.span, format!("unresolved reference '{}'.", r.name));
+            return true;
+        }
+        // Nested positions in source order: function-type parameters, the `Array<T>` element /
+        // function return (`arg`), then class type arguments. `contains_error` matters here: an
+        // ordinary generic or function type keeps its outer shape around an unresolved component.
+        let nested = r
+            .fun_params
+            .iter()
+            .chain(r.arg.iter().map(|arg| &**arg))
+            .chain(r.targs.iter());
+        for part in nested {
+            if self.resolve_ty(part).contains_error() && self.report_unresolved_type_ref(part) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn expr_inner_as(&mut self, e: ExprId, operand: ExprId, ty: TypeRef, nullable: bool) -> Ty {
         let t = {
             let ot = self.expr(operand);
             let tt = self.resolve_ty(&ty);
+            // Same kotlinc parity as `is`: an unresolved cast target is `unresolved reference
+            // 'T'.`, never a compiler-specific "not supported" rejection.
+            if tt.contains_error() && self.report_unresolved_type_ref(&ty) {
+                return Ty::Error;
+            }
             if ty.nullable()
                 && !nullable
                 && ty
