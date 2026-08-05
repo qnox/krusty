@@ -5,10 +5,11 @@
 //! `let Some(r) = run(SRC) else { return };` collapses both into a silent skip, so a genuine
 //! compile failure reports as a PASSING test.
 //!
-//! The strict helpers (`expect_box_run`, `expect_compile_in_process`, and their
-//! `*_with_stdlib` gates) split the two: the toolchain gate stays an `Option`, and a rejected
-//! source panics with the front-end diagnostics. These tests pin that contract, so the idiom
-//! cannot quietly come back through the shared harness.
+//! The strict helpers encode neither condition as optional. The low-level `expect_*` forms require
+//! their caller to supply an already-resolved toolchain and panic with front-end diagnostics on a
+//! rejection; the `*_with_stdlib` forms resolve the toolchain fail-fast and then delegate to the
+//! same contract. These tests pin that distinction so the skip idiom cannot return through the
+//! shared harness.
 
 use super::common;
 
@@ -71,17 +72,15 @@ fn a_rejected_source_panics_with_its_diagnostics() {
     );
 }
 
-/// The stdlib-gated forms still return the accepted source's result, so callers keep their
-/// `Option` purely as the toolchain gate.
+/// The stdlib-gated forms return the accepted source directly after fail-fast toolchain lookup.
 #[test]
 fn an_accepted_source_still_runs_through_the_gated_helpers() {
     let src = "fun box(): String = \"OK\"\n";
-    let Some(out) = common::expect_box_run_with_stdlib(src, "AcceptRun") else {
-        return; // toolchain not provisioned
-    };
+    // The strict helpers resolve the toolchain internally and panic on missing inputs or rejection;
+    // an impossible optional branch must not reintroduce silent skip semantics.
+    let out = common::expect_box_run_with_stdlib(src, "AcceptRun");
     assert_eq!(out, "OK");
-    let classes = common::expect_classes_with_stdlib(src, "AcceptCompile")
-        .expect("toolchain was provisioned");
+    let classes = common::expect_classes_with_stdlib(src, "AcceptCompile");
     assert!(
         classes.iter().any(|(n, _)| n.ends_with("AcceptCompileKt")),
         "emitted classes: {:?}",

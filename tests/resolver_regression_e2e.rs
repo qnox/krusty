@@ -3,9 +3,9 @@
 
 use super::common;
 
-/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
-/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
-fn run(src: &str, stem: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
+/// cannot turn either failure into a passing skip.
+fn run(src: &str, stem: &str) -> String {
     common::expect_box_run_with_stdlib(src, stem)
 }
 
@@ -25,9 +25,7 @@ fun box(): String {
     return if (t == 12) "OK" else "t=$t"
 }
 "#;
-    let Some(out) = run(src, "ResolverProgressionStep") else {
-        return;
-    };
+    let out = run(src, "ResolverProgressionStep");
     assert_eq!(out, "OK");
 }
 
@@ -46,9 +44,7 @@ fun box(): String {
     return if (folded == "abc") "OK" else "fold=$folded"
 }
 "#;
-    let Some(out) = run(src, "ResolverInlineHofs") else {
-        return;
-    };
+    let out = run(src, "ResolverInlineHofs");
     assert_eq!(out, "OK");
 }
 
@@ -62,9 +58,7 @@ fun box(): String {
     return if (x.toString() == "40000") "OK" else "x=$x"
 }
 "#;
-    let Some(out) = run(src, "ResolverUnsignedReturn") else {
-        return;
-    };
+    let out = run(src, "ResolverUnsignedReturn");
     assert_eq!(out, "OK");
 }
 
@@ -79,9 +73,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "ResolverUnsignedIntegralConversions") else {
-        return;
-    };
+    let out = run(src, "ResolverUnsignedIntegralConversions");
     assert_eq!(out, "OK");
 }
 
@@ -97,9 +89,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "ResolverUnsignedBinaryOperators") else {
-        return;
-    };
+    let out = run(src, "ResolverUnsignedBinaryOperators");
     assert_eq!(out, "OK");
 }
 
@@ -119,9 +109,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "ResolverAnonObjectGenericScope") else {
-        return;
-    };
+    let out = run(src, "ResolverAnonObjectGenericScope");
     assert_eq!(out, "OK");
 }
 
@@ -139,9 +127,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "ResolverFirstPropertyVsCall") else {
-        return;
-    };
+    let out = run(src, "ResolverFirstPropertyVsCall");
     assert_eq!(out, "OK");
 }
 

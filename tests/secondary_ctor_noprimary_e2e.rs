@@ -6,10 +6,8 @@
 use super::common;
 
 fn run_box(name: &str, src: &str) {
-    // The toolchain gate is the only legitimate skip; a source krusty rejects fails here.
-    let Some(out) = common::expect_box_run_with_stdlib(src, "B") else {
-        return;
-    };
+    // Toolchain lookup and compilation are both fail-fast; neither can become a passing skip.
+    let out = common::expect_box_run_with_stdlib(src, "B");
     assert_eq!(out, "OK", "{name}");
 }
 

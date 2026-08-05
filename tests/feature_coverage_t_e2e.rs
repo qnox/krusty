@@ -8,9 +8,9 @@
 
 use super::common;
 
-/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
-/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
-fn run(src: &str, stem: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
+/// cannot turn either failure into a passing skip.
+fn run(src: &str, stem: &str) -> String {
     common::expect_box_run_with_stdlib(src, stem)
 }
 
@@ -28,10 +28,7 @@ fn compound_assign_scalars() {
     if (d != 6.0) return \"d=$d\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "CompoundScalars") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "CompoundScalars");
     assert_eq!(out, "OK");
 }
 
@@ -49,10 +46,7 @@ fn compound_assign_array_elements() {
     if (a[3] != 1) return \"a3=${a[3]}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "CompoundArray") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "CompoundArray");
     assert_eq!(out, "OK");
 }
 
@@ -67,10 +61,7 @@ fn compound_assign_map_and_list() {
     if (list[1] != 120) return \"l1=${list[1]}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "CompoundMapList") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "CompoundMapList");
     assert_eq!(out, "OK");
 }
 
@@ -90,10 +81,7 @@ fun box(): String {\n\
     if (bag.sum() != 15) return \"sum=${bag.sum()}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "PlusAssignOp") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "PlusAssignOp");
     assert_eq!(out, "OK");
 }
 
@@ -137,10 +125,7 @@ fun box(): String {\n\
     if (a[0] != 1 || a[1] != -1 || a[2] != 1) return \"a=${a[0]},${a[1]},${a[2]}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "IncDecPropArr") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "IncDecPropArr");
     assert_eq!(out, "OK");
 }
 
@@ -160,10 +145,7 @@ fn long_bit_ops_and_shifts() {
     if (mask != 0xF000L) return \"mask=$mask\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "LongBitOps") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "LongBitOps");
     assert_eq!(out, "OK");
 }
 
@@ -188,10 +170,7 @@ fun box(): String {\n\
     if (r != \"both\") return \"r=$r\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "WhenValueGuard") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "WhenValueGuard");
     assert_eq!(out, "OK");
 }
 
@@ -214,10 +193,7 @@ fun box(): String {\n\
     if (grade(2, 2) != \"xx\") return \"gxx\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "NestedWhen") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "NestedWhen");
     assert_eq!(out, "OK");
 }
 
@@ -233,10 +209,7 @@ fn for_until_step_and_withindex() {
     if (sb.toString() != \"0a1b2c\") return \"sb=$sb\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "ForUntilStep") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "ForUntilStep");
     assert_eq!(out, "OK");
 }
 
@@ -254,10 +227,7 @@ fn for_over_chars_and_reversed_range() {
     if (rev != 22) return \"rev=$rev\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "ForCharsReversed") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "ForCharsReversed");
     assert_eq!(out, "OK");
 }
 
@@ -282,10 +252,7 @@ fn while_and_do_while_break_continue() {
     if (product != 24) return \"product=$product\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "WhileDoWhile") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "WhileDoWhile");
     assert_eq!(out, "OK");
 }
 
@@ -306,10 +273,7 @@ fn string_and_char_helpers() {
     if ('e' !in \"hello\") return \"contains\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "StringCharHelpers") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "StringCharHelpers");
     assert_eq!(out, "OK");
 }
 
@@ -328,10 +292,7 @@ fun box(): String {\n\
     if (describe(3.0) != \"other\") return \"d4\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "SmartCastWhen") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "SmartCastWhen");
     assert_eq!(out, "OK");
 }
 
@@ -349,10 +310,7 @@ fun box(): String {\n\
     if (x is String && x.length == 5) return \"OK\"\n\
     return \"fail\"\n\
 }\n";
-    let Some(out) = run(SRC, "SmartCastNull") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "SmartCastNull");
     assert_eq!(out, "OK");
 }
 
@@ -371,10 +329,7 @@ fun box(): String {\n\
     if (c2 != null) return \"c2=$c2\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "ElvisSafeCall") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "ElvisSafeCall");
     assert_eq!(out, "OK");
 }
 
@@ -395,10 +350,7 @@ fn nullable_arithmetic_and_bang_bang() {
     if (a!! < b!!) return \"OK\"\n\
     return \"cmp\"\n\
 }\n";
-    let Some(out) = run(SRC, "NullableArith") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "NullableArith");
     assert_eq!(out, "OK");
 }
 
@@ -423,10 +375,7 @@ fun box(): String {\n\
     }\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "RequireCheck") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "RequireCheck");
     assert_eq!(out, "OK");
 }
 
@@ -448,10 +397,7 @@ fun box(): String {\n\
     }\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "ErrorTodo") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "ErrorTodo");
     assert_eq!(out, "OK");
 }
 
@@ -480,9 +426,6 @@ fun box(): String {\n\
     if (r != \"three\") return \"r=$r\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "LabeledReturn") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "LabeledReturn");
     assert_eq!(out, "OK");
 }

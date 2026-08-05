@@ -5,7 +5,8 @@
 //! carry code units rather than `char`s. Expected values are kotlinc 2.4.10's.
 use super::common;
 
-fn run(src: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics.
+fn run(src: &str) -> String {
     common::expect_box_run_with_stdlib(src, "Main")
 }
 
@@ -22,7 +23,7 @@ fn escaped_surrogate_pair_literal_is_one_supplementary_character() {
         \x20 if (s.codePointAt(0) != 128512) return \"f4: \" + s.codePointAt(0)\n\
         \x20 return \"OK\"\n\
         }\n";
-    assert_eq!(run(SRC).expect("surrogate pair literal"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -36,7 +37,7 @@ fn lone_surrogate_literal_keeps_its_code_unit() {
         \x20 if (s[0] != 'x' || s[2] != 'y') return \"f3\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    assert_eq!(run(SRC).expect("lone surrogate literal"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -69,7 +70,7 @@ fn lone_surrogate_folds_through_trim_indent() {
         \x20 if (s[1] != 'x') return \"f2\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    assert_eq!(run(SRC).expect("trimIndent surrogate fold"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -83,7 +84,7 @@ fn lone_surrogate_folds_through_trim_margin() {
         \x20 if (s[1] != Char.MAX_LOW_SURROGATE) return \"f2: \" + s[1].code\n\
         \x20 return \"OK\"\n\
         }\n";
-    assert_eq!(run(SRC).expect("trimMargin surrogate fold"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -99,7 +100,7 @@ fn a_supplementary_constant_part_appends_as_a_string_not_a_char() {
         \x20 if (s[2] != '2') return \"f2\"\n\
         \x20 return \"OK\"\n\
         }\n";
-    assert_eq!(run(SRC).expect("supplementary append"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -117,7 +118,7 @@ fn lone_surrogate_survives_a_const_val_and_a_template() {
         \x20 if (t[1].code != 55296) return \"f3: \" + t[1].code\n\
         \x20 return \"OK\"\n\
         }\n";
-    assert_eq!(run(SRC).expect("const val surrogate"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]

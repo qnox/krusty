@@ -3,9 +3,8 @@
 
 use super::common;
 
-/// `None` means ONLY that the toolchain isn't provisioned; a source the front end REJECTS panics
-/// with its diagnostics instead of skipping as a silent pass.
-fn run(src: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics.
+fn run(src: &str) -> String {
     common::expect_box_run_with_stdlib(src, "P")
 }
 
@@ -18,9 +17,7 @@ fn unary_plus_runs() {
         if (0.compareTo(b) != 0) return \"fail b\"\n\
         return \"OK\"\n\
     }\n";
-    if let Some(out) = run(SRC) {
-        assert_eq!(out, "OK");
-    }
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -34,9 +31,5 @@ fn return_in_expression_position_runs() {
         if (firstOrNull(10) != 11) return \"fail val\"\n\
         return \"OK\"\n\
     }\n";
-    if let Some(out) = run(SRC) {
-        assert_eq!(out, "OK");
-    } else {
-        panic!("return-in-expression-position should compile");
-    }
+    assert_eq!(run(SRC), "OK");
 }

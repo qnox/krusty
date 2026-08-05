@@ -6,9 +6,8 @@
 
 use super::common;
 
-/// `None` means ONLY that the toolchain isn't provisioned; a source the front end REJECTS panics
-/// with its diagnostics instead of skipping as a silent pass.
-fn run(src: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics.
+fn run(src: &str) -> String {
     common::expect_box_run_with_stdlib(src, "Nb")
 }
 
@@ -31,9 +30,7 @@ fun box(): String {
 
 #[test]
 fn name_based_destructuring_runs_when_enabled() {
-    if let Some(out) = run(FOR_AND_VAL) {
-        assert_eq!(out, "OK");
-    }
+    assert_eq!(run(FOR_AND_VAL), "OK");
 }
 
 const VAR_CAPTURED: &str = r#"
@@ -54,9 +51,7 @@ fun box(): String {
 fn var_component_captured_and_mutated_in_lambda() {
     // A `var` destructured component captured AND written by a closure must be boxed (`Ref`), so the
     // closure's write is visible to the outer read. Regression for the lower_destructure boxing fix.
-    if let Some(out) = run(VAR_CAPTURED) {
-        assert_eq!(out, "OK");
-    }
+    assert_eq!(run(VAR_CAPTURED), "OK");
 }
 
 #[test]
