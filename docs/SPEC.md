@@ -480,6 +480,44 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_runs`,
   `::suspend_member_call_whose_operand_writes_a_local_runs`,
   `::suspend_operand_write_to_a_locally_dead_scratch_runs`).
+- **`suspend fun` — hoisting a suspension out of a call/template operand list preserves left-to-right
+  evaluation.** Kotlin evaluates a call's receiver and arguments (and a string template's parts)
+  strictly left to right; kotlinc spills every operand of a call with a suspending operand.
+  `hoist_expr` used to rewrite only the SUSPENSION to a preceding temp, so `f(g(), susp())` became
+  `val t = susp(); f(g(), t)` — running `g()` AFTER the suspension. `hoist_operands_in_order` now
+  binds every runtime-read/evaluated operand that precedes a later suspending operand to a prelude temp
+  first (only literal constants and the singleton value of a `Null`-typed local commute, per
+  `operand_needs_snapshot`), for the
+  `Call`/`MethodCall`/`StringConcat` arms of `hoist_expr`, the suspension-point path itself
+  (receiver included), and the `hoist_stmt` arms that keep a direct `val r = <suspend call>` /
+  bare-call statement (whose nested suspending arguments previously reached emit unhoisted and
+  skipped the file — corpus `coroutines/controlFlow_chain.kt` now compiles). The snapshot plan is
+  typed on the ORIGINAL operands before any rewrite (`hoisted_value_ty`; head kinds are preserved by
+  hoisting), so an untypeable operand bails with the IR untouched and the flattener declines the
+  shape — skip, never a reorder and never a double evaluation. An external callee
+  (`Callee::External`) has no signature in the IR; its snapshot type comes from
+  `ir.logical_types`, accepted only where logical = physical representation (scalars and `String`,
+  e.g. the flattened `String.plus` chain whose intermediate accumulators ir_lower now records).
+  The conservative boundary includes more than calls: ordinary local/parameter reads snapshot because
+  an inline-spliced later block may write the same local before the residual call reads it; static reads
+  snapshot regardless of source/module/classpath origin; and a wrapper that can THROW (`!!`,
+  `as`/non-null cast, an unboxing `ImplicitCoercion`) snapshots so its exception precedes any later
+  suspension's effects. Snapshot types come from identities already carried by the IR node
+  (`GetStatic`/`GetField`/`RefGet`, static instances/fields/enums, and `PropertyRead`'s inline type except
+  `Unit`/type-parameter reads); external field descriptors use the emitter's shared descriptor parser,
+  rather than a suspend-specific classpath branch. This covers both `h.svc.m(susp())` and
+  `f(x, run { x = 5; susp() })` without syntax- or provider-specific repair logic.
+  Operand snapshotting can also make a previously post-suspension local read disappear. Positional
+  scope capture still stores/restores every named local in scope, so
+  `reconcile_positional_spill_locals` unions those actual spill consumers into the machine-local
+  allocation set after named scopes and live temps merge. Both named-function and suspend-lambda
+  machines use that boundary; no resume arm can restore a scope-only local into an undeclared slot.
+  The existing `Nothing?`/`Ty::Null` rematerialization remains the semantic exception: such a local can
+  only ever read as `null`, so it commutes without a snapshot and stays on the dedicated no-field
+  rematerialization path instead of acquiring a verifier-sensitive ordinary temp.
+  Ordering pinned by box runs against a real suspension (`yield()`), including the snapshot temp
+  surviving the spill, the pre-mutation `var` read, the `!!`-throws-before-suspension case, and an
+  effectful operand between two suspensions (`tests/suspend_arg_order_e2e.rs`, all ten shapes).
 - **`suspend fun` — an INTRINSIC suspension point needs no operand temps.** A
   `suspendCoroutineUninterceptedOrReturn { c -> … }` recorded in `ir.intrinsic_suspension_points` is an
   inlined BLOCK, not a call: it has no operands to move ahead of the spill, and its body runs after the
@@ -620,8 +658,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   makes this reach every caller: the in-process test harness previously built its own `EmitOptions`
   from `Default`, which silently omitted both the class metadata AND the `SourceFile` stamp — so a
   test could pass on an artifact `krusty -d …` never writes. The CLI backend and `compile_in_process`
-  now share that one constructor; `EmitOptions::default()` remains the pre-class-metadata shape for a
-  caller that wants it, and `KRUSTY_NO_CLASS_METADATA` restores facade-only output for bisecting.
+  now share that one constructor. `EmitOptions::default()` is NOT a pre-class-metadata escape hatch —
+  its `emit_class_metadata` is `true` as well; what it lacks next to the shipping configuration is the
+  `SourceFile`, the inner-class resolver and the `-jvm-target` class version, so a caller that reaches
+  for it still gets class metadata and still is not emitting shipping bytes. The two supported ways to
+  get facade-only output are `KRUSTY_NO_CLASS_METADATA` (consulted by `shipping_emit_options` only,
+  for bisecting) and constructing `EmitOptions` explicitly with `emit_class_metadata: false`.
   A **`data object` synthesizes no `copy`/`componentN`** — it is a singleton, so kotlinc gives it
   `equals`/`hashCode`/`toString` only. krusty's METHOD emission already agreed, but the constant-pool
   seeder and the metadata builder both keyed on `is_data` alone, so switching the annotation on made a
@@ -1713,6 +1755,70 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recovery, which turns the miscompile back into a clean skip.
   `tests/unsigned_classpath_call_e2e.rs` asserts the backend contract directly (a decline passes; an
   EMITTED class that does not verify and run fails), so it keeps holding whichever way a shape is handled.
+  Both the receiver box and that net rest on ONE question — *is this lowered value already a
+  reference?* — which the checker's `Ty` cannot answer, since a value class and its carrier share one
+  `Ty` on both sides of a box. Lowering answers it with a **representation query**,
+  `lowered_reference_class`: the class a lowered node leaves on the stack, read off the node's own type
+  (a callee's descriptor return, read from the provider's single `PlatformMethodLayout`; a
+  cast's type operand; a field's declared type) and followed through the nodes that carry a value
+  unchanged (a block's value, a `when` whose branches agree, a reference-to-reference coercion). A
+  primitive-to-reference coercion does NOT claim its target class: the backend chooses a wrapper from
+  the source carrier, and a broad target such as `Any` cannot prove which class was produced. It is not
+  a match on the node that PRODUCED the value: a box that is cast or carried out of a block is still a box, and boxing it again
+  would push a `Lkotlin/UInt;` at the `(I)` its own factory declares — the very `VerifyError` this
+  section is about. The query is deliberately partial and one-sided: `None` means "a primitive carrier,
+  OR a shape it cannot derive", so an unknown node keeps exactly the behaviour it had before that shape
+  was understood, and a new shape can only ever remove a wrong box.
+
+  A read of a LOCAL is the one carrier shape deliberately left unanswered. Its type lives on the
+  declaring `IrExpr::Variable`, reachable only through a value-index table — and value indices are
+  per-declaration-body and re-used (they restart at ~25 sites, are saved/restored around three nested
+  bodies, and one coroutine temp is declared under the enclosing body's numbering). An entry surviving
+  into the wrong scope would claim a box for a carrier and SKIP a required box, which is the same
+  `VerifyError` from the other direction — a hardening measure that can itself miscompile is worse than
+  none. Answering it soundly needs the value-numbering scopes made explicit first; until then the query
+  returns `None` there, which is exactly the behaviour that shipped before it existed. No source shape
+  is known that reaches a member call with an already-boxed unsigned receiver: every probed candidate
+  (a nullable local via `!!`, a smart cast, a safe call, an erased map read, a `when` receiver, elvis)
+  either declines or unboxes to the carrier first, so this remains a net rather than a live path.
+  The net compares POSITIONS, so the lowered values have to be lined up with the descriptor slots first
+  (`align_call_values_to_slots`). Two shapes carry a slot no lowered value fills, and both were measured
+  over the box corpus and the full e2e suite rather than assumed:
+  - a value class's members are realized as mangled `-impl` STATICS whose descriptor spells the receiver
+    as the LEADING parameter (`kotlin/Result.getOrNull-impl:(Ljava/lang/Object;)…`) while the receiver
+    travels beside the arguments — the corpus hits this over a hundred times. The receiver is checked
+    with the arguments there, since a value-class owner is exactly where the lowerer boxes it;
+  - a `suspend` `$default` synthetic spells the CPS `Continuation` BEFORE the `int mask` + `Object`
+    marker (`withLock$default(Mutex, Object, Function0, Continuation, int, Object)`) and the backend
+    appends it at emit time. The plain suspend descriptor has already had its TRAILING continuation
+    stripped, so only the `$default` form needs this.
+  A packed vararg needs no reconciliation — the array is emitted before the values reach the check — so
+  the earlier claim that it shifts positions was wrong; no such call was observed. Any shape the
+  alignment cannot line up now declines whenever a box is on the stack at all, rather than skipping: a
+  count mismatch is "no position is known", never "nothing to check".
+  The runtime provider returns reference/primitive parameter positions, the unambiguous
+  runtime-supplied continuation position, and the concrete object return class together as one
+  `PlatformMethodLayout`; JVM descriptor syntax remains outside common lowering, and the descriptor is
+  parsed once rather than by independent parameter, continuation, and return queries that could
+  disagree.
+
+  Aligning that second shape surfaced a separate miscompile, now also declined
+  (`gate:unthreaded-continuation-slot`): an unsigned VALUE PARAMETER mangles the JVM name (`libU` →
+  `libU-OzbTU-A`), krusty looks suspend-ness up under that name while `@Metadata` records the SOURCE
+  name, and the callable comes back marked non-suspend — so nothing threads the `Continuation` its
+  descriptor still spells and the emitted `invokestatic` is one argument short. BOTH call forms hit
+  it, the `$default` synthetic and the plain mangled method, so the test is the UNFILLED slot (the
+  descriptor has one parameter more than the call has values, and that parameter is a `Continuation`)
+  rather than `$default`-ness. A non-suspend callee that declares a `Continuation` parameter of its
+  own fills every slot and is untouched. Recovering the mangled-name suspend lookup would let these
+  shapes emit again; until then they skip instead of failing verification.
+
+  `tests/bytecode_parity_e2e.rs` pins the two `equals` SHAPES: the folded carrier compare, and
+  `equals-impl` with an unboxed receiver — the latter across all four carriers (`B`/`S`/`I`/`J`) and
+  across `Any`, `String`, `UInt?`, cross-carrier, and the literal-`null` divergence. It also pins that
+  both lowerings evaluate the RECEIVER before a SUSPENDING argument: neither reaches
+  `emit_library_member_call`, so each spills the receiver to a temp itself, or the coroutine pass
+  re-evaluates it in the resume block after the argument has already run.
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
