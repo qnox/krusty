@@ -2230,7 +2230,7 @@ impl<'a> Parser<'a> {
         props: &mut Vec<PropDecl>,
         base: &mut Option<String>,
         base_args: &mut Vec<ExprId>,
-        supertypes: &mut Vec<String>,
+        supertypes: &mut Vec<TypeRef>,
         decl_line_lo: &mut u32,
     ) {
         *decl_line_lo = self.tok().span.lo;
@@ -2247,8 +2247,9 @@ impl<'a> Parser<'a> {
         *base = b;
         *base_args = b_args;
         self.file.detached_type_refs.extend(ifaces.iter().cloned());
-        // The companion's supertype list keeps bare names (it has no generic-signature needs yet).
-        *supertypes = ifaces.into_iter().map(|t| t.name).collect();
+        // The companion's supertype list keeps the full `TypeRef`s (like a class's `supertypes`) so a
+        // supertype's type arguments (`Key<Elem>`) survive to signature registration.
+        *supertypes = ifaces;
         self.skip_newlines();
         if !self.eat(TokenKind::LBrace) {
             return;
@@ -2381,7 +2382,7 @@ impl<'a> Parser<'a> {
         let mut companion_props: Vec<PropDecl> = Vec::new();
         let mut companion_base: Option<String> = None;
         let mut companion_base_args: Vec<ExprId> = Vec::new();
-        let mut companion_supertypes: Vec<String> = Vec::new();
+        let mut companion_supertypes: Vec<TypeRef> = Vec::new();
         let mut companion_decl_line: u32 = 0;
         self.skip_newlines();
         if self.eat(TokenKind::LBrace) {
@@ -3217,7 +3218,7 @@ impl<'a> Parser<'a> {
         let mut companion_props: Vec<PropDecl> = Vec::new();
         let mut companion_base: Option<String> = None;
         let mut companion_base_args: Vec<ExprId> = Vec::new();
-        let mut companion_supertypes: Vec<String> = Vec::new();
+        let mut companion_supertypes: Vec<TypeRef> = Vec::new();
         let mut companion_decl_line: u32 = 0;
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         self.skip_newlines();
@@ -3730,7 +3731,7 @@ impl<'a> Parser<'a> {
         let mut companion_props: Vec<PropDecl> = Vec::new();
         let mut companion_base: Option<String> = None;
         let mut companion_base_args: Vec<ExprId> = Vec::new();
-        let mut companion_supertypes: Vec<String> = Vec::new();
+        let mut companion_supertypes: Vec<TypeRef> = Vec::new();
         let mut companion_decl_line: u32 = 0;
         self.skip_newlines();
         if self.at(TokenKind::LBrace) {
@@ -9170,7 +9171,11 @@ class HeaderHost {
             );
         }
         assert_eq!(
-            find_class("HeaderHost").companion_supertypes,
+            find_class("HeaderHost")
+                .companion_supertypes
+                .iter()
+                .map(|supertype| supertype.name.as_str())
+                .collect::<Vec<_>>(),
             ["HeaderBase"]
         );
     }
