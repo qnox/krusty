@@ -4501,25 +4501,33 @@ fn collect_signatures_with_cp_impl(
             collect_file_type_names(file, &mut names);
             names.extend(imap.keys().cloned());
             for name in names {
-                let explicit = imap.get(&name);
+                // `collect_file_type_names` deliberately combines ordinary `TypeRef` spellings with
+                // supertype/delegation fields that the parser stores in JVM-like slash form. Normalize
+                // that representation ONCE before selecting any provider: explicit imports,
+                // same-package source declarations, module classifiers, and library classifiers must
+                // all see the same Kotlin source spelling. Keep `name` unchanged below as the binding
+                // key because later consumers query `class_names` with the original AST spelling.
+                let source_name = name.replace('/', ".");
+                let explicit = imap.get(&source_name);
                 let explicit_source =
                     explicit.and_then(|path| source_classifier_from_path(path, &user_defined));
                 let same_package_source = explicit
                     .is_none()
-                    .then(|| type_name(&class_internal(file, &name)))
+                    .then(|| type_name(&class_internal(file, &source_name)))
                     .filter(|candidate| user_defined.contains(&candidate.render()));
                 let full = explicit_source
                     .or(same_package_source)
                     .or_else(|| {
-                        resolve_name_against_imports_name(&name, &imap, &levels, &*libraries)
+                        resolve_name_against_imports_name(&source_name, &imap, &levels, &*libraries)
                     })
                     .or_else(|| {
                         // A dotted name may be the fully-qualified path of a SOURCE class in this
-                        // module (`pkg1.Cls`, `pkg1.Outer.Inner`) — source shadows the classpath.
-                        // Some positions (supertypes, delegation specs) arrive already
-                        // internalized (`pkg1/Cls`), so accept '/' too.
-                        if name.contains('.') || name.contains('/') {
-                            source_classifier_from_path(&name.replace('.', "/"), &user_defined)
+                        // module (`pkg1.Cls`, `pkg1.Outer.Inner`) — source shadows the library.
+                        if source_name.contains('.') {
+                            source_classifier_from_path(
+                                &source_name.replace('.', "/"),
+                                &user_defined,
+                            )
                         } else {
                             None
                         }
@@ -4528,7 +4536,7 @@ fn collect_signatures_with_cp_impl(
                         // A dotted type name (`lib.Thing`, `Wrap.Box`) — resolve the FQ package path
                         // or a nested type under a resolvable outer prefix.
                         resolve_dotted_classpath_type(
-                            &name,
+                            &source_name,
                             &class_names,
                             &imap,
                             &wilds,
