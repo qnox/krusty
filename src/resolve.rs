@@ -734,6 +734,11 @@ pub struct ClassSig {
     /// rather than being re-derived from a declaration's AST — a write may come from any file of the
     /// module, so the current file's declarations are not the authority on it.
     pub static_props: HashMap<String, (Ty, Visibility, bool)>,
+    /// Names of the FIELD-LESS custom-accessor entries of [`Self::static_props`] (`val X: T get() = …`).
+    /// Those have no hoisted static on the outer class — a read is a `getX` call on the companion
+    /// singleton — so a cross-file read must tell them apart from the backing-field entries without
+    /// the declaring file's AST.
+    pub computed_static_props: std::collections::HashSet<String>,
     /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
     pub lateinit_props: std::collections::HashSet<String>,
     /// Internal names of interfaces this type implements (for subtyping).
@@ -6134,6 +6139,12 @@ fn collect_signatures_with_cp_impl(
                             (name.clone(), (*ty, p.visibility, p.is_var))
                         })
                         .collect();
+                    let computed_static_props: std::collections::HashSet<String> = c
+                        .companion_props
+                        .iter()
+                        .filter(|p| crate::ast::is_computed_companion_prop(p))
+                        .map(|p| p.name.clone())
+                        .collect();
                     let lateinit_props: std::collections::HashSet<String> = c
                         .body_props
                         .iter()
@@ -6292,6 +6303,7 @@ fn collect_signatures_with_cp_impl(
                             static_methods,
                             companion_fun_names,
                             static_props,
+                            computed_static_props,
                             lateinit_props,
                             interfaces: interfaces_ref,
                             interface_type_args: c
@@ -6364,6 +6376,7 @@ fn collect_signatures_with_cp_impl(
                                 static_methods: HashMap::new(),
                                 companion_fun_names: std::collections::HashSet::new(),
                                 static_props: HashMap::new(),
+                                computed_static_props: std::collections::HashSet::new(),
                                 lateinit_props: Default::default(),
                                 interfaces: companion_interfaces_ref,
                                 interface_type_args: Vec::new(),

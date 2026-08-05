@@ -22546,6 +22546,40 @@ impl<'a> Lower<'a> {
                     let getter = property_getter_name(&name);
                     return self.lower_companion_computed_accessor(internal_name, &getter, None);
                 }
+                // `C.X` where `C` is declared in a SIBLING file of the module (the same-file maps
+                // above only cover this file's classes; the checker resolved the read through the
+                // class's `static_props`). The declaring file hoists a backing-field companion
+                // property to a static on the OUTER class, so the read is the same `getstatic C.X`
+                // the same-file arm emits; a FIELD-LESS computed property has no static, so the
+                // read is its `getX` on the companion singleton.
+                if let Some(cls) = self.module_class_named(&rn) {
+                    if let Some(&(cty, _, _)) = cls.static_props.get(&name) {
+                        let internal = cls.internal();
+                        if cls.computed_static_props.contains(&name) {
+                            let comp_internal = format!("{internal}$Companion");
+                            let field = self.runtime.companion_instance_field(
+                                &internal,
+                                &comp_internal,
+                                "Companion",
+                            )?;
+                            let recv = self.platform_static_field(field);
+                            let descriptor = format!("(){}", self.runtime.type_descriptor(cty)?);
+                            return Some(self.emit_virtual_call(
+                                comp_internal,
+                                property_getter_name(&name),
+                                descriptor,
+                                false,
+                                recv,
+                                vec![],
+                            ));
+                        }
+                        return Some(self.emit_external_static_field(
+                            internal,
+                            name.clone(),
+                            self.runtime.type_descriptor(cty)?,
+                        ));
+                    }
+                }
             }
             if rt == Ty::Char && name == "code" {
                 // `c.code` → the `Char`'s code unit as an `Int` (a no-op coercion on the JVM
