@@ -361,6 +361,23 @@ pub fn lower_value_classes(
     if under.is_empty() {
         return true;
     }
+    // Publish only the distinction the existing unified value-class lookup cannot answer: which
+    // resolved value classes belong to this source module. `IrFile::is_value_class_name` already
+    // recognizes same-file and external/module declarations, so copying `under` into a second public
+    // name table would create two semantic authorities that can drift. The metadata writer combines
+    // that existing lookup with this origin subset when deciding whether a downstream reader can see
+    // the value-class record.
+    ir.module_source_value_classes = under
+        .keys()
+        .copied()
+        .filter(|fq_name| {
+            module_value_classes.contains_key(fq_name)
+                || ir
+                    .classes
+                    .iter()
+                    .any(|c| c.is_value && c.fq_name == *fq_name)
+        })
+        .collect();
 
     // A semantic property operation deliberately keeps the Kotlin property name. For an owner compiled
     // from another source file there is no classfile for the emitter to inspect, so record the JVM

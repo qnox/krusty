@@ -20685,6 +20685,10 @@ impl<'a> Lower<'a> {
                         .unwrap_or_else(|| "kotlin/Any".to_string())
                 });
                 let is_interface = member.is_interface();
+                // The operator-invoke path threads the callee's DECLARED return exactly like an
+                // ordinary member call: `factory.create()` must not read its `Object` result as a box
+                // when the callee declares a value class there.
+                let declared_ret = member.declared_ret;
                 let call = self.emit_virtual_call(
                     owner,
                     member.name,
@@ -20693,6 +20697,7 @@ impl<'a> Lower<'a> {
                     recv,
                     a,
                 );
+                self.record_call_declared_ret(call, declared_ret);
                 Some(self.coerce_to_static(call, ret, physical_ret))
             }
             InvokeKind::ExtensionOperator { receiver_ty: rt } => {

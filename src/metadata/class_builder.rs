@@ -34,6 +34,12 @@ pub struct PropMeta {
     /// `(jvm name, jvm descriptor)` of the accessor, when one is emitted.
     pub getter: Option<(String, String)>,
     pub setter: Option<(String, String)>,
+    /// An explicit `JvmFieldSignature.desc` for a backing field whose descriptor the reader cannot
+    /// derive from the Kotlin type — a VALUE-CLASS-typed property, whose field holds the erased
+    /// underlying (`val k: K` → `Ljava/lang/String;`). `None` leaves the field derived, which is what
+    /// every ordinary property records. (The boxed-nullable-primitive and bare-type-parameter cases
+    /// below are derived from the property itself, since the shape alone determines them.)
+    pub field_desc: Option<String>,
 }
 
 /// Member-function descriptor for class metadata (`Class.function` = f9). The JVM signature is usually
@@ -515,7 +521,7 @@ pub fn build_class(
                 .setter
                 .as_ref()
                 .map(|(sn, sd)| jvm_method_sig(&mut st, Some(sn), sd));
-            let boxed_field_desc = match p.ty {
+            let boxed_field_desc = p.field_desc.clone().or(match p.ty {
                 Ty::Nullable(
                     Ty::Int
                     | Ty::Long
@@ -537,7 +543,7 @@ pub fn build_class(
                     .as_ref()
                     .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
                 _ => None,
-            };
+            });
             let mut field = Pb::new();
             if let Some(d) = &boxed_field_desc {
                 field.field_varint(2, st.local(d) as u64); // JvmFieldSignature.desc = 2
@@ -704,6 +710,7 @@ mod tests {
                 tparam: None,
                 getter: None,
                 setter: None,
+                field_desc: None,
             })
         };
 
@@ -757,6 +764,7 @@ mod tests {
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
+                field_desc: None,
             }],
             &[],
             &[],
@@ -856,6 +864,7 @@ mod tests {
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
+                field_desc: None,
             },
             PropMeta {
                 name: "y".into(),
@@ -868,6 +877,7 @@ mod tests {
                 tparam: None,
                 getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                 setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
+                field_desc: None,
             },
         ];
         let (d1, _d2) = build_class(
@@ -929,6 +939,7 @@ mod tests {
                 tparam: None,
                 getter: Some(("getR".into(), "()Ljava/util/List;".into())),
                 setter: None,
+                field_desc: None,
             }],
             &[],
             &[],
@@ -1036,6 +1047,7 @@ mod tests {
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
+                field_desc: None,
             }],
             &[],
             &[],
@@ -1084,6 +1096,7 @@ mod tests {
                 tparam: None,
                 getter: Some(("getX".into(), "()I".into())),
                 setter: None,
+                field_desc: None,
             }],
             &[],
             &[],
@@ -1136,6 +1149,7 @@ mod tests {
                     tparam: None,
                     getter: Some(("getX".into(), "()I".into())),
                     setter: None,
+                    field_desc: None,
                 },
                 PropMeta {
                     name: "y".into(),
@@ -1148,6 +1162,7 @@ mod tests {
                     tparam: None,
                     getter: Some(("getY".into(), "()Ljava/lang/String;".into())),
                     setter: Some(("setY".into(), "(Ljava/lang/String;)V".into())),
+                    field_desc: None,
                 },
             ],
             &[],

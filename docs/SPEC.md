@@ -605,25 +605,61 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   builder and the constant-pool seeder now both take the `c.ctor_param_count` prefix, which makes the
   `d2` string table byte-identical to kotlinc's for this source (`krusty_roundtrip_class_metadata_e2e::
   a_body_property_adds_no_component_or_copy_parameter`).
-  **A VALUE-CLASS-typed CONSTRUCTOR PARAMETER withholds the record.** `class Holder(val id: ItemId)`
-  gets kotlinc's private-primary + synthetic `DefaultConstructorMarker` accessor ABI, which the
-  builder cannot describe: it named the PRIVATE `<init>(Ljava/lang/String;)V` (kotlinc names
-  `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`), typed `id` as `String`
-  instead of `LItemId;`, and dropped the getter's mangled `getId-YyT5sjE`. Real kotlinc reading that
+  **Admission is TRANSITIVE: a class is not described in terms of a value class a reader cannot read
+  back as one.** A value class without a record reads downstream as an ordinary class — the caller
+  casts the carrier to the box and binds an INSTANCE accessor where kotlinc emits the static `-impl`
+  (`A.create('O').publicValue` → `checkcast A; A.getPublicValue()` on a `String`, ClassCastException).
+  So `value_class_is_readable` answers POSITIVELY, never by assumption: a value class declared in THIS
+  file must pass the builder's own shape bails (`value_class_metadata_shape_admitted` — kind, single-`val`
+  field, no value-class ctor parameter, nothing declared beyond the synthesized set); one declared in
+  another file of this MODULE is unknown here, because its record is decided by its own emit, so the
+  answer is no; anything else is on the CLASSPATH, where value-class-ness is itself decoded from the
+  `@Metadata` inline record — being known as a value class at all IS the evidence a record exists.
+  That is what lets `Factory.invoke(Result<Int>)` be described while `Holder.make(): A` (a
+  sibling file's value class with a declared member) stays withheld. The value classes the pass
+  resolved reach the writer through the existing `IrFile::is_value_class_name` lookup plus the
+  `module_source_value_classes` origin subset; there is no second value-class name table.
+  Found by the box corpus's
+  `compileKotlinAgainstKotlin/inlineClasses/privateConstructorWithPrivateFieldUsingTypeTable`; the
+  cross-file half by review. Test:
+  `krusty_roundtrip_class_metadata_e2e::a_sibling_files_undescribed_value_class_withholds_the_record`.
+  Still open, and PRE-EXISTING (this entry neither caused nor fixed it): a value class whose carrier is
+  `Object` read out of a generic slot is not unboxed — `val w: W = listOf(W("a"))[0]; showW(w)` passes
+  the box where the carrier is wanted, and passing `list[0]` STRAIGHT into a value-class parameter
+  fails the same way for a concrete carrier too (nothing unboxes a boxed argument at the call itself).
+  **With the read side in place, a VALUE-CLASS-INVOLVED member and a VALUE-CLASS-typed BODY PROPERTY
+  are both DESCRIBED, byte-identically to kotlinc.** The member is stated in Kotlin terms
+  (`make(): K`) with a `JvmMethodSignature` carrying the mangled name and the erased descriptor —
+  `ir.vc_declared_sigs` holds that declared form, recorded before erasure. The BODY PROPERTY is the
+  harder half: its accessor is synthesized straight from the declaration and never appears in
+  `c.methods`, so the record takes the Kotlin type from the `IrProperty` (`k: LK;`) and the JVM
+  spelling from the value-class pass's stamp (`getK-XLNMDGE`), plus an explicit
+  `JvmFieldSignature.desc` — a reader cannot derive the erased `Ljava/lang/String;` field from the type
+  `K`. ONE source of accessor spelling (`ir_emit::accessor_jvm_names`) now feeds the record, the
+  constant-pool seeder, the debug tables and the `@NotNull` attachment, because all four key on the
+  accessor by NAME: while three of them said `getK`, the record advertised a method the class file does
+  not define, the pool interned a constant nothing referenced, and the real accessor silently lost its
+  `LineNumberTable`/`LocalVariableTable` and its `@NotNull`. The seeder also interns a value-class
+  initializer's `constructor-impl` between the constant it pushes and the field it stores, which is
+  where kotlinc puts it. Tests: `data_class_metadata_wiring_e2e::{value_class_parameter_member,
+  value_class_return_member, value_class_body_property, suspend_returning_nullable_value_class}
+  _is_byte_identical`, and the round-trips
+  `krusty_roundtrip_class_metadata_e2e::{a_value_class_returning_member, value_class_body_property}
+  _round_trips`.
+  The same one-source rule fixed an `is`-prefixed property: `val isOpen` keeps the SOURCE name as its
+  accessor (`isOpen()`, never `getIsOpen`; a `var`'s setter is `setOpen`), and the record used to name
+  `getIsOpen` — a method the class file does not define — while the accessor lost its debug tables.
+  Test: `data_class_metadata_wiring_e2e::is_prefixed_property_accessors_are_byte_identical`.
+  **Still open, same family: a VALUE-CLASS-typed CONSTRUCTOR PARAMETER withholds the record.** Not for
+  the property's sake — that half is described correctly now — but for the CONSTRUCTOR's: the class
+  gets kotlinc's private-primary + synthetic `DefaultConstructorMarker` ABI, and the builder names the
+  PRIVATE `<init>(Ljava/lang/String;)V` where kotlinc names
+  `(Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`. Real kotlinc reading that
   record rejects `Holder(ItemId("OK"))` as a type mismatch, and a caller that satisfied it would
-  `invokespecial` the private constructor. `ir.has_value_param_ctor` — recorded by the value-class
-  pass BEFORE erasure loses the parameter's identity — is the signal; `vc_declared_sigs` cannot be,
-  since it holds non-synthesized FUNCTIONS only. Test:
+  `invokespecial` a private constructor. A `value class` with a DECLARED member also still declines:
+  its member runs on the unboxed carrier through a static `-impl` pair the record does not yet spell.
+  `ir.has_value_param_ctor` (recorded before erasure) is the signal. Test:
   `krusty_roundtrip_class_metadata_e2e::a_value_class_constructor_parameter_withholds_the_record`.
-  **A VALUE-CLASS-typed BODY PROPERTY also withholds the record.** Its accessor is not listed in
-  `c.methods`, so scanning only declared method ids misses it and would describe `k: String` with a
-  plain `getK` even though the class file defines the mangled `getK-XLNMDGE` (kotlinc describes
-  `k: LK;`). The value-class pass stamps that exact JVM accessor spelling on the semantic
-  `IrProperty`; metadata admission consumes the same declaration-level realization as accessor
-  emission and conservatively withholds the whole record before a downstream reader can bind a
-  nonexistent getter. Tests:
-  `data_class_metadata_wiring_e2e::value_class_body_property_matches_kotlinc_without_metadata` and
-  `krusty_roundtrip_class_metadata_e2e::value_class_body_property_withholds_the_record`.
   **The classpath value-class RETURN, and why a VALUE-CLASS-INVOLVED member can now be DESCRIBED.**
   A value-class return erases exactly like a value-class parameter: the JVM method hands back the
   UNDERLYING (`fun make(): K` → `make-XLNMDGE()Ljava/lang/String;`) while `@Metadata` names `K`. A
@@ -656,26 +692,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   **What still declines, and why none of it is the return model.** Each is a WRITE-side divergence
   from kotlinc, invisible while the record was withheld, and each is proven by a differential
   comparison for the same source. (1) A VALUE-CLASS-typed CONSTRUCTOR PARAMETER, unchanged — see the
-  paragraph above. (2) A VALUE-CLASS-typed PROPERTY: the METHODS match kotlinc exactly (both emit
-  `getK-XLNMDGE()Ljava/lang/String;`) but the RECORD does not — krusty writes
-  `d2=[…,"k","","getK","()Ljava/lang/String;"]` where kotlinc writes
-  `[…,"k","LK;","getK-XLNMDGE","()Ljava/lang/String;","Ljava/lang/String;"]`, an EMPTY property type
-  and an unmangled getter, so a reader binds a `getK()` that does not exist. (3) A VALUE class with a
+  paragraph above. (2) A VALUE class with a
   DECLARED MEMBER: kotlinc realizes `value class S(val v: String) { fun k(): String }` as the STATIC
   `k-impl(Ljava/lang/String;)Ljava/lang/String;` over the carrier, krusty as an INSTANCE `k()` on the
   box, so reading krusty's record puts the carrier under an `invokevirtual S.k()` — a VerifyError.
   The read side is fine there: against a KOTLINC-built `S` the same `box()` runs. A COMPUTED property
   counts as such a member and `declared_fids` cannot see it (its accessor is synthesized from
   `IrProperty`, and `accessor_names` comes from backing fields); the SOLE underlying property does
-  not, since kotlinc gives it an instance `getV()` too. (4) A member whose value-class position erases
-  to `Object` (`value class A<T>(val value: T)`, `kotlin/Result`): the return model rests on the
-  physical type identifying the carrier, and at `Object` it does not — `call_declared_ret` resolves
-  that ambiguity but is threaded only on the member and static call paths, not yet the
-  operator-invoke one, where `useCase(param)` still lands a raw carrier under a `checkcast
-  kotlin/Result`. Read off the ERASED signature rather than a value-class table, so it holds for a
-  classpath value class exactly as for a same-file one. A `suspend` member's RETURN is exempt from
+  not, since kotlinc gives it an instance `getV()` too. (3) A member whose value-class position erases
+  to `Object` (`value class A<T>(val value: T)`, `kotlin/Result`). `call_declared_ret` now resolves
+  the RETURN ambiguity on member, static and operator-invoke paths, but parameter positions still
+  lack the equivalent selected-declaration carrier fact: an `Object`-underlying value-class argument
+  may arrive boxed where the callee expects its carrier. Admission therefore remains a conservative
+  whole-member decline whenever any declared value-class position erases to `Object`, until both
+  directions are verified on every call route. The test is read from the ERASED signature rather
+  than a value-class table, so it holds for a classpath value class exactly as for a same-file one.
+  A `suspend` member's RETURN is exempt from
   this test — CPS makes it `Object` whatever it declares — with one exception that is a real
-  miscompile: (5) a CONCRETE `suspend` member whose value-class return krusty BOXES at the CPS
+  miscompile: (4) a CONCRETE `suspend` member whose value-class return krusty BOXES at the CPS
   `areturn` (`ir.suspend_boxed_value_class_returns`). kotlinc boxes there only for a PRIMITIVE
   underlying; over a reference, nullable, or generic underlying it `areturn`s the raw carrier, while
   krusty boxes unconditionally. Because the record krusty writes is byte-identical to kotlinc's,
@@ -692,8 +726,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_value_class_parameter_member_round_trips` and
   `an_inherited_value_class_returning_member_round_trips` each RUN `box()` against krusty's own class
   output (a caller that merely compiles while emitting the boxed form still fails);
-  `a_value_class_with_a_declared_member_withholds_the_record`,
-  `value_class_body_property_withholds_the_record` and
+  `a_value_class_with_a_declared_member_withholds_the_record` and
   `a_concrete_suspend_value_class_return_withholds_the_record` pin the declines above on the emitted
   METHOD, so each fails the day its ABI is corrected. `data_class_metadata_wiring_e2e::
   value_class_parameter_member_is_byte_identical`, `value_class_return_member_is_byte_identical` and
@@ -701,7 +734,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   included, against kotlinc's.
   The box corpus's `// MODULE:` path — the only place the gate compiles a DOWNSTREAM module against
   krusty's own class output — now emits class metadata too, matching what ships; switching the
-  annotation on was itself a net gain (3466 → 3471 cases compiled, still 0 miscompiles), and
+  annotation on was itself a net gain (3466 → 3471 → 3589 cases compiled as the value-class records landed, still 0 miscompiles), and
   describing value-class members took it from 3472 to **3587 cases compiled, still 0 miscompiles**.
   Keeping it off would have left the gate blind to precisely the defects above: they surfaced only
   once that path wrote what the CLI writes.

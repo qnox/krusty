@@ -1276,6 +1276,10 @@ pub struct IrFile {
     /// `-<hash>` mangling). Recorded by the value-class pass BEFORE erasure; read by `emit_default_stub`
     /// (signature + box-on-fill + unbox-on-delegate) AND the `$default` CALL site (boxed arg + descriptor).
     pub default_stub_boxed_params: std::collections::HashMap<u32, Vec<(usize, crate::types::Ty)>>,
+    /// The subset declared in this MODULE's SOURCE (this file or a sibling). Whether such a class ends up
+    /// carrying an `@Metadata` record is decided by its own emit, so a record here cannot assume it does —
+    /// unlike a CLASSPATH value class, whose value-class-ness is itself decoded from that record.
+    pub module_source_value_classes: std::collections::HashSet<TypeName>,
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: std::collections::HashSet<TypeName>,

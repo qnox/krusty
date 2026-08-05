@@ -3464,6 +3464,12 @@ impl SymbolSource for JvmLibraries {
                             inline: m.inline,
                             suspend,
                             signature: m.signature.clone(),
+                            // Preserve the declaration-level return recovered when the class member
+                            // was aligned with metadata. This overload view is the common input to
+                            // instance-member selection (named calls and operator `invoke` alike);
+                            // rebuilding a callable without the fact makes a later specialized
+                            // `Object` return indistinguishable from a genuinely boxed generic slot.
+                            declared_ret: m.declared_ret,
                             // Whether the dispatch owner is an interface is the MEMBER's fact here.
                             // For a mapped builtin resolved with no JDK on the classpath the JVM
                             // owner (`java/util/List`) has no class file, so the call site cannot
