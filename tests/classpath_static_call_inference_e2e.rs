@@ -231,3 +231,118 @@ fn generic_extension_property_keeps_nullability_and_kotlin_collection_type() {
         });
     assert_eq!(output.trim(), "OK");
 }
+
+#[test]
+fn java_generic_member_binds_lambda_param_from_receiver_type_argument() {
+    // A lambda passed to a classpath generic member
+    // (`TransformSequence<T>.mapPresent(Function<? super T, ? extends R>)`) must type `it` from the
+    // RECEIVER's type argument (`TransformSequence<InputNode>` → `it: InputNode`). Otherwise the
+    // typed `SlotLookup.read(InputNode, TypedSlot<T>)` overload is unreachable inside the lambda.
+    // The member signature spells the wildcard argument with the OWNER formal `T`; binding only the
+    // return side previously left that parameter to fall back to `Any`. All names here are synthetic:
+    // the fixture preserves the generic signature shape without retaining reproduction identities.
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let java = [
+        (
+            "InputNode.java".into(),
+            r#"
+                package fixtures;
+                public class InputNode {
+                    private final String name;
+                    public InputNode(String name) { this.name = name; }
+                    public String getName() { return name; }
+                }
+            "#
+            .into(),
+        ),
+        (
+            "TypedSlot.java".into(),
+            r#"
+                package fixtures;
+                public final class TypedSlot<T> {
+                    private final String name;
+                    private TypedSlot(String name) { this.name = name; }
+                    public static <T> TypedSlot<T> create(String name) { return new TypedSlot<T>(name); }
+                }
+            "#
+            .into(),
+        ),
+        (
+            "SlotLookup.java".into(),
+            r#"
+                package fixtures;
+                public final class SlotLookup {
+                    public static Object read(InputNode node, Object slot) { return null; }
+                    public static <T> T read(InputNode node, TypedSlot<T> slot) { return null; }
+                }
+            "#
+            .into(),
+        ),
+        (
+            "TransformSequence.java".into(),
+            r#"
+                package fixtures;
+                import java.util.function.Function;
+                public class TransformSequence<T> {
+                    public <R> TransformSequence<R> mapPresent(Function<? super T, ? extends R> fun) { return new TransformSequence<R>(); }
+                    public T first() { return null; }
+                    public <R> R convert(T value, R fallback) { return fallback; }
+                }
+            "#
+            .into(),
+        ),
+    ];
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        return;
+    };
+    let root = library.parent().map(std::path::Path::to_path_buf);
+    let classpath = vec![library, stdlib];
+    let source = r#"
+        import fixtures.InputNode
+        import fixtures.SlotLookup
+        import fixtures.TransformSequence
+        import fixtures.TypedSlot
+
+        class ResultRecord(val name: String)
+
+        private val SLOT = TypedSlot.create<ResultRecord>("result")
+
+        fun create(node: InputNode?, items: TransformSequence<InputNode>): ResultRecord? {
+            // Next iteration: `R` is not yet inferred from the lambda BODY through the Java SAM
+            // parameter (the wildcard decodes as `Obj(java/util/function/Function, …)`, which never
+            // unifies with the lambda's function type), so `.first()?.name` on the chained result
+            // still reports `unresolved reference 'name'.` — kotlinc infers `R` there.
+            val parent = items
+                .mapPresent { SlotLookup.read(it, SLOT) }
+                .first()
+            return parent
+        }
+
+        // A method whose params mix the CLASS formal (`T value`) and a METHOD formal (`R fallback`)
+        // must still infer `R` from the argument — binding the class formal from the receiver must
+        // not erase the method formal to `Any` (`label.length` would not resolve).
+        fun convertLabel(items: TransformSequence<InputNode>): Int {
+            val label = items.convert(InputNode("node"), "OK")
+            return label.length
+        }
+
+        fun box(): String {
+            if (create(null, TransformSequence<InputNode>()) != null) return "create"
+            if (convertLabel(TransformSequence<InputNode>()) != 2) return "convert"
+            return "OK"
+        }
+    "#;
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
+            )
+        });
+    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output.trim(), "OK");
+}
