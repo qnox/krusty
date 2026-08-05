@@ -304,8 +304,66 @@ fn init_body_string_consts(ir: &IrFile, c: &IrClass) -> std::collections::HashMa
     };
     for &s in stmts {
         if let IrExpr::SetField { index, value, .. } = ir.expr(s) {
-            if let IrExpr::Const(crate::ir::IrConst::String(t)) = ir.expr(*value) {
+            if let IrExpr::Const(crate::ir::IrConst::String(t)) = ir.expr(init_operand(ir, *value))
+            {
                 out.insert(*index, t.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The value an initializer STORES, seeing through a value-class construction: the value-class pass
+/// rewrites `val k: K = K("OK")` to `K.constructor-impl("OK")`, whose stored value is still the constant
+/// the `ldc` pushes. Anything else is its own operand.
+fn init_operand(ir: &IrFile, value: crate::ir::ExprId) -> crate::ir::ExprId {
+    match ir.expr(value) {
+        IrExpr::Call {
+            callee: crate::ir::Callee::Static { name, .. },
+            args,
+            ..
+        } if name == "constructor-impl" && args.len() == 1 => args[0],
+        _ => value,
+    }
+}
+
+/// Per field index, the `(value class, `constructor-impl` descriptor)` its initializer constructs FROM A
+/// CONSTANT. The constant-pool seeder needs it to intern the factory where kotlinc does: after the
+/// constant the initializer pushes and before the field the store writes.
+///
+/// Restricted to a constant operand on purpose. kotlinc interns in EVALUATION order, so an initializer
+/// that computes its argument (`K(compute())`) interns that call first and the factory after it —
+/// seeding the factory at the field's position would put it ahead of a call the seeder does not model.
+/// Leaving those to natural emission order keeps them where they were.
+fn init_body_value_class_ctors(
+    ir: &IrFile,
+    c: &IrClass,
+) -> std::collections::HashMap<u32, (String, String)> {
+    let mut out = std::collections::HashMap::new();
+    let Some(body) = c.init_body else { return out };
+    let IrExpr::Block { stmts, .. } = ir.expr(body) else {
+        return out;
+    };
+    for &s in stmts {
+        if let IrExpr::SetField { index, value, .. } = ir.expr(s) {
+            if let IrExpr::Call {
+                callee:
+                    crate::ir::Callee::Static {
+                        owner,
+                        name,
+                        descriptor,
+                        ..
+                    },
+                args,
+                ..
+            } = ir.expr(*value)
+            {
+                let from_constant = args
+                    .first()
+                    .is_some_and(|&a| matches!(ir.expr(a), IrExpr::Const(_)));
+                if name == "constructor-impl" && from_constant {
+                    out.insert(*index, (owner.render(), descriptor.clone()));
+                }
             }
         }
     }
@@ -371,28 +429,13 @@ fn build_class_metadata(
             d2: vec![],
         });
     }
-    if c.is_annotation
-        || c.enum_entry_of.is_some()
-        || c.prop_ref.is_some()
-        || c.func_ref.is_some()
-        || c.companion_class.is_some()
-        || !c.secondary_ctors.is_empty()
-        // An interface legitimately has NO constructor; every other kind must have its primary.
-        || (!c.has_primary_ctor && !c.is_interface)
-        || (c.fields.len() as u32) < c.ctor_param_count
-    {
+    if !class_metadata_common_shape_admitted(ir, c) {
         return None;
     }
-    let cap = |s: &str| {
-        let mut c = s.chars();
-        c.next()
-            .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
-            .unwrap_or_default()
-    };
     // A `data class` also carries kotlinc's synthesized `componentN`/`copy`/`equals`/`hashCode`/
     // `toString` — derivable from the primary-ctor properties alone, so allowed alongside accessors.
-    if c.is_value && (c.fields.len() != 1 || !c.fields[0].is_final()) {
-        return None; // multi-field / `var` value classes are a shape not computed yet
+    if c.is_value && !value_class_metadata_shape_admitted(ir, c) {
+        return None;
     }
     // A value class's compiler-synthesized members (the static `-impl` family + their instance
     // delegators); allowed alongside the property accessor without disqualifying the shape.
@@ -440,8 +483,8 @@ fn build_class_metadata(
         .fields
         .iter()
         .flat_map(|f| {
-            let cn = cap(&f.name);
-            [format!("get{cn}"), format!("set{cn}")]
+            let (getter, setter) = accessor_jvm_names(c, &f.name);
+            [getter, setter]
         })
         .collect();
     // Any member that is NOT an accessor and NOT part of a data/value class's synthesized set is a REAL
@@ -467,7 +510,7 @@ fn build_class_metadata(
     // `box()`) and pinned by the box corpus's `compileKotlinAgainstKotlin/inlineClasses/*` MODULE
     // chains.
     //
-    // Three shapes still decline, and NONE of them for the reason removed above: each is a WRITE-side
+    // Four shapes still decline, and NONE of them for the reason removed above: each is a WRITE-side
     // gap — krusty's own output differs from kotlinc's — so the read half fixed here cannot reach them.
     // Each was invisible while the record was withheld, and each is proven by a differential comparison
     // against real kotlinc for the same source.
@@ -482,16 +525,7 @@ fn build_class_metadata(
     //    erasure loses the parameter's identity) is the signal; `vc_declared_sigs` cannot be, as it
     //    holds non-synthesized FUNCTIONS only.
     //
-    // 2. A VALUE-CLASS-typed PROPERTY. The METHODS match kotlinc exactly (both emit `getK-XLNMDGE()
-    //    Ljava/lang/String;`), but the RECORD does not: for `class Holder { val k: K = K("OK") }`
-    //    krusty writes `d2=[…,"k","","getK","()Ljava/lang/String;"]` where kotlinc writes
-    //    `[…,"k","LK;","getK-XLNMDGE","()Ljava/lang/String;","Ljava/lang/String;"]` — the property's
-    //    Kotlin type is EMPTY rather than `LK;` and its getter is spelled unmangled. A reader binds a
-    //    `getK()` the class file does not define; krusty's own reader reports `.k`'s result as having
-    //    no member `v`. Describing a value-class property type is a separate write-side model from the
-    //    value-class RETURN, which is why the stamped realization still gates admission here.
-    //
-    // 3. A VALUE class with a DECLARED MEMBER of its own. kotlinc realizes
+    // 2. A VALUE class with a DECLARED MEMBER of its own. kotlinc realizes
     //    `value class S(val v: String) { fun k(): String }` as the STATIC
     //    `k-impl(Ljava/lang/String;)Ljava/lang/String;` over the unboxed carrier; krusty emits an
     //    INSTANCE `k()` on the box. Reading krusty's record then puts the carrier on the stack under an
@@ -504,16 +538,18 @@ fn build_class_metadata(
     //    get() = … }` is that shape — kotlinc emits the static `getPublicValue-impl(Object)`, krusty an
     //    instance `getPublicValue()`. The SOLE underlying property is not a declared member in this
     //    sense: kotlinc gives it an instance `getV()` too, so it stays admissible.
-    // 4. A member whose value-class position erases to `Object` — i.e. the value class's underlying is
+    // 3. A member whose value-class position erases to `Object` — i.e. the value class's underlying is
     //    itself erased-top (`value class A<T>(val value: T)`, `kotlin/Result`). The RETURN model
     //    described above rests on the physical type identifying the carrier, and at `Object` it does
     //    not: a carrier and a BOX sitting in a generic slot are spelled identically, which is the same
-    //    ambiguity `call_declared_ret` exists to resolve — and it is only threaded on the member and
-    //    static call paths, not yet on the operator-invoke one (`useCase(param)` still lands a raw
-    //    carrier under a `checkcast kotlin/Result`). Describing these members turns a SKIP into a
-    //    miscompile, so they wait for the remaining paths. Read off the ERASED signature rather than a
-    //    value-class table, so it holds for a classpath value class (`Result`) exactly as for a
-    //    same-file one: a position that DECLARED a value class and now spells `Object` is the case.
+    //    ambiguity `call_declared_ret` exists to resolve. That declared-return fact is now threaded
+    //    through ordinary member, static and operator-invoke calls, but parameter positions still lack
+    //    an equivalent selected-declaration carrier fact: an `Object`-underlying value-class argument
+    //    can still arrive boxed where the callee expects its carrier. Admission therefore remains a
+    //    conservative whole-member decline whenever ANY declared value-class position erases to
+    //    `Object`, until both directions are verified on every call route. Read this off the erased
+    //    signature rather than a value-class table, so it holds for a classpath value class (`Result`)
+    //    exactly as for a same-file one.
     //
     //    A `suspend` member's return is EXEMPT, because the CPS rewrite makes every suspend method
     //    return `Object` regardless of what it declares (the real return rides the `Continuation`'s
@@ -521,7 +557,7 @@ fn build_class_metadata(
     //    perfectly describable — `interface I { suspend fun f(a: K): String }` is byte-identical to
     //    kotlinc. Value-class PARAMETERS are still checked; only the return is exempt.
     //
-    //    The exemption itself has an exception, and it is a real miscompile rather than a lost
+    // 4. The exemption itself has an exception, and it is a real miscompile rather than a lost
     //    opportunity: when the value-class pass BOXES the value-class return at the CPS `areturn`
     //    (`ir.suspend_boxed_value_class_returns`), krusty's bytecode and kotlinc's disagree. kotlinc
     //    boxes only for a PRIMITIVE underlying; over a reference, nullable, or generic underlying it
@@ -555,15 +591,37 @@ fn build_class_metadata(
     };
     let has_object_erased_value_class_member =
         declared_fids.iter().any(erases_value_class_to_object);
-    let has_computed_property = c.properties.iter().any(|p| p.backing_field.is_none());
-    let has_value_class_property_realization = c
+    if has_object_erased_value_class_member
+        || (!c.is_value && ir.has_value_param_ctor(&c.fq_name()))
+    {
+        return None;
+    }
+    // …and a class cannot be described in terms of a value class a downstream compilation cannot READ
+    // as one (`value_class_is_readable`): it would see an ordinary class, cast the carrier to the box
+    // and bind an instance accessor where kotlinc emits the static `-impl` — a ClassCastException.
+    // Describing `Holder.make(): A` is only sound once `A` itself is described.
+    let mentions_undescribed_value_class = |t: &Ty| {
+        t.non_null().obj_internal().is_some_and(|fq_name| {
+            // Same-file and classpath declarations are in the unified lookup. A sibling source
+            // declaration is deliberately not materialized into this file's IR, so the module-origin
+            // subset is also positive identity for that one case; it is not a second underlying map.
+            (ir.is_value_class_name(fq_name) || ir.module_source_value_classes.contains(&fq_name))
+                && !value_class_is_readable(ir, fq_name)
+        })
+    };
+    if declared_fids.iter().any(|fid| {
+        ir.vc_declared_sigs
+            .get(fid)
+            .is_some_and(|(_, params, ret)| {
+                params
+                    .iter()
+                    .chain(std::iter::once(ret))
+                    .any(mentions_undescribed_value_class)
+            })
+    }) || c
         .properties
         .iter()
-        .any(|p| p.getter_jvm_name.is_some() || p.setter_jvm_name.is_some());
-    if has_object_erased_value_class_member
-        || (!c.is_value
-            && (has_value_class_property_realization || ir.has_value_param_ctor(&c.fq_name())))
-        || (c.is_value && (!declared_fids.is_empty() || has_computed_property))
+        .any(|p| p.getter_jvm_name.is_some() && mentions_undescribed_value_class(&p.ty))
     {
         return None;
     }
@@ -575,9 +633,24 @@ fn build_class_metadata(
         .enumerate()
         .map(|(i, f)| {
             let visibility = property_visibility(ir, &c.fq_name(), &f.name);
+            // The value-class pass erases the backing FIELD to the underlying carrier and stamps the
+            // accessor's mangled JVM spelling on the property DECLARATION, which keeps the Kotlin type.
+            // So the record's Kotlin half comes from the declaration (`k: K`) and its JVM half from the
+            // field + stamp (`getK-XLNMDGE()Ljava/lang/String;`) — the same two facts accessor emission
+            // consumes, which is what keeps the described accessor one the class file defines. The
+            // erased field descriptor is recorded explicitly: a reader cannot derive
+            // `Ljava/lang/String;` from `K`.
+            let declaration = c.properties.iter().find(|p| p.name == f.name);
+            let stamped = declaration
+                .is_some_and(|p| p.getter_jvm_name.is_some() || p.setter_jvm_name.is_some());
+            let (getter, setter) = accessor_jvm_names(c, &f.name);
+            let declared_ty = match declaration {
+                Some(p) if stamped => p.ty,
+                _ => f.ty,
+            };
             PropMeta {
                 name: f.name.clone(),
-                ty: f.ty,
+                ty: declared_ty,
                 is_var: !f.is_final(),
                 visibility,
                 has_constant: f.is_final()
@@ -591,10 +664,10 @@ fn build_class_metadata(
                         .and_then(|(_, tp)| c.type_params.iter().position(|t| t == tp))
                         .map(|i| i as u32)
                 }),
-                getter: (!visibility.is_private())
-                    .then(|| (format!("get{}", cap(&f.name)), format!("(){}", desc(f.ty)))),
+                getter: (!visibility.is_private()).then(|| (getter, format!("(){}", desc(f.ty)))),
                 setter: (!visibility.is_private() && !f.is_final())
-                    .then(|| (format!("set{}", cap(&f.name)), format!("({})V", desc(f.ty)))),
+                    .then(|| (setter, format!("({})V", desc(f.ty)))),
+                field_desc: (declared_ty != f.ty).then(|| desc(f.ty)),
             }
         })
         .collect();
@@ -616,6 +689,7 @@ fn build_class_metadata(
             tparam: None,
             getter: None,
             setter: None,
+            field_desc: None,
         });
     }
     let named_ctor_args: Vec<(String, Ty, bool, Option<u32>)> = c
@@ -934,6 +1008,103 @@ fn build_class_metadata(
 /// Compute a plain property class's ctor/field/accessor descriptors and seed the constant pool in
 /// kotlinc's interning order (see [`ClassWriter::seed_plain_class_pool`]). Mirrors the descriptors that
 /// `attach_synth_debug_tables` and the natural emission produce, so the seeded entries are reused.
+/// Whether the value class `fq_name` is one a downstream compilation can READ as a value class.
+///
+/// Admission is transitive: a member described as returning/taking `X` is only sound when `X` itself
+/// carries a record, because a value class WITHOUT one reads downstream as an ordinary class — the
+/// caller casts the carrier to the box and binds an instance accessor where kotlinc emits the static
+/// `-impl`, i.e. a ClassCastException. So this answers positively, never by assumption:
+///
+/// - declared in THIS file: exactly when [`build_class_metadata`] admits it;
+/// - declared in another file of this MODULE: unknown here (that file's record is decided by its own
+///   emit), so the answer is no;
+/// - anything else is on the CLASSPATH, where value-class-ness is itself decoded from the `@Metadata`
+///   inline record — being known as a value class at all IS the evidence that a record exists.
+fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool {
+    if let Some(declared) = ir.classes.iter().find(|other| other.fq_name == fq_name) {
+        return value_class_metadata_shape_admitted(ir, declared);
+    }
+    !ir.module_source_value_classes.contains(&fq_name)
+}
+
+/// Common class-shape admission shared by the writer and transitive value-class readability. Keeping
+/// these kind/constructor bails in one predicate is correctness-critical: if the writer withholds a
+/// value class but the transitive check independently admits it, a mentioning class publishes a type
+/// a downstream compiler reads as an ordinary box.
+fn class_metadata_common_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
+    !(c.is_annotation
+        || c.enum_entry_of.is_some()
+        || c.prop_ref.is_some()
+        || c.func_ref.is_some()
+        || c.companion_class.is_some()
+        || !c.secondary_ctors.is_empty()
+        || (!c.has_primary_ctor && !c.is_interface)
+        || (c.fields.len() as u32) < c.ctor_param_count
+        || (!c.is_value && ir.has_value_param_ctor(&c.fq_name())))
+}
+
+/// The single admission predicate for a VALUE class's own metadata record. Both
+/// [`build_class_metadata`] and [`value_class_is_readable`] call it, so adding a new write-side bail
+/// cannot silently let a different class describe the withheld value class downstream.
+fn value_class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
+    c.is_value
+        && class_metadata_common_shape_admitted(ir, c)
+        && c.fields.len() == 1
+        && c.fields[0].is_final()
+        && !ir.has_value_param_ctor(&c.fq_name())
+        // A computed property is static `-impl` over the carrier in kotlinc and an instance accessor
+        // on the box here, so the value class remains withheld until those physical ABIs agree.
+        && !c.properties.iter().any(|p| p.backing_field.is_none())
+        && class_metadata_declares_only_synthesized_members(ir, c)
+}
+
+/// Whether the VALUE class `c` declares nothing beyond the members a value class synthesizes (the
+/// `-impl` family, the `Any` overrides, and its own field accessor) — part of the condition under which
+/// [`build_class_metadata`] describes it at all.
+fn class_metadata_declares_only_synthesized_members(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
+    const SYNTHESIZED: [&str; 10] = [
+        "equals",
+        "hashCode",
+        "toString",
+        "equals-impl",
+        "equals-impl0",
+        "hashCode-impl",
+        "toString-impl",
+        "box-impl",
+        "unbox-impl",
+        "constructor-impl",
+    ];
+    c.methods.iter().all(|&fid| {
+        let name = &ir.functions[fid as usize].name;
+        SYNTHESIZED.contains(&name.as_str())
+            || c.fields.iter().any(|f| {
+                let (getter, setter) = accessor_jvm_names(c, &f.name);
+                *name == getter || *name == setter
+            })
+    })
+}
+
+/// The JVM accessor spellings a class's synthesized property accessors are emitted under: the value-class
+/// pass's stamp when the plain convention is not the physical ABI (`val k: K` → `getK-XLNMDGE`), else the
+/// convention itself. The constant-pool seeder, the debug tables (`LineNumberTable`/`LocalVariableTable`)
+/// and the `@Metadata` record all key on the accessor by NAME, so they must ask the same question the
+/// emission does — a seeded/annotated `getK` beside an emitted `getK-XLNMDGE` interns a constant nothing
+/// uses, drops the accessor's debug info, and (in the record) advertises a method that does not exist.
+/// The convention itself is [`crate::names::property_getter_name`] — the same helper the accessor
+/// EMISSION uses, so a Kotlin `is`-prefixed property (`val isOpen`, whose accessor keeps the source
+/// name rather than becoming `getIsOpen`) is spelled one way everywhere.
+fn accessor_jvm_names(c: &crate::ir::IrClass, field_name: &str) -> (String, String) {
+    let declaration = c.properties.iter().find(|p| p.name == field_name);
+    (
+        declaration
+            .and_then(|p| p.getter_jvm_name.clone())
+            .unwrap_or_else(|| crate::names::property_getter_name(field_name)),
+        declaration
+            .and_then(|p| p.setter_jvm_name.clone())
+            .unwrap_or_else(|| crate::names::property_setter_name(field_name)),
+    )
+}
+
 fn seed_plain_class_pool(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -943,12 +1114,6 @@ fn seed_plain_class_pool(
     cw: &mut ClassWriter,
 ) {
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
-    let cap = |s: &str| {
-        let mut ch = s.chars();
-        ch.next()
-            .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
-            .unwrap_or_default()
-    };
     // Reference-type annotation kind: 0 = primitive or bare type parameter (no annotation), 1 =
     // non-null reference (@NotNull + a `checkNotNullParameter` guard), 2 = nullable (@Nullable, no guard).
     let ann_kind = |name: &str, t: Ty| -> u8 {
@@ -965,6 +1130,7 @@ fn seed_plain_class_pool(
     let is_nonnull_ref = |name: &str, t: Ty| ann_kind(name, t) == 1;
     let ctor_desc = format!("({})V", ctor_field_descs(c));
     let body_consts = init_body_string_consts(ir, c);
+    let body_value_class_ctors = init_body_value_class_ctors(ir, c);
     let stored = init_body_stored_fields(ir, c);
     let fields: Vec<crate::jvm::classfile::SeedField> = c
         .fields
@@ -977,6 +1143,7 @@ fn seed_plain_class_pool(
             is_ctor_param: i < c.ctor_param_count as usize,
             stores_in_ctor: i < c.ctor_param_count as usize || stored.contains(&(i as u32)),
             string_const: body_consts.get(&(i as u32)).cloned(),
+            value_class_ctor: body_value_class_ctors.get(&(i as u32)).cloned(),
         })
         .collect();
     // (name, descriptor, setter_kind): 0 getter, 1 primitive setter, 2 non-null reference setter.
@@ -988,18 +1155,11 @@ fn seed_plain_class_pool(
         .iter()
         .filter(|f| !property_visibility(ir, fq_name, &f.name).is_private())
     {
-        accessors.push((
-            format!("get{}", cap(&f.name)),
-            format!("(){}", desc(f.ty)),
-            0,
-        ));
+        let (getter, setter) = accessor_jvm_names(c, &f.name);
+        accessors.push((getter, format!("(){}", desc(f.ty)), 0));
         if !f.is_final() {
             let kind = if is_nonnull_ref(&f.name, f.ty) { 2 } else { 1 };
-            accessors.push((
-                format!("set{}", cap(&f.name)),
-                format!("({})V", desc(f.ty)),
-                kind,
-            ));
+            accessors.push((setter, format!("({})V", desc(f.ty)), kind));
         }
     }
     // Generic `Signature`s for PARAMETERIZED-type members (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`).
@@ -1162,12 +1322,6 @@ fn attach_synth_debug_tables(
             _ => 1,
         }
     };
-    let cap = |s: &str| {
-        let mut ch = s.chars();
-        ch.next()
-            .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
-            .unwrap_or_default()
-    };
     // A non-null reference param carries a `checkNotNullParameter` guard (`aload <slot>; ldc <name>;
     // invokestatic`) before the body; kotlinc's LineNumberTable maps the decl line to the post-prologue
     // offset. The guard's length is SLOT-dependent: `aload_0..3` is 1 byte but `aload <u1>` (slot ≥ 4)
@@ -1263,7 +1417,7 @@ fn attach_synth_debug_tables(
             .copied()
             .filter(|&l| l != 0)
             .unwrap_or(line);
-        let g = format!("get{}", cap(&f.name));
+        let (g, s) = accessor_jvm_names(c, &f.name);
         cw.set_method_debug(
             &g,
             &format!("(){}", desc(f.ty)),
@@ -1271,7 +1425,6 @@ fn attach_synth_debug_tables(
             &this_only,
         );
         if !f.is_final() {
-            let s = format!("set{}", cap(&f.name));
             let pd = desc(f.ty);
             // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
             // `<set-?>` String's real ldc width + invokestatic(3).
@@ -1422,12 +1575,6 @@ fn attach_synth_debug_tables(
 /// class with reference-typed properties. Call after `attach_synth_debug_tables`.
 fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
-    let cap = |s: &str| {
-        let mut ch = s.chars();
-        ch.next()
-            .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
-            .unwrap_or_default()
-    };
     // A reference type (descriptor `L…;`/`[…`) gets `@NotNull` unless it is `Ty::Nullable`, then
     // `@Nullable`; a primitive gets no annotation.
     let ann = |name: &str, t: Ty| -> Option<&'static str> {
@@ -1469,19 +1616,10 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         let Some(a) = ann(&f.name, f.ty) else {
             continue;
         };
-        cw.set_method_nullability(
-            &format!("get{}", cap(&f.name)),
-            &format!("(){}", desc(f.ty)),
-            Some(a),
-            &[],
-        );
+        let (getter, setter) = accessor_jvm_names(c, &f.name);
+        cw.set_method_nullability(&getter, &format!("(){}", desc(f.ty)), Some(a), &[]);
         if !f.is_final() {
-            cw.set_method_nullability(
-                &format!("set{}", cap(&f.name)),
-                &format!("({})V", desc(f.ty)),
-                None,
-                &[Some(a)],
-            );
+            cw.set_method_nullability(&setter, &format!("({})V", desc(f.ty)), None, &[Some(a)]);
         }
     }
     // Data-class synthesized methods: `copy` returns the class (`@NotNull`), `toString` returns
@@ -3488,13 +3626,8 @@ fn emit_class(
         .fields
         .iter()
         .flat_map(|f| {
-            let cn = {
-                let mut ch = f.name.chars();
-                ch.next()
-                    .map(|x| x.to_uppercase().collect::<String>() + ch.as_str())
-                    .unwrap_or_default()
-            };
-            [format!("get{cn}"), format!("set{cn}")]
+            let (getter, setter) = accessor_jvm_names(c, &f.name);
+            [getter, setter]
         })
         .collect();
     let mut ordered: Vec<u32> = Vec::with_capacity(c.methods.len());

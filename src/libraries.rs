@@ -1221,6 +1221,14 @@ impl FunctionInfo {
         );
         member.owner = Some(self.callable.owner);
         member.physical_ret = self.callable.physical_ret;
+        // Preserve the selected declaration's pre-substitution return when a generic `FunctionInfo`
+        // is materialized as an instance-member emit handle. The logical `ret` above is deliberately
+        // caller-specialized, so it cannot replace this fact: `Factory.invoke(): TokenBox<String>` and
+        // `List<TokenBox<String>>.get()` may both specialize to `TokenBox<String>` and physically return
+        // `Object`, while only the declaration says the former hands back an unboxed carrier. Dropping
+        // the fact here makes every downstream consumer—including the operator-invoke path—guess from
+        // indistinguishable substituted/physical types and unbox a real carrier as though it were a box.
+        member.declared_ret = self.callable.declared_ret;
         member.signature = self.callable.signature.clone();
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
