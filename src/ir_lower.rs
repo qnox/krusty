@@ -6151,15 +6151,15 @@ impl<'a> Lower<'a> {
             .as_ref()
             .filter(|layout| layout.reference_slots.len() == args.len() + 1)
             .and_then(|layout| layout.continuation_slot);
-        // For a callable NOT marked suspend, nothing will thread it, so the emitted `invokestatic` is
-        // an argument SHORT: it links and fails verification. The record is wrong rather than the
-        // call — an unsigned value parameter mangles the JVM name (`libU` → `libU-OzbTU-A`) and the
-        // suspend lookup, keyed by that name, misses the `@Metadata` entry under the SOURCE name.
-        // Both call forms reach this: the `$default` synthetic and the plain mangled method, which is
-        // why the test is the UNFILLED slot rather than `$default`-ness. A non-suspend callee that
-        // takes a `Continuation` as an ordinary parameter fills every slot and is untouched.
-        // Declining keeps the wrong record out of a class file; recovering the lookup would let the
-        // shape emit again.
+        // A callable the library read did NOT mark `suspend`, whose signature still carries a
+        // continuation nothing will thread: the emitted call would be an argument SHORT. The RECORD is
+        // wrong rather than the call, so this is an ASSERTION on the library read, not a feature — no
+        // source shape is known to reach it, it cannot be pinned by a test without injecting that
+        // fault, and its lack of coverage is NOT a sign it is dead. It is the last thing between a
+        // wrong record and a class the platform rejects, which is strictly worse than a decline.
+        // What IS pinned is that it does not over-fire: the test is the UNFILLED slot, so a
+        // non-suspend callee that takes a `Continuation` as an ordinary parameter fills every slot and
+        // is untouched (`a_plain_continuation_parameter_is_not_an_unthreaded_continuation`).
         if continuation.is_some() && !callable.suspend {
             return self.bail("gate:unthreaded-continuation-slot");
         }

@@ -1802,23 +1802,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parsed once rather than by independent parameter, continuation, and return queries that could
   disagree.
 
-  Aligning that second shape surfaced a separate miscompile, now also declined
-  (`gate:unthreaded-continuation-slot`): an unsigned VALUE PARAMETER mangles the JVM name (`libU` →
-  `libU-OzbTU-A`), krusty looks suspend-ness up under that name while `@Metadata` records the SOURCE
-  name, and the callable comes back marked non-suspend — so nothing threads the `Continuation` its
-  descriptor still spells and the emitted `invokestatic` is one argument short. BOTH call forms hit
-  it, the `$default` synthetic and the plain mangled method, so the test is the UNFILLED slot (the
-  descriptor has one parameter more than the call has values, and that parameter is a `Continuation`)
-  rather than `$default`-ness. A non-suspend callee that declares a `Continuation` parameter of its
-  own fills every slot and is untouched. Recovering the mangled-name suspend lookup would let these
-  shapes emit again; until then they skip instead of failing verification.
-
   `tests/bytecode_parity_e2e.rs` pins the two `equals` SHAPES: the folded carrier compare, and
   `equals-impl` with an unboxed receiver — the latter across all four carriers (`B`/`S`/`I`/`J`) and
   across `Any`, `String`, `UInt?`, cross-carrier, and the literal-`null` divergence. It also pins that
   both lowerings evaluate the RECEIVER before a SUSPENDING argument: neither reaches
   `emit_library_member_call`, so each spills the receiver to a temp itself, or the coroutine pass
   re-evaluates it in the resume block after the argument has already run.
+
+  Aligning that second shape surfaced a separate miscompile, since FIXED: an unsigned VALUE PARAMETER
+  MANGLES the JVM name (`libU` → `libU-OzbTU-A`, and the synthetic `libU-OzbTU-A$default` is named
+  from the mangled form). A source-name suspend set missed that bytecode candidate: the callable came
+  back non-suspend, nothing threaded the `Continuation` its descriptor still spells, and the emitted
+  `invokestatic` was one argument short — a class that links and fails verification. Suspend-ness is
+  now projected from the SAME metadata declaration selected by JVM name and descriptor shape for
+  arity, defaults, return type, and contracts. This both recognizes mangled suspend declarations and
+  prevents their flag from leaking to an ordinary same-source-name overload. Both suspend call forms
+  emit and run: the `$default` synthetic (an argument omitted) and the plain mangled method (every
+  argument supplied); the synthetic fixture also pins the ordinary overload independently.
+
+  A net stays behind it (`gate:unthreaded-continuation-slot`): if a callable is not marked `suspend`
+  and its descriptor still spells a `Continuation` the lowered values do not fill, the file is
+  declined rather than emitted a slot short. The test is the UNFILLED slot (one descriptor parameter
+  more than the call has values, and that parameter a `Continuation`) rather than `$default`-ness, so
+  a non-suspend callee that declares a `Continuation` parameter of its own fills every slot and is
+  untouched. It is an ASSERTION, not a feature: no source shape is known to reach it, and reaching it
+  means a classpath read failed to recognize a `suspend` callee — so it is deliberately untestable
+  without injecting that fault, and must not be deleted as dead code. What IS pinned is that it does
+  not over-fire (`a_plain_continuation_parameter_is_not_an_unthreaded_continuation`).
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
