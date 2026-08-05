@@ -1375,9 +1375,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so krusty recognizes them the same way kotlinc does: by the **resolved stdlib symbol**, gated on the
   name *not* being shadowed by a user-declared function or local (a user `fun arrayOf` wins, never the
   intrinsic) — not by bare source name. An element that lowers to a
-  branch — an `if`/`when`/elvis or a **safe call** `c?.calc()` — is rejected (the file skips): a branch
-  mid-`Vararg`-fill emits a StackMapTable frame inside the element-store sequence that the verifier
-  rejects, so `is_branchy` treats those as non-spliceable (`ArrayOfRef` in `tests/feature_box_e2e.rs`).
+  branch — an `if`/`when`/elvis, a **safe call** `c?.calc()`, a relational comparison — is rejected on the
+  vararg-pack lowering paths (the file skips): `is_branchy` treats those as non-spliceable (`ArrayOfRef`
+  in `tests/feature_box_e2e.rs`). This is a *conservative lowering* restriction, not a verifier one — the
+  emitter now types the held `[array, array, index]` into a mid-fill element's frames (see "An operand
+  held on the stack across a branchy sub-expression must be TYPED into its frames"), so the shapes that
+  do reach emit are verifiable. `try` must stay rejected regardless: a handler CLEARS the operand stack,
+  so the partly-built array held there would be lost. `is_branchy`'s `==`/`!=` arm fires only when the
+  LHS is *syntactically* a primitive literal (`file_expr_is_jvm_scalar`), so `listOf(x == y, …)` over
+  `Int` parameters is NOT declined and does reach emit — that gap is what exposed the frame bug.
 - **Enum reflection intrinsics** `enumValueOf<E>(name)` / `enumValues<E>()`: the checker requires an
   enum type argument and types the result as `E` / `Array<E>`. The synthetic registry emits
   `E.valueOf(name)` / `E.values()`, including through an expanded reified inline function. A reified
@@ -1587,6 +1593,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so it isn't stranded on the operand stack across the branch's merge frame (`VerifyError: Inconsistent
   stackmap frames`). Non-branchy operands emit in place, so the common-case bytecode is unchanged.
   `BranchyArithmetic` in `tests/feature_box_e2e.rs`.
+- **An operand held on the stack across a branchy sub-expression must be TYPED into its frames.** Where
+  spilling to a temp isn't available — the store instruction needs its operands underneath it — the
+  emitter keeps the held entries on the operand stack and records them in every stack-map frame the
+  sub-expression writes (`pending_stack`, applied through `emit_value_over`). This covers the positions
+  that fill a container element-wise: a `Vararg`'s `dup; index; <element>; aastore` loop (`[array, array,
+  index]` held), the `SpreadBuilder`/`PrimitiveSpreadBuilder` `dup; <element>; add` loop
+  (`[builder, builder]`), and `kotlin/Array.get`/`.set` (`[array]` under the index, `[array, index]` under
+  the value). A comparison in such a position (`listOf(x == y, x != y)`, `b[0] = x == y`) branches to a
+  merge label whose frame previously declared an EMPTY stack; the class file still emitted successfully
+  and only failed at link time (`VerifyError: Inconsistent stackmap frames at branch target N` /
+  "Current frame's stack size doesn't match stackmap"). kotlinc also holds operands live across the
+  element, just with full frames — and one fewer, since it `astore`s the array to a local and reloads
+  it per element instead of `dup`ing it. All comparison arms are affected alike (numeric `if_icmp*`,
+  referential `if_acmp*`, `ifnull`, and the `lcmp`/`dcmp*` three-way forms), since each records its own
+  branch+merge frames. Where the position CAN spill instead — `Array.get`/`.set`, which start from an
+  empty stack — an operand that must not be held at all (`must_spill_across`: a `try`, whose handler
+  clears the operand stack) takes the `emit_operands` temp route; the `Vararg`/`SpreadBuilder` fill
+  loops have no such option, and lowering declines a `try` element for them (`is_branchy`).
+  `tests/comparison_under_operands_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
