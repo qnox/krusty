@@ -636,6 +636,8 @@ mod java_source_platform_params_e2e;
 mod java_source_supertype_chain_e2e;
 #[path = "java_static_field_e2e.rs"]
 mod java_static_field_e2e;
+#[path = "java_static_member_import_e2e.rs"]
+mod java_static_member_import_e2e;
 #[path = "jimage_compressed_e2e.rs"]
 mod jimage_compressed_e2e;
 #[path = "js_backend_coverage_e2e.rs"]
