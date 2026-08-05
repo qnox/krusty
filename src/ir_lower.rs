@@ -13,12 +13,13 @@ use crate::ast::{
 };
 use crate::frontend::{
     classifier_over_default, function_import_scope, qualified_path, typeref_leaf,
-    AnonymousObjectCapture, ClassNames, CompoundAssignmentTarget, CtorDefaultValue,
-    DelegateGetValueTarget, DestructureComponentTarget, ExprLowering, FrontendClassSig,
-    FrontendSymbols, FrontendTypeInfo, FunctionImportScope, InlineCall, InvokeKind,
-    IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin, ReceiverLambda,
-    ResolvedCall, ResolvedConstructor, ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall,
-    ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
+    AnonymousObjectCapture, AnonymousObjectCaptureSource, ClassNames, CompoundAssignmentTarget,
+    CtorDefaultValue, DelegateGetValueTarget, DestructureComponentTarget, ExprLowering,
+    FrontendClassSig, FrontendSymbols, FrontendTypeInfo, FunctionImportScope, InlineCall,
+    InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin,
+    ReceiverLambda, ResolvedCall, ResolvedConstructor, ResolvedCtorDelegationTarget,
+    ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature,
+    StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -3563,7 +3564,7 @@ fn lower_file_at_reporting_impl(
                     // enclosing instance's (private) members, which Kotlin binds by capture — not by
                     // inheritance (a base's private field is invisible to a subclass). The construction
                     // path still cannot mix captures with superclass constructor arguments, so it would
-                    // resolve such a name to the inherited field and miscompile (KT-3684). Bail those;
+                    // resolve such a name to the inherited field and miscompile. Bail those;
                     // SAM-style anon objects over interfaces or no-argument classes are unaffected
                     // (their outer-instance capture lowers through `this$0`).
                     // Anonymous-ness is an AST ownership fact, not a property of the generated JVM
@@ -7449,24 +7450,52 @@ impl<'a> Lower<'a> {
         })
     }
 
+    fn captured_enclosing_dispatch_value(&mut self, owner: TypeName) -> Option<u32> {
+        // A captured enclosing receiver is an IR layout capability, not proof that the current source
+        // declaration was spelled `inner`. Anonymous classes use the same leading synthetic field, and
+        // either receiver may satisfy an owner inherited from a dependency. Walk that uniform layout and
+        // ask the federated hierarchy about compatibility at every step; this avoids separate
+        // source/classpath/anonymous dispatch branches.
+        if let Some((value, ty)) = self.lookup("this$0") {
+            if self
+                .syms
+                .is_assignable_across_sources(ty, Ty::obj_name(owner))
+            {
+                return Some(self.emit_get_value(value));
+            }
+        }
+        if let Some(mut current) = self.cur_class {
+            let mut value = self.emit_get_value(0);
+            let mut seen = std::collections::HashSet::new();
+            while seen.insert(current) {
+                let (class, captured_ty) = {
+                    let info = self.class_info_name(current)?;
+                    let (_, captured_ty) =
+                        info.fields.first().filter(|(name, _)| name == "this$0")?;
+                    (info.id, *captured_ty)
+                };
+                value = self.emit_get_field(value, class, 0);
+                if self
+                    .syms
+                    .is_assignable_across_sources(captured_ty, Ty::obj_name(owner))
+                {
+                    return Some(value);
+                }
+                current = captured_ty.non_null().obj_internal()?;
+            }
+        }
+        None
+    }
+
     fn member_extension_dispatch_value(&mut self, owner: TypeName) -> Option<u32> {
         if let Some(receiver) = self.member_extension_dispatch_slot(owner) {
             return Some(self.emit_get_value(receiver));
         }
-        if let Some(current) = self.cur_class {
-            let captures_owner = self
-                .syms
-                .class_by_type_name(current)
-                .and_then(|class| class.inner_of_name())
-                == Some(owner);
-            if captures_owner {
-                if let Some((value, _)) = self.lookup("this$0") {
-                    return Some(self.emit_get_value(value));
-                }
-                let class = self.class_info_name(current)?.id;
-                let receiver = self.emit_get_value(0);
-                return Some(self.emit_get_field(receiver, class, 0));
-            }
+        // A missing capture is an ordinary miss, not the end of dispatch resolution: singleton owners
+        // below remain valid even while lowering an unrelated non-inner class. Keeping the capture walk
+        // isolated prevents its structural `?` exits from accidentally suppressing that fallback.
+        if let Some(receiver) = self.captured_enclosing_dispatch_value(owner) {
+            return Some(receiver);
         }
         let class = self.syms.class_by_type_name(owner)?;
         if class.is_object() {
@@ -11317,12 +11346,16 @@ impl<'a> Lower<'a> {
     }
 
     fn lower_anonymous_capture(&mut self, capture: &AnonymousObjectCapture) -> Option<u32> {
-        // The synthetic outer-instance capture: supply the enclosing `this` (the dispatch receiver
-        // at the construction site) — it is neither a scope local nor a field of the current class.
-        if capture.name == "this$0" {
-            let (this, actual) = self.lookup("$dispatch").or_else(|| self.lookup("this"))?;
-            let value = self.emit_get_value(this);
-            return self.coerce_argument_value(value, actual, capture.ty);
+        match capture.source {
+            AnonymousObjectCaptureSource::EnclosingInstance => {
+                // Supply the enclosing dispatch receiver selected by the checker. The JVM field name
+                // is deliberately irrelevant here: capture provenance, not a string convention,
+                // decides where the constructor argument comes from.
+                let (this, actual) = self.lookup("$dispatch").or_else(|| self.lookup("this"))?;
+                let value = self.emit_get_value(this);
+                return self.coerce_argument_value(value, actual, capture.ty);
+            }
+            AnonymousObjectCaptureSource::LexicalValue => {}
         }
         if let Some((value, actual)) = self.lookup(&capture.name) {
             let value = self.emit_get_value(value);
@@ -13893,9 +13926,10 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// For an unqualified call inside an inner class, resolve `name` as an ENCLOSING method (reached
-    /// through `this$0`). Returns `(method_class, method_index, method_fid, inner_class_id)`.
-    fn inner_outer_method(&self, name: &str) -> Option<(ClassId, u32, u32, ClassId)> {
+    /// For an unqualified call inside any class carrying an enclosing-instance field, resolve `name`
+    /// against that captured receiver. Inner declarations and hoisted anonymous objects share this IR
+    /// capability; the physical field marker only identifies how to load it.
+    fn captured_outer_method(&self, name: &str) -> Option<(ClassId, u32, u32, ClassId)> {
         let cur = self.cur_class.as_ref()?;
         let cur_id = self.class_info_name(*cur)?.id;
         let outer = match self.ir.classes[cur_id as usize].fields.first() {
@@ -15753,50 +15787,7 @@ impl<'a> Lower<'a> {
     /// value. `e` is the source property read, so lowering reuses checker-selected handles and applies
     /// expression-specific generic coercions. Returns `None` when the type exposes no such member.
     fn receiver_fn_dispatch_value(&mut self, owner: TypeName) -> Option<u32> {
-        if let Some(value) = self.member_extension_dispatch_value(owner) {
-            return Some(value);
-        }
-
-        if let Some((slot, ty)) = self.lookup("this$0") {
-            let matches = ty.obj_internal().is_some_and(|internal| {
-                internal == owner
-                    || self
-                        .syms
-                        .supertype_internal_names(&internal.render())
-                        .contains(&owner)
-            });
-            if matches {
-                return Some(self.emit_get_value(slot));
-            }
-        }
-
-        let mut current = self.cur_class?;
-        let mut value = self.emit_get_value(0);
-        let mut seen = std::collections::HashSet::new();
-        while seen.insert(current) {
-            let class = self.class_info_name(current)?.id;
-            let outer = self
-                .ir
-                .classes
-                .get(class as usize)?
-                .fields
-                .first()
-                .filter(|field| field.name == "this$0")?
-                .ty
-                .non_null()
-                .obj_internal()?;
-            value = self.emit_get_field(value, class, 0);
-            if outer == owner
-                || self
-                    .syms
-                    .supertype_internal_names(&outer.render())
-                    .contains(&owner)
-            {
-                return Some(value);
-            }
-            current = outer;
-        }
-        None
+        self.member_extension_dispatch_value(owner)
     }
 
     fn receiver_fn_value(&mut self, name: &str, origin: ReceiverFnValueOrigin) -> Option<u32> {
@@ -15889,14 +15880,45 @@ impl<'a> Lower<'a> {
             .collect()
     }
 
+    /// Materialize the exact implicit receiver selected by the checker. A directly scoped receiver is
+    /// read from its slot; an enclosing class receiver is recovered through the same typed capture walk
+    /// used by member-extension dispatch. The map carries semantic types only—JVM field spelling stays
+    /// an implementation detail of [`Self::member_extension_dispatch_value`].
+    fn selected_implicit_receiver(&mut self, expression: AstExprId) -> Option<(u32, Ty)> {
+        let expected = self
+            .info
+            .implicit_receiver_selections
+            .get(&expression)
+            .copied()?;
+        if let Some((slot, ty)) = self
+            .implicit_receivers()
+            .into_iter()
+            .find(|(_, ty)| *ty == expected)
+        {
+            return Some((self.emit_get_value(slot), ty));
+        }
+        let owner = expected.non_null().obj_internal()?;
+        self.member_extension_dispatch_value(owner)
+            .map(|value| (value, expected))
+    }
+
     fn lower_implicit_receiver_call(
         &mut self,
         name: &str,
         args: &[AstExprId],
         call: AstExprId,
     ) -> Option<u32> {
+        if self.info.implicit_receiver_selections.contains_key(&call) {
+            // The checker has already applied language precedence and overload selection. Load that
+            // exact semantic receiver instead of probing the backend's visible `this` slots: an
+            // enclosing instance can live behind a synthetic capture field and need not have the same
+            // concrete type as the member's provider-owned declaration owner.
+            let (value, expected) = self.selected_implicit_receiver(call)?;
+            return self.lower_this_member_call(value, expected, name, args, call);
+        }
         let receivers = self.implicit_receivers();
-        for (value, ty) in receivers {
+        for (slot, ty) in receivers {
+            let value = self.emit_get_value(slot);
             if let Some(result) = self.lower_this_member_call(value, ty, name, args, call) {
                 return Some(result);
             }
@@ -15908,6 +15930,18 @@ impl<'a> Lower<'a> {
         // The narrowed fallback inserts the required checkcast.
         if self.info.narrowed_this_member.contains_key(&e) {
             return None;
+        }
+        if self.info.implicit_receiver_selections.contains_key(&e) {
+            // Reads and calls share one checker-selected receiver rule. In particular, a dependency
+            // property inherited by an enclosing source class must read from the captured enclosing
+            // object, not from the anonymous object's own slot-0 `this`.
+            let (recv, ty) = self.selected_implicit_receiver(e)?;
+            if let Some(internal) = ty.obj_internal() {
+                if let Some(read) = self.lower_declared_property_read(recv, internal, name, e) {
+                    return Some(read);
+                }
+            }
+            return self.lower_member_read_on(recv, ty, name, e);
         }
         let receivers = self.implicit_receivers();
         if receivers.len() <= 1 {
@@ -16902,7 +16936,7 @@ impl<'a> Lower<'a> {
 
     fn lower_this_member_default_call(
         &mut self,
-        this_v: u32,
+        receiver: u32,
         class: ClassId,
         index: u32,
         mfid: u32,
@@ -16937,7 +16971,6 @@ impl<'a> Lower<'a> {
             }
             slot[p] = Some(self.lower_arg(*arg, &params[p])?);
         }
-        let recv = self.emit_get_value(this_v);
         let mut a: Vec<Option<u32>> = Vec::with_capacity(n);
         for (k, s) in slot.iter().enumerate() {
             let v = match s {
@@ -16955,12 +16988,12 @@ impl<'a> Lower<'a> {
             };
             a.push(Some(v));
         }
-        Some(self.emit_method_call(class, index, recv, a))
+        Some(self.emit_method_call(class, index, receiver, a))
     }
 
     fn lower_this_member_call(
         &mut self,
-        this_v: u32,
+        this_value: u32,
         this_ty: Ty,
         name: &str,
         args: &[AstExprId],
@@ -16990,8 +17023,7 @@ impl<'a> Lower<'a> {
         ) = self.info.resolved_calls.get(&e).cloned()
         {
             if extension_receiver == this_ty {
-                let extension = self.emit_get_value(this_v);
-                return self.lower_member_extension_call(extension, &target, args, e);
+                return self.lower_member_extension_call(this_value, &target, args, e);
             }
         }
         // The checker resolved this as a MODULE member and recorded the argument→parameter mapping in
@@ -17017,8 +17049,7 @@ impl<'a> Lower<'a> {
                 if target_name != name {
                     return None;
                 }
-                let recv = self.emit_get_value(this_v);
-                return self.lower_module_member_call(recv, &target, args, e);
+                return self.lower_module_member_call(this_value, &target, args, e);
             }
         }
         // A user instance method on the receiver's class — `this.m(args)`.
@@ -17035,12 +17066,11 @@ impl<'a> Lower<'a> {
                 let params = self.ir.functions[mfid as usize].params.clone();
                 let vararg = self.syms.method_is_vararg_name(internal, name);
                 if let Some(n_fixed) = vararg_arity(vararg, params.len(), args.len()) {
-                    let recv = self.emit_get_value(this_v);
                     let a = self.lower_call_args_vararg(args, &params, vararg, n_fixed)?;
                     return Some(self.emit_method_call(
                         class,
                         index,
-                        recv,
+                        this_value,
                         a.into_iter().map(Some).collect(),
                     ));
                 }
@@ -17056,7 +17086,7 @@ impl<'a> Lower<'a> {
                 // a mismatch means the wrong overload, so bail (skip the file) rather than miscompile.
                 if args.len() < params.len() && !vararg && self.member_ret_matches_call(&ret, e) {
                     if let Some(v) =
-                        self.lower_this_member_default_call(this_v, class, index, mfid, e, args)
+                        self.lower_this_member_default_call(this_value, class, index, mfid, e, args)
                     {
                         return Some(v);
                     }
@@ -17064,13 +17094,15 @@ impl<'a> Lower<'a> {
             }
         }
         if matches!(name, "toString" | "hashCode") && args.is_empty() {
-            let recv = self.emit_get_value(this_v);
-            return Some(self.emit_external_call(format!("kotlin/Any.{name}"), Some(recv), vec![]));
+            return Some(self.emit_external_call(
+                format!("kotlin/Any.{name}"),
+                Some(this_value),
+                vec![],
+            ));
         }
         if let Some(resolved) = self.info.resolved_member(e).cloned() {
-            let recv = self.emit_get_value(this_v);
             if let Some(r) =
-                self.lower_library_default_member_call(recv, this_ty, e, &resolved, args)
+                self.lower_library_default_member_call(this_value, this_ty, e, &resolved, args)
             {
                 return Some(r);
             }
@@ -17098,7 +17130,7 @@ impl<'a> Lower<'a> {
                 .or_else(|| this_ty.obj_internal())
                 .unwrap_or_else(crate::types::wk::any);
             let physical_ret = member.physical_ret;
-            let call = self.emit_library_member_call(recv, owner, member, ret, false, a)?;
+            let call = self.emit_library_member_call(this_value, owner, member, ret, false, a)?;
             return Some(self.coerce_generic_read(call, e, physical_ret));
         }
         // A MODULE extension on the receiver (`fun Recv.name(args)` declared in this compilation) —
@@ -17108,8 +17140,7 @@ impl<'a> Lower<'a> {
         if let Some(fid) = self.unique_ext_fun_id_by_arity(this_ty, name, args.len()) {
             let params = self.ir.functions[fid as usize].params.clone();
             if params.len() == args.len() + 1 {
-                let recv = self.emit_get_value(this_v);
-                let mut a = vec![recv];
+                let mut a = vec![this_value];
                 for (arg, pt) in args.iter().zip(&params[1..]) {
                     a.push(self.lower_arg(*arg, pt)?);
                 }
@@ -17117,8 +17148,7 @@ impl<'a> Lower<'a> {
             }
         }
         // A stdlib/library EXTENSION on the receiver (`uppercase`/`reversed`).
-        let recv = self.emit_get_value(this_v);
-        self.lower_ext_call_on(recv, this_ty, name, args, e)
+        self.lower_ext_call_on(this_value, this_ty, name, args, e)
     }
 
     /// Inline a receiver-lambda scope call the checker resolved (`x.run { … }`, `x.apply { … }`,
@@ -22407,8 +22437,13 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::ExtensionPropertyGet { getter }) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                let (this_v, this_ty) = self.lookup("this")?;
-                let receiver = self.emit_get_value(this_v);
+                let (receiver, this_ty) = if self.info.implicit_receiver_selections.contains_key(&e)
+                {
+                    self.selected_implicit_receiver(e)?
+                } else {
+                    let (slot, ty) = self.lookup("this")?;
+                    (self.emit_get_value(slot), ty)
+                };
                 let target = getter.params.first().copied().unwrap_or(this_ty);
                 let receiver = self.coerce_argument_value(receiver, this_ty, target)?;
                 return self.emit_extension_property_get(e, *getter, receiver);
@@ -22425,8 +22460,12 @@ impl<'a> Lower<'a> {
             if let Some(ExprLowering::IntrinsicProperty(member)) =
                 self.info.expr_lowers.get(&e).cloned()
             {
-                let (this_v, this_ty) = self.lookup("this")?;
-                let recv = self.emit_get_value(this_v);
+                let (recv, this_ty) = if self.info.implicit_receiver_selections.contains_key(&e) {
+                    self.selected_implicit_receiver(e)?
+                } else {
+                    let (slot, ty) = self.lookup("this")?;
+                    (self.emit_get_value(slot), ty)
+                };
                 let fallback = this_ty.obj_internal().unwrap_or_else(crate::types::wk::any);
                 let ret = member.ret;
                 return self.emit_library_member_call(recv, fallback, *member, ret, false, vec![]);
@@ -24591,12 +24630,15 @@ impl<'a> Lower<'a> {
                     }
                 }
             }
-            // Member of the nearest implicit receiver shadows a same-module top-level function of
-            // the same name (kotlinc scoping — the checker resolves it as a member, so the lowerer
-            // must too). Only in a receiver-lambda body (`cur_class` cleared) and when the name is
-            // not a local; `lower_this_member_call` returns `None` when no member matches, so a
-            // genuine top-level call still falls through to the module-function path below.
-            if self.cur_class.is_none() && self.lookup(&fname).is_none() {
+            // A checker-selected implicit receiver is authoritative even inside a generated/local
+            // class: that receiver may be an enclosing instance held in a capture field rather than
+            // the current class's slot-0 `this`. The legacy receiver-lambda path remains for call
+            // shapes not yet carrying the semantic handoff; a genuine top-level call still falls
+            // through because neither condition produces a member lowering.
+            if self.lookup(&fname).is_none()
+                && (self.cur_class.is_none()
+                    || self.info.implicit_receiver_selections.contains_key(&e))
+            {
                 if let Some(r) = self.lower_implicit_receiver_call(&fname, &args, e) {
                     return Some(r);
                 }
@@ -24817,7 +24859,8 @@ impl<'a> Lower<'a> {
                     self.lookup("$dispatch")
                         .or_else(|| self.lookup("this"))
                         .and_then(|(this_v, this_ty)| {
-                            self.lower_this_member_call(this_v, this_ty, &fname, &args, e)
+                            let this_value = self.emit_get_value(this_v);
+                            self.lower_this_member_call(this_value, this_ty, &fname, &args, e)
                         })
                 } else {
                     None
@@ -25134,8 +25177,8 @@ impl<'a> Lower<'a> {
                 let this = self.emit_get_value(0);
                 let a = self.lower_call_args_vararg(&args, &params, vararg, n_fixed)?;
                 self.emit_method_call(class, index, this, a.into_iter().map(Some).collect())
-            } else if let Some((class, index, mfid, cur_id)) = self.inner_outer_method(&fname) {
-                // Unqualified call to an enclosing method from an inner class: `this.this$0.foo()`.
+            } else if let Some((class, index, mfid, cur_id)) = self.captured_outer_method(&fname) {
+                // Unqualified call through the captured enclosing instance: `this.this$0.foo()`.
                 let params = self.ir.functions[mfid as usize].params.clone();
                 if args.len() != params.len() {
                     return None;
@@ -25187,11 +25230,11 @@ impl<'a> Lower<'a> {
                 // krusty's synthetic outer-instance marker (created by inner-class synthesis and by
                 // the anonymous-object outer-instance capture; `$` cannot appear in a plain Kotlin
                 // identifier), so it exactly identifies a class with a captured outer instance.
-                let is_inner = self.ir.classes[class as usize]
+                let captures_outer = self.ir.classes[class as usize]
                     .fields
                     .first()
                     .is_some_and(|f| f.name == "this$0");
-                if is_inner {
+                if captures_outer {
                     let field_tys: Vec<Ty> = self.ir.classes[class as usize]
                         .fields
                         .iter()

@@ -1692,6 +1692,16 @@ struct MemberExtensionProperty {
 pub struct AnonymousObjectCapture {
     pub name: String,
     pub ty: Ty,
+    /// Semantic source of the captured value. Keep this separate from `name`: `this$0` is one JVM
+    /// field spelling, not a reliable front-end discriminator. A backend or future target may choose
+    /// a different physical name while the enclosing-instance meaning remains unchanged.
+    pub source: AnonymousObjectCaptureSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnonymousObjectCaptureSource {
+    LexicalValue,
+    EnclosingInstance,
 }
 
 pub struct SymbolTable {
@@ -9693,6 +9703,12 @@ pub struct TypeInfo {
     /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
     /// [`Self::resolved_top_level`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// The exact semantic receiver selected for an unqualified member access through the implicit-receiver
+    /// stack. This is deliberately separate from [`Self::resolved_calls`]: the selected callable says
+    /// what to invoke, while this map says which runtime object supplies its dispatch/extension
+    /// receiver. Reconstructing that choice in lowering from local names loses captured enclosing
+    /// instances (and can invoke/read a dependency member on the anonymous object itself).
+    pub implicit_receiver_selections: HashMap<ExprId, Ty>,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     source_extension_properties: HashMap<ExprId, crate::libraries::PropertyInfo>,
     source_extension_property_writes: HashMap<StmtId, crate::libraries::PropertyInfo>,
@@ -11358,6 +11374,7 @@ fn make_checker<'a>(
         narrowed_this_member: HashMap::new(),
         pending_unknown_named_arg: HashMap::new(),
         resolved_calls: HashMap::new(),
+        implicit_receiver_selections: HashMap::new(),
         source_contracts: HashMap::new(),
         resolved_source_calls: HashMap::new(),
         source_extension_properties: HashMap::new(),
@@ -11408,7 +11425,6 @@ fn class_receiver_labels(
     symbols: &SymbolTable,
     current: Option<Ty>,
 ) -> Vec<(String, Ty, bool)> {
-    let mut labels = Vec::new();
     // Start from the collected signature's semantic nesting edge. Reconstructing the owner from
     // `ClassDecl::name` / `inner_of` would make receiver labels depend on whether this declaration was
     // spelled as a dotted nested source name, and previously required a separate fallback for an
@@ -11416,24 +11432,10 @@ fn class_receiver_labels(
     // signature, so its normalized internal name gives source files and later module consumers one
     // origin-independent path to the lexical outer chain.
     let current_internal = current.and_then(Ty::obj_internal);
-    let mut outer = current_internal
+    let outer = current_internal
         .and_then(|internal| symbols.class_by_type_name(internal))
         .and_then(ClassSig::inner_of_name);
-    while let Some(internal) = outer {
-        let Some(signature) = symbols.class_by_type_name(internal) else {
-            break;
-        };
-        let declaration = symbols
-            .class_simple_name(internal)
-            .unwrap_or_else(|| "<anonymous>".to_string());
-        labels.push((
-            class_declaration_label(&declaration).to_string(),
-            Ty::obj_name(signature.internal_name()),
-            true,
-        ));
-        outer = signature.inner_of_name();
-    }
-    labels.reverse();
+    let mut labels = enclosing_receiver_labels(symbols, outer);
     if let Some(ty) = current {
         // The current AST declaration is the authoritative source spelling for its explicit label;
         // using a reverse symbol-table lookup here would be ambiguous in an already-diagnosed duplicate
@@ -11441,6 +11443,44 @@ fn class_receiver_labels(
         labels.push((class_declaration_label(&class.name).to_string(), ty, true));
     }
     labels
+}
+
+/// Build receiver labels for one or more semantic enclosing-class roots. `roots` is nearest-first;
+/// each root's `inner_of` chain is expanded through the same path, deduplicated, then returned
+/// outermost-first. Ordinary inner classes and structurally owned anonymous objects feed this helper
+/// different roots but share the graph traversal and label construction policy.
+fn enclosing_receiver_labels(
+    symbols: &SymbolTable,
+    roots: impl IntoIterator<Item = TypeName>,
+) -> Vec<(String, Ty, bool)> {
+    let mut owners = Vec::new();
+    for root in roots {
+        let mut current = Some(root);
+        while let Some(internal) = current {
+            if owners.contains(&internal) {
+                break;
+            }
+            owners.push(internal);
+            current = symbols
+                .class_by_type_name(internal)
+                .and_then(ClassSig::inner_of_name);
+        }
+    }
+    owners
+        .into_iter()
+        .rev()
+        .filter_map(|internal| {
+            let signature = symbols.class_by_type_name(internal)?;
+            let declaration = symbols
+                .class_simple_name(internal)
+                .unwrap_or_else(|| "<anonymous>".to_string());
+            Some((
+                class_declaration_label(&declaration).to_string(),
+                Ty::obj_name(signature.internal_name()),
+                true,
+            ))
+        })
+        .collect()
 }
 
 fn anonymous_body_bound_names(
@@ -11579,8 +11619,8 @@ fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty
 }
 
 /// Whether an anonymous class body reaches the ENCLOSING class instance: an explicit `this@Outer`
-/// naming the immediate structural owner, or a reference to one of its member functions (declared
-/// or inherited, skipping names the anonymous class itself binds). Such references cannot be
+/// naming the immediate structural owner, or a reference to one of its members (declared or
+/// inherited, skipping names the anonymous class itself binds). Such references cannot be
 /// captured by value like an immutable property — they bind through the synthetic `this$0`
 /// outer-instance capture. Names the body does not reference keep the capture out, so a
 /// construction with superclass arguments (`object : Base(1) { … }`) stays on the
@@ -11588,7 +11628,8 @@ fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty
 fn anonymous_body_needs_outer_this(
     file: &File,
     declaration: DeclId,
-    syms: &SymbolTable,
+    resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+    outer_label: &str,
     outer: Ty,
 ) -> bool {
     let Decl::Class(class) = file.decl(declaration) else {
@@ -11599,23 +11640,21 @@ fn anonymous_body_needs_outer_this(
     };
     let bound = anonymous_body_bound_names(file, declaration);
     let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(simple) = syms.class_simple_name(internal) {
-        names.insert(format!("this@{}", class_declaration_label(&simple)));
-    }
+    // The receiver stack owns the source label spelling; do not recover it from a generated class
+    // name. Member names below come from the federated type shape, so this capture rule does not stop
+    // when a source owner inherits from a dependency classifier or require a source/classpath fallback.
+    names.insert(format!("this@{outer_label}"));
     let mut hierarchy = vec![internal];
     let mut visited = std::collections::HashSet::new();
     while let Some(owner) = hierarchy.pop() {
         if !visited.insert(owner) {
             continue;
         }
-        let Some(signature) = syms.class_by_type_name(owner) else {
+        let Some(shape) = resolver.resolve_type_name(owner) else {
             continue;
         };
-        names.extend(signature.methods.keys().cloned());
-        if let Some(base) = signature.super_internal {
-            hierarchy.push(base);
-        }
-        hierarchy.extend(signature.interfaces.iter());
+        names.extend(shape.members.iter().map(|member| member.name.clone()));
+        hierarchy.extend(shape.supertypes.iter_ids());
     }
     let names: std::collections::HashSet<&str> = names
         .iter()
@@ -11638,6 +11677,7 @@ fn anonymous_body_needs_outer_this(
 struct AnonymousCaptureCandidate {
     name: String,
     ty: Ty,
+    source: AnonymousObjectCaptureSource,
 }
 
 fn record_anonymous_construction_captures(
@@ -11659,17 +11699,27 @@ fn record_anonymous_construction_captures(
                 .any(|later| later.name == candidate.name)
         })
         .filter(|(_, candidate)| candidate.ty != Ty::Error)
-        .filter(|(_, candidate)| !bound.contains(&candidate.name))
-        .filter(|(_, candidate)| !anonymous_body_writes_name(file, declaration, &candidate.name))
-        // The synthetic outer-instance capture's name never appears in source, so the body-usage
-        // scan would always drop it; its need was decided by `anonymous_body_needs_outer_this`.
         .filter(|(_, candidate)| {
-            candidate.name == "this$0"
-                || anonymous_body_uses_name(file, declaration, &candidate.name, candidate.ty)
+            match candidate.source {
+                // Enclosing-instance need was decided against the anonymous body's receiver uses.
+                // It has no source variable name, so lexical bound/write/use filters do not apply.
+                AnonymousObjectCaptureSource::EnclosingInstance => true,
+                AnonymousObjectCaptureSource::LexicalValue => {
+                    !bound.contains(&candidate.name)
+                        && !anonymous_body_writes_name(file, declaration, &candidate.name)
+                        && anonymous_body_uses_name(
+                            file,
+                            declaration,
+                            &candidate.name,
+                            candidate.ty,
+                        )
+                }
+            }
         })
         .map(|(_, candidate)| AnonymousObjectCapture {
             name: candidate.name.clone(),
             ty: candidate.ty,
+            source: candidate.source,
         })
         .collect();
     captures.insert(declaration, selected);
@@ -13566,6 +13616,7 @@ fn check_file_at_impl_mode(
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        implicit_receiver_selections,
         resolved_source_calls,
         source_extension_properties,
         source_extension_property_writes,
@@ -13720,6 +13771,7 @@ fn check_file_at_impl_mode(
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        implicit_receiver_selections,
         resolved_source_calls,
         source_extension_properties,
         source_extension_property_writes,
@@ -14022,8 +14074,9 @@ struct Checker<'a> {
     /// a class body pushes `(ClassName, ty, true)`; a receiver lambda / scope function pushes
     /// `(fnName, receiverTy, false)`. Resolves `this@Label`. The innermost entry is the current `this`
     /// (lowered as a bare `this`); a `this@Label` matching the IMMEDIATE outer CLASS (one class level up,
-    /// nothing but classes between) lowers via the inner class's `this$0`. Anything else type-checks but
-    /// the lowerer skips it (it can't yet reach a captured / multi-level outer receiver).
+    /// nothing but classes between) lowers through the current class's captured enclosing-instance
+    /// field. Anything else type-checks but the lowerer skips it (it can't yet reach a captured /
+    /// multi-level outer receiver).
     this_labels: Vec<(String, Ty, bool)>,
     /// Source class owners of a hoisted anonymous-object declaration, nearest first. They contribute
     /// lexical classifier scope but are not implicit runtime receivers (captures remain a separate ABI).
@@ -14069,6 +14122,10 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Checker-selected receiver for a bare call or property read. The receiver stack is semantic scope
+    /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
+    /// JVM slot names.
+    implicit_receiver_selections: HashMap<ExprId, Ty>,
     /// Decoded `contract { … }` effects of the current file's top-level functions, keyed by
     /// `DeclId`. Filled before the decl walk (decode is AST-only) so call sites see contracts
     /// irrespective of function declaration order.
@@ -16061,53 +16118,36 @@ impl<'a> Checker<'a> {
     /// [`Self::set_anonymous_lexical_class_context`]); each owner's own `inner_of` chain continues
     /// outward. Returned outermost-first, matching [`class_receiver_labels`].
     fn anonymous_outer_receiver_labels(&self) -> Vec<(String, Ty, bool)> {
-        let mut roots: Vec<TypeName> = Vec::new();
-        for &owner in &self.lexical_class_context {
-            let mut current = Some(owner);
-            while let Some(internal) = current {
-                if roots.contains(&internal) {
-                    break;
-                }
-                roots.push(internal);
-                current = self
-                    .syms
-                    .class_by_type_name(internal)
-                    .and_then(ClassSig::inner_of_name);
-            }
-        }
-        let mut labels = Vec::with_capacity(roots.len());
-        for internal in roots.iter().rev() {
-            let Some(signature) = self.syms.class_by_type_name(*internal) else {
-                continue;
-            };
-            let declaration = self
-                .syms
-                .class_simple_name(*internal)
-                .unwrap_or_else(|| "<anonymous>".to_string());
-            labels.push((
-                class_declaration_label(&declaration).to_string(),
-                Ty::obj_name(signature.internal_name()),
-                true,
-            ));
-        }
-        labels
+        enclosing_receiver_labels(self.syms, self.lexical_class_context.iter().copied())
     }
 
-    /// The enclosing instance an anonymous-object construction captures as `this$0`: the innermost
-    /// CLASS receiver on the label stack — the dispatch instance lowering supplies at the
-    /// construction site (an extension receiver is not a capturable enclosing instance).
-    fn anonymous_construction_outer_this(&self) -> Option<Ty> {
+    /// The enclosing instance an anonymous-object construction captures: the innermost CLASS receiver
+    /// on the label stack, with its source label. The dispatch instance lowering supplies the value at
+    /// the construction site (an extension receiver is not a capturable enclosing instance), while the
+    /// label lets capture discovery recognize `this@Label` without parsing a generated class name.
+    fn anonymous_construction_outer_receiver(&self) -> Option<(&str, Ty)> {
         self.this_labels
             .iter()
             .rev()
             .find(|(_, _, is_class)| *is_class)
-            .map(|(_, receiver, _)| *receiver)
+            .map(|(label, receiver, _)| (label.as_str(), *receiver))
     }
 
     fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
         if let Some(span) = receiver.extension_receiver {
             self.mark_extension_receiver_span_used(expression, span);
         }
+    }
+
+    /// Preserve the receiver selected while resolving a BARE member access and account for a
+    /// receiver-lambda capture in one operation. Lowering cannot safely repeat this lookup: an enclosing
+    /// class receiver may be represented by a synthetic field rather than a local `this` slot, and
+    /// provider-backed inheritance can make the declaration owner differ from the receiver's concrete
+    /// type.
+    fn mark_implicit_receiver_selection(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
+        self.implicit_receiver_selections
+            .insert(expression, receiver.ty);
+        self.mark_extension_receiver_used(expression, receiver);
     }
 
     fn mark_extension_receiver_stmt_used(&mut self, statement: StmtId, receiver: ImplicitReceiver) {
@@ -24328,17 +24368,17 @@ impl<'a> Checker<'a> {
                                 if let Some(ty) =
                                     self.resolve_property_read(receiver, &n, self.span(e), Some(e))
                                 {
-                                    self.mark_extension_receiver_used(e, implicit_receiver);
+                                    self.mark_implicit_receiver_selection(e, implicit_receiver);
                                     return self.set(e, ty);
                                 }
                             } else if let Some((ty, _)) = self.lookup_prop_name(internal, &n) {
-                                self.mark_extension_receiver_used(e, implicit_receiver);
+                                self.mark_implicit_receiver_selection(e, implicit_receiver);
                                 return self.set(e, ty);
                             }
                         }
                     }
                     if let Some(ty) = self.try_member_read(receiver, &n, self.span(e), Some(e)) {
-                        self.mark_extension_receiver_used(e, implicit_receiver);
+                        self.mark_implicit_receiver_selection(e, implicit_receiver);
                         return self.set(e, ty);
                     }
                 }
@@ -24465,7 +24505,7 @@ impl<'a> Checker<'a> {
                     })
                 {
                     let ret = member.ret;
-                    self.mark_extension_receiver_used(e, implicit_receiver);
+                    self.mark_implicit_receiver_selection(e, implicit_receiver);
                     self.expr_lowers
                         .insert(e, ExprLowering::IntrinsicProperty(Box::new(member)));
                     ret
@@ -31276,19 +31316,34 @@ impl<'a> Checker<'a> {
                     .map(|(name, local)| AnonymousCaptureCandidate {
                         name: name.clone(),
                         ty: local.narrowed.unwrap_or(local.ty),
+                        source: AnonymousObjectCaptureSource::LexicalValue,
                     })
                     .collect::<Vec<_>>();
                 candidates.sort_by(|left, right| left.name.cmp(&right.name));
-                // A body reaching the enclosing instance (`this@Outer` or an outer member call)
+                // A body reaching the enclosing instance (`this@Outer` or an outer member access)
                 // needs the instance itself, supplied FIRST so it lands at field 0 — the slot
-                // `inner_outer_method` and `LabeledThisOuter` lowering read as `this$0`.
-                if let Some(outer) = self.anonymous_construction_outer_this() {
-                    if anonymous_body_needs_outer_this(self.file, declaration, self.syms, outer) {
+                // `captured_outer_method` and `LabeledThisOuter` lowering read as `this$0`.
+                if let Some((outer_label, outer)) = self
+                    .anonymous_construction_outer_receiver()
+                    .map(|(label, ty)| (label.to_string(), ty))
+                {
+                    let needs_outer = {
+                        let resolver = self.resolver();
+                        anonymous_body_needs_outer_this(
+                            self.file,
+                            declaration,
+                            &resolver,
+                            &outer_label,
+                            outer,
+                        )
+                    };
+                    if needs_outer {
                         candidates.insert(
                             0,
                             AnonymousCaptureCandidate {
                                 name: "this$0".to_string(),
                                 ty: outer,
+                                source: AnonymousObjectCaptureSource::EnclosingInstance,
                             },
                         );
                     }
@@ -31315,15 +31370,18 @@ impl<'a> Checker<'a> {
                 .unwrap_or_default();
             if !captures.is_empty() {
                 for capture in captures {
-                    let actual = if capture.name == "this$0" {
-                        // The outer-instance capture is not a scope local; the construction site's
-                        // dispatch instance supplies it.
-                        self.anonymous_construction_outer_this()
-                            .unwrap_or(Ty::Error)
-                    } else {
-                        self.lookup(&capture.name)
+                    let actual = match capture.source {
+                        AnonymousObjectCaptureSource::EnclosingInstance => {
+                            // The outer-instance capture is not a scope local; the construction site's
+                            // dispatch instance supplies it.
+                            self.anonymous_construction_outer_receiver()
+                                .map(|(_, ty)| ty)
+                                .unwrap_or(Ty::Error)
+                        }
+                        AnonymousObjectCaptureSource::LexicalValue => self
+                            .lookup(&capture.name)
                             .map(|local| local.narrowed.unwrap_or(local.ty))
-                            .unwrap_or(Ty::Error)
+                            .unwrap_or(Ty::Error),
                     };
                     self.expect_assignable(capture.ty, actual, span, "anonymous object capture");
                 }
@@ -34739,38 +34797,17 @@ impl<'a> Checker<'a> {
                     if let Some(ret) = self
                         .check_applicable_module_member_call(call, receiver, &fname, args, &arg_tys)
                     {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                     if let Some(ret) = self.check_member_extension_function_call(
                         call, receiver, &fname, args, &arg_tys,
                     ) {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                 }
                 if !self.module_declares(&fname) {
-                    if let Some(outer) = self.this_ty.and_then(|receiver| {
-                        receiver
-                            .obj_internal()
-                            .and_then(|internal| {
-                                self.syms
-                                    .class_by_type_name(internal)
-                                    .and_then(ClassSig::inner_of_name)
-                            })
-                            .map(Ty::obj_name)
-                    }) {
-                        if !implicit_receivers
-                            .iter()
-                            .any(|receiver| receiver.ty == outer)
-                        {
-                            if let Some(ret) = self.check_applicable_module_member_call(
-                                call, outer, &fname, args, &arg_tys,
-                            ) {
-                                return ret;
-                            }
-                        }
-                    }
                     if let Some(bt) = self.effective_this_narrow() {
                         if let Some(bi) = bt.obj_internal() {
                             if let Some(ret) = self.check_applicable_module_member_call(
@@ -34818,7 +34855,7 @@ impl<'a> Checker<'a> {
                         &arg_tys,
                         args,
                     ) {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                 }
@@ -35631,7 +35668,7 @@ impl<'a> Checker<'a> {
                         args,
                         &arg_tys,
                     ) {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                 }
