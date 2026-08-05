@@ -126,21 +126,27 @@ fn errors_match_kotlinc_in_text_and_location() {
         "fun <T> applySame(block: (T) -> T, value: T): T = block(value)\nfun mismatched(x: String, suffix: Char = 'K'): Int = x.length + suffix.code\nfun bad(): Any = applySame(::mismatched, \"O\")",
         "fun foo(x: String, y: Char = 'K'): String = x + y\nfun <T, U> hold(f: (T) -> U): U = hold(f)\nfun bad(): String = hold<Int, String>(::foo)",
         "fun foo(x: Int, y: Char = 'K'): String = x.toString() + y\nfun <T : CharSequence, U> hold(f: (T) -> U): U = hold(f)\nfun bad(): String = hold(::foo)",
-        // A type present on NO classpath in either compiler (`Widget` resolves to the JDK-internal
-        // `jdk.internal.org.jline.reader.Widget` when the JDK is on the classpath, so it is a poor
-        // choice for an "unresolved" probe).
-        "fun f(p: UnresolvedWidgetType): Int = 0",
+        // A deliberately unique type present on NO supplied classpath. Keep the spelling synthetic:
+        // diagnostic regressions must not depend on or disclose a class from the scanned project.
+        "fun f(p: DefinitelyAbsentClassifier): Int = 0",
         // An `is` whose TARGET type is unresolved reports the unresolved reference at the type's
         // span — never a compiler-specific "not supported" rejection.
-        "fun f(p: Any) = p is UnresolvedWidgetType",
+        "fun f(p: Any) = p is DefinitelyAbsentClassifier",
         // … and a failing type ARGUMENT is named at its own span, not the outer generic's.
-        "fun f(p: Any) = p is Array<UnresolvedWidgetType>",
+        "fun f(p: Any) = p is Array<DefinitelyAbsentClassifier>",
+        // Ordinary generic arguments retain an outer `Ty::Obj`; nested Error detection must inspect
+        // that semantic shape instead of relying on `outer == Ty::Error`.
+        "fun f(p: Any) = p is List<DefinitelyAbsentClassifier>",
+        // Function types retain `Ty::Fun` around erroneous parameters for the same reason.
+        "fun f(p: Any) = p is (DefinitelyAbsentClassifier) -> String",
         // When the OUTER name is the unresolvable one it is named first, not its type argument.
-        "fun f(p: Any) = p is UnresolvedWidgetType<String>",
+        "fun f(p: Any) = p is DefinitelyAbsentClassifier<String>",
         // A nullable unresolved target resolves to the same reference diagnostic.
-        "fun f(p: Any) = p is UnresolvedWidgetType?",
+        "fun f(p: Any) = p is DefinitelyAbsentClassifier?",
         // The `as` sibling reports identically.
-        "fun f(p: Any) = p as UnresolvedWidgetType",
+        "fun f(p: Any) = p as DefinitelyAbsentClassifier",
+        "fun f(p: Any) = p as List<DefinitelyAbsentClassifier>",
+        "fun f(p: Any) = p as (DefinitelyAbsentClassifier) -> String",
     ];
 
     let root = std::env::temp_dir().join(format!("krusty_diag_{}", std::process::id()));
@@ -180,6 +186,33 @@ fn errors_match_kotlinc_in_text_and_location() {
     }
     let _ = fs::remove_dir_all(&root);
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n\n"));
+}
+
+#[test]
+fn resolved_but_unsupported_is_as_shapes_are_not_called_unresolved() {
+    // `resolve_ty` also returns `Ty::Error` for a KNOWN classifier whose shape the backend cannot
+    // implement. That is distinct from an absent classifier: the unresolved-reference helper must
+    // decline these so the existing supported-shape diagnostic remains authoritative.
+    for source in [
+        "fun f(p: Any) = p is Array",
+        "fun f(p: Any) = p is Array<Nothing>",
+        "fun f(p: Any) = p as Array",
+        "fun f(p: Any) = p as Array<Nothing>",
+    ] {
+        let diagnostics = common::front_end_diagnostics(source, &[], None);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|message| !message.contains("unresolved reference 'Array'")),
+            "a resolved Array shape was mislabeled unresolved for {source:?}: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("not supported")),
+            "the resolved unsupported-shape diagnostic disappeared for {source:?}: {diagnostics:?}"
+        );
+    }
 }
 
 #[test]
