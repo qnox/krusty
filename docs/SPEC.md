@@ -485,8 +485,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   strictly left to right; kotlinc spills every operand of a call with a suspending operand.
   `hoist_expr` used to rewrite only the SUSPENSION to a preceding temp, so `f(g(), susp())` became
   `val t = susp(); f(g(), t)` — running `g()` AFTER the suspension. `hoist_operands_in_order` now
-  binds every effectful operand that precedes a later suspending operand to a prelude temp first
-  (constants and plain local reads stay inline, per `operand_needs_snapshot`), for the
+  binds every runtime-read/evaluated operand that precedes a later suspending operand to a prelude temp
+  first (only literal constants commute, per `operand_needs_snapshot`), for the
   `Call`/`MethodCall`/`StringConcat` arms of `hoist_expr`, the suspension-point path itself
   (receiver included), and the `hoist_stmt` arms that keep a direct `val r = <suspend call>` /
   bare-call statement (whose nested suspending arguments previously reached emit unhoisted and
@@ -497,16 +497,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`Callee::External`) has no signature in the IR; its snapshot type comes from
   `ir.logical_types`, accepted only where logical = physical representation (scalars and `String`,
   e.g. the flattened `String.plus` chain whose intermediate accumulators ir_lower now records).
-  "Effectful" includes more than calls: a top-level `var` read (`GetStatic` with `is_var`) must be
-  materialized because the suspension may write it (a `val` read commutes and stays inline), and a
-  wrapper that can THROW (`!!`, `as`/non-null cast, an unboxing `ImplicitCoercion`) snapshots
-  regardless of its child so its exception precedes any later suspension's effects. Snapshot types
-  also come from the declarations the node indexes (`GetStatic`/`GetField`/`RefGet`, and
-  `PropertyRead`'s inline type except `Unit`/type-parameter reads), covering the service-receiver
-  shape `h.svc.m(susp())` without a skip.
+  The conservative boundary includes more than calls: ordinary local/parameter reads snapshot because
+  an inline-spliced later block may write the same local before the residual call reads it; static reads
+  snapshot regardless of source/module/classpath origin; and a wrapper that can THROW (`!!`,
+  `as`/non-null cast, an unboxing `ImplicitCoercion`) snapshots so its exception precedes any later
+  suspension's effects. Snapshot types come from identities already carried by the IR node
+  (`GetStatic`/`GetField`/`RefGet`, static instances/fields/enums, and `PropertyRead`'s inline type except
+  `Unit`/type-parameter reads); external field descriptors use the emitter's shared descriptor parser,
+  rather than a suspend-specific classpath branch. This covers both `h.svc.m(susp())` and
+  `f(x, run { x = 5; susp() })` without syntax- or provider-specific repair logic.
+  Operand snapshotting can also make a previously post-suspension local read disappear. Positional
+  scope capture still stores/restores every named local in scope, so
+  `reconcile_positional_spill_locals` unions those actual spill consumers into the machine-local
+  allocation set after named scopes and live temps merge. Both named-function and suspend-lambda
+  machines use that boundary; no resume arm can restore a scope-only local into an undeclared slot.
   Ordering pinned by box runs against a real suspension (`yield()`), including the snapshot temp
   surviving the spill, the pre-mutation `var` read, the `!!`-throws-before-suspension case, and an
-  effectful operand between two suspensions (`tests/suspend_arg_order_e2e.rs`, all nine shapes).
+  effectful operand between two suspensions (`tests/suspend_arg_order_e2e.rs`, all ten shapes).
 - **`suspend fun` — an INTRINSIC suspension point needs no operand temps.** A
   `suspendCoroutineUninterceptedOrReturn { c -> … }` recorded in `ir.intrinsic_suspension_points` is an
   inlined BLOCK, not a call: it has no operands to move ahead of the spill, and its body runs after the

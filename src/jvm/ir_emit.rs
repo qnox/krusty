@@ -11965,7 +11965,10 @@ fn descriptor_ret_words(desc: &str) -> i32 {
 }
 
 /// Parse a single JVM field/type descriptor into a `Ty`.
-fn ty_from_field_descriptor(d: &str) -> Ty {
+///
+/// Suspend operand materialization also consumes exact field descriptors already present in IR. Keep
+/// that pass on this canonical parser instead of growing a second primitive/object/array branch table.
+pub(crate) fn ty_from_field_descriptor(d: &str) -> Ty {
     match d.as_bytes().first() {
         Some(b'I') => Ty::Int,
         Some(b'J') => Ty::Long,

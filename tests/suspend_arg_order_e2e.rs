@@ -119,6 +119,35 @@ fun box(): String = runBlocking {{\n\
 }
 
 #[test]
+fn local_read_precedes_inline_block_mutation_and_suspension() {
+    // Inline lowering can splice the later operand's block statements into the hoist prelude. The
+    // earlier `GetValue` must therefore be snapshotted too: leaving it in the residual call changes
+    // `f(x, run { x = 5; susp() })` into the equivalent of `x = 5; val t = susp(); f(x, t)` and reads
+    // 5 instead of the source-order value 0. Conservatively materializing ordinary local/parameter
+    // reads matches the shared ordered-operand rule and avoids a special scan for writes in one later
+    // block shape.
+    let src = format!(
+        "{PRELUDE}\
+fun f(a: Int, b: Int): Int = a * 10 + b\n\
+suspend fun test(): String {{\n\
+    var x = 0\n\
+    val r = f(x, run {{ x = 5; susp() }})\n\
+    return order + r\n\
+}}\n\
+fun box(): String = runBlocking {{\n\
+    val o = test()\n\
+    if (o == \"s2\") \"OK\" else \"F:$o\"\n\
+}}\n"
+    );
+    let out =
+        run(&src).expect("local read before a mutating suspending block should compile + run");
+    assert_eq!(
+        out, "OK",
+        "the local operand must be read before the later inline block mutates it"
+    );
+}
+
+#[test]
 fn notnull_assert_throws_before_suspension_effects() {
     // `x!!` THROWS at its evaluation position: in `f2(x!!, susp())` with a null `x`, kotlinc raises
     // the NPE before `susp()` runs — the suspension's side effect must never be observed.
