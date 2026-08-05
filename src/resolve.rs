@@ -16034,11 +16034,11 @@ impl<'a> Checker<'a> {
     fn resolve_constructor_name(
         &self,
         internal: TypeName,
-        args: &[Ty],
+        args: &[CallArgKind],
     ) -> Option<crate::libraries::LibraryMember> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
-            .resolve_symbol(SymRecv::TypeName(internal), "", args, &[])
+            .resolve_symbol_with_literal_args(SymRecv::TypeName(internal), "", args, &[])
             .and_then(Symbol::constructor)
     }
     fn resolve_synthetic_constructor_name(
@@ -28239,18 +28239,29 @@ impl<'a> Checker<'a> {
         crate::symbol_resolver::ty_subst(gm.ret_shape, &binds)
     }
 
-    /// The result type of a constructor call `Name<A,…>(…)`: the class instantiated with the call's
-    /// explicit type arguments (`ArrayList<Int>()` → `ArrayList<Int>`), so member/element types
-    /// resolve. Falls back to the raw class type when there are no explicit type arguments.
-    /// Select and record the classpath/library constructor target for `call`. The checker owns overload,
-    /// named/default, value-class, and marker-constructor selection; lowering only emits this target.
+    /// Preserve syntax-only argument provenance for constructor selection. The semantic provider may
+    /// expose source, dependency, or runtime declarations; none of those origins changes how a lambda
+    /// literal participates in selection.
+    fn constructor_arg_kinds(&self, args: &[ExprId], arg_tys: &[Ty]) -> Vec<CallArgKind> {
+        args.iter()
+            .zip(arg_tys)
+            .map(|(&argument, &ty)| call_arg_kind(self.file, argument, ty))
+            .collect()
+    }
+
+    /// Select a semantic-provider constructor target. The checker owns overload, named/default,
+    /// value-class, and marker-constructor selection; lowering only emits the recorded target.
     fn select_library_constructor_name(
         &self,
         internal: TypeName,
         args: Vec<ExprId>,
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
-        if let Some(member) = self.resolve_constructor_name(internal, arg_tys) {
+        // Lambda arguments keep their literal provenance (as method-call overload selection does) so
+        // a provider SAM-interface parameter admits them through the shared SAM signature operation;
+        // every other argument stays a typed value with any independent literal provenance intact.
+        let arg_kinds = self.constructor_arg_kinds(&args, arg_tys);
+        if let Some(member) = self.resolve_constructor_name(internal, &arg_kinds) {
             // A value-class ctor has an EMPTY descriptor (the marker krusty uses); resolve it like any
             // class — `Plain` carrying its parameter types. ir_lower emits a uniform `New` from those, and
             // the value-class JVM pass realizes `constructor-impl`. No value-class handling in the resolver.
@@ -28268,8 +28279,69 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
         let target = self.select_library_constructor_name(internal, args, arg_tys)?;
+        self.check_selected_constructor_lambdas(&target);
         self.resolved_constructors.insert(call, target.clone());
         Some(target)
+    }
+
+    /// Check lambda arguments that deliberately remained probes until constructor selection.
+    ///
+    /// Both bare and qualified/named construction reach this operation with the same selected target;
+    /// source spelling and symbol origin are irrelevant. The selected parameter supplies the first
+    /// real expectation, including a provider SAM method's parameter types. Arguments checked earlier
+    /// are left untouched so their bodies and diagnostics are never duplicated.
+    fn check_selected_constructor_lambdas(&mut self, target: &ResolvedConstructor) {
+        // A lambda argument whose checking the argument pass DEFERRED (still unchecked now) gets its
+        // first check here, against the selected constructor's parameter: a SAM-interface parameter
+        // contributes its method's parameter types — the conversion `expect_call_arg` applies after
+        // method-call selection — any other parameter is the expectation. An already-checked
+        // argument (every non-deferred call shape) is left as it is.
+        let recheck = |c: &mut Self, parameter: Ty, argument: ExprId| {
+            if matches!(c.file.expr(argument), Expr::Lambda { .. })
+                && c.expr_types[argument.0 as usize] == Ty::Error
+            {
+                if crate::symbol_resolver::classpath_sam_signature(&*c.syms.libraries, parameter)
+                    .is_some()
+                {
+                    // `expect_call_arg` ignores the provisional actual for a selected SAM and checks
+                    // the body against the SAM method. Pass the current slot only to preserve that
+                    // shared call-argument boundary.
+                    let actual = c.expr_types[argument.0 as usize];
+                    c.expect_call_arg(parameter, argument, actual);
+                } else {
+                    c.check_argument_expected(argument, parameter, false, None);
+                }
+            }
+        };
+        match target {
+            ResolvedConstructor::Plain { member, args } => {
+                for (&argument, &parameter) in args.iter().zip(&member.params) {
+                    recheck(self, parameter, argument);
+                }
+            }
+            ResolvedConstructor::Synthetic { ctor, args } => {
+                for (&argument, &parameter) in args.iter().zip(&ctor.real_params) {
+                    recheck(self, parameter, argument);
+                }
+            }
+            ResolvedConstructor::PlainSlots { member, slots } => {
+                for (argument, &parameter) in slots.iter().zip(&member.params) {
+                    if let Some(argument) = argument {
+                        recheck(self, parameter, *argument);
+                    }
+                }
+            }
+            ResolvedConstructor::NamedDefault {
+                real_params, slots, ..
+            } => {
+                for (argument, &parameter) in slots.iter().zip(real_params) {
+                    if let Some(argument) = argument {
+                        recheck(self, parameter, *argument);
+                    }
+                }
+            }
+            ResolvedConstructor::Source { .. } => {}
+        }
     }
 
     fn record_inherited_library_constructor_name(
@@ -28280,12 +28352,13 @@ impl<'a> Checker<'a> {
         args: Vec<ExprId>,
         arg_tys: &[Ty],
     ) -> Option<ResolvedConstructor> {
+        let arg_kinds = self.constructor_arg_kinds(&args, arg_tys);
         let target = if let Some(member) = crate::symbol_resolver::resolve_constructor_from_type(
             &*self.syms.libraries,
             &*self.syms.libraries,
             internal,
             classifier,
-            arg_tys,
+            &arg_kinds,
         ) {
             if !self.member_accessible(member.visibility, internal) {
                 return None;
@@ -28322,6 +28395,7 @@ impl<'a> Checker<'a> {
             slots.resize(member.params.len(), None);
             ResolvedConstructor::PlainSlots { member, slots }
         };
+        self.check_selected_constructor_lambdas(&target);
         self.resolved_constructors.insert(call, target.clone());
         Some(target)
     }
@@ -28343,20 +28417,26 @@ impl<'a> Checker<'a> {
             &ctor_params,
             self.file.call_has_trailing_lambda.contains(&call.0),
         )?;
+        // Preserve unchecked lambdas through mapping just as the ordinary named-constructor path
+        // does. The inherited classifier is a different metadata view, not a different call model.
         for &argument in slots.iter().flatten() {
-            self.expr(argument);
+            if !matches!(self.file.expr(argument), Expr::Lambda { .. })
+                && self.expr_types[argument.0 as usize] == Ty::Error
+            {
+                self.expr(argument);
+            }
         }
         let target = if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
-            let types = ordered
+            let arg_kinds = ordered
                 .iter()
-                .map(|argument| self.expr_types[argument.0 as usize])
+                .map(|&argument| self.call_arg_kind(argument))
                 .collect::<Vec<_>>();
             let Some(member) = crate::symbol_resolver::resolve_constructor_from_type(
                 &*self.syms.libraries,
                 &*self.syms.libraries,
                 internal,
                 classifier,
-                &types,
+                &arg_kinds,
             ) else {
                 return Ok(None);
             };
@@ -28418,6 +28498,7 @@ impl<'a> Checker<'a> {
                 ResolvedConstructor::PlainSlots { member, slots }
             }
         };
+        self.check_selected_constructor_lambdas(&target);
         self.resolved_constructors.insert(call, target.clone());
         Ok(Some(target))
     }
@@ -28441,24 +28522,35 @@ impl<'a> Checker<'a> {
             &ctor_params,
             self.file.call_has_trailing_lambda.contains(&call.0),
         )?;
-        // Type only arguments this call has not typed yet. This constructor is one CANDIDATE for a
+        // Type only NON-LAMBDA arguments this call has not typed yet. This constructor is one CANDIDATE for a
         // `Name(args)` whose name may also be a top-level function; re-checking an argument that already
         // has a type would overwrite it with the expected-type-free one — a trailing lambda already shaped
         // against the function's receiver parameter (`Cfg.() -> Unit`) would fall back to `() -> Unit`,
         // after which neither this constructor nor the function accepts the call.
         for &a in slots.iter().flatten() {
-            if self.expr_types[a.0 as usize] == Ty::Error {
+            if self.expr_types[a.0 as usize] == Ty::Error
+                && !matches!(self.file.expr(a), Expr::Lambda { .. })
+            {
                 self.expr(a);
             }
         }
         if let Some(ordered) = slots.iter().copied().collect::<Option<Vec<ExprId>>>() {
             let tys: Vec<Ty> = ordered
                 .iter()
-                .map(|a| self.expr_types[a.0 as usize])
+                .map(|&a| {
+                    if matches!(self.file.expr(a), Expr::Lambda { .. })
+                        && self.expr_types[a.0 as usize] == Ty::Error
+                    {
+                        self.lambda_probe_ty(a).unwrap_or(Ty::Error)
+                    } else {
+                        self.expr_types[a.0 as usize]
+                    }
+                })
                 .collect();
             let Some(target) = self.select_library_constructor_name(internal, ordered, &tys) else {
                 return Ok(None);
             };
+            self.check_selected_constructor_lambdas(&target);
             let target = match target {
                 ResolvedConstructor::Plain { member, .. } => {
                     ResolvedConstructor::PlainSlots { member, slots }
@@ -28489,6 +28581,7 @@ impl<'a> Checker<'a> {
             slots,
             mask,
         };
+        self.check_selected_constructor_lambdas(&target);
         self.resolved_constructors.insert(call, target.clone());
         Ok(Some(target))
     }
@@ -31558,7 +31651,19 @@ impl<'a> Checker<'a> {
                     if !self.value_root_shadows_classifier(&root)
                         && self.classifier_receiver_internal(receiver).is_none()
                     {
-                        if let Some(pkg) = qualified_path(self.file, receiver) {
+                        if let Some(pkg) = qualified_path(self.file, receiver).filter(|pkg| {
+                            let scope = [type_name(pkg)];
+                            // A dotted package path is only a TOP-LEVEL-FUNCTION candidate when the
+                            // semantic provider actually exposes that name in the package. Do this
+                            // symbol-kind test before touching arguments: the same syntax also spells
+                            // a fully-qualified constructor, and speculatively checking its lambda
+                            // here would bind `it`/declared parameters without the constructor's SAM
+                            // expectation. The selected callable path owns the first body check.
+                            !self
+                                .resolver_in_scope(&scope)
+                                .top_level_candidates(&name)
+                                .is_empty()
+                        }) {
                             let arg_tys = self.arg_tys(args);
                             let targs: Vec<Ty> = self
                                 .file
@@ -32036,35 +32141,35 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        let arg_tys = self.arg_tys(args);
+                        // Constructor selection consumes the same literal-aware argument facts as
+                        // every other provider call. In particular, leave a lambda body unchecked
+                        // until the selected constructor supplies its SAM/function expectation;
+                        // `arg_tys` alone would erase that provenance and bind parameters as `Any`.
+                        let arg_tys = self
+                            .call_arg_kinds(args)
+                            .into_iter()
+                            .map(|argument| argument.ty())
+                            .collect::<Vec<_>>();
                         // POSITIONAL — a plain constructor, a value-class-param/omitted-default
                         // synthetic. Type-check the provided
                         // arguments against the plain constructor's params when it matches.
-                        if let Some(target) = self.record_library_constructor_name(
-                            call,
-                            internal,
-                            args.to_vec(),
-                            &arg_tys,
-                        ) {
+                        if self
+                            .record_library_constructor_name(
+                                call,
+                                internal,
+                                args.to_vec(),
+                                &arg_tys,
+                            )
+                            .is_some()
+                        {
                             crate::trace_compiler!(
                                 "resolve",
                                 "classpath nested constructor {qualified} -> {internal}"
                             );
-                            if let ResolvedConstructor::Plain { member, .. } = target {
-                                let params =
-                                    crate::symbol_resolver::apply_platform_call_parameter_nullability(
-                                        member.params.clone(),
-                                        &member.call_sig.platform_nullable_params,
-                                        &arg_tys,
-                                        member.call_sig.vararg,
-                                    );
-                                self.expect_call_args(
-                                    &params,
-                                    member.call_sig.vararg,
-                                    args,
-                                    &arg_tys,
-                                );
-                            }
+                            // `record_library_constructor_name` performs the selected lambda check.
+                            // Re-running `expect_call_args` here would walk the body twice and duplicate
+                            // diagnostics; non-lambda compatibility was already established by the
+                            // constructor selector, including platform nullability and vararg shape.
                             return Ty::obj_name(internal);
                         }
                     }
@@ -34117,6 +34222,21 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // An otherwise UN-SHAPED lambda is postponed only when this bare name semantically
+                // denotes a constructible classifier and no top-level callable competes for it. The
+                // classifier lookup is federated, so source/module/dependency origin does not enter
+                // the rule. Ordinary functions and extensions keep their established eager fallback
+                // (notably zero-parameter lambdas whose empty parameter vector is a real shape).
+                let defer_unshaped_constructor_lambdas = has_lambda_argument
+                    && !self.lexical_value_declares(&fname)
+                    && !self.same_named_callable_exists(&fname)
+                    && self
+                        .classifier_internal_name(&fname)
+                        .and_then(|internal| self.resolved_type_name(internal))
+                        .is_some_and(|classifier| {
+                            !classifier.constructors.is_empty()
+                                || classifier.value_underlying.is_some()
+                        });
                 // Diagnostics from typing the arguments below are provisional while `fname` may name a
                 // class: if no constructor accepts them, a companion `operator fun invoke` re-types
                 // them against ITS signature and this pass's complaints never applied.
@@ -34412,6 +34532,15 @@ impl<'a> Checker<'a> {
                             if let Some(elem) = t.array_elem() {
                                 return elem;
                             }
+                        }
+                        // A constructor lambda that no earlier semantic shape supplied remains a
+                        // PROBE until selection. The classifier decision above is provider-neutral;
+                        // other callables retain their established argument checking and lowering.
+                        if defer_unshaped_constructor_lambdas
+                            && matches!(self.file.expr(a), Expr::Lambda { .. })
+                            && self.expr_types[a.0 as usize] == Ty::Error
+                        {
+                            return self.lambda_probe_ty(a).unwrap_or(Ty::Error);
                         }
                         self.expr(a)
                     })
@@ -42155,8 +42284,8 @@ fun box(): String {
             "no value passed for parameter 'x'.",
         );
         err_contains(
-            "fun f(p: Widget): Int = 0",
-            "unresolved reference 'Widget'.",
+            "fun f(p: TextOnly): Int = 0",
+            "unresolved reference 'TextOnly'.",
         );
     }
 

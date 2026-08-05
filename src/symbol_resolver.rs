@@ -818,6 +818,10 @@ fn classpath_sam_arg_matches(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> 
     let Some(arity) = arg.fun_arity() else {
         return false;
     };
+    // A checked lambda has an authoritative arity and must match exactly. An unchecked literal uses
+    // the `Error` probe above; its selected call path performs the first body check and may synthesize
+    // implicit `it` for a one-parameter SAM. Keeping those states distinct avoids syntax-specific
+    // exceptions for call paths that happened to check a lambda too early.
     if sam.params.len() != usize::from(arity) {
         return false;
     }
@@ -2204,7 +2208,7 @@ impl<'a> SymbolResolver<'a> {
                 let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
                 if name.is_empty() {
                     // `Type(args)` — the type's constructor, real or synthesized.
-                    resolve_constructor_name(self.lib, &self.src, internal, &arg_tys)
+                    resolve_constructor_name(self.lib, &self.src, internal, args)
                         .filter(|member| access.allows(member.visibility, internal))
                         .map(Symbol::Constructor)
                         .or_else(|| {
@@ -3313,7 +3317,7 @@ fn resolve_constructor_name(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     internal: TypeName,
-    args: &[Ty],
+    args: &[CallArgKind],
 ) -> Option<LibraryMember> {
     let Some(t) = lib.resolve_type_name(internal) else {
         crate::trace_compiler!(
@@ -3330,8 +3334,11 @@ pub(crate) fn resolve_constructor_from_type(
     src: &dyn SymbolSource,
     internal: TypeName,
     t: &crate::libraries::LibraryType,
-    args: &[Ty],
+    args: &[CallArgKind],
 ) -> Option<LibraryMember> {
+    // Exact/erased/ABI passes compare RUNTIME types; the lambda-literal provenance only drives the
+    // SAM adaptation in the assignable pass below.
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     crate::trace_compiler!(
         "value_classes",
         "resolve_constructor {internal} ctors={:?} args={args:?}",
@@ -3341,8 +3348,8 @@ pub(crate) fn resolve_constructor_from_type(
         apply_platform_parameter_nullability(
             m.params.clone(),
             &m.call_sig.platform_nullable_params,
-            args,
-        ) == args
+            &arg_tys,
+        ) == arg_tys
     }) {
         return Some(m.clone());
     }
@@ -3350,8 +3357,8 @@ pub(crate) fn resolve_constructor_from_type(
     // (`class Rec(val id: Vid, val n: Int)` → `<init>(Ljava/lang/String;I)V` for `Vid(String)`), but the
     // call passes the value-class type itself (`Rec(Vid("x"), 1)` → arg `Vid`). Retry with each value-class
     // argument erased to its underlying, mirroring the ABI the descriptor-read `ctor` params already carry.
-    let erased = value_erased_args(lib, args);
-    if erased != args {
+    let erased = value_erased_args(lib, &arg_tys);
+    if erased != arg_tys {
         if let Some(m) = t.constructors.iter().find(|m| {
             apply_platform_parameter_nullability(
                 m.params.clone(),
@@ -3369,7 +3376,7 @@ pub(crate) fn resolve_constructor_from_type(
     // ABI-form matching bridges target collection identity and drops type arguments without
     // hardcoding collection relationships. Exact ABI identity runs before subtype widening so the
     // most-specific overload still wins.
-    let abi_args = abi_form_args(lib, args);
+    let abi_args = abi_form_args(lib, &arg_tys);
     if let Some(abi_args) = &abi_args {
         if let Some(m) = t.constructors.iter().find(|m| {
             let params = apply_platform_parameter_nullability(
@@ -3391,7 +3398,7 @@ pub(crate) fn resolve_constructor_from_type(
             let params = apply_platform_parameter_nullability(
                 m.params.clone(),
                 &m.call_sig.platform_nullable_params,
-                args,
+                &arg_tys,
             );
             // A module-declared argument class reaches its library supertype only through the
             // SOURCE federation (`class V : Visitor()` into `Holder(Visitor)`), mirroring member
@@ -3402,11 +3409,22 @@ pub(crate) fn resolve_constructor_from_type(
             // above, so an `(Int)`/`(Long)` overload pair still binds the exact one. `accepts_numeric`
             // is the shared predicate, so this admits exactly what those origins do — including the
             // `Int`-into-`Byte`/`Short` narrowing they already accept.
+            // A lambda literal SAM-converts to a Java functional-interface parameter through the
+            // same `classpath_sam_signature` mechanism method overloads use — without it every
+            // candidate looks inapplicable and the call is reported unresolved. Against a
+            // NON-function parameter the lambda matches ONLY through that conversion: a lambda
+            // whose checking the call site deferred carries a placeholder type that plain
+            // assignability would admit anywhere (a `TextOnly(String)` call with a lambda argument
+            // must stay unresolved).
             (params.len() == args.len()
                 && params.iter().zip(args).all(|(p, a)| {
-                    abi_arg_assignable_to_param(lib, *a, *p)
-                        || source_arg_assignable(src, p, a)
-                        || p.accepts_numeric(*a)
+                    if a.is_lambda_literal() && p.fun_arity().is_none() {
+                        classpath_sam_arg_matches(lib, *p, a.ty())
+                    } else {
+                        abi_arg_assignable_to_param(lib, a.ty(), *p)
+                            || source_arg_assignable(src, p, &a.ty())
+                            || p.accepts_numeric(a.ty())
+                    }
                 }))
             .then_some((params, m))
         }),
@@ -3415,7 +3433,7 @@ pub(crate) fn resolve_constructor_from_type(
         CandidateSelection::Selected(m) => {
             crate::trace_compiler!(
                 "value_classes",
-                "resolve_constructor {internal} matched assignable args {args:?}"
+                "resolve_constructor {internal} matched assignable args {arg_tys:?}"
             );
             return Some(m.clone());
         }
@@ -3423,14 +3441,15 @@ pub(crate) fn resolve_constructor_from_type(
         CandidateSelection::None => {}
     }
     // Fixed-arity constructors take precedence over expanded varargs.
-    for candidate_args in std::iter::once(args).chain((erased != args).then_some(erased.as_slice()))
+    for candidate_args in
+        std::iter::once(arg_tys.as_slice()).chain((erased != arg_tys).then_some(erased.as_slice()))
     {
         if let Some(member) = resolve_vararg_constructor(lib, &t.constructors, candidate_args) {
             return Some(member.clone());
         }
     }
     if let Some(abi_args) = &abi_args {
-        if abi_args.as_slice() != args && abi_args.as_slice() != erased.as_slice() {
+        if abi_args.as_slice() != arg_tys.as_slice() && abi_args.as_slice() != erased.as_slice() {
             if let Some(member) = resolve_vararg_constructor(lib, &t.constructors, abi_args) {
                 return Some(member.clone());
             }
@@ -3444,17 +3463,18 @@ pub(crate) fn resolve_constructor_from_type(
         // `X(u)` over the single underlying value — reference (`RoleId(String)`) or scalar
         // (`Count(Int)`); both erase to the underlying through the value-classes pass. (`null` only fits a
         // reference underlying.)
-        let fits = matches!(args, [arg]
+        let fits = matches!(arg_tys.as_slice(), [arg]
             if *arg == underlying || (matches!(*arg, Ty::Null) && underlying.is_reference()));
         // A ZERO-arg construction `Id()` when the sole underlying param is DEFAULTED — kotlinc realizes
         // it through the `constructor-impl$default` synthetic (which fills the default itself). Accept it
         // ONLY when that synthetic exists on the classpath, AND the underlying is a REFERENCE: the lowering
         // passes `null` for the dummy underlying slot, which fits only a reference (a scalar would need a
         // typed zero). A mandatory-param value class stays unresolved (no synthetic → no phantom call).
-        let all_default = args.is_empty() && underlying.is_reference() && t.value_ctor_has_default;
+        let all_default =
+            arg_tys.is_empty() && underlying.is_reference() && t.value_ctor_has_default;
         crate::trace_compiler!(
             "value_classes",
-            "resolve_constructor {internal} value-class underlying={underlying:?} args={args:?} fits={fits} all_default={all_default}"
+            "resolve_constructor {internal} value-class underlying={underlying:?} args={arg_tys:?} fits={fits} all_default={all_default}"
         );
         if fits {
             // Descriptor is unused on this path (the checker only needs the type; the lowerer lowers the
