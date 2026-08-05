@@ -845,7 +845,7 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
-fn classpath_sam_arg_matches(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool {
+pub(crate) fn classpath_sam_arg_matches(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool {
     let Some(sam) = classpath_sam_signature(lib, param) else {
         return false;
     };

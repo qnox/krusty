@@ -1,0 +1,271 @@
+//! SAM conversion of a lambda argument into a SOURCE (Kotlin-declared) function's parameter of a
+//! JAVA functional-interface type. Java method calls and classpath constructor calls already admit
+//! a lambda literal through the `sam_method` metadata, but module-function argument matching typed
+//! the lambda against the interface itself and reported `argument type mismatch: actual type is
+//! '() -> String', but 'java.lang.Runnable' was expected` (intellij-community's ActionUtil.kt:404 —
+//! `actionManager.performWithActionCallbacks(action, event) { … }`, where ActionManagerEx declares
+//! `abstract fun performWithActionCallbacks(action: AnAction, event: AnActionEvent, runnable:
+//! Runnable): AnActionResult`). kotlinc 2.4.10 accepts every positive shape below and rejects the
+//! negative ones; the box-runs verify the lambda actually EXECUTES through the SAM method.
+use super::common;
+
+fn diagnostics(src: &str) -> Vec<String> {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
+}
+
+/// Top-level Kotlin function with a `Runnable` parameter, trailing lambda; the stored runnable is
+/// invoked and its side effect observed.
+#[test]
+fn top_level_runnable_param_trailing_lambda_runs() {
+    const SRC: &str = "var ran = \"\"\n\
+        fun runIt(runnable: Runnable) { runnable.run() }\n\
+        fun box(): String {\n\
+        \x20 runIt { ran = \"OK\" }\n\
+        \x20 return ran.ifEmpty { \"not ran\" }\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_top_level_trailing");
+}
+
+/// Abstract member function with a `Runnable` parameter (/tmp/fix17.kt shape), runtime-verified
+/// through an override.
+#[test]
+fn abstract_member_runnable_param_trailing_lambda_runs() {
+    const SRC: &str = "abstract class Manager {\n\
+        \x20 abstract fun perform(runnable: Runnable): String\n\
+        }\n\
+        class M : Manager() {\n\
+        \x20 override fun perform(runnable: Runnable): String {\n\
+        \x20\x20 runnable.run()\n\
+        \x20\x20 return \"ran\"\n\
+        \x20 }\n\
+        }\n\
+        var ran = \"\"\n\
+        fun box(): String {\n\
+        \x20 val m: Manager = M()\n\
+        \x20 val r = m.perform { ran = \"x\" }\n\
+        \x20 return if (r == \"ran\" && ran == \"x\") \"OK\" else \"fail:$r:$ran\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_abstract_member");
+}
+
+/// Parenthesized (non-trailing) lambda: `runIt({ "x" })`.
+#[test]
+fn runnable_param_parenthesized_lambda_runs() {
+    const SRC: &str = "var ran = \"\"\n\
+        fun runIt(runnable: Runnable) { runnable.run() }\n\
+        fun box(): String {\n\
+        \x20 runIt({ ran = \"OK\" })\n\
+        \x20 return ran.ifEmpty { \"not ran\" }\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_parenthesized");
+}
+
+/// A GENERIC Java SAM parameter (`Consumer<String>`): a declared lambda parameter binds the SAM
+/// method's substituted parameter type (String), and an implicit `it` does too. Runtime-verified.
+#[test]
+fn consumer_param_lambda_binds_declared_and_implicit_parameters() {
+    const SRC: &str = "import java.util.function.Consumer\n\
+        var seen = \"\"\n\
+        fun consume(c: Consumer<String>) { c.accept(\"hello\") }\n\
+        fun box(): String {\n\
+        \x20 consume { s -> seen = s + \"!\" }\n\
+        \x20 if (seen != \"hello!\") return \"declared:$seen\"\n\
+        \x20 consume { seen = it }\n\
+        \x20 return if (seen == \"hello\") \"OK\" else \"implicit:$seen\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_consumer_binding");
+}
+
+/// Overload disambiguation (kotlinc-pinned): a lambda picks `f(Runnable)` over `f(String)`, but
+/// `g(Any)` over `g(Runnable)` — an exact function-type-to-Any match beats the SAM conversion.
+/// Both declaration orders of the Any/Runnable pair resolve the same way.
+#[test]
+fn overload_picks_runnable_over_string_but_any_over_runnable() {
+    const SRC: &str = "fun pick(r: Runnable): String = \"runnable\"\n\
+        fun pick(s: String): String = \"string\"\n\
+        fun pickAny(r: Runnable): String = \"runnable\"\n\
+        fun pickAny(a: Any): String = \"any\"\n\
+        fun pickAnyRev(a: Any): String = \"any\"\n\
+        fun pickAnyRev(r: Runnable): String = \"runnable\"\n\
+        fun box(): String {\n\
+        \x20 val a = pick { }\n\
+        \x20 val b = pickAny { }\n\
+        \x20 val c = pickAnyRev { }\n\
+        \x20 return if (a == \"runnable\" && b == \"any\" && c == \"any\") \"OK\" else \"fail:$a:$b:$c\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_overload_choice");
+}
+
+/// The conversion applies in ANY argument position, not only the trailing one (kotlinc-pinned).
+#[test]
+fn runnable_param_lambda_in_first_position_runs() {
+    const SRC: &str = "var ran = false\n\
+        fun first(r: Runnable, n: Int) { r.run() }\n\
+        fun box(): String {\n\
+        \x20 first({ ran = true }, 1)\n\
+        \x20 return if (ran) \"OK\" else \"not ran\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_first_position");
+}
+
+/// Negative pin: a lambda into a parameter of a NON-SAM Java interface (`java.util.List<String>`)
+/// must still be an argument type mismatch.
+#[test]
+fn lambda_against_non_sam_java_interface_still_fails() {
+    let diags = diagnostics(
+        "fun takeList(l: java.util.List<String>) {}\n\
+         fun box(): String {\n\
+         \x20 takeList { }\n\
+         \x20 return \"OK\"\n\
+         }\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("argument type mismatch") && d.contains("List")),
+        "expected argument type mismatch mentioning List, got {diags:?}"
+    );
+}
+
+/// Negative pin (kotlinc-verified): a lambda into a KOTLIN plain (non-`fun`) interface parameter
+/// converts through no mechanism — still an argument type mismatch.
+#[test]
+fn lambda_against_kotlin_plain_interface_still_fails() {
+    let diags = diagnostics(
+        "interface Plain { fun run() }\n\
+         fun takePlain(p: Plain) {}\n\
+         fun box(): String {\n\
+         \x20 takePlain { }\n\
+         \x20 return \"OK\"\n\
+         }\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("argument type mismatch") && d.contains("Plain")),
+        "expected argument type mismatch mentioning Plain, got {diags:?}"
+    );
+}
+
+/// Negative pin (shape stays supported): a Kotlin `fun interface` parameter already converts a
+/// lambda through the Kotlin SAM mechanism — this keeps working.
+#[test]
+fn kotlin_fun_interface_param_still_converts() {
+    const SRC: &str = "fun interface KRunner { fun run() }\n\
+        var ran = \"\"\n\
+        fun takeK(r: KRunner) { r.run() }\n\
+        fun box(): String {\n\
+        \x20 takeK { ran = \"OK\" }\n\
+        \x20 return ran.ifEmpty { \"not ran\" }\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_kotlin_fun_interface");
+}
+
+/// Divergence pin: a function VALUE (not a lambda literal) into a Java SAM parameter. kotlinc
+/// 2.4.10 ACCEPTS this (the Kotlin 2.2 function-value SAM conversion), but krusty's SAM lowering
+/// wraps only lambda literals — a non-literal conversion has no wrapper path even for Kotlin
+/// `fun interface`s — so the call is still an argument type mismatch here.
+#[test]
+fn function_value_into_java_sam_param_still_fails() {
+    let diags = diagnostics(
+        "fun runIt(r: Runnable) { r.run() }\n\
+         fun box(): String {\n\
+         \x20 val f: () -> Unit = { }\n\
+         \x20 runIt(f)\n\
+         \x20 return \"OK\"\n\
+         }\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("argument type mismatch") && d.contains("Runnable")),
+        "expected argument type mismatch mentioning Runnable, got {diags:?}"
+    );
+}
+
+/// Negative pin (kotlinc-pinned): a lambda matched against TWO same-arity Java-SAM overloads of
+/// one top-level name fits both through SAM conversion, so the call is an overload resolution
+/// ambiguity — krusty reports it with each candidate's source display.
+///
+/// Documented divergence: with a 1-parameter lambda (`two { it.length; "y" }`) krusty's probe
+/// still sees both SAMs as arity-fitting and accepts one, where kotlinc is ambiguous too; an
+/// implicit-`it` lambda's arity cannot disqualify the 0-parameter `Runnable` overload the way an
+/// explicit 1-parameter SAM signature check would. krusty accepts more here.
+#[test]
+fn two_sam_overload_top_level_lambda_is_ambiguous() {
+    let diags = diagnostics(
+        "import java.util.function.Consumer\n\
+         fun two(r: Runnable): String = \"runnable\"\n\
+         fun two(c: Consumer<String>): String = \"consumer\"\n\
+         fun box(): String = two { }\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("overload resolution ambiguity")),
+        "expected overload resolution ambiguity, got {diags:?}"
+    );
+}
+
+/// Negative pin (kotlinc-pinned): the same two-SAM ambiguity for MEMBER overloads — and the
+/// diagnostic lists the two candidates with their distinct parameter types.
+#[test]
+fn two_sam_overload_member_lambda_is_ambiguous() {
+    let diags = diagnostics(
+        "import java.util.function.Consumer\n\
+         class M {\n\
+         \x20 fun perform(c: Consumer<String>): String = \"consumer\"\n\
+         \x20 fun perform(r: Runnable): String = \"runnable\"\n\
+         }\n\
+         fun box(): String = M().perform { }\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("overload resolution ambiguity")
+                && d.contains("Consumer")
+                && d.contains("Runnable")),
+        "expected member overload ambiguity listing Consumer and Runnable, got {diags:?}"
+    );
+}
+
+/// Member overloads (kotlinc-pinned): an exact `Any` match beats the SAM conversion into
+/// `Runnable`, in BOTH declaration orders. Runtime-verified.
+#[test]
+fn member_overload_any_and_runnable_picks_any_both_orders() {
+    const SRC: &str = "class M {\n\
+        \x20 fun perform(r: Runnable): String = \"runnable\"\n\
+        \x20 fun perform(a: Any): String = \"any\"\n\
+        \x20 fun performRev(a: Any): String = \"any\"\n\
+        \x20 fun performRev(r: Runnable): String = \"runnable\"\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 val m = M()\n\
+        \x20 val a = m.perform { }\n\
+        \x20 val b = m.performRev { }\n\
+        \x20 return if (a == \"any\" && b == \"any\") \"OK\" else \"fail:$a:$b\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_member_any_runnable");
+}
+
+/// Member overloads (kotlinc-pinned): a 1-parameter lambda cannot fit the 0-parameter
+/// `Runnable` SAM, so `Consumer<String>` wins — in BOTH declaration orders. Runtime-verified.
+#[test]
+fn member_overload_consumer_and_runnable_picks_consumer_both_orders() {
+    const SRC: &str = "import java.util.function.Consumer\n\
+        class M {\n\
+        \x20 fun perform(c: Consumer<String>): String = \"consumer\"\n\
+        \x20 fun perform(r: Runnable): String = \"runnable\"\n\
+        \x20 fun performRev(r: Runnable): String = \"runnable\"\n\
+        \x20 fun performRev(c: Consumer<String>): String = \"consumer\"\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 val m = M()\n\
+        \x20 val a = m.perform { s -> s.length; \"y\" }\n\
+        \x20 val b = m.performRev { s -> s.length; \"y\" }\n\
+        \x20 return if (a == \"consumer\" && b == \"consumer\") \"OK\" else \"fail:$a:$b\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_member_consumer_runnable");
+}
