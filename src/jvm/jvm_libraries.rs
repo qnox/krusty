@@ -133,11 +133,19 @@ impl JvmLibraries {
             else {
                 continue;
             };
-            // Select metadata ONCE from the physical JVM name and descriptor shape. A `$default`
-            // synthetic has no entry of its own, so only its suffix is stripped; a value-class-mangled
-            // name stays intact and matches `MetaFn.jvm_name`. Suspend-ness is one fact on that exact
-            // callable, beside arity/default/return facts — never a name-wide lookup that can leak
-            // from a suspend overload to an ordinary same-named sibling.
+            if is_default && params.len() >= 2 {
+                // A `$default` synthetic appends mask/marker slots that do not identify the source
+                // overload. Remove that ABI tail BEFORE metadata alignment: otherwise the mask of a
+                // two-parameter overload can prefix-match a real third `Int` parameter and make the
+                // longer sibling win. A suspend Continuation precedes this tail and deliberately
+                // remains for the selected metadata declaration to classify and trim generically.
+                params.truncate(params.len() - 2);
+            }
+            // Select metadata ONCE from the JVM name and descriptor-derived parameter shape. A
+            // `$default` synthetic has no entry of its own, so its suffix and mask/marker ABI tail are
+            // normalized first; a value-class-mangled name stays intact and matches `MetaFn.jvm_name`.
+            // Suspend-ness is one fact on that exact callable, beside arity/default/return facts —
+            // never a name-wide lookup that can leak to an ordinary same-named sibling.
             let meta = self.cp.metadata_call_facts_name(
                 c.owner,
                 meta_name,
@@ -164,11 +172,6 @@ impl JvmLibraries {
                 if keep < params.len() {
                     params.truncate(keep);
                 }
-            } else if is_default && params.len() >= 2 {
-                // Metadata-free synthetic fallback: retain the legacy mask/marker trimming. A Kotlin
-                // `$default` should normally align above; this branch is conservative for incomplete
-                // or foreign metadata and makes no suspend claim of its own.
-                params.truncate(params.len() - 2);
             }
             let inline_desc = if is_default {
                 method_descriptor(&params, physical_ret)

@@ -123,21 +123,16 @@ suspend fun pick(value: UInt, suffix: String = \"!\"): String = \"$value$suffix\
         "mangled JVM name must retain suspend"
     );
 
-    // `$default` has no metadata entry: stripping only that suffix must still align its full physical
-    // shape to the same declaration, report the two source parameters, and retain `suspend`.
+    // `$default` has no metadata entry. Its caller strips the suffix and the non-identifying
+    // mask/marker ABI tail before this generic alignment; the remaining source-plus-Continuation
+    // shape must select the same declaration, report two source parameters, and retain `suspend`.
     let default_facts = cp.metadata_call_facts(
         owner,
         default
             .name
             .strip_suffix("$default")
             .expect("selected default synthetic"),
-        &[
-            Ty::Int,
-            Ty::String,
-            continuation,
-            Ty::Int,
-            Ty::obj("java/lang/Object"),
-        ],
+        &[Ty::Int, Ty::String, continuation],
         &Ty::obj("java/lang/Object"),
         false,
         &underlying,
