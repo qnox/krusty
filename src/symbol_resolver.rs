@@ -998,6 +998,10 @@ fn vararg_parameter_shape_at(
     {
         return None;
     }
+    // At the vararg slot a plain argument fits the ELEMENT type, while a SPREAD (`*xs`) fits the
+    // ARRAY type — Kotlin allows both, mixed in any order (`f("a", *xs)`).
+    let vararg_expected =
+        |argument: &CallArgKind| if argument.is_spread() { array } else { element };
     if args.len() < vararg_index
         || params[..vararg_index]
             .iter()
@@ -1009,12 +1013,16 @@ fn vararg_parameter_shape_at(
         || args[vararg_index..]
             .iter()
             .enumerate()
-            .any(|(offset, argument)| !fits(vararg_index + offset, &element, argument))
+            .any(|(offset, argument)| {
+                !fits(vararg_index + offset, &vararg_expected(argument), argument)
+            })
     {
         return None;
     }
     let mut expanded = params[..vararg_index].to_vec();
-    expanded.resize(args.len(), element);
+    for argument in &args[vararg_index.min(args.len())..] {
+        expanded.push(vararg_expected(argument));
+    }
     Some(expanded)
 }
 
@@ -2500,8 +2508,12 @@ impl<'a> SymbolResolver<'a> {
                 let element = array.array_elem()?;
                 // Positional arguments beginning at a non-final vararg all belong to that
                 // vararg; later parameters can only be supplied by name. Preserve an array
-                // argument only for the already-normalized spread/pass-through shape.
-                if args.len() == slot + 1 && args.get(slot) == Some(&array) {
+                // argument for the already-normalized spread/pass-through shape — sole, or an
+                // exact-arity list whose vararg position already holds the array (the slot-mapped
+                // named form, `segd("O", "K", flag = true)`, arrives here pre-packed).
+                if args.get(slot) == Some(&array)
+                    && (args.len() == slot + 1 || args.len() == vparams.len())
+                {
                     return None;
                 }
                 let mut physical = args[..slot].to_vec();
@@ -2615,16 +2627,42 @@ impl<'a> SymbolResolver<'a> {
         if vparams.len() != slots.len() {
             return None;
         }
-        for (param, slot) in vparams.iter().zip(slots) {
+        for (index, (param, slot)) in vparams.iter().zip(slots).enumerate() {
             if let Some(arg) = slot {
-                if !self.arg_fits_or_subtype(param, arg) {
+                // The slot map stores a vararg's arguments in ELEMENT form (`segd("O", "K",
+                // flag = true)` keeps `"O"` at the vararg slot), so that slot admits the element
+                // type as well as the array itself.
+                let vararg_element_fits = o.call_sig.vararg_index == Some(index)
+                    && param
+                        .array_elem()
+                        .is_some_and(|element| self.arg_fits_or_subtype(&element, arg));
+                if !vararg_element_fits && !self.arg_fits_or_subtype(param, arg) {
                     return None;
                 }
             }
         }
         if slots.iter().all(Option::is_some) {
-            let args: Vec<Ty> = slots.iter().map(|slot| slot.unwrap()).collect();
-            return self.build_extension_callable(name, receiver, &args, type_args, o);
+            let mut args: Vec<Ty> = slots.iter().map(|slot| slot.unwrap()).collect();
+            // Present the vararg slot in its ARRAY form: the packed array is what the emitted
+            // call passes, and `build_extension_callable` reads an exact `vparams` match as the
+            // already-normalized shape. An ELEMENT-form slot means the call site must PACK, so
+            // stamp the vararg slot/element on the callable for the slot-aware lowering.
+            let mut element_form_vararg = None;
+            if let Some(vararg) = o.call_sig.vararg_index {
+                if let (Some(param), Some(arg)) = (vparams.get(vararg), args.get_mut(vararg)) {
+                    if *arg != *param && param.array_elem().is_some() {
+                        *arg = *param;
+                        element_form_vararg = param.array_elem().map(|element| (vararg, element));
+                    }
+                }
+            }
+            let mut callable =
+                self.build_extension_callable(name, receiver, &args, type_args, o)?;
+            if let Some((vararg, element)) = element_form_vararg {
+                callable.vararg_elem = Some(element);
+                callable.vararg_index = Some(vararg);
+            }
+            return Some(callable);
         }
 
         let ret_ty = o.ret.apply(bind_defaulted_ext_ret_slots(
@@ -3996,37 +4034,45 @@ fn resolve_property_setter(
     // No `@Metadata` property: a JAVA accessor pair (`isX`/`getX` + `setX(v)`) IS a synthetic
     // property (spec § Java synthetic properties). Kotlin only synthesizes a property when the
     // GETTER exists, so require the read to resolve; then take the single-argument `void` member
-    // setter — preferring the overload whose parameter matches the getter's type, then the
-    // MOST-DERIVED override (a setter overridden at several hierarchy rungs — `Component.setFont`
-    // redeclared by `Container` and `JComponent` — is ONE Kotlin setter, not an ambiguity), and
-    // refusing a genuinely ambiguous remainder (conservative: kotlinc pairs accessors per matching
-    // type).
+    // setter — requiring the parameter to match the getter's type, then selecting the MOST-DERIVED
+    // override (the same setter redeclared by a base and derived class is one Kotlin setter, not an
+    // ambiguity), and refusing a genuinely ambiguous remainder. Every rule is applied to the whole
+    // candidate set, including a singleton, so correctness cannot depend on whether another overload
+    // happened to be present.
     let getter = resolve_property_member(lib, recv, property, member_access)?;
     let setter_name = crate::names::property_setter_name(property);
-    let mut setters = lib
+    let setters = lib
         .member_overloads(recv, &setter_name)
         .overloads
         .into_iter()
-        .filter(|o| o.kind == FnKind::Member)
+        // Setter lookup is member lookup, so apply the same access-context predicate used by an
+        // ordinary call. The JVM provider exposes protected declarations for legal subclass sites;
+        // treating that provider surface as globally callable would turn a public getter plus an
+        // inaccessible protected setter into a writable property and emit an illegal call.
+        .filter(|o| {
+            o.kind == FnKind::Member
+                && member_visible(member_access, o.visibility, o.callable.owner_type())
+        })
         .filter(|o| {
             o.callable.params.len() == 1
                 && o.callable.ret == Ty::Unit
                 && !o.callable.name.contains('-')
+                // Getter/setter TYPE agreement defines whether a JavaBean pair is a Kotlin synthetic
+                // `var`; it is not merely an overload tie-break. Otherwise `String getValue()` plus
+                // `void setValue(int)` invents one property with different read/write types.
+                && o.callable.params[0] == getter.ret.non_null()
         })
         .collect::<Vec<_>>();
-    if setters.len() > 1 {
-        setters.retain(|o| o.callable.params[0] == getter.ret.non_null());
-    }
-    if setters.len() > 1 {
-        let nearest = setters.iter().map(|o| o.receiver_rank).min();
-        if let Some(nearest) = nearest {
-            setters.retain(|o| o.receiver_rank == nearest);
-        }
-    }
-    match setters.as_slice() {
-        [setter] => Some(setter.callable.clone()),
-        _ => None,
-    }
+    // `receiver_rank` is the provider-neutral member-MRO order already consumed by ordinary call
+    // selection. Use that common fact for every set size, then demand one candidate at the winning
+    // rung; malformed or genuinely ambiguous duplicates remain read-only rather than becoming an
+    // arbitrary call target.
+    let nearest_rank = setters.iter().map(|setter| setter.receiver_rank).min()?;
+    let mut nearest = setters
+        .into_iter()
+        .filter(|setter| setter.receiver_rank == nearest_rank);
+    let setter = nearest.next()?;
+    nearest.next().is_none().then_some(setter.callable)
 }
 
 fn select_instance_info(
@@ -4377,6 +4423,10 @@ fn member_visible(
 pub(crate) enum CallArgKind {
     /// A fully inferred non-lambda expression type.
     Typed(Ty),
+    /// A SPREAD argument (`*xs`): its type is the ARRAY being spread. At a vararg slot it fits
+    /// the vararg's array type where a plain argument fits the element type, so a mixed call
+    /// (`f("a", *xs)`) stays applicable. Everywhere else it behaves as `Typed`.
+    Spread(Ty),
     /// A lambda literal whose `Ty::Fun` may have unknown parameter/return types (`Error`).
     /// The resolver may infer those unknowns from the candidate overload.
     LambdaLiteral(Ty),
@@ -4394,9 +4444,14 @@ impl CallArgKind {
     pub(crate) fn ty(self) -> Ty {
         match self {
             CallArgKind::Typed(ty)
+            | CallArgKind::Spread(ty)
             | CallArgKind::LambdaLiteral(ty)
             | CallArgKind::IntegerLiteral { ty, .. } => ty,
         }
+    }
+
+    pub(crate) fn is_spread(self) -> bool {
+        matches!(self, CallArgKind::Spread(_))
     }
 
     pub(crate) fn is_lambda_literal(self) -> bool {
@@ -4650,7 +4705,10 @@ fn select_overload(
         let Some(vararg_index) = o.call_sig.vararg_index else {
             return false;
         };
-        let Some(elem) = lp.get(vararg_index).and_then(|p| p.array_elem()) else {
+        let Some(array) = lp.get(vararg_index).copied() else {
+            return false;
+        };
+        let Some(elem) = array.array_elem() else {
             return false;
         };
         args.len() >= vararg_index
@@ -4662,10 +4720,12 @@ fn select_overload(
             })
             && args[vararg_index..].iter().all(|a| {
                 let ty = a.ty();
-                ty == elem
+                // A SPREAD argument (`*xs`) fits the vararg's ARRAY type; a plain one, the element.
+                let expected = if a.is_spread() { array } else { elem };
+                ty == expected
                     || (!exact
-                        && (platform_arg_assignable(lib, &elem, &ty)
-                            || source_arg_assignable(assign_src, &elem, &ty)))
+                        && (platform_arg_assignable(lib, &expected, &ty)
+                            || source_arg_assignable(assign_src, &expected, &ty)))
             })
             && (vararg_index + 1..lp.len()).all(|index| o.call_sig.param_has_default(index))
     };
@@ -5392,6 +5452,7 @@ mod tests {
             contract: None,
             generic_sig: None,
             singleton_dispatch: None,
+            declared_ret: None,
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),

@@ -30,9 +30,10 @@ use crate::ir::{
     for_each_child, Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrFile,
     IrFunction, IrTypeOp,
 };
+use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::types::{type_name, Ty, TypeName};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const I32_MIN: i32 = i32::MIN;
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
@@ -192,7 +193,8 @@ pub fn lower_suspend(
         // Hoist a suspension nested at an unconditional position in an expression (`foo() + 2`) into a
         // preceding `val tmp = foo()` temp, so the flattener only meets suspensions at handled positions.
         if let (Some(b), None) = (body, forward) {
-            hoist_suspensions(ir, b, &suspend_set, &orig_rets);
+            let mut value_types = function_value_types(ir, fid, b);
+            hoist_suspensions(ir, b, &suspend_set, &orig_rets, &mut value_types);
         }
         // Desugar `return <suspend call>` (incl. an `= <suspend call>` expression body) into
         // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
@@ -787,6 +789,7 @@ fn hoist_when_cond_suspensions(
     when_expr: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
     out: &mut Vec<ExprId>,
 ) -> Option<ExprId> {
     let IrExpr::When { branches } = ir.exprs[when_expr as usize].clone() else {
@@ -803,7 +806,7 @@ fn hoist_when_cond_suspensions(
         .into_iter()
         .map(|(cond, body)| {
             (
-                cond.map(|c| hoist_expr(ir, c, suspend_set, orig_rets, &mut prelude)),
+                cond.map(|c| hoist_expr(ir, c, suspend_set, orig_rets, value_types, &mut prelude)),
                 body,
             )
         })
@@ -814,20 +817,28 @@ fn hoist_when_cond_suspensions(
     }))
 }
 
-fn hoist_suspensions(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, orig_rets: &[Ty]) {
+fn hoist_suspensions(
+    ir: &mut IrFile,
+    b: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
     };
     let mut out: Vec<ExprId> = Vec::with_capacity(stmts.len());
     for s in stmts {
-        hoist_stmt(ir, s, suspend_set, orig_rets, &mut out);
+        hoist_stmt(ir, s, suspend_set, orig_rets, value_types, &mut out);
     }
     // A block's TAIL VALUE that is an `if`/`when` EXPRESSION (a lambda's tail expression, `runBlocking { …;
     // if (susp()) a else b }`) — hoist a suspension in its CONDITIONS to a preceding temp, exactly as a
     // `return if (susp()) …` statement above, so the flattener never meets a condition-suspending When it
     // can't model.
-    let new_value = value
-        .map(|v| hoist_when_cond_suspensions(ir, v, suspend_set, orig_rets, &mut out).unwrap_or(v));
+    let new_value = value.map(|v| {
+        hoist_when_cond_suspensions(ir, v, suspend_set, orig_rets, value_types, &mut out)
+            .unwrap_or(v)
+    });
     ir.exprs[b as usize] = IrExpr::Block {
         stmts: out,
         value: new_value,
@@ -840,6 +851,7 @@ fn hoist_stmt(
     stmt: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
     out: &mut Vec<ExprId>,
 ) {
     // Statements the flattener handles directly keep their suspension in place.
@@ -860,7 +872,9 @@ fn hoist_stmt(
             let new_branches: Branches = branches
                 .into_iter()
                 .map(|(cond, body)| {
-                    let nc = cond.map(|c| hoist_expr(ir, c, suspend_set, orig_rets, &mut prelude));
+                    let nc = cond.map(|c| {
+                        hoist_expr(ir, c, suspend_set, orig_rets, value_types, &mut prelude)
+                    });
                     (nc, body)
                 })
                 .collect();
@@ -877,7 +891,7 @@ fn hoist_stmt(
         // the flattener meets a `Return(When{cond suspends})` it can't model and bails. (Only the condition
         // is hoisted; a branch VALUE that suspends stays for the flattener / a later skip.)
         IrExpr::Return(Some(v)) if when_cond_suspends(ir, *v, suspend_set) => {
-            let nw = hoist_when_cond_suspensions(ir, *v, suspend_set, orig_rets, out)
+            let nw = hoist_when_cond_suspensions(ir, *v, suspend_set, orig_rets, value_types, out)
                 .expect("guard ensured a condition suspends");
             let nr = ir.add_expr(IrExpr::Return(Some(nw)));
             out.push(nr);
@@ -890,7 +904,7 @@ fn hoist_stmt(
             // not one in an argument. Recurse into the body block (in place); nested loops recurse too.
             let body = *body;
             if matches!(ir.exprs[body as usize], IrExpr::Block { .. }) {
-                hoist_suspensions(ir, body, suspend_set, orig_rets);
+                hoist_suspensions(ir, body, suspend_set, orig_rets, value_types);
             }
             out.push(stmt);
             return;
@@ -899,7 +913,7 @@ fn hoist_stmt(
         // scope block, etc. Recurse so a suspension buried in a call argument inside it (or its nested
         // loops) is hoisted to a preceding bound temp before the flattener sees it.
         IrExpr::Block { value: None, .. } => {
-            hoist_suspensions(ir, stmt, suspend_set, orig_rets);
+            hoist_suspensions(ir, stmt, suspend_set, orig_rets, value_types);
             out.push(stmt);
             return;
         }
@@ -916,7 +930,7 @@ fn hoist_stmt(
                 stmts: ns,
                 value: None,
             };
-            hoist_suspensions(ir, stmt, suspend_set, orig_rets);
+            hoist_suspensions(ir, stmt, suspend_set, orig_rets, value_types);
             out.push(stmt);
             return;
         }
@@ -932,12 +946,18 @@ fn hoist_stmt(
                 .chain(*finally)
                 .collect();
             for b in blocks {
-                hoist_suspensions(ir, b, suspend_set, orig_rets);
+                hoist_suspensions(ir, b, suspend_set, orig_rets, value_types);
             }
             out.push(stmt);
             return;
         }
+        // `val r = <suspend call>` — the flattener binds this shape directly, but the CALL's own
+        // receiver/arguments still evaluate before it: hoist a suspension there (and snapshot the
+        // effectful operands preceding it) into `out`, keeping the direct init. On an untypeable
+        // snapshot the operands stay in place and the emit declines the residual nested suspension.
         IrExpr::Variable { init: Some(i), .. } if is_suspension_point(ir, *i, suspend_set) => {
+            let i = *i;
+            hoist_call_operands_in_order(ir, i, suspend_set, orig_rets, value_types, out);
             out.push(stmt);
             return;
         }
@@ -952,7 +972,7 @@ fn hoist_stmt(
             // re-bind `a` to the When with the hoisted condition. A branch VALUE that suspends stays for
             // the flattener's `stmt_cond_suspension` (`val a = when { … -> susp() }`), which this arm still
             // routes to (`hoist_when_cond_suspensions` returns `None`) when the condition doesn't suspend.
-            match hoist_when_cond_suspensions(ir, i, suspend_set, orig_rets, out) {
+            match hoist_when_cond_suspensions(ir, i, suspend_set, orig_rets, value_types, out) {
                 Some(nw) => {
                     let nv = ir.add_expr(IrExpr::Variable {
                         index,
@@ -966,14 +986,17 @@ fn hoist_stmt(
             }
             return;
         }
+        // A bare suspension-call STATEMENT keeps its suspension in place, but its operands hoist
+        // exactly as in the bound form above.
         _ if is_suspension_point(ir, stmt, suspend_set) => {
+            hoist_call_operands_in_order(ir, stmt, suspend_set, orig_rets, value_types, out);
             out.push(stmt);
             return;
         }
         _ => {}
     }
     // Hoist suspensions in the statement's unconditional sub-expressions.
-    let new_stmt = hoist_expr(ir, stmt, suspend_set, orig_rets, out);
+    let new_stmt = hoist_expr(ir, stmt, suspend_set, orig_rets, value_types, out);
     out.push(new_stmt);
 }
 
@@ -985,37 +1008,15 @@ fn hoist_expr(
     e: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
     prelude: &mut Vec<ExprId>,
 ) -> ExprId {
     if is_suspension_point(ir, e, suspend_set) {
-        // Hoist nested suspensions in the receiver/arguments first (they evaluate before the call).
-        match ir.exprs[e as usize].clone() {
-            IrExpr::Call { args, .. } => {
-                let na: Vec<ExprId> = args
-                    .iter()
-                    .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
-                    .collect();
-                if let IrExpr::Call { args, .. } = &mut ir.exprs[e as usize] {
-                    *args = na;
-                }
-            }
-            IrExpr::MethodCall { receiver, args, .. } => {
-                let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
-                let na: Vec<Option<ExprId>> = args
-                    .iter()
-                    .map(|&a| a.map(|x| hoist_expr(ir, x, suspend_set, orig_rets, prelude)))
-                    .collect();
-                if let IrExpr::MethodCall {
-                    receiver: r,
-                    args: a,
-                    ..
-                } = &mut ir.exprs[e as usize]
-                {
-                    *r = nr;
-                    *a = na;
-                }
-            }
-            _ => {}
+        // Hoist nested suspensions in the receiver/arguments first (they evaluate before the call),
+        // preserving left-to-right operand order. On an untypeable snapshot, leave the whole call
+        // unhoisted — the flattener declines the residual nested suspension (skip, not miscompile).
+        if !hoist_call_operands_in_order(ir, e, suspend_set, orig_rets, value_types, prelude) {
+            return e;
         }
         // Logical return type of the suspension: from ir_lower for a cross-unit call or intrinsic
         // point, else the callee's `orig_rets` entry (a same-file callee), else `Object`.
@@ -1032,14 +1033,45 @@ fn hoist_expr(
             init: Some(e),
             named: false,
         });
+        value_types.insert(tmp, ty);
         prelude.push(var);
         return ir.add_expr(IrExpr::GetValue(tmp));
     }
     match ir.exprs[e as usize].clone() {
         // Unconditional value nodes: recurse, rewriting children.
         IrExpr::PrimitiveBinOp { op, lhs, rhs } => {
-            let nl = hoist_expr(ir, lhs, suspend_set, orig_rets, prelude);
-            let nr = hoist_expr(ir, rhs, suspend_set, orig_rets, prelude);
+            // Hoisting a suspension out of the right operand must not leapfrog evaluation of the
+            // left operand. In `effect() + await()`, rewriting only the suspension to a preceding
+            // temp produces `val r = await(); effect() + r`, reversing Kotlin's left-to-right order.
+            // Bind the complete left value first whenever the right subtree suspends. This rule is
+            // based solely on ordered IR operands and their semantic value type; it does not depend
+            // on the call's source spelling, package, or provider.
+            let rhs_suspends = expr_calls_suspend(ir, rhs, suspend_set);
+            // If both operands contain a suspension, moving the right one ahead of the left would be
+            // wrong and no single prelude can preserve the conditional state structure. Keep the
+            // binary expression intact so the state-machine validator declines the unsupported shape.
+            if expr_calls_suspend(ir, lhs, suspend_set) && rhs_suspends {
+                return e;
+            }
+            let mut nl = hoist_expr(ir, lhs, suspend_set, orig_rets, value_types, prelude);
+            if rhs_suspends && operand_needs_snapshot(ir, nl, value_types) {
+                let Some(ty) = hoisted_value_ty(ir, nl, orig_rets, value_types) else {
+                    // An untyped/unmodeled left value cannot be materialized safely. Leave this shape
+                    // for the existing backend-decline path instead of guessing a verifier type.
+                    return e;
+                };
+                let tmp = max_value_index(ir) + 1;
+                let bound = ir.add_expr(IrExpr::Variable {
+                    index: tmp,
+                    ty,
+                    init: Some(nl),
+                    named: false,
+                });
+                value_types.insert(tmp, ty);
+                prelude.push(bound);
+                nl = ir.add_expr(IrExpr::GetValue(tmp));
+            }
+            let nr = hoist_expr(ir, rhs, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PrimitiveBinOp {
                 op,
                 lhs: nl,
@@ -1048,17 +1080,26 @@ fn hoist_expr(
             e
         }
         IrExpr::PrimitiveNeg { operand, ty } => {
-            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, prelude);
+            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PrimitiveNeg { operand, ty };
             e
         }
         // A string template / `+=` concat: parts evaluate unconditionally left-to-right, so a
-        // suspension inside one (`"a ${susp()} b"`, `result += susp()`) hoists to a preceding temp.
+        // suspension inside one (`"a ${susp()} b"`, `result += susp()`) hoists to a preceding temp,
+        // and every effectful part BEFORE it snapshots first to keep the source order.
         IrExpr::StringConcat(parts) => {
-            let np: Vec<ExprId> = parts
-                .iter()
-                .map(|&p| hoist_expr(ir, p, suspend_set, orig_rets, prelude))
-                .collect();
+            let operands: Vec<Option<ExprId>> = parts.iter().map(|&p| Some(p)).collect();
+            let Some(no) = hoist_operands_in_order(
+                ir,
+                &operands,
+                suspend_set,
+                orig_rets,
+                value_types,
+                prelude,
+            ) else {
+                return e;
+            };
+            let np: Vec<ExprId> = no.into_iter().map(|p| p.unwrap()).collect();
             ir.exprs[e as usize] = IrExpr::StringConcat(np);
             e
         }
@@ -1067,7 +1108,7 @@ fn hoist_expr(
             arg,
             type_operand,
         } => {
-            let na = hoist_expr(ir, arg, suspend_set, orig_rets, prelude);
+            let na = hoist_expr(ir, arg, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::TypeOp {
                 op,
                 arg: na,
@@ -1082,7 +1123,7 @@ fn hoist_expr(
             named,
         } => {
             if let Some(i) = init {
-                let ni = hoist_expr(ir, i, suspend_set, orig_rets, prelude);
+                let ni = hoist_expr(ir, i, suspend_set, orig_rets, value_types, prelude);
                 ir.exprs[e as usize] = IrExpr::Variable {
                     index,
                     ty,
@@ -1093,7 +1134,7 @@ fn hoist_expr(
             e
         }
         IrExpr::SetValue { var, value } => {
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::SetValue { var, value: nv };
             e
         }
@@ -1106,8 +1147,8 @@ fn hoist_expr(
             index,
             value,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::SetField {
                 receiver: nr,
                 class,
@@ -1117,7 +1158,7 @@ fn hoist_expr(
             e
         }
         IrExpr::Return(Some(v)) => {
-            let nv = hoist_expr(ir, v, suspend_set, orig_rets, prelude);
+            let nv = hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::Return(Some(nv));
             e
         }
@@ -1129,8 +1170,8 @@ fn hoist_expr(
             elem,
             value,
         } => {
-            let nh = hoist_expr(ir, holder, suspend_set, orig_rets, prelude);
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            let nh = hoist_expr(ir, holder, suspend_set, orig_rets, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::RefSet {
                 holder: nh,
                 elem,
@@ -1143,40 +1184,15 @@ fn hoist_expr(
         // receiver and arguments evaluate UNCONDITIONALLY and left-to-right before the access, so hoist
         // each suspension there to a preceding bound temp (`val tmp = r.all(); return tmp.size`), which
         // the flattener handles. A suspend call in this position was already intercepted above.
-        IrExpr::Call {
-            callee,
-            dispatch_receiver,
-            args,
-        } => {
-            let nr = dispatch_receiver.map(|r| hoist_expr(ir, r, suspend_set, orig_rets, prelude));
-            let na: Vec<ExprId> = args
-                .iter()
-                .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, prelude))
-                .collect();
-            ir.exprs[e as usize] = IrExpr::Call {
-                callee,
-                dispatch_receiver: nr,
-                args: na,
-            };
+        IrExpr::Call { .. } => {
+            // Use the same ordered-call reconstruction as the suspension-point path. Keeping one
+            // implementation matters here: both direct suspension calls and ordinary calls that
+            // merely CONTAIN one obey the identical receiver-then-arguments evaluation contract.
+            hoist_call_operands_in_order(ir, e, suspend_set, orig_rets, value_types, prelude);
             e
         }
-        IrExpr::MethodCall {
-            class,
-            index,
-            receiver,
-            args,
-        } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
-            let na: Vec<Option<ExprId>> = args
-                .iter()
-                .map(|&a| a.map(|x| hoist_expr(ir, x, suspend_set, orig_rets, prelude)))
-                .collect();
-            ir.exprs[e as usize] = IrExpr::MethodCall {
-                class,
-                index,
-                receiver: nr,
-                args: na,
-            };
+        IrExpr::MethodCall { .. } => {
+            hoist_call_operands_in_order(ir, e, suspend_set, orig_rets, value_types, prelude);
             e
         }
         IrExpr::GetField {
@@ -1184,7 +1200,7 @@ fn hoist_expr(
             class,
             index,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::GetField {
                 receiver: nr,
                 class,
@@ -1201,7 +1217,7 @@ fn hoist_expr(
             field,
             operation,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PropertyRead {
                 receiver: nr,
                 owner,
@@ -1222,8 +1238,8 @@ fn hoist_expr(
             interface,
             operation,
         } => {
-            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, prelude);
-            let nv = hoist_expr(ir, value, suspend_set, orig_rets, prelude);
+            let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            let nv = hoist_expr(ir, value, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::PropertyWrite {
                 receiver: nr,
                 owner,
@@ -1244,8 +1260,12 @@ fn hoist_expr(
         IrExpr::Block {
             stmts,
             value: Some(v),
-        } if stmts.is_empty() => hoist_expr(ir, v, suspend_set, orig_rets, prelude),
+        } if stmts.is_empty() => hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude),
         // A non-suspending block prelude can move with its suspending value without reordering effects.
+        // The ordered-operand planner snapshots every earlier runtime read before reaching this arm,
+        // including an ordinary local: `f(x, run { x = 5; susp() })` therefore materializes `x` before
+        // these statements move into the prelude. This shared rule avoids trying to recognize writes
+        // hidden in one particular block/module/classpath representation.
         IrExpr::Block {
             stmts,
             value: Some(v),
@@ -1255,12 +1275,350 @@ fn hoist_expr(
             && expr_calls_suspend(ir, v, suspend_set) =>
         {
             prelude.extend(stmts);
-            hoist_expr(ir, v, suspend_set, orig_rets, prelude)
+            hoist_expr(ir, v, suspend_set, orig_rets, value_types, prelude)
         }
         // A leaf or a conditional/unhandled node: leave it (any suspension inside surfaces to the
         // flattener, which restructures it or skips the file).
         _ => e,
     }
+}
+
+/// Hoist any call's receiver/argument operands IN PLACE, preserving their shared left-to-right
+/// evaluation contract. Both a direct suspension point and an ordinary call containing a nested
+/// suspension use this one reconstruction path, rather than maintaining shape-specific copies.
+/// Returns `false` — leaving `e` untouched — when a required operand snapshot cannot be typed; the
+/// caller keeps the expression unhoisted so the flattener declines the shape. A non-call intrinsic
+/// suspension point has no operands and therefore returns `true`.
+fn hoist_call_operands_in_order(
+    ir: &mut IrFile,
+    e: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+    prelude: &mut Vec<ExprId>,
+) -> bool {
+    match ir.exprs[e as usize].clone() {
+        IrExpr::Call {
+            dispatch_receiver,
+            args,
+            ..
+        } => {
+            let mut operands: Vec<Option<ExprId>> = vec![dispatch_receiver];
+            operands.extend(args.iter().map(|&a| Some(a)));
+            let Some(mut no) = hoist_operands_in_order(
+                ir,
+                &operands,
+                suspend_set,
+                orig_rets,
+                value_types,
+                prelude,
+            ) else {
+                return false;
+            };
+            let nr = no.remove(0);
+            let na: Vec<ExprId> = no.into_iter().map(|a| a.unwrap()).collect();
+            if let IrExpr::Call {
+                dispatch_receiver: r,
+                args,
+                ..
+            } = &mut ir.exprs[e as usize]
+            {
+                *r = nr;
+                *args = na;
+            }
+            true
+        }
+        IrExpr::MethodCall { receiver, args, .. } => {
+            let mut operands: Vec<Option<ExprId>> = vec![Some(receiver)];
+            operands.extend(args.iter().copied());
+            let Some(mut no) = hoist_operands_in_order(
+                ir,
+                &operands,
+                suspend_set,
+                orig_rets,
+                value_types,
+                prelude,
+            ) else {
+                return false;
+            };
+            let nr = no.remove(0).unwrap();
+            if let IrExpr::MethodCall {
+                receiver: r,
+                args: a,
+                ..
+            } = &mut ir.exprs[e as usize]
+            {
+                *r = nr;
+                *a = no;
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+/// Hoist suspensions inside an ordered operand list (a call's receiver + arguments, a template's
+/// parts) while preserving Kotlin's strict left-to-right evaluation order: any effectful operand
+/// that precedes a later suspending operand is bound to a prelude temp (kotlinc spills every
+/// operand of such a call), so `f(g(), susp())` runs `g()` before the suspension. `None` slots
+/// (default-argument holes) pass through untouched.
+///
+/// Returns `None` — with `ir` and `prelude` unmodified — when a required snapshot cannot be given
+/// a verifier type; the caller leaves the whole expression unhoisted so the flattener declines the
+/// shape (skip, never miscompile). The snapshot plan is decided and typed on the ORIGINAL operands
+/// before any rewrite: bailing mid-hoist would strand already-bound prelude temps next to a
+/// returned original expression, double-evaluating their effects. Typing the original is valid for
+/// the residual because every head-kind-CHANGING rewrite is excluded from the plan: a direct
+/// suspension point (residual `GetValue`) is skipped outright, and a collapsing `Block` types as
+/// `None` so the plan bails before anything is rewritten. All remaining rewrites replace children
+/// in place with typed `GetValue` temps and keep the head node, preserving its recovered type.
+fn hoist_operands_in_order(
+    ir: &mut IrFile,
+    operands: &[Option<ExprId>],
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+    prelude: &mut Vec<ExprId>,
+) -> Option<Vec<Option<ExprId>>> {
+    let suspends: Vec<bool> = operands
+        .iter()
+        .map(|o| o.is_some_and(|x| expr_calls_suspend(ir, x, suspend_set)))
+        .collect();
+    // Plan phase: type every operand that must be snapshot. A direct suspension point never needs
+    // one (its residual is a pure `GetValue`); an operand merely CONTAINING a suspension snapshots
+    // conservatively (its residual can still be effectful — `h(susp())` hoists to `h(tmp)`).
+    let mut snapshot_ty: Vec<Option<Ty>> = vec![None; operands.len()];
+    if let Some(last) = suspends.iter().rposition(|&s| s) {
+        for (i, o) in operands.iter().enumerate().take(last) {
+            let Some(x) = *o else { continue };
+            if is_suspension_point(ir, x, suspend_set) {
+                continue;
+            }
+            if suspends[i] || operand_needs_snapshot(ir, x, value_types) {
+                let Some(ty) = hoisted_value_ty(ir, x, orig_rets, value_types) else {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "hoist_operands_in_order BAIL: operand {i} untypeable: {:?} logical={:?}",
+                        ir.exprs[x as usize],
+                        ir.logical_types.get(&x)
+                    );
+                    return None;
+                };
+                snapshot_ty[i] = Some(ty);
+            }
+        }
+    }
+    // Rewrite phase: hoist each operand's suspensions, then materialize the planned snapshots so
+    // every effect lands in the prelude in source order.
+    let mut out = Vec::with_capacity(operands.len());
+    for (i, o) in operands.iter().enumerate() {
+        let Some(x) = *o else {
+            out.push(None);
+            continue;
+        };
+        let mut nx = hoist_expr(ir, x, suspend_set, orig_rets, value_types, prelude);
+        if let Some(ty) = snapshot_ty[i] {
+            let tmp = max_value_index(ir) + 1;
+            let bound = ir.add_expr(IrExpr::Variable {
+                index: tmp,
+                ty,
+                init: Some(nx),
+                named: false,
+            });
+            value_types.insert(tmp, ty);
+            prelude.push(bound);
+            nx = ir.add_expr(IrExpr::GetValue(tmp));
+        }
+        out.push(Some(nx));
+    }
+    Some(out)
+}
+
+/// Whether evaluating an operand before a later suspension must be materialized. Literal values and a
+/// `Null`-typed local are the only values allowed to commute: the latter's semantic domain is the
+/// singleton `null`, and the state machine deliberately rematerializes it rather than treating it as an
+/// ordinary JVM local spill. Every other runtime read or evaluation snapshots at its source position. A
+/// plain `GetValue` is not intrinsically stable because an inline-spliced later operand can write that
+/// local before the residual call reads it; likewise, a static `val` read can trigger initialization and
+/// is still a runtime field access. This semantic rule preserves exceptions and effects without a
+/// growing list of special cases for local/module/classpath storage or wrappers.
+fn operand_needs_snapshot(ir: &IrFile, expression: ExprId, value_types: &HashMap<u32, Ty>) -> bool {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Const(_) => false,
+        IrExpr::GetValue(local) => value_types
+            .get(local)
+            .is_none_or(|ty| !is_rematerialized_null(ty)),
+        _ => true,
+    }
+}
+
+/// The semantic JVM value type needed when suspend normalization materializes an already-evaluated
+/// expression into a temporary. This is deliberately an IR-identity query: it reads the selected
+/// callee/field/type node and never re-resolves a source name. It covers the common runtime-read and
+/// expression shapes that can precede a suspension in any ordered operand list; returning `None` makes
+/// an unexpected lowering shape decline safely instead of emitting a temp with a guessed verifier type.
+fn hoisted_value_ty(
+    ir: &IrFile,
+    expression: ExprId,
+    orig_rets: &[Ty],
+    value_types: &HashMap<u32, Ty>,
+) -> Option<Ty> {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Const(constant) => Some(match constant {
+            IrConst::Boolean(_) => Ty::Boolean,
+            IrConst::Int(_) => Ty::Int,
+            IrConst::Long(_) => Ty::Long,
+            IrConst::Double(_) => Ty::Double,
+            IrConst::Float(_) => Ty::Float,
+            IrConst::Char(_) => Ty::Char,
+            IrConst::String(_) => Ty::String,
+            IrConst::Short(_) => Ty::Short,
+            IrConst::Byte(_) => Ty::Byte,
+            IrConst::Null => Ty::Null,
+        }),
+        // A class literal is emitted as an `ldc Class`, which is still a runtime resolution action and
+        // therefore must stay before a later suspension (including any linkage failure it can raise).
+        IrExpr::ClassConst { .. } => Some(Ty::obj("java/lang/Class")),
+        // Value indices are local to one function. Looking through the complete arena can find a
+        // declaration with the same numeric index in an unrelated method and poison the verifier type
+        // of the new temp. The caller supplies the current function's parameter/local environment.
+        IrExpr::GetValue(index) => value_types.get(index).copied(),
+        IrExpr::Call { callee, .. } => match callee {
+            Callee::Local(function) | Callee::LocalDefault(function) => {
+                orig_rets.get(*function as usize).copied()
+            }
+            Callee::CrossFile { ret, .. } => Some(*ret),
+            Callee::Static { descriptor, .. } | Callee::Special { descriptor, .. } => {
+                crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
+            }
+            Callee::Virtual {
+                descriptor, params, ..
+            } => params.as_ref().map(|(_, ret)| *ret).or_else(|| {
+                crate::jvm::ir_emit::parse_physical_method_desc(descriptor).map(|(_, ret)| ret)
+            }),
+            // An external callee carries no signature in the IR; the checker's recorded logical type
+            // stands in, but ONLY where logical = physical representation (scalars and String —
+            // `"a" + susp()` chains). An `Obj`/nullable/etc. logical type may hide a value-class or
+            // boxing representation owned by the value-class pass, so those still return `None`.
+            Callee::External(_) => ir.logical_types.get(&expression).copied().filter(|ty| {
+                matches!(
+                    ty,
+                    Ty::Int
+                        | Ty::Byte
+                        | Ty::Short
+                        | Ty::Long
+                        | Ty::Float
+                        | Ty::Double
+                        | Ty::Boolean
+                        | Ty::Char
+                        | Ty::String
+                )
+            }),
+        },
+        IrExpr::MethodCall { class, index, .. } => ir
+            .classes
+            .get(*class as usize)
+            .and_then(|class| class.methods.get(*index as usize))
+            .and_then(|function| orig_rets.get(*function as usize))
+            .copied(),
+        IrExpr::PrimitiveBinOp { op, lhs, .. } => Some(match op {
+            IrBinOp::Lt
+            | IrBinOp::Le
+            | IrBinOp::Gt
+            | IrBinOp::Ge
+            | IrBinOp::Eq
+            | IrBinOp::Ne
+            | IrBinOp::RefEq
+            | IrBinOp::RefNe
+            | IrBinOp::And
+            | IrBinOp::Or => Ty::Boolean,
+            _ => hoisted_value_ty(ir, *lhs, orig_rets, value_types)?,
+        }),
+        IrExpr::PrimitiveNeg { ty, .. }
+        | IrExpr::TypeOp {
+            type_operand: ty, ..
+        } => Some(*ty),
+        // A constructed instance's verifier type is its class; generic arguments are erased at this
+        // boundary (the temp only needs the internal name).
+        IrExpr::New { internal, .. } => Some(Ty::Obj(*internal, &[])),
+        // `operand!!` yields its operand's value unchanged (the assert only throws), matching
+        // `value_ty`'s treatment in the emitter.
+        IrExpr::NotNullAssert { operand } => hoisted_value_ty(ir, *operand, orig_rets, value_types),
+        // Declared storage types, read straight off the IR declaration the node indexes — the same
+        // sources the emitter's `value_ty` consults. `PropertyRead` carries its type inline; a
+        // `Unit`-typed property realizes through a `()V` accessor (nothing to bind) and a bare
+        // type-parameter's erasure is the emitter's concern, so both decline.
+        IrExpr::GetStatic(i) => Some(ir.statics[*i as usize].ty),
+        // Static/singleton reads share the same semantic rule regardless of whether their declaration
+        // originated in this file, another module, or the classpath. Recover their physical type from
+        // the identity already stored on the IR node; the descriptor parser is shared with emission so
+        // array/object/primitive handling cannot drift into a suspend-only copy.
+        IrExpr::StaticInstance { ty, .. } => ir
+            .classes
+            .get(*ty as usize)
+            .map(|class| Ty::obj(&class.fq_name())),
+        IrExpr::ExternalStaticInstance { ty, .. } => Some(Ty::obj_name(*ty)),
+        IrExpr::ExternalStaticField { descriptor, .. } => {
+            let ty = crate::jvm::ir_emit::ty_from_field_descriptor(descriptor);
+            (!matches!(ty, Ty::Unit | Ty::Error)).then_some(ty)
+        }
+        IrExpr::EnumEntry { class, .. } | IrExpr::EnumValueOf { class, .. } => ir
+            .classes
+            .get(*class as usize)
+            .map(|class| Ty::obj(&class.fq_name())),
+        IrExpr::EnumValues { class } => ir
+            .classes
+            .get(*class as usize)
+            .map(|class| Ty::array(Ty::obj(&class.fq_name()))),
+        IrExpr::UnitInstance => Some(Ty::obj("kotlin/Unit")),
+        IrExpr::GetField { class, index, .. } => ir
+            .classes
+            .get(*class as usize)
+            .and_then(|class| class.fields.get(*index as usize))
+            .map(|field| field.ty),
+        IrExpr::PropertyRead { ty, .. } => {
+            (!matches!(ty, Ty::Unit | Ty::Error | Ty::TyParam(..))).then_some(*ty)
+        }
+        IrExpr::RefGet { elem, .. } => Some(*elem),
+        _ => None,
+    }
+}
+
+/// Snapshot the semantic types in one function's value-index namespace before suspend hoisting.
+/// `IrFile::exprs` is a module-wide arena while `GetValue(n)` is function-local, so any type query
+/// based on a global scan is inherently ambiguous. Nested lambda bodies own another namespace and are
+/// deliberately skipped; only their capture expressions still belong to the enclosing function.
+fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
+    fn collect(ir: &IrFile, expression: ExprId, out: &mut HashMap<u32, Ty>) {
+        match &ir.exprs[expression as usize] {
+            IrExpr::Variable {
+                index, ty, init, ..
+            } => {
+                out.entry(*index).or_insert(*ty);
+                if let Some(init) = init {
+                    collect(ir, *init, out);
+                }
+            }
+            IrExpr::Lambda { captures, .. } => {
+                for &capture in captures {
+                    collect(ir, capture, out);
+                }
+            }
+            _ => for_each_child(&ir.exprs, expression, &mut |child| collect(ir, child, out)),
+        }
+    }
+
+    let function = &ir.functions[fid as usize];
+    let receiver_offset = u32::from(function.dispatch_receiver.is_some());
+    let mut out = HashMap::new();
+    if let Some(receiver) = function.dispatch_receiver {
+        out.insert(0, Ty::obj_name(receiver));
+    }
+    for (index, ty) in function.params.iter().copied().enumerate() {
+        out.insert(receiver_offset + index as u32, ty);
+    }
+    collect(ir, body, &mut out);
+    out
 }
 
 /// For a same-file suspend call, the callee `FunId` — used to recover the callee's LOGICAL return type
@@ -1851,24 +2209,12 @@ fn build_state_machine(
             spilled.push((idx, spill_field_ty(ty)));
         }
     }
-    // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
-    // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified).
-    if spills_bottom_typed_local(&spilled) || suspending_over_progression(ir, b, &suspend_set) {
-        return false;
-    }
     // The spilled value parameters — captured at continuation construction (in spilled order).
     let param_caps: Vec<(u32, Ty)> = spilled
         .iter()
         .filter(|(idx, _)| param_ty(*idx).is_some())
         .cloned()
         .collect();
-    crate::trace_compiler!(
-        "suspend",
-        "build_state_machine fid={fid} this_offset={this_offset} completion_idx={completion_idx} spilled={:?} param_caps={:?}",
-        spilled.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
-        param_caps.iter().map(|(i, _)| *i).collect::<Vec<_>>()
-    );
-
     let fname = ir.functions[fid as usize].name.clone();
     // kotlinc nests a suspend method's continuation class under its ENCLOSING class
     // (`Svc$work$1`), and a top-level suspend fun's under the file facade (`FooKt$foo$1`). The
@@ -1950,6 +2296,24 @@ fn build_state_machine(
     // reflects the suspensions its machine actually has).
     let mut live_calls: HashSet<ExprId> = HashSet::new();
     collect_suspension_points(ir, b, &suspend_set, &mut live_calls);
+    // A positional scope list is the authoritative set the flattener stores and restores. Reconcile
+    // local allocation with it after both pre-splice named scopes and post-hoist live temps are merged:
+    // otherwise a named local that becomes dead after operand snapshotting can still be restored into
+    // an undeclared JVM slot. The same helper is used by lambda machines below, so allocation cannot
+    // drift by machine or declaration-provider shape.
+    reconcile_positional_spill_locals(ir, b, &susp_scopes, &live_calls, &mut spilled);
+    // NOTE: `spill_shape_unmodeled` deliberately applies only to the LAMBDA machine — the named
+    // machine's restore handles sub-int spills (`Boolean` params/temps, e2e-verified). Validate after
+    // positional reconciliation because scope-only locals are real spills too.
+    if spills_bottom_typed_local(&spilled) || suspending_over_progression(ir, b, &suspend_set) {
+        return false;
+    }
+    crate::trace_compiler!(
+        "suspend",
+        "build_state_machine fid={fid} this_offset={this_offset} completion_idx={completion_idx} spilled={:?} param_caps={:?}",
+        spilled.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        param_caps.iter().map(|(i, _)| *i).collect::<Vec<_>>()
+    );
     let mut layout = SpillLayout::default();
     for (call, scope) in &susp_scopes {
         if live_calls.contains(call) {
@@ -2230,9 +2594,9 @@ fn build_state_machine(
     // default: `throw IllegalStateException(...)` (an unreachable resume label) — matches kotlinc.
     let msg = k(
         ir,
-        IrExpr::Const(IrConst::String(
-            "call to 'resume' before 'invoke' with coroutine".to_string(),
-        )),
+        IrExpr::Const(IrConst::String(KtString::from(
+            "call to 'resume' before 'invoke' with coroutine",
+        ))),
     );
     let exc = ir.new_external(
         "java/lang/IllegalStateException",
@@ -2309,7 +2673,8 @@ fn build_lambda_state_machine(
     // flattener meets it as a bound-local suspension typed by the callee's logical return.
     normalize_block_inits(ir, b);
     split_unit_conditional_returns(ir, b, orig_rets.get(fid as usize) == Some(&Ty::Unit));
-    hoist_suspensions(ir, b, &suspend_set, orig_rets);
+    let mut value_types = function_value_types(ir, fid, b);
+    hoist_suspensions(ir, b, &suspend_set, orig_rets, &mut value_types);
     // A `suspendCoroutineUninterceptedOrReturn { c -> … }` block reads its continuation parameter:
     // bind it to the lambda machine itself (`this` = value-index 0) so `c.resume(v)` re-enters
     // THIS machine at the resume label.
@@ -2401,14 +2766,6 @@ fn build_lambda_state_machine(
         .fields
         .first()
         .is_some_and(|f| f.name == "this");
-    if (receiver_lambda && spill_shape_unmodeled(&spilled))
-        || spills_bottom_typed_local(&spilled)
-        || suspending_over_progression(ir, b, &suspend_set)
-        || tail_suspending_loop(ir, &stmts, &suspend_set)
-    {
-        return false;
-    }
-
     // The PRE-SPLICE per-suspension scope lists (captured in `lower_suspend`); a lambda has no
     // value-param prefix (captures/params live in leading fields, reloaded each entry). A lambda
     // fid the prelude never visited (not in `suspend_funs`) falls back to a post-transform walk.
@@ -2430,6 +2787,14 @@ fn build_lambda_state_machine(
     merge_live_temps(&mut susp_scopes, live_temp_scopes(ir, b, &suspend_set));
     let mut live_calls: HashSet<ExprId> = HashSet::new();
     collect_suspension_points(ir, b, &suspend_set, &mut live_calls);
+    reconcile_positional_spill_locals(ir, b, &susp_scopes, &live_calls, &mut spilled);
+    if (receiver_lambda && spill_shape_unmodeled(&spilled))
+        || spills_bottom_typed_local(&spilled)
+        || suspending_over_progression(ir, b, &suspend_set)
+        || tail_suspending_loop(ir, &stmts, &suspend_set)
+    {
+        return false;
+    }
     let mut layout = SpillLayout::default();
     for (call, scope) in &susp_scopes {
         if live_calls.contains(call) {
@@ -2629,9 +2994,9 @@ fn build_lambda_state_machine(
     }
     let msg = k(
         ir,
-        IrExpr::Const(IrConst::String(
-            "call to 'resume' before 'invoke' with coroutine".to_string(),
-        )),
+        IrExpr::Const(IrConst::String(KtString::from(
+            "call to 'resume' before 'invoke' with coroutine",
+        ))),
     );
     let exc = ir.new_external(
         "java/lang/IllegalStateException",
@@ -3960,6 +4325,36 @@ fn merge_live_temps(scopes: &mut SuspensionScopes, temps: SuspensionScopes) {
             }
         }
     }
+}
+
+/// Make the machine-local allocation set agree with the positional lists it will actually store and
+/// restore. Scope capture deliberately includes every named local in scope, while the earlier liveness
+/// analysis finds locals whose values are read across a suspension; either route makes a local a real
+/// spill consumer. Parameters/captures have no declaration in `body` and retain their dedicated entry
+/// handling, so only body-local declarations are added here. Centralizing the reconciliation keeps the
+/// named-function and suspend-lambda machines consistent and avoids operand/block-specific exceptions.
+fn reconcile_positional_spill_locals(
+    ir: &IrFile,
+    body: ExprId,
+    scopes: &SuspensionScopes,
+    live_calls: &HashSet<ExprId>,
+    spilled: &mut Vec<(u32, Ty)>,
+) {
+    for (call, scope) in scopes {
+        if !live_calls.contains(call) {
+            continue;
+        }
+        for &(local, _) in &scope.values {
+            if spilled.iter().any(|(existing, _)| *existing == local) {
+                continue;
+            }
+            if let Some(ty) = find_local_ty(ir, body, local) {
+                spilled.push((local, spill_field_ty(ty)));
+            }
+        }
+    }
+    spilled.sort_by_key(|(local, _)| *local);
+    spilled.dedup_by_key(|(local, _)| *local);
 }
 
 /// One lexically in-scope local of a [`ScopeWalk`]. `named` distinguishes a source variable (always

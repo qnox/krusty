@@ -588,6 +588,10 @@ fn fn_info(
         contract: sig.contract.clone(),
         generic_sig: sig.generic_sig.clone().map(Box::new),
         singleton_dispatch: None,
+        // A SOURCE callable's `ret` is already the declared type and its `physical_ret` is not yet
+        // erased, so there is no carrier-vs-box question for the value-class pass to answer here — it
+        // sees the declaration itself. The fact exists for callables read back from a class file.
+        declared_ret: None,
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -638,6 +642,8 @@ fn source_callable(
         contract: None,
         generic_sig: None,
         singleton_dispatch: None,
+        // See the note in the builder above: a source callable carries its declaration un-erased.
+        declared_ret: None,
     }
 }
 
@@ -1028,7 +1034,7 @@ mod tests {
             .classes
             .insert(type_name("sample/Phase"), class("sample/Phase"));
         symbols.enums.insert(
-            "Phase".to_string(),
+            type_name("sample/Phase"),
             vec!["FIRST".to_string(), "SECOND".to_string()],
         );
 
