@@ -29726,6 +29726,42 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// The write analogue of [`Self::resolve_external_inherited_property`]: a setter inherited
+    /// through a source class's EXTERNAL supertype (`object : Mid<String>() {}` writing
+    /// `actionHint`, where `setActionHint` is declared on `Mid`'s classpath supertype). The
+    /// receiver's own type names no such member for the symbol resolver — the source declaration
+    /// walk must cross into the classpath at the first external rung and resolve the setter
+    /// against that receiver, exactly as the read does for the getter.
+    fn resolve_external_inherited_property_setter(
+        &self,
+        receiver: TypeName,
+        name: &str,
+    ) -> Option<crate::libraries::LibraryCallable> {
+        let mut work = vec![receiver];
+        let mut seen = Vec::new();
+        while let Some(current) = work.pop() {
+            if seen.contains(&current) {
+                continue;
+            }
+            seen.push(current);
+            let Some(class) = self.syms.class_by_type_name(current) else {
+                if current != receiver {
+                    if let Some(setter) = self.resolve_property_setter(Ty::obj_name(current), name)
+                    {
+                        return Some(setter);
+                    }
+                }
+                continue;
+            };
+            if let Some(superclass) = class.super_internal {
+                work.push(superclass);
+            }
+            let interfaces: Vec<_> = class.interfaces.iter_ids().collect();
+            work.extend(interfaces.into_iter().rev());
+        }
+        None
+    }
+
     fn check_member(&mut self, rt: Ty, name: &str, span: Span, mexpr: Option<ExprId>) -> Ty {
         if rt == Ty::Error {
             return Ty::Error;
@@ -36704,13 +36740,24 @@ impl<'a> Checker<'a> {
                 .and_then(|internal| self.lookup_prop_with_owner_name(internal, &name))
         };
         let property_setter = if !rt.is_nullable() && source_property.is_none() {
-            self.resolve_property_setter(rt, &name)
+            // The receiver's own type answers first; a setter inherited through a source class's
+            // EXTERNAL supertype needs the declaration walk to cross into the classpath (the read
+            // side already does — `resolve_external_inherited_property`).
+            self.resolve_property_setter(rt, &name).or_else(|| {
+                rt.obj_internal().and_then(|internal| {
+                    self.resolve_external_inherited_property_setter(internal, &name)
+                })
+            })
         } else {
             None
         };
         let classpath_property =
             if !rt.is_nullable() && source_property.is_none() && property_setter.is_none() {
-                self.resolve_property_member(rt, &name)
+                self.resolve_property_member(rt, &name).or_else(|| {
+                    rt.obj_internal().and_then(|internal| {
+                        self.resolve_external_inherited_property(internal, &name)
+                    })
+                })
             } else {
                 None
             };
