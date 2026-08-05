@@ -2,9 +2,8 @@
 
 use super::common;
 
-/// `None` means ONLY that the toolchain isn't provisioned; a source the front end REJECTS panics
-/// with its diagnostics instead of skipping as a silent pass.
-fn run(src: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics.
+fn run(src: &str) -> String {
     common::expect_box_run_with_stdlib(src, "Main")
 }
 
@@ -27,7 +26,7 @@ fun box(): String {\n\
     val s = M().doTest(l)\n\
     return if (s == \"1:2;2:3;3:4;\") \"OK\" else \"fail: $s\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("member-ext componentN destructure"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -42,7 +41,7 @@ class M {\n\
     }\n\
 }\n\
 fun box(): String = if (M().result() == \"member\") \"OK\" else \"fail\"\n";
-    assert_eq!(run(SRC).expect("member extension precedence"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -58,7 +57,7 @@ class Outer {\n\
     }\n\
 }\n\
 fun box(): String = Outer().Inner().result()\n";
-    assert_eq!(run(SRC).expect("outer member extension"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -91,11 +90,7 @@ fun box(): String {\n\
     val ss = s.toString()\n\
     return if (ss == \"0:a;1:b;\") \"OK\" else \"fail: $ss\"\n\
 }\n";
-    if let Some(out) = run(SRC) {
-        assert_eq!(out, "OK");
-    } else {
-        panic!("bracket withIndex destructure did not compile");
-    }
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -107,7 +102,7 @@ fn unsigned_with_index_destructures_to_value_type() {
     }\n\
     return if (sum == 2740) \"OK\" else \"fail: $sum\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("unsigned withIndex destructure"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -124,7 +119,7 @@ fun box(): String {\n\
     }\n\
     return if (total == 5.0) \"OK\" else \"fail: $total\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("custom-iterable withIndex"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -144,7 +139,7 @@ fun box(): String {\n\
     val ss = sb.toString()\n\
     return if (ss == \"0:a;1:b;\") \"OK\" else \"fail: $ss\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("CharSequence length stub"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
 
 #[test]
@@ -160,10 +155,7 @@ fun box(): String {\n\
     val value: CharSequence = Chars(\"OK\")\n\
     return \"${value[0]}${value[1]}:${value.length}\"\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("inherited CharSequence mapped bridges"),
-        "OK:2"
-    );
+    assert_eq!(run(SRC), "OK:2");
 }
 
 #[test]
@@ -176,5 +168,5 @@ fn for_destructuring_over_with_index() {
     val ss = s.toString()\n\
     return if (ss == \"0:a;1:b;\") \"OK\" else \"fail: $ss\"\n\
 }\n";
-    assert_eq!(run(SRC).expect("withIndex destructure"), "OK");
+    assert_eq!(run(SRC), "OK");
 }
