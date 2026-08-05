@@ -1276,10 +1276,6 @@ pub struct IrFile {
     /// `-<hash>` mangling). Recorded by the value-class pass BEFORE erasure; read by `emit_default_stub`
     /// (signature + box-on-fill + unbox-on-delegate) AND the `$default` CALL site (boxed arg + descriptor).
     pub default_stub_boxed_params: std::collections::HashMap<u32, Vec<(usize, crate::types::Ty)>>,
-    /// Every value class this file's lowering resolved, by internal name → its erased underlying: the
-    /// ones declared here, the ones its module declares elsewhere, and the classpath ones it references.
-    /// Recorded by the JVM value-class pass, which is the phase that knows them.
-    pub value_class_underlyings: std::collections::HashMap<TypeName, crate::types::Ty>,
     /// The subset declared in this MODULE's SOURCE (this file or a sibling). Whether such a class ends up
     /// carrying an `@Metadata` record is decided by its own emit, so a record here cannot assume it does —
     /// unlike a CLASSPATH value class, whose value-class-ness is itself decoded from that record.

@@ -610,14 +610,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   casts the carrier to the box and binds an INSTANCE accessor where kotlinc emits the static `-impl`
   (`A.create('O').publicValue` → `checkcast A; A.getPublicValue()` on a `String`, ClassCastException).
   So `value_class_is_readable` answers POSITIVELY, never by assumption: a value class declared in THIS
-  file must pass the builder's own shape bails (`class_metadata_shape_admitted` — kind, single-`val`
+  file must pass the builder's own shape bails (`value_class_metadata_shape_admitted` — kind, single-`val`
   field, no value-class ctor parameter, nothing declared beyond the synthesized set); one declared in
   another file of this MODULE is unknown here, because its record is decided by its own emit, so the
   answer is no; anything else is on the CLASSPATH, where value-class-ness is itself decoded from the
   `@Metadata` inline record — being known as a value class at all IS the evidence a record exists.
-  That is what lets `WhateverUseCase.invoke(Result<Int>)` be described while `Holder.make(): A` (a
+  That is what lets `Factory.invoke(Result<Int>)` be described while `Holder.make(): A` (a
   sibling file's value class with a declared member) stays withheld. The value classes the pass
-  resolved reach the writer as `IrFile::{value_class_underlyings, module_source_value_classes}`.
+  resolved reach the writer through the existing `IrFile::is_value_class_name` lookup plus the
+  `module_source_value_classes` origin subset; there is no second value-class name table.
   Found by the box corpus's
   `compileKotlinAgainstKotlin/inlineClasses/privateConstructorWithPrivateFieldUsingTypeTable`; the
   cross-file half by review. Test:
@@ -699,12 +700,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   counts as such a member and `declared_fids` cannot see it (its accessor is synthesized from
   `IrProperty`, and `accessor_names` comes from backing fields); the SOLE underlying property does
   not, since kotlinc gives it an instance `getV()` too. (3) A member whose value-class position erases
-  to `Object` (`value class A<T>(val value: T)`, `kotlin/Result`): the return model rests on the
-  physical type identifying the carrier, and at `Object` it does not — `call_declared_ret` resolves
-  that ambiguity but is threaded only on the member and static call paths, not yet the
-  operator-invoke one, where `useCase(param)` still lands a raw carrier under a `checkcast
-  kotlin/Result`. Read off the ERASED signature rather than a value-class table, so it holds for a
-  classpath value class exactly as for a same-file one. A `suspend` member's RETURN is exempt from
+  to `Object` (`value class A<T>(val value: T)`, `kotlin/Result`). `call_declared_ret` now resolves
+  the RETURN ambiguity on member, static and operator-invoke paths, but parameter positions still
+  lack the equivalent selected-declaration carrier fact: an `Object`-underlying value-class argument
+  may arrive boxed where the callee expects its carrier. Admission therefore remains a conservative
+  whole-member decline whenever any declared value-class position erases to `Object`, until both
+  directions are verified on every call route. The test is read from the ERASED signature rather
+  than a value-class table, so it holds for a classpath value class exactly as for a same-file one.
+  A `suspend` member's RETURN is exempt from
   this test — CPS makes it `Object` whatever it declares — with one exception that is a real
   miscompile: (4) a CONCRETE `suspend` member whose value-class return krusty BOXES at the CPS
   `areturn` (`ir.suspend_boxed_value_class_returns`). kotlinc boxes there only for a PRIMITIVE
@@ -723,8 +726,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_value_class_parameter_member_round_trips` and
   `an_inherited_value_class_returning_member_round_trips` each RUN `box()` against krusty's own class
   output (a caller that merely compiles while emitting the boxed form still fails);
-  `a_value_class_with_a_declared_member_withholds_the_record`,
-  `value_class_body_property_withholds_the_record` and
+  `a_value_class_with_a_declared_member_withholds_the_record` and
   `a_concrete_suspend_value_class_return_withholds_the_record` pin the declines above on the emitted
   METHOD, so each fails the day its ABI is corrected. `data_class_metadata_wiring_e2e::
   value_class_parameter_member_is_byte_identical`, `value_class_return_member_is_byte_identical` and

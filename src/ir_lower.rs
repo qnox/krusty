@@ -20686,7 +20686,7 @@ impl<'a> Lower<'a> {
                 });
                 let is_interface = member.is_interface();
                 // The operator-invoke path threads the callee's DECLARED return exactly like an
-                // ordinary member call: `useCase(param)` must not read its `Object` result as a box
+                // ordinary member call: `factory.create()` must not read its `Object` result as a box
                 // when the callee declares a value class there.
                 let declared_ret = member.declared_ret;
                 let call = self.emit_virtual_call(

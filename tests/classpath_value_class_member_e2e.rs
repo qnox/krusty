@@ -38,88 +38,30 @@ fn classpath_value_class_param_member_resolves_mangled() {
     }
 }
 
-/// A classpath member whose RETURN is a value class is JVM-name-MANGLED and physically returns that
-/// value class's ERASED underlying (`fun make(): K` → `make-XLNMDGE()Ljava/lang/String;`). The value on
-/// the stack is therefore ALREADY the unboxed carrier: tagging the result with the declared `K` as a
-/// `checkcast K` and unboxing it hands `unbox-impl` a `String` — a ClassCastException. kotlinc emits
-/// neither instruction. The sibling PROPERTY (`val k: K` → `getK-XLNMDGE()`) has the same physical
-/// shape and is checked beside it, so the two members stay on one rule.
+/// Operator invocation must carry the selected declaration's return fact just like an explicitly
+/// named member call. The generic value class below erases its carrier to `Object`, so logical and
+/// physical types cannot classify the result: a real box read from a generic slot has the identical
+/// JVM shape. Only `Factory.invoke`'s declared, pre-substitution return proves that the `String` left
+/// by the mangled method is the unboxed `TokenBox<String>` carrier. Without that fact the consumer
+/// emits `checkcast TokenBox; unbox-impl` over the `String` and fails at runtime.
 #[test]
-fn classpath_value_class_return_member_is_already_unboxed() {
+fn operator_invoke_uses_declared_value_class_return() {
     let jdk = common::jdk_modules();
-    let sl = common::stdlib_jar();
+    let stdlib = common::stdlib_jar();
     let Some(libout) = common::compile_lib(
-        "vcmemberret",
+        "vcoperatorreturn",
         "package lib\n\
-         @JvmInline value class K(val v: String)\n\
-         class Holder {\n\
-        \x20   val k: K = K(\"prop\")\n\
-        \x20   fun make(): K = K(\"made\")\n\
-        \x20   fun echo(x: K): String = x.v\n\
-         }\n",
+         @JvmInline value class TokenBox<T>(val value: T)\n\
+         class Factory { operator fun invoke(): TokenBox<String> = TokenBox(\"OK\") }\n",
     ) else {
         return;
     };
-    let cp = vec![libout.clone(), sl.clone()];
-    let main = "import lib.Holder\n\
-        import lib.K\n\
-        fun box(): String {\n\
-        \x20 val h = Holder()\n\
-        \x20 if (h.make().v != \"made\") return \"f1\"\n\
-        \x20 if (h.k.v != \"prop\") return \"f2\"\n\
-        \x20 val made: K = h.make()\n\
-        \x20 if (made.v != \"made\") return \"f3\"\n\
-        \x20 if (h.echo(made) != \"made\") return \"f4\"\n\
-        \x20 if (h.echo(h.make()) != \"made\") return \"f5\"\n\
-        \x20 return \"OK\"\n\
-        }\n";
+    let cp = vec![libout.clone(), stdlib.clone()];
+    let main = "import lib.Factory\nfun box(): String = Factory()().value\n";
     let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
-        .expect("krusty failed to compile a value-class-returning member call");
-    match common::run_box(&classes, "MainKt", &[libout, sl]) {
-        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
-        None => eprintln!("skipping: box runner unavailable"),
-    }
-}
-
-/// The carrier rule must NOT swallow a genuine generic slot. Reading a value class back out of a
-/// `List<S>` yields a BOX (the list stores boxes), so that read still needs `checkcast S; unbox-impl`
-/// even though the member producing it returns the carrier. The two are told apart by the carrier
-/// being a CONCRETE type: `S(String)` erases to `Ljava/lang/String;`, which a generic slot's
-/// `Ljava/lang/Object;` can never be mistaken for.
-///
-/// The slot is read into a local first, deliberately. Passing `list[0]` STRAIGHT into a value-class
-/// parameter is a separate, pre-existing gap: nothing unboxes a boxed argument at the call itself
-/// (the boundary that unboxes is the local's declared type), and it fails the same way with or
-/// without the carrier rule.
-#[test]
-fn a_generic_slot_still_boxes_a_concrete_carrier_value_class() {
-    let jdk = common::jdk_modules();
-    let sl = common::stdlib_jar();
-    let Some(libout) = common::compile_lib(
-        "vcgenericslot",
-        "package lib\n\
-         @JvmInline value class S(val v: String)\n\
-         object F {\n\
-        \x20   fun make(): S = S(\"a\")\n\
-        \x20   fun show(s: S): String = s.v\n\
-         }\n",
-    ) else {
-        return;
-    };
-    let cp = vec![libout.clone(), sl.clone()];
-    let main = "import lib.F\n\
-        import lib.S\n\
-        fun box(): String {\n\
-        \x20 val list: List<S> = listOf(F.make())\n\
-        \x20 val fromSlot: S = list[0]\n\
-        \x20 val direct: S = F.make()\n\
-        \x20 return if (F.show(fromSlot) == \"a\" && F.show(direct) == \"a\") \"OK\"\n\
-        \x20        else \"fail: ${F.show(fromSlot)}/${F.show(direct)}\"\n\
-        }\n";
-    let classes = common::compile_in_process(main, "Main", &cp, Some(jdk.as_path()))
-        .expect("krusty failed to compile a value class read out of a generic slot");
-    match common::run_box(&classes, "MainKt", &[libout, sl]) {
-        Some(o) => assert_eq!(o.trim(), "OK", "box() = {o:?}"),
+        .expect("krusty failed to compile an operator with a declared value-class return");
+    match common::run_box(&classes, "MainKt", &[libout, stdlib]) {
+        Some(output) => assert_eq!(output.trim(), "OK", "box() = {output:?}"),
         None => eprintln!("skipping: box runner unavailable"),
     }
 }

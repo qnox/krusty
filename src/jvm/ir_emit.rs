@@ -429,22 +429,13 @@ fn build_class_metadata(
             d2: vec![],
         });
     }
-    if c.is_annotation
-        || c.enum_entry_of.is_some()
-        || c.prop_ref.is_some()
-        || c.func_ref.is_some()
-        || c.companion_class.is_some()
-        || !c.secondary_ctors.is_empty()
-        // An interface legitimately has NO constructor; every other kind must have its primary.
-        || (!c.has_primary_ctor && !c.is_interface)
-        || (c.fields.len() as u32) < c.ctor_param_count
-    {
+    if !class_metadata_common_shape_admitted(ir, c) {
         return None;
     }
     // A `data class` also carries kotlinc's synthesized `componentN`/`copy`/`equals`/`hashCode`/
     // `toString` — derivable from the primary-ctor properties alone, so allowed alongside accessors.
-    if c.is_value && (c.fields.len() != 1 || !c.fields[0].is_final()) {
-        return None; // multi-field / `var` value classes are a shape not computed yet
+    if c.is_value && !value_class_metadata_shape_admitted(ir, c) {
+        return None;
     }
     // A value class's compiler-synthesized members (the static `-impl` family + their instance
     // delegators); allowed alongside the property accessor without disqualifying the shape.
@@ -519,7 +510,7 @@ fn build_class_metadata(
     // `box()`) and pinned by the box corpus's `compileKotlinAgainstKotlin/inlineClasses/*` MODULE
     // chains.
     //
-    // Three shapes still decline, and NONE of them for the reason removed above: each is a WRITE-side
+    // Four shapes still decline, and NONE of them for the reason removed above: each is a WRITE-side
     // gap — krusty's own output differs from kotlinc's — so the read half fixed here cannot reach them.
     // Each was invisible while the record was withheld, and each is proven by a differential comparison
     // against real kotlinc for the same source.
@@ -534,16 +525,7 @@ fn build_class_metadata(
     //    erasure loses the parameter's identity) is the signal; `vc_declared_sigs` cannot be, as it
     //    holds non-synthesized FUNCTIONS only.
     //
-    // 2. A VALUE-CLASS-typed PROPERTY. The METHODS match kotlinc exactly (both emit `getK-XLNMDGE()
-    //    Ljava/lang/String;`), but the RECORD does not: for `class Holder { val k: K = K("OK") }`
-    //    krusty writes `d2=[…,"k","","getK","()Ljava/lang/String;"]` where kotlinc writes
-    //    `[…,"k","LK;","getK-XLNMDGE","()Ljava/lang/String;","Ljava/lang/String;"]` — the property's
-    //    Kotlin type is EMPTY rather than `LK;` and its getter is spelled unmangled. A reader binds a
-    //    `getK()` the class file does not define; krusty's own reader reports `.k`'s result as having
-    //    no member `v`. Describing a value-class property type is a separate write-side model from the
-    //    value-class RETURN, which is why the stamped realization still gates admission here.
-    //
-    // 3. A VALUE class with a DECLARED MEMBER of its own. kotlinc realizes
+    // 2. A VALUE class with a DECLARED MEMBER of its own. kotlinc realizes
     //    `value class S(val v: String) { fun k(): String }` as the STATIC
     //    `k-impl(Ljava/lang/String;)Ljava/lang/String;` over the unboxed carrier; krusty emits an
     //    INSTANCE `k()` on the box. Reading krusty's record then puts the carrier on the stack under an
@@ -556,16 +538,18 @@ fn build_class_metadata(
     //    get() = … }` is that shape — kotlinc emits the static `getPublicValue-impl(Object)`, krusty an
     //    instance `getPublicValue()`. The SOLE underlying property is not a declared member in this
     //    sense: kotlinc gives it an instance `getV()` too, so it stays admissible.
-    // 4. A member whose value-class position erases to `Object` — i.e. the value class's underlying is
+    // 3. A member whose value-class position erases to `Object` — i.e. the value class's underlying is
     //    itself erased-top (`value class A<T>(val value: T)`, `kotlin/Result`). The RETURN model
     //    described above rests on the physical type identifying the carrier, and at `Object` it does
     //    not: a carrier and a BOX sitting in a generic slot are spelled identically, which is the same
-    //    ambiguity `call_declared_ret` exists to resolve — and it is only threaded on the member and
-    //    static call paths, not yet on the operator-invoke one (`useCase(param)` still lands a raw
-    //    carrier under a `checkcast kotlin/Result`). Describing these members turns a SKIP into a
-    //    miscompile, so they wait for the remaining paths. Read off the ERASED signature rather than a
-    //    value-class table, so it holds for a classpath value class (`Result`) exactly as for a
-    //    same-file one: a position that DECLARED a value class and now spells `Object` is the case.
+    //    ambiguity `call_declared_ret` exists to resolve. That declared-return fact is now threaded
+    //    through ordinary member, static and operator-invoke calls, but parameter positions still lack
+    //    an equivalent selected-declaration carrier fact: an `Object`-underlying value-class argument
+    //    can still arrive boxed where the callee expects its carrier. Admission therefore remains a
+    //    conservative whole-member decline whenever ANY declared value-class position erases to
+    //    `Object`, until both directions are verified on every call route. Read this off the erased
+    //    signature rather than a value-class table, so it holds for a classpath value class (`Result`)
+    //    exactly as for a same-file one.
     //
     //    A `suspend` member's return is EXEMPT, because the CPS rewrite makes every suspend method
     //    return `Object` regardless of what it declares (the real return rides the `Continuation`'s
@@ -573,7 +557,7 @@ fn build_class_metadata(
     //    perfectly describable — `interface I { suspend fun f(a: K): String }` is byte-identical to
     //    kotlinc. Value-class PARAMETERS are still checked; only the return is exempt.
     //
-    //    The exemption itself has an exception, and it is a real miscompile rather than a lost
+    // 4. The exemption itself has an exception, and it is a real miscompile rather than a lost
     //    opportunity: when the value-class pass BOXES the value-class return at the CPS `areturn`
     //    (`ir.suspend_boxed_value_class_returns`), krusty's bytecode and kotlinc's disagree. kotlinc
     //    boxes only for a PRIMITIVE underlying; over a reference, nullable, or generic underlying it
@@ -607,10 +591,8 @@ fn build_class_metadata(
     };
     let has_object_erased_value_class_member =
         declared_fids.iter().any(erases_value_class_to_object);
-    let has_computed_property = c.properties.iter().any(|p| p.backing_field.is_none());
     if has_object_erased_value_class_member
         || (!c.is_value && ir.has_value_param_ctor(&c.fq_name()))
-        || (c.is_value && (!declared_fids.is_empty() || has_computed_property))
     {
         return None;
     }
@@ -620,7 +602,10 @@ fn build_class_metadata(
     // Describing `Holder.make(): A` is only sound once `A` itself is described.
     let mentions_undescribed_value_class = |t: &Ty| {
         t.non_null().obj_internal().is_some_and(|fq_name| {
-            ir.value_class_underlyings.contains_key(&fq_name)
+            // Same-file and classpath declarations are in the unified lookup. A sibling source
+            // declaration is deliberately not materialized into this file's IR, so the module-origin
+            // subset is also positive identity for that one case; it is not a second underlying map.
+            (ir.is_value_class_name(fq_name) || ir.module_source_value_classes.contains(&fq_name))
                 && !value_class_is_readable(ir, fq_name)
         })
     };
@@ -1037,17 +1022,17 @@ fn build_class_metadata(
 ///   inline record — being known as a value class at all IS the evidence that a record exists.
 fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool {
     if let Some(declared) = ir.classes.iter().find(|other| other.fq_name == fq_name) {
-        return class_metadata_shape_admitted(ir, declared);
+        return value_class_metadata_shape_admitted(ir, declared);
     }
     !ir.module_source_value_classes.contains(&fq_name)
 }
 
-/// The shape conditions under which [`build_class_metadata`] describes a class, as far as a VALUE class
-/// can be tested without re-running the whole builder: the kind bails it opens with, the single-`val`
-/// field requirement, and "declares nothing beyond the synthesized set". Kept beside those bails —
-/// a new one there must be mirrored here, or a mentioning class starts describing an unreadable type.
-fn class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
-    if c.is_annotation
+/// Common class-shape admission shared by the writer and transitive value-class readability. Keeping
+/// these kind/constructor bails in one predicate is correctness-critical: if the writer withholds a
+/// value class but the transitive check independently admits it, a mentioning class publishes a type
+/// a downstream compiler reads as an ordinary box.
+fn class_metadata_common_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
+    !(c.is_annotation
         || c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
@@ -1055,15 +1040,22 @@ fn class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
         || !c.secondary_ctors.is_empty()
         || (!c.has_primary_ctor && !c.is_interface)
         || (c.fields.len() as u32) < c.ctor_param_count
-        || (c.is_value && (c.fields.len() != 1 || !c.fields[0].is_final()))
-        || ir.has_value_param_ctor(&c.fq_name())
-        // A COMPUTED property is realized by kotlinc as a static `-impl` over the carrier and by krusty
-        // as an instance accessor, so a value class with one is withheld — mirror that here.
-        || (c.is_value && c.properties.iter().any(|p| p.backing_field.is_none()))
-    {
-        return false;
-    }
-    class_metadata_declares_only_synthesized_members(ir, c)
+        || (!c.is_value && ir.has_value_param_ctor(&c.fq_name())))
+}
+
+/// The single admission predicate for a VALUE class's own metadata record. Both
+/// [`build_class_metadata`] and [`value_class_is_readable`] call it, so adding a new write-side bail
+/// cannot silently let a different class describe the withheld value class downstream.
+fn value_class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
+    c.is_value
+        && class_metadata_common_shape_admitted(ir, c)
+        && c.fields.len() == 1
+        && c.fields[0].is_final()
+        && !ir.has_value_param_ctor(&c.fq_name())
+        // A computed property is static `-impl` over the carrier in kotlinc and an instance accessor
+        // on the box here, so the value class remains withheld until those physical ABIs agree.
+        && !c.properties.iter().any(|p| p.backing_field.is_none())
+        && class_metadata_declares_only_synthesized_members(ir, c)
 }
 
 /// Whether the VALUE class `c` declares nothing beyond the members a value class synthesizes (the
