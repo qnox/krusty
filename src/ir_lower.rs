@@ -1222,6 +1222,7 @@ fn lower_file_at_reporting_impl(
                 .collect();
             let id = lo.ir.add_class(IrClass {
                 fq_name: type_name(&internal),
+                is_inner_class: inner_outer.is_some(),
                 is_value: c.is_value,
                 is_data: c.is_data,
                 decl_line: c.decl_line,
@@ -1306,7 +1307,7 @@ fn lower_file_at_reporting_impl(
                 // Only a language-level `inner` class needs its enclosing-instance field available to
                 // superclass arguments. Anonymous-object captures are normal constructor fields even
                 // when their physical ABI spelling is the conventional `this$0`.
-                pre_super_param_field_count: u32::from(inner_outer.is_some()),
+                pre_super_param_fields: inner_outer.iter().map(|_| (0, 0)).collect(),
                 explicit_param_stores: false,
                 methods: vec![],
                 is_interface: c.is_interface(),
@@ -2303,6 +2304,7 @@ fn lower_file_at_reporting_impl(
                     };
                 let comp_id = lo.ir.add_class(IrClass {
                     fq_name: type_name(&comp_fq),
+                    is_inner_class: false,
                     is_value: false,
                     is_data: false,
                     decl_line: c.companion_decl_line,
@@ -2314,7 +2316,7 @@ fn lower_file_at_reporting_impl(
                     ctor_param_count: 0,
                     ctor_args: vec![],
                     init_body: None,
-                    pre_super_param_field_count: 0,
+                    pre_super_param_fields: vec![],
                     explicit_param_stores: false,
                     methods: vec![],
                     is_interface: false,
@@ -4364,6 +4366,7 @@ fn lower_file_at_reporting_impl(
                         }
                         let sub_id = lo.ir.add_class(IrClass {
                             fq_name: type_name(&sub_fq),
+                            is_inner_class: false,
                             is_value: false,
                             is_data: false,
                             decl_line: 0,
@@ -4381,7 +4384,7 @@ fn lower_file_at_reporting_impl(
                             ctor_param_count: 0,
                             ctor_args: vec![],
                             init_body: None,
-                            pre_super_param_field_count: 0,
+                            pre_super_param_fields: vec![],
                             explicit_param_stores: false,
                             methods: vec![],
                             is_interface: false,
@@ -10227,6 +10230,7 @@ impl<'a> Lower<'a> {
             .collect();
         let class = IrClass {
             fq_name: type_name(&internal),
+            is_inner_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -10238,7 +10242,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args,
             init_body,
-            pre_super_param_field_count: 0,
+            pre_super_param_fields: vec![],
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
@@ -12726,6 +12730,7 @@ impl<'a> Lower<'a> {
             .internal;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_inner_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -12737,7 +12742,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
-            pre_super_param_field_count: 0,
+            pre_super_param_fields: vec![],
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
@@ -12846,6 +12851,7 @@ impl<'a> Lower<'a> {
             .internal;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_inner_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -12857,7 +12863,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
-            pre_super_param_field_count: 0,
+            pre_super_param_fields: vec![],
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
@@ -13156,6 +13162,7 @@ impl<'a> Lower<'a> {
         );
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_inner_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -13167,7 +13174,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
-            pre_super_param_field_count: 0,
+            pre_super_param_fields: vec![],
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
@@ -13865,6 +13872,7 @@ impl<'a> Lower<'a> {
             .obj_internal()?;
         let synth_id = self.ir.add_class(IrClass {
             fq_name: type_name(&synth_fq),
+            is_inner_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -13876,7 +13884,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
-            pre_super_param_field_count: 0,
+            pre_super_param_fields: vec![],
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,

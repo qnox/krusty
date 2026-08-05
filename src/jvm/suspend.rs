@@ -5443,14 +5443,21 @@ fn build_continuation_class(
     // param to its `L$i` field, then `super(completion)`. A top-level fn with no live params is just
     // `<init>(Continuation)`.
     let mut ctor_args: Vec<IrCtorArg> = Vec::new();
+    let mut pre_super_param_fields = Vec::new();
     let mut arg_idx = 1u32; // value-index of the next ctor argument (`this` is 0)
     if let Some(owner) = receiver {
         let recv_ty = Ty::obj_name(owner);
+        let receiver_field = fields.len() as u32;
         fields.push(
             crate::ir::IrField::new("this$0".to_string(), recv_ty.clone())
                 .with_is_final(true)
                 .with_is_private(false),
         );
+        // The continuation ABI stores its member receiver before `ContinuationImpl.<init>`, but the
+        // receiver field follows result/label/spills and is not a primary-constructor property. Carry
+        // the exact parameter/field edge so emission needs neither a field-name rule nor a leading-field
+        // assumption. This is independent of language-level inner/static nesting.
+        pre_super_param_fields.push((0, receiver_field));
         ctor_args.push(IrCtorArg {
             name: None,
             ty: recv_ty,
@@ -5474,6 +5481,7 @@ fn build_continuation_class(
     let super_arg = ir.add_expr(IrExpr::GetValue(super_completion_idx));
     let class = IrClass {
         fq_name: crate::types::type_name(internal),
+        is_inner_class: false,
         is_value: false,
         is_data: false,
         decl_line: 0,
@@ -5485,7 +5493,7 @@ fn build_continuation_class(
         ctor_param_count: 0,
         ctor_args,
         init_body: None,
-        pre_super_param_field_count: 0,
+        pre_super_param_fields,
         explicit_param_stores: false,
         methods: vec![inv_fid],
         is_interface: false,

@@ -1690,7 +1690,7 @@ fn inner_class_access(c: &IrClass) -> u16 {
 
     // Inner/static nesting is a source-level class property, not a consequence of a field spelling.
     // In particular, another synthetic class may conventionally call an ordinary capture `this$0`.
-    let is_inner = c.pre_super_param_field_count != 0;
+    let is_inner = c.is_inner_class;
     let mut access = PUBLIC | if is_inner { 0 } else { STATIC };
     if c.is_annotation {
         access |= INTERFACE | ABSTRACT | ANNOTATION;
@@ -3215,21 +3215,19 @@ fn emit_class(
             // ordinary capture does not. Keeping this as ordering metadata avoids interpreting a JVM
             // field name as source semantics. A `putfield` of the current class's own field on the
             // still-uninitialized `this` is legal per JVMS 4.10.2.4.
-            let mut param_slot = 1u16;
-            let mut field_i = 0usize;
-            for (param_i, param_ty) in param_tys.iter().enumerate() {
-                if ctor_param_is_field.get(param_i).copied().unwrap_or(true) {
-                    if field_i < c.pre_super_param_field_count as usize {
-                        let field = &c.fields[field_i];
-                        ctor.aload(0);
-                        load(*param_ty, param_slot, &mut ctor);
-                        let fref =
-                            e.cw.fieldref(&fq_name, &field.name, &type_descriptor(field.ty));
-                        ctor.putfield(fref, slot_words(field.ty) as i32);
-                    }
-                    field_i += 1;
-                }
-                param_slot += slot_words(*param_ty);
+            for &(param_i, field_i) in &c.pre_super_param_fields {
+                let param_i = param_i as usize;
+                let field = &c.fields[field_i as usize];
+                let param_ty = param_tys[param_i];
+                let param_slot = 1 + param_tys[..param_i]
+                    .iter()
+                    .map(|ty| slot_words(*ty))
+                    .sum::<u16>();
+                ctor.aload(0);
+                load(param_ty, param_slot, &mut ctor);
+                let fref =
+                    e.cw.fieldref(&fq_name, &field.name, &type_descriptor(field.ty));
+                ctor.putfield(fref, slot_words(field.ty) as i32);
             }
             // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
             let super_args = c.super_args.clone();
@@ -3279,7 +3277,11 @@ fn emit_class(
                         let name = &c.fields[field_i].name;
                         // Fields already stored before `super(…)` are not stored again here. The cutoff
                         // is semantic constructor metadata, independent of their physical ABI names.
-                        if field_i >= c.pre_super_param_field_count as usize {
+                        if !c
+                            .pre_super_param_fields
+                            .iter()
+                            .any(|&(_, pre_super_field)| pre_super_field as usize == field_i)
+                        {
                             // kotlinc maps this field store to the parameter's own source line —
                             // capture the pc where it starts.
                             let pc = ctor.bytes.len() as u16;
