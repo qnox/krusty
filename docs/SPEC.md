@@ -1296,12 +1296,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   joins the per-formal argument types (`String` + `String?` → `T := String?`, `Int` + `String` →
   `Any`) and accepts. The checker's top-level classpath arm now infers the joined binding from the
   metadata generic signature (explicit type arguments override), substitutes it into each declared
-  parameter, and checks arguments against those; a slot whose substitution still mentions an unbound
-  formal falls back to the erased parameter, and the emitted call is unchanged (`c.params` stays the
-  JVM-erased emit handle). A defaulted call (`assertEquals(a, b)` omitting `message`) resolves
-  through the `$default` synthetic, which carries no generic signature of its own — the resolver now
-  publishes the base function's signature on the returned callable so the same substitution covers
-  it (`tests/classpath_generic_nullable_arg_e2e.rs`).
+  parameter, and checks arguments against those; a slot whose shape mentions a formal the call left
+  unbound keeps the erased parameter, and the emitted call is unchanged (`c.params` stays the
+  JVM-erased emit handle). The joined binding must still satisfy the declared upper bounds — `fun
+  <T : Any>` with a `String?` join is rejected exactly as kotlinc rejects the bound violation (the
+  expectations fall back to the erased parameters, which refuse the nullable argument). A defaulted
+  call (`assertEquals(a, b)` omitting `message`) resolves through the `$default` synthetic, which
+  carries no generic signature of its own — the resolver now publishes the base function's signature
+  on the returned callable so the same substitution covers it. The labelled parameter-omitting form
+  (`eqd(expected = …, actual = …)`) additionally needed the named-argument slot SCORER to admit an
+  argument into a generically-typed slot (the positional path's `arg_fits` already admits anything
+  into an erased `Any`; the scorer's strict assignability test did not)
+  (`tests/classpath_generic_nullable_arg_e2e.rs`).
 - `vararg` parameters: the parameter's JVM type is the array (`Int...` → `[I`); a call packs the trailing
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index

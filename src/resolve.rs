@@ -17132,15 +17132,28 @@ impl<'a> Checker<'a> {
                 &value_signature,
                 trailing_lambda,
             ) {
-                Ok(slots) => mapped.push((
-                    self.call_slot_score_vararg(
-                        value_params,
-                        &slots,
-                        candidate.call_sig.vararg_index,
-                    ),
-                    slots,
-                    candidate,
-                )),
+                Ok(slots) => {
+                    // The generic shapes align with `value_params` only when nothing was stripped
+                    // in front of them and the arity agrees (see the expectations guard).
+                    let generic_shapes = candidate
+                        .generic_sig
+                        .as_ref()
+                        .filter(|gsig| {
+                            context_count == 0
+                                && gsig.params.len() == candidate.callable.params.len()
+                        })
+                        .map(|gsig| gsig.params.clone());
+                    mapped.push((
+                        self.call_slot_score_vararg_generic(
+                            value_params,
+                            &slots,
+                            candidate.call_sig.vararg_index,
+                            generic_shapes.as_deref(),
+                        ),
+                        slots,
+                        candidate,
+                    ));
+                }
                 Err(error) => failures.push((error, candidate)),
             }
         }
@@ -22042,13 +22055,17 @@ impl<'a> Checker<'a> {
     /// rejects shapes the declaration accepts — kotlinc joins the per-formal argument types instead
     /// (`String` + `String?` → `T := String?`), and every `T` slot then expects the join. `actuals`
     /// are `(parameter slot, argument type)` pairs; explicit type arguments override the inferred
-    /// binding. `None` when the callable has no metadata generics to instantiate (the erased
-    /// parameters ARE the declaration) or its shape can't be aligned slot-for-slot.
+    /// binding. A slot whose shape mentions a formal the call left unbound is `None` — the erased
+    /// parameter stays its expectation. The whole result is `None` when the callable has no metadata
+    /// generics to instantiate (the erased parameters ARE the declaration), its shape can't be
+    /// aligned slot-for-slot, or the joined bindings violate a declared upper bound (`fun <T : Any>`
+    /// with `T := String?` — kotlinc rejects the call, so the erased parameters must too).
     fn library_generic_call_param_expectations(
+        &self,
         c: &crate::libraries::LibraryCallable,
         actuals: &[(usize, Ty)],
         type_args: &[Ty],
-    ) -> Option<Vec<Ty>> {
+    ) -> Option<Vec<Option<Ty>>> {
         let gsig = c.generic_sig.as_deref()?;
         if gsig.formals.is_empty() || c.context_count > 0 || gsig.params.len() != c.params.len() {
             return None;
@@ -22060,21 +22077,58 @@ impl<'a> Checker<'a> {
         for (formal, targ) in gsig.formals.iter().zip(type_args) {
             binds.insert(formal.clone(), *targ);
         }
+        if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+            gsig,
+            &binds,
+            |actual, bound| self.receiver_is_assignable(actual, bound),
+        ) {
+            return None;
+        }
         Some(
             gsig.params
                 .iter()
-                .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &binds))
+                .map(|parameter| {
+                    (!Self::ty_mentions_unbound_param(*parameter, &binds))
+                        .then(|| crate::symbol_resolver::ty_subst(*parameter, &binds))
+                })
                 .collect(),
         )
     }
 
+    /// Whether `ty` mentions a type parameter `binds` does not bind. `ty_subst` erases such a
+    /// formal to `Any`, which is NOT the declaration's expectation (a bounded formal erases to its
+    /// bound) — the caller must keep the erased parameter instead.
+    fn ty_mentions_unbound_param(ty: Ty, binds: &crate::symbol_resolver::GSigBinds) -> bool {
+        match ty {
+            Ty::TyParam(name, _) => !binds.contains_key(name),
+            Ty::Nullable(inner) => Self::ty_mentions_unbound_param(*inner, binds),
+            Ty::Obj(_, args) => args
+                .iter()
+                .any(|argument| Self::ty_mentions_unbound_param(*argument, binds)),
+            Ty::Fun(signature) => {
+                signature
+                    .params
+                    .iter()
+                    .any(|parameter| Self::ty_mentions_unbound_param(*parameter, binds))
+                    || Self::ty_mentions_unbound_param(signature.ret, binds)
+            }
+            _ => false,
+        }
+    }
+
     /// The expectation for one argument slot out of
     /// [`Self::library_generic_call_param_expectations`]: the substituted logical parameter when
-    /// inference fully instantiated it, else the erased parameter (an unbound formal is a
-    /// placeholder, not a type an argument can be measured against).
-    fn library_expected_param(expectations: Option<&Vec<Ty>>, fallback: Ty, slot: usize) -> Ty {
+    /// inference fully instantiated it, else the erased parameter. The post-substitution
+    /// `ty_mentions_type_param` filter catches a BINDING that itself carries an enclosing scope's
+    /// formal (an argument typed by an outer generic) — that too is a placeholder, not a type an
+    /// argument can be measured against.
+    fn library_expected_param(
+        expectations: Option<&[Option<Ty>]>,
+        fallback: Ty,
+        slot: usize,
+    ) -> Ty {
         expectations
-            .and_then(|params| params.get(slot).copied())
+            .and_then(|params| params.get(slot).copied().flatten())
             .filter(|ty| !Self::ty_mentions_type_param(*ty))
             .unwrap_or(fallback)
     }
@@ -30209,6 +30263,22 @@ impl<'a> Checker<'a> {
         slots: &[Option<ExprId>],
         vararg_index: Option<usize>,
     ) -> Option<usize> {
+        self.call_slot_score_vararg_generic(params, slots, vararg_index, None)
+    }
+
+    /// [`Self::call_slot_score_vararg`] with the candidate's metadata generic parameter shapes: a
+    /// slot whose declared shape mentions a type parameter admits ANY argument here — the erased
+    /// parameter (`T` → `Any`) would wrongly reject a nullable argument the call-site inference
+    /// accepts (`T := String?`), exactly as the positional path's `arg_fits` admits any argument
+    /// into an erased `Any`. The post-selection checker still measures the argument against the
+    /// substituted expectation.
+    fn call_slot_score_vararg_generic(
+        &self,
+        params: &[Ty],
+        slots: &[Option<ExprId>],
+        vararg_index: Option<usize>,
+        generic_shapes: Option<&[Ty]>,
+    ) -> Option<usize> {
         if params.len() != slots.len() {
             return None;
         }
@@ -30227,7 +30297,11 @@ impl<'a> Checker<'a> {
             } else {
                 params[i]
             };
+            let generically_typed = generic_shapes
+                .and_then(|shapes| shapes.get(i).copied())
+                .is_some_and(Self::ty_mentions_type_param);
             if aty != Ty::Error
+                && !generically_typed
                 && !self.receiver_is_assignable(aty, expected)
                 && !argument.adapts_integer_literal_to(expected)
                 && !self.erased_function_param_fits(expected, aty)
@@ -35264,7 +35338,7 @@ impl<'a> Checker<'a> {
                                 })
                                 .map(|((index, &parameter), _)| (parameter, arg_tys[index]))
                                 .collect();
-                            let expectations = Self::library_generic_call_param_expectations(
+                            let expectations = self.library_generic_call_param_expectations(
                                 &c,
                                 &actuals,
                                 &call_targs,
@@ -35280,7 +35354,7 @@ impl<'a> Checker<'a> {
                                 };
                                 self.expect_library_call_arg(
                                     Self::library_expected_param(
-                                        expectations.as_ref(),
+                                        expectations.as_deref(),
                                         declared,
                                         parameter,
                                     ),
@@ -35299,7 +35373,7 @@ impl<'a> Checker<'a> {
                             // substitution.
                             let actuals: Vec<(usize, Ty)> =
                                 arg_tys.iter().copied().enumerate().take(fixed).collect();
-                            let expectations = Self::library_generic_call_param_expectations(
+                            let expectations = self.library_generic_call_param_expectations(
                                 &c,
                                 &actuals,
                                 &call_targs,
@@ -35307,7 +35381,7 @@ impl<'a> Checker<'a> {
                             for i in 0..fixed.min(arg_tys.len()) {
                                 self.expect_library_call_arg(
                                     Self::library_expected_param(
-                                        expectations.as_ref(),
+                                        expectations.as_deref(),
                                         c.params[i],
                                         i,
                                     ),
@@ -35337,7 +35411,7 @@ impl<'a> Checker<'a> {
                                 .enumerate()
                                 .take(prefix_len)
                                 .collect();
-                            let expectations = Self::library_generic_call_param_expectations(
+                            let expectations = self.library_generic_call_param_expectations(
                                 &c,
                                 &actuals,
                                 &call_targs,
@@ -35345,7 +35419,7 @@ impl<'a> Checker<'a> {
                             for i in 0..prefix_len {
                                 self.expect_library_call_arg(
                                     Self::library_expected_param(
-                                        expectations.as_ref(),
+                                        expectations.as_deref(),
                                         c.params[i],
                                         i,
                                     ),
@@ -35372,7 +35446,7 @@ impl<'a> Checker<'a> {
                                     !matches!(self.file.expr(sel_args[i]), Expr::Lambda { .. })
                                 })
                                 .collect();
-                            let expectations = Self::library_generic_call_param_expectations(
+                            let expectations = self.library_generic_call_param_expectations(
                                 &c,
                                 &actuals,
                                 &call_targs,
@@ -35383,7 +35457,7 @@ impl<'a> Checker<'a> {
                                 }
                                 self.expect_library_call_arg(
                                     Self::library_expected_param(
-                                        expectations.as_ref(),
+                                        expectations.as_deref(),
                                         c.params[i],
                                         i,
                                     ),
