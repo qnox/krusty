@@ -211,8 +211,9 @@ fn resolved_but_unsupported_is_as_shapes_are_not_called_unresolved() {
         assert!(
             diagnostics
                 .iter()
-                .all(|message| !message.contains("unresolved reference 'Array'")),
-            "a resolved Array shape was mislabeled unresolved for {source:?}: {diagnostics:?}"
+                .all(|message| !message.contains("unresolved reference")),
+            "a resolved or precedence-suppressed shape was mislabeled unresolved for \
+             {source:?}: {diagnostics:?}"
         );
         assert!(
             diagnostics
