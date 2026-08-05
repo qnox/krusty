@@ -888,6 +888,11 @@ pub struct MetadataCallFacts {
     /// arguments, so consumers do not repeat overload alignment merely to recover semantic
     /// classifiers erased by a JVM signature (`MutableList<MutableSet<T>>` → `List<Set<T>>`).
     pub declared_ret: Option<Ty>,
+    /// Whether the descriptor-aligned declaration carries Kotlin's `suspend` modifier. Keeping this
+    /// beside the other facts selected from the SAME callable prevents a name-wide flag from leaking
+    /// across overloads, and lets consumers ignore whether a provider exposes source and JVM names
+    /// separately.
+    pub suspend: bool,
     /// Kotlin's source-level `operator` modifier. The JVM descriptor/name cannot encode it.
     pub is_operator: bool,
     /// The callable's declared contract, decoded from `@Metadata` (`None` when it has none).
@@ -919,6 +924,7 @@ impl MetadataCallFacts {
             call_sig,
             ret: ReturnInfo::default(),
             declared_ret: None,
+            suspend: false,
             is_operator: false,
             contract: None,
             context_count: 0,
@@ -938,9 +944,6 @@ struct ClassMeta {
     /// equality (hash collisions stay correct). Same-name entries keep declaration order (sort is
     /// by `(hash, index)`).
     by_jvm_name: Vec<(u64, u32)>,
-    /// The names under which a `suspend` function of this class can be looked up — BOTH its
-    /// `@Metadata` source name and its (possibly mangled) JVM name, per [`suspend_lookup_names`].
-    suspend_names: HashSet<String>,
     /// The facade's decoded [`MetaFn`] slices, SHARED by refcount: the class's own `Package`
     /// functions, or one segment per multifile PART. The parts' decodes are already retained on
     /// their cached `ClassInfo`s — segmenting instead of materializing a merged copy removes the
@@ -1375,26 +1378,6 @@ pub(super) fn aligned_member_metadata<'a>(
     compatible.next().is_none().then_some(selected)
 }
 
-/// Every name a `suspend` function answers to in [`ClassMeta::suspend_names`]: its `@Metadata` SOURCE
-/// name and the JVM name it was compiled under. The two differ whenever the signature is mangled — a
-/// value-class value parameter (`libU` → `libU-OzbTU-A`) or an explicit `@JvmName` — and a caller
-/// keys by whichever name it holds. The top-level overload scan holds a BYTECODE method name, so a
-/// source-only set left a mangled `suspend` function marked non-suspend: its descriptor kept the CPS
-/// `Continuation`, nothing threaded it, and the emitted `invokestatic` was one argument short. The
-/// sibling `jvm_name`-keyed lookups (inline-ness, the metadata call facts a contract rides on) match
-/// the entry's JVM name already; indexing both names is what puts this one on the same footing.
-///
-/// Empty for a non-`suspend` function.
-fn suspend_lookup_names(f: &super::metadata::MetaFn) -> impl Iterator<Item = String> + '_ {
-    f.is_suspend()
-        .then(|| {
-            std::iter::once(f.kotlin_name.clone())
-                .chain((f.jvm_name != f.kotlin_name).then(|| f.jvm_name.clone()))
-        })
-        .into_iter()
-        .flatten()
-}
-
 /// Pick the metadata function whose signature corresponds to the JVM method with `desc_params`, returning
 /// `(kept-param end, index into `meta.fns`)`. Disambiguates OVERLOADS sharing a JVM name
 /// (`any()` vs `any(predicate)`, `IntArray.any` vs `CharArray.any`) by receiver + value-parameter match,
@@ -1800,7 +1783,6 @@ impl Classpath {
         // copy here duplicated every part `MetaFn` (deep Strings included) — ~a third of peak heap.
         let mut fn_segments: Vec<std::sync::Arc<[super::metadata::MetaFn]>> = Vec::new();
         let mut prop_segments: Vec<std::sync::Arc<[super::metadata::MetaProp]>> = Vec::new();
-        let mut suspend_names: HashSet<String> = HashSet::new();
         if let Some(ci) = &ci {
             if !ci.meta.package_functions.is_empty() {
                 fn_segments.push(ci.meta.package_functions.clone());
@@ -1808,11 +1790,6 @@ impl Classpath {
             if !ci.meta.package_properties.is_empty() {
                 prop_segments.push(ci.meta.package_properties.clone());
             }
-            suspend_names.extend(
-                super::metadata::class_functions(ci)
-                    .iter()
-                    .flat_map(suspend_lookup_names),
-            );
             // A multifile FACADE has no function/property metadata of its own — its `d1` lists the
             // PART class names, which hold them; each part slice becomes a shared segment (the same
             // fns-empty/props-empty gating the merged-copy version used).
@@ -1827,20 +1804,9 @@ impl Classpath {
                     if merge_props && !pci.meta.package_properties.is_empty() {
                         prop_segments.push(pci.meta.package_properties.clone());
                     }
-                    suspend_names.extend(
-                        super::metadata::class_functions(&pci)
-                            .iter()
-                            .flat_map(suspend_lookup_names),
-                    );
                 }
             }
         }
-        suspend_names.extend(
-            fn_segments
-                .iter()
-                .flat_map(|s| s.iter())
-                .flat_map(suspend_lookup_names),
-        );
         // Hash-sorted by-JVM-name lookup over the flat segment concatenation: no name copies, and
         // same-name overloads stay in declaration order (sort by `(hash, index)`), matching the old
         // map's insertion-ordered index vecs.
@@ -1853,7 +1819,6 @@ impl Classpath {
         by_jvm_name.sort_unstable();
         let meta = std::rc::Rc::new(ClassMeta {
             by_jvm_name,
-            suspend_names,
             fn_segments,
             prop_segments,
         });
@@ -1980,6 +1945,7 @@ impl Classpath {
             call_sig,
             ret: metadata_return_info(c.ret_class, c.ret_nullable()),
             declared_ret: metadata_declared_return(c),
+            suspend: c.is_suspend(),
             is_operator: c.is_operator(),
             contract: c.contract.clone(),
             context_count: c.context_count,
@@ -2013,6 +1979,7 @@ impl Classpath {
             call_sig: function.member_call_sig(),
             ret: metadata_return_info(function.ret_class, function.ret_nullable()),
             declared_ret: metadata_declared_return(function),
+            suspend: function.is_suspend(),
             is_operator: function.is_operator(),
             contract: function.contract.clone(),
             context_count: function.context_count,
@@ -2945,28 +2912,6 @@ impl Classpath {
                     .zip(&desc_params[off..end])
                     .all(|(m, d)| meta_param_compat(m.ty, m.nullable(), d, value_underlying))
         })
-    }
-
-    /// Whether `internal.name(...)` is a Kotlin `suspend` function, per the class's `@Metadata`
-    /// `IS_SUSPEND` flag. A call to it is a coroutine suspension point. Includes the superclass walk
-    /// needed for facade part classes. `name` may be either the source name or the compiled JVM name
-    /// (see [`suspend_lookup_names`]); a caller holding a bytecode method name must still strip a
-    /// `$default` suffix, which is a synthetic with no `@Metadata` entry of its own.
-    pub fn is_suspend_method_name(&self, internal: TypeName, name: &str) -> bool {
-        let mut cur = Some(internal);
-        while let Some(s) = cur.take() {
-            if s.matches("java/lang/Object") {
-                break;
-            }
-            if self.class_meta_name(s).suspend_names.contains(name) {
-                return true;
-            }
-            match self.find_name(s) {
-                Some(ci) => cur = ci.super_class,
-                None => break,
-            }
-        }
-        false
     }
 
     /// Find extension function candidates for `receiver_desc.method_name`.

@@ -214,12 +214,13 @@ fun box(): String {\n\
 
 /// An unsigned VALUE PARAMETER mangles the `suspend` function's JVM name (`libU` → `libU-OzbTU-A`),
 /// and the `$default` synthetic is named from the mangled form. krusty looks suspend-ness up under
-/// that JVM name; `@Metadata` records the mangled name beside the SOURCE one, so the lookup has to
-/// match the entry's JVM name the way the inline/contract lookups already do. Keyed on the source
-/// name alone it missed, the callable came back marked non-suspend, the coroutine pass never
-/// threaded the `Continuation` the descriptor still spells, and the emitted `invokestatic` was one
-/// argument short — a class that links and fails verification, which is the outcome this whole file
-/// exists to rule out.
+/// that JVM name. Suspend-ness therefore has to come from the metadata declaration selected by JVM
+/// name AND descriptor shape, alongside the call facts already projected from that declaration.
+/// Keyed on the source name alone it missed the mangled method, while indexing every suspend source
+/// name would leak the flag to an ordinary overload. On the miss, the callable came back non-suspend,
+/// the coroutine pass never threaded the `Continuation` the descriptor still spells, and the emitted
+/// `invokestatic` was one argument short — a class that links and fails verification, which is the
+/// outcome this whole file exists to rule out.
 ///
 /// BOTH call forms are covered: the `$default` synthetic (an argument omitted) and the plain mangled
 /// method (every argument supplied) missed the same way, so the fix cannot key on `$default`. Both
@@ -233,7 +234,9 @@ fn mangled_suspend_classpath_call_threads_its_continuation() {
         &[(
             "Lib.kt",
             "package lib\n\
+import kotlin.coroutines.Continuation\n\
 fun mark(): String = \"!\"\n\
+fun libU(c: Continuation<Unit>): String = \"plain\"\n\
 suspend fun libU(t: UInt, s: String = mark()): String = \"$t$s\"\n",
         )],
     ) else {
@@ -252,7 +255,12 @@ fun box(): String {{\n\
     var out = \"\"\n\
     val body: suspend () -> Unit = {{ out = {call} }}\n\
     body.startCoroutine(Continuation(EmptyCoroutineContext) {{ it.getOrThrow() }})\n\
-    return if (out == \"7!\") \"OK\" else \"bad: $out\"\n\
+    // The source-name sibling is NOT suspend. A name-wide flag would incorrectly classify it from\n\
+    // the mangled declaration above and strip its ordinary trailing Continuation parameter, making\n\
+    // this legal call unresolvable. The metadata fact must follow the selected JVM name and\n\
+    // descriptor rather than leak across an overload family.\n\
+    val plain = libU(Continuation(EmptyCoroutineContext) {{ _ -> }})\n\
+    return if (out == \"7!\" && plain == \"plain\") \"OK\" else \"bad: $out/$plain\"\n\
 }}\n"
         )
     };

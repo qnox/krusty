@@ -128,47 +128,16 @@ impl JvmLibraries {
             }
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
-            // Suspend-ness lives on the declaration's `@Metadata`; a `$default` synthetic has no entry
-            // of its own, so detect it via the stripped `meta_name` — otherwise a suspend function's
-            // `withLock$default` keeps its `Continuation` param and no normal call shape resolves.
-            // `meta_name` is a BYTECODE name and may be mangled (`libU-OzbTU-A` for a value-class
-            // value parameter); the lookup is keyed by both of the entry's names, so it still hits.
-            let suspend = self.cp.is_suspend_method_name(c.owner, meta_name);
-            // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
-            // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
-            // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
-            let descriptor = if suspend {
-                strip_continuation_param(&c.descriptor)
-            } else {
-                c.descriptor.clone()
-            };
-            let Some((mut params, physical_ret)) = parse_method_desc_with_field_params(&descriptor)
+            let Some((mut params, physical_ret)) =
+                parse_method_desc_with_field_params(&c.descriptor)
             else {
                 continue;
             };
-            if is_default && params.len() >= 2 {
-                params.truncate(params.len() - 2);
-            }
-            // The CPS `Continuation` is emit-only — never part of the function signature `@Metadata`
-            // records. For a non-`$default` suspend method it is trailing and already gone (stripped
-            // from `descriptor` above); a `$default` synthetic spells it before the mask/marker, so it
-            // survived into the logical params. Drop it here so the params ARE the source signature and
-            // align against metadata; the emit `descriptor` keeps the physical CPS form.
-            if suspend
-                && params
-                    .last()
-                    .and_then(|p| p.obj_internal())
-                    .is_some_and(|n| n.matches("kotlin/coroutines/Continuation"))
-            {
-                params.pop();
-            }
-            // Drop any SYNTHETIC trailing params the JVM descriptor appends beyond the `@Metadata`
-            // SOURCE signature — a `@Composable` method's trailing `(Composer, int)` (a `suspend`
-            // Continuation is already removed above). `@Metadata` records only the source
-            // `value_parameter`s, so its count bounds the source params; keep the descriptor's
-            // leading params (their exact types — an extension receiver, a vararg array) and
-            // truncate the trailing synthetics. A normal function's metadata count equals the
-            // descriptor's param count, so this is a no-op for it (no regression).
+            // Select metadata ONCE from the physical JVM name and descriptor shape. A `$default`
+            // synthetic has no entry of its own, so only its suffix is stripped; a value-class-mangled
+            // name stays intact and matches `MetaFn.jvm_name`. Suspend-ness is one fact on that exact
+            // callable, beside arity/default/return facts — never a name-wide lookup that can leak
+            // from a suspend overload to an ordinary same-named sibling.
             let meta = self.cp.metadata_call_facts_name(
                 c.owner,
                 meta_name,
@@ -177,10 +146,29 @@ impl JvmLibraries {
                 false,
                 &|name| self.value_underlying_name(name),
             );
+            let suspend = meta.suspend;
+            // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
+            // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
+            // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
+            let descriptor = if suspend {
+                strip_continuation_param(&c.descriptor)
+            } else {
+                c.descriptor.clone()
+            };
+            // Drop any SYNTHETIC trailing params the JVM descriptor appends beyond the `@Metadata`
+            // SOURCE signature — a CPS Continuation, `$default` mask/marker, or `@Composable`
+            // `(Composer, int)` tail. The descriptor-aligned fact reports the source prefix from the
+            // same declaration that supplied `suspend`; ordinary methods with a Continuation parameter
+            // keep it because it is part of THEIR aligned source arity.
             if let Some(keep) = meta.kept_params {
                 if keep < params.len() {
                     params.truncate(keep);
                 }
+            } else if is_default && params.len() >= 2 {
+                // Metadata-free synthetic fallback: retain the legacy mask/marker trimming. A Kotlin
+                // `$default` should normally align above; this branch is conservative for incomplete
+                // or foreign metadata and makes no suspend claim of its own.
+                params.truncate(params.len() - 2);
             }
             let inline_desc = if is_default {
                 method_descriptor(&params, physical_ret)

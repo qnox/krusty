@@ -1811,21 +1811,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
   Aligning that second shape surfaced a separate miscompile, since FIXED: an unsigned VALUE PARAMETER
   MANGLES the JVM name (`libU` → `libU-OzbTU-A`, and the synthetic `libU-OzbTU-A$default` is named
-  from the mangled form), and a classpath callable is only marked `suspend` if the lookup — which
-  holds a BYTECODE method name — finds the `@Metadata` entry. Keying that one set on the entry's
-  SOURCE name alone made it miss: the callable came back non-suspend, nothing threaded the
-  `Continuation` its descriptor still spells, and the emitted `invokestatic` was one argument short —
-  a class that links and fails verification. A `suspend` function is therefore indexed under **both**
-  of the names its metadata entry carries, source and JVM, which is the keying its sibling per-name
-  metadata lookups (inline-ness, and the call facts a contract rides on) already used — they match
-  the entry's `jvm_name` and never had the blind spot. Both call forms now emit and run: the
-  `$default` synthetic (an argument omitted) and the plain mangled method (every argument supplied).
-
-  The fixture is synthetic; the shape is not. A `Duration` parameter mangles the same way, so
-  `kotlinx/coroutines/DelayKt.delay-VtjQ1oo(J, Continuation)` — the `delay(1.seconds)` overload,
-  sitting beside the unmangled `delay(Long)` — and `withTimeout-KLykuaI` / `withTimeoutOrNull-KLykuaI`
-  (all three verified in kotlinx-coroutines 1.10.1), plus several hundred more across a jar corpus
-  (heavily in Compose's gesture APIs), were every one of them read back as non-suspend.
+  from the mangled form). A source-name suspend set missed that bytecode candidate: the callable came
+  back non-suspend, nothing threaded the `Continuation` its descriptor still spells, and the emitted
+  `invokestatic` was one argument short — a class that links and fails verification. Suspend-ness is
+  now projected from the SAME metadata declaration selected by JVM name and descriptor shape for
+  arity, defaults, return type, and contracts. This both recognizes mangled suspend declarations and
+  prevents their flag from leaking to an ordinary same-source-name overload. Both suspend call forms
+  emit and run: the `$default` synthetic (an argument omitted) and the plain mangled method (every
+  argument supplied); the synthetic fixture also pins the ordinary overload independently.
 
   A net stays behind it (`gate:unthreaded-continuation-slot`): if a callable is not marked `suspend`
   and its descriptor still spells a `Continuation` the lowered values do not fill, the file is
