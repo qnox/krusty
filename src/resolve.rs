@@ -34989,6 +34989,25 @@ impl<'a> Checker<'a> {
                         return ret;
                     }
                 }
+                // A smart-cast narrowing of the current `this` (e.g. `if (this is Sub) { … }` on an
+                // extension receiver) is still an implicit MEMBER receiver: its members shadow any
+                // top-level function of the same name in kotlinc's scope order. Try it BEFORE the
+                // top-level paths and regardless of what top-levels the module declares — gating it
+                // on `!module_declares` let an unrelated top-level `navigate` (any package, any
+                // signature) suppress the narrowed member and misreport arity.
+                if let Some(bt) = self.effective_this_narrow() {
+                    if self.this_ty != Some(bt) {
+                        if let Some(bi) = bt.obj_internal() {
+                            if let Some(ret) = self.check_applicable_module_member_call(
+                                call, bt, &fname, args, &arg_tys,
+                            ) {
+                                self.narrowed_this_member.insert(call, bi);
+                                self.mark_current_extension_receiver_used(call);
+                                return ret;
+                            }
+                        }
+                    }
+                }
                 if !self.module_declares(&fname) {
                     if let Some(outer) = self.this_ty.and_then(|receiver| {
                         receiver
@@ -35007,17 +35026,6 @@ impl<'a> Checker<'a> {
                             if let Some(ret) = self.check_applicable_module_member_call(
                                 call, outer, &fname, args, &arg_tys,
                             ) {
-                                return ret;
-                            }
-                        }
-                    }
-                    if let Some(bt) = self.effective_this_narrow() {
-                        if let Some(bi) = bt.obj_internal() {
-                            if let Some(ret) = self.check_applicable_module_member_call(
-                                call, bt, &fname, args, &arg_tys,
-                            ) {
-                                self.narrowed_this_member.insert(call, bi);
-                                self.mark_current_extension_receiver_used(call);
                                 return ret;
                             }
                         }
