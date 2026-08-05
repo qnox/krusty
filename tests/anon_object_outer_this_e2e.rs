@@ -110,3 +110,23 @@ fn reads_outer_property_without_an_outer_call() {
          fun box(): String = Host().callback().invoke()\n",
     );
 }
+
+#[test]
+fn adapts_value_class_receiver_at_anonymous_constructor_boundary() {
+    // A value-class member executes with a boxed slot-0 receiver, while a constructor field of that
+    // non-null value-class type uses the unboxed carrier on the JVM. The anonymous-object construction
+    // is an independent representation boundary: adapt the argument there, then let the captured field
+    // reconstruct the receiver for the later member call. This fixture also guards constructor ordering:
+    // the ordinary capture must not be mistaken for an inner-class field that is stored before `super`.
+    run_ok(
+        "AnonOuterValueReceiver",
+        "interface Callback { fun invoke(): String }\n\
+         @JvmInline value class Host(private val payload: Int) {\n\
+         fun callback(): Callback = object : Callback {\n\
+         override fun invoke(): String = record()\n\
+         }\n\
+         fun record(): String = \"OK\"\n\
+         }\n\
+         fun box(): String = Host(1).callback().invoke()\n",
+    );
+}

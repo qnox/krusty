@@ -1303,6 +1303,10 @@ fn lower_file_at_reporting_impl(
                     }))
                     .collect(),
                 init_body: None,
+                // Only a language-level `inner` class needs its enclosing-instance field available to
+                // superclass arguments. Anonymous-object captures are normal constructor fields even
+                // when their physical ABI spelling is the conventional `this$0`.
+                pre_super_param_field_count: u32::from(inner_outer.is_some()),
                 explicit_param_stores: false,
                 methods: vec![],
                 is_interface: c.is_interface(),
@@ -2310,6 +2314,7 @@ fn lower_file_at_reporting_impl(
                     ctor_param_count: 0,
                     ctor_args: vec![],
                     init_body: None,
+                    pre_super_param_field_count: 0,
                     explicit_param_stores: false,
                     methods: vec![],
                     is_interface: false,
@@ -4376,6 +4381,7 @@ fn lower_file_at_reporting_impl(
                             ctor_param_count: 0,
                             ctor_args: vec![],
                             init_body: None,
+                            pre_super_param_field_count: 0,
                             explicit_param_stores: false,
                             methods: vec![],
                             is_interface: false,
@@ -10232,6 +10238,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args,
             init_body,
+            pre_super_param_field_count: 0,
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
@@ -12730,6 +12737,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
+            pre_super_param_field_count: 0,
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
@@ -12849,6 +12857,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
+            pre_super_param_field_count: 0,
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
@@ -13158,6 +13167,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
+            pre_super_param_field_count: 0,
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
@@ -13866,6 +13876,7 @@ impl<'a> Lower<'a> {
             ctor_param_count: 0,
             ctor_args: vec![],
             init_body: None,
+            pre_super_param_field_count: 0,
             explicit_param_stores: false,
             methods: vec![],
             is_interface: false,
@@ -15890,10 +15901,18 @@ impl<'a> Lower<'a> {
             .implicit_receiver_selections
             .get(&expression)
             .copied()?;
-        if let Some((slot, ty)) = self
-            .implicit_receivers()
+        let receivers = self.implicit_receivers();
+        if let Some((slot, ty)) = receivers.iter().copied().find(|(_, ty)| *ty == expected) {
+            return Some((self.emit_get_value(slot), ty));
+        }
+        // A separately checked/emitted generic inline body can carry a different type-parameter symbol
+        // for the same physical receiver slot. Preserve checker precedence by trying exact identity
+        // first, then compare the shared semantic receiver erasure (rather than branching on file or
+        // inline origin). The receiver list is nearest-first, so equally erased nested receivers retain
+        // the same scope ordering the checker applied.
+        if let Some((slot, ty)) = receivers
             .into_iter()
-            .find(|(_, ty)| *ty == expected)
+            .find(|(_, ty)| ty.erased_recv() == expected.erased_recv())
         {
             return Some((self.emit_get_value(slot), ty));
         }

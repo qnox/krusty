@@ -783,6 +783,12 @@ pub struct IrClass {
     /// `val`/`var` param→field stores (the desugared primary-constructor sugar); it also carries body-
     /// property initializers (`SetField`) and `init { … }` blocks. `None` when there's nothing to run.
     pub init_body: Option<ExprId>,
+    /// Number of leading field-backed constructor parameters that must be stored before the superclass
+    /// constructor runs. This is semantic constructor-order metadata: the JVM backend must not infer it
+    /// from a synthetic field spelling. Today an `inner` class contributes its single enclosing-instance
+    /// field here; ordinary lexical/enclosing captures, including anonymous-object captures that share
+    /// the conventional physical name, remain ordinary post-`super` stores.
+    pub pre_super_param_field_count: u32,
     /// `true` when `init_body` already stores the primary-constructor `val`/`var` params (and inner
     /// `this$0`) to their fields — the desugared form. The JVM backend then must NOT auto-store them (it
     /// would double-store). `false` for synthesized classes that still rely on the backend's implicit
@@ -2320,6 +2326,7 @@ mod tests {
             ctor_param_count: 0,
             ctor_args: Vec::new(),
             init_body: None,
+            pre_super_param_field_count: 0,
             explicit_param_stores: false,
             methods: Vec::new(),
             is_interface: false,

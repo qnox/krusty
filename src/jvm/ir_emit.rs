@@ -1688,7 +1688,9 @@ fn inner_class_access(c: &IrClass) -> u16 {
     const ANNOTATION: u16 = 0x2000;
     const ENUM: u16 = 0x4000;
 
-    let is_inner = c.fields.first().is_some_and(|field| field.name == "this$0");
+    // Inner/static nesting is a source-level class property, not a consequence of a field spelling.
+    // In particular, another synthetic class may conventionally call an ordinary capture `this$0`.
+    let is_inner = c.pre_super_param_field_count != 0;
     let mut access = PUBLIC | if is_inner { 0 } else { STATIC };
     if c.is_annotation {
         access |= INTERFACE | ABSTRACT | ANNOTATION;
@@ -3200,16 +3202,34 @@ fn emit_class(
                     }
                 }
             }
-            // An inner class stores its captured outer instance (`this$0`, field 0) BEFORE `super(…)`,
-            // so a super-constructor argument can read the outer instance (`inner class Inner :
-            // Base(run { outerProp })`) — kotlinc emits the same. A `putfield` of the current class's own
-            // field on the still-uninitialized `this` is legal per JVMS 4.10.2.4.
-            if let Some(this0) = c.fields.iter().find(|field| field.name == "this$0") {
-                ctor.aload(0);
-                ctor.aload(1); // the outer instance = first constructor parameter
-                let fref =
-                    e.cw.fieldref(&fq_name, "this$0", &type_descriptor(this0.ty));
-                ctor.putfield(fref, slot_words(this0.ty) as i32);
+            let ctor_param_is_field: Vec<bool> = if c.ctor_args.is_empty() {
+                vec![true; param_tys.len()]
+            } else {
+                c.ctor_args
+                    .iter()
+                    .map(|argument| argument.is_field)
+                    .collect()
+            };
+            // Store only constructor fields explicitly marked as pre-super. A language-level inner
+            // class marks its enclosing-instance field because a superclass argument may read it; an
+            // ordinary capture does not. Keeping this as ordering metadata avoids interpreting a JVM
+            // field name as source semantics. A `putfield` of the current class's own field on the
+            // still-uninitialized `this` is legal per JVMS 4.10.2.4.
+            let mut param_slot = 1u16;
+            let mut field_i = 0usize;
+            for (param_i, param_ty) in param_tys.iter().enumerate() {
+                if ctor_param_is_field.get(param_i).copied().unwrap_or(true) {
+                    if field_i < c.pre_super_param_field_count as usize {
+                        let field = &c.fields[field_i];
+                        ctor.aload(0);
+                        load(*param_ty, param_slot, &mut ctor);
+                        let fref =
+                            e.cw.fieldref(&fq_name, &field.name, &type_descriptor(field.ty));
+                        ctor.putfield(fref, slot_words(field.ty) as i32);
+                    }
+                    field_i += 1;
+                }
+                param_slot += slot_words(*param_ty);
             }
             // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
             let super_args = c.super_args.clone();
@@ -3254,16 +3274,12 @@ fn emit_class(
             if !c.explicit_param_stores {
                 let mut slot = 1u16;
                 let mut field_i = 0usize;
-                let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-                    vec![true; param_tys.len()]
-                } else {
-                    c.ctor_args.iter().map(|a| a.is_field).collect()
-                };
                 for (i, t) in param_tys.iter().enumerate() {
-                    if is_field.get(i).copied().unwrap_or(true) {
+                    if ctor_param_is_field.get(i).copied().unwrap_or(true) {
                         let name = &c.fields[field_i].name;
-                        // `this$0` is already stored BEFORE `super(…)` above — don't store it again.
-                        if name != "this$0" {
+                        // Fields already stored before `super(…)` are not stored again here. The cutoff
+                        // is semantic constructor metadata, independent of their physical ABI names.
+                        if field_i >= c.pre_super_param_field_count as usize {
                             // kotlinc maps this field store to the parameter's own source line —
                             // capture the pc where it starts.
                             let pc = ctor.bytes.len() as u16;
