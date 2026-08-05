@@ -11,6 +11,8 @@ const LIB: &str = "package lib\n\
     \x20 val store = mutableListOf(\"a\")\n\
     \x20 fun items(): MutableList<String> = store\n\
     \x20 fun tags(): List<String> = listOf(\"t\")\n\
+    \x20 val grid = mutableListOf(mutableSetOf(\"n\"))\n\
+    \x20 fun nested(): MutableList<MutableSet<String>> = grid\n\
     }\n";
 
 #[test]
@@ -24,5 +26,25 @@ fn mutable_member_return_keeps_mutability() {
         }\n";
     if let Some(out) = common::expect_box_run_against("member_mutable_ret", LIB, MAIN) {
         assert_eq!(out, "OK", "MutableList member return must keep .add()");
+    }
+}
+
+#[test]
+fn nested_mutable_member_return_keeps_inner_mutability() {
+    // The INNER classifier erases too: `MutableList<MutableSet<String>>`'s JVM signature spells
+    // `List<Set<String>>`, so the element read `.get(0)` typed a read-only `Set` and `.add` failed.
+    // Each argument's classifier must be recovered from the metadata return type under the same
+    // same-JVM-internal guard, level by level.
+    const MAIN: &str = "import lib.Repo\n\
+        fun box(): String {\n\
+        \x20 val r = Repo()\n\
+        \x20 r.nested().get(0).add(\"x\")\n\
+        \x20 return if (r.nested().get(0).size == 2) \"OK\" else \"F:\" + r.nested().get(0).size\n\
+        }\n";
+    if let Some(out) = common::expect_box_run_against("member_nested_mutable_ret", LIB, MAIN) {
+        assert_eq!(
+            out, "OK",
+            "MutableSet element of a MutableList return must keep .add()"
+        );
     }
 }
