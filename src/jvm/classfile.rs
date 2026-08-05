@@ -94,6 +94,11 @@ pub struct SeedField {
     /// A `String` literal initializer. kotlinc interns it as an `ldc` constant just before the
     /// property's store, so it lands ahead of the field's own name/descriptor.
     pub string_const: Option<KtString>,
+    /// `(value class internal name, `constructor-impl` descriptor)` when the initializer CONSTRUCTS a
+    /// value class (`val k: K = K("OK")`). The store is then `ldc <const>; invokestatic
+    /// K.constructor-impl; putfield`, so the factory's entries intern between the constant and the
+    /// field — exactly where kotlinc puts them.
+    pub value_class_ctor: Option<(String, String)>,
 }
 
 /// Per-member JVM generic `Signature` strings for a plain class, in kotlinc's interning positions, passed
@@ -1030,6 +1035,9 @@ impl ClassWriter {
             // A body property's `String` initializer is pushed by `ldc` before its `putfield`.
             if let Some(sc) = &f.string_const {
                 self.cp.string_kt(sc);
+            }
+            if let Some((owner, desc)) = &f.value_class_ctor {
+                self.cp.methodref(owner, "constructor-impl", desc);
             }
             self.cp.utf8(&f.name);
             self.cp.utf8(&f.desc);
