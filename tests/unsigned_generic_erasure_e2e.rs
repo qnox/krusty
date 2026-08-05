@@ -244,3 +244,25 @@ fn unsigned_function_value_preserves_semantic_adapters() {
         "UnsignedPropertyReferenceValue",
     );
 }
+
+/// Semantic wrapper identity refines a SCALAR carrier; it must not turn an ALREADY-BOXED reference
+/// into a second boxing request. Nullable unsigned arguments arrive at `FunctionN.invoke` as
+/// `kotlin/UInt` already, while a safe-call receiver can arrive as `java/lang/Integer`. Reapplying
+/// `UInt.box-impl` or `Integer.valueOf` to either reference produces invalid bytecode, so these two
+/// shapes pin the carrier guard independently of which wrapper class is involved.
+#[test]
+fn semantic_adapter_does_not_rebox_an_existing_reference_carrier() {
+    common::expect_box_ok_with_stdlib(
+        "val nullableUInt: UInt? = 2u\n\
+         fun box(): String {\n\
+             val same: (UInt?) -> Boolean = { value -> nullableUInt == value }\n\
+             return if (same(2u)) \"OK\" else \"bad\"\n\
+         }\n",
+        "NullableUnsignedFunctionValue",
+    );
+    common::expect_box_ok_with_stdlib(
+        "fun apply(value: Int?, operation: Int.(Int) -> Int): Int? = value?.operation(1)\n\
+         fun box(): String = if (apply(1) { this + it + 2 } == 4) \"OK\" else \"bad\"\n",
+        "NullableSignedFunctionReceiver",
+    );
+}

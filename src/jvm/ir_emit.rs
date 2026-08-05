@@ -4904,7 +4904,13 @@ fn box_prim_free(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
 /// has intentionally erased the distinction.
 fn semantic_scalar_adapter(semantic: Ty, carrier: Ty) -> Ty {
     let semantic = semantic.non_null();
-    if semantic.is_jvm_scalar() {
+    // Adapter selection must not CREATE a second boundary. Nullable scalars and other expressions
+    // can already be represented by a wrapper reference when they reach a generic consumer. In that
+    // case the carrier is the authority and this helper is deliberately a no-op; choosing the
+    // non-null semantic scalar would try to feed that existing reference into another `box-impl` or
+    // `valueOf`. Only a physical scalar crossing into/out of a reference slot needs semantic wrapper
+    // identity.
+    if carrier.is_jvm_scalar() && semantic.is_jvm_scalar() {
         semantic
     } else {
         carrier
