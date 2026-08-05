@@ -266,3 +266,20 @@ fn semantic_adapter_does_not_rebox_an_existing_reference_carrier() {
         "NullableSignedFunctionReceiver",
     );
 }
+
+/// The guard that declines an unsigned RECEIVER of an inline scope function (see
+/// `unsigned_receiver_of_an_inline_scope_function_never_miscompiles` in
+/// `unsigned_classpath_call_e2e`) must not spill over to a splice whose boxed value comes from
+/// OUTSIDE it. `map`'s element arrives from `Iterator.next()` already boxed as `kotlin/UInt`, so this
+/// shape keeps emitting and is asserted STRICTLY: a decline here would mean the guard over-fired.
+///
+/// The value is `4294967295u`, whose signed reading is `-1`, so a wrong box that verifies and runs is
+/// caught as a wrong answer rather than passing silently.
+#[test]
+fn unsigned_inline_splice_element_still_emits_under_the_receiver_guard() {
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String =\n\
+    if (listOf(4294967295u).map { it }.first().toString() == \"4294967295\") \"OK\" else \"bad\"\n",
+        "UIntMapElementStillEmits",
+    );
+}

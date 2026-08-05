@@ -497,3 +497,45 @@ fn unsigned_member_calls_on_a_reference_carried_receiver_verify() {
         "ULongNullableBangEquals",
     );
 }
+
+/// An unsigned RECEIVER of an inline-spliced scope function (`5u.let { … }`).
+///
+/// After #531 a spliced lambda parameter is typed as the semantic wrapper (`kotlin/UInt`), so the
+/// splice entry `checkcast`s to that inline class and the body unboxes through it. The value filling
+/// that parameter therefore has to be a real `box-impl` instance. It was not: the splice's own
+/// argument loop boxes the host's scalar operands and cannot see unsignedness — `5u` reaches the
+/// emitter as `Const(Int(5))` — so it emitted `Integer.valueOf` and the shape threw
+/// `ClassCastException` at run time while krusty reported success.
+///
+/// The emitter has no way to arrange agreement: nothing there maps a host argument onto the lambda
+/// parameter it feeds. It can only rule the splice out, so this shape now DECLINES, which is why it
+/// is pinned with this file's permissive helper rather than a strict emit-and-run one.
+///
+/// The real fix belongs in lowering, which does know the type: an unsigned argument flowing into a
+/// reference parameter already gets its `box-impl` from `coerce_argument_value` (that is why
+/// `listOf(5u)` produces a genuine `kotlin/UInt`), but the RECEIVER of an inline classpath extension
+/// never reaches that coercion. Until it does, declining is the only sound outcome here.
+///
+/// `listOf(5u).map { … }` is deliberately NOT affected: it passes a `List` reference, so the splice
+/// boxes no scalar and the element still arrives from `Iterator.next()` already boxed.
+#[test]
+fn unsigned_receiver_of_an_inline_scope_function_never_miscompiles() {
+    expect_emitted_box_verifies(
+        "fun box(): String = if (5u.let { it.toString() } == \"5\") \"OK\" else \"bad\"\n",
+        "UIntLetReceiver",
+    );
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val d: ULong = 5uL\n\
+    return if (d.let { it.toString() } == \"5\") \"OK\" else \"bad\"\n\
+}\n",
+        "ULongLetReceiver",
+    );
+    // A carrier whose signed reading differs, so a wrong box that VERIFIES is caught too.
+    expect_emitted_box_verifies(
+        "fun f(): UInt = 4294967295u\n\
+         fun box(): String =\n\
+    if (f().let { it.toString() } == \"4294967295\") \"OK\" else \"bad\"\n",
+        "UIntLetCallReceiver",
+    );
+}

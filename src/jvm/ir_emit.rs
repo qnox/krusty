@@ -4896,6 +4896,19 @@ fn box_prim_free(cw: &mut ClassWriter, code: &mut CodeBuilder, t: Ty) {
     code.invokestatic(m, slot_words(t) as i32, 1);
 }
 
+/// Whether `t` is the semantic WRAPPER reference of an unsigned inline class (`kotlin/UInt`, …).
+///
+/// A boundary typed this way carries a real `box-impl` instance, so whatever fills it must have been
+/// boxed through that inline class — `java/lang/Integer` will not do, and the mismatch surfaces as a
+/// `ClassCastException` rather than a verifier error.
+fn is_unsigned_wrapper_ref(t: Ty) -> bool {
+    t.obj_internal().is_some_and(|n| {
+        [Ty::UByte, Ty::UShort, Ty::UInt, Ty::ULong]
+            .into_iter()
+            .any(|u| u.kotlin_class_internal().is_some_and(|w| w == n))
+    })
+}
+
 /// Select the scalar whose box/unbox adapter owns a reference boundary before reducing that scalar
 /// to its JVM carrier. Signed scalars are their carriers, but an unsigned scalar is an inline class:
 /// `UInt` uses `kotlin/UInt.box-impl`/`unbox-impl` even though values inside a method use the same
@@ -7107,6 +7120,9 @@ impl<'a> Emitter<'a> {
         // since the body is inlined into the host (a deep lambda body, e.g. `123 != intArrayOf() as Any`,
         // would otherwise overflow the host's stack). Propagated to `splice_inline` below.
         let mut lam_max_stack = 0u16;
+        // Whether any spliced lambda takes a parameter typed as an unsigned WRAPPER — a boundary that
+        // only accepts a real `box-impl` instance. See the guard before the argument loop below.
+        let mut lambda_takes_unsigned_wrapper = false;
         for (i, &a) in args.iter().enumerate() {
             let mut scratch = CodeBuilder::new(self.next_slot);
             let (lam_insns, lam_fr) = if let IrExpr::Lambda {
@@ -7132,6 +7148,8 @@ impl<'a> Emitter<'a> {
                 let cap_tys = jvm_tys(&impl_f.params[..n_cap]);
                 let lam_tys = jvm_tys(&impl_f.params[n_cap..]);
                 let lam_semantic_tys = &impl_f.params[n_cap..];
+                lambda_takes_unsigned_wrapper |=
+                    lam_tys.iter().any(|t| is_unsigned_wrapper_ref(*t));
                 let impl_ret = ir_ty_to_jvm(&impl_f.ret);
                 // Each capture binds to the caller's actual slot (a mutable capture writes through).
                 let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(captures.len());
@@ -7275,6 +7293,33 @@ impl<'a> Emitter<'a> {
             return false; // frames carry no stack prefix → need an empty baseline
         }
         let ret_words = descriptor_ret_words(descriptor);
+        // A spliced lambda parameter typed as an unsigned WRAPPER only accepts a real `box-impl`
+        // instance, and the argument loop below cannot produce one: it sees `5u` as `Const(Int(5))`,
+        // because being unsigned is a lowering-level fact and `ir_lower` records none on this path
+        // (kotlinc splices `let` with no box in the first place). It boxes `Integer.valueOf`, the
+        // spliced entry does `checkcast kotlin/UInt`, and `5u.let { … }` throws `ClassCastException`
+        // while krusty reports success.
+        //
+        // Nothing here maps a host argument onto the lambda parameter it feeds, so agreement cannot be
+        // arranged locally — only ruled out. Decline the splice and let the ordinary (non-spliced) path
+        // emit the call, where lowering supplies the box it knows the type of. Shapes whose boxed value
+        // comes from OUTSIDE the splice are untouched: `listOf(5u).map { … }` passes its argument as a
+        // `List` reference, so no scalar is boxed here and the element still arrives from
+        // `Iterator.next()` as a genuine `kotlin/UInt`.
+        //
+        // Deciding BEFORE the loop matters: once it starts emitting into `code` there is nothing to
+        // take back.
+        if lambda_takes_unsigned_wrapper
+            && args.iter().enumerate().any(|(i, &a)| {
+                !matches!(self.ir.expr(a), IrExpr::Lambda { .. })
+                    && self.function_ref_class_and_captures(a).is_none()
+                    && self.property_ref_class_and_captures(a).is_none()
+                    && params[i].is_reference()
+                    && self.value_ty(a).is_jvm_scalar()
+            })
+        {
+            return false;
+        }
         // Emit each NON-lambda argument (the operands the host prologue stores into its parameter slots).
         let mut arg_words = 0i32;
         for (i, &a) in args.iter().enumerate() {

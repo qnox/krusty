@@ -1895,6 +1895,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call's logical carrier type. Strict verifier/runtime tests cover calls, properties, inline lambdas,
   and ordinary function values so a future decline cannot silently remove the adapter coverage.
 
+  Typing a spliced lambda parameter as the semantic WRAPPER puts a requirement on whoever FILLS it:
+  only a real `box-impl` instance will do, since the entry `checkcast`s to the inline class and the
+  body unboxes through it. That holds when the value comes from outside the splice — `map`'s element
+  arrives from `Iterator.next()` already boxed — but NOT when the host takes a scalar argument through
+  an erased reference parameter, because the splice's own argument loop supplies that box and cannot
+  see unsignedness: `5u` reaches the emitter as `Const(Int(5))`, being unsigned is a lowering-level
+  fact, and `ir_lower` records none on this path (kotlinc splices `let` with no box in the first
+  place). It emitted `Integer.valueOf` against a `checkcast kotlin/UInt`, so `5u.let { … }` threw
+  `ClassCastException` while krusty reported success.
+
+  Nothing in the emitter maps a host argument onto the lambda parameter it feeds, so agreement cannot
+  be arranged there — only ruled out. An unsigned RECEIVER of an inline scope function therefore
+  DECLINES the splice, and the file falls back to the ordinary path; the element shape is untouched
+  and still emits. The proper fix belongs in lowering, which does know the type: an unsigned argument
+  flowing into a reference parameter already gets its `box-impl` from `coerce_argument_value` (this is
+  why `listOf(5u)` yields a genuine `kotlin/UInt`), but the RECEIVER of an inline classpath extension
+  never reaches that coercion. Until it does, declining is the only sound outcome. Because the shape
+  declines, it is pinned with the permissive helper in `unsigned_classpath_call_e2e`, while the
+  element shape keeps a STRICT assertion so an over-firing guard shows up as a failure.
+
   A BOUNDED type parameter erases to its BOUND rather than to `Object` (`<T : Comparable<T>>` →
   `Comparable`), and kotlinc unboxes there identically. The two classpath call sites (an imported bare
   name, a fully qualified call) each decide separately whether a substituted result needs coercing at
