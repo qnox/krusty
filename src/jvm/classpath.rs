@@ -1257,20 +1257,24 @@ fn meta_callable_aligns(
 /// The descriptor form of a metadata value parameter: a value class erases to its underlying
 /// (`Duration` → `J`; unsigned normalizes like the mapped builtins, `UInt` → `I`) — except NULLABLE,
 /// which boxes to the class itself. `actual` is the JVM descriptor segment; both forms are admitted.
+/// [`type_descriptor`] is the single `Ty`-to-JVM boundary and already normalizes metadata's dotted
+/// nested-class tail. Comparing its result directly is intentional: repeating that normalization in
+/// this metadata-only caller previously let classpath matching carry a private descriptor policy that
+/// bytecode emission did not share.
 fn member_param_desc_matches(
     class: TypeName,
     nullable: bool,
     actual: &str,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> bool {
-    let class_desc = type_descriptor(kotlin_type_name_to_ty(class)).replace('.', "$");
+    let class_desc = type_descriptor(kotlin_type_name_to_ty(class));
     if class_desc == actual {
         return true;
     }
     let Some(erased) = metadata_value_class_underlying(class, nullable, value_underlying) else {
         return false;
     };
-    type_descriptor(erased).replace('.', "$") == actual
+    type_descriptor(erased) == actual
 }
 
 fn metadata_member_descriptor(
@@ -1293,7 +1297,10 @@ fn metadata_member_descriptor(
         let params: Vec<Ty> = signature.params.iter().map(erased).collect();
         method_descriptor(&params, signature.ret)
     };
-    Some(descriptor.replace('.', "$"))
+    // `method_descriptor` delegates every component to the same normalized descriptor boundary used
+    // by emission. Returning it unchanged prevents metadata members from maintaining a second,
+    // provider-specific spelling repair.
+    Some(descriptor)
 }
 
 fn metadata_member_shape_matches(
