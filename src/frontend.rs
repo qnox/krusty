@@ -15,7 +15,7 @@ pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{
     check_file, check_file_at, check_file_in_source_set, collect_signatures,
     collect_signatures_with_cp, preinfer_module_returns, AnonymousObjectCapture,
-    CompoundAssignmentTarget, SourceConstructorMatcher,
+    AnonymousObjectCaptureSource, CompoundAssignmentTarget, SourceConstructorMatcher,
 };
 pub(crate) use crate::resolve::{
     classifier_over_default, function_import_scope, pick_overload, qualified_path, typeref_leaf,
@@ -1979,7 +1979,7 @@ mod tests {
             analysis
                 .symbols
                 .classes
-                .get("Child")
+                .get(&crate::types::type_name("consumer/Child"))
                 .expect("consumer class")
                 .ctor_params,
             [Ty::obj("support/Parent$Category")]

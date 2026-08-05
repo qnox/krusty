@@ -45,30 +45,29 @@ fn utf8_width(c: u32) -> usize {
 /// JVM "modified UTF-8" (JVMS 4.4.7): like UTF-8 except U+0000 is `C0 80` and supplementary chars
 /// use surrogate pairs (not needed for our `d1`, whose chars are U+0000..U+00FF).
 pub fn modified_utf8(s: &str) -> Vec<u8> {
+    modified_utf8_units(s.encode_utf16())
+}
+
+/// Modified UTF-8 for a sequence of UTF-16 code UNITS.
+///
+/// This is the encoding's native domain: it has no supplementary form, so a character outside the
+/// BMP is written as its surrogate PAIR, each half in three bytes. An UNPAIRED surrogate therefore
+/// encodes exactly the same way — which is how a Kotlin string constant containing one (`"\uD800"`)
+/// reaches the class file even though it has no Rust `String` spelling.
+pub fn modified_utf8_units(units: impl Iterator<Item = u16>) -> Vec<u8> {
     let mut out = Vec::new();
-    for c in s.chars() {
-        let u = c as u32;
+    for unit in units {
+        let u = unit as u32;
         match u {
             0x0001..=0x007f => out.push(u as u8),
             0 | 0x0080..=0x07ff => {
                 out.push(0xc0 | (u >> 6) as u8);
                 out.push(0x80 | (u & 0x3f) as u8);
             }
-            0x0800..=0xffff => {
+            _ => {
                 out.push(0xe0 | (u >> 12) as u8);
                 out.push(0x80 | ((u >> 6) & 0x3f) as u8);
                 out.push(0x80 | (u & 0x3f) as u8);
-            }
-            _ => {
-                // supplementary: encode as surrogate pair, each 3 bytes
-                let v = u - 0x10000;
-                let hi = 0xd800 + (v >> 10);
-                let lo = 0xdc00 + (v & 0x3ff);
-                for s in [hi, lo] {
-                    out.push(0xe0 | (s >> 12) as u8);
-                    out.push(0x80 | ((s >> 6) & 0x3f) as u8);
-                    out.push(0x80 | (s & 0x3f) as u8);
-                }
             }
         }
     }

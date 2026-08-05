@@ -125,13 +125,7 @@ impl<'a> ModuleSymbols<'a> {
         if let Some(s) = c.super_internal {
             supertypes.push(s);
         }
-        let enum_entries = self.syms.enums.iter().find_map(|(name, entries)| {
-            self.syms
-                .classes
-                .get(name)
-                .is_some_and(|class| class.internal_name() == c.internal_name())
-                .then(|| entries.clone())
-        });
+        let enum_entries = self.syms.enum_entries_of(c.internal_name()).cloned();
         let kind = if c.is_annotation() {
             crate::libraries::TypeKind::Annotation
         } else if c.is_object() {
@@ -204,7 +198,11 @@ impl<'a> ModuleSymbols<'a> {
             // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
             companion_object: None,
             value_companion_fns: Vec::new(),
-            value_underlying: None,
+            // `LibraryType` is the provider-neutral classifier shape consumed by the federated
+            // resolver. Preserve source value-class metadata here just as a classpath provider
+            // does, so every downstream query (identity diagnostics included) can use the common
+            // `SymbolSource::is_value_name` contract instead of branching on symbol provenance.
+            value_underlying: c.value_field.as_ref().map(|(_, ty)| *ty),
             alias_target: None,
             // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can
             // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in
@@ -594,6 +592,10 @@ fn fn_info(
         contract: sig.contract.clone(),
         generic_sig: sig.generic_sig.clone().map(Box::new),
         singleton_dispatch: None,
+        // A SOURCE callable's `ret` is already the declared type and its `physical_ret` is not yet
+        // erased, so there is no carrier-vs-box question for the value-class pass to answer here — it
+        // sees the declaration itself. The fact exists for callables read back from a class file.
+        declared_ret: None,
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -644,6 +646,8 @@ fn source_callable(
         contract: None,
         generic_sig: None,
         singleton_dispatch: None,
+        // See the note in the builder above: a source callable carries its declaration un-erased.
+        declared_ret: None,
     }
 }
 
@@ -1025,14 +1029,16 @@ mod tests {
         state.flags = state.flags.with_sealed(true);
         let mut complete = class("sample/Complete");
         complete.super_internal = Some(type_name("sample/State"));
-        symbols.classes.insert("State".to_string(), state);
-        symbols.classes.insert("Complete".to_string(), complete);
+        symbols.classes.insert(type_name("sample/State"), state);
+        symbols
+            .classes
+            .insert(type_name("sample/Complete"), complete);
 
         symbols
             .classes
-            .insert("Phase".to_string(), class("sample/Phase"));
+            .insert(type_name("sample/Phase"), class("sample/Phase"));
         symbols.enums.insert(
-            "Phase".to_string(),
+            type_name("sample/Phase"),
             vec!["FIRST".to_string(), "SECOND".to_string()],
         );
 
@@ -1055,9 +1061,25 @@ mod tests {
     }
 
     #[test]
+    fn type_shapes_include_value_class_metadata() {
+        let mut symbols = FrontendSymbols::default();
+        let mut id = class("sample/Id");
+        id.value_field = Some(("raw".to_string(), Ty::Int));
+        symbols.classes.insert(type_name("sample/Id"), id);
+
+        let source = ModuleSymbols::new(&symbols);
+        let shape = source.resolve_type_name(type_name("sample/Id")).unwrap();
+        assert_eq!(shape.value_underlying, Some(Ty::Int));
+        assert!(
+            source.is_value_name(type_name("sample/Id")),
+            "the common SymbolSource query must recognize source value classes without a provider-specific fallback"
+        );
+    }
+
+    #[test]
     fn resolve_type_name_reuses_the_shape_built_for_a_repeated_query() {
         let mut st = FrontendSymbols::default();
-        st.insert_class("Widget".into(), class("demo/Widget"));
+        st.insert_class(class("demo/Widget"));
         let m = ModuleSymbols::new(&st);
         let first = m.resolve_type_name(type_name("demo/Widget")).unwrap();
         let second = m.resolve_type_name(type_name("demo/Widget")).unwrap();
@@ -1155,8 +1177,8 @@ mod tests {
         let mut sub = class("demo/Sub");
         sub.super_internal = Some(crate::types::type_name("demo/Base"));
         sub.methods.insert("own".into(), vec![sig(vec![], Ty::Int)]);
-        st.insert_class("Base".into(), base);
-        st.insert_class("Sub".into(), sub);
+        st.insert_class(base);
+        st.insert_class(sub);
         let m = ModuleSymbols::new(&st);
 
         // `own` is on Sub itself (rung 0).
@@ -1193,8 +1215,8 @@ mod tests {
         );
         let mut sub = class("demo/Sub");
         sub.super_internal = Some(type_name("demo/Base"));
-        symbols.insert_class("Base".into(), base);
-        symbols.insert_class("Sub".into(), sub);
+        symbols.insert_class(base);
+        symbols.insert_class(sub);
         let source = ModuleSymbols::new(&symbols);
 
         let properties = source.property_members(Ty::obj("demo/Sub"), "state");
@@ -1233,7 +1255,7 @@ mod tests {
         let mut method = sig(vec![Ty::Int], Ty::Int);
         method.set_is_inline(true);
         c.methods.insert("apply".into(), vec![method]);
-        st.insert_class("Host".into(), c);
+        st.insert_class(c);
         let m = ModuleSymbols::new(&st);
 
         let members = m.instance_members(Ty::obj("demo/Host"), "apply");
@@ -1434,7 +1456,7 @@ mod tests {
         c.ctor_params = vec![Ty::Int, Ty::Int];
         c.methods.insert("sum".into(), vec![sig(vec![], Ty::Int)]);
         c.interfaces = vec![crate::types::type_name("demo/Shape")].into();
-        st.insert_class("Point".into(), c);
+        st.insert_class(c);
         let m = ModuleSymbols::new(&st);
         let t = m.resolve_type("demo/Point").expect("shape");
         assert_eq!(t.constructors.len(), 1);
@@ -1451,7 +1473,7 @@ mod tests {
         let mut symbols = FrontendSymbols::default();
         let mut hidden = class("demo/Hidden");
         hidden.visibility = Visibility::Private;
-        symbols.insert_class("Hidden".into(), hidden);
+        symbols.insert_class(hidden);
 
         assert!(
             !ModuleSymbols::new(&symbols)
@@ -1473,7 +1495,7 @@ mod tests {
         contract
             .methods
             .insert("run".into(), vec![sig(vec![], Ty::Int)]);
-        symbols.insert_class("Contract".into(), contract);
+        symbols.insert_class(contract);
 
         let selected = ModuleSymbols::new(&symbols)
             .member_overloads(Ty::obj("demo/Contract"), "run")
@@ -1492,14 +1514,14 @@ mod tests {
         let mut defaulted = class("demo/Defaulted");
         defaulted.ctor_params = vec![Ty::Int];
         defaulted.ctor_defaults = vec![Some(CtorDefaultValue::Int(1))];
-        st.insert_class("Defaulted".into(), defaulted);
+        st.insert_class(defaulted);
 
         let mut secondary = class("demo/Secondary");
         secondary.has_primary_ctor = false;
         secondary.ctor_params = vec![Ty::Int];
         secondary.ctor_defaults = vec![None];
         secondary.secondary_ctors = vec![vec![]];
-        st.insert_class("Secondary".into(), secondary);
+        st.insert_class(secondary);
 
         let mut final_required = class("demo/FinalRequired");
         final_required.has_primary_ctor = false;
@@ -1507,17 +1529,17 @@ mod tests {
         final_required.ctor_defaults = vec![None];
         final_required.secondary_ctors = vec![vec![Ty::Int]];
         final_required.set_is_final(true);
-        st.insert_class("FinalRequired".into(), final_required);
+        st.insert_class(final_required);
 
         let mut abstract_with_interface = class("demo/AbstractWithInterface");
         abstract_with_interface.set_is_abstract(true);
         abstract_with_interface.interfaces = vec![type_name("demo/RequiredInterface")].into();
-        st.insert_class("AbstractWithInterface".into(), abstract_with_interface);
+        st.insert_class(abstract_with_interface);
 
         let mut sealed = class("demo/Sealed");
         sealed.set_is_abstract(true);
         sealed.set_is_sealed(true);
-        st.insert_class("Sealed".into(), sealed);
+        st.insert_class(sealed);
 
         let source = ModuleSymbols::new(&st);
         let defaulted = source

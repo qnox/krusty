@@ -142,3 +142,19 @@ fn array_subscript_spills_a_try_instead_of_holding_the_array() {
         "TryUnderArrayStore",
     );
 }
+
+#[test]
+fn inline_branching_element_does_not_splice_over_a_held_array() {
+    // A call node is not one of lowering's syntactically branchy vararg elements, but an inline
+    // call can expose a branch when its body is spliced. Inline bytecode was recorded at an empty
+    // operand-stack baseline, so the fill path must not treat it like an ordinary comparison whose
+    // frames can simply inherit the held array entries.
+    common::expect_box_ok_with_stdlib(
+        "fun pick(flag: Boolean): Array<String> = arrayOf(\n\
+         run { if (flag) \"O\" else \"X\" },\n\
+         run { if (flag) \"K\" else \"Y\" },\n\
+         )\n\
+         fun box(): String = pick(true).joinToString(\"\")\n",
+        "InlineBranchUnderArrayFill",
+    );
+}

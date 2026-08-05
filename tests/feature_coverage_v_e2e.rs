@@ -9,9 +9,9 @@
 
 use super::common;
 
-/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
-/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
-fn run(src: &str, stem: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
+/// cannot turn either failure into a passing skip.
+fn run(src: &str, stem: &str) -> String {
     common::expect_box_run_with_stdlib(src, stem)
 }
 
@@ -25,10 +25,7 @@ fun box(): String {\n\
     if (b != 4) return \"b=$b\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "DestrDataFn") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "DestrDataFn");
     assert_eq!(out, "OK");
 }
 
@@ -44,10 +41,7 @@ fun box(): String {\n\
     if (str != \"ab\") return \"str=$str\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "DestrLoop") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "DestrLoop");
     assert_eq!(out, "OK");
 }
 
@@ -64,10 +58,7 @@ fun box(): String {\n\
     if (classify(3.0) != \"other\") return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "WhenMultiType") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "WhenMultiType");
     assert_eq!(out, "OK");
 }
 
@@ -86,10 +77,7 @@ fun box(): String {\n\
     if (describe(Square(3)) != \"square\") return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "WhenSealedGuard") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "WhenSealedGuard");
     assert_eq!(out, "OK");
 }
 
@@ -114,10 +102,7 @@ fun box(): String {\n\
     if (tryCatchVal(true) != 20) return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "TryFinallyCtl") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "TryFinallyCtl");
     assert_eq!(out, "OK");
 }
 
@@ -144,10 +129,7 @@ fun box(): String {\n\
     if (handle(2) != \"re\") return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "MultiCatch") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "MultiCatch");
     assert_eq!(out, "OK");
 }
 
@@ -164,10 +146,7 @@ fn char_range_and_contains() {
     if (down.toString() != \"edcba\") return \"down=$down\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "CharRange") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "CharRange");
     assert_eq!(out, "OK");
 }
 
@@ -186,10 +165,7 @@ fn long_range_step_until() {
     if (7L !in 0L..10L) return \"f4\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "LongRangeStep") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "LongRangeStep");
     assert_eq!(out, "OK");
 }
 
@@ -209,10 +185,7 @@ fn string_trim_and_repeat() {
     if (\"ab\".repeat(3) != \"ababab\") return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "StringTrim") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "StringTrim");
     assert_eq!(out, "OK");
 }
 
@@ -229,10 +202,7 @@ fn string_chunked_and_compare() {
     if (fs != \"n=42\") return \"f5\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "StringChunked") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "StringChunked");
     assert_eq!(out, "OK");
 }
 
@@ -247,10 +217,7 @@ fn map_of_list_values() {
     if (a.size != 2) return \"asize=${a.size}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "MapOfList") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "MapOfList");
     assert_eq!(out, "OK");
 }
 
@@ -266,10 +233,7 @@ fn list_of_pairs_nested_generics() {
     if (inner[1].second != 4) return \"f2\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "ListOfPairs") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "ListOfPairs");
     assert_eq!(out, "OK");
 }
 
@@ -295,10 +259,7 @@ fun box(): String {\n\
     if (sb.toString() != \"abc\") return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "ReceiverDsl") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "ReceiverDsl");
     assert_eq!(out, "OK");
 }
 
@@ -325,10 +286,7 @@ fun box(): String {\n\
     if (add(5) != 105) return \"f5\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "OpsGetSet") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "OpsGetSet");
     assert_eq!(out, "OK");
 }
 
@@ -350,10 +308,7 @@ fun box(): String {\n\
     if (b <= a) return \"f5\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "OpsArith") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "OpsArith");
     assert_eq!(out, "OK");
 }
 
@@ -372,10 +327,7 @@ fun box(): String {\n\
     if (r.lo != 1 || r.hi != 5) return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "OpsRangeTo") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "OpsRangeTo");
     assert_eq!(out, "OK");
 }
 
@@ -394,10 +346,7 @@ fun box(): String {\n\
     if (h.name != \"set\") return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "Lateinit") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "Lateinit");
     assert_eq!(out, "OK");
 }
 
@@ -418,10 +367,7 @@ fun box(): String {\n\
     if (firstOr(listOf<Int>(), 9) != 9) return \"f4\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "GenericFactory") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "GenericFactory");
     assert_eq!(out, "OK");
 }
 
@@ -436,10 +382,7 @@ fn nested_recursion() {
     if (captured != 10) return \"cap=$captured\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "NestedRecursion") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "NestedRecursion");
     assert_eq!(out, "OK");
 }
 
@@ -460,10 +403,7 @@ fun box(): String {\n\
     if (labeled(prefix = \"p\") != \"p\") return \"f4\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "VarargSpread") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "VarargSpread");
     assert_eq!(out, "OK");
 }
 
@@ -480,9 +420,6 @@ fun box(): String {\n\
     if (make(\"ab\", 3, 1, 2) != 9) return \"f3\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(SRC, "NamedDefaultVararg") else {
-        eprintln!("skip");
-        return;
-    };
+    let out = run(SRC, "NamedDefaultVararg");
     assert_eq!(out, "OK");
 }
