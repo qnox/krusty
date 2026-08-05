@@ -1281,9 +1281,13 @@ impl JvmLibraries {
                 if let Some(property_gsig) = meta_props
                     .iter()
                     .filter(|property| {
-                        property.getter.as_ref().is_some_and(|getter| {
-                            getter.name == m.name && getter.desc == m.descriptor
-                        })
+                        // A member EXTENSION property's getter takes the extension receiver as a JVM
+                        // parameter its metadata gsig models as `receiver` instead — replacing the
+                        // whole gsig would desync `params` from the method's. It has its own path.
+                        !property.is_extension
+                            && property.getter.as_ref().is_some_and(|getter| {
+                                getter.name == m.name && getter.desc == m.descriptor
+                            })
                     })
                     .find_map(|property| property.generic_sig.as_ref())
                     .filter(|gsig| matches!(gsig.ret.non_null(), Ty::Fun(_)))
@@ -2176,8 +2180,14 @@ fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
         // A FUNCTION-typed return (`getHandler(): Function2<Scope, Req, Resp>` — a fun-typed
         // property's accessor) already parsed to the shaped `Ty::Fun`; the erased descriptor
         // return is the all-`Any` `FunctionN`, so failing to recover here strips a lambda
-        // assigned to the property of its parameter types and receiver.
-        ty if matches!(ty.non_null(), Ty::Fun(_)) && !has_free_ty_params(ty) => Some(ty),
+        // assigned to the property of its parameter types and receiver. A raw-`Signature` fun
+        // type spells collections/boxed primitives in Java form (`List<Integer>`) — canonicalize
+        // exactly as the parameterized-`Obj` arm below does (the helper recurses into `Fun` and
+        // `Nullable`, preserving the receiver/suspend shape); a metadata-decoded ret is already
+        // Kotlin-spelled, so this is a no-op for it.
+        ty if matches!(ty.non_null(), Ty::Fun(_)) && !has_free_ty_params(ty) => {
+            Some(canonicalize_jvm_collections(ty))
+        }
         Ty::Obj(_, args) if !args.is_empty() && !has_free_ty_params(gsig.ret) => {
             // Canonicalize the recovered type to Kotlin form (`java/util/List<java/lang/Integer>` →
             // `kotlin/collections/List<kotlin/Int>`), so a member/`for`/extension keyed on the Kotlin

@@ -56,6 +56,54 @@ fn a_read_classpath_receiver_fun_typed_property_invokes_receiver_style() {
     common::expect_box_ok_against("cpfuntypedpropread", LIB, main);
 }
 
+/// A SUSPEND fun-typed classpath property (`var onEvent: (suspend (Req) -> Resp)? = null`).
+/// Metadata spells the type as `Function2<Req, Continuation<Resp>, Any?>` plus a suspend TYPE flag;
+/// a lambda literal assigned to it is a 1-parameter suspend lambda to kotlinc. Checked, not run:
+/// driving the suspend call needs a coroutine runtime not on this classpath — the fact under test
+/// is that the assignment resolves cleanly (no arity/type mismatch, `req.tag` resolves).
+#[test]
+fn a_lambda_assigned_to_a_classpath_suspend_fun_typed_property_checks_clean() {
+    const SUSPEND_LIB: &str = "package lib\n\
+         class Req(val tag: String)\n\
+         class Resp(val body: String)\n\
+         class Config { var onEvent: (suspend (Req) -> Resp)? = null }\n";
+    let main = "import lib.Config\n\
+        import lib.Resp\n\
+        fun f(c: Config) {\n\
+        \x20 c.onEvent = { req -> Resp(req.tag) }\n\
+        }\n";
+    if let Some(diagnostics) =
+        common::checker_diags_against("cpfuntypedpropsuspend", SUSPEND_LIB, main)
+    {
+        assert!(
+            diagnostics.is_empty(),
+            "a suspend fun-typed classpath property assignment must check clean, got: {diagnostics:#?}"
+        );
+    }
+}
+
+/// A classpath MEMBER (not a property accessor) returning a function type: the recovered return
+/// comes from the raw JVM `Signature` (`Function1<List<Integer>, List<Integer>>`), which spells
+/// collections and boxed primitives in Java form. The recovery must canonicalize them
+/// (`java/util/List<java/lang/Integer>` → `kotlin/collections/List<kotlin/Int>`) exactly as the
+/// parameterized-`Obj` return recovery does — else members on the invoked result (`.sum()`) are
+/// unresolved and the argument check compares Kotlin against Java spellings.
+#[test]
+fn a_classpath_member_fun_typed_return_canonicalizes_collections() {
+    const MAKER_LIB: &str = "package lib\n\
+         class Maker {\n\
+         \x20 fun make(): (List<Int>) -> List<Int> = { xs -> xs.map { it + 1 } }\n\
+         }\n";
+    let main = "import lib.Maker\n\
+        fun box(): String {\n\
+        \x20 val f = Maker().make()\n\
+        \x20 val n = f(listOf(1, 2)).sum()\n\
+        \x20 if (n != 5) return \"fail: \" + n\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    common::expect_box_ok_against("cpfunretcanon", MAKER_LIB, main);
+}
+
 #[test]
 fn a_lambda_assigned_to_a_classpath_plain_fun_typed_property_infers_params() {
     const PLAIN_LIB: &str = "package lib\n\

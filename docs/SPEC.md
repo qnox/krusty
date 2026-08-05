@@ -2463,8 +2463,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   build, so a property READ (`val h = c.handler`) recovers the full shape through the member walk —
   which also required `concrete_generic_ret` to accept a `Ty::Fun` return (it only recovered
   parameterized `Ty::Obj` returns before, so a shaped fun-typed accessor return was discarded for the
-  erased descriptor), and (3) nothing else: every non-fun-typed property keeps its previous
-  class-name/descriptor reading. Additionally, a lambda literal in a context whose EXPECTED type is a
+  erased descriptor) — canonicalizing it exactly as the parameterized-`Obj` arm does, since a
+  raw-`Signature` fun type (any classpath member returning a function type, not just an accessor)
+  spells collections/boxed primitives in Java form (`List<Integer>`) and members on the invoked
+  result (`.sum()`) would be unresolved — and (3) nothing else: every non-fun-typed property keeps
+  its previous class-name/descriptor reading; a member EXTENSION property is excluded from the
+  accessor overlay (its metadata gsig models the receiver as `receiver`, not a parameter, so a
+  wholesale replace would desync `params` from the JVM method's). A SUSPEND fun-typed property
+  (`(suspend (Req) -> Resp)?`) checks clean against kotlinc today (pinned by test); its metadata
+  type decodes Continuation-tailed (the Type-level suspend flag — `Type.flags` bit 0 — is not yet
+  read), which is a known follow-up. Additionally, a lambda literal in a context whose EXPECTED type is a
   NULLABLE function type (`c.handler = { req -> … }` against `F?`) now shapes against the non-null
   `F`, as kotlinc does — before, only a bare `Ty::Fun` expectation shaped the lambda, so the body's
   parameters read as `Any` and bare receiver calls were unresolved. Verified end-to-end against a
