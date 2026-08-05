@@ -5943,6 +5943,33 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Preserve source evaluation order when an already-lowered value must survive a later
+    /// suspending operand. Coroutine lowering moves the later operand into a resume block; leaving
+    /// the earlier expression nested in the eventual operation would move (and potentially repeat)
+    /// its evaluation as well. Materialize it once in the spill scope and return the reload plus the
+    /// declaration that must wrap the final operation.
+    ///
+    /// This is intentionally independent of call origin and operation kind. Ordinary virtual calls
+    /// and intrinsic/static rewrites have the same ordering contract, so keeping the rule here avoids
+    /// separate member/classpath/unsigned copies drifting on the suspension predicate or slot shape.
+    fn spill_value_before_suspending_operands(
+        &mut self,
+        value: u32,
+        value_ty: Ty,
+        later_operands: &[u32],
+    ) -> (u32, Option<u32>) {
+        if !self.cur_fn_suspend
+            || !later_operands
+                .iter()
+                .any(|&operand| self.ir_subtree_suspends(operand))
+        {
+            return (value, None);
+        }
+        let slot = self.fresh_value();
+        let declaration = self.emit_named_variable(slot, ty_to_ir(value_ty), Some(value));
+        (self.emit_get_value(slot), Some(declaration))
+    }
+
     fn propagate_suspend_source_line(&mut self, e: u32, line: u32) {
         let mut pending = Vec::new();
         crate::ir::for_each_child(&self.ir.exprs, e, &mut |child| pending.push(child));
@@ -5997,34 +6024,21 @@ impl<'a> Lower<'a> {
             None,
         )?;
         let interface = member.is_interface() || self.library_type_is_interface(owner);
-        // kotlinc pushes the receiver BEFORE evaluating arguments; an argument that suspends forces
-        // the pushed receiver into a continuation spill slot (an unnamed temp local in its
-        // bytecode). Mirror it with a temp in the spill scope: `val tmp = recv; tmp.m(<arg>)`.
-        if self.cur_fn_suspend && args.iter().any(|&a| self.ir_subtree_suspends(a)) {
-            let rv = self.fresh_value();
-            let decl = self.emit_named_variable(rv, ty_to_ir(Ty::obj_name(owner)), Some(recv));
-            let recv_g = self.emit_get_value(rv);
-            let call = self.emit_virtual_call(
-                owner,
-                member.name,
-                member.descriptor,
-                interface,
-                recv_g,
-                args,
-            );
-            if suspend {
-                self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
-            }
-            self.record_call_declared_ret(call, declared_ret);
-            return Some(self.emit_block(vec![decl], Some(call)));
-        }
+        // kotlinc pushes the receiver BEFORE evaluating arguments. Route the suspension boundary
+        // through the common ordering helper so virtual calls and intrinsic/static rewrites cannot
+        // disagree about when an already-evaluated receiver needs a continuation spill.
+        let (recv, recv_spill) =
+            self.spill_value_before_suspending_operands(recv, Ty::obj_name(owner), &args);
         let call =
             self.emit_virtual_call(owner, member.name, member.descriptor, interface, recv, args);
         if suspend {
             self.ir.suspend_calls.insert(call, ty_to_ir(logical_ret));
         }
         self.record_call_declared_ret(call, declared_ret);
-        Some(call)
+        Some(match recv_spill {
+            Some(declaration) => self.emit_block(vec![declaration], Some(call)),
+            None => call,
+        })
     }
 
     /// Pack expanded member arguments into the physical trailing array.
@@ -25898,22 +25912,69 @@ impl<'a> Lower<'a> {
                     .lower_selected_op_call(receiver, receiver_ty, &name, &args, target, Some(e))
                     .map(|(value, _)| value);
             }
-            // `a.equals(b)` between two values of the SAME unsigned type is kotlinc's `equals`
-            // INTRINSIC: an unsigned value class wraps exactly one field, so its equality can only
-            // compare the two carriers — kotlinc folds the call away to the instructions `a == b`
-            // emits, with no box anywhere. Deliberately narrow to an argument of exactly the receiver's
-            // type: for any OTHER argument the answer is the value class's own, which is what makes a
-            // cross-carrier comparison `false` (a `UInt` is never a `ULong`, however the bits line up)
-            // and a nullable one null-safe. Those keep the ordinary member-call path.
+            // `a.equals(b)` on an unsigned receiver. The `invokevirtual` form of this call needs a
+            // REFERENCE receiver, and an unsigned value lives in the primitive slot of its carrier —
+            // so reaching it means boxing the receiver purely to have something to invoke on. kotlinc
+            // avoids that in every shape but one (see the `null` note below), via two lowerings that
+            // both leave the receiver unboxed:
+            //
+            //  * BOTH sides the same unsigned type is kotlinc's `equals` INTRINSIC: an unsigned value
+            //    class wraps exactly one field, so its equality can only compare the two carriers, and
+            //    the call folds away to the instructions `a == b` emits, with no call at all;
+            //  * every OTHER argument keeps the value class's OWN equality, reached through the static
+            //    `kotlin/UInt."equals-impl":(ILjava/lang/Object;)Z`. It tests the argument's runtime
+            //    class first, which is what makes a cross-carrier comparison `false` (a `UInt` is never
+            //    a `ULong`, however the bits line up), a `null` argument `false`, and a `UInt?` one
+            //    null-safe — semantics a carrier compare would get wrong, hence the narrow fold above.
+            //
+            // Two deliberate shape divergences, both against a kotlinc result that is a CONSTANT and
+            // both answering that same constant:
+            //  * the CROSS-CARRIER pair, where kotlinc's PRIMITIVE-`equals` intrinsic sees the two
+            //    erased carriers, boxes both through the JAVA wrappers (`Integer.valueOf`/
+            //    `Long.valueOf`) and calls `Intrinsics.areEqual` — `false` by construction, which is
+            //    what `equals-impl` answers for a `kotlin/ULong` argument;
+            //  * a LITERAL `null` argument, the one place kotlinc does box the receiver and emit
+            //    `invokevirtual kotlin/UInt.equals` (its intrinsic declines the `Nothing?` argument).
+            //    `equals-impl` answers the same `false` without the box. A `null` held in an `Any?`
+            //    goes through `equals-impl` in kotlinc too — only the bare literal differs.
             {
                 let rty = self.info.ty(receiver);
-                if let [arg] = args[..] {
-                    // `Ty` equality here is exact, nullability included: `UInt?` is a different type
-                    // and must NOT fold (its equality is null-safe, a carrier compare is not).
-                    if rty.is_unsigned() && name == "equals" && self.info.ty(arg) == rty {
+                if rty.is_unsigned() && name == "equals" {
+                    if let [arg] = args[..] {
+                        // `Ty` equality here is exact, nullability included: `UInt?` is a different
+                        // type and must NOT fold (its equality is null-safe, a carrier compare is not).
+                        let same_type = self.info.ty(arg) == rty;
                         let l = self.expr(receiver)?;
-                        let r = self.expr(arg)?;
-                        return Some(self.emit_primitive_bin_op(IrBinOp::Eq, l, r));
+                        // A non-same-type argument occupies the erased `Object` slot, so it arrives
+                        // BOXED however it was carried: an unsigned one through its own `box-impl`
+                        // (never a Java wrapper — `equals-impl` type-tests it), a signed primitive
+                        // through the wrapper, a reference unchanged.
+                        let r = if same_type {
+                            self.expr(arg)?
+                        } else {
+                            // `equals` declares `other: Any?`. Nullability erases from the JVM
+                            // descriptor but remains part of the semantic callable/argument model;
+                            // keeping it here prevents the lowering contract from claiming that the
+                            // literal-null case is flowing into a non-null parameter.
+                            self.lower_arg(arg, &Ty::nullable(Ty::obj("kotlin/Any")))?
+                        };
+                        // kotlinc evaluates the RECEIVER first. When the ARGUMENT suspends, everything
+                        // after the suspension point moves into the resume block — so a receiver left
+                        // as a plain operand is re-evaluated there, AFTER the argument, and a receiver
+                        // with a side effect runs in the wrong order. Spill it to a temp local first
+                        // (an unnamed slot in kotlinc's bytecode), the same fix and the same condition
+                        // `emit_library_member_call` applies to the shapes that still reach it.
+                        let (l, recv_spill) =
+                            self.spill_value_before_suspending_operands(l, rty, &[r]);
+                        let value = if same_type {
+                            self.emit_primitive_bin_op(IrBinOp::Eq, l, r)
+                        } else {
+                            self.runtime_call(RuntimeOp::UnsignedEquals, rty, vec![l, r])?
+                        };
+                        return Some(match recv_spill {
+                            Some(declaration) => self.emit_block(vec![declaration], Some(value)),
+                            None => value,
+                        });
                     }
                 }
             }
