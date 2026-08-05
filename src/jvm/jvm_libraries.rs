@@ -1180,6 +1180,10 @@ impl JvmLibraries {
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
             let meta_fns = metadata::class_functions(&ci);
+            // The class's `@Metadata` PROPERTY records — the only carrier of a fun-typed property's
+            // full Kotlin shape (receiver mark, nullability), which both the field descriptor and the
+            // accessor `Signature` erase.
+            let meta_props = metadata::class_properties(&ci);
             // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
             // source-level shape survives (a receiver function type erases to `FunctionN` in both the
             // descriptor and the `Signature`).
@@ -1267,6 +1271,24 @@ impl JvmLibraries {
                             .collect::<Vec<_>>(),
                         metadata.is_suspend(),
                     );
+                }
+                // The same limitation applies to a FUNCTION-typed PROPERTY's accessor: its `Signature`
+                // spells the raw `FunctionN` (no receiver mark), so `var handler: (Scope.(Req) -> Resp)?`
+                // read back as an ordinary `(Scope, Req) -> Resp` and a lambda assigned to the property
+                // bound no `this`. The property's `@Metadata` type keeps the full Kotlin shape; publish
+                // it as the getter's logical return. Only a fun-typed property is overlaid — every other
+                // accessor keeps its descriptor/`Signature` reading.
+                if let Some(property_gsig) = meta_props
+                    .iter()
+                    .filter(|property| {
+                        property.getter.as_ref().is_some_and(|getter| {
+                            getter.name == m.name && getter.desc == m.descriptor
+                        })
+                    })
+                    .find_map(|property| property.generic_sig.as_ref())
+                    .filter(|gsig| matches!(gsig.ret.non_null(), Ty::Fun(_)))
+                {
+                    member.generic_sig = Some(property_gsig.clone());
                 }
                 // A member EXTENSION is deliberately excluded from `aligned_member_metadata`: its
                 // metadata parameter list omits the receiver the JVM method leads with, so the shared
@@ -2151,6 +2173,11 @@ fn field_type_parameter_erasure(
 
 fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
     match gsig.ret {
+        // A FUNCTION-typed return (`getHandler(): Function2<Scope, Req, Resp>` — a fun-typed
+        // property's accessor) already parsed to the shaped `Ty::Fun`; the erased descriptor
+        // return is the all-`Any` `FunctionN`, so failing to recover here strips a lambda
+        // assigned to the property of its parameter types and receiver.
+        ty if matches!(ty.non_null(), Ty::Fun(_)) && !has_free_ty_params(ty) => Some(ty),
         Ty::Obj(_, args) if !args.is_empty() && !has_free_ty_params(gsig.ret) => {
             // Canonicalize the recovered type to Kotlin form (`java/util/List<java/lang/Integer>` →
             // `kotlin/collections/List<kotlin/Int>`), so a member/`for`/extension keyed on the Kotlin
@@ -2693,7 +2720,20 @@ impl SymbolSource for JvmLibraries {
                     // keeps as the boxed class while the getter returns the unboxed form — the property's
                     // declared type and its getter's return then disagreed ("return type mismatch:
                     // expected 'Boolean', actual 'Boolean'").
-                    let ty = if ret_ty.is_jvm_scalar() {
+                    // A FUNCTION-typed property's descriptor erases to a raw `FunctionN` (all-`Any`,
+                    // no receiver mark), which gives a lambda assigned to it no expected shape — its
+                    // body's bare receiver calls and parameter types were unresolved. `@Metadata`'s
+                    // property type keeps the full shape (`(Scope.(Req) -> Resp)?`), decoded into
+                    // `generic_sig.ret`; prefer it for exactly that case. Every other property keeps
+                    // the class-name reading below (the value-class/primitive reasoning applies).
+                    let meta_fun_ty = mp
+                        .generic_sig
+                        .as_ref()
+                        .map(|gsig| gsig.ret)
+                        .filter(|ret| matches!(ret.non_null(), Ty::Fun(_)));
+                    let ty = if let Some(fun_ty) = meta_fun_ty {
+                        fun_ty
+                    } else if ret_ty.is_jvm_scalar() {
                         ret_ty
                     } else {
                         mp.ret_class.map_or(Ty::obj("kotlin/Any"), Ty::obj_name)
@@ -2735,6 +2775,15 @@ impl SymbolSource for JvmLibraries {
                         if params.len() != 1 || physical_ret != Ty::Unit {
                             return None;
                         }
+                        // The setter's descriptor erases a fun-typed property's value parameter to
+                        // the raw `FunctionN`; assignment checks the written value against
+                        // `params[0]`, so a lambda written to the property would get no shape.
+                        // Publish the metadata-recovered property type as the LOGICAL parameter —
+                        // the descriptor keeps driving the emitted `setX` call.
+                        let params = match meta_fun_ty {
+                            Some(fun_ty) => vec![fun_ty],
+                            None => params,
+                        };
                         Some(LibraryCallable::library(
                             cn,
                             s.name,

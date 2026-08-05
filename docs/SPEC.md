@@ -2451,6 +2451,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its value parameters, and a Java SAM parameter binds its method's parameters, through `?.` as
   through `.`. Test: `tests/library_fun_type_lambda_param_e2e.rs`.
 
+- **Function-typed CLASSPATH properties (`var handler: (Scope.(Req) -> Resp)? = null` in a
+  dependency).** The JVM erases the property's shape everywhere the descriptor reaches: the field and
+  accessor descriptors spell the raw `FunctionN` (all-`Any`), and even the accessor's generic
+  `Signature` cannot spell a receiver mark (`Cfg.(A) -> B` and `(Cfg, A) -> B` share the `Function1`/
+  `Function2` erasure). The `@Metadata` property type is the semantic authority; its decoded
+  `generic_sig.ret` (a `Ty::Fun` with the `@ExtensionFunctionType` receiver mark and the nullable
+  wrapper) is published at three seams: (1) the `PropertySet` member property's `ty` and its setter's
+  logical `params[0]` (the type an assignment checks the written value against — the emitted `setX`
+  still uses the erased descriptor), (2) the accessor member's `generic_sig` in the classpath member
+  build, so a property READ (`val h = c.handler`) recovers the full shape through the member walk —
+  which also required `concrete_generic_ret` to accept a `Ty::Fun` return (it only recovered
+  parameterized `Ty::Obj` returns before, so a shaped fun-typed accessor return was discarded for the
+  erased descriptor), and (3) nothing else: every non-fun-typed property keeps its previous
+  class-name/descriptor reading. Additionally, a lambda literal in a context whose EXPECTED type is a
+  NULLABLE function type (`c.handler = { req -> … }` against `F?`) now shapes against the non-null
+  `F`, as kotlinc does — before, only a bare `Ty::Fun` expectation shaped the lambda, so the body's
+  parameters read as `Any` and bare receiver calls were unresolved. Verified end-to-end against a
+  kotlinc-compiled dependency (assignment, plain fun type, and receiver-style read/invoke).
+  Test: `tests/classpath_fun_typed_property_lambda_e2e.rs`.
+
 - **Aliased imports (`import a.b.Member as Alias`).** The import map binds the alias directly to the
   full target for types and values. Ordinary lexical resolution handles local shadowing; lowering uses
   the resolved target member name.
