@@ -3966,6 +3966,43 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`fun ap(f: (Int) -> Int)` + `fun ap(s: String)` fails on object and instance receivers alike).
   Test: `tests/object_receiver_lambda_e2e.rs`.
 
+- **`Type { … }` selects a CLASSPATH companion's `operator fun invoke` over a non-matching
+  constructor, and the trailing lambda is shaped against the operator's parameter.** ktor's
+  `MockEngine { req -> respond(…) }`: the class has constructors (`(MockEngineConfig)`,
+  `(MockEngineConfig, Boolean)`), and the companion declares
+  `operator fun invoke(handler: MockRequestHandler)` where the handler is a SUSPEND RECEIVER
+  function type behind a typealias. kotlinc picks the operator and types the block with
+  `MockRequestHandleScope` as `this` and the request as its parameter. krusty resolved the
+  operator only for the shapes its Phase-A lambda typing could already handle: the argument-typing
+  pass consulted constructors (`construction_lambda_param_shapes`) and same-named top-level
+  functions, but never companion `invoke`, so the block was typed shapeless, the late
+  companion-invoke fallback could not match it against the operator's function-type parameter, and
+  the whole call collapsed into `no value passed for parameter 'config'` + `unresolved function`
+  with every bare call inside the block unresolved (cascading into `HttpClient(engine) { … }`
+  unresolved because `engine` carried an error type). Three seams close it, all origin-generic:
+  (1) `companion_invoke_lambda_param_shapes` — the companion-invoke analogue of the constructor
+  shaping channel, same unique-arity ambiguity rule, consulted for slots the constructor channel
+  leaves non-function-typed (a constructor that CAN take the lambda keeps priority);
+  (2) the classpath member decode publishes each function-typed parameter's `Signature`-recovered
+  shape into the logical `params` (the descriptor erases `Scope.(Req) -> Resp` to a raw
+  all-`Any` `Function2`) and rewrites the gsig in the same pass so overload candidates agree;
+  (3) a parameter `@Metadata` marks with the `Type.flags` SUSPEND_TYPE bit is CPS-erased in the
+  `Signature` attribute (`FunctionN+1<…, Continuation<T>, Object>`) — the flag is decoded
+  (`parse_type_suspend_flag`, `MetaValueParam::suspend_fun`) and the logical
+  `suspend R.(P) -> T` recovered (`recover_suspend_fun_shape`). The flag is the ONLY witness:
+  a source-level `(…, Continuation<T>) -> Any` parameter has the identical `Signature`, so the
+  shape alone must not be rewritten. The constructor probe's mapping diagnostic is suppressed
+  when the companion operator accepts the typed arguments (kotlinc reports nothing), mirroring
+  the source path's rollback; explicit constructor arguments still pick the constructor.
+  Two boundaries the publish must respect: a GENERIC function-type parameter (`T.() -> String`)
+  stays erased — its consumers substitute through the gsig at the call site, and a raw `TyParam`
+  published into `params` would short-circuit that substitution (a named lambda argument then
+  binds `this` to the unsubstituted variable); and once a `Unit`-returning function-type
+  parameter is concrete, the named-slot member path must keep kotlinc's LAMBDA-LITERAL `Unit`
+  coercion (`after(pre = { n -> n.toLong() }, …)` against `pre: (Int) -> Unit` — the literal's
+  trailing expression coerces to `Unit`; an ordinary `(Int) -> Long` VALUE still does not fit).
+  Test: `tests/classpath_companion_invoke_lambda_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

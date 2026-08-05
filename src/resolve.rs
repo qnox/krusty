@@ -21928,6 +21928,11 @@ impl<'a> Checker<'a> {
             &parameter_arg_kinds,
             type_args,
         );
+        crate::trace_compiler!(
+            "resolve",
+            "provider_member_lambda_expectations {name}: map={argument_parameters:?} specialized={specialized_params:?} names={:?}",
+            candidate.call_sig.param_names
+        );
         Some(
             argument_parameters
                 .into_iter()
@@ -30232,6 +30237,8 @@ impl<'a> Checker<'a> {
                 && !self.receiver_is_assignable(aty, expected)
                 && !argument.adapts_integer_literal_to(expected)
                 && !self.erased_function_param_fits(expected, aty)
+                && !(argument.is_lambda_literal()
+                    && self.lambda_literal_unit_fun_param_fits(expected, aty))
             {
                 return None;
             }
@@ -30420,6 +30427,70 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// The companion `operator fun invoke` parameter shapes a lambda argument of `Name(args)` is
+    /// typed against — kotlinc's `Type.Companion.invoke(args)` factory convention, where `Name` is a
+    /// classpath class whose constructors cannot accept the lambda (`MockEngine { req -> … }`: the
+    /// constructor takes a config object, the companion `invoke` a receiver function type). Same
+    /// ambiguity rule as [`Self::construction_lambda_param_shapes`]: answer only when the arity
+    /// identifies one non-suspend operator `invoke`, so a lambda is never typed against the wrong
+    /// overload's receiver. Module-declared classes are excluded — their companion channel re-types
+    /// arguments against the companion signature itself.
+    fn companion_invoke_lambda_param_shapes(
+        &self,
+        name: &str,
+        arity: usize,
+    ) -> Option<Vec<(Ty, bool)>> {
+        if self.module_class_named(name).is_some() {
+            return None;
+        }
+        let internal = self.syms.class_names.get(name)?;
+        if internal.starts_with("__ty/") {
+            return None;
+        }
+        let companion_internal = self
+            .resolved_type_name(internal)?
+            .companion_object
+            .as_ref()?
+            .1;
+        let companion = self.resolved_type_name(companion_internal)?;
+        let member = {
+            let mut same_arity = companion.members.iter().filter(|member| {
+                member.name == CALLABLE_INVOKE_OPERATOR
+                    && member.is_operator()
+                    && !member.suspend()
+                    && member.params.len() == arity
+            });
+            match (same_arity.next(), same_arity.next()) {
+                (Some(member), None) => member,
+                _ => return None,
+            }
+        };
+        crate::trace_compiler!(
+            "resolve",
+            "companion_invoke_lambda_shapes {name}: params={:?} recv_marks={:?}",
+            member.params,
+            member.call_sig.lambda_receiver_params
+        );
+        Some(
+            member
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, parameter)| {
+                    (
+                        *parameter,
+                        member
+                            .call_sig
+                            .lambda_receiver_params
+                            .get(i)
+                            .copied()
+                            .unwrap_or(false),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     /// The vararg parameter slot of a selected TOP-LEVEL callable, recovered from the candidate set it
     /// was picked out of. A [`crate::libraries::LibraryCallable`] records `vararg_index` only for the
     /// `$default` form, but a positional argument check needs the slot for EVERY vararg call — without
@@ -30525,6 +30596,28 @@ impl<'a> Checker<'a> {
         }
         self.erased_function_param_fits(expected, actual)
             .then_some(1)
+    }
+
+    /// Whether a LAMBDA LITERAL's checked function type fits a `Unit`-returning function-type
+    /// parameter: `after(pre = { n -> n.toLong() })` against `pre: (Int) -> Unit` is valid Kotlin —
+    /// a literal's trailing expression coerces to `Unit` (the value is discarded) — but the checked
+    /// lambda carries its body's type (`(Int) -> Long`), which plain function-type assignability
+    /// rejects. Literal-only: an ordinary `(Int) -> Long` VALUE is genuinely not a `(Int) -> Unit`.
+    fn lambda_literal_unit_fun_param_fits(&self, expected: Ty, actual: Ty) -> bool {
+        let (Ty::Fun(expected), Ty::Fun(actual)) = (expected.non_null(), actual) else {
+            return false;
+        };
+        expected.ret == Ty::Unit
+            && expected.params.len() == actual.params.len()
+            && expected.suspend == actual.suspend
+            && expected
+                .params
+                .iter()
+                .zip(&actual.params)
+                .all(|(expected, actual)| {
+                    expected.is_erased_top()
+                        || self.member_argument_score(*expected, *actual).is_some()
+                })
     }
 
     /// Whether `actual` fits a FUNCTION-typed parameter whose signature reached the checker ERASED.
@@ -33917,6 +34010,18 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // The companion-invoke factory shapes only slots the constructor channel leaves
+                // non-function-typed — a constructor that CAN take the lambda keeps priority.
+                let invoke_lambda_types: Option<Vec<(Ty, bool)>> = if !self
+                    .lexical_value_declares(&fname)
+                    && args
+                        .iter()
+                        .any(|&a| matches!(self.file.expr(a), Expr::Lambda { .. }))
+                {
+                    self.companion_invoke_lambda_param_shapes(&fname, args.len())
+                } else {
+                    None
+                };
                 // Diagnostics from typing the arguments below are provisional while `fname` may name a
                 // class: if no constructor accepts them, a companion `operator fun invoke` re-types
                 // them against ITS signature and this pass's complaints never applied.
@@ -33930,6 +34035,18 @@ impl<'a> Checker<'a> {
                         }
                         if let Some((Ty::Fun(signature), has_receiver)) =
                             ctor_lambda_types.as_ref().and_then(|types| types.get(i))
+                        {
+                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                                return self.check_lambda_with_function_type_labeled(
+                                    a,
+                                    signature,
+                                    *has_receiver,
+                                    None,
+                                );
+                            }
+                        }
+                        if let Some((Ty::Fun(signature), has_receiver)) =
+                            invoke_lambda_types.as_ref().and_then(|types| types.get(i))
                         {
                             if matches!(self.file.expr(a), Expr::Lambda { .. }) {
                                 return self.check_lambda_with_function_type_labeled(
@@ -34539,7 +34656,27 @@ impl<'a> Checker<'a> {
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
-                                    if !self.same_named_callable_exists(&fname) {
+                                    // A companion `operator fun invoke` that accepts these
+                                    // arguments resolves this call further down — the
+                                    // constructor's mapping complaint never applied (kotlinc
+                                    // reports nothing here).
+                                    // Same gate as the late fallback INCLUDING its shadow guard —
+                                    // suppression must imply the fallback actually runs.
+                                    let companion_invoke_applies = !self
+                                        .value_root_shadows_classifier(&fname)
+                                        && self
+                                            .classpath_companion_ty(&fname)
+                                            .and_then(|ct| {
+                                                self.resolve_instance_member(
+                                                    ct,
+                                                    CALLABLE_INVOKE_OPERATOR,
+                                                    &arg_tys,
+                                                )
+                                            })
+                                            .is_some_and(|m| !m.member.suspend());
+                                    if !companion_invoke_applies
+                                        && !self.same_named_callable_exists(&fname)
+                                    {
                                         self.report_call_arg_mapping_error(call, args, error);
                                     }
                                 }
