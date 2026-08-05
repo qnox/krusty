@@ -480,6 +480,44 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/suspend_e2e.rs::suspend_call_whose_argument_writes_a_local_runs`,
   `::suspend_member_call_whose_operand_writes_a_local_runs`,
   `::suspend_operand_write_to_a_locally_dead_scratch_runs`).
+- **`suspend fun` — hoisting a suspension out of a call/template operand list preserves left-to-right
+  evaluation.** Kotlin evaluates a call's receiver and arguments (and a string template's parts)
+  strictly left to right; kotlinc spills every operand of a call with a suspending operand.
+  `hoist_expr` used to rewrite only the SUSPENSION to a preceding temp, so `f(g(), susp())` became
+  `val t = susp(); f(g(), t)` — running `g()` AFTER the suspension. `hoist_operands_in_order` now
+  binds every runtime-read/evaluated operand that precedes a later suspending operand to a prelude temp
+  first (only literal constants and the singleton value of a `Null`-typed local commute, per
+  `operand_needs_snapshot`), for the
+  `Call`/`MethodCall`/`StringConcat` arms of `hoist_expr`, the suspension-point path itself
+  (receiver included), and the `hoist_stmt` arms that keep a direct `val r = <suspend call>` /
+  bare-call statement (whose nested suspending arguments previously reached emit unhoisted and
+  skipped the file — corpus `coroutines/controlFlow_chain.kt` now compiles). The snapshot plan is
+  typed on the ORIGINAL operands before any rewrite (`hoisted_value_ty`; head kinds are preserved by
+  hoisting), so an untypeable operand bails with the IR untouched and the flattener declines the
+  shape — skip, never a reorder and never a double evaluation. An external callee
+  (`Callee::External`) has no signature in the IR; its snapshot type comes from
+  `ir.logical_types`, accepted only where logical = physical representation (scalars and `String`,
+  e.g. the flattened `String.plus` chain whose intermediate accumulators ir_lower now records).
+  The conservative boundary includes more than calls: ordinary local/parameter reads snapshot because
+  an inline-spliced later block may write the same local before the residual call reads it; static reads
+  snapshot regardless of source/module/classpath origin; and a wrapper that can THROW (`!!`,
+  `as`/non-null cast, an unboxing `ImplicitCoercion`) snapshots so its exception precedes any later
+  suspension's effects. Snapshot types come from identities already carried by the IR node
+  (`GetStatic`/`GetField`/`RefGet`, static instances/fields/enums, and `PropertyRead`'s inline type except
+  `Unit`/type-parameter reads); external field descriptors use the emitter's shared descriptor parser,
+  rather than a suspend-specific classpath branch. This covers both `h.svc.m(susp())` and
+  `f(x, run { x = 5; susp() })` without syntax- or provider-specific repair logic.
+  Operand snapshotting can also make a previously post-suspension local read disappear. Positional
+  scope capture still stores/restores every named local in scope, so
+  `reconcile_positional_spill_locals` unions those actual spill consumers into the machine-local
+  allocation set after named scopes and live temps merge. Both named-function and suspend-lambda
+  machines use that boundary; no resume arm can restore a scope-only local into an undeclared slot.
+  The existing `Nothing?`/`Ty::Null` rematerialization remains the semantic exception: such a local can
+  only ever read as `null`, so it commutes without a snapshot and stays on the dedicated no-field
+  rematerialization path instead of acquiring a verifier-sensitive ordinary temp.
+  Ordering pinned by box runs against a real suspension (`yield()`), including the snapshot temp
+  surviving the spill, the pre-mutation `var` read, the `!!`-throws-before-suspension case, and an
+  effectful operand between two suspensions (`tests/suspend_arg_order_e2e.rs`, all ten shapes).
 - **`suspend fun` — an INTRINSIC suspension point needs no operand temps.** A
   `suspendCoroutineUninterceptedOrReturn { c -> … }` recorded in `ir.intrinsic_suspension_points` is an
   inlined BLOCK, not a call: it has no operands to move ahead of the spill, and its body runs after the
@@ -620,8 +658,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   makes this reach every caller: the in-process test harness previously built its own `EmitOptions`
   from `Default`, which silently omitted both the class metadata AND the `SourceFile` stamp — so a
   test could pass on an artifact `krusty -d …` never writes. The CLI backend and `compile_in_process`
-  now share that one constructor; `EmitOptions::default()` remains the pre-class-metadata shape for a
-  caller that wants it, and `KRUSTY_NO_CLASS_METADATA` restores facade-only output for bisecting.
+  now share that one constructor. `EmitOptions::default()` is NOT a pre-class-metadata escape hatch —
+  its `emit_class_metadata` is `true` as well; what it lacks next to the shipping configuration is the
+  `SourceFile`, the inner-class resolver and the `-jvm-target` class version, so a caller that reaches
+  for it still gets class metadata and still is not emitting shipping bytes. The two supported ways to
+  get facade-only output are `KRUSTY_NO_CLASS_METADATA` (consulted by `shipping_emit_options` only,
+  for bisecting) and constructing `EmitOptions` explicitly with `emit_class_metadata: false`.
   A **`data object` synthesizes no `copy`/`componentN`** — it is a singleton, so kotlinc gives it
   `equals`/`hashCode`/`toString` only. krusty's METHOD emission already agreed, but the constant-pool
   seeder and the metadata builder both keyed on `is_data` alone, so switching the annotation on made a
@@ -2795,11 +2837,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java/util/List`), on which the kotlin.collections extensions aren't keyed. `suspend_return_from_gsig`
   now canonicalizes a JVM collection to its Kotlin type (`jvm_class_map::jvm_collection_to_kotlin`), and
   the member walk recovers the EXACT read-only-vs-mutable form (`List` vs `MutableList`) from the member's
-  `@Metadata` return classifier (`Classpath::metadata_member_return_class`) — which the JVM signature
-  erases — so a declared `MutableList` return keeps `.add(…)`. (2) The CPS `box_returns` pass hit its
+  `@Metadata` return type (the aligned call facts/property fallback + guarded overlay below) — which
+  the JVM signature erases — so a declared `MutableList` return keeps `.add(…)`. (2) The CPS `box_returns` pass hit its
   `_ => false` fallthrough on a LAMBDA argument in `return m.map { … }`, bailing the state machine; a lambda
   argument is a value (its body is a separate impl function, not a `return` of the suspend fn) so it is now
   a leaf there (varargs recurse into their elements). Test: `tests/suspend_collection_hof_e2e.rs`.
+- **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
+  level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell
+  `java/util/List`) at every depth, so signature-derived resolution canonicalized `fun items():
+  MutableList<String>` / `val bag: MutableList<String>` / `fun nested(): MutableList<MutableSet<String>>`
+  to their read-only forms and `.add(…)` was a false "unresolved reference". The `@Metadata` return type
+  preserves the exact classifiers: the already-aligned `MetadataCallFacts::declared_ret` carries a
+  metadata FUNCTION's full return without a second overload lookup;
+  `Classpath::metadata_property_ret_ty_name` handles a property GETTER (matched by its
+  `JvmPropertySignature` — a getter is NOT a metadata function, and class-member properties are
+  `metadata::class_properties`, not the package-level `meta_properties_name`); and
+  `overlay_metadata_collection_names` overlays the classifiers onto the
+  signature-derived type level by level. Guard per level: a metadata name replaces the signature's ONLY
+  when the shared erasure table identifies a Kotlin collection sibling mapping to the same JVM internal
+  (`is_kotlin_collection_type_name` + `type_names_map_to_same_jvm_internal`), and the walk descends into
+  type arguments only when the classifiers agree with matching arity — a divergent classifier (stale
+  metadata) never forms an arity-mismatched type. Structure, primitives, and nullability stay the
+  signature side's; only names come from metadata. Applied in both the plain and suspend member-walk
+  arms. Tests:
+  `tests/classpath_member_mutable_collection_e2e.rs`, `tests/classpath_property_mutable_collection_e2e.rs`.
 - **A non-inlined `suspend inline fun` whose lambda argument itself SUSPENDS is DECLINED, not miscompiled
   (safety guard).** `kotlinx.coroutines.sync.Mutex.withLock` is `suspend inline fun <T> Mutex.withLock(owner:
   Any? = null, action: () -> T): T`. krusty does not splice it — it lowers the call as a plain
@@ -3431,15 +3492,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   regardless of spelling. Applies to functions, classes and interfaces alike. Test:
   `tests/feature_coverage_n_e2e.rs::where_clause_single_bound`.
 
-  Still open: MULTIPLE bounds on one parameter (`where T : Comparable<T>, T : Named`). Kotlin gives
+  MULTIPLE bounds on one parameter (`where T : Comparable<T>, T : Named`) were initially left open
+  and have since landed — see "A type parameter carries every bound" below. Kotlin gives
   such a parameter the INTERSECTION of its bounds and resolves members from all of them, while the JVM
-  erasure takes ONE; `Ty::TyParam` carries a single bound, so only that one's members resolve. An
-  attempt to carry the later bounds beside the erasure and keep the parameter's identity
+  erasure takes ONE; at the time `Ty::TyParam` carried a single bound, so only that one's members
+  resolved. An attempt to carry the later bounds by re-tagging the parameter's identity
   (`Ty::TyParam(name, first_bound)` in place of the bare erasure) was REVERTED: the checker and lowerer
   match structurally on `Ty::Obj` in many places, so a parameter that stops being an `Obj` stops
   resolving source-declared members (`resolve.rs`'s `matches!(rt, Ty::Obj(..))` module-member gate) and
-  stops being assignable to its own bound — both shapes that worked before. A real fix needs an
-  intersection the type model can express, not a re-tagged erasure. Note also that the erasure is NOT
+  stops being assignable to its own bound — both shapes that worked before. The fix that landed keeps
+  the extra bounds BESIDE the untouched erasure, not in a re-tagged one. Note also that the erasure is NOT
   simply the first declared bound: kotlinc hoists a CLASS bound ahead of interface bounds regardless of
   order (`where T : Named, T : Base` erases to `Base`), and writes `<T extends Base & Named>` in the
   generic signature where krusty writes only the first.

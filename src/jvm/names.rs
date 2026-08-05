@@ -193,8 +193,26 @@ fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static st
 
 /// A JVM field/type descriptor from a krusty `Ty`.
 pub fn type_descriptor(ty: Ty) -> String {
-    let obj_desc =
-        |internal: &str| format!("L{};", crate::jvm::jvm_class_map::to_jvm_internal(internal));
+    // `@Metadata` spells a nested class with a dot (`kotlin/coroutines/CoroutineContext.Key`), and
+    // the frontend deliberately KEEPS that spelling for the stdlib-mapped nested collections
+    // (`Map.Entry`) so their extensions match. A descriptor is the JVM-emission boundary: dots in
+    // the class segment are nested separators and MUST be `$` here — emitted raw, the JVM refuses
+    // to load the class (ClassFormatError). Normalizing at this one boundary, rather than at the
+    // metadata decode sites, leaves the frontend's spelling equilibrium untouched and covers every
+    // `Ty` that reaches bytecode.
+    let obj_desc = |internal: &str| {
+        let mapped = crate::jvm::jvm_class_map::to_jvm_internal(internal);
+        let slash = mapped.rfind('/').map(|i| i + 1).unwrap_or(0);
+        if mapped[slash..].contains('.') {
+            format!(
+                "L{}{};",
+                &mapped[..slash],
+                mapped[slash..].replace('.', "$")
+            )
+        } else {
+            format!("L{mapped};")
+        }
+    };
     match ty {
         Ty::Int => "I".into(),
         Ty::Byte => "B".into(),
@@ -265,6 +283,23 @@ mod tests {
     fn unit_array_uses_the_unit_reference_descriptor() {
         let array = Ty::obj_args("kotlin/Array", &[Ty::Unit]);
         assert_eq!(type_descriptor(array), "[Lkotlin/Unit;");
+    }
+
+    #[test]
+    fn nested_object_descriptors_normalize_only_the_class_tail() {
+        // A `Ty` uses `/` for its package and may retain metadata's source-facing dots between nested
+        // classifiers. The shared descriptor boundary owns the complete conversion: it preserves the
+        // package path and turns every class-tail dot into `$`, including more than one nesting level.
+        // This direct contract guard keeps classpath matching and bytecode emission from growing local
+        // `.replace` repairs for individual providers or call sites.
+        assert_eq!(
+            type_descriptor(Ty::obj("sample/pkg/Outer.Middle.Inner")),
+            "Lsample/pkg/Outer$Middle$Inner;"
+        );
+        assert_eq!(
+            type_descriptor(Ty::obj("kotlin/collections/Map.Entry")),
+            "Ljava/util/Map$Entry;"
+        );
     }
 
     #[test]

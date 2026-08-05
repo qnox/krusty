@@ -23155,6 +23155,10 @@ impl<'a> Lower<'a> {
                 for &op_e in &operands[1..] {
                     let r = lower_concat_operand(self, op_e)?;
                     acc = self.emit_external_call("kotlin/String.plus", Some(acc), vec![r]);
+                    // The intermediate accumulators of the flattened chain have no AST node of their
+                    // own, so the generic per-expression recording below never sees them; each one is
+                    // a `String` (the suspend pass types operand snapshots from this map).
+                    self.ir.logical_types.insert(acc, Ty::String);
                 }
                 acc
             } else {

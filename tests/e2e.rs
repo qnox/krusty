@@ -174,6 +174,10 @@ mod classpath_jdk_static_e2e;
 mod classpath_jvmstatic_object_property_e2e;
 #[path = "classpath_member_metadata_alignment_e2e.rs"]
 mod classpath_member_metadata_alignment_e2e;
+#[path = "classpath_member_mutable_collection_e2e.rs"]
+mod classpath_member_mutable_collection_e2e;
+#[path = "classpath_member_overload_no_names_e2e.rs"]
+mod classpath_member_overload_no_names_e2e;
 #[path = "classpath_member_receiver_lambda_e2e.rs"]
 mod classpath_member_receiver_lambda_e2e;
 #[path = "classpath_named_arg_skips_default_e2e.rs"]
@@ -200,6 +204,8 @@ mod classpath_object_nested_e2e;
 mod classpath_object_value_e2e;
 #[path = "classpath_properties_query_e2e.rs"]
 mod classpath_properties_query_e2e;
+#[path = "classpath_property_mutable_collection_e2e.rs"]
+mod classpath_property_mutable_collection_e2e;
 #[path = "classpath_protected_member_e2e.rs"]
 mod classpath_protected_member_e2e;
 #[path = "classpath_qualified_nested_named_ctor_e2e.rs"]
@@ -980,6 +986,8 @@ mod super_to_base_secondary_ctor_e2e;
 mod superclass_bridge_e2e;
 #[path = "supertype_scan_arrow_e2e.rs"]
 mod supertype_scan_arrow_e2e;
+#[path = "suspend_arg_order_e2e.rs"]
+mod suspend_arg_order_e2e;
 #[path = "suspend_class_implements_interface_e2e.rs"]
 mod suspend_class_implements_interface_e2e;
 #[path = "suspend_collection_hof_e2e.rs"]

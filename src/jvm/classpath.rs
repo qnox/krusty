@@ -883,6 +883,11 @@ pub struct MetadataCallFacts {
     pub kept_params: Option<usize>,
     pub call_sig: CallSig,
     pub ret: ReturnInfo,
+    /// The full source-declared return type selected from the SAME descriptor-aligned metadata
+    /// callable as every other fact in this record. Unlike [`Self::ret`], this retains nested type
+    /// arguments, so consumers do not repeat overload alignment merely to recover semantic
+    /// classifiers erased by a JVM signature (`MutableList<MutableSet<T>>` → `List<Set<T>>`).
+    pub declared_ret: Option<Ty>,
     /// Kotlin's source-level `operator` modifier. The JVM descriptor/name cannot encode it.
     pub is_operator: bool,
     /// The callable's declared contract, decoded from `@Metadata` (`None` when it has none).
@@ -913,6 +918,7 @@ impl MetadataCallFacts {
             kept_params: None,
             call_sig,
             ret: ReturnInfo::default(),
+            declared_ret: None,
             is_operator: false,
             contract: None,
             context_count: 0,
@@ -1259,20 +1265,24 @@ fn meta_callable_aligns(
 /// The descriptor form of a metadata value parameter: a value class erases to its underlying
 /// (`Duration` → `J`; unsigned normalizes like the mapped builtins, `UInt` → `I`) — except NULLABLE,
 /// which boxes to the class itself. `actual` is the JVM descriptor segment; both forms are admitted.
+/// [`type_descriptor`] is the single `Ty`-to-JVM boundary and already normalizes metadata's dotted
+/// nested-class tail. Comparing its result directly is intentional: repeating that normalization in
+/// this metadata-only caller previously let classpath matching carry a private descriptor policy that
+/// bytecode emission did not share.
 fn member_param_desc_matches(
     class: TypeName,
     nullable: bool,
     actual: &str,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> bool {
-    let class_desc = type_descriptor(kotlin_type_name_to_ty(class)).replace('.', "$");
+    let class_desc = type_descriptor(kotlin_type_name_to_ty(class));
     if class_desc == actual {
         return true;
     }
     let Some(erased) = metadata_value_class_underlying(class, nullable, value_underlying) else {
         return false;
     };
-    type_descriptor(erased).replace('.', "$") == actual
+    type_descriptor(erased) == actual
 }
 
 fn metadata_member_descriptor(
@@ -1295,7 +1305,10 @@ fn metadata_member_descriptor(
         let params: Vec<Ty> = signature.params.iter().map(erased).collect();
         method_descriptor(&params, signature.ret)
     };
-    Some(descriptor.replace('.', "$"))
+    // `method_descriptor` delegates every component to the same normalized descriptor boundary used
+    // by emission. Returning it unchanged prevents metadata members from maintaining a second,
+    // provider-specific spelling repair.
+    Some(descriptor)
 }
 
 fn metadata_member_shape_matches(
@@ -1419,6 +1432,18 @@ fn aligned_meta_callable<'a>(
 
 pub(super) fn metadata_return_info(class: Option<TypeName>, nullable: bool) -> ReturnInfo {
     ReturnInfo::new(nullable, class.map(kotlin_type_name_to_ty))
+}
+
+/// Project the structured return from an already-selected metadata function. Keeping this beside the
+/// lightweight [`ReturnInfo`] projection makes descriptor alignment the single overload decision:
+/// callers may choose the cheap classifier/nullability view or the full generic structure without
+/// searching the same metadata list again.
+fn metadata_declared_return(function: &super::metadata::MetaFn) -> Option<Ty> {
+    function
+        .generic_sig
+        .as_ref()
+        .map(|signature| signature.ret)
+        .or_else(|| function.ret_class.map(kotlin_type_name_to_ty))
 }
 
 /// Per-class `@Metadata` cache: class internal name → Kotlin function names that participate in
@@ -1954,6 +1979,7 @@ impl Classpath {
             kept_params: Some(end),
             call_sig,
             ret: metadata_return_info(c.ret_class, c.ret_nullable()),
+            declared_ret: metadata_declared_return(c),
             is_operator: c.is_operator(),
             contract: c.contract.clone(),
             context_count: c.context_count,
@@ -1986,6 +2012,7 @@ impl Classpath {
             kept_params: None,
             call_sig: function.member_call_sig(),
             ret: metadata_return_info(function.ret_class, function.ret_nullable()),
+            declared_ret: metadata_declared_return(function),
             is_operator: function.is_operator(),
             contract: function.contract.clone(),
             context_count: function.context_count,
@@ -2003,6 +2030,36 @@ impl Classpath {
                 )
             }),
         })
+    }
+
+    /// The metadata-declared RETURN type of the PROPERTY getter realized by JVM method
+    /// `jvm_name`/`jvm_desc`, with full structure when the metadata generic signature carries it and
+    /// the bare classifier otherwise. Function returns travel in [`MetadataCallFacts::declared_ret`]
+    /// from the already descriptor-aligned callable; a getter is not a metadata function, so this
+    /// deliberately separate fallback matches its `JvmPropertySignature` without repeating function
+    /// alignment. Together they carry collection identity that JVM signatures erase at every depth.
+    pub fn metadata_property_ret_ty_name(
+        &self,
+        internal: TypeName,
+        jvm_name: &str,
+        jvm_desc: &str,
+    ) -> Option<Ty> {
+        let ci = self.find_name(internal)?;
+        super::metadata::class_properties(&ci)
+            .iter()
+            .find(|property| {
+                property
+                    .getter
+                    .as_ref()
+                    .is_some_and(|getter| getter.name == jvm_name && getter.desc == jvm_desc)
+            })
+            .and_then(|property| {
+                property
+                    .generic_sig
+                    .as_ref()
+                    .map(|gsig| gsig.ret)
+                    .or_else(|| property.ret_class.map(kotlin_type_name_to_ty))
+            })
     }
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
