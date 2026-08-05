@@ -8383,7 +8383,10 @@ impl<'a> Lower<'a> {
         // what the bare-name path does. The CHECKER selected the overload and recorded the packing
         // slot; a callee whose last parameter merely IS an array is not evidence of a vararg, so
         // that shape stays a sound skip.
-        let packed_vararg = (!c.default_call)
+        // `vararg_index` is FULL-arity (context prefix included); this path prepends no context
+        // arguments, so a context callable must stay a sound skip rather than lower the written
+        // args against the context slot.
+        let packed_vararg = (!c.default_call && c.context_count == 0)
             .then_some(c.vararg_index)
             .flatten()
             .filter(|&slot| slot + 1 == c.params.len() && args.len() >= slot)
@@ -24919,10 +24922,18 @@ impl<'a> Lower<'a> {
                     if c.params.len() != ctx_n + args.len() {
                         return None;
                     }
-                    if ctx_n == 0 && self.info.resolved_call_arg_slots.contains_key(&e) {
+                    if self.info.resolved_call_arg_slots.contains_key(&e) {
+                        // The slot map is VALUE-indexed (the checker builds it against the
+                        // context-stripped signature); the `ctx_n` context arguments are already
+                        // in `a`, so the slots fill `c.params[ctx_n..]`. Source order without the
+                        // map would silently swap reordered same-typed named arguments.
                         let slots = self.info.resolved_call_arg_slots.get(&e).cloned()?;
-                        let (slot_args, prelude) = self
-                            .lower_call_slot_args_source_order(&args, &slots, &c.params, false)?;
+                        let (slot_args, prelude) = self.lower_call_slot_args_source_order(
+                            &args,
+                            &slots,
+                            &c.params[ctx_n..],
+                            false,
+                        )?;
                         a.extend(slot_args);
                         arg_prelude = prelude;
                     } else {

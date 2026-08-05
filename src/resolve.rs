@@ -17143,7 +17143,13 @@ impl<'a> Checker<'a> {
         if !mapped.is_empty() && mapped.iter().all(|(score, _, _)| score.is_none()) {
             if mapped.len() == 1 {
                 let (_, slots, candidate) = mapped.pop().unwrap();
-                for (parameter, argument) in candidate.callable.params.iter().zip(&slots) {
+                // The slots are value-indexed — explain the rejection against the VALUE
+                // parameters, not the context prefix.
+                let context_count = candidate.context_count.min(candidate.callable.params.len());
+                for (parameter, argument) in candidate.callable.params[context_count..]
+                    .iter()
+                    .zip(&slots)
+                {
                     if let Some(argument) = argument {
                         self.expect_assignable(
                             *parameter,
@@ -35205,11 +35211,14 @@ impl<'a> Checker<'a> {
                         // against the VALUE parameters only.
                         let ctx = c.context_count.min(c.params.len());
                         let value_params = &c.params[ctx..];
-                        let last_is_array =
-                            c.params.last().is_some_and(|p| p.array_elem().is_some());
+                        let last_is_array = value_params
+                            .last()
+                            .is_some_and(|p| p.array_elem().is_some());
                         let vararg = last_is_array
                             && (value_params.len() != arg_tys.len()
-                                || c.params.last().map_or(false, |p| arg_tys.last() != Some(p)));
+                                || value_params
+                                    .last()
+                                    .map_or(false, |p| arg_tys.last() != Some(p)));
                         if let Some(slots) = named_slots.as_ref().filter(|_| c.default_call) {
                             // The labelled, parameter-omitting form: each argument is checked against
                             // the parameter its label named, not against the one at its position.

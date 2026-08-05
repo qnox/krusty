@@ -12,6 +12,7 @@ const LIB: &str = "package lib\n\
      class C(val tag: String)\n\
      context(c: C) fun assemble(prefix: String, vararg parts: String): String =\n\
      \x20 c.tag + prefix + parts.joinToString(\"\")\n\
+     context(c: C) fun combine(a: String, b: String): String = c.tag + a + b\n\
 ";
 
 #[test]
@@ -25,6 +26,21 @@ fn element_form_vararg_after_named_arg_on_context_function_resolves() {
             "expected clean resolution, got: {diags:#?}"
         );
     }
+}
+
+#[test]
+fn reordered_named_args_on_context_function_lower_by_slot() {
+    // RUNTIME guard: the lowerer must consume the checker's slot map for a context call, not
+    // fall back to source order — `combine(b = ..., a = ...)` with same-typed parameters would
+    // otherwise emit with the arguments silently swapped ("kBA" instead of "kAB").
+    let main = "import lib.C\n\
+        import lib.combine\n\
+        fun box(): String {\n\
+        \x20 val got = with(C(\"k\")) { combine(b = \"B\", a = \"A\") }\n\
+        \x20 if (got != \"kAB\") return \"fail: \" + got\n\
+        \x20 return \"OK\"\n\
+        }\n";
+    common::expect_box_ok_against("cpcontextnamedreorder", LIB, main);
 }
 
 #[test]
