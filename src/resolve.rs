@@ -7801,12 +7801,32 @@ fn array_builtin_ret(fname: &str, arg_tys: &[Ty]) -> Option<Ty> {
 /// collapse, numeric types widen (`Int`/`Long` → `Long`); anything else is `Error` (so the caller
 /// conservatively skips rather than guessing a supertype). Deliberately narrower than the full
 /// checker's least-upper-bound — it only needs to be SOUND, never complete.
+///
+/// One exception beyond equality/widening: a `null` branch joins the other branch's NULLABLE
+/// form — `if (c) x else null` is `T?` — exactly the answer the full checker's `join` gives the
+/// same expression, so an unannotated property initialized by such a conditional infers instead
+/// of false-reporting "cannot infer the type of property".
 fn common_lit_ty(a: Ty, b: Ty) -> Ty {
     if a == b {
-        a
-    } else {
-        Ty::promote(a, b).unwrap_or(Ty::Error)
+        return a;
     }
+    if let Some(t) = Ty::promote(a, b) {
+        return t;
+    }
+    let null_joined = |t: Ty| {
+        if t.is_reference() {
+            Some(Ty::nullable(t.non_null()))
+        } else {
+            t.nullable_non_ref()
+        }
+    };
+    if a == Ty::Null {
+        return null_joined(b).unwrap_or(Ty::Error);
+    }
+    if b == Ty::Null {
+        return null_joined(a).unwrap_or(Ty::Error);
+    }
+    Ty::Error
 }
 
 fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty {
