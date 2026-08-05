@@ -4554,8 +4554,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   all capture `this` and lower, in inline-spliced and real (invokedynamic) closures alike. An extension
   owned by an unrelated object stays uncaptured (its dispatch is the object's `INSTANCE`). The direct
   (non-lambda) call and the bare-name form (kk1 above) already worked.
-  (`tests/member_extension_in_lambda_e2e.rs`; production: micronaut controller
-  `ms.map { it.toResponse() }` with a private member extension.)
+  (`tests/member_extension_in_lambda_e2e.rs`.)
 
 - **A static method DECLARED ON AN INTERFACE uses an `InterfaceMethodref` constant.** A Kotlin interface's
   `foo$default` synthetic (reached when a call OMITS an interface-declared default arg — `interface A { fun

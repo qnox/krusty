@@ -38,6 +38,15 @@ use std::collections::{HashMap, HashSet};
 const I32_MIN: i32 = i32::MIN;
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
 type Branches = Vec<(Option<ExprId>, ExprId)>;
+/// The semantic pieces of a value-position `try`, after peeling the optional result coercion that
+/// must instead be applied to each selected branch. Keeping this extraction in one place ensures
+/// return-bound and local-bound forms recognize exactly the same IR shapes.
+struct ValueTryParts {
+    body: ExprId,
+    catches: Vec<crate::ir::IrCatch>,
+    finally: Option<ExprId>,
+    branch_wrap: Option<(IrTypeOp, Ty)>,
+}
 /// A direct suspension at a statement: `(optional bound local + type, the call ExprId)`. The call (a
 /// `Call` or `MethodCall`) is reused — the continuation is threaded into it by `emit_suspension`.
 type Suspension = (Option<(u32, Ty)>, ExprId);
@@ -590,31 +599,7 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
     let mut changed = false;
     for s in stmts {
         if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            // Move a result coercion onto each selected branch (like `desugar_value_when`): an
-            // expression body whose `try` value coerces to the declared return type wraps the
-            // `Try` in a `TypeOp` this desugar must see through.
-            let (try_expr, branch_wrap) = match ir.exprs[e as usize].clone() {
-                IrExpr::TypeOp {
-                    op,
-                    arg,
-                    type_operand,
-                } if matches!(ir.exprs[arg as usize], IrExpr::Try { .. }) => {
-                    (arg, Some((op, type_operand)))
-                }
-                _ => (e, None),
-            };
-            if matches!(ir.exprs[try_expr as usize], IrExpr::Try { .. })
-                && expr_calls_suspend(ir, try_expr, suspend_set)
-            {
-                let IrExpr::Try {
-                    body,
-                    catches,
-                    finally,
-                    ..
-                } = ir.exprs[try_expr as usize].clone()
-                else {
-                    unreachable!()
-                };
+            if let Some(parts) = suspending_value_try(ir, e, suspend_set) {
                 let tmp = max_value_index(ir) + 1;
                 let dflt = zero_value(ir, ret_ty);
                 let decl = ir.add_expr(IrExpr::Variable {
@@ -623,30 +608,9 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
                     init: Some(dflt),
                     named: false,
                 });
-                let new_body =
-                    assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set, branch_wrap);
-                let new_catches: Vec<crate::ir::IrCatch> = catches
-                    .into_iter()
-                    .map(|c| crate::ir::IrCatch {
-                        var: c.var,
-                        name: c.name,
-                        exc_internal: c.exc_internal,
-                        body: assign_branch_to_tmp(
-                            ir,
-                            c.body,
-                            tmp,
-                            ret_ty,
-                            suspend_set,
-                            branch_wrap,
-                        ),
-                    })
-                    .collect();
-                let new_try = ir.add_expr(IrExpr::Try {
-                    body: new_body,
-                    catches: new_catches,
-                    finally,
-                    result: Ty::Unit,
-                });
+                // Add the target declaration before rewriting branches: a suspending branch may
+                // allocate another temporary via `max_value_index`, which must not reuse `tmp`.
+                let new_try = bind_value_try_to_local(ir, parts, tmp, ret_ty, suspend_set);
                 let get = ir.add_expr(IrExpr::GetValue(tmp));
                 let ret = ir.add_expr(IrExpr::Return(Some(get)));
                 new_stmts.push(decl);
@@ -667,28 +631,7 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
             named,
         } = ir.exprs[s as usize].clone()
         {
-            let (try_expr, branch_wrap) = match ir.exprs[init as usize].clone() {
-                IrExpr::TypeOp {
-                    op,
-                    arg,
-                    type_operand,
-                } if matches!(ir.exprs[arg as usize], IrExpr::Try { .. }) => {
-                    (arg, Some((op, type_operand)))
-                }
-                _ => (init, None),
-            };
-            if matches!(ir.exprs[try_expr as usize], IrExpr::Try { .. })
-                && expr_calls_suspend(ir, try_expr, suspend_set)
-            {
-                let IrExpr::Try {
-                    body,
-                    catches,
-                    finally,
-                    ..
-                } = ir.exprs[try_expr as usize].clone()
-                else {
-                    unreachable!()
-                };
+            if let Some(parts) = suspending_value_try(ir, init, suspend_set) {
                 let dflt = zero_value(ir, &ty);
                 let decl = ir.add_expr(IrExpr::Variable {
                     index,
@@ -696,29 +639,7 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
                     init: Some(dflt),
                     named,
                 });
-                let new_body = assign_branch_to_tmp(ir, body, index, &ty, suspend_set, branch_wrap);
-                let new_catches: Vec<crate::ir::IrCatch> = catches
-                    .into_iter()
-                    .map(|c| crate::ir::IrCatch {
-                        var: c.var,
-                        name: c.name,
-                        exc_internal: c.exc_internal,
-                        body: assign_branch_to_tmp(
-                            ir,
-                            c.body,
-                            index,
-                            &ty,
-                            suspend_set,
-                            branch_wrap,
-                        ),
-                    })
-                    .collect();
-                let new_try = ir.add_expr(IrExpr::Try {
-                    body: new_body,
-                    catches: new_catches,
-                    finally,
-                    result: Ty::Unit,
-                });
+                let new_try = bind_value_try_to_local(ir, parts, index, &ty, suspend_set);
                 new_stmts.push(decl);
                 new_stmts.push(new_try);
                 changed = true;
@@ -733,6 +654,75 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
             value,
         };
     }
+}
+
+/// Recognize the one semantic value-`try` shape supported by the state-machine desugar. The source
+/// context (`return` versus a local initializer) is intentionally absent: both consumers must peel
+/// the same optional result coercion and apply the same suspension predicate.
+fn suspending_value_try(
+    ir: &IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> Option<ValueTryParts> {
+    // An expression body whose value coerces to its declared return type wraps the `Try` in a
+    // `TypeOp`. Move that operation onto each selected branch, like `desugar_value_when`.
+    let (try_expr, branch_wrap) = match ir.exprs[expression as usize].clone() {
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } if matches!(ir.exprs[arg as usize], IrExpr::Try { .. }) => {
+            (arg, Some((op, type_operand)))
+        }
+        _ => (expression, None),
+    };
+    if !expr_calls_suspend(ir, try_expr, suspend_set) {
+        return None;
+    }
+    let IrExpr::Try {
+        body,
+        catches,
+        finally,
+        ..
+    } = ir.exprs[try_expr as usize].clone()
+    else {
+        return None;
+    };
+    Some(ValueTryParts {
+        body,
+        catches,
+        finally,
+        branch_wrap,
+    })
+}
+
+/// Turn the recognized value-`try` into a statement-position `try` assigning every value-producing
+/// branch to `target`. This single reconstruction path prevents return-bound and local-bound forms
+/// from drifting in catch/finally handling or coercion placement.
+fn bind_value_try_to_local(
+    ir: &mut IrFile,
+    parts: ValueTryParts,
+    target: u32,
+    ty: &Ty,
+    suspend_set: &HashSet<u32>,
+) -> ExprId {
+    let new_body = assign_branch_to_tmp(ir, parts.body, target, ty, suspend_set, parts.branch_wrap);
+    let new_catches: Vec<crate::ir::IrCatch> = parts
+        .catches
+        .into_iter()
+        .map(|catch| crate::ir::IrCatch {
+            var: catch.var,
+            name: catch.name,
+            exc_internal: catch.exc_internal,
+            body: assign_branch_to_tmp(ir, catch.body, target, ty, suspend_set, parts.branch_wrap),
+        })
+        .collect();
+    ir.add_expr(IrExpr::Try {
+        body: new_body,
+        catches: new_catches,
+        finally: parts.finally,
+        result: Ty::Unit,
+    })
 }
 
 /// Desugar a VALUE-position `when`/`if` in `return` position whose BRANCH VALUES suspend (but whose
@@ -1294,41 +1284,30 @@ fn hoist_expr(
             hoist_call_operands_in_order(ir, e, suspend_set, orig_rets, value_types, prelude);
             e
         }
-        // A construction whose argument suspends (`Sub(mk().tag)`): constructor arguments evaluate
-        // unconditionally left-to-right, so each suspension there hoists like any call argument —
-        // but ONLY when every argument BEFORE the last suspending one is effect-free. A preceding
-        // argument left inline would run AFTER the hoisted suspension (`Sub(f(), susp())` →
-        // `val t = susp(); Sub(f(), t)`), where Kotlin evaluates strictly left-to-right. Leave the
-        // risky shape unhoisted: the flattener then bails and the file SKIPS rather than
-        // miscompiles. (`Sub(mk().tag + "!")` — a single argument — is the production shape and
-        // stays hoistable.)
-        IrExpr::New {
-            internal,
-            args,
-            ctor_params,
-            ctor_desc,
-        } => {
-            let last_susp = args
-                .iter()
-                .rposition(|&a| expr_calls_suspend(ir, a, suspend_set));
-            if let Some(last) = last_susp {
-                let prefix_pure = args[..last].iter().all(|&a| {
-                    matches!(ir.exprs[a as usize], IrExpr::Const(_) | IrExpr::GetValue(_))
-                });
-                if !prefix_pure {
-                    return e;
-                }
-            }
-            let na: Vec<ExprId> = args
-                .iter()
-                .map(|&a| hoist_expr(ir, a, suspend_set, orig_rets, value_types, &mut *prelude))
-                .collect();
-            ir.exprs[e as usize] = IrExpr::New {
-                internal,
-                args: na,
-                ctor_params,
-                ctor_desc,
+        // Constructors obey the same ordered-operand contract as calls and string concatenation.
+        // Reuse the shared planner so an effectful argument before a later suspension is snapshotted
+        // in source order (`New(effect(), suspend())`), while an operand whose verifier type cannot
+        // be recovered still declines safely. A constructor-only purity list would duplicate the
+        // planner and reject shapes it already handles generically.
+        IrExpr::New { args, .. } => {
+            let operands: Vec<Option<ExprId>> = args.iter().map(|&arg| Some(arg)).collect();
+            let Some(new_operands) = hoist_operands_in_order(
+                ir,
+                &operands,
+                suspend_set,
+                orig_rets,
+                value_types,
+                prelude,
+            ) else {
+                return e;
             };
+            let new_args = new_operands
+                .into_iter()
+                .map(|arg| arg.expect("constructor operands have no default-argument holes"))
+                .collect();
+            if let IrExpr::New { args, .. } = &mut ir.exprs[e as usize] {
+                *args = new_args;
+            }
             e
         }
         IrExpr::GetField {

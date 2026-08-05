@@ -339,12 +339,11 @@ fn projected_generic_extension_receiver_with_concrete_inference_is_accepted() {
 }
 
 #[test]
-fn suspend_ctor_arg_after_side_effect_rejected() {
-    // `S(g(), d())` with a suspending second constructor argument: hoisting `d()` would run it
-    // BEFORE the non-suspending `g()`, inverting Kotlin's left-to-right evaluation. The hoist
-    // declines the shape (a preceding argument that is not a constant/local read), so the
-    // flattener bails and the file skips rather than miscompiles.
-    assert!(rejects(
+fn suspend_ctor_arg_after_side_effect_accepted() {
+    // Constructors now use the shared ordered-operand planner: `g()` is snapshotted before `d()`
+    // is hoisted, preserving Kotlin's left-to-right evaluation instead of requiring a
+    // constructor-specific rejection. Runtime order is pinned by `suspend_try_catch_shapes_e2e`.
+    assert!(!rejects(
         "class S(val a: Int, val b: Int)\n\
          var log = 0\n\
          fun g(): Int { log += 1; return log }\n\
@@ -355,7 +354,7 @@ fn suspend_ctor_arg_after_side_effect_rejected() {
 
 #[test]
 fn suspend_ctor_single_arg_accepted() {
-    // The production shape — one (suspending) constructor argument — stays hoistable.
+    // The one-argument case remains a direct instance of the same generic operand rule.
     assert!(!rejects(
         "class S(val a: Int)\n\
          suspend fun d(): Int = 1\n\

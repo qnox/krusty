@@ -9644,6 +9644,18 @@ impl<'a> Lower<'a> {
         let Some(cur) = self.cur_class else {
             return false;
         };
+        // Calls, reads, and writes are recorded in different checker maps because they attach to
+        // different AST node kinds. Their capture decision is nevertheless one semantic rule: the
+        // in-scope enclosing instance must be a valid dispatch receiver for the selected extension
+        // owner, across source and dependency symbol providers alike.
+        fn uses_enclosing_extension_dispatch(
+            lo: &Lower<'_>,
+            cur: TypeName,
+            owner: TypeName,
+        ) -> bool {
+            lo.syms
+                .is_assignable_across_sources(Ty::obj_name(cur), Ty::obj_name(owner))
+        }
         fn scan(lo: &Lower, cur: TypeName, bound: &[String], e: AstExprId, deep: bool) -> bool {
             if let Expr::Name(n) = lo.afile.expr(e) {
                 // `this`/`super` (incl. labeled `this@Outer`) are bare names here, not a dedicated
@@ -9675,20 +9687,14 @@ impl<'a> Lower<'a> {
             if let Some(ResolvedCall::MemberExtension { owner, .. }) =
                 lo.info.resolved_calls.get(&e)
             {
-                if lo
-                    .syms
-                    .is_assignable_across_sources(Ty::obj_name(cur), Ty::obj_name(*owner))
-                {
+                if uses_enclosing_extension_dispatch(lo, cur, *owner) {
                     return true;
                 }
             }
             if let Some(ExprLowering::MemberExtensionPropertyRead { owner, .. }) =
                 lo.info.expr_lowers.get(&e)
             {
-                if lo
-                    .syms
-                    .is_assignable_across_sources(Ty::obj_name(cur), Ty::obj_name(*owner))
-                {
+                if uses_enclosing_extension_dispatch(lo, cur, *owner) {
                     return true;
                 }
             }
@@ -9718,10 +9724,7 @@ impl<'a> Lower<'a> {
                     if let Some(StmtLowering::MemberExtensionPropertyWrite { owner, .. }) =
                         lo.info.stmt_lowers.get(&s)
                     {
-                        if lo
-                            .syms
-                            .is_assignable_across_sources(Ty::obj_name(cur), Ty::obj_name(*owner))
-                        {
+                        if uses_enclosing_extension_dispatch(lo, cur, *owner) {
                             return true;
                         }
                     }

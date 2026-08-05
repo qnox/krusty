@@ -1,4 +1,4 @@
-//! Suspend-function `try`/`catch` shapes from production controller code.
+//! Suspend-function `try`/`catch` shapes expressed with synthetic declarations.
 //!
 //! Three related gaps in the state-machine flattener:
 //! 1. A value-position `try` under a RESULT COERCION (`suspend fun f(): Base = try { sub() } catch
@@ -121,8 +121,8 @@ fn expression_bodied_try_with_result_coercion() {
 
 #[test]
 fn expression_bodied_multi_catch_maps_exceptions() {
-    // The production controller shape: an expression-bodied suspend function whose whole body is a
-    // `try` with several non-suspending catches mapping exceptions to a common supertype.
+    // An expression-bodied suspend function whose whole body is a `try` with several
+    // non-suspending catches mapping exceptions to a common supertype.
     const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
         open class R(val s: String)\n\
         class Ok(s: String) : R(s)\n\
@@ -294,5 +294,27 @@ fn multi_catch_with_trailing_throwable_arm() {
     assert_eq!(
         run("Main", MAIN).expect("trailing Throwable arm"),
         "A:a-v/T:i-v"
+    );
+}
+
+#[test]
+fn constructor_arguments_keep_order_around_suspensions() {
+    // Constructors share the ordered-operand planner with calls: the ordinary first argument is
+    // snapshotted before either later suspension, and the two suspension points remain ordered.
+    // This catches the tempting but incorrect rewrite `Triple(first(), step("b"), step("c"))` →
+    // `val b = step("b"); val c = step("c"); Triple(first(), b, c)`.
+    const MAIN: &str = "import kotlinx.coroutines.runBlocking\n\
+        var trace = \"\"\n\
+        fun first(): String { trace += \"a\"; return \"a\" }\n\
+        suspend fun step(value: String): String { trace += value; return value }\n\
+        class Triple(val a: String, val b: String, val c: String)\n\
+        suspend fun build(): Triple = Triple(first(), step(\"b\"), step(\"c\"))\n\
+        fun box(): String = runBlocking {\n\
+        \x20 val value = build()\n\
+        \x20 trace + \":\" + value.a + value.b + value.c\n\
+        }\n";
+    assert_eq!(
+        run("Main", MAIN).expect("ordered constructor operands"),
+        "abc:abc"
     );
 }
