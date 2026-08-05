@@ -16751,14 +16751,10 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         // The CHECKER resolved this extension and recorded the callable (keyed by the call `ExprId`).
         let c = self.info.resolved_extension(e).cloned()?;
-        // The first parameter is the extension receiver. Box a primitive receiver flowing into a generic
-        // `Object` receiver param; a reference receiver widens to its declared param type for free.
+        // The receiver is the callable's first argument. Realize it from the selected logical type plus
+        // the provider's physical slot fact, exactly as the inline router and direct call path do.
         let p0 = *c.params.first().unwrap_or(&rt);
-        let recv = if self.has_scalar_value_repr(rt) && p0.is_reference() {
-            self.coerce_to_static(recv_ir, rt, p0)
-        } else {
-            recv_ir
-        };
+        let recv = self.coerce_callable_argument_value(recv_ir, rt, p0, &c, 0)?;
         let source_receiver = c.source_receiver;
         let mut a = vec![recv];
         let explicit_params = c.params.get(1..)?;
@@ -23403,7 +23399,21 @@ impl<'a> Lower<'a> {
                     if let Some(c) = self.info.resolved_extension(e).cloned() {
                         if c.params.len() == 2 {
                             let l = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
+                            let l = self.coerce_callable_argument_value(
+                                l,
+                                self.info.ty(lhs),
+                                c.params[0],
+                                &c,
+                                0,
+                            )?;
                             let r = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
+                            let r = self.coerce_callable_argument_value(
+                                r,
+                                self.info.ty(rhs),
+                                c.params[1],
+                                &c,
+                                1,
+                            )?;
                             return self.emit_library_static_call(c, vec![l, r], false);
                         }
                     }
@@ -26669,10 +26679,12 @@ impl<'a> Lower<'a> {
                 // A library extension `recv.name(args)` → `invokestatic facade.name(recv, args)`.
                 // The CHECKER resolved it (sole resolver) and recorded the callable; the lowerer
                 // only reads it. Owner + descriptor come from that record — no name hardcoded.
-                // Coerce the receiver + arguments to the extension's parameter types so a
-                // primitive flowing into a generic `Object` parameter (`fun <T> T.to(…)`) boxes.
+                // Coerce the receiver + arguments to the extension's selected parameter types. The
+                // receiver additionally consumes the provider's physical first-slot fact, because a
+                // substituted generic receiver can be scalar while its erased ABI slot is a reference.
                 let p0 = *c.params.first().unwrap_or(&rt);
                 let recv = self.lower_arg(receiver, &ty_to_ir(p0))?;
+                let recv = self.coerce_callable_argument_value(recv, rt, p0, &c, 0)?;
                 let mut a = vec![recv];
                 let explicit_params = c.params.get(1..)?;
                 // A `$default` call with a TRAILING LAMBDA: the lambda fills the LAST real parameter
