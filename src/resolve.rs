@@ -19056,6 +19056,20 @@ impl<'a> Checker<'a> {
             .and_then(|internal| self.syms.classes.get(&internal))
     }
 
+    /// Whether the companion body currently being checked declares its own static property `name`.
+    ///
+    /// `companion_of` names the enclosing source declaration, so resolve it through the exact
+    /// same-package identity rather than a global simple-name map. The companion member shadows a
+    /// same-named file property for both reads and writes; reads already use this owner's
+    /// `static_props` before file scope, while unsupported own-property writes use this predicate to
+    /// reject instead of silently falling through to the file property.
+    fn companion_own_static_property(&self, name: &str) -> bool {
+        self.companion_of
+            .as_deref()
+            .and_then(|class| self.same_package_class(class))
+            .is_some_and(|owner| owner.static_props.contains_key(name))
+    }
+
     /// The MODULE source class an unqualified classifier name binds to in this file: an explicit
     /// import naming a module class wins (kotlinc), then a same-package declaration. The import arm
     /// is classifier-first, like `resolve_name_against_imports_name` — a nested source class shadows
@@ -24217,10 +24231,6 @@ impl<'a> Checker<'a> {
                     if let Some(ty) = self.record_class_static_property_read(e, owner, &n) {
                         return self.set(e, ty);
                     }
-                }
-                if self.companion_of.is_some() && self.syms.props.contains_key(&n) {
-                    self.diags.error(self.span(e), "krusty: top-level property access from a companion member is not supported".to_string());
-                    return self.set(e, Ty::Error);
                 }
                 if let Some(cls) = self.module_object_named(&n) {
                     // A bare `object` name used as a value (`val x = Foo`, or a self-reference

@@ -2636,12 +2636,7 @@ impl<'a> SemanticClassifier<'a> {
                     modifiers: HighlightModifiers::READONLY | HighlightModifiers::STATIC,
                 };
             }
-            if let Some(class) = self
-                .symbols
-                .class_names
-                .get_class(&owner)
-                .and_then(|internal| self.symbols.classes.get(&internal))
-            {
+            if let Some(class) = self.symbols.classes.get(&owner) {
                 if let Some((_, is_var)) = class.prop(name) {
                     return MemberHighlight {
                         kind: HighlightKind::Property,
