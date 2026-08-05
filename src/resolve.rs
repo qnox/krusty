@@ -38594,8 +38594,10 @@ impl<'a> Checker<'a> {
                         // For a NON-FINAL vararg the labelled slot map pairs each compacted
                         // argument with the parameter its label named; capture the pairing
                         // before the map is handed to the lowerer below.
-                        let slot_arg_pairs: Option<Vec<usize>> =
-                            resolved_slots.as_ref().map(|slots| {
+                        let slot_arg_pairs: Option<Vec<usize>> = resolved_slots
+                            .as_ref()
+                            .filter(|_| c.vararg_index.is_some())
+                            .map(|slots| {
                                 slots
                                     .iter()
                                     .enumerate()

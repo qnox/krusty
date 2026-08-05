@@ -1066,10 +1066,9 @@ fn vararg_parameter_shape_at(
     };
     // Trailing parameters OMITTED: every remaining argument is a vararg element, legal only when
     // each parameter after the vararg declares a default.
-    if (vararg_index + 1..params.len())
-        .all(|position| param_defaults.get(position).copied().unwrap_or(false))
-        && elements_fit(args.len())
-    {
+    let trailing_all_defaulted = (vararg_index + 1..params.len())
+        .all(|position| param_defaults.get(position).copied().unwrap_or(false));
+    if trailing_all_defaulted && elements_fit(args.len()) {
         return Some(expand(args.len()));
     }
     // Trailing parameters FILLED: the last `trailing` arguments bind the parameters after the
@@ -1077,6 +1076,14 @@ fn vararg_parameter_shape_at(
     // middle arguments are the vararg's elements (possibly none).
     let trailing = params.len() - vararg_index - 1;
     if trailing == 0 {
+        return None;
+    }
+    // A DEFAULTED trailing parameter is element-first in Kotlin: `fun tagged(vararg xs: String,
+    // s: String = "d")` called `tagged("a", "b")` packs BOTH arguments and defaults `s` (the
+    // OMITTED form above, or — when the elements do not fit it — the `$default` route this
+    // selector must not pre-empt). Filling it positionally would silently bind the last argument
+    // to `s`, so FILLED is reserved for trailing parameters that are actually required.
+    if trailing_all_defaulted {
         return None;
     }
     let element_end = args.len().checked_sub(trailing)?;
@@ -2431,6 +2438,30 @@ impl<'a> SymbolResolver<'a> {
                                 .vararg_index
                                 .and_then(|index| index.checked_sub(o.context_count))
                                 .or_else(|| params.len().checked_sub(1))?;
+                            // A non-final vararg whose trailing parameters ALL declare defaults
+                            // is element-first (`tagged("a", "b")` packs both and defaults `s`):
+                            // that call belongs to the `$default` route below, which this
+                            // positional selector must not pre-empt by binding the last argument
+                            // to the trailing parameter. Defaults are full-arity like the index.
+                            let full_arity = params.len() + o.context_count;
+                            let trailing_all_defaulted =
+                                (vararg_index + o.context_count + 1..full_arity).all(|position| {
+                                    o.call_sig
+                                        .param_defaults
+                                        .get(position)
+                                        .copied()
+                                        .unwrap_or(false)
+                                });
+                            // A non-final vararg combined with CONTEXT parameters is not modelled
+                            // past this point: the checker's argument pairing and the lowerer's
+                            // packing both work in value-parameter space while the emitted list
+                            // carries the context prefix. Decline here so all three layers agree
+                            // rather than admit a shape only the selector understands.
+                            if vararg_index + 1 < params.len()
+                                && (trailing_all_defaulted || o.context_count > 0)
+                            {
+                                return None;
+                            }
                             vararg_parameter_shape_at(
                                 params,
                                 args,
@@ -2496,6 +2527,7 @@ impl<'a> SymbolResolver<'a> {
         let non_final_vararg = o
             .call_sig
             .vararg_index
+            .filter(|_| o.context_count == 0)
             .and_then(|index| index.checked_sub(o.context_count))
             .filter(|&v| v + 1 < params.len() && params[v].array_elem().is_some())
             .filter(|&v| {

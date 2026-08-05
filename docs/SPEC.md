@@ -5476,5 +5476,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   last-parameter-is-array heuristic can find a non-final slot); the checker checks the vararg
   slot's argument against the ELEMENT type unless it is already the array (spread pass-through),
   and lowering packs via the slot map (labelled) or `lower_non_last_vararg_args` (trailing
-  lambda). Tests: `tests/classpath_nonfinal_vararg_named_e2e.rs` (box case runtime-verified,
-  output `abx`).
+  lambda). Two boundaries are deliberate. A trailing parameter that declares a DEFAULT stays
+  element-first (`fun tagged(vararg xs: String, s: String = "d")` called `tagged("a", "b")` packs
+  BOTH and defaults `s`), so the positional selector declines rather than bind the last argument
+  to it — resolving that element-form call against a classpath top-level `$default` is a
+  separate, pre-existing gap. A non-final vararg combined with CONTEXT parameters is declined at
+  the selector so all three layers agree (the checker's pairing and the lowerer's packing work in
+  value-parameter space, the emitted list carries the context prefix). An UNLABELLED spread
+  (`f("a", *arr) { … }`) resolves but does not lower: plain-name spread calls are diverted to
+  `lower_spread_call`, which emits only a same-file single-vararg module target and otherwise
+  bails (a skip, never a miscompile); the LABELLED spread form lowers and runs.
+  Tests: `tests/classpath_nonfinal_vararg_named_e2e.rs` (named, trailing-lambda, empty-vararg and
+  labelled-spread cases runtime-verified — `abx`, `x`, `bcx`).
