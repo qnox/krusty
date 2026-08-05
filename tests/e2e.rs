@@ -750,6 +750,8 @@ mod nested_class_ctor_scope_e2e;
 mod nested_class_supertype_e2e;
 #[path = "nested_class_unqualified_e2e.rs"]
 mod nested_class_unqualified_e2e;
+#[path = "nested_classifier_forward_ref_e2e.rs"]
+mod nested_classifier_forward_ref_e2e;
 #[path = "nested_ctor_named_args_e2e.rs"]
 mod nested_ctor_named_args_e2e;
 #[path = "nested_data_class_tostring_e2e.rs"]

@@ -4108,9 +4108,27 @@ impl<'a> Parser<'a> {
                             self.file.decls.push(id);
                         }
                     }
+                    // A nested `enum class Inner { A, B }` in an object body hoists to the file top
+                    // level as `Foo.Inner` (internal `Foo$Inner`) — exactly like a class-body nested
+                    // enum, so the whole body sees it regardless of declaration order.
+                    TokenKind::Ident
+                        if self.text() == "enum"
+                            && self
+                                .t
+                                .get(self.i + 1)
+                                .map_or(false, |t| t.kind == TokenKind::KwClass) =>
+                    {
+                        let start = self.file.decls.len();
+                        let mut nested = self.parse_enum();
+                        self.reprefix_hoisted(&name, start);
+                        nested.visibility = visibility_of(&mods);
+                        nested.name = format!("{}.{}", name, nested.name);
+                        let id = self.file.add_decl(Decl::Class(nested));
+                        self.file.decls.push(id);
+                    }
                     TokenKind::Ident
                         if matches!(self.text(), "object" | "interface")
-                            || (matches!(self.text(), "enum" | "annotation")
+                            || (self.text() == "annotation"
                                 && self
                                     .t
                                     .get(self.i + 1)
