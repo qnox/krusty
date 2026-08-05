@@ -1390,7 +1390,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
   The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
   new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
-<<<<<<< HEAD
 - **Unsigned types `UByte`/`UShort`/`UInt`/`ULong`** — Kotlin inline classes over `Byte`/`Short`/`Int`/`Long`;
   unboxed they ARE that JVM primitive (descriptor `B`/`S`/`I`/`J`), with unsignedness driving
   operation/conversion choice (kotlinc hardcodes these intrinsic mappings, so krusty mirrors them). Literals
@@ -1411,17 +1410,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   DIVERGENCE, not a skip: the native unsigned types do not carry kotlinc's value-class NAME MANGLING on a
   function that takes one — krusty emits `f(byte)` where kotlinc emits `f-7apg3OU(byte)`, pre-existing and
   shared by `UInt`/`ULong`.
-=======
-- **Unsigned types `UInt`/`ULong`** — Kotlin inline classes over `Int`/`Long`; unboxed they ARE that JVM
-  primitive (descriptor `I`/`J`), with unsignedness driving operation/conversion choice (kotlinc hardcodes
-  these intrinsic mappings, so krusty mirrors them). Literals `1u`/`0xFFuL`; `+`/`-`/`*`/`==` use the signed
-  two's-complement opcodes; `/`/`%`/`<`/`>` use `Integer.{divide,remainder,compare}Unsigned` (`Long.*` for
-  `ULong`); `toString`/templates use `Integer.toUnsignedString`; `UInt.toLong()` zero-extends via
-  `Integer.toUnsignedLong` (not the sign-extending `i2l`); `toInt`/`toUInt` reinterpret (no-op). Boxing into
-  a reference context uses the inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and
-  `unbox-impl` on read, `is UInt` → `instanceof kotlin/UInt`) — never `Integer`, so identity and large
-  values are preserved. `tests/unsigned_e2e.rs`. (`UByte`/`UShort`, `UIntRange` value iteration, and unsigned
-  `when` subjects are not yet modeled — they cleanly skip.)
 - **Unsigned values at a CLASSPATH call boundary** — because an unsigned value has TWO representations
   (the carrier in a primitive slot, and the boxed inline class), every classpath call is a place where the
   representation the lowerer produced must agree with the descriptor the backend spells verbatim. Both
@@ -1453,7 +1441,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   recovery, which turns the miscompile back into a clean skip.
   `tests/unsigned_classpath_call_e2e.rs` asserts the backend contract directly (a decline passes; an
   EMITTED class that does not verify and run fails), so it keeps holding whichever way a shape is handled.
->>>>>>> origin/master
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
@@ -2914,7 +2901,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   loop recursion) and `tests/deep_expression_nesting_check_e2e.rs`
   (450-level `0+(…)` right-nesting through the checker and lowering, end-to-end).
 
-<<<<<<< HEAD
 - **Vararg spread arguments mixed with plain ones (`f(x, *a, y)`).** A call that mixes spreads and
   plain arguments packs ONE array through the platform spread builder, exactly as kotlinc does:
   `kotlin/jvm/internal/SpreadBuilder` for a reference element, `<Prim>SpreadBuilder`
@@ -3079,7 +3065,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   regardless of spelling. Applies to functions, classes and interfaces alike. Test:
   `tests/feature_coverage_n_e2e.rs::where_clause_single_bound`.
 
-  Still open: MULTIPLE bounds on one parameter (`where T : Comparable<T>, T : Named`). Kotlin gives
+  MULTIPLE bounds on one parameter (`where T : Comparable<T>, T : Named`) were initially left open
+  and have since landed — see "A type parameter carries every bound" below. Kotlin gives
   such a parameter the INTERSECTION of its bounds and resolves members from all of them, while the JVM
   erasure takes ONE; `Ty::TyParam` carries a single bound, so only that one's members resolve. An
   attempt to carry the later bounds beside the erasure and keep the parameter's identity
@@ -3363,7 +3350,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unresolved. The remaining bounds are kept beside the erasure and retried when the lookup fails; the
   erasure itself is untouched, so descriptors still match kotlinc. Test:
   `tests/feature_coverage_n_e2e.rs::where_clause_two_bounds`.
-=======
 - **A member called on an OBJECT or COMPANION receiver types its lambda arguments from the selected
   candidate, exactly as an instance receiver does.** `Wrap.apply2 { it * 2 }` on
   `object Wrap { fun apply2(f: (Int) -> Int): Int }` must bind `it` to `Int`. The instance-receiver
@@ -3419,7 +3405,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   scores every candidate equally, so declaration order decides
   (`fun ap(f: (Int) -> Int)` + `fun ap(s: String)` fails on object and instance receivers alike).
   Test: `tests/object_receiver_lambda_e2e.rs`.
->>>>>>> origin/master
 
 ## 8. Success criteria for the PoC
 
