@@ -26669,14 +26669,19 @@ fn body_has_disallowed_return(file: &ast::File, e: AstExprId, own_label: &str) -
     expr_bad(file, e, own_label)
 }
 
+/// Whether `e` lowers to a branch, and so is declined by the vararg-pack paths that call this (the
+/// whole call then fails to lower and the file skips).
+///
+/// The emitter itself no longer *needs* this: a mid-fill element's stack-map frames now type the held
+/// `[array, array, index]` (`Emitter::emit_value_over`). It stays as a conservative restriction —
+/// lifting it turns skips into emitted code, which needs its own corpus round-trip. `Try` is the one
+/// case that must keep bailing: an exception handler CLEARS the operand stack, so the partly-built
+/// array held there is lost and no frame can describe it.
 fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
     match file.expr(e) {
         Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } => true,
-        // A safe call `recv?.m()` lowers to a null-check branch (a stackmap frame), so it is not safe to
-        // splice mid-sequence (e.g. as an array-literal element) — treat it as branchy so callers bail.
+        // A safe call `recv?.m()` lowers to a null-check branch (a stackmap frame).
         Expr::SafeCall { .. } => true,
-        // A `try`/`catch` expression emits exception-handler merge frames; as a mid-`Vararg`-fill element
-        // those frames land inside the element-store sequence and fail the verifier — bail (skip).
         Expr::Try { .. } => true,
         Expr::Binary { op, lhs, .. } => {
             use ast::BinOp::*;
