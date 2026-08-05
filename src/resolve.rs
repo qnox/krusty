@@ -19376,17 +19376,50 @@ impl<'a> Checker<'a> {
                     erased_type_key(Ty::obj_name(internal))
                 } else if let Some(t) = Ty::from_name(name) {
                     erased_type_key(t)
-                } else if let Some(internal) = internal.found() {
+                } else if let Some(internal) = internal
+                    .found()
+                    .or_else(|| default_classifier_internal(name))
+                {
                     erased_type_key(Ty::obj_name(internal))
                 } else {
                     ErasedTypeKey::Unresolved(name.to_string())
                 }
             }
         };
+        // A `vararg` parameter erases to its ARRAY type on the JVM (`vararg x: String` →
+        // `([Ljava/lang/String;)`), so it keys as `Array<element>` — `Ty::array` picks the
+        // primitive specialization (`IntArray`) for a primitive element, matching the descriptor.
+        // A declared `Array<T>` likewise keeps its (erased) element so `Array<String>` and
+        // `Array<Int>` — which erase to different descriptors — do not collide, while a declared
+        // `Array<String>` and a `vararg String` do.
+        let array_key = |elem: ErasedTypeKey| ErasedTypeKey::Ty(Ty::array(erased_key_ty(elem)));
         ErasedSigKey {
             name: f.name.clone(),
             receiver: f.receiver.as_ref().map(|r| key(&r.name)),
-            params: f.params.iter().map(|p| key(&p.ty.name)).collect(),
+            params: f
+                .params
+                .iter()
+                .map(|p| {
+                    let k = key(&p.ty.name);
+                    if p.is_vararg {
+                        array_key(k)
+                    } else if let (ErasedTypeKey::Ty(Ty::Obj(n, _)), Some(arg)) = (&k, &p.ty.arg) {
+                        // `key` only sees the name string, so a declared `Array<T>` recovers its
+                        // erased element from `p.ty.arg` here — the name-typed sibling of the
+                        // Array arm in `erased_type_key`.
+                        if n.matches("kotlin/Array") {
+                            ErasedTypeKey::Ty(Ty::obj_args(
+                                "kotlin/Array",
+                                &[erased_key_ty(key(&arg.name))],
+                            ))
+                        } else {
+                            k
+                        }
+                    } else {
+                        k
+                    }
+                })
+                .collect(),
         }
     }
 
