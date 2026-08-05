@@ -630,6 +630,8 @@ mod java_instance_e2e;
 mod java_nested_static_e2e;
 #[path = "java_source_interop_e2e.rs"]
 mod java_source_interop_e2e;
+#[path = "java_source_platform_params_e2e.rs"]
+mod java_source_platform_params_e2e;
 #[path = "java_source_supertype_chain_e2e.rs"]
 mod java_source_supertype_chain_e2e;
 #[path = "java_static_field_e2e.rs"]
