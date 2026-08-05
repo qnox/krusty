@@ -8396,12 +8396,20 @@ impl<'a> Lower<'a> {
             let call_inline = c.inline.can_inline();
             let erased_generic_ret = physical_ret.is_erased_top() && logical_ret != physical_ret;
             let suspend = c.suspend;
-            let call = self.emit_library_static_call(c, a, suspend)?;
+            let call = self.emit_reified_library_static_call(e, c, a, suspend, None)?;
             return Some(if call_inline || erased_generic_ret {
                 self.coerce_erased_call_result(e, call, &physical_ret, true)
             } else {
                 call
             });
+        }
+        // The reified `assertFailsWith<T> { … }` intrinsic, exactly as the bare-name branch applies
+        // it: the callee's platform realization is inline-only bytecode with no callable fallback,
+        // so the semantic try/catch shape is realized directly. A fully-qualified spelling
+        // (`kotlin.test.assertFailsWith<E> { … }`) selects the same callable and needs the same
+        // lowering.
+        if let Some(intrinsic) = self.lower_assert_fails_with_default(e, &c, args) {
+            return Some(intrinsic);
         }
         let last_is_array = c.params.last().is_some_and(|p| p.array_elem().is_some());
         if last_is_array {
@@ -8459,7 +8467,11 @@ impl<'a> Lower<'a> {
                     && !logical_ret.is_unsigned()
                     && physical_ret.is_reference()));
         let suspend = c.suspend;
-        let call = self.emit_library_static_call(c, a, suspend)?;
+        // Through the COMMON reified boundary (`emit_reified_library_static_call`), like the
+        // bare-name top-level and extension origins: a `<reified T>` inline callee spelled fully
+        // qualified needs the call's resolved type arguments attached, or the emitter cannot
+        // specialize the spliced body and would fall back to the throwing compiled one.
+        let call = self.emit_reified_library_static_call(e, c, a, suspend, None)?;
         let call = if arg_prelude.is_empty() {
             call
         } else {

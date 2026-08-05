@@ -500,6 +500,8 @@ mod fq_ctor_call_e2e;
 mod fq_source_typeref_e2e;
 #[path = "fq_static_call_e2e.rs"]
 mod fq_static_call_e2e;
+#[path = "fq_targ_trailing_lambda_e2e.rs"]
+mod fq_targ_trailing_lambda_e2e;
 #[path = "fq_toplevel_call_e2e.rs"]
 mod fq_toplevel_call_e2e;
 #[path = "fq_vararg_call_e2e.rs"]

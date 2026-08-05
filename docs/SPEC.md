@@ -5008,3 +5008,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its real CPS entry point. A same-file `suspend inline` member still reports it and still gates.
   Tests: `cross_file_inline_call_e2e::suspend_inline_extension_cross_file_executes`,
   `coroutine_intrinsics_e2e::suspend_inline_operator_*_reaches_the_inline_gate`.
+
+- **A fully-qualified call with an explicit type argument and a trailing lambda over a defaulted
+  leading parameter (`kotlin.test.assertFailsWith<E> { … }`).** Three per-channel drops, all
+  FQ-spelling-only (the `import`ed bare-name spelling already had each piece): (1) the checker's FQ
+  top-level channel paired arguments with parameters index-for-index even when the resolver selected
+  a `$default` callable with omitted leading defaults, so the trailing lambda was checked against
+  `message: String?` ("argument type mismatch: actual type is '() -> X', but 'String' was expected") —
+  it now maps arguments to semantic slots (`unlabelled_argument_slots`, the same trailing-lambda rule
+  the member path and the `$default` lowerer apply); (2) the FQ channel never stashed the RESOLVED
+  explicit type arguments (`resolved_call_type_args`), and the FQ lowering path called
+  `emit_library_static_call` directly instead of the common `emit_reified_library_static_call`
+  boundary, so a `<reified T>` callee could not be specialized and fell back to the throwing compiled
+  body — a runtime `UnsupportedOperationException`, i.e. a miscompile (now: specialize, or bail like
+  the bare-name path); (3) the FQ lowering path never consulted the reified `assertFailsWith`
+  intrinsic, which realizes the semantic try/catch shape for the inline-only kotlin-test helper. The
+  lambda-splicing emit path (`try_inline_unified`) also now threads the reified substitution through
+  to `splice_unified` instead of passing an empty map. Test: `tests/fq_targ_trailing_lambda_e2e.rs`.
