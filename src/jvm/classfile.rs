@@ -2,6 +2,7 @@
 //! Targets major version 50 (Java 6). Methods that create lambda objects (new $lambda$N) emit a
 //! StackMapTable attribute so the type-checking verifier on Java 25+ accepts them.
 
+use crate::kt_string::KtString;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -92,7 +93,7 @@ pub struct SeedField {
     pub stores_in_ctor: bool,
     /// A `String` literal initializer. kotlinc interns it as an `ldc` constant just before the
     /// property's store, so it lands ahead of the field's own name/descriptor.
-    pub string_const: Option<String>,
+    pub string_const: Option<KtString>,
     /// `(value class internal name, `constructor-impl` descriptor)` when the initializer CONSTRUCTS a
     /// value class (`val k: K = K("OK")`). The store is then `ldc <const>; invokestatic
     /// K.constructor-impl; putfield`, so the factory's entries intern between the constant and the
@@ -129,6 +130,14 @@ pub struct DataMemberInfo<'a> {
 #[derive(PartialEq, Eq, Hash, Clone)]
 enum Const {
     Utf8(String),
+    /// A `CONSTANT_Utf8` whose value is a string CONSTANT that no Rust `String` can spell — one
+    /// containing an unpaired surrogate. `CONSTANT_Utf8` is modified UTF-8, which encodes every
+    /// UTF-16 code unit (including a lone surrogate) as its own sequence, so the class-file format
+    /// carries these fine; only the in-compiler `String` cannot.
+    ///
+    /// Disjoint from `Utf8` by construction — a value reachable as a `String` is always interned as
+    /// `Utf8` — so the two never split one value across two pool entries.
+    Utf8Units(Vec<u16>),
     Integer(i32),
     Float(u32), // bit pattern (f32 isn't Hash/Eq)
     Long(i64),
@@ -227,6 +236,17 @@ impl ConstPool {
         let n = self.utf8(s);
         self.intern(Const::String(n))
     }
+    /// Intern the `CONSTANT_Utf8` for a Kotlin string VALUE, keeping its code units.
+    fn utf8_kt(&mut self, s: &KtString) -> u16 {
+        match s.as_str() {
+            Some(text) => self.utf8(text),
+            None => self.intern(Const::Utf8Units(s.units().collect())),
+        }
+    }
+    fn string_kt(&mut self, s: &KtString) -> u16 {
+        let n = self.utf8_kt(s);
+        self.intern(Const::String(n))
+    }
     /// Whether a `CONSTANT_Class` for `internal_name` is already in the pool (WITHOUT interning it).
     /// kotlinc emits an `InnerClasses` entry for a nested class only when it appears as a class
     /// constant (a `new`/`checkcast`/owner ref), not merely inside a descriptor string.
@@ -303,6 +323,12 @@ impl ConstPool {
                 Const::Utf8(s) => {
                     out.push(1);
                     let b = crate::metadata::encoding::modified_utf8(s);
+                    u2(out, b.len() as u16);
+                    out.extend_from_slice(&b);
+                }
+                Const::Utf8Units(units) => {
+                    out.push(1);
+                    let b = crate::metadata::encoding::modified_utf8_units(units.iter().copied());
                     u2(out, b.len() as u16);
                     out.extend_from_slice(&b);
                 }
@@ -813,6 +839,12 @@ impl ClassWriter {
         let idx = self.cp.utf8(s);
         u2(out, idx);
     }
+    /// An annotation `element_value` holding a Kotlin string VALUE (see [`KtString`]).
+    fn ev_str_kt(&mut self, out: &mut Vec<u8>, s: &KtString) {
+        out.push(b's');
+        let idx = self.cp.utf8_kt(s);
+        u2(out, idx);
+    }
     fn ev_int_array(&mut self, out: &mut Vec<u8>, vs: &[i32]) {
         out.push(b'[');
         u2(out, vs.len() as u16);
@@ -873,7 +905,7 @@ impl ClassWriter {
                     let i = self.cp.double(*x);
                     u2(out, i);
                 }
-                IrConst::String(s) => self.ev_str(out, s),
+                IrConst::String(s) => self.ev_str_kt(out, s),
                 IrConst::Null => self.ev_str(out, ""),
             },
             AnnoValue::Enum(ty, name) => {
@@ -1002,7 +1034,7 @@ impl ClassWriter {
         for f in fields.iter().filter(|f| f.stores_in_ctor) {
             // A body property's `String` initializer is pushed by `ldc` before its `putfield`.
             if let Some(sc) = &f.string_const {
-                self.cp.string(sc);
+                self.cp.string_kt(sc);
             }
             if let Some((owner, desc)) = &f.value_class_ctor {
                 self.cp.methodref(owner, "constructor-impl", desc);
@@ -1339,6 +1371,10 @@ impl ClassWriter {
 
     pub fn const_string(&mut self, s: &str) -> u16 {
         self.cp.string(s)
+    }
+    /// `CONSTANT_String` for a Kotlin string VALUE (see [`KtString`]).
+    pub fn const_string_kt(&mut self, s: &KtString) -> u16 {
+        self.cp.string_kt(s)
     }
     pub fn const_int(&mut self, v: i32) -> u16 {
         self.cp.integer(v)
@@ -2931,6 +2967,11 @@ impl CodeBuilder {
     }
     pub fn push_string(&mut self, s: &str, cw: &mut ClassWriter) {
         let i = cw.const_string(s);
+        self.ldc(i);
+    }
+    /// `ldc <string>` for a Kotlin string VALUE (see [`KtString`]).
+    pub fn push_string_kt(&mut self, s: &KtString, cw: &mut ClassWriter) {
+        let i = cw.const_string_kt(s);
         self.ldc(i);
     }
     /// `ldc <class>` — push a `Class` constant (e.g. `A.class`).

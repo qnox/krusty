@@ -217,7 +217,7 @@ impl<'a> PluginContext<'a> {
         class: ClassId,
         property: &str,
         annotation: &str,
-    ) -> Option<String> {
+    ) -> Option<crate::kt_string::KtString> {
         let file = self.source_file?;
         let p = self
             .source_class(ir, class)?

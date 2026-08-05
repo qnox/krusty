@@ -1,6 +1,7 @@
 //! `krusty-ir` to JavaScript source emission.
 
 use crate::ir::{Callee, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp};
+use crate::kt_string::KtString;
 use crate::types::Ty;
 
 /// Emit a whole file's IR as a JavaScript module (one `class` per IR class, one `function` per
@@ -579,14 +580,17 @@ fn js_op(op: IrBinOp) -> &'static str {
     }
 }
 
-fn js_string(s: &str) -> String {
+/// A JS string literal for a Kotlin string value. A JS string is also a UTF-16 code-unit sequence,
+/// so an unpaired surrogate is written as `\uXXXX` and survives verbatim.
+fn js_string(s: &KtString) -> String {
     let mut out = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            _ => out.push(c),
+    for unit in s.units() {
+        match char::from_u32(unit as u32) {
+            Some('"') => out.push_str("\\\""),
+            Some('\\') => out.push_str("\\\\"),
+            Some('\n') => out.push_str("\\n"),
+            Some(c) => out.push(c),
+            None => out.push_str(&format!("\\u{unit:04X}")),
         }
     }
     out.push('"');

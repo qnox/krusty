@@ -24,6 +24,7 @@ use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
     IrEnumEntry, IrExpr, IrField, IrFile, IrFunction, IrTypeOp, IrfFlags,
 };
+use crate::kt_string::KtString;
 use crate::libraries::{map_call_args, InlineKind, SemanticPlatform};
 use crate::names::{property_getter_name, property_setter_name};
 use crate::runtime::{
@@ -10764,8 +10765,8 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn ir_const_str(&mut self, s: String) -> u32 {
-        self.emit_const(IrConst::String(s))
+    fn ir_const_str(&mut self, s: impl Into<KtString>) -> u32 {
+        self.emit_const(IrConst::String(s.into()))
     }
     fn this_field(&mut self, class_id: ClassId, i: u32) -> u32 {
         let this = self.emit_get_value(0);
@@ -26672,48 +26673,94 @@ fn is_when_test(file: &ast::File, e: AstExprId) -> bool {
     matches!(file.expr(e), Expr::Is { .. } | Expr::InRange { .. })
 }
 
+/// Whether a UTF-16 code unit is `Char.isWhitespace()` — Kotlin's predicate, which on the JVM is
+/// `Character.isWhitespace(c) || Character.isSpaceChar(c)`.
+///
+/// That is NOT Rust's `char::is_whitespace` (the Unicode `White_Space` property). Compared against
+/// JBR 21 over the whole BMP, the two sets differ in exactly five code points: Kotlin also counts
+/// the separators `U+001C..U+001F`, and does not count `U+0085` (NEL — a `Cc` control that is
+/// neither `isWhitespace` nor `isSpaceChar`). The rest — including `U+00A0`, `U+2007` and `U+202F`,
+/// which `Character.isWhitespace` alone excludes — agree, because `isSpaceChar` re-admits every
+/// `Zs`/`Zl`/`Zp` character. This decides where an indent ends, so the difference is observable:
+/// `"\u{85}a".trimIndent()` keeps its leading NEL under kotlinc.
+///
+/// A surrogate half is not whitespace and has no scalar form, so it answers `false` without a lossy
+/// conversion.
+fn is_unit_whitespace(unit: u16) -> bool {
+    if (0x1c..=0x1f).contains(&unit) {
+        return true;
+    }
+    unit != 0x85 && char::from_u32(unit as u32).is_some_and(char::is_whitespace)
+}
+
+/// `String.isBlank()` over code units.
+fn is_unit_line_blank(line: &[u16]) -> bool {
+    line.iter().all(|&u| is_unit_whitespace(u))
+}
+
+const LF: u16 = b'\n' as u16;
+
+/// Join `lines` with `\n`, the shared tail of `trimIndent`/`trimMargin`.
+fn join_unit_lines(lines: Vec<Vec<u16>>) -> KtString {
+    let mut out: Vec<u16> = Vec::new();
+    for (i, line) in lines.into_iter().enumerate() {
+        if i > 0 {
+            out.push(LF);
+        }
+        out.extend_from_slice(&line);
+    }
+    KtString::from_units(out)
+}
+
 /// `String.trimIndent()`: split into lines, drop the common minimal indentation of the non-blank
 /// lines from every line, and omit a blank FIRST or LAST line — matching `kotlin.text.trimIndent`.
-fn trim_indent(s: &str) -> String {
-    let lines: Vec<&str> = s.split('\n').collect();
+///
+/// Works in UTF-16 code units, not `char`s: the receiver may contain an unpaired surrogate (folded
+/// in from a `${'\uD800'}` template part), and Kotlin measures the indent in code units anyway.
+fn trim_indent(s: &KtString) -> KtString {
+    let units: Vec<u16> = s.units().collect();
+    let lines: Vec<&[u16]> = units.split(|&u| u == LF).collect();
     let min_indent = lines
         .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
+        .filter(|l| !is_unit_line_blank(l))
+        .map(|l| l.iter().take_while(|&&u| is_unit_whitespace(u)).count())
         .min()
         .unwrap_or(0);
     let last = lines.len().saturating_sub(1);
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<Vec<u16>> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        if (i == 0 || i == last) && line.trim().is_empty() {
+        if (i == 0 || i == last) && is_unit_line_blank(line) {
             continue;
         }
         // A blank line may be shorter than `min_indent`; only cut what is there.
         let cut = min_indent.min(line.len());
-        out.push(line[cut..].to_string());
+        out.push(line[cut..].to_vec());
     }
-    out.join("\n")
+    join_unit_lines(out)
 }
 
 /// `String.trimMargin(prefix)`: for each line, remove leading whitespace up to and including the
 /// first `prefix`; a line without the prefix is left unchanged. A blank FIRST or LAST line is
 /// omitted — matching `kotlin.text.trimMargin`.
-fn trim_margin(s: &str, margin: &str) -> String {
-    let lines: Vec<&str> = s.split('\n').collect();
+fn trim_margin(s: &KtString, margin: &str) -> KtString {
+    let margin: Vec<u16> = margin.encode_utf16().collect();
+    let units: Vec<u16> = s.units().collect();
+    let lines: Vec<&[u16]> = units.split(|&u| u == LF).collect();
     let last = lines.len().saturating_sub(1);
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<Vec<u16>> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        if (i == 0 || i == last) && line.trim().is_empty() {
+        if (i == 0 || i == last) && is_unit_line_blank(line) {
             continue;
         }
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix(margin) {
-            out.push(rest.to_string());
+        let indent = line.iter().take_while(|&&u| is_unit_whitespace(u)).count();
+        let trimmed = &line[indent..];
+        if trimmed.starts_with(&margin) {
+            out.push(trimmed[margin.len()..].to_vec());
         } else {
-            out.push(line.to_string());
+            out.push(line.to_vec());
         }
     }
-    out.join("\n")
+    join_unit_lines(out)
 }
 
 /// `(property_name, serial_name)` for each primary-constructor property carrying `@SerialName("…")`
@@ -28433,6 +28480,38 @@ fn align_call_values_to_slots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Char.isWhitespace()` is `Character.isWhitespace(c) || Character.isSpaceChar(c)`, which is not
+    /// Rust's `char::is_whitespace`. The two sets differ in exactly these five code points (checked
+    /// against JBR 21 over the whole BMP), and the predicate decides where a `trimIndent` indent ends.
+    #[test]
+    fn unit_whitespace_matches_kotlins_predicate_not_rusts() {
+        // Kotlin-only: the file/group/record/unit separators are `Character.isWhitespace`.
+        for unit in 0x1c..=0x1f {
+            assert!(
+                is_unit_whitespace(unit),
+                "U+{unit:04X} is Kotlin whitespace"
+            );
+        }
+        // Rust-only: NEL is a `Cc` control — neither `isWhitespace` nor `isSpaceChar`.
+        assert!(!is_unit_whitespace(0x85));
+        // Agreeing cases, including the `Zs` characters `Character.isWhitespace` alone excludes and
+        // `isSpaceChar` re-admits.
+        for unit in [b' ' as u16, b'\t' as u16, 0x00a0, 0x2007, 0x202f, 0x3000] {
+            assert!(is_unit_whitespace(unit), "U+{unit:04X} is whitespace");
+        }
+        for unit in [b'a' as u16, 0x00, 0xd800, 0xdfff] {
+            assert!(!is_unit_whitespace(unit), "U+{unit:04X} is not whitespace");
+        }
+    }
+
+    /// A blank line and the common indent are both measured with that predicate, so a leading NEL is
+    /// ordinary content: kotlinc leaves it in place rather than stripping it as indentation.
+    #[test]
+    fn trim_indent_does_not_treat_nel_as_indentation() {
+        let source = KtString::from("\u{85}a\n\u{85}b");
+        assert_eq!(trim_indent(&source), source);
+    }
 
     struct UnsignedBoxRuntime;
 

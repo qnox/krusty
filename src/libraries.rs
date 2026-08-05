@@ -1605,7 +1605,9 @@ pub enum LibConst {
     Long(i64),
     Float(f32),
     Double(f64),
-    Str(String),
+    /// A platform-neutral Kotlin string constant. The semantic library boundary carries UTF-16
+    /// units so a classpath provider cannot corrupt values that Rust `String` cannot represent.
+    Str(crate::kt_string::KtString),
 }
 
 #[derive(Clone, Debug, PartialEq)]

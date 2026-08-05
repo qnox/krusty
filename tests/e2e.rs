@@ -1106,6 +1106,8 @@ mod unsigned_ext_e2e;
 mod unsigned_toplevel_e2e;
 #[path = "use_site_variance_e2e.rs"]
 mod use_site_variance_e2e;
+#[path = "utf16_string_constant_e2e.rs"]
+mod utf16_string_constant_e2e;
 #[path = "val_backing_field_getter_e2e.rs"]
 mod val_backing_field_getter_e2e;
 #[path = "value_class_branch_repr_e2e.rs"]
