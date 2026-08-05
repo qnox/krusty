@@ -234,58 +234,58 @@ fn generic_extension_property_keeps_nullability_and_kotlin_collection_type() {
 
 #[test]
 fn java_generic_member_binds_lambda_param_from_receiver_type_argument() {
-    // The intellij `ActionContextElement` shape: a lambda passed to a Java generic member
-    // (`JBIterable<T>.filterMap(Function<? super T, ? extends R>)`) must type `it` from the
-    // RECEIVER's type argument (`JBIterable<Component>` → `it: Component`), or an overload like
-    // `ClientProperty.get(Component, Key<T>)` is unreachable inside it. The member's generic
-    // signature spelled the wildcard argument as the CLASS formal `T`, but only the return type
-    // was bound from the receiver — the parameter side fell back to `Any`, and the call failed
-    // with "unresolved Java static 'ClientProperty.get' for given argument types".
+    // A lambda passed to a classpath generic member
+    // (`TransformSequence<T>.mapPresent(Function<? super T, ? extends R>)`) must type `it` from the
+    // RECEIVER's type argument (`TransformSequence<InputNode>` → `it: InputNode`). Otherwise the
+    // typed `SlotLookup.read(InputNode, TypedSlot<T>)` overload is unreachable inside the lambda.
+    // The member signature spells the wildcard argument with the OWNER formal `T`; binding only the
+    // return side previously left that parameter to fall back to `Any`. All names here are synthetic:
+    // the fixture preserves the generic signature shape without retaining reproduction identities.
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
     let java = [
         (
-            "Component.java".into(),
+            "InputNode.java".into(),
             r#"
                 package fixtures;
-                public class Component {
+                public class InputNode {
                     private final String name;
-                    public Component(String name) { this.name = name; }
+                    public InputNode(String name) { this.name = name; }
                     public String getName() { return name; }
                 }
             "#
             .into(),
         ),
         (
-            "Key.java".into(),
+            "TypedSlot.java".into(),
             r#"
                 package fixtures;
-                public final class Key<T> {
+                public final class TypedSlot<T> {
                     private final String name;
-                    private Key(String name) { this.name = name; }
-                    public static <T> Key<T> create(String name) { return new Key<T>(name); }
+                    private TypedSlot(String name) { this.name = name; }
+                    public static <T> TypedSlot<T> create(String name) { return new TypedSlot<T>(name); }
                 }
             "#
             .into(),
         ),
         (
-            "ClientProperty.java".into(),
+            "SlotLookup.java".into(),
             r#"
                 package fixtures;
-                public final class ClientProperty {
-                    public static Object get(Component component, Object key) { return null; }
-                    public static <T> T get(Component component, Key<T> key) { return null; }
+                public final class SlotLookup {
+                    public static Object read(InputNode node, Object slot) { return null; }
+                    public static <T> T read(InputNode node, TypedSlot<T> slot) { return null; }
                 }
             "#
             .into(),
         ),
         (
-            "JBIterable.java".into(),
+            "TransformSequence.java".into(),
             r#"
                 package fixtures;
                 import java.util.function.Function;
-                public class JBIterable<T> {
-                    public <R> JBIterable<R> filterMap(Function<? super T, ? extends R> fun) { return new JBIterable<R>(); }
+                public class TransformSequence<T> {
+                    public <R> TransformSequence<R> mapPresent(Function<? super T, ? extends R> fun) { return new TransformSequence<R>(); }
                     public T first() { return null; }
                     public <R> R convert(T value, R fallback) { return fallback; }
                 }
@@ -299,22 +299,22 @@ fn java_generic_member_binds_lambda_param_from_receiver_type_argument() {
     let root = library.parent().map(std::path::Path::to_path_buf);
     let classpath = vec![library, stdlib];
     let source = r#"
-        import fixtures.ClientProperty
-        import fixtures.Component
-        import fixtures.JBIterable
-        import fixtures.Key
+        import fixtures.InputNode
+        import fixtures.SlotLookup
+        import fixtures.TransformSequence
+        import fixtures.TypedSlot
 
-        class ActionContextElement(val name: String)
+        class ResultRecord(val name: String)
 
-        private val KEY = Key.create<ActionContextElement>("K")
+        private val SLOT = TypedSlot.create<ResultRecord>("result")
 
-        fun create(component: Component?, items: JBIterable<Component>): ActionContextElement? {
+        fun create(node: InputNode?, items: TransformSequence<InputNode>): ResultRecord? {
             // Next iteration: `R` is not yet inferred from the lambda BODY through the Java SAM
             // parameter (the wildcard decodes as `Obj(java/util/function/Function, …)`, which never
             // unifies with the lambda's function type), so `.first()?.name` on the chained result
             // still reports `unresolved reference 'name'.` — kotlinc infers `R` there.
             val parent = items
-                .filterMap { ClientProperty.get(it, KEY) }
+                .mapPresent { SlotLookup.read(it, SLOT) }
                 .first()
             return parent
         }
@@ -322,14 +322,14 @@ fn java_generic_member_binds_lambda_param_from_receiver_type_argument() {
         // A method whose params mix the CLASS formal (`T value`) and a METHOD formal (`R fallback`)
         // must still infer `R` from the argument — binding the class formal from the receiver must
         // not erase the method formal to `Any` (`label.length` would not resolve).
-        fun convertLabel(items: JBIterable<Component>): Int {
-            val label = items.convert(Component("c"), "OK")
+        fun convertLabel(items: TransformSequence<InputNode>): Int {
+            val label = items.convert(InputNode("node"), "OK")
             return label.length
         }
 
         fun box(): String {
-            if (create(null, JBIterable<Component>()) != null) return "create"
-            if (convertLabel(JBIterable<Component>()) != 2) return "convert"
+            if (create(null, TransformSequence<InputNode>()) != null) return "create"
+            if (convertLabel(TransformSequence<InputNode>()) != 2) return "convert"
             return "OK"
         }
     "#;
