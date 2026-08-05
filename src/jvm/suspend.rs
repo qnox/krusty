@@ -1054,7 +1054,7 @@ fn hoist_expr(
                 return e;
             }
             let mut nl = hoist_expr(ir, lhs, suspend_set, orig_rets, value_types, prelude);
-            if rhs_suspends && operand_needs_snapshot(ir, nl) {
+            if rhs_suspends && operand_needs_snapshot(ir, nl, value_types) {
                 let Some(ty) = hoisted_value_ty(ir, nl, orig_rets, value_types) else {
                     // An untyped/unmodeled left value cannot be materialized safely. Leave this shape
                     // for the existing backend-decline path instead of guessing a verifier type.
@@ -1394,7 +1394,7 @@ fn hoist_operands_in_order(
             if is_suspension_point(ir, x, suspend_set) {
                 continue;
             }
-            if suspends[i] || operand_needs_snapshot(ir, x) {
+            if suspends[i] || operand_needs_snapshot(ir, x, value_types) {
                 let Some(ty) = hoisted_value_ty(ir, x, orig_rets, value_types) else {
                     crate::trace_compiler!(
                         "suspend",
@@ -1434,14 +1434,22 @@ fn hoist_operands_in_order(
     Some(out)
 }
 
-/// Whether evaluating an operand before a later suspension must be materialized. Only literal values
-/// are allowed to commute: every runtime read or evaluation snapshots at its source position. A plain
-/// `GetValue` is not intrinsically stable because an inline-spliced later operand can write that local
-/// before the residual call reads it; likewise, a static `val` read can trigger initialization and is
-/// still a runtime field access. This node-origin-neutral rule also preserves exceptions and other
-/// effects without a growing list of special cases for local/module/classpath storage or wrappers.
-fn operand_needs_snapshot(ir: &IrFile, expression: ExprId) -> bool {
-    !matches!(&ir.exprs[expression as usize], IrExpr::Const(_))
+/// Whether evaluating an operand before a later suspension must be materialized. Literal values and a
+/// `Null`-typed local are the only values allowed to commute: the latter's semantic domain is the
+/// singleton `null`, and the state machine deliberately rematerializes it rather than treating it as an
+/// ordinary JVM local spill. Every other runtime read or evaluation snapshots at its source position. A
+/// plain `GetValue` is not intrinsically stable because an inline-spliced later operand can write that
+/// local before the residual call reads it; likewise, a static `val` read can trigger initialization and
+/// is still a runtime field access. This semantic rule preserves exceptions and effects without a
+/// growing list of special cases for local/module/classpath storage or wrappers.
+fn operand_needs_snapshot(ir: &IrFile, expression: ExprId, value_types: &HashMap<u32, Ty>) -> bool {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Const(_) => false,
+        IrExpr::GetValue(local) => value_types
+            .get(local)
+            .is_none_or(|ty| !is_rematerialized_null(ty)),
+        _ => true,
+    }
 }
 
 /// The semantic JVM value type needed when suspend normalization materializes an already-evaluated

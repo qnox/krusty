@@ -486,7 +486,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `hoist_expr` used to rewrite only the SUSPENSION to a preceding temp, so `f(g(), susp())` became
   `val t = susp(); f(g(), t)` — running `g()` AFTER the suspension. `hoist_operands_in_order` now
   binds every runtime-read/evaluated operand that precedes a later suspending operand to a prelude temp
-  first (only literal constants commute, per `operand_needs_snapshot`), for the
+  first (only literal constants and the singleton value of a `Null`-typed local commute, per
+  `operand_needs_snapshot`), for the
   `Call`/`MethodCall`/`StringConcat` arms of `hoist_expr`, the suspension-point path itself
   (receiver included), and the `hoist_stmt` arms that keep a direct `val r = <suspend call>` /
   bare-call statement (whose nested suspending arguments previously reached emit unhoisted and
@@ -511,6 +512,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `reconcile_positional_spill_locals` unions those actual spill consumers into the machine-local
   allocation set after named scopes and live temps merge. Both named-function and suspend-lambda
   machines use that boundary; no resume arm can restore a scope-only local into an undeclared slot.
+  The existing `Nothing?`/`Ty::Null` rematerialization remains the semantic exception: such a local can
+  only ever read as `null`, so it commutes without a snapshot and stays on the dedicated no-field
+  rematerialization path instead of acquiring a verifier-sensitive ordinary temp.
   Ordering pinned by box runs against a real suspension (`yield()`), including the snapshot temp
   surviving the spill, the pre-mutation `var` read, the `!!`-throws-before-suspension case, and an
   effectful operand between two suspensions (`tests/suspend_arg_order_e2e.rs`, all ten shapes).
