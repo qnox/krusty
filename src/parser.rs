@@ -5,6 +5,7 @@
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
+use crate::kt_string::{KtString, KtStringBuf};
 use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 
@@ -4588,7 +4589,12 @@ impl<'a> Parser<'a> {
                     name: "Any".to_string(),
                     flags: TrFlags::default()
                         .with_nullable(true)
-                        .with_definitely_non_null(false),
+                        .with_definitely_non_null(false)
+                        // `Any?` is the correct semantic bound, while this marker retains the one
+                        // source distinction needed by erased runtime checks. Without it,
+                        // `Function1<*, *>` and `Function1<Any?, Any?>` become indistinguishable:
+                        // Kotlin permits the former in `is` and rejects the latter as erased.
+                        .with_star_projection(true),
                     arg: None,
                     targs: Vec::new(),
                     span,
@@ -7551,7 +7557,7 @@ impl<'a> Parser<'a> {
                 TokenKind::StrChunk => {
                     let text = self.text();
                     let piece = if raw {
-                        text.to_string()
+                        KtString::from(text)
                     } else {
                         unescape_chunk(text)
                     };
@@ -8305,8 +8311,19 @@ fn unquote_char(raw: &str) -> u16 {
 }
 
 /// Unescape a literal chunk of a string template (no surrounding quotes).
-fn unescape_chunk(inner: &str) -> String {
-    let mut out = String::with_capacity(inner.len());
+fn unescape_chunk(inner: &str) -> KtString {
+    let mut out = KtStringBuf::with_capacity(inner.len());
+    unescape_into(inner, &mut out);
+    out.finish()
+}
+
+/// Unescape `inner` (a string body without its quotes) into `out`.
+///
+/// `\uXXXX` denotes one UTF-16 code UNIT and is taken verbatim, including the surrogate range
+/// D800..DFFF: `"😀"` is U+1F600 written as its two halves, and `"\uD800"` is a legal
+/// one-element string. Decoding each escape through `char::from_u32` rejects both, which is why the
+/// accumulator is a [`KtStringBuf`] rather than a `String`.
+fn unescape_into(inner: &str, out: &mut KtStringBuf) {
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
         if c == '\\' {
@@ -8320,11 +8337,10 @@ fn unescape_chunk(inner: &str) -> String {
                 Some('\'') => out.push('\''),
                 Some('$') => out.push('$'),
                 Some('0') => out.push('\0'),
-                // `\uXXXX` — a 4-hex-digit UTF-16 code unit.
                 Some('u') => {
                     let hex: String = chars.by_ref().take(4).collect();
-                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                        out.push(ch);
+                    if let Ok(unit) = u32::from_str_radix(&hex, 16) {
+                        out.push_unit(unit as u16);
                     }
                 }
                 Some(other) => out.push(other),
@@ -8334,7 +8350,6 @@ fn unescape_chunk(inner: &str) -> String {
             out.push(c);
         }
     }
-    out
 }
 
 /// Parse an integer literal: decimal, `0x`/`0X` hex, or `0b`/`0B` binary, with `_` separators.
@@ -8372,48 +8387,22 @@ fn parse_unsigned_literal_bits(text: &str) -> u64 {
     u64::from_str_radix(digits, radix).unwrap_or(0)
 }
 
-fn unquote(raw: &str) -> String {
+fn unquote(raw: &str) -> KtString {
     // Raw string `"""..."""`: content is verbatim (no escape processing), three quotes each side.
     if raw.starts_with("\"\"\"") {
         let inner = raw
             .strip_prefix("\"\"\"")
             .and_then(|s| s.strip_suffix("\"\"\""))
             .unwrap_or(raw);
-        return inner.to_string();
+        return KtString::from(inner);
     }
     let inner = raw
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(raw);
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('b') => out.push('\u{0008}'),
-                Some('\\') => out.push('\\'),
-                Some('"') => out.push('"'),
-                Some('\'') => out.push('\''),
-                Some('$') => out.push('$'),
-                Some('0') => out.push('\0'),
-                // `\uXXXX` — a 4-hex-digit UTF-16 code unit.
-                Some('u') => {
-                    let hex: String = chars.by_ref().take(4).collect();
-                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                        out.push(ch);
-                    }
-                }
-                Some(other) => out.push(other),
-                None => {}
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    let mut out = KtStringBuf::with_capacity(inner.len());
+    unescape_into(inner, &mut out);
+    out.finish()
 }
 
 #[cfg(test)]
@@ -8743,6 +8732,36 @@ mod tests {
         let projected = &file.type_projection_args[&array.span.lo];
         assert!(projected.in_projection());
         assert_eq!(projected.name, "T");
+    }
+
+    #[test]
+    fn star_projection_keeps_its_source_identity_after_bound_erasure() {
+        // Both arguments resolve as nullable Any for ordinary type reasoning, but only the first was
+        // written as `*`. Runtime `is FunctionN<*, ...>` validation needs that distinction and must
+        // not infer it from the erased name/nullability pair.
+        let mut diagnostics = DiagSink::new();
+        let source = "fun projected(value: Function1<*, Any?>) {}";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("t", source)
+        );
+        let function = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Fun(function) if function.name == "projected" => Some(function),
+                _ => None,
+            })
+            .expect("projected function");
+        let arguments = &function.params[0].ty.targs;
+        assert_eq!(arguments.len(), 2);
+        assert!(arguments.iter().all(|argument| argument.name == "Any"));
+        assert!(arguments.iter().all(TypeRef::nullable));
+        assert!(arguments[0].is_star_projection());
+        assert!(!arguments[1].is_star_projection());
     }
 
     #[test]

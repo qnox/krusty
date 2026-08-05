@@ -38,6 +38,21 @@ pub struct PlatformField {
     pub descriptor: String,
 }
 
+/// Provider-owned interpretation of an already-spelled method descriptor.
+///
+/// Common lowering needs all three facts together when it validates a call boundary: parameter
+/// representation says whether a boxed value may occupy each physical slot, `continuation_slot`
+/// identifies the runtime-supplied CPS value appended later by the backend, and `return_class`
+/// identifies a concrete reference representation left by a call. Keeping them in one result makes
+/// the provider parse its descriptor once and prevents independent queries from disagreeing about one
+/// physical method signature.
+#[derive(Clone, Debug)]
+pub struct PlatformMethodLayout {
+    pub reference_slots: Vec<bool>,
+    pub continuation_slot: Option<usize>,
+    pub return_class: Option<TypeName>,
+}
+
 /// Platform construction plan for a Kotlin range value expression. `elem` is the semantic element
 /// type operands coerce to; `through` constructs `a..b`; `until` realizes `a..<b` when supported.
 #[derive(Clone, Debug)]
@@ -64,6 +79,9 @@ pub struct PlatformRangeCtor {
 pub enum RuntimeOp {
     UnsignedBox,
     UnsignedUnbox,
+    /// The value class's OWN equality against an arbitrary reference — the static
+    /// `equals-impl(<carrier>, Object)`, which takes the receiver UNBOXED.
+    UnsignedEquals,
     UnsignedCompare,
     UnsignedDivide,
     UnsignedRemainder,
@@ -122,15 +140,20 @@ pub trait TargetRuntime {
         None
     }
 
-    /// Per parameter position of an already-spelled platform method `descriptor`, whether that slot
-    /// holds a REFERENCE (so a boxed value may occupy it) rather than a primitive carrier.
+    /// Interpret an already-spelled platform method `descriptor` in one pass.
     ///
     /// Common lowering needs this to check its own work: a callee's descriptor is emitted VERBATIM
     /// while arguments are coerced to the callable's declared parameter types, and the two can
     /// disagree about whether a value is boxed. Asking the platform keeps descriptor SYNTAX where it
-    /// belongs — lowering never parses a target's spelling itself. `None` when the descriptor cannot
-    /// be read, which leaves the decision to the platform's own gates.
-    fn descriptor_reference_params(&self, _descriptor: &str) -> Option<Vec<bool>> {
+    /// belongs — lowering never parses a target's spelling itself. The same result identifies an
+    /// unambiguous synthetic CPS continuation, when present, so a `suspend` `$default` descriptor can
+    /// be aligned without reparsing or a second provider contract. `None` means the descriptor itself
+    /// cannot be read and leaves the decision to platform gates; an absent/ambiguous continuation is
+    /// represented by `layout.continuation_slot == None` while retaining the trustworthy slot kinds.
+    /// `layout.return_class` names only a concrete object return: a primitive carrier, array, or void
+    /// return has no class claim. Common lowering needs the class rather than a reference boolean to
+    /// distinguish a specific value-class box from an arbitrary object.
+    fn descriptor_method_layout(&self, _descriptor: &str) -> Option<PlatformMethodLayout> {
         None
     }
 

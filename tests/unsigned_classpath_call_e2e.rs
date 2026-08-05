@@ -17,10 +17,12 @@
 //! is a fully supported type there. What was wrong was the representation of a value at a call
 //! boundary, which no signature-level check can see.
 //!
-//! Both now emit kotlinc's shapes, and a SAME-TYPE `a.equals(b)` no longer reaches the member call
-//! at all — it folds to a carrier compare (kotlinc's intrinsic; the shape is pinned in
-//! `bytecode_parity_e2e`). The boxed receiver still carries every other argument type, which is what
-//! `unsigned_equals_keeps_value_class_semantics_across_argument_types` exercises.
+//! Both now emit kotlinc's shapes, and `a.equals(b)` no longer reaches the member call at ANY argument
+//! type — a same-type argument folds to a carrier compare (kotlinc's intrinsic) and every other one
+//! goes to the static `equals-impl`, whose receiver slot is the carrier. Both shapes are pinned in
+//! `bytecode_parity_e2e`; what
+//! `unsigned_equals_keeps_value_class_semantics_across_argument_types` exercises here is that the
+//! rerouting did not change what `equals` ANSWERS across the argument types.
 //!
 //! The contract pinned here is the backend's, not the feature's. Declining the file is always a
 //! legal outcome; claiming success and writing a class that fails verification is not. So
@@ -37,8 +39,13 @@ use super::common::BackendOutcome;
 /// rejection fails too: these are backend tests and must not pass through a parse/type error.
 fn expect_emitted_box_verifies(src: &str, stem: &str) {
     let stdlib = common::stdlib_jar();
+    expect_emitted_box_verifies_on(src, stem, std::slice::from_ref(&stdlib));
+}
+
+/// [`expect_emitted_box_verifies`] against an explicit classpath — for a shape that needs a callee
+/// no stdlib declaration has (a `suspend` classpath function with a defaulted unsigned parameter).
+fn expect_emitted_box_verifies_on(src: &str, stem: &str, cp: &[std::path::PathBuf]) {
     let jdk = common::jdk_modules();
-    let cp = std::slice::from_ref(&stdlib);
     match common::backend_outcome_in_process(src, stem, cp, Some(&jdk)) {
         None => panic!("{stem}: the front end rejected the source; this is a backend test"),
         Some(BackendOutcome::Emitted) => {
@@ -97,9 +104,10 @@ fn unsigned_min_of_emits_verifiable_bytecode() {
     );
 }
 
-/// `a.equals(b)`. A same-type pair folds to a carrier compare (kotlinc's intrinsic — shape pinned in
-/// `bytecode_parity_e2e`); any other argument stays an `invokevirtual kotlin/UInt.equals(Object)Z`,
-/// whose receiver must be the BOXED value class. Both paths are exercised here.
+/// `a.equals(b)`. A same-type pair folds to a carrier compare (kotlinc's intrinsic); any other
+/// argument reaches the static `kotlin/UInt."equals-impl":(ILjava/lang/Object;)Z`, whose receiver
+/// slot is the carrier — so neither path boxes the receiver. Both shapes are pinned in
+/// `bytecode_parity_e2e`; both are exercised here for what they ANSWER.
 #[test]
 fn unsigned_equals_call_emits_verifiable_bytecode() {
     expect_emitted_box_verifies(
@@ -122,6 +130,198 @@ fn unsigned_equals_call_emits_verifiable_bytecode() {
 }\n",
         "ULongEquals",
     );
+}
+
+/// A value class's member, reached on a receiver that HOLDS an unsigned value.
+///
+/// `kotlin/Result`'s members are mangled `-impl` statics whose descriptor spells the receiver as the
+/// LEADING parameter (`getOrNull-impl:(Ljava/lang/Object;)Ljava/lang/Object;`) while the receiver
+/// travels beside the arguments — the count mismatch that used to skip the check outright, and the
+/// single most common one in the box corpus. The receiver slot is a reference here, so the boxed
+/// `UInt` inside belongs in it and the call must EMIT; the alignment is what tells the two apart.
+///
+/// The payload is only tested for presence: comparing it back (`r.getOrNull() == 7u`) answers `false`
+/// today, a separate wrong-VALUE defect in the boxed round trip that has nothing to do with which
+/// descriptor slot the receiver occupies.
+#[test]
+fn value_class_impl_member_on_an_unsigned_payload_still_emits() {
+    let stdlib = common::stdlib_jar();
+    let cp = std::slice::from_ref(&stdlib);
+    let jdk = common::jdk_modules();
+    let src = "fun box(): String {\n\
+    val r: Result<UInt> = Result.success(7u)\n\
+    return if (r.getOrNull() != null) \"OK\" else \"bad\"\n\
+}\n";
+    assert_eq!(
+        common::backend_outcome_in_process(src, "UResultImplMember", cp, Some(&jdk)),
+        Some(BackendOutcome::Emitted),
+        "the receiver occupies the descriptor's leading REFERENCE slot; do not decline"
+    );
+    expect_emitted_box_verifies(src, "UResultImplMember");
+}
+
+/// A BOXED unsigned argument to a `suspend` classpath function with a defaulted parameter.
+///
+/// The shape the descriptor/argument check used to skip outright. A `$default` synthetic spells the
+/// CPS `Continuation` BEFORE the `int mask` + `Object marker`
+/// (`libAny$default(Object, String, Continuation, int, Object)`) and the backend appends that
+/// continuation at emit time, so the descriptor carries five slots where lowering built four values.
+/// The counts disagreed and every argument went unchecked.
+///
+/// `7u` into an `Any` parameter is a legitimate box — `Ljava/lang/Object;` takes it — so this pins
+/// that the shape is ALIGNED rather than merely skipped or blanket-declined: dropping the
+/// continuation slot puts the box back on the reference slot it really occupies.
+///
+/// Needs a fixture jar: no stdlib `suspend` function pairs a default with a parameter that boxes.
+#[test]
+fn boxed_unsigned_argument_to_a_suspend_default_classpath_call_still_emits() {
+    let stdlib = common::stdlib_jar();
+    let Some(lib) = common::compile_libs(
+        "USuspendDefaultLib",
+        &[(
+            "Lib.kt",
+            "package lib\n\
+fun mark(): String = \"!\"\n\
+suspend fun libAny(t: Any, s: String = mark()): String = \"$t$s\"\n",
+        )],
+    ) else {
+        // kotlinc unavailable in this environment: the fixture cannot be built, and a source-only
+        // stand-in would not exercise a CLASSPATH call at all. A fixture kotlinc REJECTS panics
+        // inside the helper rather than skipping.
+        return;
+    };
+    let src = "import kotlin.coroutines.*\n\
+import lib.libAny\n\
+\n\
+fun box(): String {\n\
+    var out = \"\"\n\
+    val body: suspend () -> Unit = { out = libAny(7u) }\n\
+    body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    return if (out == \"7!\") \"OK\" else \"bad: $out\"\n\
+}\n";
+    let cp = [lib, stdlib];
+    let jdk = common::jdk_modules();
+    // STRICTER than the file's usual contract on purpose. A decline would pass there, and a decline
+    // is exactly what a blanket-conservative answer to the count mismatch produces — the box is on
+    // the stack, so "cannot align, therefore refuse" would swallow this legal call.
+    assert_eq!(
+        common::backend_outcome_in_process(src, "USuspendDefaultBoxed", &cp, Some(&jdk)),
+        Some(BackendOutcome::Emitted),
+        "a box landing in a reference slot must still emit once the continuation slot is aligned out"
+    );
+    expect_emitted_box_verifies_on(src, "USuspendDefaultBoxed", &cp);
+}
+
+/// An unsigned VALUE PARAMETER mangles the `suspend` function's JVM name (`libU` → `libU-OzbTU-A`),
+/// and the `$default` synthetic is named from the mangled form. krusty looks suspend-ness up under
+/// that JVM name, `@Metadata` records the SOURCE name, and the callable comes back marked
+/// non-suspend — so the coroutine pass never threads the `Continuation` its descriptor still spells,
+/// and the emitted `invokestatic` is one argument short. That links and fails verification, which is
+/// the outcome this whole file exists to rule out.
+///
+/// The unfilled continuation slot is visible at the call site, so the file is declined instead. BOTH
+/// call forms are covered: the `$default` synthetic (an argument omitted) and the plain mangled
+/// method (every argument supplied) fail the same way, so the decline cannot key on `$default`.
+///
+/// The underlying gap is the mangled-name suspend lookup, not the argument shape — recovering it
+/// would make these shapes EMIT, which the contract here already allows.
+#[test]
+fn suspend_call_with_an_unthreaded_continuation_declines() {
+    let stdlib = common::stdlib_jar();
+    let Some(lib) = common::compile_libs(
+        "UMangledSuspendLib",
+        &[(
+            "Lib.kt",
+            "package lib\n\
+fun mark(): String = \"!\"\n\
+suspend fun libU(t: UInt, s: String = mark()): String = \"$t$s\"\n",
+        )],
+    ) else {
+        return;
+    };
+    let cp = [lib, stdlib];
+    let jdk = common::jdk_modules();
+    let body = |call: &str| {
+        format!(
+            "import kotlin.coroutines.*\n\
+import lib.libU\n\
+\n\
+fun box(): String {{\n\
+    var out = \"\"\n\
+    val body: suspend () -> Unit = {{ out = {call} }}\n\
+    body.startCoroutine(Continuation(EmptyCoroutineContext) {{ it.getOrThrow() }})\n\
+    return if (out == \"7!\") \"OK\" else \"bad: $out\"\n\
+}}\n"
+        )
+    };
+    for (stem, call) in [
+        // `libU-OzbTU-A$default(int, String, Continuation, int, Object)` — 5 slots, 4 values.
+        ("UMangledSuspendDefault", "libU(7u)"),
+        // `libU-OzbTU-A(int, String, Continuation)` — 3 slots, 2 values. No `$default` involved.
+        ("UMangledSuspendPlain", "libU(7u, \"!\")"),
+    ] {
+        let src = body(call);
+        // Name the decline exhaustively: any OTHER outcome means this shape is being skipped by an
+        // unrelated gate and the unthreaded continuation is back to reaching the backend unnoticed.
+        match common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)) {
+            Some(BackendOutcome::LowerBail(reason)) => assert_eq!(
+                reason, "gate:unthreaded-continuation-slot",
+                "{stem}: the unfilled continuation slot is what must decline this call"
+            ),
+            // Recovering the mangled-name suspend lookup makes the call correct; then it must run.
+            Some(BackendOutcome::Emitted) => {}
+            other => {
+                panic!("{stem}: expected the continuation decline or a correct emit, got {other:?}")
+            }
+        }
+        expect_emitted_box_verifies_on(&src, stem, &cp);
+    }
+}
+
+/// The unthreaded-continuation decline keys on the UNFILLED slot, not on the word `Continuation`.
+///
+/// A non-suspend function may take one as an ordinary parameter, and a call to it — through the
+/// `$default` synthetic or not — fills every slot it has. Refusing on the type alone would decline a
+/// perfectly ordinary call, so both call forms are pinned as EMITTED.
+#[test]
+fn a_plain_continuation_parameter_is_not_an_unthreaded_continuation() {
+    let stdlib = common::stdlib_jar();
+    let Some(lib) = common::compile_libs(
+        "ContParamDefaultLib",
+        &[(
+            "Lib.kt",
+            "package lib\n\
+import kotlin.coroutines.Continuation\n\
+fun mark(): String = \"!\"\n\
+fun libCont(c: Continuation<Unit>, s: String = mark()): String = \"$s\"\n",
+        )],
+    ) else {
+        return;
+    };
+    let cp = [lib, stdlib];
+    let jdk = common::jdk_modules();
+    for (stem, call, want) in [
+        // Through `libCont$default(Continuation, String, int, Object)` — 4 values over 4 slots.
+        ("ContParamDefault", "libCont(c)", "!"),
+        // The plain method `libCont(Continuation, String)` — 2 over 2.
+        ("ContParamPlain", "libCont(c, \"x\")", "x"),
+    ] {
+        let src = format!(
+            "import kotlin.coroutines.*\n\
+import lib.libCont\n\
+\n\
+fun box(): String {{\n\
+    val c = Continuation<Unit>(EmptyCoroutineContext) {{ }}\n\
+    return if ({call} == \"{want}\") \"OK\" else \"bad\"\n\
+}}\n"
+        );
+        assert_eq!(
+            common::backend_outcome_in_process(&src, stem, &cp, Some(&jdk)),
+            Some(BackendOutcome::Emitted),
+            "{stem}: a declared Continuation parameter fills its own slot; do not decline"
+        );
+        expect_emitted_box_verifies_on(&src, stem, &cp);
+    }
 }
 
 /// `UByte`/`UShort` have no carrier `Ty` of their own and are declined by `jvm_can_emit`'s
@@ -148,9 +348,10 @@ fn narrow_unsigned_types_stay_declined_or_correct() {
 }
 
 /// The `equals` intrinsic must not change what `equals` MEANS. kotlinc folds only the same-type case
-/// to a carrier compare; every other argument still goes through the value class's own equality,
-/// which is what makes a cross-carrier comparison answer `false` (a `UInt` is never a `ULong`, even
-/// when the carriers hold the same bits).
+/// to a carrier compare; every other argument still goes through the value class's own equality —
+/// `equals-impl`, which tests the argument's runtime class first. That is what makes a cross-carrier
+/// comparison answer `false` (a `UInt` is never a `ULong`, even when the carriers hold the same bits),
+/// a `null` argument answer `false`, and a boxed-but-equal one answer `true`.
 #[test]
 fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
     expect_emitted_box_verifies(
@@ -163,6 +364,11 @@ fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
     val anyA: Any = a\n\
     if (!a.equals(anyA)) return \"f any-eq\"\n\
     if (a.equals(\"4294967295\")) return \"f any-ne\"\n\
+    val na: UInt? = a\n\
+    if (!a.equals(na)) return \"f nullable-eq\"\n\
+    if (a.equals(null)) return \"f null\"\n\
+    val i: Int = -1\n\
+    if (a.equals(i)) return \"f signed-carrier\"\n\
     return \"OK\"\n\
 }\n",
         "UEqualsSemantics",
@@ -175,8 +381,111 @@ fn unsigned_equals_keeps_value_class_semantics_across_argument_types() {
     if (!a.equals(a)) return \"f same-eq\"\n\
     val anyA: Any = a\n\
     if (!a.equals(anyA)) return \"f any-eq\"\n\
+    val na: ULong? = a\n\
+    if (!a.equals(na)) return \"f nullable-eq\"\n\
+    val l: Long = -1L\n\
+    if (a.equals(l)) return \"f signed-carrier\"\n\
     return \"OK\"\n\
 }\n",
         "ULongEqualsSemantics",
+    );
+    // The narrow pair carries the same contract on its own `B`/`S` carrier.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val a: UByte = 200.toUByte()\n\
+    val anyA: Any = a\n\
+    if (!a.equals(anyA)) return \"f any-eq\"\n\
+    if (a.equals(200.toUShort())) return \"f cross-carrier\"\n\
+    return \"OK\"\n\
+}\n",
+        "UByteEqualsSemantics",
+    );
+}
+
+/// A member call whose receiver passed through a REFERENCE position in the source before reaching it.
+///
+/// These are the shapes that would double-box if the receiver-boxing branch ever saw an already-boxed
+/// receiver: the value is boxed while it sits in the nullable local / map / elvis, so a branch that
+/// boxed it again would push a `Lkotlin/UInt;` at the `(I)` its own factory declares.
+///
+/// They do NOT reach the member call boxed today, and this test does not pretend otherwise. Checked
+/// against the emitted bytecode: `UNullableBangEquals`, `UMapValueEquals`, `UWhenReceiverEquals` and
+/// `ULongNullableBangEquals` emit, and each one UNBOXES to the carrier (the `!!`/erased-read coercion)
+/// and then boxes once for the `invokevirtual` — the round trip is visible as
+/// `checkcast kotlin/UInt; unbox-impl; box-impl`. `UNullableSmartCastEquals`, `UNullableSafeEquals`
+/// and `UElvisReceiverEquals` are declined by the backend outright.
+///
+/// So what is pinned here is the backend's contract, not the representation query's arms: these are
+/// the source shapes closest to putting a boxed unsigned in receiver position, and whatever the
+/// lowerer decides about any of them, the result must be a class that verifies and runs — or a
+/// decline. The query's own arms are covered where they can be reached directly, by the walk's unit
+/// tests in `src/ir_lower.rs`.
+#[test]
+fn unsigned_member_calls_on_a_reference_carried_receiver_verify() {
+    // A nullable local: the value lives boxed, and `!!` brings it back to a member call.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: UInt? = 5u\n\
+    val s: Any = \"5\"\n\
+    return if (!u!!.equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "UNullableBangEquals",
+    );
+    // The same value reached by a smart cast rather than by an assertion.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: UInt? = 5u\n\
+    val s: Any = \"5\"\n\
+    if (u != null) return if (!u.equals(s)) \"OK\" else \"bad\"\n\
+    return \"bad null\"\n\
+}\n",
+        "UNullableSmartCastEquals",
+    );
+    // A safe call — the receiver is a temp the lowerer introduced, not a source local.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: UInt? = 5u\n\
+    val s: Any = \"5\"\n\
+    return if (u?.equals(s) == false) \"OK\" else \"bad\"\n\
+}\n",
+        "UNullableSafeEquals",
+    );
+    // An ERASED read: the map holds the box, and the element comes back as `Object`.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val m = mapOf(\"k\" to 5u)\n\
+    val s: Any = \"5\"\n\
+    return if (!m[\"k\"]!!.equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "UMapValueEquals",
+    );
+    // A `when` receiver — no single node produces the value the call runs on.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val a: UInt = 5u\n\
+    val b: UInt = 7u\n\
+    val s: Any = \"5\"\n\
+    val c = a < b\n\
+    return if (!(if (c) a else b).equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "UWhenReceiverEquals",
+    );
+    // An elvis result, then a member call on it.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: UInt? = null\n\
+    val s: Any = \"0\"\n\
+    return if (!(u ?: 0u).equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "UElvisReceiverEquals",
+    );
+    // The `ULong` carrier takes the same path through its own box.
+    expect_emitted_box_verifies(
+        "fun box(): String {\n\
+    val u: ULong? = 5uL\n\
+    val s: Any = \"5\"\n\
+    return if (!u!!.equals(s)) \"OK\" else \"bad\"\n\
+}\n",
+        "ULongNullableBangEquals",
     );
 }
