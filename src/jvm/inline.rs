@@ -5,7 +5,7 @@
 //! local remapping, and `reifiedOperationMarker` handling layer on top in later phases.
 
 use super::classfile::ClassWriter;
-use super::classreader::{MethodCode, C};
+use super::classreader::{utf8_value, MethodCode, C};
 use std::collections::HashMap;
 
 /// How a compiled class realizes a PROPERTY read. Kotlin source can declare getter/setter behavior, but
@@ -116,7 +116,10 @@ fn name_and_type(cp: &[C], i: u16) -> Option<(&str, &str)> {
 pub fn relocate_const(src_cp: &[C], idx: u16, cw: &mut ClassWriter) -> Option<u16> {
     match src_cp.get(idx as usize)? {
         C::Class(n) => Some(cw.class_ref(utf8(src_cp, *n)?)),
-        C::String(u) => Some(cw.const_string(utf8(src_cp, *u)?)),
+        // A value-bearing string uses the class reader's single code-unit accessor. Names and
+        // descriptors use `utf8` above; duplicating the variant conversion here risks making
+        // classpath constant inlining disagree with `ConstantValue` field reads.
+        C::String(u) => Some(cw.const_string_kt(&utf8_value(src_cp, *u)?)),
         C::Integer(v) => Some(cw.const_int(*v)),
         C::Float(b) => Some(cw.const_float(f32::from_bits(*b))),
         C::Long(v) => Some(cw.const_long(*v)),

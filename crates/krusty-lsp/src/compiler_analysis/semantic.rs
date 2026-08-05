@@ -14,7 +14,7 @@ use krusty::frontend::{
     lex_name_tokens, CompoundAssignmentTarget, FrontendNameToken, FrontendNameTokenKind,
     FrontendSymbols, FrontendTypeInfo,
 };
-use krusty::types::Ty;
+use krusty::types::{type_name, Ty, TypeName};
 
 use super::{
     checked_property_type,
@@ -194,10 +194,12 @@ const PLAIN_CLASS_HIGHLIGHT: MemberHighlight = MemberHighlight {
 /// `data`, `operator`, and source deprecation). One shared table keeps cross-file editor
 /// classification exact without adding editor concerns to the compiler's public symbol ABI.
 pub struct HighlightSymbols {
-    class_kinds: HashMap<String, HighlightKind>,
-    class_modifiers: HashMap<String, u16>,
+    /// Classifier presentation keyed by the same semantic internal identity as compiler symbols.
+    /// Source-only modifiers live in `source_classes`, whose fully-qualified lookup is file-aware.
+    class_kinds: HashMap<TypeName, HighlightKind>,
     source_classes: HashMap<String, MemberHighlight>,
-    members: HashMap<(String, String), MemberHighlight>,
+    source_class_owners: HashMap<String, TypeName>,
+    members: HashMap<(TypeName, String), MemberHighlight>,
 }
 
 impl HighlightSymbols {
@@ -207,10 +209,7 @@ impl HighlightSymbols {
                 .classes
                 .iter()
                 .map(|(internal, class)| {
-                    // The class map keys on internal names; recover the source spelling this
-                    // simple-name-keyed highlight table is queried by.
-                    let name = internal.segment().replace('$', ".");
-                    let kind = if symbols.enums.contains_key(&name) {
+                    let kind = if symbols.enums.contains_key(internal) {
                         HighlightKind::Enum
                     } else if class.is_annotation() {
                         HighlightKind::Decorator
@@ -221,20 +220,24 @@ impl HighlightSymbols {
                     } else {
                         HighlightKind::Class
                     };
-                    (name, kind)
+                    (*internal, kind)
                 })
                 .collect(),
-            class_modifiers: HashMap::new(),
             source_classes: HashMap::new(),
+            source_class_owners: HashMap::new(),
             members: HashMap::new(),
         };
         for file in files {
             for &declaration in &file.file.decls {
                 if let Decl::Class(class) = file.file.decl(declaration) {
-                    metadata.collect_class(class);
+                    metadata.collect_class(&file.file, class);
                     metadata.source_classes.insert(
                         source_classifier_name(&file.file, &class.name),
                         class_highlight(class),
+                    );
+                    metadata.source_class_owners.insert(
+                        source_classifier_name(&file.file, &class.name),
+                        source_classifier_internal(&file.file, &class.name),
                     );
                 }
             }
@@ -279,16 +282,11 @@ impl HighlightSymbols {
         metadata
     }
 
-    fn collect_class(&mut self, class: &ClassDecl) {
-        let highlight = class_highlight(class);
-        self.class_kinds.insert(class.name.clone(), highlight.kind);
-        if highlight.modifiers != 0 {
-            self.class_modifiers
-                .insert(class.name.clone(), highlight.modifiers);
-        }
+    fn collect_class(&mut self, file: &File, class: &ClassDecl) {
+        let owner = source_classifier_internal(file, &class.name);
         for property in &class.props {
             self.members.insert(
-                (class.name.clone(), property.name.clone()),
+                (owner, property.name.clone()),
                 MemberHighlight {
                     kind: HighlightKind::Property,
                     modifiers: variable_modifier(property.is_var)
@@ -302,7 +300,7 @@ impl HighlightSymbols {
         }
         for property in class.body_props.iter().chain(&class.companion_props) {
             self.members.insert(
-                (class.name.clone(), property.name.clone()),
+                (owner, property.name.clone()),
                 MemberHighlight {
                     kind: HighlightKind::Property,
                     modifiers: variable_modifier(property.is_var),
@@ -311,7 +309,7 @@ impl HighlightSymbols {
         }
         for function in class.methods.iter().chain(&class.companion_methods) {
             self.members.insert(
-                (class.name.clone(), function.name.clone()),
+                (owner, function.name.clone()),
                 MemberHighlight {
                     kind: if function.is_operator() {
                         HighlightKind::Operator
@@ -324,7 +322,7 @@ impl HighlightSymbols {
         }
         for entry in &class.enum_entries {
             self.members.insert(
-                (class.name.clone(), entry.name.clone()),
+                (owner, entry.name.clone()),
                 MemberHighlight {
                     kind: HighlightKind::EnumMember,
                     modifiers: HighlightModifiers::READONLY
@@ -344,6 +342,23 @@ impl HighlightSymbols {
         })
         .map(|qualified| {
             qualified.and_then(|qualified| self.source_classes.get(&qualified).copied())
+        })
+    }
+
+    fn bound_class(&self, symbols: &FrontendSymbols, name: &str) -> Option<MemberHighlight> {
+        let internal = symbols.class_names.get_class(name)?;
+        self.class_kinds
+            .get(&internal)
+            .copied()
+            .map(|kind| MemberHighlight { kind, modifiers: 0 })
+    }
+
+    fn contextual_class_identity(&self, file: &File, name: &str) -> Result<Option<TypeName>, ()> {
+        contextual_source_classifier(file, name, |candidate| {
+            self.source_class_owners.contains_key(candidate)
+        })
+        .map(|qualified| {
+            qualified.and_then(|qualified| self.source_class_owners.get(&qualified).copied())
         })
     }
 }
@@ -373,6 +388,16 @@ fn source_classifier_name(file: &File, name: &str) -> String {
     match &file.package {
         Some(package) if !package.is_empty() => format!("{package}.{name}"),
         _ => name.to_owned(),
+    }
+}
+
+fn source_classifier_internal(file: &File, name: &str) -> TypeName {
+    let classifier = name.replace('.', "$");
+    match &file.package {
+        Some(package) if !package.is_empty() => {
+            type_name(&format!("{}/{classifier}", package.replace('.', "/")))
+        }
+        _ => type_name(&classifier),
     }
 }
 
@@ -807,23 +832,29 @@ impl<'a> SemanticClassifier<'a> {
             self.mark_index(index, HighlightKind::Namespace, 0);
         }
         let name = self.tokens[terminal].text(self.source);
-        let (kind, modifiers) = if let Some(&kind) = self.highlight_symbols.class_kinds.get(name) {
-            (kind, self.default_library_modifier(name))
-        } else if is_kotlin_builtin_type(name) {
-            (HighlightKind::Class, HighlightModifiers::DEFAULT_LIBRARY)
-        } else if self.symbols.props.contains_key(name) {
-            (
-                HighlightKind::Property,
-                variable_modifier(self.symbols.props[name].1) | HighlightModifiers::STATIC,
-            )
-        } else if self.symbols.funs.contains_key(name) {
-            (
-                HighlightKind::Function,
-                HighlightModifiers::STATIC | self.default_library_modifier(name),
-            )
-        } else {
-            (HighlightKind::Namespace, 0)
-        };
+        let (kind, modifiers) =
+            if let Ok(Some(highlight)) = self.highlight_symbols.contextual_class(self.file, name) {
+                (
+                    highlight.kind,
+                    highlight.modifiers | self.default_library_modifier(name),
+                )
+            } else if let Some(highlight) = self.highlight_symbols.bound_class(self.symbols, name) {
+                (highlight.kind, self.default_library_modifier(name))
+            } else if is_kotlin_builtin_type(name) {
+                (HighlightKind::Class, HighlightModifiers::DEFAULT_LIBRARY)
+            } else if self.symbols.props.contains_key(name) {
+                (
+                    HighlightKind::Property,
+                    variable_modifier(self.symbols.props[name].1) | HighlightModifiers::STATIC,
+                )
+            } else if self.symbols.funs.contains_key(name) {
+                (
+                    HighlightKind::Function,
+                    HighlightModifiers::STATIC | self.default_library_modifier(name),
+                )
+            } else {
+                (HighlightKind::Namespace, 0)
+            };
         self.mark_index(terminal, kind, modifiers);
         let qualified = path
             .iter()
@@ -842,12 +873,7 @@ impl<'a> SemanticClassifier<'a> {
     }
 
     fn mark_class(&mut self, class: &ClassDecl) {
-        let kind = self
-            .highlight_symbols
-            .class_kinds
-            .get(&class.name)
-            .copied()
-            .unwrap_or(HighlightKind::Class);
+        let kind = class_highlight(class).kind;
         let mut modifiers = HighlightModifiers::DECLARATION;
         if class.modality.is_abstract() || class.kind == ClassKind::Interface {
             modifiers |= HighlightModifiers::ABSTRACT;
@@ -1810,17 +1836,17 @@ impl<'a> SemanticClassifier<'a> {
                             self.function_reference_modifiers(call, name),
                         )
                     }
-                } else if let Some(&kind) = self.highlight_symbols.class_kinds.get(name) {
+                } else if let Ok(Some(highlight)) =
+                    self.highlight_symbols.contextual_class(self.file, name)
+                {
                     (
-                        kind,
-                        self.default_library_modifier(name)
-                            | self
-                                .highlight_symbols
-                                .class_modifiers
-                                .get(name)
-                                .copied()
-                                .unwrap_or(0),
+                        highlight.kind,
+                        self.default_library_modifier(name) | highlight.modifiers,
                     )
+                } else if let Some(highlight) =
+                    self.highlight_symbols.bound_class(self.symbols, name)
+                {
+                    (highlight.kind, self.default_library_modifier(name))
                 } else if let Some(binding) = self.binding_at_kind(name, span.lo, false) {
                     (binding.kind, binding.modifiers)
                 } else if self.symbols.props.contains_key(name) {
@@ -2117,7 +2143,15 @@ impl<'a> SemanticClassifier<'a> {
                 return self.contextual_class_target(name, at);
             }
         }
-        if self.highlight_symbols.class_kinds.contains_key(name) {
+        if self
+            .highlight_symbols
+            .contextual_class(self.file, name)
+            .is_ok_and(|highlight| highlight.is_some())
+            || self
+                .highlight_symbols
+                .bound_class(self.symbols, name)
+                .is_some()
+        {
             return self.contextual_class_target(name, at);
         }
         self.binding_at_kind(name, at, self.callees.contains_key(&expression))
@@ -2587,7 +2621,7 @@ impl<'a> SemanticClassifier<'a> {
             if let Some(&highlight) = self
                 .highlight_symbols
                 .members
-                .get(&(owner.clone(), name.to_owned()))
+                .get(&(owner, name.to_owned()))
             {
                 return highlight;
             }
@@ -2660,28 +2694,17 @@ impl<'a> SemanticClassifier<'a> {
         }
     }
 
-    fn receiver_owner(&self, receiver: ExprId) -> Option<String> {
+    fn receiver_owner(&self, receiver: ExprId) -> Option<TypeName> {
         if let Expr::Name(name) = self.file.expr(receiver) {
-            if self.highlight_symbols.class_kinds.contains_key(name) {
-                return Some(name.clone());
+            if let Ok(Some(owner)) = self
+                .highlight_symbols
+                .contextual_class_identity(self.file, name)
+            {
+                return Some(owner);
             }
         }
-        let ty = self
-            .type_info?
-            .expr_types
-            .get(receiver.0 as usize)?
-            .non_null();
-        let Ty::Obj(owner, _) = ty else {
-            return None;
-        };
-        Some(
-            owner
-                .render()
-                .rsplit(['/', '$'])
-                .next()
-                .unwrap_or_default()
-                .to_owned(),
-        )
+        self.receiver_definition_owner(receiver)
+            .map(|owner| type_name(&owner))
     }
 
     fn function_reference_modifiers(&self, call: ExprId, name: &str) -> u16 {
@@ -2849,20 +2872,10 @@ impl<'a> SemanticClassifier<'a> {
         let highlight = match self.highlight_symbols.contextual_class(self.file, name) {
             Ok(Some(highlight)) => highlight,
             Err(()) => PLAIN_CLASS_HIGHLIGHT,
-            Ok(None) => MemberHighlight {
-                kind: self
-                    .highlight_symbols
-                    .class_kinds
-                    .get(name)
-                    .copied()
-                    .unwrap_or(HighlightKind::Class),
-                modifiers: self
-                    .highlight_symbols
-                    .class_modifiers
-                    .get(name)
-                    .copied()
-                    .unwrap_or(0),
-            },
+            Ok(None) => self
+                .highlight_symbols
+                .bound_class(self.symbols, name)
+                .unwrap_or(PLAIN_CLASS_HIGHLIGHT),
         };
         (
             highlight.kind,
