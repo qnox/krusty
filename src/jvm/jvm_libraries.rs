@@ -19,7 +19,7 @@ use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
     RangeConstruction, RuntimeCtor, RuntimeOp,
 };
-use crate::symbol_resolver::{ty_subst, ty_subst_all};
+use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{InheritanceShape, SymbolSource};
 use crate::types::{type_name, Ty, TypeName, TypeNameList};
 
@@ -3355,7 +3355,32 @@ impl SymbolSource for JvmLibraries {
                         // decoded signature is what preserves and binds its type parameters. Re-parsing
                         // `m.signature` here would therefore lose facts in the former case and fail to
                         // produce any signature in the latter.
-                        let generic_sig = m.generic_sig.clone();
+                        //
+                        // A member signature can mention its OWNER's type variables in its value
+                        // parameters, including under a function/SAM argument. Bind those variables
+                        // from the applied dispatch type before call-site inference, exactly as return
+                        // recovery below does. This is deliberately independent of whether the
+                        // provider represented a receiver in `GenericSig`: metadata signatures carry
+                        // one while a raw JVM `Signature` cannot, but both describe the same semantic
+                        // need. The partial substitution policy leaves the member's own formals open.
+                        let generic_sig = m.generic_sig.clone().map(|signature| {
+                            let bindings = self.member_receiver_bindings_name(
+                                receiver,
+                                cn,
+                                &signature.formals,
+                            );
+                            if bindings.is_empty() {
+                                return signature;
+                            }
+                            GenericSig {
+                                params: signature
+                                    .params
+                                    .iter()
+                                    .map(|param| ty_subst_keep_unbound(*param, &bindings))
+                                    .collect(),
+                                ..signature
+                            }
+                        });
                         // A `suspend fun` member's physical method appends a `Continuation` parameter
                         // and erases its return to `Object`; present the LOGICAL signature (drop the
                         // continuation, recover the real return from the `Continuation<T>` type
