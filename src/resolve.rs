@@ -2037,7 +2037,7 @@ impl SymbolTable {
     /// declaring owner. This is the single substitution operation shared by signature inference,
     /// ordinary reads, read-only probes, and stable-path checks. It depends only on semantic types
     /// and hierarchy edges, never on source file/module/classpath origin or generated JVM names.
-    fn applied_declared_member_prop_ty(
+    pub(crate) fn applied_declared_member_prop_ty(
         &self,
         recv: Ty,
         owner: TypeName,
