@@ -1864,27 +1864,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   means a classpath read failed to recognize a `suspend` callee — so it is deliberately untestable
   without injecting that fault, and must not be deleted as dead code. What IS pinned is that it does
   not over-fire (`a_plain_continuation_parameter_is_not_an_unthreaded_continuation`).
-- **An unsigned value out of an ERASED GENERIC call result** — `fun <T> ident(t: T): T` erases to
-  `(Object)Object`, so `ident(5u)` pushes a boxed `kotlin/UInt` and the use site has to unbox it. The
-  unbox for an unsigned box is its own inline class's, `checkcast kotlin/UInt; invokevirtual
-  kotlin/UInt."unbox-impl":()I` — NOT the boxed-primitive `checkcast java/lang/Integer; intValue`,
-  which throws `ClassCastException` at run time because `kotlin/UInt` is not an `Integer`. krusty
-  emitted that `Integer` round trip and reported success. For THIS shape the defect was in the
-  erased-call-result coercion: the value-read coercion (`coerce_to_static`) had the unsigned branch
-  already, which is why the map-element path (`mapOf("k" to 5u)["k"]!!`) and an indexed read
-  (`listOf(5u, 7u)[0]`) were correct while a generic call result was not. All four carriers now
-  behave alike, each through its own class (`kotlin/UByte."unbox-impl":()B`, …); the checkcast/unbox
-  pair matches kotlinc instruction for instruction, while the surrounding code still diverges where
-  it already did (`Integer.toUnsignedString` on a masked carrier rather than
-  `UByte."toString-impl"`).
+- **An unsigned value crossing an ERASED GENERIC result boundary** — `fun <T> ident(t: T): T`
+  erases to `(Object)Object`, so `ident(5u)` pushes a boxed `kotlin/UInt` and the use site has to
+  unbox it. The unbox for an unsigned box is its own inline class's, `checkcast kotlin/UInt;
+  invokevirtual kotlin/UInt."unbox-impl":()I` — NOT the boxed-primitive `checkcast
+  java/lang/Integer; intValue`, which throws `ClassCastException` at run time because
+  `kotlin/UInt` is not an `Integer`. All four carriers behave alike, each through its own class
+  (`kotlin/UByte."unbox-impl":()B`, …); the checkcast/unbox pair matches kotlinc instruction for
+  instruction, while the surrounding code still diverges where it already did
+  (`Integer.toUnsignedString` on a masked carrier rather than `UByte."toString-impl"`).
 
-  Two OTHER routes to the same wrong unbox remain open, and both are emitter-side rather than
-  coercion-side — the unsigned static type is already normalized to `Int` by the time the unbox is
-  chosen, so `unbox_prim`'s (correct) unsigned rows are never consulted:
-  `Pair(5u, 1).first` (a classpath generic PROPERTY read, through `emit_realized_property_read`) and
-  `listOf(5u).map { it }.first()` (an inline-splice loop element, through `try_inline_unified`). Both
-  emit `checkcast java/lang/Integer; intValue` and throw at run time while krusty reports success.
-  They predate this fix and are not addressed by it.
+  The rule applies to EVERY erased reference boundary, not only calls: wrapper ADAPTER selection
+  consumes the semantic scalar type first, and only then may slot/descriptor selection map that type
+  to its JVM carrier. `semantic_scalar_adapter` is the emitter-side statement of that ordering. Thus
+  a generic property result (`Pair<UInt, …>.first`) unboxes through `kotlin/UInt`, and an inline
+  `FunctionN` argument/result (`listOf(5u).map { it }`) crosses its `Object` invoke slots as a boxed
+  `kotlin/UInt`; neither is allowed to rediscover the wrapper from the later `int` carrier. Callable
+  references, property references, and ordinary lambda objects obey that same `FunctionN` contract.
+  `InvokeFunction` therefore retains its semantic parameter list as well as its return type: the one
+  generic consumer can select argument and result adapters without branching on which closure object
+  produced the value. Plain-lambda implementation methods explicitly unbox boxed unsigned parameters
+  into carrier locals and box unsigned result tails; declared SAM methods instead follow their own
+  physical descriptors. Property writes use the same adapter in the opposite direction. This is
+  deliberately independent of source file, module, classpath provider, owner, accessor spelling, or
+  inline host identity.
+
+  Lowering's erased-call-result coercion follows the same semantic rule. The value-read coercion
+  (`coerce_to_static`) already retained unsigned identity, which is why a map/indexed read was correct
+  while the call-result route was not; the latter now emits the unsigned unbox before recording the
+  call's logical carrier type. Strict verifier/runtime tests cover calls, properties, inline lambdas,
+  and ordinary function values so a future decline cannot silently remove the adapter coverage.
 
   A BOUNDED type parameter erases to its BOUND rather than to `Object` (`<T : Comparable<T>>` →
   `Comparable`), and kotlinc unboxes there identically. The two classpath call sites (an imported bare

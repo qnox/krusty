@@ -14,57 +14,34 @@
 //! A BOUNDED type parameter erases to its bound rather than to `Object` (`<T : Comparable<T>>` →
 //! `Comparable`), and kotlinc unboxes there identically; both erasures are pinned here.
 //!
-//! The contract is the backend's, as in `unsigned_classpath_call_e2e`: declining the file is always
-//! a legal outcome, emitting a class that does not load and run is not.
+//! These are strict regressions: every source shape must emit, verify, run, and return `OK`. A backend
+//! decline is therefore a failure here rather than an accepted unsupported outcome; otherwise a new
+//! bail could make the suite green without exercising the adapter it exists to pin.
 
 use super::common;
-use super::common::BackendOutcome;
 
-/// Assert the backend's own contract: whatever krusty EMITS must verify and run.
-///
-/// STRICTER than the sibling helper in `unsigned_classpath_call_e2e`, which accepts a decline. Every
-/// shape in this file EMITS today (all four carriers included — none of them declines), and emitting
-/// the right unbox is the whole property under test, so accepting a decline would let a future bail
-/// leave a green test with no coverage at all. A shape that legitimately starts declining should be
-/// moved to the permissive sibling deliberately, not pass silently here.
-fn expect_box_emits_and_verifies(src: &str, stem: &str) {
-    let stdlib = common::stdlib_jar();
-    expect_box_emits_and_verifies_on(src, stem, std::slice::from_ref(&stdlib));
-}
-
-/// [`expect_box_emits_and_verifies`] against an explicit classpath — for a shape whose callee needs a
-/// fixture jar no stdlib declaration provides.
-fn expect_box_emits_and_verifies_on(src: &str, stem: &str, cp: &[std::path::PathBuf]) {
+/// Strict explicit-classpath counterpart of `common::expect_box_ok_with_stdlib`. The shared helper
+/// owns compilation-failure diagnostics and distinguishes an unavailable result from a passing skip;
+/// this wrapper only supplies the fixture classpath and asserts the semantic result.
+fn expect_box_ok_on(src: &str, stem: &str, cp: &[std::path::PathBuf]) {
     let jdk = common::jdk_modules();
-    match common::backend_outcome_in_process(src, stem, cp, Some(&jdk)) {
-        None => panic!("{stem}: the front end rejected the source; this is a backend test"),
-        Some(BackendOutcome::Emitted) => {
-            let Some(out) = common::compile_and_run_box(src, stem, cp, Some(&jdk)) else {
-                panic!(
-                    "{stem}: krusty reported success, but the emitted class does not load and run \
-                     (a class that fails verification is strictly worse than declining the file)"
-                );
-            };
-            assert_eq!(out, "OK", "{stem}");
-        }
-        Some(other) => panic!(
-            "{stem}: the backend declined ({other:?}). Declining is a legal outcome in general, but \
-             this shape emitted when the unsigned unbox was fixed, and a decline here would mean the \
-             test no longer exercises the unbox it exists to pin"
-        ),
-    }
+    assert_eq!(
+        common::expect_box_run(src, stem, cp, Some(&jdk)),
+        "OK",
+        "{stem}"
+    );
 }
 
 /// `ident(5u).toString()` — the reported shape. The unbox feeds a static carrier helper
 /// (`Integer.toUnsignedString`), so the wrong wrapper throws `ClassCastException` immediately.
 #[test]
 fn unsigned_generic_call_result_unboxes_through_its_own_value_class() {
-    expect_box_emits_and_verifies(
+    common::expect_box_ok_with_stdlib(
         "fun <T> ident(t: T): T = t\n\
          fun box(): String = if (ident(5u).toString() == \"5\") \"OK\" else \"bad\"\n",
         "UIntGenericIdent",
     );
-    expect_box_emits_and_verifies(
+    common::expect_box_ok_with_stdlib(
         "fun <T> ident(t: T): T = t\n\
          fun box(): String = if (ident(5uL).toString() == \"5\") \"OK\" else \"bad\"\n",
         "ULongGenericIdent",
@@ -75,7 +52,7 @@ fn unsigned_generic_call_result_unboxes_through_its_own_value_class() {
 /// `kotlin/UByte`/`kotlin/UShort` — a `Byte`/`Short` unbox is wrong for the same reason.
 #[test]
 fn narrow_unsigned_generic_call_result_unboxes_through_its_own_value_class() {
-    expect_box_emits_and_verifies(
+    common::expect_box_ok_with_stdlib(
         "fun <T> ident(t: T): T = t\n\
          fun box(): String {\n\
         val b: UByte = 5u\n\
@@ -83,7 +60,7 @@ fn narrow_unsigned_generic_call_result_unboxes_through_its_own_value_class() {
     }\n",
         "UByteGenericIdent",
     );
-    expect_box_emits_and_verifies(
+    common::expect_box_ok_with_stdlib(
         "fun <T> ident(t: T): T = t\n\
          fun box(): String {\n\
         val s: UShort = 5u\n\
@@ -97,7 +74,7 @@ fn narrow_unsigned_generic_call_result_unboxes_through_its_own_value_class() {
 /// same `checkcast kotlin/UInt; unbox-impl` after the call.
 #[test]
 fn unsigned_bounded_generic_call_result_unboxes_through_its_own_value_class() {
-    expect_box_emits_and_verifies(
+    common::expect_box_ok_with_stdlib(
         "fun <T : Comparable<T>> pick(a: T, b: T): T = if (a >= b) a else b\n\
          fun box(): String {\n\
         val u: UInt = 5u\n\
@@ -112,7 +89,7 @@ fn unsigned_bounded_generic_call_result_unboxes_through_its_own_value_class() {
 /// surfaces as the `Integer` round trip the reported shape showed.
 #[test]
 fn unsigned_generic_call_result_as_value_class_receiver() {
-    expect_box_emits_and_verifies(
+    common::expect_box_ok_with_stdlib(
         "fun <T> ident(t: T): T = t\n\
          fun box(): String {\n\
         val s: Any = \"x\"\n\
@@ -138,7 +115,8 @@ fn unsigned_bounded_classpath_generic_call_result_unboxes_through_its_own_value_
         &[(
             "Lib.kt",
             "package lib\n\
-fun <T : Comparable<T>> pickLib(a: T, b: T): T = if (a >= b) a else b\n",
+fun <T : Comparable<T>> pickLib(a: T, b: T): T = if (a >= b) a else b\n\
+class Cell<T>(var value: T)\n",
         )],
     ) else {
         // kotlinc unavailable in this environment: the fixture cannot be built, and a source-only
@@ -148,7 +126,7 @@ fun <T : Comparable<T>> pickLib(a: T, b: T): T = if (a >= b) a else b\n",
     let cp = [lib, stdlib];
     // The IMPORTED bare name and the FULLY QUALIFIED call are separate lowering sites, each of which
     // carried its own copy of the gate; both must reach the coercion.
-    expect_box_emits_and_verifies_on(
+    expect_box_ok_on(
         "import lib.pickLib\n\
 \n\
 fun box(): String {\n\
@@ -158,12 +136,26 @@ fun box(): String {\n\
         "UIntBoundedClasspathGeneric",
         &cp,
     );
-    expect_box_emits_and_verifies_on(
+    expect_box_ok_on(
         "fun box(): String {\n\
     val u: UInt = 5u\n\
     return if (lib.pickLib(u, 3u) == u) \"OK\" else \"bad\"\n\
 }\n",
         "UIntBoundedClasspathGenericFq",
+        &cp,
+    );
+    // A mutable generic property exercises both directions of the same bridge. The setter must box
+    // the primitive carrier as its semantic unsigned wrapper before storing it in `Object`, and the
+    // getter must select the matching unsigned unbox adapter after reading that erased slot.
+    expect_box_ok_on(
+        "import lib.Cell\n\
+\n\
+fun box(): String {\n\
+    val cell = Cell(1u)\n\
+    cell.value = 5u\n\
+    return if (cell.value.toString() == \"5\") \"OK\" else \"bad\"\n\
+}\n",
+        "UnsignedGenericPropertyRoundTrip",
         &cp,
     );
 }
@@ -172,12 +164,83 @@ fun box(): String {\n\
 /// the erased-result coercion is shared, so the stdlib path must unbox identically.
 #[test]
 fn unsigned_classpath_generic_call_result_unboxes_through_its_own_value_class() {
-    expect_box_emits_and_verifies(
+    common::expect_box_ok_with_stdlib(
         "fun box(): String = if (run { 5u }.toString() == \"5\") \"OK\" else \"bad\"\n",
         "UIntClasspathGenericRun",
     );
-    expect_box_emits_and_verifies(
+    common::expect_box_ok_with_stdlib(
         "fun box(): String = if (listOf(5u, 7u).first().toString() == \"5\") \"OK\" else \"bad\"\n",
         "UIntClasspathGenericFirst",
+    );
+}
+
+/// Generic property reads cross the same erased-reference boundary as generic function results.
+/// `Pair<A, B>.first` is declared as `A` and therefore returns `Object`; after substituting
+/// `A = UInt`, the bridge must select the unsigned inline-class adapter from the semantic result
+/// type before mapping that type to its JVM carrier. This regression deliberately uses only a
+/// standard generic property so the rule cannot depend on a fixture, owner, or accessor spelling.
+#[test]
+fn unsigned_generic_property_result_uses_the_semantic_unbox_adapter() {
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String = if (Pair(5u, 1).first.toString() == \"5\") \"OK\" else \"bad\"\n",
+        "UnsignedGenericPropertyResult",
+    );
+}
+
+/// An inlined higher-order call still crosses the erased `FunctionN` result boundary: its lambda
+/// body produces the primitive carrier, while `invoke` promises `Object`. The adapter chosen for
+/// that boundary must retain the lambda's semantic unsigned type instead of boxing the carrier as
+/// its signed JVM wrapper. The following generic read then exercises the matching unbox direction.
+#[test]
+fn unsigned_inline_lambda_result_uses_the_semantic_box_adapter() {
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String = if (listOf(5u).map { it }.first().toString() == \"5\") \"OK\" else \"bad\"\n",
+        "UnsignedInlineLambdaResult",
+    );
+}
+
+/// Callable and property references are alternate lambda operands for the same inline-splice host.
+/// Their generated `FunctionN` adapters must obey the identical semantic-wrapper rule instead of
+/// deriving a signed wrapper from the referenced declaration's physical carrier.
+#[test]
+fn unsigned_inline_reference_adapters_preserve_semantic_identity() {
+    common::expect_box_ok_with_stdlib(
+        "fun keep(value: UInt): UInt = value\n\
+         fun box(): String = if (listOf(5u).map(::keep).first().toString() == \"5\") \"OK\" else \"bad\"\n",
+        "UnsignedInlineFunctionReference",
+    );
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String = if (listOf(Pair(5u, 1)).map(Pair<UInt, Int>::first).first().toString() == \"5\") \"OK\" else \"bad\"\n",
+        "UnsignedInlinePropertyReference",
+    );
+}
+
+/// A real `FunctionN` closure has the same boundary even when no library body is spliced. Its
+/// implementation method uses primitive carriers, but the erased `invoke(Object): Object` contract
+/// carries boxed Kotlin values. Both the instantiated parameter and return descriptors therefore
+/// have to derive their adapters from `UInt`, not from its later JVM `int` representation.
+#[test]
+fn unsigned_function_value_preserves_semantic_adapters() {
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String {\n\
+             val identity: (UInt) -> UInt = { value -> value }\n\
+             return if (identity(5u).toString() == \"5\") \"OK\" else \"bad\"\n\
+         }\n",
+        "UnsignedFunctionValue",
+    );
+    common::expect_box_ok_with_stdlib(
+        "fun keep(value: UInt): UInt = value\n\
+         fun box(): String {\n\
+             val identity: (UInt) -> UInt = ::keep\n\
+             return if (identity(5u).toString() == \"5\") \"OK\" else \"bad\"\n\
+         }\n",
+        "UnsignedFunctionReferenceValue",
+    );
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String {\n\
+             val read: (Pair<UInt, Int>) -> UInt = Pair<UInt, Int>::first\n\
+             return if (read(Pair(5u, 1)).toString() == \"5\") \"OK\" else \"bad\"\n\
+         }\n",
+        "UnsignedPropertyReferenceValue",
     );
 }

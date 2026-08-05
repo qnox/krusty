@@ -8785,31 +8785,18 @@ impl<'a> Lower<'a> {
         // (`asSeq<String>(x): String` physically `CharSequence`), insert the `checkcast` kotlinc emits so
         // a member access on the result verifies.
         let st = self.info.ty(e);
-        // An UNSIGNED static type behind the erased return is an inline class, not a boxed primitive:
-        // the value on the stack is a `kotlin/UInt`, so the unbox is `checkcast kotlin/UInt` +
-        // `unbox-impl`, exactly as the value-read coercion (`coerce_to_static`) already emits. The
-        // boxed-primitive unbox below would `checkcast java/lang/Integer` and throw at run time.
-        // Emitted before the logical-type record so the value-class pass does not also treat the call
-        // as already carrying its unboxed underlying and strip this unbox.
-        if st.is_unsigned() && phys.is_reference() {
-            return self
-                .unbox_unsigned(call, st)
-                .expect("unsigned integer target must provide box/unbox shape");
+        // Keep scalar adapter policy shared with property/index/value reads. This is intentionally
+        // consulted before the logical-type record below: an unsigned adapter produces the unboxed
+        // carrier itself, and recording the original call as already logically unboxed would let the
+        // value-class pass strip that required adapter.
+        if let Some(coerced) = self.coerce_scalar_from_physical(call, st, phys) {
+            return coerced;
         }
         // Record the CALL's logical type keyed by its own id (the outer `fn expr` records only the wrapper
         // this returns). The value-class pass reads it so a library value-class return (`runCatching: Result`)
         // reprs as its UNBOXED underlying — letting the wrapping coercion strip as a redundant same-type cast.
         if st != Ty::Error {
             self.ir.logical_types.insert(call, ty_to_ir(st));
-        }
-        // A scalar static type behind an erased return unboxes. This must NOT require the physical
-        // return to be erased-top: `fun <T : Number> id(x: T): T` returns `Number`, and kotlinc still
-        // emits the unbox (`invokevirtual Number.intValue`). Gating on erased-top left the boxed value
-        // on the stack where an `int` was expected — a VerifyError. The early return above already
-        // established that the erased return IS a type parameter (bounded or not), which is exactly
-        // when the checker's substituted type may refine it.
-        if self.has_scalar_value_repr(st) && phys.is_reference() {
-            return self.emit_type_op(IrTypeOp::ImplicitCoercion, call, ty_to_ir(st));
         }
         if st.is_reference() && !st.is_erased_top() && st != Ty::Null && st.non_null() != phys {
             return self.emit_type_op(IrTypeOp::Cast, call, ty_to_ir(st));
@@ -9446,6 +9433,7 @@ impl<'a> Lower<'a> {
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, *ty));
         }
+        let own_scope_from = self.scope.len();
         for &context_ty in &sig.params[..context_count] {
             let v = self.fresh_value();
             self.scope.push(("this".to_string(), v, context_ty));
@@ -9462,6 +9450,32 @@ impl<'a> Lower<'a> {
         for (name, pty) in bind_names.iter().zip(value_params.iter()) {
             let v = self.fresh_value();
             self.scope.push((name.clone(), v, *pty));
+        }
+        // A plain `FunctionN` receives every own parameter through an erased `Object` slot. Native
+        // unsigned types need their Kotlin inline-class box there, not Java's wrapper for the shared
+        // signed carrier. Keep each raw parameter index in its wrapper representation, bind source
+        // reads to a fresh carrier local, and prepend one generic unbox declaration to both the real
+        // closure method and its inline-body form. A declared SAM is excluded because its method
+        // descriptor, rather than `FunctionN`, is the representation authority.
+        let mut function_param_prelude = Vec::new();
+        if sam.is_none() {
+            for scope_index in own_scope_from..self.scope.len() {
+                let (_, raw, ty) = self.scope[scope_index].clone();
+                if !ty.is_unsigned() {
+                    continue;
+                }
+                let carrier = self.fresh_value();
+                self.scope[scope_index].1 = carrier;
+                let raw_value = self.emit_get_value(raw);
+                let unboxed = self
+                    .unbox_unsigned(raw_value, ty)
+                    .expect("unsigned FunctionN parameter must provide unbox shape");
+                function_param_prelude.push(self.emit_variable(
+                    carrier,
+                    ty_to_ir(ty),
+                    Some(unboxed),
+                ));
+            }
         }
         // Closures return `Unit` through its reference carrier, including for `Unit?`.
         let sam_void_pre = matches!(&sam, Some((_, _, _, true)));
@@ -9537,17 +9551,35 @@ impl<'a> Lower<'a> {
         // user `return` in the lambda becomes a real return from the *enclosing* method (a correct
         // non-local return), not the lambda.
         let (ret_ty, block, inline_body) = if diverges {
-            let b = self.emit_block(vec![ve], None);
-            (ty_to_ir(lambda_ret), b, ve)
+            let mut stmts = function_param_prelude.clone();
+            stmts.push(ve);
+            let b = self.emit_block(stmts, None);
+            let inline = if function_param_prelude.is_empty() {
+                ve
+            } else {
+                self.emit_block(function_param_prelude.clone(), Some(ve))
+            };
+            (ty_to_ir(lambda_ret), b, inline)
         } else if sam_void {
             // The SAM method returns `void` (`run()V`): run the body for effect, no return value.
-            let b = self.emit_block(vec![ve], None);
-            (ty_to_ir(Ty::Unit), b, ve)
+            let mut stmts = function_param_prelude.clone();
+            stmts.push(ve);
+            let b = self.emit_block(stmts, None);
+            let inline = if function_param_prelude.is_empty() {
+                ve
+            } else {
+                self.emit_block(function_param_prelude.clone(), Some(ve))
+            };
+            (ty_to_ir(Ty::Unit), b, inline)
         } else if lambda_ret == Ty::Unit {
             let unit = self.emit_unit();
             let ret = self.emit_return(Some(unit));
-            let b = self.emit_block(vec![ve, ret], None);
-            let inline_b = self.emit_block(vec![ve], Some(unit));
+            let mut method_stmts = function_param_prelude.clone();
+            method_stmts.extend([ve, ret]);
+            let b = self.emit_block(method_stmts, None);
+            let mut inline_stmts = function_param_prelude.clone();
+            inline_stmts.push(ve);
+            let inline_b = self.emit_block(inline_stmts, Some(unit));
             (ty_to_ir(stored_value_ty(Ty::Unit)), b, inline_b)
         } else {
             let ret_val = if lambda_ret.is_reference()
@@ -9558,16 +9590,53 @@ impl<'a> Lower<'a> {
             } else {
                 ve
             };
-            let ret = self.emit_return(Some(ret_val));
-            let b = self.emit_block(vec![ret], None);
-            (ty_to_ir(lambda_ret), b, ret_val)
+            // A plain `FunctionN` method returns `Object`. For an unsigned result that object is the
+            // unsigned inline-class wrapper, never the signed JVM carrier's wrapper. LambdaMetafactory
+            // can perform Java primitive boxing (`int` -> `Integer`) but cannot invent Kotlin's
+            // `UInt.box-impl`, so materialize that semantic adapter explicitly and declare the impl
+            // method's physical return as the wrapper. A user SAM is deliberately excluded: its own
+            // declared method descriptor decides whether a value-class result is carried unboxed.
+            //
+            // Keep the same boxed node as `inline_body`. A bytecode-spliced `FunctionN.invoke` site
+            // also promises `Object`, so real closures and inline hosts now share one producer
+            // invariant rather than repairing their results in separate emitter branches.
+            let (method_ret, function_value) = if sam.is_none() && lambda_ret.is_unsigned() {
+                let boxed = self
+                    .box_unsigned(ret_val, lambda_ret)
+                    .expect("unsigned lambda result must provide box shape");
+                let wrapper = lambda_ret
+                    .kotlin_class_internal()
+                    .expect("unsigned lambda result must name its wrapper");
+                (Ty::obj_name(wrapper), boxed)
+            } else {
+                (lambda_ret, ret_val)
+            };
+            let ret = self.emit_return(Some(function_value));
+            let mut method_stmts = function_param_prelude.clone();
+            method_stmts.push(ret);
+            let b = self.emit_block(method_stmts, None);
+            let inline = if function_param_prelude.is_empty() {
+                function_value
+            } else {
+                self.emit_block(function_param_prelude.clone(), Some(function_value))
+            };
+            (ty_to_ir(method_ret), b, inline)
         };
         let seq = self.next_synthetic_seq();
         let impl_name = format!("{}$lambda${}", self.cur_fn_name, seq);
         // Impl parameters: captured variables first, then the lambda's own parameters.
         let mut params_ir: Vec<Ty> = captures.iter().map(|(_, _, t)| ty_to_ir(*t)).collect();
         let own_params_from = params_ir.len() as u32;
-        params_ir.extend(sig.params.iter().map(|t| stored_value_ty(*t)));
+        params_ir.extend(sig.params.iter().map(|t| {
+            if sam.is_none() && t.is_unsigned() {
+                Ty::obj_name(
+                    t.kotlin_class_internal()
+                        .expect("unsigned FunctionN parameter must name its wrapper"),
+                )
+            } else {
+                stored_value_ty(*t)
+            }
+        }));
         let params_len = params_ir.len() as u32;
         let fid = self.ir.add_fun(IrFunction {
             name: impl_name,
@@ -15104,6 +15173,7 @@ impl<'a> Lower<'a> {
         let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
             func: lambda,
             args: Vec::new(),
+            params: Vec::new(),
             ret: Ty::obj("kotlin/Any"),
         });
         let msg = self.ir_const_str("Expected an exception to be thrown.".to_string());
@@ -15160,6 +15230,7 @@ impl<'a> Lower<'a> {
             let msg = self.ir.add_expr(IrExpr::InvokeFunction {
                 func: lambda,
                 args: Vec::new(),
+                params: Vec::new(),
                 ret: Ty::obj("kotlin/Any"),
             });
             self.emit_new_external(
@@ -15288,6 +15359,33 @@ impl<'a> Lower<'a> {
         Some(self.emit_block(vec![avar, bvar], Some(eq)))
     }
 
+    /// Apply the scalar portion of a physical-to-static coercion through one provenance-neutral rule.
+    ///
+    /// Calls, properties, indexed reads, and any future erased producer all present the same three
+    /// semantic facts here: the value expression, its substituted Kotlin type, and the physical type
+    /// left by the producer. Unsigned scalars select their inline-class adapter; other scalar targets
+    /// use the generic implicit-coercion node. The callers deliberately retain their own metadata and
+    /// reference-narrowing rules because those describe different representation histories, not a
+    /// different scalar adapter policy.
+    fn coerce_scalar_from_physical(
+        &mut self,
+        value: u32,
+        logical: Ty,
+        physical: Ty,
+    ) -> Option<u32> {
+        if !physical.is_reference() {
+            return None;
+        }
+        if logical.is_unsigned() {
+            return Some(
+                self.unbox_unsigned(value, logical)
+                    .expect("unsigned integer target must provide box/unbox shape"),
+            );
+        }
+        self.has_scalar_value_repr(logical)
+            .then(|| self.emit_type_op(IrTypeOp::ImplicitCoercion, value, ty_to_ir(logical)))
+    }
+
     /// Mark a value's substituted STATIC type for the backend's box/unbox coercion (an unsigned/primitive
     /// value out of an erased `Object` unboxes). A REFERENCE narrowing (`Object`→`String`, `Object[]`→
     /// `Array<Int>`) is NOT tagged here: the backend owns erasure and inserts that `checkcast` at the
@@ -15325,17 +15423,8 @@ impl<'a> Lower<'a> {
         if self.is_value_class_type(logical) && !physical.non_null().is_erased_top() {
             self.ir.logical_types.insert(read, ty_to_ir(logical));
         }
-        // An unsigned value out of an erased reference: checkcast to the inline-class object, then
-        // `unbox-impl` — the wrapper is `kotlin/UInt`, not `Integer`.
-        if logical.is_unsigned() && physical.is_reference() {
-            return self
-                .unbox_unsigned(read, logical)
-                .expect("unsigned integer target must provide box/unbox shape");
-        }
-        // A primitive out of an erased reference unboxes through the value-class pass's `ImplicitCoercion`
-        // channel — the emitter decides (box/unbox/nothing) from the value's actual type.
-        if self.has_scalar_value_repr(logical) && physical.is_reference() {
-            self.emit_type_op(IrTypeOp::ImplicitCoercion, read, ty_to_ir(logical))
+        if let Some(coerced) = self.coerce_scalar_from_physical(read, logical, physical) {
+            coerced
         } else if logical.is_reference()
             && !matches!(logical, Ty::Null)
             && physical.is_reference()
@@ -15774,6 +15863,7 @@ impl<'a> Lower<'a> {
         let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
             func: function,
             args: lowered,
+            params: params.to_vec(),
             ret: ty_to_ir(ret),
         });
         if suspend {
@@ -20699,6 +20789,7 @@ impl<'a> Lower<'a> {
                 let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
                     func,
                     args: ir_args,
+                    params: params.to_vec(),
                     ret: ty_to_ir(ret),
                 });
                 // A SUSPEND function value (`block: suspend (A)->R`) implements `Function{N+1}` and is a
@@ -21372,6 +21463,7 @@ impl<'a> Lower<'a> {
                 let invoke = self.ir.add_expr(IrExpr::InvokeFunction {
                     func,
                     args: ir_args,
+                    params: params.to_vec(),
                     ret: ty_to_ir(ret),
                 });
                 // A `suspend Bar.() -> R` value implements `Function{N+1}` (trailing `Continuation`)
