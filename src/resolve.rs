@@ -13701,7 +13701,7 @@ struct ImplicitPropertyWriteResolution {
     is_var: bool,
     source_owner: Option<TypeName>,
     classpath_getter: Option<crate::symbol_resolver::ResolvedMember>,
-    classpath_setter: Option<crate::libraries::LibraryCallable>,
+    classpath_setter: Option<crate::symbol_resolver::PropertySetterResolution>,
     extension_receiver: Option<Span>,
 }
 
@@ -15519,7 +15519,7 @@ impl<'a> Checker<'a> {
         &self,
         recv: Ty,
         name: &str,
-    ) -> Option<crate::libraries::LibraryCallable> {
+    ) -> Option<crate::symbol_resolver::PropertySetterResolution> {
         use crate::symbol_resolver::{SymRecv, Symbol};
         self.resolver()
             .resolve_symbol(SymRecv::Value(recv), name, &[], &[])
@@ -20901,7 +20901,7 @@ impl<'a> Checker<'a> {
             let getter = self.resolve_property_member(receiver, name);
             let setter = self.resolve_property_setter(receiver, name);
             if let Some(setter) = setter {
-                let ty = setter.params.first().copied().unwrap_or(Ty::Error);
+                let ty = setter.callable.params.first().copied().unwrap_or(Ty::Error);
                 return Some(ImplicitPropertyWriteResolution {
                     receiver,
                     property_ty: ty,
@@ -20939,7 +20939,10 @@ impl<'a> Checker<'a> {
                 property_ty: resolution.property_ty,
                 source_owner: resolution.source_owner,
                 classpath_getter: resolution.classpath_getter.clone().map(Box::new),
-                classpath_setter: resolution.classpath_setter.clone().map(Box::new),
+                classpath_setter: resolution
+                    .classpath_setter
+                    .clone()
+                    .map(|setter| Box::new(setter.callable)),
             },
         );
     }
@@ -29756,7 +29759,7 @@ impl<'a> Checker<'a> {
         &self,
         receiver: TypeName,
         name: &str,
-    ) -> Option<crate::libraries::LibraryCallable> {
+    ) -> Option<crate::symbol_resolver::PropertySetterResolution> {
         let mut work = vec![receiver];
         let mut seen = Vec::new();
         while let Some(current) = work.pop() {
@@ -36671,8 +36674,12 @@ impl<'a> Checker<'a> {
                                 self.diags
                                     .error(target_span, "'val' cannot be reassigned.".to_string());
                             }
+                            let expected = resolution
+                                .classpath_setter
+                                .as_ref()
+                                .map_or(resolution.property_ty, |setter| setter.value_ty_for(vt));
                             self.expect_assignable(
-                                resolution.property_ty,
+                                expected,
                                 vt,
                                 self.value_diagnostic_span(value, vt),
                                 "assignment",
@@ -36799,7 +36806,7 @@ impl<'a> Checker<'a> {
             .or_else(|| {
                 property_setter
                     .as_ref()
-                    .and_then(|setter| setter.params.first().copied())
+                    .and_then(|setter| setter.callable.params.first().copied())
             })
             .or_else(|| classpath_property.as_ref().map(|property| property.ret))
             .or_else(|| {
@@ -36843,20 +36850,23 @@ impl<'a> Checker<'a> {
             return;
         }
         if let Some(setter) = property_setter {
-            let pty = setter.params.first().copied().unwrap_or(Ty::Error);
+            // A JAVA setter parameter is a PLATFORM type: widen the expected type only for a
+            // nullable value (`value_ty_for`), so an incompatible argument still reports the
+            // declared parameter type and lowering keeps the erased `params[0]`.
+            let pty = setter.value_ty_for(vt);
             self.expect_assignable(pty, vt, self.value_diagnostic_span(value, vt), "assignment");
             // `property_setter` can only come from a property declaration. Preserve the selected
             // owner for every symbol source so lowering does not branch on module vs classpath.
-            let owner = setter.owner_type();
+            let owner = setter.callable.owner_type();
             self.stmt_lowers.insert(
                 s,
                 StmtLowering::MemberPropertyWrite {
                     owner,
-                    ty: setter.params.first().copied().unwrap_or(pty),
+                    ty: setter.callable.params.first().copied().unwrap_or(pty),
                     interface: self.resolved_owner_is_interface(owner),
                 },
             );
-            self.property_setters.insert(s, setter);
+            self.property_setters.insert(s, setter.callable);
             return;
         }
         if classpath_property.is_some() {

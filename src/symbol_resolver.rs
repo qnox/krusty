@@ -1541,6 +1541,32 @@ pub enum SymRecv<'q> {
     TopLevel,
 }
 
+/// A resolved synthetic-property SETTER (`recv.name = value`): the callable plus the write-side
+/// call fact the erased `params[0]` cannot carry — that a JAVA setter parameter is a PLATFORM
+/// type (`platform_nullable_params`) accepting nullable arguments. The checker widens the
+/// expected type only when the written value is nullable (mirroring
+/// [`apply_platform_call_parameter_nullability`]), so an incompatible argument still reports the
+/// declared (non-null) parameter type.
+#[derive(Clone, Debug)]
+pub struct PropertySetterResolution {
+    pub callable: LibraryCallable,
+    pub platform_value_param: bool,
+}
+
+impl PropertySetterResolution {
+    /// The type a written `value` is checked against: the declared parameter type, widened to its
+    /// nullable form only for a PLATFORM parameter facing a nullable value — the same shape
+    /// [`apply_platform_call_parameter_nullability`] gives a Java method call.
+    pub fn value_ty_for(&self, value: Ty) -> Ty {
+        let param = self.callable.params.first().copied().unwrap_or(Ty::Error);
+        if self.platform_value_param && (value.is_nullable() || value == Ty::Null) {
+            Ty::nullable(param)
+        } else {
+            param
+        }
+    }
+}
+
 /// What a name DENOTES on its receiver — the declared thing the resolver found, NOT how it is used.
 /// [`SymbolResolver::resolve_symbol`] resolves a name to one of these; the CALLER then applies whatever
 /// its syntax needs (invoke it, read it, write its setter, take a reference), including handling a
@@ -1551,7 +1577,7 @@ pub enum SymRecv<'q> {
 pub struct MemberFacets {
     pub call: Option<ResolvedMember>,
     pub read: Option<ResolvedMember>,
-    pub write: Option<LibraryCallable>,
+    pub write: Option<PropertySetterResolution>,
     pub method_ref: Option<LibraryMember>,
     pub property_ref: Option<ResolvedPropertyRef>,
     /// Every overload named `name` applicable to the receiver — instance members, operators, AND in-scope
@@ -1612,7 +1638,7 @@ impl Symbol {
         }
     }
     /// The setter of this property (`recv.name = v`).
-    pub fn property_setter(self) -> Option<LibraryCallable> {
+    pub fn property_setter(self) -> Option<PropertySetterResolution> {
         match self {
             Symbol::Member(f) => f.write,
             _ => None,
@@ -4007,7 +4033,8 @@ fn resolve_property_ref(
                 member.physical_ret,
                 member.descriptor,
             ),
-            resolve_property_setter(lib, recv, name, member_access),
+            resolve_property_setter(lib, recv, name, member_access)
+                .map(|resolution| resolution.callable),
         )
     };
     let direct_member = |callable: &LibraryCallable| {
@@ -4175,17 +4202,19 @@ fn resolve_property_member(
 }
 
 /// Resolve a `var` property's SETTER by its real `@Metadata` name — the write analogue of
-/// [`property_getter_via_query`]. Returns the setter `LibraryCallable` (its `owner`/`descriptor` drive
-/// the emitted `setX(v)` call, `params[0]` is the value type the write is checked against). `None` when
-/// the property is read-only (`val`, no setter), no source exposes it as a member property, or the
-/// setter is value-class `@JvmName`-mangled (`setId-<hash>` — left to the value-class path, which knows
-/// the logical type).
+/// [`property_getter_via_query`]. Returns the setter resolution: its `callable`'s
+/// `owner`/`descriptor` drive the emitted `setX(v)` call and `params[0]` is the value type the
+/// write is checked against, while `platform_value_param` carries the JAVA setter parameter's
+/// PLATFORM nullability (nullable arguments accepted) that the erased `params[0]` cannot spell.
+/// `None` when the property is read-only (`val`, no setter), no source exposes it as a member
+/// property, or the setter is value-class `@JvmName`-mangled (`setId-<hash>` — left to the
+/// value-class path, which knows the logical type).
 fn resolve_property_setter(
     lib: &dyn SemanticPlatform,
     recv: Ty,
     property: &str,
     member_access: Option<&MemberAccess<'_>>,
-) -> Option<LibraryCallable> {
+) -> Option<PropertySetterResolution> {
     let metadata_properties = lib
         .property_members(recv, property)
         .overloads
@@ -4206,7 +4235,11 @@ fn resolve_property_setter(
         if setter.params.len() != 1 {
             return None;
         }
-        return Some(setter);
+        // Kotlin `@Metadata` declares the parameter's EXACT nullability; no platform widening.
+        return Some(PropertySetterResolution {
+            callable: setter,
+            platform_value_param: false,
+        });
     }
     // No `@Metadata` property: a JAVA accessor pair (`isX`/`getX` + `setX(v)`) IS a synthetic
     // property (spec § Java synthetic properties). Kotlin only synthesizes a property when the
@@ -4239,7 +4272,25 @@ fn resolve_property_setter(
         }
     }
     match setters.as_slice() {
-        [setter] => Some(setter.callable.clone()),
+        [setter] => Some(PropertySetterResolution {
+            callable: setter.callable.clone(),
+            // A JAVA setter parameter is a PLATFORM type (the classpath/stub reader marks it in
+            // `platform_nullable_params`): the write accepts a nullable value too. The flag rides
+            // the same per-parameter representation Java METHOD calls already use — the checker
+            // widens the expected type only for a nullable argument, so an incompatible one still
+            // reports the declared parameter type.
+            platform_value_param: setter
+                .call_sig
+                .platform_nullable_params
+                .first()
+                .copied()
+                .unwrap_or(false)
+                && setter
+                    .callable
+                    .params
+                    .first()
+                    .is_some_and(|param| param.is_reference()),
+        }),
         _ => None,
     }
 }
