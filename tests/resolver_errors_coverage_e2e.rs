@@ -369,15 +369,30 @@ fn call_non_callable_property() {
 }
 
 // ---------------------------------------------------------------------------
-// Smart-cast on a `var` does not narrow (member absent after `is`)
+// Smart-cast on a `var`: narrows for a plain local (kotlinc's rule), but never
+// when a closure writes the var (a deferred write could reset it).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn no_smart_cast_on_var() {
+fn smart_cast_on_local_var_narrows() {
+    // kotlinc accepts this: a local `var` no closure writes smart-casts after `is`.
     let d = diags(
         "fun box(): Int { var a: Any = \"hi\"; if (a is String) { return a.length }; return 0 }",
     );
-    assert_rejected(&d, "no smart-cast on a var receiver");
+    assert!(
+        d.is_empty(),
+        "a local var smart-cast must compile (kotlinc accepts it), got: {d:?}"
+    );
+}
+
+#[test]
+fn no_smart_cast_on_var_written_in_closure() {
+    // kotlinc rejects the smart cast here ("captured by a changing closure"): the lambda can
+    // reset `a` between the `is`-check and the read.
+    let d = diags(
+        "fun box(): Int { var a: Any = \"hi\"; val f = { a = 1 }; if (a is String) { return a.length }; f(); return 0 }",
+    );
+    assert_rejected(&d, "no smart-cast on a var a closure writes");
 }
 
 // ---------------------------------------------------------------------------
