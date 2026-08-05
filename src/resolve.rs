@@ -31367,7 +31367,8 @@ impl<'a> Checker<'a> {
                                         c.owner.render()
                                     );
                                     // Stash the RESOLVED explicit type arguments, exactly as the
-                                    // bare-name and extension channels do: the lowerer reads them to
+                                    // extension channel does (unconditionally on explicit targs;
+                                    // every reader is gated on inline-ness): the lowerer reads them to
                                     // specialize a `<reified T>` inline callee's spliced body
                                     // (`kotlin.test.assertFailsWith<E> { … }` spelled fully
                                     // qualified). Without them the emitter cannot bind the reified

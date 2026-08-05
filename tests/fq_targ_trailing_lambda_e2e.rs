@@ -18,6 +18,10 @@ const LIB: &str = "package pkg\n\
     \x20   throw AssertionError(\"unexpected: \" + e)\n\
     \x20 }\n\
     \x20 throw AssertionError(message ?: \"expected an exception\")\n\
+    }\n\
+    fun <T> g(a: Int = 0, b: String, block: () -> T): T {\n\
+    \x20 if (a != 0) throw AssertionError(b)\n\
+    \x20 return block()\n\
     }\n";
 
 #[test]
@@ -64,18 +68,54 @@ fn fq_targ_trailing_lambda_reified_checker_clean() {
     assert!(diags.is_empty(), "expected clean check, got: {diags:?}");
 }
 
-/// Compile-and-run `main` with kotlin-test on the classpath, skipping when the toolchain or the
-/// kotlin-test jar is not provisioned.
-fn run_with_kotlin_test(main: &str) -> Option<String> {
-    let test_jar = common::kotlin_test_jar()?;
+#[test]
+fn fq_targ_named_arg_and_trailing_lambda_checker_clean() {
+    // The NAMED-argument channel adjacent to the new slot-mapped branch: `message` labelled, lambda
+    // trailing — resolves through `resolved_slots`, not the new mapping, and must stay clean.
+    // (`message = null` is a SEPARATE pre-existing gap: the named channel loses the parameter's
+    // metadata `String?` nullability and rejects the null.)
+    const MAIN: &str = "fun box(): String {\n\
+        \x20 val n = pkg.fw<Int>(message = \"m\") { 42 }\n\
+        \x20 return n.toString()\n\
+        }\n";
+    let Some(diags) = common::checker_diags_against("fq_targ_trailing_lambda", LIB, MAIN) else {
+        return;
+    };
+    assert!(diags.is_empty(), "expected clean check, got: {diags:?}");
+}
+
+#[test]
+fn fq_targ_trailing_lambda_mid_omission_rejected() {
+    // The border the new branch must NOT mis-accept: a positional argument cannot skip a leading
+    // defaulted parameter (`\"x\"` pairs with `a: Int`, kotlinc rejects). Guard against the
+    // slot-mapped branch ever swallowing the mismatch.
+    const MAIN: &str = "fun box(): String {\n\
+        \x20 val n = pkg.g<Int>(\"x\") { 42 }\n\
+        \x20 return n.toString()\n\
+        }\n";
+    let Some(diags) = common::checker_diags_against("fq_targ_trailing_lambda", LIB, MAIN) else {
+        return;
+    };
+    assert!(
+        !diags.is_empty(),
+        "expected a diagnostic for the positional String-into-Int argument"
+    );
+}
+
+/// Compile-and-run `main` with kotlin-test on the classpath. An unprovisioned kotlin-test jar is a
+/// FAILURE, never a skip — these are the verbatim-bug regression tests, and a silent pass-as-skip
+/// would hide exactly the regression they pin (see the toolchain-accessor rule in `common`).
+fn run_with_kotlin_test(main: &str) -> String {
+    let test_jar = common::kotlin_test_jar()
+        .expect("no kotlin-test jar found; provision the reference toolchain (`just` fetches it)");
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    Some(common::expect_box_run(
+    common::expect_box_run(
         main,
         "Main",
         &[stdlib, test_jar, jdk.clone()],
         Some(jdk.as_path()),
-    ))
+    )
 }
 
 #[test]
@@ -87,10 +127,7 @@ fn fq_assert_fails_with_targ_trailing_lambda() {
         \x20 val e = kotlin.test.assertFailsWith<IllegalStateException> { throw IllegalStateException(\"boom\") }\n\
         \x20 return if (e.message == \"boom\") \"OK\" else \"fail: ${e.message}\"\n\
         }\n";
-    let Some(out) = run_with_kotlin_test(MAIN) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run_with_kotlin_test(MAIN), "OK");
 }
 
 #[test]
@@ -101,8 +138,5 @@ fn fq_assert_fails_with_message_and_trailing_lambda() {
         \x20 val e = kotlin.test.assertFailsWith<IllegalStateException>(\"m\") { throw IllegalStateException(\"boom\") }\n\
         \x20 return if (e.message == \"boom\") \"OK\" else \"fail: ${e.message}\"\n\
         }\n";
-    let Some(out) = run_with_kotlin_test(MAIN) else {
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(run_with_kotlin_test(MAIN), "OK");
 }
