@@ -6,9 +6,9 @@
 
 use super::common;
 
-/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
-/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
-fn run(src: &str, stem: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
+/// cannot turn either failure into a passing skip.
+fn run(src: &str, stem: &str) -> String {
     common::expect_box_run_with_stdlib(src, stem)
 }
 
@@ -27,9 +27,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcComputed") else {
-        return;
-    };
+    let out = run(src, "VcComputed");
     assert_eq!(out, "OK");
 }
 
@@ -56,9 +54,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcInit") else {
-        return;
-    };
+    let out = run(src, "VcInit");
     assert_eq!(out, "OK");
 }
 
@@ -90,9 +86,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcDataField") else {
-        return;
-    };
+    let out = run(src, "VcDataField");
     assert_eq!(out, "OK");
 }
 
@@ -113,9 +107,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcEqHash") else {
-        return;
-    };
+    let out = run(src, "VcEqHash");
     assert_eq!(out, "OK");
 }
 
@@ -136,9 +128,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcArithRet") else {
-        return;
-    };
+    let out = run(src, "VcArithRet");
     assert_eq!(out, "OK");
 }
 
@@ -159,9 +149,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcGenericFn") else {
-        return;
-    };
+    let out = run(src, "VcGenericFn");
     assert_eq!(out, "OK");
 }
 
@@ -184,9 +172,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcWhenIs") else {
-        return;
-    };
+    let out = run(src, "VcWhenIs");
     assert_eq!(out, "OK");
 }
 
@@ -219,9 +205,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcPoly") else {
-        return;
-    };
+    let out = run(src, "VcPoly");
     assert_eq!(out, "OK");
 }
 
@@ -242,9 +226,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcNested") else {
-        return;
-    };
+    let out = run(src, "VcNested");
     assert_eq!(out, "OK");
 }
 
@@ -266,9 +248,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcCompanion") else {
-        return;
-    };
+    let out = run(src, "VcCompanion");
     assert_eq!(out, "OK");
 }
 
@@ -286,9 +266,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcDefaultParam") else {
-        return;
-    };
+    let out = run(src, "VcDefaultParam");
     assert_eq!(out, "OK");
 }
 
@@ -309,9 +287,7 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcListAccess") else {
-        return;
-    };
+    let out = run(src, "VcListAccess");
     assert_eq!(out, "OK");
 }
 
@@ -332,8 +308,6 @@ fun box(): String {
     return "OK"
 }
 "#;
-    let Some(out) = run(src, "VcStrMember") else {
-        return;
-    };
+    let out = run(src, "VcStrMember");
     assert_eq!(out, "OK");
 }

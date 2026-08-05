@@ -38,6 +38,15 @@ use std::collections::{HashMap, HashSet};
 const I32_MIN: i32 = i32::MIN;
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
 type Branches = Vec<(Option<ExprId>, ExprId)>;
+/// The semantic pieces of a value-position `try`, after peeling the optional result coercion that
+/// must instead be applied to each selected branch. Keeping this extraction in one place ensures
+/// return-bound and local-bound forms recognize exactly the same IR shapes.
+struct ValueTryParts {
+    body: ExprId,
+    catches: Vec<crate::ir::IrCatch>,
+    finally: Option<ExprId>,
+    branch_wrap: Option<(IrTypeOp, Ty)>,
+}
 /// A direct suspension at a statement: `(optional bound local + type, the call ExprId)`. The call (a
 /// `Call` or `MethodCall`) is reused — the continuation is threaded into it by `emit_suspension`.
 type Suspension = (Option<(u32, Ty)>, ExprId);
@@ -203,6 +212,13 @@ pub fn lower_suspend(
         if let (Some(b), None) = (body, forward) {
             desugar_value_try(ir, b, &suspend_set, &ret_ty);
             desugar_value_when(ir, b, &suspend_set, &ret_ty);
+            // The value-`try`/`when` desugars bind each branch's value to a local, which can leave a
+            // suspension NESTED in that bound value (`v = Sub(mk().tag)`) — a position the FIRST
+            // hoist pass (which ran before the desugars) never saw. Hoist again with a FRESH
+            // value-type map (the desugars declared new locals); already-normalized statements pass
+            // through unchanged.
+            let mut value_types = function_value_types(ir, fid, b);
+            hoist_suspensions(ir, b, &suspend_set, &orig_rets, &mut value_types);
             desugar_tail_suspend(ir, b, &suspend_set, &ret_ty);
         }
         let has_susp =
@@ -571,8 +587,10 @@ fn desugar_returns_under(ir: &mut IrFile, s: ExprId, suspend_set: &HashSet<u32>,
 /// flattener (which models a `try` STATEMENT) can handle it: `return try { … } catch { … }` becomes
 /// `var tmp = <default>; try { … tmp = <body value> } catch { … tmp = <catch value> }; return tmp`. A
 /// suspending branch value is bound to a fresh `Variable` first (the flattener's `stmt_suspension` handles
-/// a suspend `Variable` init, not a `SetValue`), then copied to `tmp`. Only `return <try>` is rewritten
-/// (the production shape); a `val`/assignment of a suspending `try` is left to skip the file.
+/// a suspend `Variable` init, not a `SetValue`), then copied to `tmp`. Both `return <try>` and a bound
+/// `val v = <try>` are rewritten (the latter targets the bound local directly), and a result COERCION
+/// wrapping the `try` (`suspend fun f(): Base = try { sub() } …`) moves onto each selected branch, like
+/// `desugar_value_when`'s branch wrap. A `SetValue` of a suspending `try` is left to skip the file.
 fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret_ty: &Ty) {
     let IrExpr::Block { stmts, value } = ir.exprs[b as usize].clone() else {
         return;
@@ -581,18 +599,7 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
     let mut changed = false;
     for s in stmts {
         if let IrExpr::Return(Some(e)) = ir.exprs[s as usize] {
-            if matches!(ir.exprs[e as usize], IrExpr::Try { .. })
-                && expr_calls_suspend(ir, e, suspend_set)
-            {
-                let IrExpr::Try {
-                    body,
-                    catches,
-                    finally,
-                    ..
-                } = ir.exprs[e as usize].clone()
-                else {
-                    unreachable!()
-                };
+            if let Some(parts) = suspending_value_try(ir, e, suspend_set) {
                 let tmp = max_value_index(ir) + 1;
                 let dflt = zero_value(ir, ret_ty);
                 let decl = ir.add_expr(IrExpr::Variable {
@@ -601,27 +608,40 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
                     init: Some(dflt),
                     named: false,
                 });
-                let new_body = assign_branch_to_tmp(ir, body, tmp, ret_ty, suspend_set, None);
-                let new_catches: Vec<crate::ir::IrCatch> = catches
-                    .into_iter()
-                    .map(|c| crate::ir::IrCatch {
-                        var: c.var,
-                        name: c.name,
-                        exc_internal: c.exc_internal,
-                        body: assign_branch_to_tmp(ir, c.body, tmp, ret_ty, suspend_set, None),
-                    })
-                    .collect();
-                let new_try = ir.add_expr(IrExpr::Try {
-                    body: new_body,
-                    catches: new_catches,
-                    finally,
-                    result: Ty::Unit,
-                });
+                // Add the target declaration before rewriting branches: a suspending branch may
+                // allocate another temporary via `max_value_index`, which must not reuse `tmp`.
+                let new_try = bind_value_try_to_local(ir, parts, tmp, ret_ty, suspend_set);
                 let get = ir.add_expr(IrExpr::GetValue(tmp));
                 let ret = ir.add_expr(IrExpr::Return(Some(get)));
                 new_stmts.push(decl);
                 new_stmts.push(new_try);
                 new_stmts.push(ret);
+                changed = true;
+                continue;
+            }
+        }
+        // The same value-position `try`, already bound to a local (`val v = try { … } …` — spelled
+        // in source, or produced by an earlier pass binding an expression body's result): rewrite in
+        // place, using the BOUND local as the branch-assignment target (`var v = <default>; try { …
+        // v = <body value> } catch { … v = <catch value> }`).
+        if let IrExpr::Variable {
+            index,
+            ty,
+            init: Some(init),
+            named,
+        } = ir.exprs[s as usize].clone()
+        {
+            if let Some(parts) = suspending_value_try(ir, init, suspend_set) {
+                let dflt = zero_value(ir, &ty);
+                let decl = ir.add_expr(IrExpr::Variable {
+                    index,
+                    ty,
+                    init: Some(dflt),
+                    named,
+                });
+                let new_try = bind_value_try_to_local(ir, parts, index, &ty, suspend_set);
+                new_stmts.push(decl);
+                new_stmts.push(new_try);
                 changed = true;
                 continue;
             }
@@ -634,6 +654,75 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
             value,
         };
     }
+}
+
+/// Recognize the one semantic value-`try` shape supported by the state-machine desugar. The source
+/// context (`return` versus a local initializer) is intentionally absent: both consumers must peel
+/// the same optional result coercion and apply the same suspension predicate.
+fn suspending_value_try(
+    ir: &IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> Option<ValueTryParts> {
+    // An expression body whose value coerces to its declared return type wraps the `Try` in a
+    // `TypeOp`. Move that operation onto each selected branch, like `desugar_value_when`.
+    let (try_expr, branch_wrap) = match ir.exprs[expression as usize].clone() {
+        IrExpr::TypeOp {
+            op,
+            arg,
+            type_operand,
+        } if matches!(ir.exprs[arg as usize], IrExpr::Try { .. }) => {
+            (arg, Some((op, type_operand)))
+        }
+        _ => (expression, None),
+    };
+    if !expr_calls_suspend(ir, try_expr, suspend_set) {
+        return None;
+    }
+    let IrExpr::Try {
+        body,
+        catches,
+        finally,
+        ..
+    } = ir.exprs[try_expr as usize].clone()
+    else {
+        return None;
+    };
+    Some(ValueTryParts {
+        body,
+        catches,
+        finally,
+        branch_wrap,
+    })
+}
+
+/// Turn the recognized value-`try` into a statement-position `try` assigning every value-producing
+/// branch to `target`. This single reconstruction path prevents return-bound and local-bound forms
+/// from drifting in catch/finally handling or coercion placement.
+fn bind_value_try_to_local(
+    ir: &mut IrFile,
+    parts: ValueTryParts,
+    target: u32,
+    ty: &Ty,
+    suspend_set: &HashSet<u32>,
+) -> ExprId {
+    let new_body = assign_branch_to_tmp(ir, parts.body, target, ty, suspend_set, parts.branch_wrap);
+    let new_catches: Vec<crate::ir::IrCatch> = parts
+        .catches
+        .into_iter()
+        .map(|catch| crate::ir::IrCatch {
+            var: catch.var,
+            name: catch.name,
+            exc_internal: catch.exc_internal,
+            body: assign_branch_to_tmp(ir, catch.body, target, ty, suspend_set, parts.branch_wrap),
+        })
+        .collect();
+    ir.add_expr(IrExpr::Try {
+        body: new_body,
+        catches: new_catches,
+        finally: parts.finally,
+        result: Ty::Unit,
+    })
 }
 
 /// Desugar a VALUE-position `when`/`if` in `return` position whose BRANCH VALUES suspend (but whose
@@ -1193,6 +1282,32 @@ fn hoist_expr(
         }
         IrExpr::MethodCall { .. } => {
             hoist_call_operands_in_order(ir, e, suspend_set, orig_rets, value_types, prelude);
+            e
+        }
+        // Constructors obey the same ordered-operand contract as calls and string concatenation.
+        // Reuse the shared planner so an effectful argument before a later suspension is snapshotted
+        // in source order (`New(effect(), suspend())`), while an operand whose verifier type cannot
+        // be recovered still declines safely. A constructor-only purity list would duplicate the
+        // planner and reject shapes it already handles generically.
+        IrExpr::New { args, .. } => {
+            let operands: Vec<Option<ExprId>> = args.iter().map(|&arg| Some(arg)).collect();
+            let Some(new_operands) = hoist_operands_in_order(
+                ir,
+                &operands,
+                suspend_set,
+                orig_rets,
+                value_types,
+                prelude,
+            ) else {
+                return e;
+            };
+            let new_args = new_operands
+                .into_iter()
+                .map(|arg| arg.expect("constructor operands have no default-argument holes"))
+                .collect();
+            if let IrExpr::New { args, .. } = &mut ir.exprs[e as usize] {
+                *args = new_args;
+            }
             e
         }
         IrExpr::GetField {
@@ -3893,12 +4008,14 @@ impl Flat<'_> {
                     return;
                 }
             }
-            // A `try { … } catch (e) { … }` STATEMENT whose body suspends. Model the common shape: a
-            // SINGLE catch, no `finally`, a straight-line catch body (which MAY itself suspend). The
-            // try-body states are marked with a handler; the assembly's dispatch `catch` routes an
-            // exception thrown while `this.label` is one of them to the handler state, leaving a suspension
-            // BEFORE/AFTER the try uncaught. Richer shapes (finally, multiple catches, a BRANCH in the
-            // catch) skip the whole file.
+            // A `try { … } catch (e) { … }` STATEMENT whose body suspends. Modeled shapes: one or
+            // more NON-suspending catches, or a SINGLE straight-line catch that MAY itself suspend
+            // — no `finally` either way. The try-body states are marked with a handler; the
+            // assembly's dispatch `catch` routes an exception thrown while `this.label` is one of
+            // them to the handler state, leaving a suspension BEFORE/AFTER the try uncaught; the
+            // handler re-checks the exception's type per arm (`instanceof`) and re-throws a
+            // non-matching one. Richer shapes (finally combinations, a suspending catch among
+            // several, a BRANCH in a suspending catch) skip the whole file.
             if let IrExpr::Try {
                 body,
                 catches,
@@ -3973,13 +4090,17 @@ impl Flat<'_> {
                         self.states[cur] = out;
                         return;
                     }
-                    // Anything other than a single `catch` (no finally) is unmodeled.
-                    if catches.len() != 1 {
+                    // Multiple catches are modeled only when NO catch body suspends (each arm then
+                    // emits entirely inside the one handler state); a suspending catch body is
+                    // modeled only when it is the sole catch.
+                    let catch_suspends = catches
+                        .iter()
+                        .any(|c| expr_calls_suspend(self.ir, c.body, self.suspend));
+                    if catches.is_empty() || (catches.len() > 1 && catch_suspends) {
                         self.failed = true;
                         self.states[cur] = out;
                         return;
                     }
-                    let catch_suspends = expr_calls_suspend(self.ir, catches[0].body, self.suspend);
                     // A SUSPENDING catch that additionally branches (`When` from a `?.`/elvis/`if`)
                     // spans resume states with branch temps the handler frame can't reconcile — skip.
                     // A NON-suspending catch emits entirely inside its handler state (its temps are
@@ -3995,7 +4116,6 @@ impl Flat<'_> {
                         self.states[cur] = out;
                         return;
                     }
-                    let catch = catches.into_iter().next().unwrap();
                     let saved = self.cur_handler;
                     // `try_after` and `handler` belong to the ENCLOSING handler region, not this try's.
                     let try_after = self.new_state();
@@ -4013,46 +4133,99 @@ impl Flat<'_> {
                     self.flatten(&body_stmts, try_entry, Some(try_after));
                     let a_body = std::mem::replace(&mut self.assigned, a_entry);
                     self.cur_handler = saved;
-                    // Handler state: the stashed exception arrives in `result` (loaded into `r_v` at the
-                    // loop top, like a resume value).
-                    let exc_ty = Ty::obj(&catch.exc_internal.render());
-                    let catch_stmts = if catch_suspends {
-                        // The catch body itself suspends, so `r_v` is clobbered by its own resume. Bind
-                        // the exception ONCE from `r_v` on handler entry into its spilled local `ev`
-                        // (whose reads were pre-rewritten in `build_state_machine`); the spill machinery
-                        // then carries it across the catch's suspension and restores it for the later
-                        // reads (`throw e`).
-                        let ev = self.catch_spills[&catch.var];
-                        let rv = self.gv(self.r_v);
-                        let cast = self.add(IrExpr::TypeOp {
-                            op: IrTypeOp::Cast,
-                            arg: rv,
-                            type_operand: exc_ty,
-                        });
-                        let bind = self.add(IrExpr::SetValue {
-                            var: ev,
-                            value: cast,
-                        });
-                        let mut cs = vec![bind];
-                        cs.extend(self.block_stmts(catch.body));
-                        cs
-                    } else {
-                        // A NON-suspending catch body: `r_v` still holds the exception throughout, so
-                        // read it there directly. Avoids a catch-variable LOCAL — which the IR's
-                        // value-index reuse can alias with a body local of another type, and which the
-                        // emitter can slot-coalesce with an `int` temp (a ref stored into an int slot →
-                        // VerifyError).
-                        let mut reads: Vec<ExprId> = Vec::new();
-                        collect_getvalue(self.ir, catch.body, catch.var, &mut reads);
-                        for n in reads {
+                    // Handler state: the stashed exception arrives in `result` (loaded into `r_v` at
+                    // the loop top, like a resume value). The dispatch's exception routing is a
+                    // catch-ALL (`catch (Throwable)` around the state loop), so the handler must
+                    // re-check the exception's type itself — each catch arm is guarded by
+                    // `instanceof` and a non-matching exception RE-THROWS (kotlinc semantics: it
+                    // propagates out of the coroutine; running the arm unguarded silently swallowed
+                    // it). A `Throwable`-typed catch needs no guard and makes later arms dead.
+                    let mut arms: Branches = Vec::new();
+                    let mut full_cover = false;
+                    for catch in catches {
+                        let exc_internal = catch.exc_internal.render();
+                        let exc_ty = Ty::obj(&exc_internal);
+                        let arm_stmts: Vec<ExprId> = if catch_suspends {
+                            // The catch body itself suspends, so `r_v` is clobbered by its own
+                            // resume. Bind the exception ONCE from `r_v` on arm entry into its
+                            // spilled local `ev` (whose reads were pre-rewritten in
+                            // `build_state_machine`); the spill machinery then carries it across
+                            // the catch's suspension and restores it for the later reads
+                            // (`throw e`).
+                            let ev = self.catch_spills[&catch.var];
                             let rv = self.gv(self.r_v);
-                            self.ir.exprs[n as usize] = IrExpr::TypeOp {
+                            let cast = self.add(IrExpr::TypeOp {
                                 op: IrTypeOp::Cast,
                                 arg: rv,
                                 type_operand: exc_ty,
-                            };
+                            });
+                            let bind = self.add(IrExpr::SetValue {
+                                var: ev,
+                                value: cast,
+                            });
+                            let mut cs = vec![bind];
+                            cs.extend(self.block_stmts(catch.body));
+                            cs
+                        } else {
+                            // A NON-suspending catch body: `r_v` still holds the exception
+                            // throughout, so read it there directly. Avoids a catch-variable LOCAL
+                            // — which the IR's value-index reuse can alias with a body local of
+                            // another type, and which the emitter can slot-coalesce with an `int`
+                            // temp (a ref stored into an int slot → VerifyError).
+                            let mut reads: Vec<ExprId> = Vec::new();
+                            collect_getvalue(self.ir, catch.body, catch.var, &mut reads);
+                            for n in reads {
+                                let rv = self.gv(self.r_v);
+                                self.ir.exprs[n as usize] = IrExpr::TypeOp {
+                                    op: IrTypeOp::Cast,
+                                    arg: rv,
+                                    type_operand: exc_ty,
+                                };
+                            }
+                            self.block_stmts(catch.body)
+                        };
+                        let blk = self.add(IrExpr::Block {
+                            stmts: arm_stmts,
+                            value: None,
+                        });
+                        full_cover = matches!(
+                            exc_internal.as_str(),
+                            "kotlin/Throwable" | "java/lang/Throwable"
+                        );
+                        if full_cover {
+                            arms.push((None, blk));
+                            break; // later arms are dead
                         }
-                        self.block_stmts(catch.body)
+                        let rv = self.gv(self.r_v);
+                        let guard = self.add(IrExpr::TypeOp {
+                            op: IrTypeOp::InstanceOf,
+                            arg: rv,
+                            type_operand: exc_ty,
+                        });
+                        arms.push((Some(guard), blk));
+                    }
+                    if !full_cover {
+                        // else: no arm matches — re-throw the stashed exception.
+                        let rv = self.gv(self.r_v);
+                        let exc = self.add(IrExpr::TypeOp {
+                            op: IrTypeOp::Cast,
+                            arg: rv,
+                            type_operand: Ty::obj("java/lang/Throwable"),
+                        });
+                        let thr = self.add(IrExpr::Throw { operand: exc });
+                        arms.push((
+                            None,
+                            self.add(IrExpr::Block {
+                                stmts: vec![thr],
+                                value: None,
+                            }),
+                        ));
+                    }
+                    let catch_stmts: Vec<ExprId> = if arms.len() == 1 {
+                        // A single unguarded arm (a full-coverage catch) keeps the direct shape.
+                        self.block_stmts(arms[0].1)
+                    } else {
+                        vec![self.add(IrExpr::When { branches: arms })]
                     };
                     self.flatten(&catch_stmts, handler, Some(try_after));
                     // `try_after` joins the body and handler paths: a spilled local is definitely

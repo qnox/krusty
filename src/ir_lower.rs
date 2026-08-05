@@ -9661,6 +9661,18 @@ impl<'a> Lower<'a> {
         let Some(cur) = self.cur_class else {
             return false;
         };
+        // Calls, reads, and writes are recorded in different checker maps because they attach to
+        // different AST node kinds. Their capture decision is nevertheless one semantic rule: the
+        // in-scope enclosing instance must be a valid dispatch receiver for the selected extension
+        // owner, across source and dependency symbol providers alike.
+        fn uses_enclosing_extension_dispatch(
+            lo: &Lower<'_>,
+            cur: TypeName,
+            owner: TypeName,
+        ) -> bool {
+            lo.syms
+                .is_assignable_across_sources(Ty::obj_name(cur), Ty::obj_name(owner))
+        }
         fn scan(lo: &Lower, cur: TypeName, bound: &[String], e: AstExprId, deep: bool) -> bool {
             if let Expr::Name(n) = lo.afile.expr(e) {
                 // `this`/`super` (incl. labeled `this@Outer`) are bare names here, not a dedicated
@@ -9684,6 +9696,25 @@ impl<'a> Lower<'a> {
                     return true;
                 }
             }
+            // A selected MEMBER EXTENSION use dispatched on the enclosing instance is an enclosing-
+            // `this` reference the source never spells: `it.toResponse()` / `it.tag` name only the
+            // EXTENSION receiver, while the dispatch receiver is the implicit `this` the accessor
+            // call needs (`member_extension_dispatch_value`). Assignability, not equality — the
+            // extension may be declared on a base class of `cur`.
+            if let Some(ResolvedCall::MemberExtension { owner, .. }) =
+                lo.info.resolved_calls.get(&e)
+            {
+                if uses_enclosing_extension_dispatch(lo, cur, *owner) {
+                    return true;
+                }
+            }
+            if let Some(ExprLowering::MemberExtensionPropertyRead { owner, .. }) =
+                lo.info.expr_lowers.get(&e)
+            {
+                if uses_enclosing_extension_dispatch(lo, cur, *owner) {
+                    return true;
+                }
+            }
             // A SHALLOW (inline-splice) scan does not descend into a NESTED lambda's body.
             if !deep && matches!(lo.afile.expr(e), Expr::Lambda { .. }) {
                 return false;
@@ -9702,6 +9733,15 @@ impl<'a> Lower<'a> {
                                     .instance_members(Ty::obj_name(cur), name)
                                     .is_empty())
                         {
+                            return true;
+                        }
+                    }
+                    // A member extension PROPERTY write (`it.mark = v`) dispatches on the
+                    // enclosing `this` the same way the read/call forms above do.
+                    if let Some(StmtLowering::MemberExtensionPropertyWrite { owner, .. }) =
+                        lo.info.stmt_lowers.get(&s)
+                    {
+                        if uses_enclosing_extension_dispatch(lo, cur, *owner) {
                             return true;
                         }
                     }
@@ -26635,14 +26675,19 @@ fn body_has_disallowed_return(file: &ast::File, e: AstExprId, own_label: &str) -
     expr_bad(file, e, own_label)
 }
 
+/// Whether `e` lowers to a branch, and so is declined by the vararg-pack paths that call this (the
+/// whole call then fails to lower and the file skips).
+///
+/// The emitter itself no longer *needs* this: a mid-fill element's stack-map frames now type the held
+/// `[array, array, index]` (`Emitter::emit_value_over`). It stays as a conservative restriction —
+/// lifting it turns skips into emitted code, which needs its own corpus round-trip. `Try` is the one
+/// case that must keep bailing: an exception handler CLEARS the operand stack, so the partly-built
+/// array held there is lost and no frame can describe it.
 fn is_branchy(file: &ast::File, e: AstExprId) -> bool {
     match file.expr(e) {
         Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } => true,
-        // A safe call `recv?.m()` lowers to a null-check branch (a stackmap frame), so it is not safe to
-        // splice mid-sequence (e.g. as an array-literal element) — treat it as branchy so callers bail.
+        // A safe call `recv?.m()` lowers to a null-check branch (a stackmap frame).
         Expr::SafeCall { .. } => true,
-        // A `try`/`catch` expression emits exception-handler merge frames; as a mid-`Vararg`-fill element
-        // those frames land inside the element-store sequence and fail the verifier — bail (skip).
         Expr::Try { .. } => true,
         Expr::Binary { op, lhs, .. } => {
             use ast::BinOp::*;
