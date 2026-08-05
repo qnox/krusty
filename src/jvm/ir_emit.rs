@@ -10583,9 +10583,6 @@ impl<'a> Emitter<'a> {
         code.invokevirtual(m, slot_words(ty) as i32, 1);
     }
 
-    /// Whether emitting `e` as a value records a StackMapTable frame (a primitive comparison, a
-    /// `when`, or a `while` — anywhere in its subtree). Such an expression can't be emitted while
-    /// other operands sit on the stack (its merge frames would omit them); callers spill first.
     /// Whether an operand held on the stack BELOW `e` must be spilled to a temp instead
     /// (`pending_stack` must not be used across it): a `try` in the subtree — the JVM clears the
     /// operand stack on handler entry, so a held value would be lost (and its handler frame mistyped) —
@@ -10608,6 +10605,9 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Whether emitting `e` records a StackMapTable frame anywhere in its subtree. An operand
+    /// sequence uses this semantic fact either to spill earlier values to locals or, where the
+    /// instruction shape must keep them live, to describe them through [`Self::emit_value_over`].
     fn records_frame(&self, e: u32) -> bool {
         use IrBinOp::*;
         match self.ir.expr(e) {
@@ -10741,10 +10741,13 @@ impl<'a> Emitter<'a> {
             self.emit_value(e, code);
             return;
         }
+        // Preserve an outer held-operand context exactly. Nested emission may itself use this helper;
+        // restoring a saved depth makes the scope rule explicit and cannot accidentally retain or
+        // remove entries based on the nested call's final length.
+        let outer_depth = self.pending_stack.len();
         self.pending_stack.extend_from_slice(held);
         self.emit_value(e, code);
-        self.pending_stack
-            .truncate(self.pending_stack.len() - held.len());
+        self.pending_stack.truncate(outer_depth);
     }
 
     /// The two `[receiver, receiver]` stack entries a `dup`-then-call sequence holds. The receiver
@@ -10999,9 +11002,9 @@ impl<'a> Emitter<'a> {
                 {
                     self.emit_value(lhs, code);
                     let lv = self.verif_single(lt);
-                    self.pending_stack.push(lv);
-                    self.emit_value(rhs, code);
-                    self.pending_stack.pop();
+                    // Use the same scoped pending-stack path as container fills and array
+                    // subscripts; all held-operand frames now share one restoration invariant.
+                    self.emit_value_over(rhs, &[lv], code);
                 } else {
                     self.emit_operands(&[lhs, rhs], code);
                 }
