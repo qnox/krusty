@@ -127,6 +127,38 @@ fn invoke_convention_cross_file_is_the_residual_gap() {
          deleting the check, and drop the residual gap from docs/SPEC.md"
     );
 
+    // A failed compile alone cannot support the SPEC's diagnostic distinction: the runner returns
+    // `None` for both a silent refusal and an ordinary front-end error. Ask the same module-prepared
+    // front end used by compilation and pin that the plain convention currently declines WITHOUT a
+    // diagnostic. This is deliberately checked before the suspend spelling below, so a future fix
+    // cannot accidentally trade the silent gap for a newly noisy one while leaving the runtime
+    // assertion above unchanged.
+    let plain_diagnostics =
+        common::module_front_end_diagnostics(&[("Lib.kt", LIB), ("Main.kt", MAIN)])
+            .expect("the JVM toolchain is provisioned for the runtime assertion above");
+    assert!(
+        plain_diagnostics.is_empty(),
+        "the non-suspend cross-file invoke gap is currently silent, got {plain_diagnostics:?}"
+    );
+
+    // The suspend form reaches a different explicit guard: extension-operator `invoke` lowering
+    // cannot thread a continuation yet, so checker selection declines and the call is diagnosed.
+    // Pin the exact public diagnostic promised by the SPEC instead of inferring it from another
+    // `None` result. Both declarations are otherwise the same provider-neutral module shapes.
+    const SUSPEND_LIB: &str = "class Box(var v: Int)\n\
+                               suspend operator fun Box.invoke(): Int = v\n";
+    const SUSPEND_MAIN: &str = "suspend fun drive(a: Box): Int = a()\n";
+    let suspend_diagnostics =
+        common::module_front_end_diagnostics(&[("Lib.kt", SUSPEND_LIB), ("Main.kt", SUSPEND_MAIN)])
+            .expect("the JVM toolchain is provisioned for the runtime assertion above");
+    assert!(
+        suspend_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic == "unresolved function 'a'"),
+        "the suspend cross-file invoke gap must stay loud and attributable, got \
+         {suspend_diagnostics:?}"
+    );
+
     const SAME_FILE: &str = "class Box(var v: Int)\n\
                              operator fun Box.invoke(): Int = v\n\
                              fun box(): String {\n\
