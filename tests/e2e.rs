@@ -182,6 +182,8 @@ mod classpath_member_overload_no_names_e2e;
 mod classpath_member_receiver_lambda_e2e;
 #[path = "classpath_named_arg_skips_default_e2e.rs"]
 mod classpath_named_arg_skips_default_e2e;
+#[path = "classpath_named_nullable_toplevel_e2e.rs"]
+mod classpath_named_nullable_toplevel_e2e;
 #[path = "classpath_nested_ctor_reordered_named_valueclass_e2e.rs"]
 mod classpath_nested_ctor_reordered_named_valueclass_e2e;
 #[path = "classpath_nullable_arg_defaults_e2e.rs"]

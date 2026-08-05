@@ -17132,22 +17132,32 @@ impl<'a> Checker<'a> {
                 &value_signature,
                 trailing_lambda,
             ) {
-                Ok(slots) => mapped.push((
-                    self.call_slot_score_vararg(
+                Ok(slots) => {
+                    // The stored params are descriptor-erased (`String?` reads as `String`); the
+                    // metadata nullability rides `platform_nullable_params`. The positional channel
+                    // widens through `apply_platform_call_parameter_nullability`, which zips
+                    // params with args POSITIONALLY — named slots are param-indexed, so widen
+                    // slot-driven here or `f(message = null)` on `message: String?` scores as
+                    // null-into-`String` and the call is rejected.
+                    let widened = self.widen_platform_nullable_slot_params(
                         value_params,
+                        &value_signature.platform_nullable_params,
+                        &slots,
+                    );
+                    let score = self.call_slot_score_vararg(
+                        &widened,
                         &slots,
                         candidate.call_sig.vararg_index,
-                    ),
-                    slots,
-                    candidate,
-                )),
+                    );
+                    mapped.push((score, slots, candidate, widened));
+                }
                 Err(error) => failures.push((error, candidate)),
             }
         }
-        if !mapped.is_empty() && mapped.iter().all(|(score, _, _)| score.is_none()) {
+        if !mapped.is_empty() && mapped.iter().all(|(score, _, _, _)| score.is_none()) {
             if mapped.len() == 1 {
-                let (_, slots, candidate) = mapped.pop().unwrap();
-                for (parameter, argument) in candidate.callable.params.iter().zip(&slots) {
+                let (_, slots, _, widened) = mapped.pop().unwrap();
+                for (parameter, argument) in widened.iter().zip(&slots) {
                     if let Some(argument) = argument {
                         self.expect_assignable(
                             *parameter,
@@ -17167,9 +17177,9 @@ impl<'a> Checker<'a> {
             }
             return Err(());
         }
-        mapped.retain(|(score, _, _)| score.is_some());
-        mapped.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
-        if let Some((_, slots, _)) = mapped.into_iter().next() {
+        mapped.retain(|(score, _, _, _)| score.is_some());
+        mapped.sort_by_key(|(score, _, _, _)| std::cmp::Reverse(*score));
+        if let Some((_, slots, _, _)) = mapped.into_iter().next() {
             let selected_args = slots.iter().copied().flatten().collect::<Vec<_>>();
             let selected_types = selected_args
                 .iter()
@@ -30160,6 +30170,35 @@ impl<'a> Checker<'a> {
     /// Score a mapped call's slots against the candidate's parameters. At the vararg slot the
     /// ELEMENT form (a positional first element) and the ARRAY form (a spread, or the named
     /// whole-array assignment) both score — the slot map keeps element-form arguments.
+    /// Slot-driven form of `apply_platform_call_parameter_nullability`: widen a metadata-nullable
+    /// reference parameter to `T?` when the argument MAPPED TO ITS SLOT is null/nullable. The
+    /// positional helper zips params with args by position, which is wrong once named arguments
+    /// reorder or skip slots.
+    fn widen_platform_nullable_slot_params(
+        &self,
+        params: &[Ty],
+        nullable: &[bool],
+        slots: &[Option<ExprId>],
+    ) -> Vec<Ty> {
+        params
+            .iter()
+            .enumerate()
+            .map(|(i, &parameter)| {
+                let accepts_null = nullable.get(i).copied().unwrap_or(false)
+                    && parameter.is_reference()
+                    && slots.get(i).copied().flatten().is_some_and(|argument| {
+                        let aty = self.expr_types[argument.0 as usize];
+                        aty.is_nullable() || aty == Ty::Null
+                    });
+                if accepts_null {
+                    Ty::nullable(parameter)
+                } else {
+                    parameter
+                }
+            })
+            .collect()
+    }
+
     fn call_slot_score_vararg(
         &self,
         params: &[Ty],
