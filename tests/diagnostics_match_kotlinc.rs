@@ -206,6 +206,9 @@ fn resolved_but_unsupported_is_as_shapes_are_not_called_unresolved() {
         // `Ty::Fun` shape. Pin that representation-level invariant so parser spelling cannot select a
         // different diagnostic path.
         "fun f(p: Any) = p is Function1<DefinitelyAbsentClassifier, String>",
+        // An explicit `Any?` is still a concrete generic argument, not a star projection. The parser
+        // retains that distinction even though both resolve to the same bound.
+        "fun f(p: Any) = p is Function1<Any?, Any?>",
     ] {
         let diagnostics = common::front_end_diagnostics(source, &[], None);
         assert!(

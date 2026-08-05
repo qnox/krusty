@@ -23296,15 +23296,18 @@ impl<'a> Checker<'a> {
         let t = {
             let ot = self.expr(operand);
             let tt = self.resolve_ty(&ty);
-            // A function target carries concrete parameter/return types that JVM `instanceof
-            // FunctionN` cannot test. Kotlin rejects that ERASED check before any unresolved nested
-            // classifier (whereas `as (Missing) -> R` still reports `Missing`). Inspect the resolved
-            // semantic type, not the arrow parser fields: `typeref_leaf` deliberately normalizes both
-            // `(P) -> R` and `Function1<P, R>` to `Ty::Fun`, and the operator must treat those
-            // equivalent spellings consistently. Keep the whole shape on the loud unsupported path
-            // instead of accepting an always-erased test or manufacturing the cast operator's
-            // unresolved diagnostic.
-            if matches!(tt.non_null(), Ty::Fun(_)) {
+            // A function target with concrete parameter/return types carries information that JVM
+            // `instanceof FunctionN` cannot test. Kotlin rejects that ERASED check before any
+            // unresolved nested classifier (whereas `as (Missing) -> R` still reports `Missing`).
+            // `typeref_leaf` normalizes arrow and named function spellings to the same `Ty::Fun`, so
+            // use that semantic identity for the category decision. The one source-level distinction
+            // that survives separately is intentional: a named `FunctionN<*, ...>` is runtime-
+            // checkable by arity and Kotlin permits it. The parser marks stars while resolving them to
+            // their ordinary `Any?` bound, avoiding both spelling-specific name tests and source-text
+            // recovery here.
+            let runtime_checkable_star_function =
+                !ty.targs.is_empty() && ty.targs.iter().all(TypeRef::is_star_projection);
+            if matches!(tt.non_null(), Ty::Fun(_)) && !runtime_checkable_star_function {
                 self.diags.error(
                     self.span(e),
                     "krusty: 'is' on this type is not supported".to_string(),

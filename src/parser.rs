@@ -4589,7 +4589,12 @@ impl<'a> Parser<'a> {
                     name: "Any".to_string(),
                     flags: TrFlags::default()
                         .with_nullable(true)
-                        .with_definitely_non_null(false),
+                        .with_definitely_non_null(false)
+                        // `Any?` is the correct semantic bound, while this marker retains the one
+                        // source distinction needed by erased runtime checks. Without it,
+                        // `Function1<*, *>` and `Function1<Any?, Any?>` become indistinguishable:
+                        // Kotlin permits the former in `is` and rejects the latter as erased.
+                        .with_star_projection(true),
                     arg: None,
                     targs: Vec::new(),
                     span,
@@ -8727,6 +8732,36 @@ mod tests {
         let projected = &file.type_projection_args[&array.span.lo];
         assert!(projected.in_projection());
         assert_eq!(projected.name, "T");
+    }
+
+    #[test]
+    fn star_projection_keeps_its_source_identity_after_bound_erasure() {
+        // Both arguments resolve as nullable Any for ordinary type reasoning, but only the first was
+        // written as `*`. Runtime `is FunctionN<*, ...>` validation needs that distinction and must
+        // not infer it from the erased name/nullability pair.
+        let mut diagnostics = DiagSink::new();
+        let source = "fun projected(value: Function1<*, Any?>) {}";
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected: {}",
+            diagnostics.render("t", source)
+        );
+        let function = file
+            .decls
+            .iter()
+            .find_map(|&id| match file.decl(id) {
+                Decl::Fun(function) if function.name == "projected" => Some(function),
+                _ => None,
+            })
+            .expect("projected function");
+        let arguments = &function.params[0].ty.targs;
+        assert_eq!(arguments.len(), 2);
+        assert!(arguments.iter().all(|argument| argument.name == "Any"));
+        assert!(arguments.iter().all(TypeRef::nullable));
+        assert!(arguments[0].is_star_projection());
+        assert!(!arguments[1].is_star_projection());
     }
 
     #[test]
