@@ -174,6 +174,8 @@ mod classpath_jdk_static_e2e;
 mod classpath_jvmstatic_object_property_e2e;
 #[path = "classpath_member_metadata_alignment_e2e.rs"]
 mod classpath_member_metadata_alignment_e2e;
+#[path = "classpath_member_mutable_collection_e2e.rs"]
+mod classpath_member_mutable_collection_e2e;
 #[path = "classpath_member_overload_no_names_e2e.rs"]
 mod classpath_member_overload_no_names_e2e;
 #[path = "classpath_member_receiver_lambda_e2e.rs"]
