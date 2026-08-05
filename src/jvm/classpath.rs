@@ -1933,9 +1933,23 @@ impl Classpath {
                 CallSig::metadata_plain(desc_params.len())
             });
         };
-        let names = c.value_params.iter().map(|p| p.name.clone()).collect();
-        let defaults = c.value_params.iter().map(|p| p.has_default()).collect();
-        let vararg = c.vararg_index();
+        // The call sig spans the FULL aligned parameter list (`end` = receiver? + context + value),
+        // and the checker strips the context prefix per call site (`call_sig_without_context`) — the
+        // same contract as a SOURCE function, whose context params are leading `params` entries. So
+        // every per-parameter fact here must carry the context prefix, and the vararg index must be
+        // full-arity; metadata spells only the VALUE parameters (context params live in field 13),
+        // so prepend the context entries rather than letting the arity mismatch clear the names.
+        let ctx = c.context_count;
+        let names = c
+            .context_param_names
+            .iter()
+            .cloned()
+            .chain(c.value_params.iter().map(|p| p.name.clone()))
+            .collect();
+        let defaults = std::iter::repeat_n(false, ctx)
+            .chain(c.value_params.iter().map(|p| p.has_default()))
+            .collect();
+        let vararg = c.vararg_index().map(|index| index + ctx);
         let mut call_sig = if extension {
             CallSig::metadata_extension(end, names, defaults, vararg)
         } else {
@@ -1944,9 +1958,15 @@ impl Classpath {
                 end,
                 names,
                 defaults,
-                lambda_receivers,
-                lambda_receiver_params,
-                c.value_params.iter().map(|p| p.materialized()).collect(),
+                std::iter::repeat_n(None, ctx)
+                    .chain(lambda_receivers)
+                    .collect(),
+                std::iter::repeat_n(false, ctx)
+                    .chain(lambda_receiver_params)
+                    .collect(),
+                std::iter::repeat_n(false, ctx)
+                    .chain(c.value_params.iter().map(|p| p.materialized()))
+                    .collect(),
                 vararg,
             )
         };
@@ -4769,6 +4789,7 @@ mod fq_tests {
             contract: None,
             context_count: 0,
             context_params_nullable: Vec::new(),
+            context_param_names: Vec::new(),
         };
 
         let narrow = [
