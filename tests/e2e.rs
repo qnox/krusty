@@ -624,6 +624,8 @@ mod is_nullable_primitive_e2e;
 mod is_primitive_smartcast_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
+#[path = "java_ctor_sam_conversion_e2e.rs"]
+mod java_ctor_sam_conversion_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
 #[path = "java_nested_static_e2e.rs"]
