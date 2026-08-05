@@ -248,6 +248,45 @@ fn value_class_param_types(
     out
 }
 
+/// The VALUE CLASS a descriptor RETURN really has, per `@Metadata` — the return counterpart of
+/// [`value_class_param_types`].
+///
+/// A value-class return erases exactly like a value-class parameter: the JVM method hands back the
+/// UNDERLYING (`fun make(): K` → `make-<hash>()Ljava/lang/String;`) while `@Metadata` names `K`. The
+/// call site needs BOTH halves. Knowing only the Kotlin return makes it treat the result as a BOXED
+/// `K` and emit kotlinc's `checkcast K; K.unbox-impl()` over a `String` that is already the carrier —
+/// a ClassCastException. Reporting the value class HERE is what marks the physical result as the
+/// already-erased form, so the representation analysis leaves it alone.
+///
+/// Only a return whose metadata names a value class AND whose descriptor carries exactly that value
+/// class's underlying is reported; anything else stays `None` and the erased type stands. A NULLABLE
+/// value class is genuinely BOXED (the descriptor carries the class itself), and
+/// `metadata_value_class_underlying` already returns `None` for it — so it keeps the boxed handling
+/// it needs.
+fn value_class_return_type(
+    callable: &super::metadata::MetaFn,
+    desc_ret: &Ty,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> Option<Ty> {
+    let name = callable.ret_class?;
+    let underlying =
+        metadata_value_class_underlying(name, callable.ret_nullable(), value_underlying)?;
+    if underlying.non_null() != desc_ret.non_null() {
+        return None;
+    }
+    // A value class krusty models as a SCALAR of its own is recovered as THAT scalar, never as the
+    // boxed class — the same rule the parameter side applies, and for the same reason: `UInt`/`ULong`
+    // ride in the JVM primitive slot of their carrier, so a REFERENCE spelling would make the lowerer
+    // box a value the descriptor takes unboxed.
+    Some(
+        meta_ids()
+            .prim
+            .get(&name)
+            .copied()
+            .unwrap_or_else(|| Ty::obj_name(name)),
+    )
+}
+
 /// Whether a `@Metadata` source value-parameter class name aligns with a JVM-descriptor parameter `Ty`.
 /// This keeps the hot overload-alignment path in borrowed names: mapped builtins compare through
 /// `to_jvm_internal`, arrays/functions use structural `Ty` facts, and no descriptor `String` is built just
@@ -857,6 +896,15 @@ pub struct MetadataCallFacts {
     /// passing a `Duration` is checked against `Long` and no overload is applicable. `None` at a
     /// position whose declared type is not a value class (the overwhelming majority).
     pub value_class_params: Vec<Option<Ty>>,
+    /// The VALUE CLASS `@Metadata` declares as the RETURN when the JVM descriptor carries its erased
+    /// underlying (`fun make(): K` ↔ `()Ljava/lang/String;`).
+    ///
+    /// The parameter facet above restores a Kotlin type resolution cannot otherwise see; this one
+    /// additionally carries a CODEGEN fact — that the physical result is ALREADY the unboxed carrier.
+    /// Without it a call site that knows the Kotlin return is `K` boxes as kotlinc does at a genuine
+    /// box boundary and casts a `String` to `K`. `None` when the return is not a value class, or is a
+    /// NULLABLE one (which really is boxed).
+    pub value_class_ret: Option<Ty>,
 }
 
 impl MetadataCallFacts {
@@ -869,6 +917,7 @@ impl MetadataCallFacts {
             contract: None,
             context_count: 0,
             value_class_params: Vec::new(),
+            value_class_ret: None,
         }
     }
 }
@@ -1208,20 +1257,24 @@ fn meta_callable_aligns(
 /// The descriptor form of a metadata value parameter: a value class erases to its underlying
 /// (`Duration` → `J`; unsigned normalizes like the mapped builtins, `UInt` → `I`) — except NULLABLE,
 /// which boxes to the class itself. `actual` is the JVM descriptor segment; both forms are admitted.
+/// [`type_descriptor`] is the single `Ty`-to-JVM boundary and already normalizes metadata's dotted
+/// nested-class tail. Comparing its result directly is intentional: repeating that normalization in
+/// this metadata-only caller previously let classpath matching carry a private descriptor policy that
+/// bytecode emission did not share.
 fn member_param_desc_matches(
     class: TypeName,
     nullable: bool,
     actual: &str,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
 ) -> bool {
-    let class_desc = type_descriptor(kotlin_type_name_to_ty(class)).replace('.', "$");
+    let class_desc = type_descriptor(kotlin_type_name_to_ty(class));
     if class_desc == actual {
         return true;
     }
     let Some(erased) = metadata_value_class_underlying(class, nullable, value_underlying) else {
         return false;
     };
-    type_descriptor(erased).replace('.', "$") == actual
+    type_descriptor(erased) == actual
 }
 
 fn metadata_member_descriptor(
@@ -1244,7 +1297,10 @@ fn metadata_member_descriptor(
         let params: Vec<Ty> = signature.params.iter().map(erased).collect();
         method_descriptor(&params, signature.ret)
     };
-    Some(descriptor.replace('.', "$"))
+    // `method_descriptor` delegates every component to the same normalized descriptor boundary used
+    // by emission. Returning it unchanged prevents metadata members from maintaining a second,
+    // provider-specific spelling repair.
+    Some(descriptor)
 }
 
 fn metadata_member_shape_matches(
@@ -1896,6 +1952,7 @@ impl Classpath {
                 end,
                 value_underlying,
             ),
+            value_class_ret: value_class_return_type(c, desc_ret, value_underlying),
         }
     }
 
@@ -1923,6 +1980,16 @@ impl Classpath {
             // Members recover their logical value-class parameters on their own path (the mangled-member
             // loop in `jvm_libraries`), so this facet stays empty here rather than duplicating it.
             value_class_params: Vec::new(),
+            // The RETURN is NOT duplicated by that loop: it recovers the Kotlin return type but says
+            // nothing about the physical result already being the erased carrier, which is the fact a
+            // call site needs to skip the box. Derive it from the member's own descriptor.
+            value_class_ret: parse_method_descriptor(jvm_desc).and_then(|(_, ret)| {
+                value_class_return_type(
+                    function,
+                    &super::jvm_libraries::desc_to_ty(ret),
+                    value_underlying,
+                )
+            }),
         })
     }
 
@@ -2256,6 +2323,9 @@ impl Classpath {
                         call_sig: crate::libraries::CallSig::metadata_plain(
                             m.generic_sig.params.len(),
                         ),
+                        // No `.kotlin_builtins` member declares a value-class return: the builtins are
+                        // the mapped platform types, whose members predate value classes entirely.
+                        declared_ret: None,
                     }
                 })
             })
