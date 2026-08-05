@@ -267,16 +267,16 @@ fn semantic_adapter_does_not_rebox_an_existing_reference_carrier() {
     );
 }
 
-/// The guard that declines an unsigned RECEIVER of an inline scope function (see
-/// `unsigned_receiver_of_an_inline_scope_function_never_miscompiles` in
-/// `unsigned_classpath_call_e2e`) must not spill over to a splice whose boxed value comes from
-/// OUTSIDE it. `map`'s element arrives from `Iterator.next()` already boxed as `kotlin/UInt`, so this
-/// shape keeps emitting and is asserted STRICTLY: a decline here would mean the guard over-fired.
+/// Receiver coercion must not disturb a lambda parameter whose value comes from the inline host's
+/// own iteration. `map` passes a `List` receiver and obtains each element from `Iterator.next()`;
+/// that element is already boxed as `kotlin/UInt`, independently of the receiver-to-first-argument
+/// boundary exercised by the scope-function regression in `unsigned_classpath_call_e2e`.
 ///
 /// The value is `4294967295u`, whose signed reading is `-1`, so a wrong box that verifies and runs is
-/// caught as a wrong answer rather than passing silently.
+/// caught as a wrong answer rather than passing silently. This remains a strict assertion to pin the
+/// separation between receiver realization and values produced inside an inline host.
 #[test]
-fn unsigned_inline_splice_element_still_emits_under_the_receiver_guard() {
+fn unsigned_inline_splice_element_keeps_its_host_provided_box() {
     common::expect_box_ok_with_stdlib(
         "fun box(): String =\n\
     if (listOf(4294967295u).map { it }.first().toString() == \"4294967295\") \"OK\" else \"bad\"\n",
