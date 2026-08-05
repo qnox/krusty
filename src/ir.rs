@@ -104,7 +104,9 @@ pub enum IrConst {
     /// legal `Char` values (`Char.MIN_HIGH_SURROGATE`), so this cannot be a Rust `char`: converting
     /// through `char::from_u32` rejects them and silently folds them to NUL.
     Char(u16),
-    String(String),
+    /// A Kotlin `String` — a sequence of UTF-16 code units. Same reason as `Char`: `"\uD800"` and
+    /// `"😀"` have no Rust `String` spelling one code unit at a time.
+    String(crate::kt_string::KtString),
     Null,
 }
 

@@ -4585,8 +4585,11 @@ fn synth_value_members(ir: &mut IrFile, class_id: u32, under: &Under, has_init: 
             index: 0,
         })
     };
-    let str_const =
-        |ir: &mut IrFile, s: String| ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(s)));
+    let str_const = |ir: &mut IrFile, s: String| {
+        ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
+            crate::kt_string::KtString::from(s),
+        )))
+    };
     let ret_block = |ir: &mut IrFile, v: ExprId| {
         let r = ir.add_expr(IrExpr::Return(Some(v)));
         ir.add_expr(IrExpr::Block {
