@@ -462,6 +462,7 @@ impl<'a> ModuleSymbols<'a> {
 
     fn collect_property_accessors(
         &self,
+        recv: Ty,
         internal: TypeName,
         name: &str,
         out: &mut Vec<FunctionInfo>,
@@ -476,23 +477,38 @@ impl<'a> ModuleSymbols<'a> {
         };
         let here = *rung;
         *rung += 1;
-        for property in class.declared_props.values() {
+        for (prop_name, property) in class.declared_props.iter() {
+            // The declaration walk stores each property's ERASED type (`List<T>` → `List<Any>`) and
+            // source accessors carry no `generic_sig` to bind through, so a query serves the applied
+            // form — the same substitution `property_members` performs. The callable's physical
+            // return stays the erased declaration: erasure is what the emitted call sees.
+            // Computed only for the matching accessor: the walk discards every other property.
+            let applied = || {
+                self.syms.applied_declared_member_prop_ty(
+                    recv,
+                    class.internal_name(),
+                    prop_name,
+                    property.ty,
+                )
+            };
             let accessor = if property.getter_name == name {
-                Some(source_accessor(
+                let mut accessor = source_accessor(
                     CallableOwner {
                         internal: class.internal_name(),
                         is_interface: class.is_interface(),
                     },
                     name,
                     property.context_params.clone(),
-                    property.ty,
+                    applied(),
                     property.visibility,
                     here,
                     property.context_params.len(),
-                ))
+                );
+                accessor.callable.physical_ret = property.ty;
+                Some(accessor)
             } else if property.setter_name.as_deref() == Some(name) {
                 let mut params = property.context_params.clone();
-                params.push(property.ty);
+                params.push(applied());
                 Some(source_accessor(
                     CallableOwner {
                         internal: class.internal_name(),
@@ -513,10 +529,10 @@ impl<'a> ModuleSymbols<'a> {
             }
         }
         for interface in class.interfaces.iter_ids() {
-            self.collect_property_accessors(interface, name, out, seen, rung);
+            self.collect_property_accessors(recv, interface, name, out, seen, rung);
         }
         if let Some(superclass) = class.super_internal {
-            self.collect_property_accessors(superclass, name, out, seen, rung);
+            self.collect_property_accessors(recv, superclass, name, out, seen, rung);
         }
     }
 }
@@ -865,7 +881,14 @@ impl SymbolSource for ModuleSymbols<'_> {
             self.collect_members(internal, name, &mut overloads, &mut seen, &mut rung);
             let mut seen = std::collections::HashSet::new();
             let mut rung = 0;
-            self.collect_property_accessors(internal, name, &mut overloads, &mut seen, &mut rung);
+            self.collect_property_accessors(
+                recv,
+                internal,
+                name,
+                &mut overloads,
+                &mut seen,
+                &mut rung,
+            );
         }
         FunctionSet { overloads }
     }
@@ -876,6 +899,19 @@ impl SymbolSource for ModuleSymbols<'_> {
             let mut seen = std::collections::HashSet::new();
             let mut rung = 0;
             self.collect_properties(internal, name, &mut overloads, &mut seen, &mut rung);
+            // The declaration walk stores each property's ERASED type (`List<T>` → `List<Any>`);
+            // a query carries the concrete receiver, so serve the applied form — the same
+            // substitution ordinary member reads perform (`Holder<A>.items: List<T>` read through
+            // `Holder<B>` is `List<B>`). Inherited owners substitute through the applied hierarchy
+            // inside the shared helper.
+            for property in &mut overloads {
+                property.ty = self.syms.applied_declared_member_prop_ty(
+                    recv,
+                    property.owner,
+                    name,
+                    property.ty,
+                );
+            }
         }
         PropertySet { overloads }
     }

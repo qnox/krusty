@@ -974,6 +974,8 @@ mod smartcast_generic_iface_member_e2e;
 mod smartcast_this_narrowed_member_e2e;
 #[path = "source_fallback_companion_props_e2e.rs"]
 mod source_fallback_companion_props_e2e;
+#[path = "source_fallback_generic_member_e2e.rs"]
+mod source_fallback_generic_member_e2e;
 #[path = "spread_in_annotation_e2e.rs"]
 mod spread_in_annotation_e2e;
 #[path = "spread_operator_e2e.rs"]
