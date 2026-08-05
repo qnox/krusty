@@ -1692,6 +1692,16 @@ struct MemberExtensionProperty {
 pub struct AnonymousObjectCapture {
     pub name: String,
     pub ty: Ty,
+    /// Semantic source of the captured value. Keep this separate from `name`: `this$0` is one JVM
+    /// field spelling, not a reliable front-end discriminator. A backend or future target may choose
+    /// a different physical name while the enclosing-instance meaning remains unchanged.
+    pub source: AnonymousObjectCaptureSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnonymousObjectCaptureSource {
+    LexicalValue,
+    EnclosingInstance,
 }
 
 pub struct SymbolTable {
@@ -9693,6 +9703,12 @@ pub struct TypeInfo {
     /// [`ResolvedCall`] for the target kinds and the typed accessors ([`Self::resolved_member`],
     /// [`Self::resolved_top_level`], …).
     pub resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// The exact semantic receiver selected for an unqualified member access through the implicit-receiver
+    /// stack. This is deliberately separate from [`Self::resolved_calls`]: the selected callable says
+    /// what to invoke, while this map says which runtime object supplies its dispatch/extension
+    /// receiver. Reconstructing that choice in lowering from local names loses captured enclosing
+    /// instances (and can invoke/read a dependency member on the anonymous object itself).
+    pub implicit_receiver_selections: HashMap<ExprId, Ty>,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
     source_extension_properties: HashMap<ExprId, crate::libraries::PropertyInfo>,
     source_extension_property_writes: HashMap<StmtId, crate::libraries::PropertyInfo>,
@@ -10865,8 +10881,9 @@ pub enum ExprLowering {
     /// A `this@Label` that denotes the INNERMOST receiver (the current `this`), so it lowers as a bare
     /// `this`. Only recorded for the innermost match; an outer-receiver label is left unresolved/skipped.
     LabeledThisInner,
-    /// A `this@Outer` denoting the IMMEDIATE enclosing class of an `inner class` — one class level up —
-    /// so it lowers as the inner class's captured outer instance (`this.this$0`).
+    /// A `this@Outer` denoting the IMMEDIATE enclosing class of an `inner class` or an anonymous
+    /// object — one class level up — so it lowers as the class's captured outer instance
+    /// (`this.this$0`).
     LabeledThisOuter,
     /// A platform property implemented by an intrinsic getter.
     IntrinsicProperty(Box<crate::libraries::LibraryMember>),
@@ -11357,6 +11374,7 @@ fn make_checker<'a>(
         narrowed_this_member: HashMap::new(),
         pending_unknown_named_arg: HashMap::new(),
         resolved_calls: HashMap::new(),
+        implicit_receiver_selections: HashMap::new(),
         source_contracts: HashMap::new(),
         resolved_source_calls: HashMap::new(),
         source_extension_properties: HashMap::new(),
@@ -11407,7 +11425,6 @@ fn class_receiver_labels(
     symbols: &SymbolTable,
     current: Option<Ty>,
 ) -> Vec<(String, Ty, bool)> {
-    let mut labels = Vec::new();
     // Start from the collected signature's semantic nesting edge. Reconstructing the owner from
     // `ClassDecl::name` / `inner_of` would make receiver labels depend on whether this declaration was
     // spelled as a dotted nested source name, and previously required a separate fallback for an
@@ -11415,24 +11432,10 @@ fn class_receiver_labels(
     // signature, so its normalized internal name gives source files and later module consumers one
     // origin-independent path to the lexical outer chain.
     let current_internal = current.and_then(Ty::obj_internal);
-    let mut outer = current_internal
+    let outer = current_internal
         .and_then(|internal| symbols.class_by_type_name(internal))
         .and_then(ClassSig::inner_of_name);
-    while let Some(internal) = outer {
-        let Some(signature) = symbols.class_by_type_name(internal) else {
-            break;
-        };
-        let declaration = symbols
-            .class_simple_name(internal)
-            .unwrap_or_else(|| "<anonymous>".to_string());
-        labels.push((
-            class_declaration_label(&declaration).to_string(),
-            Ty::obj_name(signature.internal_name()),
-            true,
-        ));
-        outer = signature.inner_of_name();
-    }
-    labels.reverse();
+    let mut labels = enclosing_receiver_labels(symbols, outer);
     if let Some(ty) = current {
         // The current AST declaration is the authoritative source spelling for its explicit label;
         // using a reverse symbol-table lookup here would be ambiguous in an already-diagnosed duplicate
@@ -11440,6 +11443,44 @@ fn class_receiver_labels(
         labels.push((class_declaration_label(&class.name).to_string(), ty, true));
     }
     labels
+}
+
+/// Build receiver labels for one or more semantic enclosing-class roots. `roots` is nearest-first;
+/// each root's `inner_of` chain is expanded through the same path, deduplicated, then returned
+/// outermost-first. Ordinary inner classes and structurally owned anonymous objects feed this helper
+/// different roots but share the graph traversal and label construction policy.
+fn enclosing_receiver_labels(
+    symbols: &SymbolTable,
+    roots: impl IntoIterator<Item = TypeName>,
+) -> Vec<(String, Ty, bool)> {
+    let mut owners = Vec::new();
+    for root in roots {
+        let mut current = Some(root);
+        while let Some(internal) = current {
+            if owners.contains(&internal) {
+                break;
+            }
+            owners.push(internal);
+            current = symbols
+                .class_by_type_name(internal)
+                .and_then(ClassSig::inner_of_name);
+        }
+    }
+    owners
+        .into_iter()
+        .rev()
+        .filter_map(|internal| {
+            let signature = symbols.class_by_type_name(internal)?;
+            let declaration = symbols
+                .class_simple_name(internal)
+                .unwrap_or_else(|| "<anonymous>".to_string());
+            Some((
+                class_declaration_label(&declaration).to_string(),
+                Ty::obj_name(signature.internal_name()),
+                true,
+            ))
+        })
+        .collect()
 }
 
 fn anonymous_body_bound_names(
@@ -11577,10 +11618,66 @@ fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty
                 .any(|expression| expression_has_member_call_named(file, expression, name))
 }
 
+/// Whether an anonymous class body reaches the ENCLOSING class instance: an explicit `this@Outer`
+/// naming the immediate structural owner, or a reference to one of its members (declared or
+/// inherited, skipping names the anonymous class itself binds). Such references cannot be
+/// captured by value like an immutable property — they bind through the synthetic `this$0`
+/// outer-instance capture. Names the body does not reference keep the capture out, so a
+/// construction with superclass arguments (`object : Base(1) { … }`) stays on the
+/// ordinary constructor path.
+fn anonymous_body_needs_outer_this(
+    file: &File,
+    declaration: DeclId,
+    resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+    outer_label: &str,
+    outer: Ty,
+) -> bool {
+    let Decl::Class(class) = file.decl(declaration) else {
+        return false;
+    };
+    let Some(internal) = outer.obj_internal() else {
+        return false;
+    };
+    let bound = anonymous_body_bound_names(file, declaration);
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The receiver stack owns the source label spelling; do not recover it from a generated class
+    // name. Member names below come from the federated type shape, so this capture rule does not stop
+    // when a source owner inherits from a dependency classifier or require a source/classpath fallback.
+    names.insert(format!("this@{outer_label}"));
+    let mut hierarchy = vec![internal];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(owner) = hierarchy.pop() {
+        if !visited.insert(owner) {
+            continue;
+        }
+        let Some(shape) = resolver.resolve_type_name(owner) else {
+            continue;
+        };
+        names.extend(shape.members.iter().map(|member| member.name.clone()));
+        hierarchy.extend(shape.supertypes.iter_ids());
+    }
+    let names: std::collections::HashSet<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !bound.contains(*name))
+        .collect();
+    if names.is_empty() {
+        return false;
+    }
+    class
+        .methods
+        .iter()
+        .filter_map(|method| fun_body_expr(&method.body))
+        .chain(class.body_props.iter().filter_map(|property| property.init))
+        .chain(class.base_args.iter().copied())
+        .any(|expression| file.expr_uses_any_name_deep(expression, &names))
+}
+
 #[derive(Clone)]
 struct AnonymousCaptureCandidate {
     name: String,
     ty: Ty,
+    source: AnonymousObjectCaptureSource,
 }
 
 fn record_anonymous_construction_captures(
@@ -11602,14 +11699,27 @@ fn record_anonymous_construction_captures(
                 .any(|later| later.name == candidate.name)
         })
         .filter(|(_, candidate)| candidate.ty != Ty::Error)
-        .filter(|(_, candidate)| !bound.contains(&candidate.name))
-        .filter(|(_, candidate)| !anonymous_body_writes_name(file, declaration, &candidate.name))
         .filter(|(_, candidate)| {
-            anonymous_body_uses_name(file, declaration, &candidate.name, candidate.ty)
+            match candidate.source {
+                // Enclosing-instance need was decided against the anonymous body's receiver uses.
+                // It has no source variable name, so lexical bound/write/use filters do not apply.
+                AnonymousObjectCaptureSource::EnclosingInstance => true,
+                AnonymousObjectCaptureSource::LexicalValue => {
+                    !bound.contains(&candidate.name)
+                        && !anonymous_body_writes_name(file, declaration, &candidate.name)
+                        && anonymous_body_uses_name(
+                            file,
+                            declaration,
+                            &candidate.name,
+                            candidate.ty,
+                        )
+                }
+            }
         })
         .map(|(_, candidate)| AnonymousObjectCapture {
             name: candidate.name.clone(),
             ty: candidate.ty,
+            source: candidate.source,
         })
         .collect();
     captures.insert(declaration, selected);
@@ -11637,6 +11747,8 @@ fn install_anonymous_object_captures(
             {
                 continue;
             }
+            // Each capture becomes a private synthetic property; for the `this$0` capture this
+            // property doubles as the outer-instance field lowering reads at index 0.
             class.props.push((capture.name.clone(), capture.ty, false));
             class.declared_props.insert(
                 capture.name.clone(),
@@ -12186,6 +12298,10 @@ fn preinfer_returns_pass_with_owners(
             );
             let labels_depth = pre.this_labels.len();
             pre.set_this_ty(Some(dispatch_ty));
+            if anonymous_lexical_scope.declarations.contains(&d) {
+                let outer = pre.anonymous_outer_receiver_labels();
+                pre.this_labels.extend(outer);
+            }
             pre.this_labels
                 .extend(class_receiver_labels(cl, pre.syms, Some(dispatch_ty)));
             let properties = pre.scoped_properties(internal_name);
@@ -12610,8 +12726,14 @@ fn check_file_at_impl_mode(
                 c.set_this_ty(current_owner.map(Ty::obj_name));
                 // Push the enclosing-class labels for the duration of this class's member checks: the
                 // OUTER chain first (`this@Outer` for an `inner class`, resolved via `this$0`), then the
-                // class's own label (`this@C`) innermost. Walk `inner_of` outward.
-                let labels = class_receiver_labels(cl, c.syms, c.this_ty);
+                // class's own label (`this@C`) innermost. Walk `inner_of` outward. An anonymous object
+                // has no `inner_of` edge; its outer chain is the structural ownership chain.
+                let mut labels = class_receiver_labels(cl, c.syms, c.this_ty);
+                if anonymous_lexical_scope.declarations.contains(&d) {
+                    let mut outer = c.anonymous_outer_receiver_labels();
+                    outer.append(&mut labels);
+                    labels = outer;
+                }
                 let label_depth = labels.len();
                 c.this_labels.extend(labels);
                 let methods: Vec<&FunDecl> = cl.methods.iter().collect();
@@ -13494,6 +13616,7 @@ fn check_file_at_impl_mode(
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        implicit_receiver_selections,
         resolved_source_calls,
         source_extension_properties,
         source_extension_property_writes,
@@ -13648,6 +13771,7 @@ fn check_file_at_impl_mode(
         resolved_call_type_args,
         narrowed_this_member,
         resolved_calls,
+        implicit_receiver_selections,
         resolved_source_calls,
         source_extension_properties,
         source_extension_property_writes,
@@ -13950,8 +14074,9 @@ struct Checker<'a> {
     /// a class body pushes `(ClassName, ty, true)`; a receiver lambda / scope function pushes
     /// `(fnName, receiverTy, false)`. Resolves `this@Label`. The innermost entry is the current `this`
     /// (lowered as a bare `this`); a `this@Label` matching the IMMEDIATE outer CLASS (one class level up,
-    /// nothing but classes between) lowers via the inner class's `this$0`. Anything else type-checks but
-    /// the lowerer skips it (it can't yet reach a captured / multi-level outer receiver).
+    /// nothing but classes between) lowers through the current class's captured enclosing-instance
+    /// field. Anything else type-checks but the lowerer skips it (it can't yet reach a captured /
+    /// multi-level outer receiver).
     this_labels: Vec<(String, Ty, bool)>,
     /// Source class owners of a hoisted anonymous-object declaration, nearest first. They contribute
     /// lexical classifier scope but are not implicit runtime receivers (captures remain a separate ABI).
@@ -13997,6 +14122,10 @@ struct Checker<'a> {
     /// [`TypeInfo::resolved_calls`] so the lowerer reads them instead of re-resolving). See
     /// [`ResolvedCall`] for the variants.
     resolved_calls: HashMap<ExprId, ResolvedCall>,
+    /// Checker-selected receiver for a bare call or property read. The receiver stack is semantic scope
+    /// state, so this decision must cross the frontend/backend boundary rather than being guessed from
+    /// JVM slot names.
+    implicit_receiver_selections: HashMap<ExprId, Ty>,
     /// Decoded `contract { … }` effects of the current file's top-level functions, keyed by
     /// `DeclId`. Filled before the decl walk (decode is AST-only) so call sites see contracts
     /// irrespective of function declaration order.
@@ -15983,10 +16112,42 @@ impl<'a> Checker<'a> {
         receivers
     }
 
+    /// Receiver labels for the enclosing-class chain of a hoisted anonymous-object declaration —
+    /// the anonymous analogue of the `inner_of` walk in [`class_receiver_labels`]. The structural
+    /// owners sit in `lexical_class_context` nearest-first (installed by
+    /// [`Self::set_anonymous_lexical_class_context`]); each owner's own `inner_of` chain continues
+    /// outward. Returned outermost-first, matching [`class_receiver_labels`].
+    fn anonymous_outer_receiver_labels(&self) -> Vec<(String, Ty, bool)> {
+        enclosing_receiver_labels(self.syms, self.lexical_class_context.iter().copied())
+    }
+
+    /// The enclosing instance an anonymous-object construction captures: the innermost CLASS receiver
+    /// on the label stack, with its source label. The dispatch instance lowering supplies the value at
+    /// the construction site (an extension receiver is not a capturable enclosing instance), while the
+    /// label lets capture discovery recognize `this@Label` without parsing a generated class name.
+    fn anonymous_construction_outer_receiver(&self) -> Option<(&str, Ty)> {
+        self.this_labels
+            .iter()
+            .rev()
+            .find(|(_, _, is_class)| *is_class)
+            .map(|(label, receiver, _)| (label.as_str(), *receiver))
+    }
+
     fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
         if let Some(span) = receiver.extension_receiver {
             self.mark_extension_receiver_span_used(expression, span);
         }
+    }
+
+    /// Preserve the receiver selected while resolving a BARE member access and account for a
+    /// receiver-lambda capture in one operation. Lowering cannot safely repeat this lookup: an enclosing
+    /// class receiver may be represented by a synthetic field rather than a local `this` slot, and
+    /// provider-backed inheritance can make the declaration owner differ from the receiver's concrete
+    /// type.
+    fn mark_implicit_receiver_selection(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
+        self.implicit_receiver_selections
+            .insert(expression, receiver.ty);
+        self.mark_extension_receiver_used(expression, receiver);
     }
 
     fn mark_extension_receiver_stmt_used(&mut self, statement: StmtId, receiver: ImplicitReceiver) {
@@ -19493,9 +19654,31 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// True if `t` is a `@JvmInline value class` reference type (carries a `value_field`).
+    /// True if `t` names a `@JvmInline value class`, independent of which symbol provider owns it.
+    ///
+    /// Keep this as the single checker-level semantic query. The module provider exports its
+    /// `value_field` through the same `LibraryType::value_underlying` shape as decoded dependencies,
+    /// so callers must not pair a source-table lookup with a separate classpath fallback. Besides
+    /// duplicating policy, that split would fail to recognize value classes supplied by any future
+    /// provider added to the federated resolver.
     fn ty_is_value_class(&self, t: Ty) -> bool {
-        matches!(t, Ty::Obj(n, _) if self.syms.class_by_type_name(n).is_some_and(|c| c.value_field.is_some()))
+        t.non_null()
+            .kotlin_class_internal()
+            .is_some_and(|name| self.resolver().is_value_name(name))
+    }
+
+    /// True if `t` is an operand kotlinc forbids on either side of `===`/`!==`: an unsigned type or a
+    /// `@JvmInline value` class (both inline classes, whose boxed identity is not stable). Nullability
+    /// makes no difference — kotlinc rejects `VC? === VC?` too.
+    ///
+    /// The value-class query goes through the federated resolver, whose source already composes the
+    /// current module and dependencies. This rule must not reconstruct separate source/classpath
+    /// probes: provider origin does not change identity semantics, and a new provider must inherit the
+    /// rejection automatically. Without the federated query an external inline class can reach the
+    /// backend as its unboxed carrier and be compared or boxed as the unrelated signed JVM scalar.
+    fn identity_prohibited_operand(&self, t: Ty) -> bool {
+        let t = t.non_null();
+        t.is_unsigned() || self.ty_is_value_class(t)
     }
 
     fn value_class_uses_type_parameter_storage(&self, ty: Ty) -> bool {
@@ -20887,18 +21070,16 @@ impl<'a> Checker<'a> {
         //    former types the `set` argument as a zero-parameter function (box
         //    `callableReference/property/extensionPropertyWithExtensionType.kt`).
         //  * A VALUE-class-typed property has a `@JvmName`-mangled accessor (`getZ-<hash>`) that the
-        //    reference class does not spell. BOTH flavours must be tested: `ty_is_value_class` sees
-        //    only a SOURCE value class, so a CLASSPATH one — `UInt`, and every other stdlib
-        //    `@JvmInline` — needs the provider's `value_underlying` probe. Without that second arm
-        //    `class H(val u: UInt)` typed `(h::u).get()` as `UInt` while the reference still returned
-        //    an erased `Integer`, and the read threw `ClassCastException` instead of skipping.
+        //    reference class does not spell. `ty_is_value_class` uses the federated symbol shape, so
+        //    this one test covers source declarations, stdlib types such as `UInt`, dependency
+        //    metadata, and future providers. Without it, `(h::u).get()` can be typed as `UInt` while
+        //    the reference still returns an erased `Integer`, causing `ClassCastException`.
         //  * A property typed as a function WITH a receiver (or context parameters) is not realized
         //    as a plain `FunctionN` there.
         let realizable = |&t: &Ty| {
             let t = t.non_null();
             !t.mentions_ty_param()
                 && !self.ty_is_value_class(t)
-                && self.syms.libraries.value_underlying(t).is_none()
                 && !matches!(t, Ty::Fun(sig) if sig.has_receiver || sig.context_count > 0)
         };
         let args: &[Ty] = if args.iter().all(realizable) {
@@ -22934,7 +23115,8 @@ impl<'a> Checker<'a> {
             // `this@Label` — a labeled receiver. Resolve from the receiver-label stack (innermost last):
             // the matching entry's type is the result. The INNERMOST match (the current `this`) records
             // `LabeledThisInner` (lowered as a bare `this`); a match exactly ONE class level up, with
-            // both ends classes, records `LabeledThisOuter` (lowered via the inner class's `this$0`).
+            // both ends classes, records `LabeledThisOuter` (lowered via the class's captured `this$0`
+            // — synthesized for `inner class`es and for anonymous objects that reach the outer instance).
             // Any other (captured / multi-level / cross-lambda) match type-checks but the lowerer skips.
             Expr::Name(n) if n.starts_with("this@") => {
                 let label = &n["this@".len()..];
@@ -23511,8 +23693,7 @@ impl<'a> Checker<'a> {
             // (`as? Int`) that nullable form is the boxed wrapper (`Int?`). A plain `x as T` keeps `T`.
             // A value/inline-class target keeps `T` (non-null): its nullable boxed form isn't modeled,
             // and a member access on the cast result must see the unboxed value-class type.
-            let is_value =
-                self.ty_is_value_class(tt) || self.syms.libraries.value_underlying(tt).is_some();
+            let is_value = self.ty_is_value_class(tt);
             if nullable && !is_value {
                 Ty::nullable(tt)
             } else {
@@ -24187,17 +24368,17 @@ impl<'a> Checker<'a> {
                                 if let Some(ty) =
                                     self.resolve_property_read(receiver, &n, self.span(e), Some(e))
                                 {
-                                    self.mark_extension_receiver_used(e, implicit_receiver);
+                                    self.mark_implicit_receiver_selection(e, implicit_receiver);
                                     return self.set(e, ty);
                                 }
                             } else if let Some((ty, _)) = self.lookup_prop_name(internal, &n) {
-                                self.mark_extension_receiver_used(e, implicit_receiver);
+                                self.mark_implicit_receiver_selection(e, implicit_receiver);
                                 return self.set(e, ty);
                             }
                         }
                     }
                     if let Some(ty) = self.try_member_read(receiver, &n, self.span(e), Some(e)) {
-                        self.mark_extension_receiver_used(e, implicit_receiver);
+                        self.mark_implicit_receiver_selection(e, implicit_receiver);
                         return self.set(e, ty);
                     }
                 }
@@ -24324,7 +24505,7 @@ impl<'a> Checker<'a> {
                     })
                 {
                     let ret = member.ret;
-                    self.mark_extension_receiver_used(e, implicit_receiver);
+                    self.mark_implicit_receiver_selection(e, implicit_receiver);
                     self.expr_lowers
                         .insert(e, ExprLowering::IntrinsicProperty(Box::new(member)));
                     ret
@@ -25983,6 +26164,31 @@ impl<'a> Checker<'a> {
                 let is_prim_wrapper = |t: Ty| t.nullable_primitive().is_some();
                 if lt == Ty::String || rt == Ty::String {
                     self.diags.error(span, "krusty: referential equality (=== / !==) on String operands is not supported".to_string());
+                    Ty::Error
+                } else if self.identity_prohibited_operand(lt)
+                    || self.identity_prohibited_operand(rt)
+                    // Two plain scalar operands use value comparison, but Kotlin permits that form
+                    // only when their semantic types agree. Letting unlike scalars through would make
+                    // the backend select its JVM comparison family from the left operand alone: e.g.
+                    // `Int === Long` could emit an int-category branch over an int and a two-slot long.
+                    // Reject at the semantic boundary, matching the reference compiler, while leaving
+                    // mixed reference/scalar identity to the object path that boxes the scalar.
+                    || (lt.is_jvm_scalar() && rt.is_jvm_scalar() && lt != rt)
+                {
+                    // kotlinc: "identity equality for arguments of types 'X' and 'Y' is prohibited."
+                    // An unsigned/value-class operand has no stable boxed identity, and two unlike
+                    // scalar types do not share an identity-comparison domain. kotlinc makes either a
+                    // hard ERROR (not the "unstable because of implicit boxing" warning a compatible
+                    // plain primitive gets). Reject before lowering so the backend never compares an
+                    // unboxed value-class carrier or mismatched JVM scalar categories.
+                    self.diags.error(
+                        span,
+                        format!(
+                            "identity equality for arguments of types '{}' and '{}' is prohibited.",
+                            lt.source_name(),
+                            rt.source_name()
+                        ),
+                    );
                     Ty::Error
                 } else if is_prim_wrapper(lt) || is_prim_wrapper(rt) {
                     // A nullable-primitive wrapper (`Int?`/`Double?`) compared with `===`/`!==`: boxed
@@ -31110,9 +31316,38 @@ impl<'a> Checker<'a> {
                     .map(|(name, local)| AnonymousCaptureCandidate {
                         name: name.clone(),
                         ty: local.narrowed.unwrap_or(local.ty),
+                        source: AnonymousObjectCaptureSource::LexicalValue,
                     })
                     .collect::<Vec<_>>();
                 candidates.sort_by(|left, right| left.name.cmp(&right.name));
+                // A body reaching the enclosing instance (`this@Outer` or an outer member access)
+                // needs the instance itself, supplied FIRST so it lands at field 0 — the slot
+                // `captured_outer_method` and `LabeledThisOuter` lowering read as `this$0`.
+                if let Some((outer_label, outer)) = self
+                    .anonymous_construction_outer_receiver()
+                    .map(|(label, ty)| (label.to_string(), ty))
+                {
+                    let needs_outer = {
+                        let resolver = self.resolver();
+                        anonymous_body_needs_outer_this(
+                            self.file,
+                            declaration,
+                            &resolver,
+                            &outer_label,
+                            outer,
+                        )
+                    };
+                    if needs_outer {
+                        candidates.insert(
+                            0,
+                            AnonymousCaptureCandidate {
+                                name: "this$0".to_string(),
+                                ty: outer,
+                                source: AnonymousObjectCaptureSource::EnclosingInstance,
+                            },
+                        );
+                    }
+                }
                 record_anonymous_construction_captures(
                     self.file,
                     call,
@@ -31135,10 +31370,19 @@ impl<'a> Checker<'a> {
                 .unwrap_or_default();
             if !captures.is_empty() {
                 for capture in captures {
-                    let actual = self
-                        .lookup(&capture.name)
-                        .map(|local| local.narrowed.unwrap_or(local.ty))
-                        .unwrap_or(Ty::Error);
+                    let actual = match capture.source {
+                        AnonymousObjectCaptureSource::EnclosingInstance => {
+                            // The outer-instance capture is not a scope local; the construction site's
+                            // dispatch instance supplies it.
+                            self.anonymous_construction_outer_receiver()
+                                .map(|(_, ty)| ty)
+                                .unwrap_or(Ty::Error)
+                        }
+                        AnonymousObjectCaptureSource::LexicalValue => self
+                            .lookup(&capture.name)
+                            .map(|local| local.narrowed.unwrap_or(local.ty))
+                            .unwrap_or(Ty::Error),
+                    };
                     self.expect_assignable(capture.ty, actual, span, "anonymous object capture");
                 }
                 return self
@@ -34553,38 +34797,17 @@ impl<'a> Checker<'a> {
                     if let Some(ret) = self
                         .check_applicable_module_member_call(call, receiver, &fname, args, &arg_tys)
                     {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                     if let Some(ret) = self.check_member_extension_function_call(
                         call, receiver, &fname, args, &arg_tys,
                     ) {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                 }
                 if !self.module_declares(&fname) {
-                    if let Some(outer) = self.this_ty.and_then(|receiver| {
-                        receiver
-                            .obj_internal()
-                            .and_then(|internal| {
-                                self.syms
-                                    .class_by_type_name(internal)
-                                    .and_then(ClassSig::inner_of_name)
-                            })
-                            .map(Ty::obj_name)
-                    }) {
-                        if !implicit_receivers
-                            .iter()
-                            .any(|receiver| receiver.ty == outer)
-                        {
-                            if let Some(ret) = self.check_applicable_module_member_call(
-                                call, outer, &fname, args, &arg_tys,
-                            ) {
-                                return ret;
-                            }
-                        }
-                    }
                     if let Some(bt) = self.effective_this_narrow() {
                         if let Some(bi) = bt.obj_internal() {
                             if let Some(ret) = self.check_applicable_module_member_call(
@@ -34632,7 +34855,7 @@ impl<'a> Checker<'a> {
                         &arg_tys,
                         args,
                     ) {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                 }
@@ -35445,7 +35668,7 @@ impl<'a> Checker<'a> {
                         args,
                         &arg_tys,
                     ) {
-                        self.mark_extension_receiver_used(call, implicit_receiver);
+                        self.mark_implicit_receiver_selection(call, implicit_receiver);
                         return ret;
                     }
                 }

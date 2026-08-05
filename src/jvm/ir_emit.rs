@@ -1688,7 +1688,9 @@ fn inner_class_access(c: &IrClass) -> u16 {
     const ANNOTATION: u16 = 0x2000;
     const ENUM: u16 = 0x4000;
 
-    let is_inner = c.fields.first().is_some_and(|field| field.name == "this$0");
+    // Inner/static nesting is a source-level class property, not a consequence of a field spelling.
+    // In particular, another synthetic class may conventionally call an ordinary capture `this$0`.
+    let is_inner = c.is_inner_class;
     let mut access = PUBLIC | if is_inner { 0 } else { STATIC };
     if c.is_annotation {
         access |= INTERFACE | ABSTRACT | ANNOTATION;
@@ -3200,16 +3202,32 @@ fn emit_class(
                     }
                 }
             }
-            // An inner class stores its captured outer instance (`this$0`, field 0) BEFORE `super(…)`,
-            // so a super-constructor argument can read the outer instance (`inner class Inner :
-            // Base(run { outerProp })`) — kotlinc emits the same. A `putfield` of the current class's own
-            // field on the still-uninitialized `this` is legal per JVMS 4.10.2.4.
-            if let Some(this0) = c.fields.iter().find(|field| field.name == "this$0") {
+            let ctor_param_is_field: Vec<bool> = if c.ctor_args.is_empty() {
+                vec![true; param_tys.len()]
+            } else {
+                c.ctor_args
+                    .iter()
+                    .map(|argument| argument.is_field)
+                    .collect()
+            };
+            // Store only constructor fields explicitly marked as pre-super. A language-level inner
+            // class marks its enclosing-instance field because a superclass argument may read it; an
+            // ordinary capture does not. Keeping this as ordering metadata avoids interpreting a JVM
+            // field name as source semantics. A `putfield` of the current class's own field on the
+            // still-uninitialized `this` is legal per JVMS 4.10.2.4.
+            for &(param_i, field_i) in &c.pre_super_param_fields {
+                let param_i = param_i as usize;
+                let field = &c.fields[field_i as usize];
+                let param_ty = param_tys[param_i];
+                let param_slot = 1 + param_tys[..param_i]
+                    .iter()
+                    .map(|ty| slot_words(*ty))
+                    .sum::<u16>();
                 ctor.aload(0);
-                ctor.aload(1); // the outer instance = first constructor parameter
+                load(param_ty, param_slot, &mut ctor);
                 let fref =
-                    e.cw.fieldref(&fq_name, "this$0", &type_descriptor(this0.ty));
-                ctor.putfield(fref, slot_words(this0.ty) as i32);
+                    e.cw.fieldref(&fq_name, &field.name, &type_descriptor(field.ty));
+                ctor.putfield(fref, slot_words(field.ty) as i32);
             }
             // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
             let super_args = c.super_args.clone();
@@ -3254,16 +3272,16 @@ fn emit_class(
             if !c.explicit_param_stores {
                 let mut slot = 1u16;
                 let mut field_i = 0usize;
-                let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-                    vec![true; param_tys.len()]
-                } else {
-                    c.ctor_args.iter().map(|a| a.is_field).collect()
-                };
                 for (i, t) in param_tys.iter().enumerate() {
-                    if is_field.get(i).copied().unwrap_or(true) {
+                    if ctor_param_is_field.get(i).copied().unwrap_or(true) {
                         let name = &c.fields[field_i].name;
-                        // `this$0` is already stored BEFORE `super(…)` above — don't store it again.
-                        if name != "this$0" {
+                        // Fields already stored before `super(…)` are not stored again here. The cutoff
+                        // is semantic constructor metadata, independent of their physical ABI names.
+                        if !c
+                            .pre_super_param_fields
+                            .iter()
+                            .any(|&(_, pre_super_field)| pre_super_field as usize == field_i)
+                        {
                             // kotlinc maps this field store to the parameter's own source line —
                             // capture the pc where it starts.
                             let pc = ctor.bytes.len() as u16;
@@ -8313,27 +8331,16 @@ impl<'a> Emitter<'a> {
     /// to ask, so it falls back to the JVM convention kotlinc itself follows: `get<Name>()`.
     fn emit_property_read(&mut self, operation: PropertyOperation<'_>, code: &mut CodeBuilder) {
         use crate::jvm::inline::PropertyAccess;
-        if let Some(field) = operation.field {
-            let access = PropertyAccess::Field {
-                owner: field.owner.render(),
-                name: field.name.clone(),
-                descriptor: field.descriptor.clone(),
-                is_static: false,
-            };
+        if let Some((access, exact_field)) = self.selected_local_property_read_access(
+            operation.owner,
+            operation.name,
+            operation.field,
+        ) {
             return self.emit_realized_property_read(
                 operation.receiver,
                 access,
                 operation.ty,
-                true,
-                code,
-            );
-        }
-        if let Some(access) = self.declared_property_read_access(operation.owner, operation.name) {
-            return self.emit_realized_property_read(
-                operation.receiver,
-                access,
-                operation.ty,
-                false,
+                exact_field,
                 code,
             );
         }
@@ -8794,6 +8801,65 @@ impl<'a> Emitter<'a> {
             && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
     }
 
+    /// Select the property-read realization available directly from semantic IR: an exact field target
+    /// recorded by resolution wins, otherwise a declaration emitted by this compilation supplies its own
+    /// field/accessor/bridge realization. `None` deliberately means the external bytecode-provider path
+    /// must decide. The boolean records the exact-field case because its erased descriptor may require a
+    /// post-read narrowing cast. Both bytecode emission and frame analysis consume this helper; duplicating
+    /// the precedence here would let them disagree about whether the inline `lateinit` guard exists.
+    fn selected_local_property_read_access(
+        &self,
+        owner: &str,
+        name: &str,
+        field: Option<&crate::libraries::InstanceFieldRef>,
+    ) -> Option<(crate::jvm::inline::PropertyAccess, bool)> {
+        use crate::jvm::inline::PropertyAccess;
+        if let Some(field) = field {
+            return Some((
+                PropertyAccess::Field {
+                    owner: field.owner.render(),
+                    name: field.name.clone(),
+                    descriptor: field.descriptor.clone(),
+                    is_static: false,
+                },
+                true,
+            ));
+        }
+        self.declared_property_read_access(owner, name)
+            .map(|access| (access, false))
+    }
+
+    /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
+    /// field carries the inline uninitialized guard, so the read emission and [`Self::records_frame`]
+    /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
+    fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
+        self.ir
+            .classes
+            .iter()
+            .find(|c| c.fq_name_matches(owner))
+            .and_then(|c| c.fields.iter().find(|f| f.name == name))
+            .is_some_and(|f| f.is_lateinit())
+    }
+
+    /// Does this property read realize as a DIRECT FIELD load of a `lateinit` backing field — the one
+    /// read shape that emits the guard INLINE rather than hiding it inside a getter body? Mirrors the
+    /// realization [`Self::emit_property_read`] picks through
+    /// [`Self::selected_local_property_read_access`]. Everything past that helper is an external-provider
+    /// property, whose owner is not a class being emitted here.
+    fn lateinit_direct_field_read(
+        &self,
+        owner: &str,
+        name: &str,
+        field: Option<&crate::libraries::InstanceFieldRef>,
+    ) -> bool {
+        use crate::jvm::inline::PropertyAccess;
+        let Some((access, _)) = self.selected_local_property_read_access(owner, name, field) else {
+            return false;
+        };
+        matches!(&access, PropertyAccess::Field { owner, name, .. }
+            if self.is_lateinit_field(owner, name))
+    }
+
     /// Emit one already-chosen realization of a property read: push the receiver (or drop it, when the
     /// realization takes none), perform the field load or accessor call, and bridge the physical result to
     /// the property read's Kotlin type.
@@ -8822,13 +8888,7 @@ impl<'a> Emitter<'a> {
                 is_static,
             } => {
                 let jt = ty_from_field_descriptor(&descriptor);
-                let lateinit = self
-                    .ir
-                    .classes
-                    .iter()
-                    .find(|c| c.fq_name_matches(&owner))
-                    .and_then(|c| c.fields.iter().find(|f| f.name == name))
-                    .is_some_and(|f| f.is_lateinit());
+                let lateinit = self.is_lateinit_field(&owner, &name);
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
                     code.getstatic(fref, slot_words(jt) as i32);
@@ -10824,8 +10884,27 @@ impl<'a> Emitter<'a> {
                         .any(|a| a.map_or(false, |x| self.records_frame(x)))
             }
             IrExpr::New { args, .. } => args.iter().any(|&a| self.records_frame(a)),
-            IrExpr::GetField { receiver, .. } | IrExpr::PropertyRead { receiver, .. } => {
+            // A `lateinit` FIELD read carries its own uninitialized guard (`dup; ifnonnull L; ldc name;
+            // invokestatic throwUninitializedPropertyAccessException; L:`), whose join records a frame
+            // typing only the field value — so an operand already on the stack must be spilled first. A
+            // read through a getter records nothing here: the guard lives inside the accessor body.
+            IrExpr::GetField {
+                receiver,
+                class,
+                index,
+            } => {
                 self.records_frame(*receiver)
+                    || self.ir.classes[*class as usize].fields[*index as usize].is_lateinit()
+            }
+            IrExpr::PropertyRead {
+                receiver,
+                owner,
+                name,
+                field,
+                ..
+            } => {
+                self.records_frame(*receiver)
+                    || self.lateinit_direct_field_read(&owner.render(), name, field.as_deref())
             }
             IrExpr::SetField {
                 receiver, value, ..
@@ -10865,10 +10944,24 @@ impl<'a> Emitter<'a> {
     /// op would be live on the stack across that frame), evaluate all ops into temps first, then load
     /// them — keeping the stack empty while each frame-recording op runs.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
+        self.emit_operands_adapted(ops, code, |_, _, _| {});
+    }
+
+    /// Frame-safe operand sequencing with one representation adapter applied immediately after each
+    /// value is pushed. Keeping the adapter inside the shared spill/load loop is essential for
+    /// category-changing bridges such as primitive boxing: a wide left operand cannot be repaired
+    /// after a right operand has landed above it, and a branchy right operand still requires both
+    /// source expressions to be evaluated with an empty stack. Consumers supply only the boundary
+    /// adapter; evaluation order, frame safety, temporary ownership, and cleanup remain centralized.
+    fn emit_operands_adapted<F>(&mut self, ops: &[u32], code: &mut CodeBuilder, mut adapt: F)
+    where
+        F: FnMut(&mut Self, Ty, &mut CodeBuilder),
+    {
         if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
             let temps = self.spill_to_temps(ops, code);
             for &(slot, t, _) in &temps {
                 load(t, slot, code);
+                adapt(self, t, code);
             }
             for &(_, _, key) in &temps {
                 self.slots.remove(&key);
@@ -10876,8 +10969,15 @@ impl<'a> Emitter<'a> {
         } else {
             for &o in ops {
                 self.emit_value(o, code);
+                adapt(self, self.value_ty(o), code);
             }
         }
+    }
+
+    /// Adapter for an operand that must occupy an erased/reference comparison slot. Reference values
+    /// are already in the required representation; [`box_prim_free`] changes only JVM scalars.
+    fn box_scalar_operand(&mut self, ty: Ty, code: &mut CodeBuilder) {
+        box_prim_free(self.cw, code, ty);
     }
 
     /// Emit `e` as a value while `held` operand-stack entries (bottom-first) are ALREADY pushed below
@@ -10910,6 +11010,17 @@ impl<'a> Emitter<'a> {
     fn held_pair(&mut self, owner: &str) -> [VerifType; 2] {
         let v = self.verif_single(Ty::obj(owner));
         [v.clone(), v]
+    }
+
+    /// Push the two operands of a referential `===`/`!==` that compares object refs, BOXING whichever
+    /// side is a primitive right where it lands — kotlinc's shape for a mixed pair (`aload_0; iload_1;
+    /// Integer.valueOf; if_acmpne`), which it accepts with only an "identity equality … can be unstable
+    /// because of implicit boxing" warning. Boxing has to happen per operand rather than once at the
+    /// end: a `Long`/`Double` left operand occupies two stack words, so a boxed right operand cannot be
+    /// swapped past it. The shared adapted-operand path owns evaluation order, frame-aware spilling,
+    /// and temporary cleanup; identity supplies only the primitive-to-reference adapter.
+    fn emit_identity_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
+        self.emit_operands_adapted(&[lhs, rhs], code, Self::box_scalar_operand);
     }
 
     fn emit_virtual_operands(
@@ -11435,14 +11546,14 @@ impl<'a> Emitter<'a> {
         // path below doesn't claim a null comparison (a `null` literal's type is a reference).
         let lhs_null = matches!(self.ir.expr(lhs), IrExpr::Const(IrConst::Null));
         let rhs_null = matches!(self.ir.expr(rhs), IrExpr::Const(IrConst::Null));
-        // Referential identity (`===`/`!==`) on two non-null references → `if_acmpeq`/`if_acmpne`.
+        // Referential identity (`===`/`!==`) on two non-null references — or on a mixed reference/
+        // primitive pair, whose primitive side boxes first — → `if_acmpeq`/`if_acmpne`.
         if matches!(op, RefEq | RefNe)
-            && lt.is_reference()
-            && self.value_ty(rhs).is_reference()
+            && identity_compares_refs(lt, self.value_ty(rhs))
             && !lhs_null
             && !rhs_null
         {
-            self.emit_operands(&[lhs, rhs], code);
+            self.emit_identity_operands(lhs, rhs, code);
             self.frame(target, vec![], code);
             if (op == RefEq) == jt {
                 code.if_acmpeq(target);
@@ -11458,7 +11569,11 @@ impl<'a> Emitter<'a> {
         };
         if matches!(op, Eq | Ne) && (lhs_null || rhs_null) {
             let operand = if lhs_null { rhs } else { lhs };
-            self.emit_value(operand, code);
+            // A physical primitive arises here only for identity (`x === null`/`x !== null`): kotlinc
+            // accepts that with an always-false/true warning, whereas structural `x == null` is
+            // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
+            // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
+            self.emit_operands_adapted(&[operand], code, Self::box_scalar_operand);
             self.frame(target, vec![], code);
             if (op == Eq) == jt {
                 code.ifnull(target);
@@ -11506,7 +11621,7 @@ impl<'a> Emitter<'a> {
         // Numeric. A comparison against the integer literal `0` uses the single-operand compare-to-zero
         // branch (`ifeq`/`iflt`/… — kotlinc's form), saving the `iconst_0`. Only the int category; the
         // others compare 3-way through `lcmp`/`dcmp*`/`fcmp*`, which already tests the result vs 0.
-        let int_cat = !matches!(lt, Ty::Long | Ty::Double | Ty::Float);
+        let int_cat = numeric_cmp_int_category(lt, self.value_ty(rhs));
         let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
         let cmp0_int = if int_cat && zero(rhs) {
             self.emit_value(lhs, code);
@@ -11992,15 +12107,19 @@ impl<'a> Emitter<'a> {
                 ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].ty)
             }
             IrExpr::PropertyRead {
-                owner, name, ty, ..
+                owner,
+                name,
+                ty,
+                field,
+                ..
             } => {
                 // What the read leaves on the stack is what its REALIZATION leaves — a `Unit` property is
                 // stored as a `Lkotlin/Unit;` field but read through a `()V` accessor, and only the chosen
                 // access says which. Consult the same source the emit does.
                 let owner = owner.render();
                 let void_accessor = self
-                    .declared_property_read_access(&owner, name)
-                    .is_some_and(|access| {
+                    .selected_local_property_read_access(&owner, name, field.as_deref())
+                    .is_some_and(|(access, _)| {
                         matches!(access, crate::jvm::inline::PropertyAccess::Accessor {
                             ref descriptor, ..
                         } if descriptor.ends_with(")V"))
@@ -12344,6 +12463,41 @@ fn push_zero(t: Ty, code: &mut CodeBuilder, cw: &mut ClassWriter) {
 
 fn is_jvm_int_category(t: Ty) -> bool {
     matches!(t, Ty::Int | Ty::Boolean | Ty::Byte | Ty::Short | Ty::Char)
+}
+
+/// True when a `RefEq`/`RefNe` between `lt` and `rt` must compare OBJECT REFERENCES (`if_acmp*`).
+/// Only a pair of JVM SCALARS is a value comparison (Kotlin's `===` on two primitives is just `==`,
+/// remapped to `Eq`/`Ne`); everything else rides in a reference slot. Two references compare as-is,
+/// and a mixed reference/primitive pair boxes its primitive side first (kotlinc's "unstable because
+/// of implicit boxing" case).
+///
+/// Phrased as "not both scalars" rather than "either is a reference" because `is_reference()` is a
+/// LANGUAGE-level query and misses types that are nonetheless references on the JVM: `Ty::Unit` (whose
+/// value is the `kotlin/Unit.INSTANCE` singleton) and `Ty::Null`. Testing for references directly left
+/// `g() === g()` and `x === null` in the numeric tail, which is exactly the int-branch-on-a-reference
+/// bug this predicate exists to prevent.
+fn identity_compares_refs(lt: Ty, rt: Ty) -> bool {
+    !(lt.is_jvm_scalar() && rt.is_jvm_scalar())
+}
+
+/// The int-vs-wide category of a numeric comparison's operands: `true` for the int-category primitives
+/// that fuse to `if_icmp*`/compare-to-zero, `false` for `Long`/`Double`/`Float`, which compare 3-way
+/// through `lcmp`/`dcmp*`/`fcmp*` first.
+///
+/// Deriving this as a bare "not `Long`/`Double`/`Float`" swept every REFERENCE type into the int
+/// category, so a mixed reference/primitive `===` that slipped past the identity path emitted an int
+/// branch on an object ref — a class file that is written out fine and only fails at verification
+/// (`VerifyError: Bad type on operand stack`). Reference operands must be handled by the identity /
+/// null / `Intrinsics.areEqual` paths before the numeric tail, so reaching here with one is an emitter
+/// bug: assert rather than silently emit unverifiable bytecode. `Unit`/`Nothing` are neither, and
+/// likewise never reach a numeric comparison.
+fn numeric_cmp_int_category(lt: Ty, rt: Ty) -> bool {
+    assert!(
+        lt.is_jvm_scalar() && rt.is_jvm_scalar(),
+        "numeric comparison reached with a non-scalar operand ({lt:?} vs {rt:?}) — \
+         reference shapes belong on the identity/null/areEqual paths"
+    );
+    !matches!(lt, Ty::Long | Ty::Double | Ty::Float)
 }
 
 fn array_store_op(elem: Ty) -> (u8, i32) {
