@@ -2820,7 +2820,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java/util/List`), on which the kotlin.collections extensions aren't keyed. `suspend_return_from_gsig`
   now canonicalizes a JVM collection to its Kotlin type (`jvm_class_map::jvm_collection_to_kotlin`), and
   the member walk recovers the EXACT read-only-vs-mutable form (`List` vs `MutableList`) from the member's
-  `@Metadata` return type (`Classpath::metadata_member_ret_ty_name` + the guarded overlay below) — which
+  `@Metadata` return type (the aligned call facts/property fallback + guarded overlay below) — which
   the JVM signature erases — so a declared `MutableList` return keeps `.add(…)`. (2) The CPS `box_returns` pass hit its
   `_ => false` fallthrough on a LAMBDA argument in `return m.map { … }`, bailing the state machine; a lambda
   argument is a value (its body is a separate impl function, not a `return` of the suspend fn) so it is now
@@ -2830,10 +2830,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java/util/List`) at every depth, so signature-derived resolution canonicalized `fun items():
   MutableList<String>` / `val bag: MutableList<String>` / `fun nested(): MutableList<MutableSet<String>>`
   to their read-only forms and `.add(…)` was a false "unresolved reference". The `@Metadata` return type
-  preserves the exact classifiers: `Classpath::metadata_member_ret_ty_name` recovers it for a metadata
-  FUNCTION and for a property GETTER (matched by its `JvmPropertySignature` — a getter is NOT a metadata
-  function, and class-member properties are `metadata::class_properties`, not the package-level
-  `meta_properties_name`), and `overlay_metadata_collection_names` overlays the classifiers onto the
+  preserves the exact classifiers: the already-aligned `MetadataCallFacts::declared_ret` carries a
+  metadata FUNCTION's full return without a second overload lookup;
+  `Classpath::metadata_property_ret_ty_name` handles a property GETTER (matched by its
+  `JvmPropertySignature` — a getter is NOT a metadata function, and class-member properties are
+  `metadata::class_properties`, not the package-level `meta_properties_name`); and
+  `overlay_metadata_collection_names` overlays the classifiers onto the
   signature-derived type level by level. Guard per level: a metadata name replaces the signature's ONLY
   when it is a `kotlin/collections/…` sibling mapping to the same JVM internal
   (`jvm_class_map::type_names_map_to_same_jvm_internal`), and the walk descends into type arguments only

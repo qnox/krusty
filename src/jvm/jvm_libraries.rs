@@ -3381,6 +3381,18 @@ impl SymbolSource for JvmLibraries {
                             &m.descriptor,
                             &|name| self.value_underlying_name(name),
                         );
+                        // A metadata FUNCTION's structured return comes from the already-aligned call
+                        // facts, keeping overload selection single-sourced. A property GETTER has no
+                        // metadata-function record, so only that shape consults the property-signature
+                        // fallback. Do this once before the plain/suspend split so both paths consume
+                        // the identical semantic return projection.
+                        let metadata_ret = match member_facts.as_ref() {
+                            Some(facts) => facts.declared_ret,
+                            None => {
+                                self.cp
+                                    .metadata_property_ret_ty_name(cn, meta_name, &m.descriptor)
+                            }
+                        };
                         let member_ret_metadata = suspend.then(|| {
                             member_facts
                                 .as_ref()
@@ -3417,14 +3429,7 @@ impl SymbolSource for JvmLibraries {
                             // policies: both arms overlay through the same guarded projection; only
                             // the way each obtains `base` differs (Continuation generic argument
                             // here, ordinary generic signature below).
-                            let base = self
-                                .cp
-                                .metadata_member_ret_ty_name(
-                                    cn,
-                                    meta_name,
-                                    &m.descriptor,
-                                    &|name| self.value_underlying_name(name),
-                                )
+                            let base = metadata_ret
                                 .map_or(base, |meta| overlay_metadata_collection_names(base, meta));
                             crate::trace_compiler!(
                                 "suspend",
@@ -3471,13 +3476,7 @@ impl SymbolSource for JvmLibraries {
                             // metadata classifiers under the same-JVM-internal guard, per level —
                             // the same projection the suspend arm applies.
                             let base = recovered.unwrap_or(m.ret);
-                            self.cp
-                                .metadata_member_ret_ty_name(
-                                    cn,
-                                    meta_name,
-                                    &m.descriptor,
-                                    &|name| self.value_underlying_name(name),
-                                )
+                            metadata_ret
                                 .map_or(base, |meta| overlay_metadata_collection_names(base, meta))
                         };
                         let call_sig = member_facts

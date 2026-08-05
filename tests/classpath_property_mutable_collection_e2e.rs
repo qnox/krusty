@@ -2,9 +2,9 @@
 //! `Signature` attribute: both `List` and `MutableList` erase to `java/util/List`, so the
 //! getter-signature path canonicalized every property type to the READ-ONLY form and
 //! `repo.bag.add("x")` reported "unresolved reference 'add'" — a false positive on any
-//! property declared with a mutable collection type. Member FUNCTIONS already recover the
-//! exact classifier from the `@Metadata` return class (guarded to the same-JVM-internal
-//! sibling); properties must apply the same rule.
+//! property declared with a mutable collection type. Member FUNCTIONS carry their full
+//! descriptor-aligned `@Metadata` return in the shared call facts; property getters are not
+//! metadata functions, so their `JvmPropertySignature` must feed the same guarded overlay.
 use super::common;
 
 const LIB: &str = "package lib\n\
