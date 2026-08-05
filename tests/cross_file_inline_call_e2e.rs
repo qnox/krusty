@@ -522,13 +522,36 @@ fn suspend_operator_plus_assign_convention_cross_file_executes() {
     );
 }
 
-/// The comparison form still SKIPS, for a reason unrelated to the convention: its result lands in a
-/// captured `var`, so the state machine has to flatten a suspending `RefSet`, which the flattener does
-/// not model (`flatten BAIL: unhandled suspending stmt RefSet`). The two forms above prove the
-/// convention itself reaches its CPS entry point; this one is pinned as a skip so that whoever teaches
-/// the flattener that statement gets a failure here and asserts the answer instead.
+/// The comparison form runs once its suspension is out of the `if` CONDITION, which is half of what
+/// the skip below is about. Binding the comparison to a local `val` first leaves the identical
+/// cross-file `compareTo` selection and the identical captured-`var` store — so this is the control
+/// that pins the convention itself as complete.
 #[test]
-fn suspend_operator_compare_to_convention_cross_file_still_skips() {
+fn suspend_operator_compare_to_convention_cross_file_runs_outside_an_if_condition() {
+    const LIB: &str = "class Box(var v: Int)\n\
+                       suspend operator fun Box.compareTo(o: Box): Int = v - o.v\n";
+    let main = format!(
+        "{SUSPEND_CONVENTION_MAIN}fun box(): String {{\n\
+         \x20   var r = 0\n\
+         \x20   val a = Box(1)\n\
+         \x20   val b = Box(2)\n\
+         \x20   suspend {{ val less = a < b; r = if (less) 7 else 9 }}.startCoroutine(EC())\n\
+         \x20   return if (r == 7) \"OK\" else \"fail: $r\"\n\
+         }}\n"
+    );
+    assert_module_answers_ok(&[("Lib.kt", LIB), ("Main.kt", &main)], "comparison");
+}
+
+/// The comparison form SKIPS when its suspension sits in the CONDITION of an if-EXPRESSION whose
+/// value is stored into a CAPTURED var — the labelled `SkipReason::Suspend` boundary the
+/// state-machine pass declines (`docs/SPEC.md`, the operator-convention suspension entry). Nothing
+/// here is about the convention, the extension, or the cross-file edge: the control above runs the
+/// same `compareTo` through the same convention into the same captured `var`, and
+/// `coroutine_intrinsics_e2e::suspend_in_an_if_expression_into_a_captured_var_skips_without_a_convention`
+/// reaches the same labelled bail in ONE file with no operator at all. kotlinc answers `7`. Pinned
+/// so that whoever lifts that boundary gets a failure here and asserts the answer instead.
+#[test]
+fn suspend_operator_compare_to_convention_cross_file_still_skips_in_an_if_condition() {
     const LIB: &str = "class Box(var v: Int)\n\
                        suspend operator fun Box.compareTo(o: Box): Int = v - o.v\n";
     let main = format!(
@@ -549,8 +572,9 @@ fn suspend_operator_compare_to_convention_cross_file_still_skips() {
             Some(&jdk)
         ),
         None,
-        "comparison: skipped only because the flattener does not model a suspending `RefSet` — if \
-         this now compiles, assert the box() answer instead of deleting the check"
+        "comparison: skipped only because the suspending condition feeds an if-EXPRESSION stored \
+         into a captured var — if this now compiles, assert the box() answer instead of deleting \
+         the check"
     );
 }
 
