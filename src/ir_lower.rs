@@ -11480,7 +11480,14 @@ impl<'a> Lower<'a> {
         ) {
             return None;
         }
+        let recv_ty = self.info.ty(receiver);
         let recv = self.expr(receiver)?;
+        // Inline routing is only a choice of CALL REALIZATION; it must not bypass the argument
+        // boundary used by the ordinary extension path. In particular, a substituted scalar/value-
+        // class receiver may still occupy the callable's erased reference slot. Realize the receiver
+        // before constructing the call so both a successful splice and any legal callable fallback
+        // consume the same representation-correct IR value.
+        let recv = self.coerce_callable_argument_value(recv, recv_ty, *c.params.first()?, &c, 0)?;
         let (logical, physical) = (c.ret, c.physical_ret);
         let source_receiver = c.source_receiver;
         let call = self.emit_library_static_call(c, vec![recv, lam], false)?;
@@ -14231,12 +14238,29 @@ impl<'a> Lower<'a> {
                 }
                 let selected_ret = callable.ret;
                 let receiver_param = callable.params[0];
-                let receiver =
-                    if self.has_scalar_value_repr(recv_ty) && receiver_param.is_reference() {
-                        self.coerce_to_static(recv_v, recv_ty, receiver_param)
-                    } else {
-                        recv_v
-                    };
+                // A library extension's receiver is its first JVM argument, so realize that boundary
+                // with the same operation as every written argument. The previous scalar-only branch
+                // called `coerce_to_static`, which describes a VALUE READ whose producer's physical
+                // type differs from its substituted Kotlin type. A receiver is the opposite direction:
+                // it is a value we own flowing INTO the selected parameter. Treating the boundary as a
+                // read happened to produce ordinary primitive boxes in the backend, but it lost the
+                // semantic identity of value classes whose scalar carrier shares that primitive. An
+                // inline splice then handed (for example) a carrier box to a lambda parameter expecting
+                // the value-class box and failed at its entry cast.
+                //
+                // Keeping the decision here is deliberately independent of where the extension was
+                // discovered and whether its body will be called or spliced. `coerce_argument_value`
+                // owns scalar-to-reference realization, nullable/reference preservation, and value-
+                // class adapters; the emitter therefore receives an IR argument whose representation
+                // already agrees with the selected parameter and needs no callable- or class-specific
+                // escape hatch.
+                let receiver = self.coerce_callable_argument_value(
+                    recv_v,
+                    recv_ty,
+                    receiver_param,
+                    &callable,
+                    0,
+                )?;
                 let params = tys_to_ir(&callable.params[1..]);
                 let (arguments, mut prelude) = match source_expr {
                     Some(call) => self.lower_call_args_in_slot_order(call, args, &params)?,
@@ -14877,6 +14901,58 @@ impl<'a> Lower<'a> {
         } else {
             Some(value)
         }
+    }
+
+    /// Realize a semantic argument against the representation of the physical parameter slot.
+    ///
+    /// Generic substitution can make the selected Kotlin parameter look scalar even though the
+    /// callable's erased ABI slot remains a reference (`T` substituted with a scalar/value class is
+    /// the canonical case). [`Self::coerce_argument_value`] needs the direction of the boundary to
+    /// select boxing rather than the identity, but it must not parse or depend on a target descriptor.
+    /// The runtime provider therefore supplies only the representation fact. A reference slot is
+    /// modeled as erased `Any` when the logical target itself is scalar; the actual semantic type is
+    /// retained separately so value classes select their own box adapter instead of their carrier's.
+    ///
+    /// `None` preserves the semantic fallback for runtimes that do not expose a layout. A primitive
+    /// slot does not overwrite a reference logical target here: value-class declaration erasure has
+    /// additional underlying-type rules and remains owned by the existing value-class realization
+    /// pass, while this helper only supplies the missing generic scalar-to-reference fact.
+    fn coerce_argument_value_for_physical_slot(
+        &mut self,
+        value: u32,
+        actual: Ty,
+        logical_target: Ty,
+        slot_is_reference: Option<bool>,
+    ) -> Option<u32> {
+        let target = match slot_is_reference {
+            Some(true) if !logical_target.is_reference() => Ty::obj("kotlin/Any"),
+            _ => logical_target,
+        };
+        self.coerce_argument_value(value, actual, target)
+    }
+
+    /// Apply [`Self::coerce_argument_value_for_physical_slot`] to one selected callable argument.
+    /// Descriptor interpretation remains behind [`TargetRuntime`], and callers identify a POSITION,
+    /// not a JVM spelling or symbol origin. Keeping this lookup beside the generic representation
+    /// operation also makes the ordinary-call and inline-call paths consume the same boundary facts.
+    fn coerce_callable_argument_value(
+        &mut self,
+        value: u32,
+        actual: Ty,
+        logical_target: Ty,
+        callable: &crate::libraries::LibraryCallable,
+        slot: usize,
+    ) -> Option<u32> {
+        let slot_is_reference = self
+            .runtime
+            .descriptor_method_layout(&callable.descriptor)
+            .and_then(|layout| layout.reference_slots.get(slot).copied());
+        self.coerce_argument_value_for_physical_slot(
+            value,
+            actual,
+            logical_target,
+            slot_is_reference,
+        )
     }
 
     /// Turn a void `Unit` result into the 1-slot `kotlin/Unit.INSTANCE` reference value: run `effect`
@@ -16675,14 +16751,10 @@ impl<'a> Lower<'a> {
     ) -> Option<u32> {
         // The CHECKER resolved this extension and recorded the callable (keyed by the call `ExprId`).
         let c = self.info.resolved_extension(e).cloned()?;
-        // The first parameter is the extension receiver. Box a primitive receiver flowing into a generic
-        // `Object` receiver param; a reference receiver widens to its declared param type for free.
+        // The receiver is the callable's first argument. Realize it from the selected logical type plus
+        // the provider's physical slot fact, exactly as the inline router and direct call path do.
         let p0 = *c.params.first().unwrap_or(&rt);
-        let recv = if self.has_scalar_value_repr(rt) && p0.is_reference() {
-            self.coerce_to_static(recv_ir, rt, p0)
-        } else {
-            recv_ir
-        };
+        let recv = self.coerce_callable_argument_value(recv_ir, rt, p0, &c, 0)?;
         let source_receiver = c.source_receiver;
         let mut a = vec![recv];
         let explicit_params = c.params.get(1..)?;
@@ -23327,7 +23399,21 @@ impl<'a> Lower<'a> {
                     if let Some(c) = self.info.resolved_extension(e).cloned() {
                         if c.params.len() == 2 {
                             let l = self.lower_arg(lhs, &ty_to_ir(c.params[0]))?;
+                            let l = self.coerce_callable_argument_value(
+                                l,
+                                self.info.ty(lhs),
+                                c.params[0],
+                                &c,
+                                0,
+                            )?;
                             let r = self.lower_arg(rhs, &ty_to_ir(c.params[1]))?;
+                            let r = self.coerce_callable_argument_value(
+                                r,
+                                self.info.ty(rhs),
+                                c.params[1],
+                                &c,
+                                1,
+                            )?;
                             return self.emit_library_static_call(c, vec![l, r], false);
                         }
                     }
@@ -26593,10 +26679,12 @@ impl<'a> Lower<'a> {
                 // A library extension `recv.name(args)` → `invokestatic facade.name(recv, args)`.
                 // The CHECKER resolved it (sole resolver) and recorded the callable; the lowerer
                 // only reads it. Owner + descriptor come from that record — no name hardcoded.
-                // Coerce the receiver + arguments to the extension's parameter types so a
-                // primitive flowing into a generic `Object` parameter (`fun <T> T.to(…)`) boxes.
+                // Coerce the receiver + arguments to the extension's selected parameter types. The
+                // receiver additionally consumes the provider's physical first-slot fact, because a
+                // substituted generic receiver can be scalar while its erased ABI slot is a reference.
                 let p0 = *c.params.first().unwrap_or(&rt);
                 let recv = self.lower_arg(receiver, &ty_to_ir(p0))?;
+                let recv = self.coerce_callable_argument_value(recv, rt, p0, &c, 0)?;
                 let mut a = vec![recv];
                 let explicit_params = c.params.get(1..)?;
                 // A `$default` call with a TRAILING LAMBDA: the lambda fills the LAST real parameter

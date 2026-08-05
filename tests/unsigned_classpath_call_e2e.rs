@@ -497,3 +497,35 @@ fn unsigned_member_calls_on_a_reference_carried_receiver_verify() {
         "ULongNullableBangEquals",
     );
 }
+
+/// An unsigned RECEIVER of an inline scope function is the function's first argument, even though
+/// source syntax puts it before the dot. That argument crosses an erased reference boundary and must
+/// therefore carry the semantic value-class box (`kotlin/UInt`, etc.), not the box of its primitive
+/// carrier (`java/lang/Integer`, etc.). The latter survives verification but fails the spliced
+/// lambda's entry cast at run time.
+///
+/// This is strict because receiver lowering now routes the value through the same argument-coercion
+/// operation as explicit arguments before either the ordinary call or inline splicer sees it. A
+/// backend decline would evade the representation contract this regression exists to exercise.
+/// Cover a literal, a local, and a call result so the fix cannot accidentally depend on one IR
+/// expression shape; the high-bit value also distinguishes unsigned semantics from a signed carrier.
+#[test]
+fn unsigned_receiver_of_an_inline_scope_function_uses_its_semantic_box() {
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String = if (5u.let { it.toString() } == \"5\") \"OK\" else \"bad\"\n",
+        "UIntLetReceiver",
+    );
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String {\n\
+    val d: ULong = 5uL\n\
+    return if (d.let { it.toString() } == \"5\") \"OK\" else \"bad\"\n\
+}\n",
+        "ULongLetReceiver",
+    );
+    common::expect_box_ok_with_stdlib(
+        "fun f(): UInt = 4294967295u\n\
+         fun box(): String =\n\
+    if (f().let { it.toString() } == \"4294967295\") \"OK\" else \"bad\"\n",
+        "UIntLetCallReceiver",
+    );
+}

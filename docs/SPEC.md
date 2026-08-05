@@ -1964,6 +1964,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call's logical carrier type. Strict verifier/runtime tests cover calls, properties, inline lambdas,
   and ordinary function values so a future decline cannot silently remove the adapter coverage.
 
+  A library extension RECEIVER is physically its first argument, so it crosses exactly the same
+  representation boundary as a source-written argument. Lowering realizes both through the shared
+  argument coercion before call or splice selection: a scalar entering a reference parameter is boxed
+  with its semantic adapter, nullable/reference values are preserved, and value classes retain their
+  identity instead of becoming a box of the underlying primitive carrier. This matters for an inline
+  scope call such as `5u.let { … }`: the spliced lambda parameter expects `kotlin/UInt`, and an
+  `Integer.valueOf` box would pass verification but fail the lambda's entry cast.
+
+  The rule is attached to the representation boundary, not to a particular unsigned class, callable,
+  discovery source, or emitter splice. Consequently ordinary and inlined library extensions consume
+  the same IR argument, while values produced inside the host remain independent — for example,
+  `map` still obtains its already-boxed element from `Iterator.next()`. Strict runtime regressions pin
+  literal, local, and call-result receivers plus the separate host-produced element shape; declining
+  either case is not accepted as a substitute for realizing the boundary.
+
   A BOUNDED type parameter erases to its BOUND rather than to `Object` (`<T : Comparable<T>>` →
   `Comparable`), and kotlinc unboxes there identically. The two classpath call sites (an imported bare
   name, a fully qualified call) each decide separately whether a substituted result needs coercing at
