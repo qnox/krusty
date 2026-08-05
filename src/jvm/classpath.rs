@@ -883,6 +883,11 @@ pub struct MetadataCallFacts {
     pub kept_params: Option<usize>,
     pub call_sig: CallSig,
     pub ret: ReturnInfo,
+    /// The full source-declared return type selected from the SAME descriptor-aligned metadata
+    /// callable as every other fact in this record. Unlike [`Self::ret`], this retains nested type
+    /// arguments, so consumers do not repeat overload alignment merely to recover semantic
+    /// classifiers erased by a JVM signature (`MutableList<MutableSet<T>>` → `List<Set<T>>`).
+    pub declared_ret: Option<Ty>,
     /// Kotlin's source-level `operator` modifier. The JVM descriptor/name cannot encode it.
     pub is_operator: bool,
     /// The callable's declared contract, decoded from `@Metadata` (`None` when it has none).
@@ -913,6 +918,7 @@ impl MetadataCallFacts {
             kept_params: None,
             call_sig,
             ret: ReturnInfo::default(),
+            declared_ret: None,
             is_operator: false,
             contract: None,
             context_count: 0,
@@ -1404,6 +1410,18 @@ fn aligned_meta_callable<'a>(
 
 pub(super) fn metadata_return_info(class: Option<TypeName>, nullable: bool) -> ReturnInfo {
     ReturnInfo::new(nullable, class.map(kotlin_type_name_to_ty))
+}
+
+/// Project the structured return from an already-selected metadata function. Keeping this beside the
+/// lightweight [`ReturnInfo`] projection makes descriptor alignment the single overload decision:
+/// callers may choose the cheap classifier/nullability view or the full generic structure without
+/// searching the same metadata list again.
+fn metadata_declared_return(function: &super::metadata::MetaFn) -> Option<Ty> {
+    function
+        .generic_sig
+        .as_ref()
+        .map(|signature| signature.ret)
+        .or_else(|| function.ret_class.map(kotlin_type_name_to_ty))
 }
 
 /// Per-class `@Metadata` cache: class internal name → Kotlin function names that participate in
@@ -1942,6 +1960,7 @@ impl Classpath {
             kept_params: Some(end),
             call_sig,
             ret: metadata_return_info(c.ret_class, c.ret_nullable()),
+            declared_ret: metadata_declared_return(c),
             is_operator: c.is_operator(),
             contract: c.contract.clone(),
             context_count: c.context_count,
@@ -1974,6 +1993,7 @@ impl Classpath {
             kept_params: None,
             call_sig: function.member_call_sig(),
             ret: metadata_return_info(function.ret_class, function.ret_nullable()),
+            declared_ret: metadata_declared_return(function),
             is_operator: function.is_operator(),
             contract: function.contract.clone(),
             context_count: function.context_count,
@@ -1991,6 +2011,36 @@ impl Classpath {
                 )
             }),
         })
+    }
+
+    /// The metadata-declared RETURN type of the PROPERTY getter realized by JVM method
+    /// `jvm_name`/`jvm_desc`, with full structure when the metadata generic signature carries it and
+    /// the bare classifier otherwise. Function returns travel in [`MetadataCallFacts::declared_ret`]
+    /// from the already descriptor-aligned callable; a getter is not a metadata function, so this
+    /// deliberately separate fallback matches its `JvmPropertySignature` without repeating function
+    /// alignment. Together they carry collection identity that JVM signatures erase at every depth.
+    pub fn metadata_property_ret_ty_name(
+        &self,
+        internal: TypeName,
+        jvm_name: &str,
+        jvm_desc: &str,
+    ) -> Option<Ty> {
+        let ci = self.find_name(internal)?;
+        super::metadata::class_properties(&ci)
+            .iter()
+            .find(|property| {
+                property
+                    .getter
+                    .as_ref()
+                    .is_some_and(|getter| getter.name == jvm_name && getter.desc == jvm_desc)
+            })
+            .and_then(|property| {
+                property
+                    .generic_sig
+                    .as_ref()
+                    .map(|gsig| gsig.ret)
+                    .or_else(|| property.ret_class.map(kotlin_type_name_to_ty))
+            })
     }
 
     /// A facade class's lambda-return-overload Kotlin names, cached (part-merged for a multifile facade).
