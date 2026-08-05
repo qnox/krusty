@@ -1666,6 +1666,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   clears the operand stack) takes the `emit_operands` temp route; the `Vararg`/`SpreadBuilder` fill
   loops have no such option, and lowering declines a `try` element for them (`is_branchy`).
   `tests/comparison_under_operands_e2e.rs`.
+- **A `lateinit` FIELD read is itself frame-recording.** The uninitialized guard kotlinc inserts at every
+  such read (`dup; ifnonnull L; ldc name; invokestatic throwUninitializedPropertyAccessException; L:`)
+  branches, and its join records a stack-map frame typing only the field value. So a `lateinit` read is a
+  branchy sub-expression exactly like a comparison or a `when`, and every position that holds operands
+  across one — `emit_operands`, `New`, `SetField`, `StringConcat`, and the `emit_value_over` fill/subscript
+  positions above — must spill or type the held entries. `records_frame` answers this for `GetField` by
+  the field's `lateinit` flag, and for `PropertyRead` by first resolving which realization the read takes:
+  only a DIRECT FIELD load carries the guard inline, since a read through the accessor hides it inside the
+  getter body (which is why a cross-class or inherited read, always an accessor read, was never affected).
+  Recursing into the receiver alone answered `false`, so `class C { lateinit var s: String; fun f() =
+  listOf(s, s) }` emitted successfully and failed at link time with `VerifyError: Inconsistent stackmap
+  frames at branch target N`. This is emitter-only: the guard shape, and the fact that a `lateinit` read
+  still throws while the field is null, are unchanged — spilling only moves *when* the earlier operands
+  are evaluated relative to it. `lateinit` on a top-level/`object` property is a separate, still-declined
+  shape (the IR backend skips the file). `tests/lateinit_operand_stack_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
