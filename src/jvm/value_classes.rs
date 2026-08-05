@@ -1845,6 +1845,14 @@ pub fn lower_value_classes(
     // child's already-rewritten (`unbox-impl`/coercion) form and decides box/unbox deterministically.
     let mut targets: Vec<ExprId> = target_slots.keys().copied().collect();
     targets.sort_unstable();
+    // User value-class member bodies normally stay out of the general boundary rewrite below because
+    // their slot-0 `this` is the BOXED wrapper and their own member ABI deliberately preserves it.
+    // A constructor nested in such a body is still an independent boundary, though: any argument whose
+    // declared field/parameter is a non-null value class is physically its UNBOXED carrier. Collect only
+    // those constructor edges here, using the same pre-erasure target types as the generic `New` handling
+    // in step 5. This is classifier- and origin-neutral; anonymous captures are one producer of the shape,
+    // but ordinary local/nested constructions obey the same representation rule.
+    let mut value_member_constructor_ops: Vec<(ExprId, BoxOp)> = Vec::new();
     for &id in &targets {
         let body = &s4_bodies[target_slots[&id]];
         let slots = &body.1;
@@ -1860,6 +1868,51 @@ pub fn lower_value_classes(
         };
         let boxed_this = body.2;
         let i = id as usize;
+        if let IrExpr::New {
+            internal,
+            args,
+            ctor_params,
+            ..
+        } = &ir.exprs[i]
+        {
+            let fields;
+            let params: &[Ty] = match cls_by_name.get(internal) {
+                Some(&class) if !orig_fields[class].is_empty() => {
+                    fields = orig_fields[class].clone();
+                    &fields
+                }
+                _ => ctor_params.as_deref().unwrap_or(&[]),
+            };
+            for (&argument, parameter) in args.iter().zip(params) {
+                let Target::UnboxedX(value_class) = target(parameter, &under) else {
+                    continue;
+                };
+                let boxed_current_receiver = matches!(
+                    (boxed_this, &ir.exprs[argument as usize]),
+                    (Some(slot), IrExpr::GetValue(argument_slot)) if slot == *argument_slot
+                );
+                if (boxed_current_receiver
+                    || is_boxed_vc(
+                        &ir.exprs,
+                        &ir.functions,
+                        &orig_fields,
+                        &orig_rets,
+                        slots,
+                        &under,
+                        CallTypes::of(ir),
+                        &ir.physical_types,
+                        &field_getters,
+                        argument,
+                        value_class,
+                    ))
+                    && !value_member_constructor_ops
+                        .iter()
+                        .any(|(existing, _)| *existing == argument)
+                {
+                    value_member_constructor_ops.push((argument, BoxOp::Unbox(value_class)));
+                }
+            }
+        }
         // First decide the rewrite WITHOUT holding a mutable borrow (so `prop_access` can `add_expr`).
         enum Rw {
             Ctor(IrExpr),
@@ -2152,7 +2205,7 @@ pub fn lower_value_classes(
     // 5. Box/unbox at call boundaries, per function so each value's slot type is known: an UNBOXED
     //    value-class value into a reference target (`Object`/generic/nullable-`X`) is `box-impl`'d; a
     //    BOXED one into an unboxed (non-null `X`) target is `unbox-impl`'d. Collect then apply.
-    let mut ops: Vec<(ExprId, BoxOp)> = Vec::new();
+    let mut ops: Vec<(ExprId, BoxOp)> = value_member_constructor_ops;
     // A `!!` over an UNBOXED primitive-underlying value class is redundant (a primitive can't be null);
     // kotlinc emits no `checkNotNull`. Strip such asserts — left in, they `checkNotNull` a primitive.
     let mut strip: Vec<(ExprId, ExprId)> = Vec::new();
