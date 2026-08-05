@@ -5,7 +5,8 @@
 use crate::ast::*;
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
-use crate::token::{Token, TokenKind};
+use crate::kt_string::{KtString, KtStringBuf};
+use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 
 /// Parse with the default language feature set.
@@ -7551,7 +7552,7 @@ impl<'a> Parser<'a> {
                 TokenKind::StrChunk => {
                     let text = self.text();
                     let piece = if raw {
-                        text.to_string()
+                        KtString::from(text)
                     } else {
                         unescape_chunk(text)
                     };
@@ -8291,52 +8292,33 @@ fn infix_bp(op: BinOp) -> (u8, u8) {
     }
 }
 
-/// Decode a `'x'` char literal (with simple escapes) to the UTF-16 code unit it denotes.
-/// A Kotlin `Char` is one code unit, so `\uXXXX` keeps
-/// its raw value even in the surrogate range D800..DFFF — `'\uD800'` is a legal `Char` (it is what
-/// `Char.MIN_HIGH_SURROGATE` equals) but not a legal Unicode scalar value, so a `char::from_u32`
-/// round-trip would reject it and silently yield NUL.
+/// Decode a lexer-validated `'x'` token to its UTF-16 code unit.
+///
+/// Validation and decoding deliberately share the token-layer contract. The fallback is parser
+/// recovery only: the lexer has already diagnosed malformed content, but the AST still needs a
+/// deterministic placeholder so later syntax recovery can continue without another escape table.
 fn unquote_char(raw: &str) -> u16 {
-    /// A source `char` is a code POINT; a well-formed `Char` literal is always in the BMP, so this is
-    /// the JVM's own `i2c` truncation.
-    fn unit(c: char) -> u16 {
-        c as u32 as u16
-    }
     let inner = raw
         .strip_prefix('\'')
         .and_then(|s| s.strip_suffix('\''))
         .unwrap_or(raw);
-    let mut chars = inner.chars();
-    match chars.next() {
-        Some('\\') => match chars.next() {
-            Some('n') => unit('\n'),
-            Some('t') => unit('\t'),
-            Some('r') => unit('\r'),
-            Some('b') => unit('\u{0008}'),
-            Some('\\') => unit('\\'),
-            Some('\'') => unit('\''),
-            Some('"') => unit('"'),
-            Some('0') => 0,
-            Some('$') => unit('$'),
-            // `\uXXXX` — a 4-hex-digit UTF-16 code unit, taken verbatim.
-            Some('u') => {
-                let hex: String = chars.by_ref().take(4).collect();
-                u32::from_str_radix(&hex, 16)
-                    .ok()
-                    .map(|v| v as u16)
-                    .unwrap_or(0)
-            }
-            Some(other) => unit(other),
-            None => 0,
-        },
-        Some(c) => unit(c),
-        None => 0,
-    }
+    decode_char_literal_content(inner).unwrap_or(0)
 }
 
 /// Unescape a literal chunk of a string template (no surrounding quotes).
-fn unescape_chunk(inner: &str) -> String {
-    let mut out = String::with_capacity(inner.len());
+fn unescape_chunk(inner: &str) -> KtString {
+    let mut out = KtStringBuf::with_capacity(inner.len());
+    unescape_into(inner, &mut out);
+    out.finish()
+}
+
+/// Unescape `inner` (a string body without its quotes) into `out`.
+///
+/// `\uXXXX` denotes one UTF-16 code UNIT and is taken verbatim, including the surrogate range
+/// D800..DFFF: `"😀"` is U+1F600 written as its two halves, and `"\uD800"` is a legal
+/// one-element string. Decoding each escape through `char::from_u32` rejects both, which is why the
+/// accumulator is a [`KtStringBuf`] rather than a `String`.
+fn unescape_into(inner: &str, out: &mut KtStringBuf) {
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
         if c == '\\' {
@@ -8350,11 +8332,10 @@ fn unescape_chunk(inner: &str) -> String {
                 Some('\'') => out.push('\''),
                 Some('$') => out.push('$'),
                 Some('0') => out.push('\0'),
-                // `\uXXXX` — a 4-hex-digit UTF-16 code unit.
                 Some('u') => {
                     let hex: String = chars.by_ref().take(4).collect();
-                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                        out.push(ch);
+                    if let Ok(unit) = u32::from_str_radix(&hex, 16) {
+                        out.push_unit(unit as u16);
                     }
                 }
                 Some(other) => out.push(other),
@@ -8364,7 +8345,6 @@ fn unescape_chunk(inner: &str) -> String {
             out.push(c);
         }
     }
-    out
 }
 
 /// Parse an integer literal: decimal, `0x`/`0X` hex, or `0b`/`0B` binary, with `_` separators.
@@ -8402,48 +8382,22 @@ fn parse_unsigned_literal_bits(text: &str) -> u64 {
     u64::from_str_radix(digits, radix).unwrap_or(0)
 }
 
-fn unquote(raw: &str) -> String {
+fn unquote(raw: &str) -> KtString {
     // Raw string `"""..."""`: content is verbatim (no escape processing), three quotes each side.
     if raw.starts_with("\"\"\"") {
         let inner = raw
             .strip_prefix("\"\"\"")
             .and_then(|s| s.strip_suffix("\"\"\""))
             .unwrap_or(raw);
-        return inner.to_string();
+        return KtString::from(inner);
     }
     let inner = raw
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(raw);
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('b') => out.push('\u{0008}'),
-                Some('\\') => out.push('\\'),
-                Some('"') => out.push('"'),
-                Some('\'') => out.push('\''),
-                Some('$') => out.push('$'),
-                Some('0') => out.push('\0'),
-                // `\uXXXX` — a 4-hex-digit UTF-16 code unit.
-                Some('u') => {
-                    let hex: String = chars.by_ref().take(4).collect();
-                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                        out.push(ch);
-                    }
-                }
-                Some(other) => out.push(other),
-                None => {}
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    let mut out = KtStringBuf::with_capacity(inner.len());
+    unescape_into(inner, &mut out);
+    out.finish()
 }
 
 #[cfg(test)]

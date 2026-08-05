@@ -15,15 +15,22 @@ use super::common;
 /// Single-compilation box run: everything lives in one source, cross-referencing declarations (which
 /// still drives the checker/`types` resolution heavily).
 ///
-/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
-/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
+/// The `Option` is vestigial, matching [`common::expect_box_run_with_stdlib`]: toolchain lookup is
+/// fail-fast and a rejected source panics with its diagnostics, so the `let Some(..) else` branches
+/// below cannot silently turn either condition into a passing skip. Collapsing those mechanical
+/// call-site shapes is separate from the two-round-trip contract hardened in this file.
 fn run(src: &str, stem: &str) -> Option<String> {
     common::expect_box_run_with_stdlib(src, stem)
 }
 
 /// Compile `lib_src` with krusty (emitting `@Metadata`), persist its classfiles to a fresh classpath
 /// dir, then compile+run `main` against that dir — a genuine krusty-emit → krusty-decode round-trip.
-fn roundtrip(tag: &str, lib_src: &str, main: &str) -> Option<String> {
+///
+/// STRICT, and returns no `Option`: toolchain access is fail-fast in the shared harness, and both
+/// halves go through the `expect_*` helpers, which panic with the front-end diagnostics when krusty
+/// declines a source. There is no skip path a rejection could hide behind — the whole point of the
+/// round-trip is that reading krusty's own output must not silently stop working.
+fn roundtrip(tag: &str, lib_src: &str, main: &str) -> String {
     let sl = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let lib_classes = common::expect_compile_in_process(
@@ -36,15 +43,15 @@ fn roundtrip(tag: &str, lib_src: &str, main: &str) -> Option<String> {
     let _ = std::fs::remove_dir_all(&dir);
     for (name, bytes) in &lib_classes {
         let p = dir.join(format!("{name}.class"));
-        std::fs::create_dir_all(p.parent()?).ok()?;
-        std::fs::write(&p, bytes).ok()?;
+        let parent = p
+            .parent()
+            .unwrap_or_else(|| panic!("{tag}: {name}.class has no parent directory"));
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|e| panic!("{tag}: cannot create {}: {e}", parent.display()));
+        std::fs::write(&p, bytes)
+            .unwrap_or_else(|e| panic!("{tag}: cannot write {}: {e}", p.display()));
     }
-    Some(common::expect_box_run(
-        main,
-        "Main",
-        &[dir, sl],
-        Some(jdk.as_path()),
-    ))
+    common::expect_box_run(main, "Main", &[dir, sl], Some(jdk.as_path()))
 }
 
 // ---------------------------------------------------------------------------
@@ -547,11 +554,7 @@ fun <T : Comparable<T>> clampMax(v: T, hi: T): T = if (v >= hi) hi else v\n";
     if (clampMax(\"a\", \"z\") != \"a\") return \"f5\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = roundtrip("data", LIB, MAIN) else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(roundtrip("data", LIB, MAIN), "OK");
 }
 
 #[test]
@@ -574,9 +577,5 @@ fun areaOf(s: Shape): Int = when (s) {\n\
     if (areaOf(Circle(2)) != 12) return \"f5\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = roundtrip("enum", LIB, MAIN) else {
-        eprintln!("skip");
-        return;
-    };
-    assert_eq!(out, "OK");
+    assert_eq!(roundtrip("enum", LIB, MAIN), "OK");
 }

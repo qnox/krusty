@@ -6,6 +6,7 @@
 //! Also reads the `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) to extract the `d2`
 //! string table, which contains type-alias targets used by `classpath.rs` for type resolution.
 
+use crate::kt_string::KtString;
 use crate::types::{TypeName, TypeNameList};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
@@ -93,7 +94,9 @@ pub enum ConstVal {
     Long(i64),
     Float(f32),
     Double(f64),
-    Str(String),
+    /// A JVM string constant is a UTF-16 code-unit sequence. Keeping [`KtString`] here is essential:
+    /// `CONSTANT_Utf8` can encode an unpaired surrogate even though Rust `String` cannot.
+    Str(KtString),
 }
 
 struct RawMember {
@@ -215,6 +218,9 @@ pub enum ReadError {
 #[derive(Clone, Debug)]
 pub enum C {
     Utf8(String),
+    /// A `CONSTANT_Utf8` payload that has no Rust `String` form because it contains an unpaired
+    /// surrogate. Names/descriptors never consume this variant; string CONSTANT consumers do.
+    Utf8Units(Vec<u16>),
     Class(u16),            // name_index
     NameAndType(u16, u16), // name_index, descriptor_index
     Fieldref(u16, u16),    // class_index, name_and_type_index
@@ -240,7 +246,11 @@ fn parse_constant_pool(r: &mut Reader) -> Result<Vec<C>, ReadError> {
         let entry = match tag {
             1 => {
                 let len = r.u2()? as usize;
-                C::Utf8(decode_modified_utf8(r.take(len)?))
+                let value = decode_modified_utf8(r.take(len)?);
+                match value.as_str() {
+                    Some(text) => C::Utf8(text.to_string()),
+                    None => C::Utf8Units(value.units().collect()),
+                }
             }
             7 => C::Class(r.u2()?),
             12 => C::NameAndType(r.u2()?, r.u2()?),
@@ -713,10 +723,7 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                     Some(C::Long(v)) => Some(ConstVal::Long(*v)),
                     Some(C::Float(bits)) => Some(ConstVal::Float(f32::from_bits(*bits))),
                     Some(C::Double(bits)) => Some(ConstVal::Double(f64::from_bits(*bits))),
-                    Some(C::String(ui)) => match cp.get(*ui as usize) {
-                        Some(C::Utf8(s)) => Some(ConstVal::Str(s.clone())),
-                        _ => None,
-                    },
+                    Some(C::String(ui)) => utf8_value(cp, *ui).map(ConstVal::Str),
                     _ => None,
                 };
             }
@@ -834,37 +841,100 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Read a string CONSTANT's referenced UTF-8 payload without routing it through a Rust `String`.
+/// Names and descriptors continue to use the `C::Utf8`-only accessors above, so malformed names fail
+/// soft; this accessor is deliberately limited to value-bearing `C::String` entries.
+pub(crate) fn utf8_value(cp: &[C], utf8_index: u16) -> Option<KtString> {
+    match cp.get(utf8_index as usize)? {
+        C::Utf8(text) => Some(KtString::from(text.clone())),
+        C::Utf8Units(units) => Some(KtString::from_units(units.clone())),
+        _ => None,
+    }
+}
+
 /// Decode JVM modified UTF-8 (handles `C0 80` → U+0000 and 2/3-byte sequences).
-fn decode_modified_utf8(bytes: &[u8]) -> String {
-    let mut s = String::new();
+///
+/// The encoding's units are UTF-16 code units, so a character outside the BMP arrives as its
+/// surrogate PAIR — two 3-byte sequences that must be recombined, not decoded one at a time.
+/// [`KtString::from_units`] combines a valid pair while retaining an UNPAIRED surrogate verbatim.
+/// Returning the semantic string-value type here prevents the generic classpath constant path from
+/// silently changing a dependency's `const val` to U+FFFD.
+fn decode_modified_utf8(bytes: &[u8]) -> KtString {
+    // Almost every pool entry is a name, descriptor or signature — pure ASCII. Modified UTF-8 writes
+    // U+0000 as `C0 80`, so a byte below 0x80 can only be the character it spells: an all-ASCII
+    // payload IS the answer, and the general path's `Vec<u16>` round-trip would be pure overhead.
+    // (`is_ascii` guarantees valid UTF-8, so nothing is replaced here.)
+    if bytes.is_ascii() {
+        return KtString::from(String::from_utf8_lossy(bytes).into_owned());
+    }
+    let mut units: Vec<u16> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if b & 0x80 == 0 {
-            s.push(b as char);
+            units.push(b as u16);
             i += 1;
         } else if b & 0xe0 == 0xc0 && i + 1 < bytes.len() {
-            let c = (((b & 0x1f) as u32) << 6) | (bytes[i + 1] & 0x3f) as u32;
-            s.push(char::from_u32(c).unwrap_or('\u{fffd}'));
+            units.push((((b & 0x1f) as u16) << 6) | (bytes[i + 1] & 0x3f) as u16);
             i += 2;
         } else if b & 0xf0 == 0xe0 && i + 2 < bytes.len() {
-            let c = (((b & 0x0f) as u32) << 12)
-                | (((bytes[i + 1] & 0x3f) as u32) << 6)
-                | (bytes[i + 2] & 0x3f) as u32;
-            s.push(char::from_u32(c).unwrap_or('\u{fffd}'));
+            units.push(
+                (((b & 0x0f) as u16) << 12)
+                    | (((bytes[i + 1] & 0x3f) as u16) << 6)
+                    | (bytes[i + 2] & 0x3f) as u16,
+            );
             i += 3;
         } else {
-            s.push('\u{fffd}');
+            units.push(0xfffd);
             i += 1;
         }
     }
-    s
+    KtString::from_units(units)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::jvm::classfile::*;
+
+    /// The ASCII fast path must agree with the general decoder byte for byte. `C0 80` (NUL) and every
+    /// multi-byte form are non-ASCII, so they never reach it — this pins the boundary.
+    #[test]
+    fn the_ascii_fast_path_agrees_with_the_general_decoder() {
+        for name in [
+            "",
+            "java/lang/String",
+            "(Ljava/lang/Object;)V",
+            "<init>",
+            "a$b",
+        ] {
+            assert!(name.is_ascii());
+            assert_eq!(decode_modified_utf8(name.as_bytes()), KtString::from(name));
+        }
+        // Modified UTF-8 NUL is `C0 80`, not `00`, so a NUL-bearing string is not ASCII and decodes
+        // through the general path.
+        assert_eq!(
+            decode_modified_utf8(&[0xc0, 0x80, b'x']),
+            KtString::from("\u{0}x")
+        );
+    }
+
+    #[test]
+    fn decodes_a_supplementary_character_from_its_surrogate_pair() {
+        // U+1F600 is encoded as two 3-byte surrogate sequences; decoding each on its own yields two
+        // replacement characters instead of the emoji.
+        let bytes = crate::metadata::encoding::modified_utf8("\u{1F600}");
+        assert_eq!(decode_modified_utf8(&bytes), KtString::from("\u{1F600}"));
+    }
+
+    #[test]
+    fn retains_an_unpaired_surrogate_as_a_code_unit() {
+        // `ED A0 80` is U+D800 in modified UTF-8. It is valid in a string constant even though it
+        // cannot become a Rust `char`; replacing it would corrupt classpath `const val` inlining.
+        let value = decode_modified_utf8(&[0xed, 0xa0, 0x80]);
+        assert_eq!(value.as_str(), None);
+        assert_eq!(value.units().collect::<Vec<_>>(), vec![0xd800]);
+    }
 
     #[test]
     fn reads_krusty_emitted_class_roundtrip() {
