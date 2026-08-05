@@ -2208,8 +2208,9 @@ fn suspend_return_from_gsig(
 /// Overlay the `@Metadata`-declared collection classifiers onto a JVM-signature-derived type, level
 /// by level. The signature erases read-only vs mutable (`List`/`MutableList` both spell
 /// `java/util/List`) at EVERY nesting depth; the metadata type preserves it. At each level the
-/// metadata classifier replaces the signature's name ONLY when it is a `kotlin/collections/…`
-/// sibling mapping to the same JVM internal — guaranteeing the same collection family and arity —
+/// metadata classifier replaces the signature's name ONLY when the shared builtin-erasure table says
+/// it is a Kotlin collection sibling mapping to the same JVM internal — guaranteeing the same
+/// collection family and arity —
 /// and the walk descends into type arguments only when the two classifiers agree (sibling or
 /// identical) with matching arity, so a divergent classifier (stale metadata) never forms an
 /// arity-mismatched or misaligned type. The base keeps its structure, primitives, and nullability;
@@ -2221,7 +2222,7 @@ fn overlay_metadata_collection_names(base: Ty, meta: Ty) -> Ty {
     let (Ty::Obj(base_name, base_args), Ty::Obj(meta_name, meta_args)) = (base, meta) else {
         return base;
     };
-    let sibling = meta_name.starts_with("kotlin/collections/")
+    let sibling = super::jvm_class_map::is_kotlin_collection_type_name(meta_name)
         && super::jvm_class_map::type_names_map_to_same_jvm_internal(meta_name, base_name);
     if !sibling && base_name != meta_name {
         return base;

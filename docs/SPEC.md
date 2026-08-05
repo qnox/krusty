@@ -2837,11 +2837,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `metadata::class_properties`, not the package-level `meta_properties_name`); and
   `overlay_metadata_collection_names` overlays the classifiers onto the
   signature-derived type level by level. Guard per level: a metadata name replaces the signature's ONLY
-  when it is a `kotlin/collections/…` sibling mapping to the same JVM internal
-  (`jvm_class_map::type_names_map_to_same_jvm_internal`), and the walk descends into type arguments only
-  when the classifiers agree with matching arity — a divergent classifier (stale metadata) never forms an
-  arity-mismatched type. Structure, primitives, and nullability stay the signature side's; only names come
-  from metadata. Applied in both the plain and suspend member-walk arms. Tests:
+  when the shared erasure table identifies a Kotlin collection sibling mapping to the same JVM internal
+  (`is_kotlin_collection_type_name` + `type_names_map_to_same_jvm_internal`), and the walk descends into
+  type arguments only when the classifiers agree with matching arity — a divergent classifier (stale
+  metadata) never forms an arity-mismatched type. Structure, primitives, and nullability stay the
+  signature side's; only names come from metadata. Applied in both the plain and suspend member-walk
+  arms. Tests:
   `tests/classpath_member_mutable_collection_e2e.rs`, `tests/classpath_property_mutable_collection_e2e.rs`.
 - **A non-inlined `suspend inline fun` whose lambda argument itself SUSPENDS is DECLINED, not miscompiled
   (safety guard).** `kotlinx.coroutines.sync.Mutex.withLock` is `suspend inline fun <T> Mutex.withLock(owner:
