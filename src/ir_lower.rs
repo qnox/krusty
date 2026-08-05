@@ -4979,7 +4979,7 @@ fn library_const_ir(lc: &crate::libraries::LibraryConst) -> crate::ir::IrConst {
         LibConst::Long(v) => IrConst::Long(v),
         LibConst::Float(v) => IrConst::Float(v),
         LibConst::Double(v) => IrConst::Double(v),
-        LibConst::Str(ref v) => IrConst::String(KtString::from(v.clone())),
+        LibConst::Str(ref v) => IrConst::String(v.clone()),
     }
 }
 

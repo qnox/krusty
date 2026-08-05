@@ -312,7 +312,13 @@ mod tests {
     fn semantic_library_contract_uses_only_symbol_source_and_type_dependencies() {
         assert_allowed_crate_modules(
             "src/libraries.rs",
-            &["contracts", "name_tree", "symbol_source", "types"],
+            &[
+                "contracts",
+                "kt_string",
+                "name_tree",
+                "symbol_source",
+                "types",
+            ],
         );
     }
 

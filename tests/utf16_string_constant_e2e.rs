@@ -119,3 +119,27 @@ fn lone_surrogate_survives_a_const_val_and_a_template() {
         }\n";
     assert_eq!(run(SRC).expect("const val surrogate"), "OK");
 }
+
+#[test]
+fn lone_surrogate_survives_classpath_constant_read_and_inline_relocation() {
+    // This is intentionally a REAL module boundary: kotlinc writes the dependency's ConstantValue,
+    // then krusty's generic class reader and library-constant contract must carry the original UTF-16
+    // unit into the consumer's IR. The inline function exercises the other consumer of the SAME
+    // decoded pool entry: bytecode relocation. A String-only read path changes either to U+FFFD.
+    const LIB: &str =
+        "package dep\nconst val MARK = \"\\uD800\"\ninline fun mark() = \"\\uD800\"\n";
+    const MAIN: &str = "import dep.MARK\nimport dep.mark\n\
+        fun box(): String {\n\
+        \x20 if (MARK.length != 1) return \"f0: \" + MARK.length\n\
+        \x20 if (MARK[0].code != 55296) return \"f1: \" + MARK[0].code\n\
+        \x20 val fromInline = mark()\n\
+        \x20 if (fromInline.length != 1) return \"f2: \" + fromInline.length\n\
+        \x20 if (fromInline[0].code != 55296) return \"f3: \" + fromInline[0].code\n\
+        \x20 return \"OK\"\n\
+        }\n";
+
+    let Some(output) = common::expect_box_run_against("utf16_classpath_const", LIB, MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}

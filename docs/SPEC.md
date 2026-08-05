@@ -986,11 +986,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     (kotlinc's form). "One character" must be counted in code units, not `char`s: a supplementary
     character is two units and does not fit a `Char`, so appending it that way would truncate it
     through `i2c`. It stays on the `append(String)` path.
-  - Known gap, read side: `decode_modified_utf8` (`src/jvm/classreader.rs`) returns a Rust `String`, so
-    a **classpath** `const val` whose value contains an unpaired surrogate reads back with U+FFFD in its
-    place. Surrogate PAIRS (any non-BMP character) decode correctly. Names and descriptors are
-    unaffected. Likewise `@JvmName("…")` falls back to the declared name if given an unpaired surrogate —
-    a JVM method name has no such spelling.
+  - The generic class reader decodes `CONSTANT_Utf8` to the same code-unit value and carries it through
+    `ConstVal`/`LibConst`, so a separately compiled **classpath** `const val` preserves an unpaired
+    surrogate too. Names and descriptors still require scalar text; an invalid name fails soft rather
+    than leaking a replacement value into resolution. Likewise `@JvmName("…")` falls back to the
+    declared name if given an unpaired surrogate — a JVM method name has no such spelling.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
