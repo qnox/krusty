@@ -1179,3 +1179,184 @@ fun box(): String {\n  val a = p(2); val b = p(1)\n  return if (a.equals(b)) \"f
         }
     }
 }
+
+/// Every OTHER argument type keeps the value class's own equality — but kotlinc reaches it through the
+/// STATIC `kotlin/UInt."equals-impl":(<carrier>Ljava/lang/Object;)Z`, whose receiver slot is the
+/// carrier. The `invokevirtual kotlin/UInt.equals` krusty used to emit forces a `box-impl` on the
+/// receiver purely to have a reference to invoke on; kotlinc writes that shape in exactly one place
+/// (a LITERAL `null` argument, pinned below as a deliberate divergence).
+///
+/// The cross-carrier pair rides the same static (`UInt.equals-impl` answers `false` for a `kotlin/ULong`
+/// argument — a `UInt` is never a `ULong`); only the ARGUMENT boxes, and the receiver stays unboxed.
+/// All four unsigned types are covered, since each spells its own carrier in the descriptor.
+#[test]
+fn unsigned_equals_on_other_argument_types_calls_equals_impl_unboxed() {
+    for (name, src, present, absent) in [
+        (
+            "ueq_any",
+            "fun p(n: Int): UInt = n.toUInt()\nfun q(): Any = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z"][..],
+            &["kotlin/UInt.equals", "box-impl"][..],
+        ),
+        (
+            "uleq_any",
+            "fun p(n: Int): ULong = n.toULong()\nfun q(): Any = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/ULong.\"equals-impl\":(JLjava/lang/Object;)Z"][..],
+            &["kotlin/ULong.equals", "box-impl"][..],
+        ),
+        // The narrow pair spells `B`/`S` — the carrier they actually live in, not a widened `I`.
+        (
+            "ubeq_any",
+            "fun p(n: Int): UByte = n.toUByte()\nfun q(): Any = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UByte.\"equals-impl\":(BLjava/lang/Object;)Z"][..],
+            &["kotlin/UByte.equals", "box-impl"][..],
+        ),
+        (
+            "useq_any",
+            "fun p(n: Int): UShort = n.toUShort()\nfun q(): Any = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UShort.\"equals-impl\":(SLjava/lang/Object;)Z"][..],
+            &["kotlin/UShort.equals", "box-impl"][..],
+        ),
+        (
+            "ueq_string",
+            "fun p(n: Int): UInt = n.toUInt()\nfun q(): String = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z"][..],
+            &["kotlin/UInt.equals", "box-impl"][..],
+        ),
+        (
+            "ueq_nullable",
+            "fun p(n: Int): UInt = n.toUInt()\nfun q(n: Int): UInt? = n.toUInt()\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q(1))) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z"][..],
+            &["kotlin/UInt.equals"][..],
+        ),
+        (
+            "ueq_cross",
+            "fun p(n: Int): UInt = n.toUInt()\nfun r(n: Int): ULong = n.toULong()\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(r(2))) \"f\" else \"OK\"\n}\n",
+            &[
+                "kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z",
+                "kotlin/ULong.\"box-impl\"",
+            ][..],
+            &["kotlin/UInt.equals", "kotlin/UInt.\"box-impl\""][..],
+        ),
+        // A LITERAL `null` is where kotlinc DOES box the receiver and `invokevirtual` (its intrinsic
+        // declines the `Nothing?` argument). krusty keeps the static: same constant `false`, no box.
+        // Pinned so the divergence is a decision on record rather than a drift nobody noticed.
+        (
+            "ueq_null_literal",
+            "fun p(n: Int): UInt = n.toUInt()\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(null)) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z"][..],
+            &["kotlin/UInt.equals", "box-impl"][..],
+        ),
+    ] {
+        let Some((dir, jh)) = krusty_compile_stdlib(name, src) else {
+            return;
+        };
+        let d = javap(&jh, &dir.join("BKt.class"));
+        let _ = fs::remove_dir_all(&dir);
+        let n = normalize(&d);
+        for want in present {
+            assert!(
+                n.contains(want),
+                "{name}: unsigned `equals` must emit `{want}`:\n{n}"
+            );
+        }
+        for gone in absent {
+            assert!(
+                !n.contains(gone),
+                "{name}: unsigned `equals` must not emit `{gone}`:\n{n}"
+            );
+        }
+    }
+}
+
+/// An ordinary virtual call and both unsigned `equals` rewrites evaluate the RECEIVER before the
+/// argument, and must keep doing so when the argument SUSPENDS. Coroutine lowering moves everything
+/// after the suspension point into the resume block; a receiver left as a nested operand is therefore
+/// re-evaluated there, AFTER the argument. All three routes share the same spill helper so origin and
+/// operation shape cannot grow independent evaluation-order rules.
+///
+/// Asserted on instruction ORDER inside the state machine (`p()` before `s()`), which is what a
+/// side-effecting receiver observes, and on exactly one invocation of each function so duplicated
+/// evaluation cannot hide behind the first matching instruction. kotlinc emits the same order via its
+/// own unnamed spill slot.
+#[test]
+fn member_and_unsigned_equals_evaluate_receiver_before_a_suspending_argument() {
+    for (name, receiver_ty, receiver_value, arg_fn, arg_call) in [
+        // The ordinary virtual-member path that originally owned the receiver-spill rule …
+        (
+            "member_suspend_any",
+            "String",
+            "\"x\"",
+            "suspend fun s(): Any? = null",
+            "s()",
+        ),
+        // The `equals-impl` path (argument is `Any`) …
+        (
+            "ueq_suspend_any",
+            "UInt",
+            "1u",
+            "suspend fun s(): Any = \"x\"",
+            "s()",
+        ),
+        // … and the same-type fold, which is a bare primitive compare with no call to hang the
+        // receiver off at all.
+        (
+            "ueq_suspend_same",
+            "UInt",
+            "1u",
+            "suspend fun s(): UInt = 1u",
+            "s()",
+        ),
+    ] {
+        let src = format!(
+            "var log: String = \"\"\n\
+fun p(): {receiver_ty} {{ log = log + \"p\"; return {receiver_value} }}\n\
+{arg_fn}\n\
+suspend fun t(): Boolean = p().equals({arg_call})\n"
+        );
+        let Some((dir, jh)) = krusty_compile_stdlib(name, &src) else {
+            return;
+        };
+        let d = javap(&jh, &dir.join("BKt.class"));
+        let _ = fs::remove_dir_all(&dir);
+        // Slice `t`'s Code attribute: the two calls live in different blocks of one state machine, and
+        // javap prints a method's instructions in offset order, so text order IS bytecode order.
+        let body = d
+            .split_once("java.lang.Object t(")
+            .unwrap_or_else(|| panic!("{name}: no suspend `t` in the dump:\n{d}"))
+            .1;
+        let recv = body
+            // The ordinary member case returns a reference while unsigned cases return their
+            // primitive carrier. Match only the selected helper name/empty parameter list: the
+            // return descriptor is deliberately varied by this table.
+            .find("Method p:()")
+            .unwrap_or_else(|| panic!("{name}: `t` never calls the receiver `p()`:\n{d}"));
+        let arg = body
+            .find("Method s:(Lkotlin/coroutines/Continuation;)")
+            .unwrap_or_else(|| panic!("{name}: `t` never calls the suspending `s()`:\n{d}"));
+        assert_eq!(
+            body.matches("Method p:()").count(),
+            1,
+            "{name}: the receiver `p()` must be evaluated exactly once:\n{d}"
+        );
+        assert_eq!(
+            body.matches("Method s:(Lkotlin/coroutines/Continuation;)")
+                .count(),
+            1,
+            "{name}: the argument `s()` must be evaluated exactly once:\n{d}"
+        );
+        assert!(
+            recv < arg,
+            "{name}: the receiver `p()` must be evaluated BEFORE the suspending argument `s()` \
+             (it needs a spill slot to survive the suspension):\n{d}"
+        );
+    }
+}
