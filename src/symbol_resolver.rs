@@ -405,6 +405,71 @@ pub(crate) fn infer_generic_bindings(
     binds
 }
 
+/// The first APPLIED supertype of `actual` whose class is `want` (a Kotlin internal name), through
+/// `src`'s direct-supertype walk. Both source and classpath types answer the walk, so a module class's
+/// registered supertype type arguments and a classpath type's metadata-decoded ones bind identically.
+/// The `frontier.pop()` walk is DEPTH-first, so when `want` is inherited through two paths the first
+/// found application wins (order-dependent); the `seen` set bounds the walk against cyclic graphs.
+fn applied_supertype_named(src: &dyn SymbolSource, actual: Ty, want: TypeName) -> Option<Ty> {
+    let mut frontier = src.direct_supertypes(actual);
+    let mut seen = std::collections::HashSet::new();
+    while let Some(ty) = frontier.pop() {
+        let Some(internal) = ty.kotlin_class_internal() else {
+            continue;
+        };
+        if !seen.insert(internal) {
+            continue;
+        }
+        if internal == want {
+            return Some(ty);
+        }
+        frontier.extend(src.direct_supertypes(ty));
+    }
+    None
+}
+
+/// The actual a class formal should bind against: `None` when the positional path already applies
+/// (the actual IS the formal's class, or the formal carries no type variables), else the actual's
+/// applied supertype of the formal's class. This is what binds a generic call's type variable from a
+/// companion-as-argument (`get(key: Key<E>)` with `Elem` — its `companion object : Key<Elem>`
+/// supertype binds `E = Elem`) or any other argument whose SUPERTYPE carries the type argument.
+fn supertype_binding_actual(
+    src: &dyn SymbolSource,
+    formals: &[String],
+    sig: Ty,
+    actual: Ty,
+) -> Option<Ty> {
+    let Ty::Obj(want, args) = sig.non_null() else {
+        return None;
+    };
+    if !args
+        .iter()
+        .any(|a| crate::types::ty_mentions_param(*a, formals))
+    {
+        return None;
+    }
+    let actual = actual.non_null();
+    if actual.kotlin_class_internal() == Some(want) {
+        return None;
+    }
+    applied_supertype_named(src, actual, want)
+}
+
+/// [`unify_ty`], plus binding through the actual's APPLIED supertypes when it is a different class
+/// than the formal.
+pub(crate) fn unify_ty_through_supertypes(
+    src: &dyn SymbolSource,
+    formals: &[String],
+    sig: Ty,
+    actual: Ty,
+    binds: &mut GSigBinds,
+) {
+    match supertype_binding_actual(src, formals, sig, actual) {
+        Some(applied) => unify_ty(sig.non_null(), applied, binds),
+        None => unify_ty(sig, actual, binds),
+    }
+}
+
 pub(crate) fn generic_bindings_satisfy_bounds(
     generic_sig: &GenericSig,
     bindings: &GSigBinds,
@@ -718,17 +783,85 @@ fn java_platform_typevar_ret(
         .unwrap_or(ret)
 }
 
-fn bind_member_return(gsig: &GenericSig, receiver: Ty, args: &[Ty], provider_ret: Ty) -> Ty {
+/// Merge one binding site's map into the accumulated `binds`, mirroring resolve.rs's
+/// `bind_or_conflict`: a formal pinned to two DIFFERENT types by two witnesses keeps its first
+/// binding but is recorded in `conflicted`, which bars the bound-type-variable early return in
+/// `bind_member_return` (the first-wins `or_insert` in `unify_ty` would otherwise let that return
+/// pick one side — `pick(1, 1L): T` typed as `Int` CCE'd at runtime, where falling back to
+/// `merge_specialized_return` widens to the erased bound and the call is rejected). Witnesses
+/// equal modulo nullability merge instead of conflicting; a `null` argument is a VACUOUS witness
+/// (it carries no type information), so it neither widens an existing binding nor conflicts — and
+/// a later real witness replaces it.
+fn merge_binding_site(
+    binds: &mut GSigBinds,
+    conflicted: &mut std::collections::HashSet<String>,
+    site: GSigBinds,
+) {
+    let nullable_bottom =
+        |candidate: Ty| matches!(candidate, Ty::Nullable(inner) if *inner == Ty::Nothing);
+    for (name, ty) in site {
+        let ty = inference_actual(ty);
+        match binds.get(&name) {
+            Some(&prev) if prev != ty => {
+                if nullable_bottom(ty) {
+                    // Vacuous `null` witness: the existing binding stands.
+                } else if nullable_bottom(prev) {
+                    binds.insert(name, ty);
+                } else if prev.non_null() == ty.non_null() {
+                    binds.insert(name, merge_inferred_ty(Some(prev), ty));
+                } else {
+                    conflicted.insert(name);
+                }
+            }
+            Some(_) => {}
+            None => {
+                binds.insert(name, ty);
+            }
+        }
+    }
+}
+
+fn bind_member_return(
+    src: &dyn SymbolSource,
+    gsig: &GenericSig,
+    receiver: Ty,
+    args: &[Ty],
+    provider_ret: Ty,
+) -> Ty {
     let mut binds = GSigBinds::new();
+    let mut conflicted = std::collections::HashSet::new();
+    // Each binding site (receiver, seeded return, each argument) unifies into a FRESH map that
+    // then merges conflict-aware: a formal's cross-site witnesses are compared before insertion.
     if let Some(declared_receiver) = gsig.receiver {
-        unify_ty(declared_receiver, receiver, &mut binds);
+        let mut site = GSigBinds::new();
+        unify_ty(declared_receiver, receiver, &mut site);
+        merge_binding_site(&mut binds, &mut conflicted, site);
     } else {
-        seed_undeclared_return_bindings(gsig.ret, provider_ret, &gsig.formals, &mut binds);
+        let mut site = GSigBinds::new();
+        seed_undeclared_return_bindings(gsig.ret, provider_ret, &gsig.formals, &mut site);
+        merge_binding_site(&mut binds, &mut conflicted, site);
     }
     for (&parameter, &argument) in gsig.params.iter().zip(args) {
-        unify_ty(parameter, argument, &mut binds);
+        let mut site = GSigBinds::new();
+        unify_ty_through_supertypes(src, &gsig.formals, parameter, argument, &mut site);
+        merge_binding_site(&mut binds, &mut conflicted, site);
     }
     let ret = ty_subst(gsig.ret, &binds);
+    // A bare type-variable return bound at this call site types as the binding even when the erased
+    // descriptor return is the variable's BOUND (`get(key: Key<E>): E?` erases to `Element?`, yet
+    // `ctx[Elem]` is `Elem?`): kotlinc checkcasts the bound erasure to the binding, and the lowering's
+    // `coerce_erased_call_result` emits exactly that cast for a type-parameter return. A vacuous
+    // binding (`null`/diverging/error argument, or an unbound variable substituted to `Any`) keeps
+    // the provider's canonical return — and so does an AMBIGUOUS one: with conflicting witnesses the
+    // binding is an arbitrary first-wins pick, so fall through to `merge_specialized_return`'s
+    // erased-bound widening (kotlinc would infer a common supertype krusty can't compute).
+    if gsig.ret.non_null().is_ty_param()
+        && !ret.is_erased_top()
+        && !matches!(ret.non_null(), Ty::Null | Ty::Nothing | Ty::Error)
+        && conflicted.is_empty()
+    {
+        return ret;
+    }
     merge_specialized_return(provider_ret, ret)
 }
 
@@ -3707,6 +3840,11 @@ fn resolve_companion_name(
         if let Some(gsig) = member.generic_sig.as_ref() {
             // Explicit call type arguments (`Maps.create<String, Int> { … }`) seed the
             // formals positionally; argument unification fills the rest.
+            // BACKLOG: unlike instance-member binding (`bind_member_return`'s
+            // `unify_ty_through_supertypes`), this site does NOT walk an argument's applied
+            // supertypes — `fun <T> readKey(k: Key<T>): T?` called `readKey(Holder)` leaves `T`
+            // unbound (the applied-supertypes walk is wired into 2 of the 4 generic binding
+            // sites: here and the source top-level path in resolve.rs still lack it).
             let mut binds = seeded_gsig_binds(gsig, type_args);
             for (&parameter, argument) in gsig.params.iter().zip(args) {
                 unify_ty(parameter, argument.ty(), &mut binds);
@@ -3925,10 +4063,15 @@ fn resolve_instance_member(
 ) -> Option<ResolvedMember> {
     let o = select_instance_info(lib, recv, name, args, member_access)?;
     let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
+    // Bind through the module-first source federation when the caller carries it, so a MODULE type's
+    // registered supertype type arguments (a companion's `Key<Elem>`) bind the member's type variables
+    // exactly like a classpath argument's metadata-decoded supertypes.
+    let bind_src: &dyn SymbolSource =
+        member_access.map_or(lib as &dyn SymbolSource, |access| access.source);
     let ret = o
         .generic_sig
         .as_ref()
-        .map(|gsig| bind_member_return(gsig, recv, &arg_tys, o.callable.ret))
+        .map(|gsig| bind_member_return(bind_src, gsig, recv, &arg_tys, o.callable.ret))
         .unwrap_or(o.callable.ret);
     let ret = o.ret.apply(java_platform_typevar_ret(
         lib,
@@ -5214,6 +5357,11 @@ mod tests {
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
 
+    /// A source with no types — the supertype walk in [`bind_member_return`] no-ops against it, so the
+    /// tests exercise the positional binding path exactly as before.
+    struct EmptySource;
+    impl SymbolSource for EmptySource {}
+
     #[test]
     fn inferred_generic_binding_joins_null_with_the_non_null_element_type() {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
@@ -5269,6 +5417,7 @@ mod tests {
         };
         assert_eq!(
             bind_member_return(
+                &EmptySource,
                 &method_generic,
                 Ty::obj("demo/Provider"),
                 &[class_of(value)],
@@ -5285,11 +5434,23 @@ mod tests {
             ret: parameter,
         };
         assert_eq!(
-            bind_member_return(&owner_generic, optional_of(value), &[Ty::Null], value,),
+            bind_member_return(
+                &EmptySource,
+                &owner_generic,
+                optional_of(value),
+                &[Ty::Null],
+                value,
+            ),
             value
         );
         assert_eq!(
-            bind_member_return(&owner_generic, optional_of(any), &[Ty::String], any,),
+            bind_member_return(
+                &EmptySource,
+                &owner_generic,
+                optional_of(any),
+                &[Ty::String],
+                any,
+            ),
             any
         );
     }
@@ -5308,7 +5469,13 @@ mod tests {
         };
 
         assert_eq!(
-            bind_member_return(&signature, Ty::obj("demo/Provider"), &[], kotlin_list),
+            bind_member_return(
+                &EmptySource,
+                &signature,
+                Ty::obj("demo/Provider"),
+                &[],
+                kotlin_list
+            ),
             kotlin_list
         );
 
@@ -5318,6 +5485,7 @@ mod tests {
         };
         assert_eq!(
             bind_member_return(
+                &EmptySource,
                 &erased_signature,
                 Ty::obj("demo/Provider"),
                 &[],

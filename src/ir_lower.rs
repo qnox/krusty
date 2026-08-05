@@ -2219,11 +2219,11 @@ fn lower_file_at_reporting_impl(
                 let mut comp_ifaces = Vec::new();
                 let csig0 = syms.class_by_internal(&internal)?;
                 for st in &c.companion_supertypes {
-                    let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st && ic.is_interface()));
+                    let is_file_iface = file.decls.iter().any(|&d| matches!(file.decl(d), Decl::Class(ic) if ic.name == *st.name && ic.is_interface()));
                     if !is_file_iface {
                         return None;
                     }
-                    let iface_internal = class_internal(file, st);
+                    let iface_internal = class_internal(file, &st.name);
                     if let Some(isig) = syms.class_by_internal(&iface_internal) {
                         for (mname, cm) in &csig0.static_methods {
                             if let Some(im) = isig.method(mname) {

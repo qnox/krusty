@@ -3725,7 +3725,9 @@ fn collect_class_type_names(
     }
     out.extend(class.base_class.iter().cloned());
     out.extend(class.companion_base.iter().cloned());
-    out.extend(class.companion_supertypes.iter().cloned());
+    for supertype in &class.companion_supertypes {
+        collect_typeref_names(supertype, out);
+    }
     out.extend(
         class
             .delegations
@@ -5973,7 +5975,7 @@ fn collect_signatures_with_cp_impl(
                     let companion_interfaces: Vec<String> = c
                         .companion_supertypes
                         .iter()
-                        .map(|s| resolve_super(s))
+                        .map(|s| resolve_super(&s.name))
                         .collect();
                     // A `companion object`'s declared base CLASS (`companion object : Base()`) — the
                     // synthesized `C$Companion` extends it, so `C`-as-value is assignable as `Base` (and
@@ -5988,6 +5990,23 @@ fn collect_signatures_with_cp_impl(
                         });
                         is_file_class.then(|| resolve_super(base))
                     });
+                    // The companion supertypes' TYPE ARGUMENTS (`companion object : Key<Elem>`), resolved
+                    // exactly like the class's own `interface_type_args` below — without them a generic
+                    // call taking the companion as a value (`get(key: Key<E>)`) sees a raw `Key` and the
+                    // type variable falls back to its upper bound. An argument may name the OUTER class
+                    // (`Key<Elem>`): it is already in `class_names` at this all-files signature pass.
+                    let companion_interface_type_args: Vec<Vec<Ty>> = c
+                        .companion_supertypes
+                        .iter()
+                        .map(|s| {
+                            s.targs
+                                .iter()
+                                .map(|argument| {
+                                    ty_of_ref(argument, &class_names, &symbolic_ctp, diags)
+                                })
+                                .collect()
+                        })
+                        .collect();
                     // SOURCE companion function names, captured before the plugin phase below injects
                     // any synthetic signature (`serializer()`) into `static_methods`.
                     let companion_fun_names: std::collections::HashSet<String> =
@@ -6382,7 +6401,7 @@ fn collect_signatures_with_cp_impl(
                                 computed_static_props: std::collections::HashSet::new(),
                                 lateinit_props: Default::default(),
                                 interfaces: companion_interfaces_ref,
-                                interface_type_args: Vec::new(),
+                                interface_type_args: companion_interface_type_args,
                                 super_internal: companion_super_internal_ref,
                                 super_type_args: Vec::new(),
                                 super_ctor_params: Vec::new(),
@@ -26538,6 +26557,47 @@ impl<'a> Checker<'a> {
                 // A plain value parameter typed as a bare type parameter (`x: T`).
                 if tparams.contains(p.ty.name.as_str()) {
                     bind_or_conflict(&mut binds, &mut conflicted, p.ty.name.as_str(), *at);
+                } else if p
+                    .ty
+                    .targs
+                    .iter()
+                    .any(|targ| tparams.contains(targ.name.as_str()))
+                {
+                    // A generic-shaped value parameter (`k: Key<T>`): the type argument binds from
+                    // the actual's APPLIED form of the parameter's class — through a supertype when
+                    // the argument is a different class (`pick(Holder)` binds `T = Holder` via the
+                    // companion's registered `Key<Holder>` supertype), a witness as reliable as a
+                    // bare-`T` parameter's (both read the argument's static type).
+                    if let Some(internal) = self.syms.class_names.get(&p.ty.name) {
+                        let formal_args: Vec<Ty> =
+                            p.ty.targs
+                                .iter()
+                                .map(|targ| {
+                                    if tparams.contains(targ.name.as_str()) {
+                                        Ty::ty_param(&targ.name, Ty::obj("kotlin/Any"))
+                                    } else {
+                                        self.resolve_ty(targ)
+                                    }
+                                })
+                                .collect();
+                        let formal = Ty::obj_args_name(internal, &formal_args);
+                        let unified = {
+                            let mut unified = crate::symbol_resolver::GSigBinds::new();
+                            crate::symbol_resolver::unify_ty_through_supertypes(
+                                &self.fed_source(),
+                                &f.type_params,
+                                formal,
+                                *at,
+                                &mut unified,
+                            );
+                            unified
+                        };
+                        for (name, ty) in unified {
+                            if let Some(tp) = f.type_params.iter().find(|tp| **tp == name) {
+                                bind_or_conflict(&mut binds, &mut conflicted, tp.as_str(), ty);
+                            }
+                        }
+                    }
                 }
             } else if let Some(ExprLowering::AdaptedRef {
                 adapted_params,
