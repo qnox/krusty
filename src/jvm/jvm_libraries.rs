@@ -1335,19 +1335,19 @@ impl JvmLibraries {
                         if !matches!(shape.non_null(), Ty::Fun(_)) || shape.mentions_ty_param() {
                             continue;
                         }
-                        let suspend_fun = aligned_metadata.is_some_and(|metadata| {
-                            metadata
-                                .value_params
-                                .get(i)
-                                .is_some_and(metadata::MetaValueParam::suspend_fun)
-                        });
-                        if suspend_fun {
+                        // A per-slot witness needs BOTH the positional alignment and an inline
+                        // type message — a `-Xuse-type-table` jar stores the type by id, which
+                        // the decoder does not follow, so its flags are absent rather than false.
+                        let slot_witness = aligned_metadata
+                            .and_then(|metadata| metadata.value_params.get(i))
+                            .filter(|parameter| parameter.has_type_witness());
+                        if slot_witness.is_some_and(metadata::MetaValueParam::suspend_fun) {
                             *shape = recover_suspend_fun_shape(*shape);
-                        } else if aligned_metadata.is_none() && continuation_tailed_fun(*shape) {
-                            // A `Continuation`-tailed shape without an aligned metadata witness is
-                            // ambiguous — it may be a suspend function type this pass cannot
-                            // disclaim. Publishing it as a concrete non-suspend signature would be
-                            // an authoritative-looking wrong answer; keep the erased leniency.
+                        } else if slot_witness.is_none() && continuation_tailed_fun(*shape) {
+                            // A `Continuation`-tailed shape without a type witness is ambiguous —
+                            // it may be a suspend function type this pass cannot disclaim.
+                            // Publishing it as a concrete non-suspend signature would be an
+                            // authoritative-looking wrong answer; keep the erased leniency.
                             continue;
                         }
                         *param = *shape;

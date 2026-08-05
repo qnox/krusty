@@ -1554,9 +1554,9 @@ fn build_property_generic_sig(
 }
 
 /// Bit-packed boolean flags for a [`MetaValueParam`], collapsing its `has_default`/`materialized`/
-/// `vararg`/`recv_fun`/`nullable`/`suspend_fun` bytes into one. Read through the `MetaValueParam`
-/// accessors of the same names; built with the `with_*` chain. Headroom for two more flags before
-/// the byte fills.
+/// `vararg`/`recv_fun`/`nullable`/`suspend_fun`/`has_type_witness` bytes into one. Read through
+/// the `MetaValueParam` accessors of the same names; built with the `with_*` chain. Headroom for
+/// one more flag before the byte fills.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MvpFlags(u8);
 
@@ -1567,6 +1567,7 @@ impl MvpFlags {
     const RECV_FUN: u8 = 1 << 3;
     const NULLABLE: u8 = 1 << 4;
     const SUSPEND_FUN: u8 = 1 << 5;
+    const HAS_TYPE_WITNESS: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -1605,6 +1606,10 @@ impl MvpFlags {
     #[inline]
     pub const fn with_suspend_fun(self, on: bool) -> Self {
         self.with(Self::SUSPEND_FUN, on)
+    }
+    #[inline]
+    pub const fn with_has_type_witness(self, on: bool) -> Self {
+        self.with(Self::HAS_TYPE_WITNESS, on)
     }
 }
 
@@ -1649,6 +1654,14 @@ impl MetaValueParam {
     #[inline]
     pub fn suspend_fun(&self) -> bool {
         self.flags.has(MvpFlags::SUSPEND_FUN)
+    }
+    /// Whether the parameter carried an INLINE `ValueParameter.type` message this decoder read.
+    /// A jar built with `-Xuse-type-table` stores `type_id` into a shared type table instead,
+    /// which this decoder does not follow — its type-level facts (`suspend_fun`, `nullable`,
+    /// `recv_fun`) are then absent, not false, and a consumer must not treat them as disclaimers.
+    #[inline]
+    pub fn has_type_witness(&self) -> bool {
+        self.flags.has(MvpFlags::HAS_TYPE_WITNESS)
     }
 }
 
@@ -2123,7 +2136,8 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64, class_tparams: &[(u64, String)
                                     .with_vararg(p.vararg_elem_body.is_some())
                                     .with_recv_fun(recv_fun)
                                     .with_nullable(parse_type_nullable(&p.type_body))
-                                    .with_suspend_fun(parse_type_suspend_flag(&p.type_body)),
+                                    .with_suspend_fun(parse_type_suspend_flag(&p.type_body))
+                                    .with_has_type_witness(!p.type_body.is_empty()),
                                 recv_fun_receiver: if recv_fun {
                                     p.recv_fun
                                         .1
