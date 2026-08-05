@@ -3024,6 +3024,13 @@ impl<'a> SymbolResolver<'a> {
             if callable.signature.is_none() {
                 callable.signature = base.and_then(|candidate| candidate.callable.signature);
             }
+            // Publish the base's generic signature on the callable too: the CHECKER measures the
+            // provided arguments against the call-site-substituted logical parameters (`T` joined
+            // across arguments — `assertEquals("x", nullable)` binds `T := String?`), and the
+            // `$default` synthetic's erased `params` alone would reject the nullable argument.
+            if callable.generic_sig.is_none() {
+                callable.generic_sig = base_gsig.map(Box::new);
+            }
             record_default_vararg_slot(&mut callable, o.call_sig.vararg_index, params, args);
             Some(callable)
         };

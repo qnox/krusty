@@ -164,6 +164,8 @@ mod classpath_extension_default_implicit_receiver_e2e;
 mod classpath_extension_receiver_lambda_e2e;
 #[path = "classpath_function_reference_e2e.rs"]
 mod classpath_function_reference_e2e;
+#[path = "classpath_generic_nullable_arg_e2e.rs"]
+mod classpath_generic_nullable_arg_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
 mod classpath_inner_classes_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]

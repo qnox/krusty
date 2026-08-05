@@ -22036,6 +22036,49 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Call-site-substituted LOGICAL parameter expectations for a resolved classpath callable whose
+    /// metadata declares its own type parameters (`fun <T> assertEquals(expected: T, actual: T)`).
+    /// `c.params` are the JVM-erased emit handles (`T` → `Any`), so measuring arguments against them
+    /// rejects shapes the declaration accepts — kotlinc joins the per-formal argument types instead
+    /// (`String` + `String?` → `T := String?`), and every `T` slot then expects the join. `actuals`
+    /// are `(parameter slot, argument type)` pairs; explicit type arguments override the inferred
+    /// binding. `None` when the callable has no metadata generics to instantiate (the erased
+    /// parameters ARE the declaration) or its shape can't be aligned slot-for-slot.
+    fn library_generic_call_param_expectations(
+        c: &crate::libraries::LibraryCallable,
+        actuals: &[(usize, Ty)],
+        type_args: &[Ty],
+    ) -> Option<Vec<Ty>> {
+        let gsig = c.generic_sig.as_deref()?;
+        if gsig.formals.is_empty() || c.context_count > 0 || gsig.params.len() != c.params.len() {
+            return None;
+        }
+        let mut binds = crate::symbol_resolver::infer_generic_bindings(
+            gsig,
+            actuals.iter().copied().filter(|(_, ty)| *ty != Ty::Error),
+        );
+        for (formal, targ) in gsig.formals.iter().zip(type_args) {
+            binds.insert(formal.clone(), *targ);
+        }
+        Some(
+            gsig.params
+                .iter()
+                .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &binds))
+                .collect(),
+        )
+    }
+
+    /// The expectation for one argument slot out of
+    /// [`Self::library_generic_call_param_expectations`]: the substituted logical parameter when
+    /// inference fully instantiated it, else the erased parameter (an unbound formal is a
+    /// placeholder, not a type an argument can be measured against).
+    fn library_expected_param(expectations: Option<&Vec<Ty>>, fallback: Ty, slot: usize) -> Ty {
+        expectations
+            .and_then(|params| params.get(slot).copied())
+            .filter(|ty| !Self::ty_mentions_type_param(*ty))
+            .unwrap_or(fallback)
+    }
+
     fn resolved_explicit_type_args(&mut self, call: ExprId) -> Vec<Ty> {
         self.file
             .call_type_args
@@ -35212,6 +35255,20 @@ impl<'a> Checker<'a> {
                         if let Some(slots) = named_slots.as_ref().filter(|_| c.default_call) {
                             // The labelled, parameter-omitting form: each argument is checked against
                             // the parameter its label named, not against the one at its position.
+                            let actuals: Vec<(usize, Ty)> = slots
+                                .iter()
+                                .enumerate()
+                                .zip(sel_args.iter())
+                                .filter(|(_, &argument)| {
+                                    !matches!(self.file.expr(argument), Expr::Lambda { .. })
+                                })
+                                .map(|((index, &parameter), _)| (parameter, arg_tys[index]))
+                                .collect();
+                            let expectations = Self::library_generic_call_param_expectations(
+                                &c,
+                                &actuals,
+                                &call_targs,
+                            );
                             for ((index, &parameter), &argument) in
                                 slots.iter().enumerate().zip(sel_args.iter())
                             {
@@ -35222,7 +35279,11 @@ impl<'a> Checker<'a> {
                                     continue;
                                 };
                                 self.expect_library_call_arg(
-                                    declared,
+                                    Self::library_expected_param(
+                                        expectations.as_ref(),
+                                        declared,
+                                        parameter,
+                                    ),
                                     arg_tys[index],
                                     argument,
                                     "argument",
@@ -35233,9 +35294,23 @@ impl<'a> Checker<'a> {
                             let elem = c.vararg_elem.unwrap_or_else(|| {
                                 c.params[fixed].array_elem().unwrap_or(Ty::Error)
                             });
+                            // The trailing element arguments already measure against the INFERRED
+                            // element (`c.vararg_elem`); only the fixed prefix needs the metadata
+                            // substitution.
+                            let actuals: Vec<(usize, Ty)> =
+                                arg_tys.iter().copied().enumerate().take(fixed).collect();
+                            let expectations = Self::library_generic_call_param_expectations(
+                                &c,
+                                &actuals,
+                                &call_targs,
+                            );
                             for i in 0..fixed.min(arg_tys.len()) {
                                 self.expect_library_call_arg(
-                                    c.params[i],
+                                    Self::library_expected_param(
+                                        expectations.as_ref(),
+                                        c.params[i],
+                                        i,
+                                    ),
                                     arg_tys[i],
                                     sel_args[i],
                                     "argument",
@@ -35256,9 +35331,24 @@ impl<'a> Checker<'a> {
                         {
                             let prefix_len = arg_tys.len() - 1;
                             let last = c.params.len() - 1;
+                            let actuals: Vec<(usize, Ty)> = arg_tys
+                                .iter()
+                                .copied()
+                                .enumerate()
+                                .take(prefix_len)
+                                .collect();
+                            let expectations = Self::library_generic_call_param_expectations(
+                                &c,
+                                &actuals,
+                                &call_targs,
+                            );
                             for i in 0..prefix_len {
                                 self.expect_library_call_arg(
-                                    c.params[i],
+                                    Self::library_expected_param(
+                                        expectations.as_ref(),
+                                        c.params[i],
+                                        i,
+                                    ),
                                     arg_tys[i],
                                     sel_args[i],
                                     "argument",
@@ -35274,12 +35364,29 @@ impl<'a> Checker<'a> {
                                 );
                             }
                         } else {
+                            let actuals: Vec<(usize, Ty)> = arg_tys
+                                .iter()
+                                .copied()
+                                .enumerate()
+                                .filter(|&(i, _)| {
+                                    !matches!(self.file.expr(sel_args[i]), Expr::Lambda { .. })
+                                })
+                                .collect();
+                            let expectations = Self::library_generic_call_param_expectations(
+                                &c,
+                                &actuals,
+                                &call_targs,
+                            );
                             for (i, a) in arg_tys.iter().enumerate() {
                                 if matches!(self.file.expr(sel_args[i]), Expr::Lambda { .. }) {
                                     continue;
                                 }
                                 self.expect_library_call_arg(
-                                    c.params[i],
+                                    Self::library_expected_param(
+                                        expectations.as_ref(),
+                                        c.params[i],
+                                        i,
+                                    ),
                                     *a,
                                     sel_args[i],
                                     "argument",

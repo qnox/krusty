@@ -1289,6 +1289,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   At a call site, a result of erased type `Object` flowing into a more specific reference context (a
   typed `val`, a `return`, a function argument) gets a `checkcast` to that type — matching kotlinc (the
   value really is that type at runtime). `kotlin.Any`/`Object` targets get no cast.
+- **A classpath generic's arguments are measured against the call-site-substituted metadata
+  parameters, not the erased ones.** `fun <T> assertEquals(expected: T, actual: T)` decodes
+  `params = [Any, Any]` from the descriptor; checking arguments against that rejected
+  `assertEquals("x", nullableString)` ("`String?` where `Any` was expected") even though kotlinc
+  joins the per-formal argument types (`String` + `String?` → `T := String?`, `Int` + `String` →
+  `Any`) and accepts. The checker's top-level classpath arm now infers the joined binding from the
+  metadata generic signature (explicit type arguments override), substitutes it into each declared
+  parameter, and checks arguments against those; a slot whose substitution still mentions an unbound
+  formal falls back to the erased parameter, and the emitted call is unchanged (`c.params` stays the
+  JVM-erased emit handle). A defaulted call (`assertEquals(a, b)` omitting `message`) resolves
+  through the `$default` synthetic, which carries no generic signature of its own — the resolver now
+  publishes the base function's signature on the returned callable so the same substitution covers
+  it (`tests/classpath_generic_nullable_arg_e2e.rs`).
 - `vararg` parameters: the parameter's JVM type is the array (`Int...` → `[I`); a call packs the trailing
   arguments into a fresh array (`newarray`/`anewarray` + per-element store) and passes it, like kotlinc.
   Spread (`*arr`) is not modeled. `for (x in arr)` over an array iterates by index
