@@ -1864,6 +1864,51 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   means a classpath read failed to recognize a `suspend` callee — so it is deliberately untestable
   without injecting that fault, and must not be deleted as dead code. What IS pinned is that it does
   not over-fire (`a_plain_continuation_parameter_is_not_an_unthreaded_continuation`).
+- **An unsigned value crossing an ERASED GENERIC result boundary** — `fun <T> ident(t: T): T`
+  erases to `(Object)Object`, so `ident(5u)` pushes a boxed `kotlin/UInt` and the use site has to
+  unbox it. The unbox for an unsigned box is its own inline class's, `checkcast kotlin/UInt;
+  invokevirtual kotlin/UInt."unbox-impl":()I` — NOT the boxed-primitive `checkcast
+  java/lang/Integer; intValue`, which throws `ClassCastException` at run time because
+  `kotlin/UInt` is not an `Integer`. All four carriers behave alike, each through its own class
+  (`kotlin/UByte."unbox-impl":()B`, …); the checkcast/unbox pair matches kotlinc instruction for
+  instruction, while the surrounding code still diverges where it already did
+  (`Integer.toUnsignedString` on a masked carrier rather than `UByte."toString-impl"`).
+
+  The rule applies to EVERY erased reference boundary, not only calls: wrapper ADAPTER selection
+  consumes the semantic scalar type first, and only then may slot/descriptor selection map that type
+  to its JVM carrier. `semantic_scalar_adapter` is the emitter-side statement of that ordering. Thus
+  a generic property result (`Pair<UInt, …>.first`) unboxes through `kotlin/UInt`, and an inline
+  `FunctionN` argument/result (`listOf(5u).map { it }`) crosses its `Object` invoke slots as a boxed
+  `kotlin/UInt`; neither is allowed to rediscover the wrapper from the later `int` carrier. Callable
+  references, property references, and ordinary lambda objects obey that same `FunctionN` contract.
+  `InvokeFunction` therefore retains its semantic parameter list as well as its return type: the one
+  generic consumer can select argument and result adapters without branching on which closure object
+  produced the value. Plain-lambda implementation methods explicitly unbox boxed unsigned parameters
+  into carrier locals and box unsigned result tails; declared SAM methods instead follow their own
+  physical descriptors. Property writes use the same adapter in the opposite direction. This is
+  deliberately independent of source file, module, classpath provider, owner, accessor spelling, or
+  inline host identity.
+
+  Lowering's erased-call-result coercion follows the same semantic rule. The value-read coercion
+  (`coerce_to_static`) already retained unsigned identity, which is why a map/indexed read was correct
+  while the call-result route was not; the latter now emits the unsigned unbox before recording the
+  call's logical carrier type. Strict verifier/runtime tests cover calls, properties, inline lambdas,
+  and ordinary function values so a future decline cannot silently remove the adapter coverage.
+
+  A BOUNDED type parameter erases to its BOUND rather than to `Object` (`<T : Comparable<T>>` →
+  `Comparable`), and kotlinc unboxes there identically. The two classpath call sites (an imported bare
+  name, a fully qualified call) each decide separately whether a substituted result needs coercing at
+  all, and both excluded unsigned deliberately — because the coercion they would have reached emitted
+  the wrong unbox. With the unbox corrected, excluding them only left the box on the stack where the
+  carrier belonged: a `VerifyError`, again with krusty reporting success. Both gates now admit
+  unsigned. No stdlib call reaches this erasure — every `<T : Comparable<T>>` helper has an unsigned
+  specialization (`maxOf(UShort, UShort)` selects `maxOf-5PvTz6A:(SS)S`) — so the test builds a
+  fixture jar. The three gates (the plain call, the packed-vararg call, and the imported bare name)
+  are now ONE predicate, `substituted_ret_needs_coercion`: spelling the same rule three ways is how
+  the unsigned exclusion came to differ between them in the first place.
+  `tests/unsigned_generic_erasure_e2e.rs` asserts a STRICTER contract than
+  `tests/unsigned_classpath_call_e2e.rs` — every shape there must EMIT and run, not merely avoid a
+  bad emit, because a decline would leave the unbox it exists to pin untested.
 - **Mutable capture rejection** — a lambda that writes an enclosing function local is rejected (the file
   skips), because krusty lowers a non-inlined lambda to a closure class that cannot mutate the outer frame.
   This applies on **both** the direct-lambda path and the extension-call path (`listOf(…).forEach { s += it }`
