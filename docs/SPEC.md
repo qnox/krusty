@@ -1666,6 +1666,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   clears the operand stack) takes the `emit_operands` temp route; the `Vararg`/`SpreadBuilder` fill
   loops have no such option, and lowering declines a `try` element for them (`is_branchy`).
   `tests/comparison_under_operands_e2e.rs`.
+- **A `lateinit` FIELD read is itself frame-recording.** The uninitialized guard kotlinc inserts at every
+  such read (`dup; ifnonnull L; ldc name; invokestatic throwUninitializedPropertyAccessException; L:`)
+  branches, and its join records a stack-map frame typing only the field value. So a `lateinit` read is a
+  branchy sub-expression exactly like a comparison or a `when`, and every position that holds operands
+  across one — `emit_operands`, `New`, `SetField`, `StringConcat`, and the `emit_value_over` fill/subscript
+  positions above — must spill or type the held entries. `records_frame` answers this for `GetField` by
+  the field's `lateinit` flag, and for `PropertyRead` by first resolving which realization the read takes:
+  only a DIRECT FIELD load carries the guard inline, since a read through the accessor hides it inside the
+  getter body (which is why a cross-class or inherited read, always an accessor read, was never affected).
+  Recursing into the receiver alone answered `false`, so `class C { lateinit var s: String; fun f() =
+  listOf(s, s) }` emitted successfully and failed at link time with `VerifyError: Inconsistent stackmap
+  frames at branch target N`. This is emitter-only: the guard shape, and the fact that a `lateinit` read
+  still throws while the field is null, are unchanged — spilling only moves *when* the earlier operands
+  are evaluated relative to it. `lateinit` on a top-level/`object` property is a separate, still-declined
+  shape (the IR backend skips the file). `tests/lateinit_operand_stack_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
@@ -1948,6 +1963,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   while the call-result route was not; the latter now emits the unsigned unbox before recording the
   call's logical carrier type. Strict verifier/runtime tests cover calls, properties, inline lambdas,
   and ordinary function values so a future decline cannot silently remove the adapter coverage.
+
+  A library extension RECEIVER is physically its first argument, so it crosses exactly the same
+  representation boundary as a source-written argument. Lowering realizes both through the shared
+  argument coercion before call or splice selection: a scalar entering a reference parameter is boxed
+  with its semantic adapter, nullable/reference values are preserved, and value classes retain their
+  identity instead of becoming a box of the underlying primitive carrier. This matters for an inline
+  scope call such as `5u.let { … }`: the spliced lambda parameter expects `kotlin/UInt`, and an
+  `Integer.valueOf` box would pass verification but fail the lambda's entry cast.
+
+  The rule is attached to the representation boundary, not to a particular unsigned class, callable,
+  discovery source, or emitter splice. Consequently ordinary and inlined library extensions consume
+  the same IR argument, while values produced inside the host remain independent — for example,
+  `map` still obtains its already-boxed element from `Iterator.next()`. Strict runtime regressions pin
+  literal, local, and call-result receivers plus the separate host-produced element shape; declining
+  either case is not accepted as a substitute for realizing the boundary.
 
   A BOUNDED type parameter erases to its BOUND rather than to `Object` (`<T : Comparable<T>>` →
   `Comparable`), and kotlinc unboxes there identically. The two classpath call sites (an imported bare
@@ -3940,7 +3970,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   applicable.** For `class Wrap(val v: Int) { companion object { operator fun invoke(f: (Int) -> Int): Int } }`,
   kotlinc resolves `Wrap { it * 2 }` to the companion operator — a lambda is not applicable to the
   constructor's `Int` parameter — while `Wrap(7)` stays a construction. krusty had this for CLASSPATH
-  types (`classpath_companion_ty` + `record_invoke`) and for source INTERFACES (which have no
+  types (`semantic_companion_ty` + `record_invoke`) and for source INTERFACES (which have no
   constructor), but a source CLASS went to the constructor unconditionally and reported
   `return type mismatch: expected 'Int', actual 'Wrap'`. The source class path now falls back to
   `check_source_companion_call(CALLABLE_INVOKE_OPERATOR, require_operator = true)` when
@@ -3966,42 +3996,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`fun ap(f: (Int) -> Int)` + `fun ap(s: String)` fails on object and instance receivers alike).
   Test: `tests/object_receiver_lambda_e2e.rs`.
 
-- **`Type { … }` selects a CLASSPATH companion's `operator fun invoke` over a non-matching
-  constructor, and the trailing lambda is shaped against the operator's parameter.** ktor's
-  `MockEngine { req -> respond(…) }`: the class has constructors (`(MockEngineConfig)`,
-  `(MockEngineConfig, Boolean)`), and the companion declares
-  `operator fun invoke(handler: MockRequestHandler)` where the handler is a SUSPEND RECEIVER
-  function type behind a typealias. kotlinc picks the operator and types the block with
-  `MockRequestHandleScope` as `this` and the request as its parameter. krusty resolved the
-  operator only for the shapes its Phase-A lambda typing could already handle: the argument-typing
-  pass consulted constructors (`construction_lambda_param_shapes`) and same-named top-level
-  functions, but never companion `invoke`, so the block was typed shapeless, the late
-  companion-invoke fallback could not match it against the operator's function-type parameter, and
-  the whole call collapsed into `no value passed for parameter 'config'` + `unresolved function`
-  with every bare call inside the block unresolved (cascading into `HttpClient(engine) { … }`
-  unresolved because `engine` carried an error type). Three seams close it, all origin-generic:
-  (1) `companion_invoke_lambda_param_shapes` — the companion-invoke analogue of the constructor
-  shaping channel, same unique-arity ambiguity rule, consulted for slots the constructor channel
-  leaves non-function-typed (a constructor that CAN take the lambda keeps priority);
-  (2) the classpath member decode publishes each function-typed parameter's `Signature`-recovered
-  shape into the logical `params` (the descriptor erases `Scope.(Req) -> Resp` to a raw
-  all-`Any` `Function2`) and rewrites the gsig in the same pass so overload candidates agree;
-  (3) a parameter `@Metadata` marks with the `Type.flags` SUSPEND_TYPE bit is CPS-erased in the
-  `Signature` attribute (`FunctionN+1<…, Continuation<T>, Object>`) — the flag is decoded
-  (`parse_type_suspend_flag`, `MetaValueParam::suspend_fun`) and the logical
-  `suspend R.(P) -> T` recovered (`recover_suspend_fun_shape`). The flag is the ONLY witness:
-  a source-level `(…, Continuation<T>) -> Any` parameter has the identical `Signature`, so the
-  shape alone must not be rewritten. The constructor probe's mapping diagnostic is suppressed
-  when the companion operator accepts the typed arguments (kotlinc reports nothing), mirroring
-  the source path's rollback; explicit constructor arguments still pick the constructor.
-  Two boundaries the publish must respect: a GENERIC function-type parameter (`T.() -> String`)
-  stays erased — its consumers substitute through the gsig at the call site, and a raw `TyParam`
-  published into `params` would short-circuit that substitution (a named lambda argument then
-  binds `this` to the unsubstituted variable); and once a `Unit`-returning function-type
-  parameter is concrete, the named-slot member path must keep kotlinc's LAMBDA-LITERAL `Unit`
-  coercion (`after(pre = { n -> n.toLong() }, …)` against `pre: (Int) -> Unit` — the literal's
-  trailing expression coerces to `Unit`; an ordinary `(Int) -> Long` VALUE still does not fit).
-  Test: `tests/classpath_companion_invoke_lambda_e2e.rs`.
+- **Explicit type arguments determine a call's type wherever argument mapping cannot.** Four
+  behaviors around a generic provider call with defaults on both sides of a non-final vararg and a
+  trailing receiver-lambda default:
+  (1) the SIGNATURE phase's lightweight property inferer maps arguments positionally, so a named
+  argument out of its declared position found no candidate and a class property initialized by
+  such a call reported "cannot infer the type of property" — when every top-level overload agrees
+  on the return after substituting the explicit type arguments (`explicit_targ_return_agreement`),
+  that IS the property's type, and argument legality stays with the full checker; (2) the
+  top-level lambda-shape probe (`lambda_shape_for_overload`) unified bindings only from
+  receiver/arguments, so a `T.() -> Unit` trailing lambda bound its implicit `this` to `T`'s
+  BOUND (`kotlin/Any`) instead of the written `<C>` — explicit type arguments now seed the
+  bindings first (`seed_explicit_type_args`; `unify_ty`'s `or_insert` keeps them authoritative);
+  (3) a classpath MEMBER call with explicit type arguments (`m.any<Org>()`) dropped them entirely
+  (`resolve_instance_member` had no `type_args` input), returning the formal's bound;
+  (4) `Type(args) { … }` where `Type`'s classpath companion declares `operator fun invoke` shapes
+  the trailing lambda from the invoke parameter exactly as a top-level overload would
+  (`companion_invoke_lambda_shape`), and a constructor whose mapping fails must DECLINE, not
+  diagnose, when such an invoke exists; otherwise a public constructor can claim the call with a
+  missing-parameter diagnostic before the semantic companion candidate is considered.
+  Tests: `tests/classpath_reified_named_default_vararg_e2e.rs`,
+  `tests/classpath_companion_invoke_lambda_e2e.rs`,
+  `tests/classpath_member_overload_no_names_e2e.rs`.
+
+- **A generic argument with nothing to bind its type parameter takes the enclosing member's
+  parameter type — expected-type inference.** A `fun <T : Any> provide(): T` call has no argument,
+  no explicit type argument, and no assignment context, so its first-pass type collapses to the
+  erased bound and the enclosing member call reported "none of the following candidates is
+  applicable". At the member-call LAST RESORT (every other path declined), such arguments
+  (`expected_retypable_generic_argument`: a bare-name or qualified generic call whose type is the
+  erased top) are re-typed against the parameter every mappable member overload agrees on, the
+  bound type is recorded as the argument's type, and member resolution runs once more
+  (`retry_member_call_with_expected_arguments`). Divergent overload sets decline — this pass
+  cannot know which parameter the argument lands in.
+  Test: `tests/classpath_member_overload_no_names_e2e.rs`.
 
 ## 8. Success criteria for the PoC
 

@@ -20,6 +20,8 @@ mod anon_fun_statement_e2e;
 mod anon_object_capture_e2e;
 #[path = "anon_object_capture_member_e2e.rs"]
 mod anon_object_capture_member_e2e;
+#[path = "anon_object_outer_this_e2e.rs"]
+mod anon_object_outer_this_e2e;
 #[path = "anonymous_function_e2e.rs"]
 mod anonymous_function_e2e;
 #[path = "apt_host_e2e.rs"]
@@ -218,6 +220,8 @@ mod classpath_receiver_lambda_e2e;
 mod classpath_receiver_lambda_overload_e2e;
 #[path = "classpath_reified_inline_toplevel_e2e.rs"]
 mod classpath_reified_inline_toplevel_e2e;
+#[path = "classpath_reified_named_default_vararg_e2e.rs"]
+mod classpath_reified_named_default_vararg_e2e;
 #[path = "classpath_runblocking_e2e.rs"]
 mod classpath_runblocking_e2e;
 #[path = "classpath_static_call_inference_e2e.rs"]
@@ -266,6 +270,8 @@ mod collection_members_e2e;
 mod collection_special_member_stub_e2e;
 #[path = "companion_const_e2e.rs"]
 mod companion_const_e2e;
+#[path = "companion_cross_file_property_e2e.rs"]
+mod companion_cross_file_property_e2e;
 #[path = "companion_e2e.rs"]
 mod companion_e2e;
 #[path = "companion_member_read_e2e.rs"]
@@ -602,6 +608,8 @@ mod interface_default_property_e2e;
 mod interface_delegation_e2e;
 #[path = "interface_delegation_expr_e2e.rs"]
 mod interface_delegation_expr_e2e;
+#[path = "interface_factory_function_e2e.rs"]
+mod interface_factory_function_e2e;
 #[path = "interface_supertype_members_e2e.rs"]
 mod interface_supertype_members_e2e;
 #[path = "internal_classpath_access_e2e.rs"]
@@ -624,6 +632,8 @@ mod is_nullable_primitive_e2e;
 mod is_primitive_smartcast_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
+#[path = "java_ctor_sam_conversion_e2e.rs"]
+mod java_ctor_sam_conversion_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
 #[path = "java_nested_static_e2e.rs"]
@@ -642,6 +652,8 @@ mod js_backend_e2e;
 mod jvm_name_toplevel_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
+#[path = "kotlin_fun_java_sam_param_e2e.rs"]
+mod kotlin_fun_java_sam_param_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
@@ -662,6 +674,8 @@ mod lambda_e2e;
 mod lambda_vs_block_fun_type_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
+#[path = "lateinit_operand_stack_e2e.rs"]
+mod lateinit_operand_stack_e2e;
 #[path = "lib_fixture_parallel_e2e.rs"]
 mod lib_fixture_parallel_e2e;
 #[path = "library_fun_type_lambda_param_e2e.rs"]
@@ -760,6 +774,8 @@ mod nested_class_ctor_scope_e2e;
 mod nested_class_supertype_e2e;
 #[path = "nested_class_unqualified_e2e.rs"]
 mod nested_class_unqualified_e2e;
+#[path = "nested_classifier_forward_ref_e2e.rs"]
+mod nested_classifier_forward_ref_e2e;
 #[path = "nested_ctor_named_args_e2e.rs"]
 mod nested_ctor_named_args_e2e;
 #[path = "nested_data_class_tostring_e2e.rs"]

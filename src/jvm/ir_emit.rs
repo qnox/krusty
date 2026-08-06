@@ -1688,7 +1688,9 @@ fn inner_class_access(c: &IrClass) -> u16 {
     const ANNOTATION: u16 = 0x2000;
     const ENUM: u16 = 0x4000;
 
-    let is_inner = c.fields.first().is_some_and(|field| field.name == "this$0");
+    // Inner/static nesting is a source-level class property, not a consequence of a field spelling.
+    // In particular, another synthetic class may conventionally call an ordinary capture `this$0`.
+    let is_inner = c.is_inner_class;
     let mut access = PUBLIC | if is_inner { 0 } else { STATIC };
     if c.is_annotation {
         access |= INTERFACE | ABSTRACT | ANNOTATION;
@@ -3200,16 +3202,32 @@ fn emit_class(
                     }
                 }
             }
-            // An inner class stores its captured outer instance (`this$0`, field 0) BEFORE `super(…)`,
-            // so a super-constructor argument can read the outer instance (`inner class Inner :
-            // Base(run { outerProp })`) — kotlinc emits the same. A `putfield` of the current class's own
-            // field on the still-uninitialized `this` is legal per JVMS 4.10.2.4.
-            if let Some(this0) = c.fields.iter().find(|field| field.name == "this$0") {
+            let ctor_param_is_field: Vec<bool> = if c.ctor_args.is_empty() {
+                vec![true; param_tys.len()]
+            } else {
+                c.ctor_args
+                    .iter()
+                    .map(|argument| argument.is_field)
+                    .collect()
+            };
+            // Store only constructor fields explicitly marked as pre-super. A language-level inner
+            // class marks its enclosing-instance field because a superclass argument may read it; an
+            // ordinary capture does not. Keeping this as ordering metadata avoids interpreting a JVM
+            // field name as source semantics. A `putfield` of the current class's own field on the
+            // still-uninitialized `this` is legal per JVMS 4.10.2.4.
+            for &(param_i, field_i) in &c.pre_super_param_fields {
+                let param_i = param_i as usize;
+                let field = &c.fields[field_i as usize];
+                let param_ty = param_tys[param_i];
+                let param_slot = 1 + param_tys[..param_i]
+                    .iter()
+                    .map(|ty| slot_words(*ty))
+                    .sum::<u16>();
                 ctor.aload(0);
-                ctor.aload(1); // the outer instance = first constructor parameter
+                load(param_ty, param_slot, &mut ctor);
                 let fref =
-                    e.cw.fieldref(&fq_name, "this$0", &type_descriptor(this0.ty));
-                ctor.putfield(fref, slot_words(this0.ty) as i32);
+                    e.cw.fieldref(&fq_name, &field.name, &type_descriptor(field.ty));
+                ctor.putfield(fref, slot_words(field.ty) as i32);
             }
             // `super(args)` — `this` is loaded first, so spill any branchy arg to temps before it.
             let super_args = c.super_args.clone();
@@ -3254,16 +3272,16 @@ fn emit_class(
             if !c.explicit_param_stores {
                 let mut slot = 1u16;
                 let mut field_i = 0usize;
-                let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-                    vec![true; param_tys.len()]
-                } else {
-                    c.ctor_args.iter().map(|a| a.is_field).collect()
-                };
                 for (i, t) in param_tys.iter().enumerate() {
-                    if is_field.get(i).copied().unwrap_or(true) {
+                    if ctor_param_is_field.get(i).copied().unwrap_or(true) {
                         let name = &c.fields[field_i].name;
-                        // `this$0` is already stored BEFORE `super(…)` above — don't store it again.
-                        if name != "this$0" {
+                        // Fields already stored before `super(…)` are not stored again here. The cutoff
+                        // is semantic constructor metadata, independent of their physical ABI names.
+                        if !c
+                            .pre_super_param_fields
+                            .iter()
+                            .any(|&(_, pre_super_field)| pre_super_field as usize == field_i)
+                        {
                             // kotlinc maps this field store to the parameter's own source line —
                             // capture the pc where it starts.
                             let pc = ctor.bytes.len() as u16;
@@ -8268,27 +8286,16 @@ impl<'a> Emitter<'a> {
     /// to ask, so it falls back to the JVM convention kotlinc itself follows: `get<Name>()`.
     fn emit_property_read(&mut self, operation: PropertyOperation<'_>, code: &mut CodeBuilder) {
         use crate::jvm::inline::PropertyAccess;
-        if let Some(field) = operation.field {
-            let access = PropertyAccess::Field {
-                owner: field.owner.render(),
-                name: field.name.clone(),
-                descriptor: field.descriptor.clone(),
-                is_static: false,
-            };
+        if let Some((access, exact_field)) = self.selected_local_property_read_access(
+            operation.owner,
+            operation.name,
+            operation.field,
+        ) {
             return self.emit_realized_property_read(
                 operation.receiver,
                 access,
                 operation.ty,
-                true,
-                code,
-            );
-        }
-        if let Some(access) = self.declared_property_read_access(operation.owner, operation.name) {
-            return self.emit_realized_property_read(
-                operation.receiver,
-                access,
-                operation.ty,
-                false,
+                exact_field,
                 code,
             );
         }
@@ -8749,6 +8756,65 @@ impl<'a> Emitter<'a> {
             && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
     }
 
+    /// Select the property-read realization available directly from semantic IR: an exact field target
+    /// recorded by resolution wins, otherwise a declaration emitted by this compilation supplies its own
+    /// field/accessor/bridge realization. `None` deliberately means the external bytecode-provider path
+    /// must decide. The boolean records the exact-field case because its erased descriptor may require a
+    /// post-read narrowing cast. Both bytecode emission and frame analysis consume this helper; duplicating
+    /// the precedence here would let them disagree about whether the inline `lateinit` guard exists.
+    fn selected_local_property_read_access(
+        &self,
+        owner: &str,
+        name: &str,
+        field: Option<&crate::libraries::InstanceFieldRef>,
+    ) -> Option<(crate::jvm::inline::PropertyAccess, bool)> {
+        use crate::jvm::inline::PropertyAccess;
+        if let Some(field) = field {
+            return Some((
+                PropertyAccess::Field {
+                    owner: field.owner.render(),
+                    name: field.name.clone(),
+                    descriptor: field.descriptor.clone(),
+                    is_static: false,
+                },
+                true,
+            ));
+        }
+        self.declared_property_read_access(owner, name)
+            .map(|access| (access, false))
+    }
+
+    /// Is `owner.name` a `lateinit` backing field of a class THIS compilation is emitting? Only such a
+    /// field carries the inline uninitialized guard, so the read emission and [`Self::records_frame`]
+    /// must answer this one question the same way — a disagreement is a `VerifyError` at link time.
+    fn is_lateinit_field(&self, owner: &str, name: &str) -> bool {
+        self.ir
+            .classes
+            .iter()
+            .find(|c| c.fq_name_matches(owner))
+            .and_then(|c| c.fields.iter().find(|f| f.name == name))
+            .is_some_and(|f| f.is_lateinit())
+    }
+
+    /// Does this property read realize as a DIRECT FIELD load of a `lateinit` backing field — the one
+    /// read shape that emits the guard INLINE rather than hiding it inside a getter body? Mirrors the
+    /// realization [`Self::emit_property_read`] picks through
+    /// [`Self::selected_local_property_read_access`]. Everything past that helper is an external-provider
+    /// property, whose owner is not a class being emitted here.
+    fn lateinit_direct_field_read(
+        &self,
+        owner: &str,
+        name: &str,
+        field: Option<&crate::libraries::InstanceFieldRef>,
+    ) -> bool {
+        use crate::jvm::inline::PropertyAccess;
+        let Some((access, _)) = self.selected_local_property_read_access(owner, name, field) else {
+            return false;
+        };
+        matches!(&access, PropertyAccess::Field { owner, name, .. }
+            if self.is_lateinit_field(owner, name))
+    }
+
     /// Emit one already-chosen realization of a property read: push the receiver (or drop it, when the
     /// realization takes none), perform the field load or accessor call, and bridge the physical result to
     /// the property read's Kotlin type.
@@ -8777,13 +8843,7 @@ impl<'a> Emitter<'a> {
                 is_static,
             } => {
                 let jt = ty_from_field_descriptor(&descriptor);
-                let lateinit = self
-                    .ir
-                    .classes
-                    .iter()
-                    .find(|c| c.fq_name_matches(&owner))
-                    .and_then(|c| c.fields.iter().find(|f| f.name == name))
-                    .is_some_and(|f| f.is_lateinit());
+                let lateinit = self.is_lateinit_field(&owner, &name);
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
                     code.getstatic(fref, slot_words(jt) as i32);
@@ -9968,9 +10028,6 @@ impl<'a> Emitter<'a> {
                         // `samMethodType` is the INTERFACE method's (erased) descriptor — NOT the
                         // lambda's — so a SAM with parameters (or a generic SAM erased to `Object`)
                         // matches the abstract method the metafactory must implement.
-                        // `instantiatedMethodType` is the impl's actual lambda signature; the
-                        // metafactory inserts the bridge between them.
-                        let inst_desc = method_descriptor(lam_tys, impl_ret);
                         let sam_desc = descriptor.clone().unwrap_or_else(|| {
                             self.ir
                                 .classes
@@ -9983,8 +10040,44 @@ impl<'a> Emitter<'a> {
                                         .find(|f| f.name == *method)
                                 })
                                 .map(|f| ir_method_desc(&f.params, &f.ret))
-                                .unwrap_or_else(|| inst_desc.clone())
+                                .unwrap_or_else(|| method_descriptor(lam_tys, impl_ret))
                         });
+                        // `instantiatedMethodType` describes the specialization of the ERASED SAM
+                        // method, not merely the lifted implementation's primitive signature. A
+                        // generic interface slot can erase to `Object` while checking substitutes a
+                        // scalar (`Comparator<in Int>` is the standard example). Advertising `int`
+                        // for that reference slot asks LambdaMetafactory to specialize a reference
+                        // parameter as a primitive and fails while the bootstrap is linked. Keep the
+                        // lambda body's semantic scalar — the implementation handle may still accept
+                        // it and the metafactory supplies the ordinary wrapper adapter — but spell the
+                        // instantiated boundary with the wrapper wherever the SAM descriptor says the
+                        // physical slot is a reference. This reads only descriptor SHAPE, so source,
+                        // sibling-module, and dependency interfaces all take the same path.
+                        let inst_desc = crate::jvm::names::parse_method_descriptor(&sam_desc)
+                            .filter(|(sam_params, _)| sam_params.len() == lam_tys.len())
+                            .map(|(sam_params, sam_ret)| {
+                                let params: String = lam_tys
+                                    .iter()
+                                    .zip(sam_params)
+                                    .map(|(&logical, physical)| {
+                                        if descriptor_is_reference(physical) {
+                                            boxed_descriptor(logical)
+                                        } else {
+                                            type_descriptor(logical)
+                                        }
+                                    })
+                                    .collect();
+                                let ret = if descriptor_is_reference(sam_ret) {
+                                    boxed_descriptor(impl_ret)
+                                } else {
+                                    type_descriptor(impl_ret)
+                                };
+                                format!("({params}){ret}")
+                            })
+                            // A malformed or temporarily incomplete provider descriptor must not
+                            // invent slot alignment. Preserve the prior implementation-signature
+                            // fallback; normal resolved SAMs always supply a parseable descriptor.
+                            .unwrap_or_else(|| method_descriptor(lam_tys, impl_ret));
                         (iface.clone(), method.clone(), sam_desc, inst_desc)
                     }
                     None => {
@@ -10779,8 +10872,27 @@ impl<'a> Emitter<'a> {
                         .any(|a| a.map_or(false, |x| self.records_frame(x)))
             }
             IrExpr::New { args, .. } => args.iter().any(|&a| self.records_frame(a)),
-            IrExpr::GetField { receiver, .. } | IrExpr::PropertyRead { receiver, .. } => {
+            // A `lateinit` FIELD read carries its own uninitialized guard (`dup; ifnonnull L; ldc name;
+            // invokestatic throwUninitializedPropertyAccessException; L:`), whose join records a frame
+            // typing only the field value — so an operand already on the stack must be spilled first. A
+            // read through a getter records nothing here: the guard lives inside the accessor body.
+            IrExpr::GetField {
+                receiver,
+                class,
+                index,
+            } => {
                 self.records_frame(*receiver)
+                    || self.ir.classes[*class as usize].fields[*index as usize].is_lateinit()
+            }
+            IrExpr::PropertyRead {
+                receiver,
+                owner,
+                name,
+                field,
+                ..
+            } => {
+                self.records_frame(*receiver)
+                    || self.lateinit_direct_field_read(&owner.render(), name, field.as_deref())
             }
             IrExpr::SetField {
                 receiver, value, ..
@@ -11983,15 +12095,19 @@ impl<'a> Emitter<'a> {
                 ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].ty)
             }
             IrExpr::PropertyRead {
-                owner, name, ty, ..
+                owner,
+                name,
+                ty,
+                field,
+                ..
             } => {
                 // What the read leaves on the stack is what its REALIZATION leaves — a `Unit` property is
                 // stored as a `Lkotlin/Unit;` field but read through a `()V` accessor, and only the chosen
                 // access says which. Consult the same source the emit does.
                 let owner = owner.render();
                 let void_accessor = self
-                    .declared_property_read_access(&owner, name)
-                    .is_some_and(|access| {
+                    .selected_local_property_read_access(&owner, name, field.as_deref())
+                    .is_some_and(|(access, _)| {
                         matches!(access, crate::jvm::inline::PropertyAccess::Accessor {
                             ref descriptor, ..
                         } if descriptor.ends_with(")V"))
@@ -12146,6 +12262,16 @@ fn boxed_descriptor(t: Ty) -> String {
         Some(w) => format!("L{w};"),
         None => type_descriptor(t),
     }
+}
+
+/// Whether one already-parsed JVM field descriptor occupies a reference slot.
+///
+/// Descriptor interpretation stays in the JVM emitter; common resolution and IR carry only the
+/// semantic SAM and the provider-supplied method spelling. Arrays are references just like objects,
+/// while primitive and `void` spellings are not. Keeping this tiny predicate shared by parameter and
+/// return specialization prevents the two halves of a LambdaMetafactory boundary from drifting.
+fn descriptor_is_reference(descriptor: &str) -> bool {
+    descriptor.starts_with('L') || descriptor.starts_with('[')
 }
 
 /// JVM internal name for a reference `Ty`, for `instanceof`/`checkcast`.

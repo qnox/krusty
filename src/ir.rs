@@ -746,6 +746,9 @@ pub struct IrProperty {
 #[derive(Clone, Debug)]
 pub struct IrClass {
     pub fq_name: TypeName,
+    /// A language-level non-static nested class. Backends consume this declaration property directly;
+    /// a synthetic receiver field or its physical name does not imply inner-class semantics.
+    pub is_inner_class: bool,
     /// `@JvmInline value class` — a single-field class represented unboxed (as its one field's type) by
     /// the JVM `jvm::value_classes` IR pass. The IR otherwise treats it as a plain class.
     pub is_value: bool,
@@ -783,6 +786,12 @@ pub struct IrClass {
     /// `val`/`var` param→field stores (the desugared primary-constructor sugar); it also carries body-
     /// property initializers (`SetField`) and `init { … }` blocks. `None` when there's nothing to run.
     pub init_body: Option<ExprId>,
+    /// Explicit `(constructor parameter index, field index)` stores that must run before the superclass
+    /// constructor. This is semantic constructor-order metadata: the JVM backend must not infer it from
+    /// a synthetic field spelling or assume the target is a leading property field. Language-level inner
+    /// classes and generated state machines can both require such a store for different reasons; ordinary
+    /// lexical/enclosing captures remain post-`super` stores.
+    pub pre_super_param_fields: Vec<(u32, u32)>,
     /// `true` when `init_body` already stores the primary-constructor `val`/`var` params (and inner
     /// `this$0`) to their fields — the desugared form. The JVM backend then must NOT auto-store them (it
     /// would double-store). `false` for synthesized classes that still rely on the backend's implicit
@@ -2308,6 +2317,7 @@ mod tests {
     fn blank_class(fq: &str) -> IrClass {
         IrClass {
             fq_name: fq.into(),
+            is_inner_class: false,
             is_value: false,
             is_data: false,
             decl_line: 0,
@@ -2320,6 +2330,7 @@ mod tests {
             ctor_param_count: 0,
             ctor_args: Vec::new(),
             init_body: None,
+            pre_super_param_fields: Vec::new(),
             explicit_param_stores: false,
             methods: Vec::new(),
             is_interface: false,

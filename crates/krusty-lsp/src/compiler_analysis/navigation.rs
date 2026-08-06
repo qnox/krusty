@@ -391,7 +391,7 @@ impl DefinitionSymbols {
                                                 symbols
                                                     .static_props
                                                     .get(&property.name)
-                                                    .map(|(ty, _, _)| *ty)
+                                                    .map(|property| property.ty)
                                             }),
                                         ),
                                         source_name(source, target.span, &property.name),
