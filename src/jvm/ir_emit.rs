@@ -10028,9 +10028,6 @@ impl<'a> Emitter<'a> {
                         // `samMethodType` is the INTERFACE method's (erased) descriptor — NOT the
                         // lambda's — so a SAM with parameters (or a generic SAM erased to `Object`)
                         // matches the abstract method the metafactory must implement.
-                        // `instantiatedMethodType` is the impl's actual lambda signature; the
-                        // metafactory inserts the bridge between them.
-                        let inst_desc = method_descriptor(lam_tys, impl_ret);
                         let sam_desc = descriptor.clone().unwrap_or_else(|| {
                             self.ir
                                 .classes
@@ -10043,8 +10040,44 @@ impl<'a> Emitter<'a> {
                                         .find(|f| f.name == *method)
                                 })
                                 .map(|f| ir_method_desc(&f.params, &f.ret))
-                                .unwrap_or_else(|| inst_desc.clone())
+                                .unwrap_or_else(|| method_descriptor(lam_tys, impl_ret))
                         });
+                        // `instantiatedMethodType` describes the specialization of the ERASED SAM
+                        // method, not merely the lifted implementation's primitive signature. A
+                        // generic interface slot can erase to `Object` while checking substitutes a
+                        // scalar (`Comparator<in Int>` is the standard example). Advertising `int`
+                        // for that reference slot asks LambdaMetafactory to specialize a reference
+                        // parameter as a primitive and fails while the bootstrap is linked. Keep the
+                        // lambda body's semantic scalar — the implementation handle may still accept
+                        // it and the metafactory supplies the ordinary wrapper adapter — but spell the
+                        // instantiated boundary with the wrapper wherever the SAM descriptor says the
+                        // physical slot is a reference. This reads only descriptor SHAPE, so source,
+                        // sibling-module, and dependency interfaces all take the same path.
+                        let inst_desc = crate::jvm::names::parse_method_descriptor(&sam_desc)
+                            .filter(|(sam_params, _)| sam_params.len() == lam_tys.len())
+                            .map(|(sam_params, sam_ret)| {
+                                let params: String = lam_tys
+                                    .iter()
+                                    .zip(sam_params)
+                                    .map(|(&logical, physical)| {
+                                        if descriptor_is_reference(physical) {
+                                            boxed_descriptor(logical)
+                                        } else {
+                                            type_descriptor(logical)
+                                        }
+                                    })
+                                    .collect();
+                                let ret = if descriptor_is_reference(sam_ret) {
+                                    boxed_descriptor(impl_ret)
+                                } else {
+                                    type_descriptor(impl_ret)
+                                };
+                                format!("({params}){ret}")
+                            })
+                            // A malformed or temporarily incomplete provider descriptor must not
+                            // invent slot alignment. Preserve the prior implementation-signature
+                            // fallback; normal resolved SAMs always supply a parseable descriptor.
+                            .unwrap_or_else(|| method_descriptor(lam_tys, impl_ret));
                         (iface.clone(), method.clone(), sam_desc, inst_desc)
                     }
                     None => {
@@ -12229,6 +12262,16 @@ fn boxed_descriptor(t: Ty) -> String {
         Some(w) => format!("L{w};"),
         None => type_descriptor(t),
     }
+}
+
+/// Whether one already-parsed JVM field descriptor occupies a reference slot.
+///
+/// Descriptor interpretation stays in the JVM emitter; common resolution and IR carry only the
+/// semantic SAM and the provider-supplied method spelling. Arrays are references just like objects,
+/// while primitive and `void` spellings are not. Keeping this tiny predicate shared by parameter and
+/// return specialization prevents the two halves of a LambdaMetafactory boundary from drifting.
+fn descriptor_is_reference(descriptor: &str) -> bool {
+    descriptor.starts_with('L') || descriptor.starts_with('[')
 }
 
 /// JVM internal name for a reference `Ty`, for `instanceof`/`checkcast`.

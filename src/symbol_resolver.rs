@@ -567,22 +567,27 @@ pub(crate) fn ty_subst_keep_unbound(sig: Ty, binds: &GSigBinds) -> Ty {
     ty_subst_with_unbound_policy(sig, binds, UnboundTyParam::Preserve)
 }
 
+/// The specialized callable shape of a functional-interface target.
+///
+/// This is a semantic fact exposed through [`SemanticPlatform`]'s type record. The target may have
+/// been loaded from a dependency, synthesized by a platform, or supplied by another source module;
+/// consumers must not create origin-specific SAM paths after this operation has answered.
 #[derive(Clone, Debug)]
-pub(crate) struct ClasspathSamSignature {
+pub(crate) struct SamSignature {
     pub params: Vec<Ty>,
     pub ret: Ty,
 }
 
-pub(crate) fn classpath_sam_signature(
+pub(crate) fn semantic_sam_signature(
     lib: &dyn SemanticPlatform,
     target: Ty,
-) -> Option<ClasspathSamSignature> {
+) -> Option<SamSignature> {
     let target = target.non_null();
     let internal = target.obj_internal()?;
     let ty = lib.resolve_type_name(internal)?;
     let sam = ty.sam_method.as_ref()?;
     let Some(gsig) = sam.generic_sig.as_ref() else {
-        return Some(ClasspathSamSignature {
+        return Some(SamSignature {
             params: sam.params.clone(),
             ret: sam.ret,
         });
@@ -595,7 +600,7 @@ pub(crate) fn classpath_sam_signature(
     if let Some(receiver) = gsig.receiver {
         unify_ty(receiver, target, &mut binds);
     }
-    Some(ClasspathSamSignature {
+    Some(SamSignature {
         params: ty_subst_all(&gsig.params, &binds),
         ret: ty_subst(gsig.ret, &binds),
     })
@@ -817,8 +822,13 @@ pub(crate) fn arg_fits(p: &Ty, a: &Ty) -> bool {
         || matches!((p, a), (Ty::Obj(pi, _), Ty::Obj(ai, _)) if pi == ai)
 }
 
-fn classpath_sam_arg_matches(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool {
-    let Some(sam) = classpath_sam_signature(lib, param) else {
+/// Whether a function-shaped argument can adapt to a functional-interface parameter.
+///
+/// `arg` is sometimes an unchecked lambda probe rather than a completed function type. Keeping that
+/// syntax state in [`CallArgKind`] at callers, then reducing it to `Ty::Error` here, lets every call
+/// origin use the same arity rule without teaching this semantic operation about AST forms.
+pub(crate) fn sam_arg_matches(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> bool {
+    let Some(sam) = semantic_sam_signature(lib, param) else {
         return false;
     };
     if arg == Ty::Error {
@@ -1130,7 +1140,7 @@ fn best_companion_overload<'a>(
             if param.fun_arity().is_some() {
                 arg_fits_source(lib, src, param, &arg.ty())
             } else {
-                classpath_sam_arg_matches(lib, *param, arg.ty())
+                sam_arg_matches(lib, *param, arg.ty())
             }
         } else {
             arg_fits_source(lib, src, param, &arg.ty())
@@ -3434,7 +3444,7 @@ pub(crate) fn resolve_constructor_from_type(
             // is the shared predicate, so this admits exactly what those origins do — including the
             // `Int`-into-`Byte`/`Short` narrowing they already accept.
             // A lambda literal SAM-converts to a Java functional-interface parameter through the
-            // same `classpath_sam_signature` mechanism method overloads use — without it every
+            // same `semantic_sam_signature` mechanism method overloads use — without it every
             // candidate looks inapplicable and the call is reported unresolved. Against a
             // NON-function parameter the lambda matches ONLY through that conversion: a lambda
             // whose checking the call site deferred carries a placeholder type that plain
@@ -3443,7 +3453,7 @@ pub(crate) fn resolve_constructor_from_type(
             (params.len() == args.len()
                 && params.iter().zip(args).all(|(p, a)| {
                     if a.is_lambda_literal() && p.fun_arity().is_none() {
-                        classpath_sam_arg_matches(lib, *p, a.ty())
+                        sam_arg_matches(lib, *p, a.ty())
                     } else {
                         abi_arg_assignable_to_param(lib, a.ty(), *p)
                             || source_arg_assignable(src, p, &a.ty())
@@ -5002,7 +5012,7 @@ pub(crate) fn best_by_args<'a>(
     // stricter so an exact call still prefers its precise overload.
     let fits = |_position: usize, p: &Ty, arg: &CallArgKind| {
         if arg.is_lambda_literal() && p.fun_arity().is_none() {
-            classpath_sam_arg_matches(lib, *p, arg.ty())
+            sam_arg_matches(lib, *p, arg.ty())
         } else {
             fun_arg_matches(lib, p, &arg.ty(), arg.is_lambda_literal())
                 || platform_arg_assignable(lib, p, &arg.ty())
@@ -5012,7 +5022,7 @@ pub(crate) fn best_by_args<'a>(
     };
     let erased_fits = |_position: usize, p: &Ty, arg: &CallArgKind| {
         if arg.is_lambda_literal() && p.fun_arity().is_none() {
-            classpath_sam_arg_matches(lib, *p, arg.ty())
+            sam_arg_matches(lib, *p, arg.ty())
         } else {
             *p == arg.ty()
                 || *p == Ty::obj("kotlin/Any")
