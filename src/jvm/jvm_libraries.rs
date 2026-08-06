@@ -1294,6 +1294,66 @@ impl JvmLibraries {
                     member_metadata.is_some_and(metadata::MetaFn::is_operator)
                         || member_extension_metadata.is_some_and(metadata::MetaFn::is_operator),
                 );
+                // Publish each FUNCTION-TYPE parameter's recovered shape into the logical `params` —
+                // the descriptor erases `Scope.(Req) -> Resp` to a raw `Function2` (all-`Any`
+                // parameters), so overload/lambda matching against `params` could never see the real
+                // inner types the `Signature` attribute carries. A parameter `@Metadata` marks
+                // SUSPEND_TYPE is further CPS-erased (`FunctionN+1<…, Continuation<T>, Object>`);
+                // recover its logical `suspend` form — the flag is the only witness, since a
+                // source-level `(…, Continuation<T>) -> Any` parameter has the identical `Signature`.
+                // The gsig is rewritten in the same pass so overload candidates (which derive their
+                // logical params from it) agree with `params`. Only function-typed parameters are
+                // touched — every other parameter keeps its descriptor-derived erasure, so member
+                // selection is unchanged for them.
+                // The SUSPEND_TYPE flags are per-VALUE-parameter and align positionally only when
+                // the physical list is exactly the value params (plus a suspend member's own
+                // trailing Continuation) — the same alignment contract `mark_receiver_fun_params`
+                // enforces. A misaligned member (contexts, extensions, failed alignment) has no
+                // trustworthy per-slot facts.
+                let aligned_metadata = member_metadata.filter(|metadata| {
+                    metadata.value_params.len() + usize::from(member.suspend())
+                        == member.params.len()
+                });
+                if let Some(gsig) = member
+                    .generic_sig
+                    .as_mut()
+                    // A constructor's receiver-function marks are restored by the dedicated
+                    // `<init>` pass below, which has its own unique-record attribution guard —
+                    // publishing here would bypass it.
+                    .filter(|g| g.params.len() == member.params.len() && m.name != "<init>")
+                {
+                    for (i, (param, shape)) in member
+                        .params
+                        .iter_mut()
+                        .zip(gsig.params.iter_mut())
+                        .enumerate()
+                    {
+                        // A GENERIC function type (`T.() -> String`) stays erased: its consumers
+                        // substitute through the gsig at the call site, and a raw `TyParam`
+                        // published here would short-circuit that substitution (a named lambda
+                        // argument then binds `this` to the unsubstituted variable).
+                        if !matches!(shape.non_null(), Ty::Fun(_)) || shape.mentions_ty_param() {
+                            continue;
+                        }
+                        // Per-slot facts need both positional alignment and a decoded declared type.
+                        // The metadata reader treats inline and table-backed types uniformly; if
+                        // neither representation resolves, absence remains unknown rather than a
+                        // false claim that the Continuation-tailed function is non-suspend.
+                        let slot_facts = aligned_metadata
+                            .and_then(|metadata| metadata.value_params.get(i))
+                            .filter(|parameter| parameter.has_type_facts());
+                        if slot_facts.is_some_and(metadata::MetaValueParam::suspend_fun) {
+                            *shape = recover_suspend_fun_shape(*shape);
+                        } else if slot_facts.is_none() && continuation_tailed_fun(*shape) {
+                            // A `Continuation`-tailed shape without declared-type facts is ambiguous —
+                            // it may be a suspend function type this pass cannot disclaim.
+                            // Publishing it as a concrete non-suspend signature would be an
+                            // authoritative-looking wrong answer; keep the erased leniency.
+                            continue;
+                        }
+                        *param = *shape;
+                    }
+                }
                 let value_arity = member
                     .params
                     .len()
@@ -2291,6 +2351,48 @@ fn canonicalize_jvm_collections(ty: Ty) -> Ty {
         }
         Ty::Nullable(inner) => Ty::nullable(canonicalize_jvm_collections(*inner)),
         other => other,
+    }
+}
+
+/// Whether a decoded function type ends in a `Continuation` parameter — the shape a CPS-erased
+/// suspend function type shares with a source-level continuation-taking one.
+fn continuation_tailed_fun(ty: Ty) -> bool {
+    match ty.non_null() {
+        Ty::Fun(sig) => matches!(
+            sig.params.last(),
+            Some(Ty::Obj(cont, _)) if cont.matches("kotlin/coroutines/Continuation")
+        ),
+        _ => false,
+    }
+}
+
+/// The LOGICAL Kotlin function type behind a CPS-erased one: the JVM `Signature` attribute spells
+/// `suspend R.(P) -> T` as `FunctionN+1<R, P, Continuation<T>, Object>`, so a decoded `Fun` whose
+/// LAST parameter is `Continuation<T>` IS a suspend function type — drop the continuation, take its
+/// `T` as the return, and set the `suspend` flag. Anything else is returned unchanged.
+fn recover_suspend_fun_shape(ty: Ty) -> Ty {
+    match ty {
+        Ty::Fun(sig) if !sig.suspend => {
+            let Some(Ty::Obj(cont, cont_args)) = sig.params.last() else {
+                return ty;
+            };
+            if !cont.matches("kotlin/coroutines/Continuation") {
+                return ty;
+            }
+            let ret = cont_args
+                .first()
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            Ty::fun_with_shape(
+                sig.params[..sig.params.len() - 1].to_vec(),
+                ret,
+                sig.context_count,
+                sig.has_receiver,
+                true,
+            )
+        }
+        Ty::Nullable(inner) => Ty::nullable(recover_suspend_fun_shape(*inner)),
+        _ => ty,
     }
 }
 
