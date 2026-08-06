@@ -209,3 +209,80 @@ fn dependency_interface_uses_source_factory() {
     }
     assert_eq!(output.trim(), "OK");
 }
+
+/// A same-named factory whose result uses a scalar value-class carrier must remain unboxed at the call
+/// boundary. This is the representation-sensitive form of the same classifier/callable arbitration;
+/// resolving it as a function is insufficient if lowering then treats its result as a boxed instance.
+#[test]
+fn value_class_factory_preserves_scalar_carrier() {
+    run_ok(
+        "ValueClassFactoryCarrier",
+        "@JvmInline value class ScalarToken(val raw: Int)\n\
+         fun ScalarToken(high: Int, low: Int): ScalarToken = ScalarToken((high shl 8) or low)\n\
+         fun box(): String = if (ScalarToken(2, 3).raw == 515) \"OK\" else \"F\"\n",
+    );
+}
+
+/// A factory result must also retain its unboxed carrier when it becomes the receiver of an extension.
+/// This separates call-result representation from the indexed-container case below, making a failure at
+/// either boundary identify the responsible lowering stage without relying on a reproduction class name.
+#[test]
+fn value_class_factory_composes_with_extension_call() {
+    run_ok(
+        "ValueClassFactoryExtensionCarrier",
+        "@JvmInline value class PackedValue(val raw: Int) { val lower: Int get() = raw and 255 }\n\
+         fun PackedValue(upper: Int, lower: Int): PackedValue = PackedValue((upper shl 8) or lower)\n\
+         fun PackedValue.withUpper(upper: Int) = PackedValue(upper, lower)\n\
+         fun box(): String = if (PackedValue(2, 3).withUpper(4).raw == 1027) \"OK\" else \"F\"\n",
+    );
+}
+
+/// The factory result can flow through value-class extension calls and an indexed setter without being
+/// mistaken for its scalar carrier. The member ABI boxes the value-class parameter, then its body must
+/// unbox that parameter before reading the sole property; checking the backing array isolates precisely
+/// that supported boundary from boxed value-class member returns, which this backend rejects safely.
+#[test]
+fn value_class_factory_composes_with_indexed_container() {
+    run_ok(
+        "ValueClassFactoryIndexedCarrier",
+        "@JvmInline value class PackedValue(val raw: Int) {\n\
+         \x20   val upper: Int get() = (raw shr 8) and 255\n\
+         \x20   val lower: Int get() = raw and 255\n\
+         }\n\
+         fun PackedValue(upper: Int, lower: Int): PackedValue = PackedValue((upper shl 8) or lower)\n\
+         fun PackedValue.withUpper(upper: Int) = PackedValue(upper, lower)\n\
+         @JvmInline value class PackedValues(val data: IntArray) {\n\
+         \x20   constructor(size: Int) : this(IntArray(size))\n\
+         \x20   operator fun set(index: Int, value: PackedValue) { data[index] = value.raw }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val values = PackedValues(1)\n\
+         \x20   values[0] = PackedValue(2, 3).withUpper(4)\n\
+         \x20   return if (values.data[0] == 1027) \"OK\" else \"F\"\n\
+         }\n",
+    );
+}
+
+/// An indexed getter is a user member, not a stored-property getter merely because both JVM names begin
+/// with `get`. User value-class members returning another value class still require a boxed-result model
+/// that this backend does not implement, so the architecture contract is to decline this whole file. This
+/// pins the safe, semantic classification: accepting and miscompiling it is worse than an explicit bail.
+#[test]
+fn indexed_getter_returning_value_class_is_rejected_safely() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let source = "@JvmInline value class ElementToken(val raw: Int)\n\
+                  @JvmInline value class TokenBuffer(val data: IntArray) {\n\
+                  \x20   operator fun get(index: Int): ElementToken = ElementToken(data[index])\n\
+                  }\n\
+                  fun box(): String = if (TokenBuffer(IntArray(1))[0].raw == 0) \"OK\" else \"F\"\n";
+    assert_eq!(
+        common::backend_rejects_in_process(
+            source,
+            "IndexedValueClassReturn",
+            &[stdlib],
+            Some(&jdk)
+        ),
+        Some(true),
+    );
+}
