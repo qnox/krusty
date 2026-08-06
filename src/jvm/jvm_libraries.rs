@@ -11,9 +11,9 @@ use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
-    CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericSig, InlineKind, LibConst,
-    LibraryCallable, LibraryConst, LibraryField, LibraryMember, LibraryType, PropKind,
-    PropertyInfo, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
+    CallSig, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig,
+    InlineKind, LibConst, LibraryCallable, LibraryConst, LibraryField, LibraryMember, LibraryType,
+    PropKind, PropertyInfo, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
 use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
@@ -281,13 +281,6 @@ impl JvmLibraries {
                 generic_sig,
                 call_sig,
                 context_count,
-                // A static on a class WITHOUT Kotlin `@Metadata` is a Java declaration: its
-                // unannotated type-variable return is a PLATFORM type (`T!`), the same fact the
-                // member decode stamps on instance members.
-                java_platform: self
-                    .cp
-                    .find_name(c.owner)
-                    .is_some_and(|ci| !ci.meta.is_present()),
                 flags: FnFlags {
                     inline: inline_kind,
                     suspend,
@@ -1240,10 +1233,6 @@ impl JvmLibraries {
                 // falls back to the descriptor comparison, which classifies this case correctly.
                 member.declared_ret =
                     member_metadata.and_then(metadata_declared_nonnull_nonsuspend_return);
-                // A class WITHOUT Kotlin `@Metadata` is a Java declaration: its unannotated types are
-                // PLATFORM types, a fact the call site needs to keep a type-variable return
-                // null-checkable (`T!`) when the variable binds to a Kotlin non-null type.
-                member.set_java_platform(is_java);
                 if let Some(java_nullable) = platform_nullable_params.clone() {
                     member.call_sig.platform_nullable_params = java_nullable;
                 }
@@ -2062,6 +2051,16 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
         params_s = rest;
     }
     let (ret, _) = parse_gsig(&inner[close + 1..])?;
+    // A raw signature has no source nullability annotation. When its OUTER return is one of the
+    // method's own formals, specializing that formal to a source primitive must retain the declared
+    // reference contract. Record that semantic behavior on the signature itself; downstream member,
+    // static, and top-level resolution then share one policy without learning why the provider chose it.
+    let return_policy = ret
+        .ty_param_name()
+        .filter(|name| formals.iter().any(|formal| formal == name))
+        .map_or(GenericReturnPolicy::Exact, |_| {
+            GenericReturnPolicy::FlexibleReference
+        });
     // The JVM `Signature` attribute is the fallback for NON-metadata callables (Java methods): an instance
     // method has no receiver parameter and a static none either, so the receiver is not modeled here.
     Some(GenericSig {
@@ -2070,6 +2069,7 @@ fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
         receiver: None,
         params,
         ret,
+        return_policy,
     })
 }
 
@@ -3567,7 +3567,6 @@ impl SymbolSource for JvmLibraries {
                             overload_rank: descriptor_narrowing(&m.descriptor) as u32,
                             generic_sig,
                             call_sig,
-                            java_platform: m.java_platform(),
                             flags: FnFlags {
                                 inline: m.inline,
                                 suspend,
@@ -4478,7 +4477,7 @@ mod tests {
         desc_to_ty, method_layout, overlay_metadata_collection_names, parse_class_gsig,
         parse_concrete_field_gsig, parse_field_gsig, parse_method_desc, parse_method_gsig,
     };
-    use crate::libraries::SemanticPlatform;
+    use crate::libraries::{GenericReturnPolicy, SemanticPlatform};
     use crate::symbol_source::SymbolSource;
     use crate::types::type_name;
     use crate::types::Ty;
@@ -4760,6 +4759,23 @@ mod tests {
                 &[Ty::ty_param("R", Ty::obj("kotlin/Any"))],
             )]
         );
+    }
+
+    #[test]
+    fn raw_signature_marks_only_outer_method_formal_returns_flexible() {
+        // The policy belongs to the exact declaration shape: a method-owned outer formal denotes an
+        // unannotated reference result, while a nested occurrence already has a reference container and
+        // an owner formal is not rebound by the method call. This prevents broad classpath provenance from
+        // changing unrelated generic returns.
+        let direct = parse_method_gsig("<T:Ljava/lang/Object;>(TT;)TT;").expect("direct formal");
+        assert_eq!(direct.return_policy, GenericReturnPolicy::FlexibleReference);
+
+        let nested = parse_method_gsig("<T:Ljava/lang/Object;>(TT;)Ljava/util/List<TT;>;")
+            .expect("nested formal");
+        assert_eq!(nested.return_policy, GenericReturnPolicy::Exact);
+
+        let owner = parse_method_gsig("(TT;)TT;").expect("owner formal");
+        assert_eq!(owner.return_policy, GenericReturnPolicy::Exact);
     }
 
     #[test]

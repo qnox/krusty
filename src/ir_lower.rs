@@ -22130,10 +22130,7 @@ impl<'a> Lower<'a> {
                 // Unbox to the wrapper's OWN primitive (`Integer`→`Int`), then numeric-convert to the
                 // result if it differs (`Int? ?: 0.0` → unbox to `Int`, then `i2d` to `Double`) —
                 // unboxing `Integer` straight to `Double` would be an invalid checkcast.
-                if let Some(lp) = lty
-                    .nullable_primitive()
-                    .or_else(|| self.syms.libraries.boxed_primitive(lty))
-                {
+                if let Some(lp) = self.syms.libraries.reference_primitive(lty) {
                     get2 = self.emit_type_op(IrTypeOp::ImplicitCoercion, get2, ty_to_ir(lp));
                     if lp != result_ty {
                         get2 = self.emit_type_op(

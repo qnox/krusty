@@ -517,168 +517,134 @@ fn null_literal_into_a_primitive_parameter_still_fails() {
     );
 }
 
-#[test]
-fn java_typevar_return_keeps_platform_nullability() {
-    // The intellij `ActionUtil` shape: a Java method returning its own TYPE VARIABLE
-    // (`public <T> T getClientProperty(Key<T> key)`) binds `T` to the Kotlin NON-NULL type the
-    // call site supplies (`Key<Boolean>` → `Boolean`). kotlinc types the result as the PLATFORM
-    // `T!`, so a null check on it is legal and smart-casts inside the branch; krusty substituted
-    // the binding's exact non-null type and rejected `was != null` with
-    // "operator '!=' cannot be applied to 'Boolean' and 'Null'.". A plain Java reference return
-    // (`String getName()`) already carries platform nullability — only the type-variable
-    // substitution lost it.
-    let jdk = common::jdk_modules();
-    let stdlib = common::stdlib_jar();
-    let java = [
-        (
-            "Key.java".into(),
-            r#"
-                package fixtures;
-                public final class Key<T> {
-                    private final String name;
-                    private Key(String name) { this.name = name; }
-                    public static <T> Key<T> create(String name) { return new Key<T>(name); }
-                }
-            "#
-            .into(),
-        ),
-        (
-            "Presentation.java".into(),
-            r#"
-                package fixtures;
-                public final class Presentation {
-                    @SuppressWarnings("unchecked")
-                    public <T> T getClientProperty(Key<T> key) { return null; }
-                    public <T> void putClientProperty(Key<T> key, T value) { }
-                    public String getName() { return null; }
-                    public Boolean getFlag() { return null; }
-                }
-            "#
-            .into(),
-        ),
-        (
-            "Lists.java".into(),
-            r#"
-                package fixtures;
-                public final class Lists {
-                    public <T> T first(java.util.List<T> list) { return list.get(0); }
-                }
-            "#
-            .into(),
-        ),
-    ];
-    let Some((library, _)) = common::javac_compile(&java, &[]) else {
-        return;
-    };
-    let root = library.parent().map(std::path::Path::to_path_buf);
-    let classpath = vec![library, stdlib];
-    let source = r#"
-        import fixtures.Key
-        import fixtures.Lists
-        import fixtures.Presentation
+/// A domain-neutral unannotated-signature provider shared by the instance and static return-policy
+/// cases. One fixture prevents setup or class naming from becoming part of the behavior under test;
+/// each test varies only the resolver path that consumes the same semantic signature policy.
+struct FlexibleReturnFixture {
+    root: Option<std::path::PathBuf>,
+    classpath: Vec<std::path::PathBuf>,
+    jdk: std::path::PathBuf,
+}
 
-        private val KEY: Key<Boolean> = Key.create("K")
-
-        fun box(): String {
-            val p = Presentation()
-            // Java returns null here: the platform-typed result must compile the null check AND
-            // skip the branch (the smart-cast `!was` inside the branch must type as Boolean).
-            val was = p.getClientProperty(KEY)
-            if (was != null && !was) return "typevar"
-            // The declared-reference controls keep their existing platform behavior.
-            val n = p.getName()
-            if (n != null && n.isEmpty()) return "name"
-            val f = p.getFlag()
-            if (f != null && !f) return "flag"
-            // Call-site inference from ARGUMENTS (`List<String>` → `T = String`): the result
-            // stays a String inside the branch.
-            val s = Lists().first(listOf("x"))
-            if (s != null && s.length != 1) return "first"
-            // The same argument inference with a PRIMITIVE binding (`List<Boolean>` → `T = Boolean`)
-            // gets the platform treatment too.
-            val b = Lists().first(listOf(true))
-            if (b != null && !b) return "firstBool"
-            // A platform result also compares against a Boolean/Int LITERAL (kotlinc unboxes the
-            // `T!` operand): `getClientProperty(...) == false` / `first(...) == 1`. The Java side
-            // returns null/`1`, so neither branch is taken.
-            if (p.getClientProperty(KEY) == false) return "eqFalse"
-            if (Lists().first(listOf(1)) != 1) return "eqInt"
-            // kotlinc also admits a null argument INTO an unannotated Java type-variable
-            // parameter (the platform `T!` parameter of `putClientProperty`).
-            p.putClientProperty(KEY, null)
-            return "OK"
+impl FlexibleReturnFixture {
+    fn new() -> Self {
+        let jdk = common::jdk_modules();
+        let stdlib = common::stdlib_jar();
+        let java = [
+            (
+                "TypedSlot.java".into(),
+                r#"
+                    package fixtures;
+                    public final class TypedSlot<T> {
+                        private TypedSlot() { }
+                        public static <T> TypedSlot<T> create() { return new TypedSlot<T>(); }
+                    }
+                "#
+                .into(),
+            ),
+            (
+                "GenericReturnProvider.java".into(),
+                r#"
+                    package fixtures;
+                    public final class GenericReturnProvider {
+                        public <T> T read(TypedSlot<T> slot) { return null; }
+                        public <T> void write(TypedSlot<T> slot, T value) { }
+                        public <T> T first(java.util.List<T> values) { return values.get(0); }
+                        public String text() { return null; }
+                        public Boolean flag() { return null; }
+                        public static <T> T echo(T value) { return value; }
+                    }
+                "#
+                .into(),
+            ),
+        ];
+        let (library, _) = common::javac_compile(&java, &[])
+            .expect("the neutral flexible-return fixture must compile");
+        let root = library.parent().map(std::path::Path::to_path_buf);
+        Self {
+            root,
+            classpath: vec![library, stdlib],
+            jdk,
         }
-    "#;
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
-        .unwrap_or_else(|| {
-            panic!(
-                "{:?}",
-                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
-            )
-        });
-    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
-    if let Some(root) = root {
-        let _ = std::fs::remove_dir_all(root);
     }
-    assert_eq!(output.trim(), "OK");
+
+    fn expect_box(&self, source: &str, module: &str) -> String {
+        common::expect_box_run(source, module, &self.classpath, Some(self.jdk.as_path()))
+    }
+}
+
+impl Drop for FlexibleReturnFixture {
+    fn drop(&mut self) {
+        if let Some(root) = self.root.take() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
 }
 
 #[test]
-fn java_static_typevar_return_keeps_platform_nullability() {
-    // The static twin of `java_typevar_return_keeps_platform_nullability`: a Java STATIC generic
-    // method (`public static <T> T identity(T t)`) binds its type variable through the
-    // companion-static return substitution (and the package top-level static index), which carried
-    // no platform fact — `Statics.identity(true)` typed as the exact non-null `Boolean` and
-    // rejected `b != null` with "operator '!=' cannot be applied to 'Boolean' and 'Null'.".
-    let jdk = common::jdk_modules();
-    let stdlib = common::stdlib_jar();
-    let java = [(
-        "Statics.java".into(),
-        r#"
-                package fixtures;
-                public final class Statics {
-                    public static <T> T identity(T t) { return t; }
-                }
-            "#
-        .into(),
-    )];
-    let Some((library, _)) = common::javac_compile(&java, &[]) else {
-        return;
-    };
-    let root = library.parent().map(std::path::Path::to_path_buf);
-    let classpath = vec![library, stdlib];
+fn flexible_method_typevar_return_survives_specialization() {
+    // An outer method formal is a reference in the unannotated declaration even when inference binds it
+    // to a non-null source primitive. The realized result must remain null-checkable and smart-castable;
+    // declared references and reference-valued substitutions are controls for the unchanged paths.
+    let fixture = FlexibleReturnFixture::new();
     let source = r#"
-        import fixtures.Statics
+        import fixtures.GenericReturnProvider
+        import fixtures.TypedSlot
+
+        private val SLOT: TypedSlot<Boolean> = TypedSlot.create()
 
         fun box(): String {
-            // Primitive binding (`T = Boolean`): the platform result null-checks and smart-casts.
-            // Java returns the argument (`true`), so the branch is skipped.
-            val b = Statics.identity(true)
-            if (b != null && !b) return "prim"
-            // Reference binding (`T = String`): unchanged — still a String inside the branch.
-            val s = Statics.identity("x")
-            if (s != null && s.length != 1) return "ref"
+            val provider = GenericReturnProvider()
+            val value = provider.read(SLOT)
+            if (value != null && !value) return "typevar"
+
+            val text = provider.text()
+            if (text != null && text.isEmpty()) return "text"
+            val flag = provider.flag()
+            if (flag != null && !flag) return "flag"
+
+            val firstText = provider.first(listOf("x"))
+            if (firstText != null && firstText.length != 1) return "firstText"
+            val firstFlag = provider.first(listOf(true))
+            if (firstFlag != null && !firstFlag) return "firstFlag"
+
+            // Equality and elvis consume the same wrapper-to-primitive capability as smart casts.
+            if (provider.read(SLOT) == false) return "eqFalse"
+            if (provider.first(listOf(1)) != 1) return "eqInt"
+            if (provider.read(SLOT) ?: true != true) return "elvis"
+
+            // Parameter flexibility is an independent control: preserving the return policy must not
+            // disturb the existing unannotated-parameter call shape.
+            provider.write(SLOT, null)
             return "OK"
         }
     "#;
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
-        .unwrap_or_else(|| {
-            panic!(
-                "{:?}",
-                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
-            )
-        });
-    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
-    if let Some(root) = root {
-        let _ = std::fs::remove_dir_all(root);
-    }
-    assert_eq!(output.trim(), "OK");
+    assert_eq!(fixture.expect_box(source, "FlexibleMemberReturn"), "OK");
+}
+
+#[test]
+fn flexible_static_typevar_return_uses_the_same_policy() {
+    // Static selection has a different candidate path, but return realization must consume the exact
+    // same declaration-owned policy after binding. Reference substitutions remain ordinary references.
+    let fixture = FlexibleReturnFixture::new();
+    let source = r#"
+        import fixtures.GenericReturnProvider
+
+        fun box(): String {
+            val flag = GenericReturnProvider.echo(true)
+            if (flag != null && !flag) return "primitive"
+            val text = GenericReturnProvider.echo("x")
+            if (text != null && text.length != 1) return "reference"
+            return "OK"
+        }
+    "#;
+    assert_eq!(fixture.expect_box(source, "FlexibleStaticReturn"), "OK");
 }
 
 #[test]
 fn kotlin_non_null_return_still_rejects_null_check() {
-    // Negative pin: a KOTLIN (non-platform) non-null return must STILL reject `!= null` with the
-    // existing message — the platform treatment above applies to Java type-variable returns only.
+    // Negative pin: an exact source signature must still reject `!= null`; only declarations whose
+    // generic signature explicitly carries the flexible-reference policy may change representation.
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
     let classpath = vec![stdlib];

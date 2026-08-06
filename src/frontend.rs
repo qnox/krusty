@@ -720,6 +720,7 @@ mod tests {
                 receiver: Some(receiver),
                 params: value_params,
                 ret: Ty::Unit,
+                return_policy: Default::default(),
             });
             ResolvedSymbols {
                 classifier,
