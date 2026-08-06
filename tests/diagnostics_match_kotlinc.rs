@@ -126,21 +126,27 @@ fn errors_match_kotlinc_in_text_and_location() {
         "fun <T> applySame(block: (T) -> T, value: T): T = block(value)\nfun mismatched(x: String, suffix: Char = 'K'): Int = x.length + suffix.code\nfun bad(): Any = applySame(::mismatched, \"O\")",
         "fun foo(x: String, y: Char = 'K'): String = x + y\nfun <T, U> hold(f: (T) -> U): U = hold(f)\nfun bad(): String = hold<Int, String>(::foo)",
         "fun foo(x: Int, y: Char = 'K'): String = x.toString() + y\nfun <T : CharSequence, U> hold(f: (T) -> U): U = hold(f)\nfun bad(): String = hold(::foo)",
-        // A type present on NO classpath in either compiler (`Widget` resolves to the JDK-internal
-        // `jdk.internal.org.jline.reader.Widget` when the JDK is on the classpath, so it is a poor
-        // choice for an "unresolved" probe).
-        "fun f(p: UnresolvedWidgetType): Int = 0",
+        // A deliberately unique type present on NO supplied classpath. Keep the spelling synthetic:
+        // diagnostic regressions must not depend on or disclose a class from the scanned project.
+        "fun f(p: DefinitelyAbsentClassifier): Int = 0",
         // An `is` whose TARGET type is unresolved reports the unresolved reference at the type's
         // span — never a compiler-specific "not supported" rejection.
-        "fun f(p: Any) = p is UnresolvedWidgetType",
+        "fun f(p: Any) = p is DefinitelyAbsentClassifier",
         // … and a failing type ARGUMENT is named at its own span, not the outer generic's.
-        "fun f(p: Any) = p is Array<UnresolvedWidgetType>",
+        "fun f(p: Any) = p is Array<DefinitelyAbsentClassifier>",
+        // Ordinary generic arguments retain an outer `Ty::Obj`; nested Error detection must inspect
+        // that semantic shape instead of relying on `outer == Ty::Error`.
+        "fun f(p: Any) = p is List<DefinitelyAbsentClassifier>",
         // When the OUTER name is the unresolvable one it is named first, not its type argument.
-        "fun f(p: Any) = p is UnresolvedWidgetType<String>",
+        "fun f(p: Any) = p is DefinitelyAbsentClassifier<String>",
         // A nullable unresolved target resolves to the same reference diagnostic.
-        "fun f(p: Any) = p is UnresolvedWidgetType?",
+        "fun f(p: Any) = p is DefinitelyAbsentClassifier?",
         // The `as` sibling reports identically.
-        "fun f(p: Any) = p as UnresolvedWidgetType",
+        "fun f(p: Any) = p as DefinitelyAbsentClassifier",
+        "fun f(p: Any) = p as List<DefinitelyAbsentClassifier>",
+        // Casts permit an erased function shape, so an unresolved parameter remains the primary
+        // diagnostic. (`is` is different and is pinned by the unsupported-shape test below.)
+        "fun f(p: Any) = p as (DefinitelyAbsentClassifier) -> String",
     ];
 
     let root = std::env::temp_dir().join(format!("krusty_diag_{}", std::process::id()));
@@ -180,6 +186,45 @@ fn errors_match_kotlinc_in_text_and_location() {
     }
     let _ = fs::remove_dir_all(&root);
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n\n"));
+}
+
+#[test]
+fn resolved_but_unsupported_is_as_shapes_are_not_called_unresolved() {
+    // `resolve_ty` also returns `Ty::Error` for a KNOWN classifier whose shape the backend cannot
+    // implement. That is distinct from an absent classifier: the unresolved-reference helper must
+    // decline these so the existing supported-shape diagnostic remains authoritative.
+    for source in [
+        "fun f(p: Any) = p is Array",
+        "fun f(p: Any) = p is Array<Nothing>",
+        "fun f(p: Any) = p as Array",
+        "fun f(p: Any) = p as Array<Nothing>",
+        // Kotlin rejects an arrow-function `is` as an erased-type check before it diagnoses a nested
+        // classifier. Krusty does not render that frontend message yet, but it must reject loudly and
+        // must not pretend the cast operator's unresolved-reference precedence applies here.
+        "fun f(p: Any) = p is (DefinitelyAbsentClassifier) -> String",
+        // The shared type resolver normalizes a named functional interface to the same semantic
+        // `Ty::Fun` shape. Pin that representation-level invariant so parser spelling cannot select a
+        // different diagnostic path.
+        "fun f(p: Any) = p is Function1<DefinitelyAbsentClassifier, String>",
+        // An explicit `Any?` is still a concrete generic argument, not a star projection. The parser
+        // retains that distinction even though both resolve to the same bound.
+        "fun f(p: Any) = p is Function1<Any?, Any?>",
+    ] {
+        let diagnostics = common::front_end_diagnostics(source, &[], None);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|message| !message.contains("unresolved reference")),
+            "a resolved or precedence-suppressed shape was mislabeled unresolved for \
+             {source:?}: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("not supported")),
+            "the resolved unsupported-shape diagnostic disappeared for {source:?}: {diagnostics:?}"
+        );
+    }
 }
 
 #[test]

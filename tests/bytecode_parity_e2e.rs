@@ -155,6 +155,267 @@ fn compare_against_zero_is_single_operand_branch() {
     );
 }
 
+#[test]
+fn compare_against_zero_in_value_position_is_single_operand_branch() {
+    // Same fusion as above, but where the comparison PRODUCES a Boolean rather than driving a branch:
+    // `a != 0` is `iload_0; ifeq` (kotlinc), never `iload_0; iconst_0; if_icmpne`.
+    let Some(d) = facade_disasm(
+        "cmp0v",
+        "fun ne0(a: Int): Boolean = a != 0\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        n.contains("iload_0\nifeq"),
+        "value-position `a != 0` must fuse to a single-operand compare-to-zero branch:\n{n}"
+    );
+    assert!(
+        !n.contains("iconst_0\nif_icmp"),
+        "value-position comparison against 0 must not materialize iconst_0 then if_icmp:\n{n}"
+    );
+}
+
+#[test]
+fn long_compare_in_value_position_tests_lcmp_without_materialized_zero() {
+    // `lcmp` already leaves -1/0/1 on the stack, so the test against it is the single-operand
+    // `ifeq`/`ifne`/`ifge`/… family — NOT a materialized `iconst_0` plus a two-operand `if_icmp*`.
+    // kotlinc: `lcmp; ifne` for `==`, `lcmp; ifge` for `<`.
+    let Some(d) = facade_disasm(
+        "lcmpv",
+        "fun eq(a: Long, b: Long): Boolean = a == b\n\
+         fun ne(a: Long, b: Long): Boolean = a != b\n\
+         fun lt(a: Long, b: Long): Boolean = a < b\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        !n.contains("lcmp\niconst_0"),
+        "`lcmp` must not be followed by a materialized zero — it already compares against 0:\n{n}"
+    );
+    // Polarity matches kotlinc: branch on the NEGATED comparison to the `false` arm, fall through to
+    // `iconst_1`. So `==` tests `ifne`, `!=` tests `ifeq`, `<` tests `ifge`.
+    for want in ["lcmp\nifne", "lcmp\nifeq", "lcmp\nifge"] {
+        assert!(
+            n.contains(want),
+            "expected fused `{want}` (kotlinc's shape):\n{n}"
+        );
+    }
+}
+
+#[test]
+fn double_compare_in_value_position_tests_dcmp_without_materialized_zero() {
+    // Covers BOTH NaN variants: `==` uses `dcmpg`, `>` uses `dcmpl` (NaN → -1), so a NaN operand makes
+    // either comparison false. A regression that picked the wrong variant would still fuse, so assert
+    // the variant too, not just the absence of the zero.
+    let Some(d) = facade_disasm(
+        "dcmpv",
+        "fun eq(a: Double, b: Double): Boolean = a == b\n\
+         fun gt(a: Double, b: Double): Boolean = a > b\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        !n.contains("dcmpg\niconst_0") && !n.contains("dcmpl\niconst_0"),
+        "`dcmp*` must not be followed by a materialized zero:\n{n}"
+    );
+    assert!(
+        n.contains("dcmpg\nifne"),
+        "expected fused `dcmpg; ifne` for `==` (kotlinc's shape):\n{n}"
+    );
+    assert!(
+        n.contains("dcmpl\nifle"),
+        "expected fused `dcmpl; ifle` for `>` — the NaN-correct variant (kotlinc's shape):\n{n}"
+    );
+}
+
+#[test]
+fn float_compare_in_value_position_tests_fcmp_without_materialized_zero() {
+    let Some(d) = facade_disasm(
+        "fcmpv",
+        "fun eq(a: Float, b: Float): Boolean = a == b\n\
+         fun gt(a: Float, b: Float): Boolean = a > b\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        !n.contains("fcmpg\niconst_0") && !n.contains("fcmpl\niconst_0"),
+        "`fcmp*` must not be followed by a materialized zero:\n{n}"
+    );
+    assert!(
+        n.contains("fcmpg\nifne") && n.contains("fcmpl\nifle"),
+        "expected fused `fcmpg; ifne` for `==` and `fcmpl; ifle` for `>`:\n{n}"
+    );
+}
+
+#[test]
+fn zero_on_the_left_in_value_position_fuses_only_for_equality() {
+    // kotlinc fuses `0 == x` / `0 != x` (they are symmetric) but does NOT mirror the ORDERING operators:
+    // `0 < x` stays the two-operand `iconst_0; iload x; if_icmpge`. Mirroring it to `iload x; ifle` is
+    // shorter but diverges, so the fusion is deliberately restricted to `==`/`!=`.
+    let Some(d) = facade_disasm(
+        "zeroleft",
+        "fun zeq(a: Int): Boolean = 0 == a\n\
+         fun zlt(a: Int): Boolean = 0 < a\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        n.contains("iload_0\nifne"),
+        "`0 == a` must fuse to the single-operand `ifne`:\n{n}"
+    );
+    assert!(
+        n.contains("iconst_0\niload_0\nif_icmpge"),
+        "`0 < a` must keep kotlinc's two-operand form, NOT be mirrored to `ifle`:\n{n}"
+    );
+    assert!(
+        !n.contains("iload_0\nifle"),
+        "`0 < a` must not be mirrored — that fuses shorter than kotlinc and diverges:\n{n}"
+    );
+}
+
+#[test]
+fn zero_on_the_left_in_branch_position_fuses_only_for_equality() {
+    // Branch and value consumers share one comparison emitter. This branch-position regression is
+    // intentionally separate from the value-position check above: the old branch-only implementation
+    // mirrored `0 < a` to the shorter `a > 0`, producing `iload_0; ifle` even though kotlinc retains
+    // operand order and emits `iconst_0; iload_0; if_icmpge` for the false edge.
+    let Some(d) = facade_disasm(
+        "zeroleftbranch",
+        "fun zlt(a: Int): String {\n  if (0 < a) return \"t\"\n  return \"f\"\n}\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        n.contains("iconst_0\niload_0\nif_icmpge"),
+        "branch-position `0 < a` must retain kotlinc's two-operand, source-order form:\n{n}"
+    );
+    assert!(
+        !n.contains("iload_0\nifle"),
+        "branch-position `0 < a` must not select a positional mirror optimization:\n{n}"
+    );
+}
+
+#[test]
+fn referential_null_comparison_in_value_position_is_single_operand() {
+    // `a === null` is a NULL comparison, not a referential one: `ifnonnull`, not `aconst_null;
+    // if_acmpne`. The null-literal check must therefore run BEFORE the `===` reference arm.
+    let Some(d) = facade_disasm(
+        "refnullv",
+        "fun isNull(a: Any?): Boolean = a === null\n\
+         fun notNull(a: Any?): Boolean = a !== null\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    assert!(
+        !n.contains("aconst_null"),
+        "`a === null` must not materialize a null to compare against:\n{n}"
+    );
+    assert!(
+        !n.contains("if_acmpeq") && !n.contains("if_acmpne"),
+        "`a === null` must use `ifnull`/`ifnonnull`, not a two-operand reference compare:\n{n}"
+    );
+}
+
+#[test]
+fn value_position_comparison_does_not_poison_a_later_inline_splice() {
+    // A value-position comparison used to leave the operand-height tracker over-reporting, so a LATER
+    // branchy inline splice in the same expression saw a non-empty baseline and refused — which
+    // escalated to a hard "inline splice failed" compile error. Fixing the merge-point accounting in
+    // `materialize_cmp_bool` also fixed that, so guard it: this must COMPILE at all. Needs the stdlib
+    // on the classpath for `takeIf` — the inline HOF whose splice was the victim.
+    let Some((dir, jh)) = krusty_compile_stdlib(
+        "splicepoison",
+        "fun two(b: Boolean, s: String): String = \"$b/$s\"\n\
+         fun t2(a: Any?, b: Any?, x: Int): String = two(a === b, x.takeIf { it > 0 }.toString())\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let d = javap(&jh, &dir.join("BKt.class"));
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        d.contains("t2"),
+        "the comparison-then-splice shape must compile:\n{d}"
+    );
+}
+
+#[test]
+fn unsigned_long_equality_tests_lcmp_without_materialized_zero() {
+    // The shape that surfaced this gap: `ULong ==` compares the carriers with `lcmp`, and must test
+    // that result directly. Needs the stdlib on the classpath for `ULong`.
+    let Some((dir, jh)) = krusty_compile_stdlib(
+        "ulcmpv",
+        "fun eq(a: ULong, b: ULong): Boolean = a == b\nfun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let d = javap(&jh, &dir.join("BKt.class"));
+    let _ = fs::remove_dir_all(&dir);
+    let n = normalize(&d);
+    assert!(
+        !n.contains("lcmp\niconst_0"),
+        "ULong `==` must test the `lcmp` result directly, not against a materialized zero:\n{n}"
+    );
+    assert!(
+        n.contains("lcmp\nifne"),
+        "expected fused `lcmp; ifne` (kotlinc's shape):\n{n}"
+    );
+}
+
+#[test]
+fn value_position_comparison_polarity_matches_kotlinc() {
+    // kotlinc materializes a comparison's Boolean by branching on the NEGATED condition to the
+    // `false` arm and falling through to `iconst_1`; the taken branch pushes `iconst_0`. Holds for
+    // the null, referential and numeric arms alike, so one shape check covers all three.
+    let Some(d) = facade_disasm(
+        "polarity",
+        "fun isNull(a: Any?): Boolean = a == null\n\
+         fun refEq(a: Any, b: Any): Boolean = a === b\n\
+         fun intEq(a: Int, b: Int): Boolean = a == b\n\
+         fun box() = \"OK\"\n",
+    ) else {
+        return;
+    };
+    let n = normalize(&d);
+    // `normalize` keeps each branch's target offset (`ifnonnull 8`), so match on the opcode followed by
+    // whatever operand, then the next line.
+    let followed_by = |opcode: &str, next: &str| {
+        n.lines()
+            .zip(n.lines().skip(1))
+            .any(|(a, b)| (a == opcode || a.starts_with(&format!("{opcode} "))) && b.trim() == next)
+    };
+    for (opcode, next) in [
+        ("ifnonnull", "iconst_1"), // `a == null` → jump away when NON-null
+        ("if_acmpne", "iconst_1"), // `a === b`   → jump away when NOT identical
+        ("if_icmpne", "iconst_1"), // `a == b`    → jump away when NOT equal
+    ] {
+        assert!(
+            followed_by(opcode, next),
+            "expected kotlinc's fall-through-to-true polarity `{opcode}; {next}`:\n{n}"
+        );
+    }
+    for opcode in ["ifnull", "if_acmpeq", "if_icmpeq"] {
+        assert!(
+            !followed_by(opcode, "iconst_0"),
+            "value-position comparisons must not use the inverted (jump-to-true) polarity \
+             (`{opcode}; iconst_0`):\n{n}"
+        );
+    }
+}
+
 // ---- Phase 399: dcmpl/fcmpl for > and >= -----------------------------------------------------
 
 #[test]
@@ -916,5 +1177,186 @@ fun box(): String {\n  val a = p(2); val b = p(1)\n  return if (a.equals(b)) \"f
                 "{name}: same-type unsigned `equals` must not emit `{gone}`:\n{n}"
             );
         }
+    }
+}
+
+/// Every OTHER argument type keeps the value class's own equality — but kotlinc reaches it through the
+/// STATIC `kotlin/UInt."equals-impl":(<carrier>Ljava/lang/Object;)Z`, whose receiver slot is the
+/// carrier. The `invokevirtual kotlin/UInt.equals` krusty used to emit forces a `box-impl` on the
+/// receiver purely to have a reference to invoke on; kotlinc writes that shape in exactly one place
+/// (a LITERAL `null` argument, pinned below as a deliberate divergence).
+///
+/// The cross-carrier pair rides the same static (`UInt.equals-impl` answers `false` for a `kotlin/ULong`
+/// argument — a `UInt` is never a `ULong`); only the ARGUMENT boxes, and the receiver stays unboxed.
+/// All four unsigned types are covered, since each spells its own carrier in the descriptor.
+#[test]
+fn unsigned_equals_on_other_argument_types_calls_equals_impl_unboxed() {
+    for (name, src, present, absent) in [
+        (
+            "ueq_any",
+            "fun p(n: Int): UInt = n.toUInt()\nfun q(): Any = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z"][..],
+            &["kotlin/UInt.equals", "box-impl"][..],
+        ),
+        (
+            "uleq_any",
+            "fun p(n: Int): ULong = n.toULong()\nfun q(): Any = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/ULong.\"equals-impl\":(JLjava/lang/Object;)Z"][..],
+            &["kotlin/ULong.equals", "box-impl"][..],
+        ),
+        // The narrow pair spells `B`/`S` — the carrier they actually live in, not a widened `I`.
+        (
+            "ubeq_any",
+            "fun p(n: Int): UByte = n.toUByte()\nfun q(): Any = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UByte.\"equals-impl\":(BLjava/lang/Object;)Z"][..],
+            &["kotlin/UByte.equals", "box-impl"][..],
+        ),
+        (
+            "useq_any",
+            "fun p(n: Int): UShort = n.toUShort()\nfun q(): Any = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UShort.\"equals-impl\":(SLjava/lang/Object;)Z"][..],
+            &["kotlin/UShort.equals", "box-impl"][..],
+        ),
+        (
+            "ueq_string",
+            "fun p(n: Int): UInt = n.toUInt()\nfun q(): String = \"x\"\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q())) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z"][..],
+            &["kotlin/UInt.equals", "box-impl"][..],
+        ),
+        (
+            "ueq_nullable",
+            "fun p(n: Int): UInt = n.toUInt()\nfun q(n: Int): UInt? = n.toUInt()\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(q(1))) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z"][..],
+            &["kotlin/UInt.equals"][..],
+        ),
+        (
+            "ueq_cross",
+            "fun p(n: Int): UInt = n.toUInt()\nfun r(n: Int): ULong = n.toULong()\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(r(2))) \"f\" else \"OK\"\n}\n",
+            &[
+                "kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z",
+                "kotlin/ULong.\"box-impl\"",
+            ][..],
+            &["kotlin/UInt.equals", "kotlin/UInt.\"box-impl\""][..],
+        ),
+        // A LITERAL `null` is where kotlinc DOES box the receiver and `invokevirtual` (its intrinsic
+        // declines the `Nothing?` argument). krusty keeps the static: same constant `false`, no box.
+        // Pinned so the divergence is a decision on record rather than a drift nobody noticed.
+        (
+            "ueq_null_literal",
+            "fun p(n: Int): UInt = n.toUInt()\n\
+fun box(): String {\n  val a = p(2)\n  return if (a.equals(null)) \"f\" else \"OK\"\n}\n",
+            &["kotlin/UInt.\"equals-impl\":(ILjava/lang/Object;)Z"][..],
+            &["kotlin/UInt.equals", "box-impl"][..],
+        ),
+    ] {
+        let Some((dir, jh)) = krusty_compile_stdlib(name, src) else {
+            return;
+        };
+        let d = javap(&jh, &dir.join("BKt.class"));
+        let _ = fs::remove_dir_all(&dir);
+        let n = normalize(&d);
+        for want in present {
+            assert!(
+                n.contains(want),
+                "{name}: unsigned `equals` must emit `{want}`:\n{n}"
+            );
+        }
+        for gone in absent {
+            assert!(
+                !n.contains(gone),
+                "{name}: unsigned `equals` must not emit `{gone}`:\n{n}"
+            );
+        }
+    }
+}
+
+/// An ordinary virtual call and both unsigned `equals` rewrites evaluate the RECEIVER before the
+/// argument, and must keep doing so when the argument SUSPENDS. Coroutine lowering moves everything
+/// after the suspension point into the resume block; a receiver left as a nested operand is therefore
+/// re-evaluated there, AFTER the argument. All three routes share the same spill helper so origin and
+/// operation shape cannot grow independent evaluation-order rules.
+///
+/// Asserted on instruction ORDER inside the state machine (`p()` before `s()`), which is what a
+/// side-effecting receiver observes, and on exactly one invocation of each function so duplicated
+/// evaluation cannot hide behind the first matching instruction. kotlinc emits the same order via its
+/// own unnamed spill slot.
+#[test]
+fn member_and_unsigned_equals_evaluate_receiver_before_a_suspending_argument() {
+    for (name, receiver_ty, receiver_value, arg_fn, arg_call) in [
+        // The ordinary virtual-member path that originally owned the receiver-spill rule …
+        (
+            "member_suspend_any",
+            "String",
+            "\"x\"",
+            "suspend fun s(): Any? = null",
+            "s()",
+        ),
+        // The `equals-impl` path (argument is `Any`) …
+        (
+            "ueq_suspend_any",
+            "UInt",
+            "1u",
+            "suspend fun s(): Any = \"x\"",
+            "s()",
+        ),
+        // … and the same-type fold, which is a bare primitive compare with no call to hang the
+        // receiver off at all.
+        (
+            "ueq_suspend_same",
+            "UInt",
+            "1u",
+            "suspend fun s(): UInt = 1u",
+            "s()",
+        ),
+    ] {
+        let src = format!(
+            "var log: String = \"\"\n\
+fun p(): {receiver_ty} {{ log = log + \"p\"; return {receiver_value} }}\n\
+{arg_fn}\n\
+suspend fun t(): Boolean = p().equals({arg_call})\n"
+        );
+        let Some((dir, jh)) = krusty_compile_stdlib(name, &src) else {
+            return;
+        };
+        let d = javap(&jh, &dir.join("BKt.class"));
+        let _ = fs::remove_dir_all(&dir);
+        // Slice `t`'s Code attribute: the two calls live in different blocks of one state machine, and
+        // javap prints a method's instructions in offset order, so text order IS bytecode order.
+        let body = d
+            .split_once("java.lang.Object t(")
+            .unwrap_or_else(|| panic!("{name}: no suspend `t` in the dump:\n{d}"))
+            .1;
+        let recv = body
+            // The ordinary member case returns a reference while unsigned cases return their
+            // primitive carrier. Match only the selected helper name/empty parameter list: the
+            // return descriptor is deliberately varied by this table.
+            .find("Method p:()")
+            .unwrap_or_else(|| panic!("{name}: `t` never calls the receiver `p()`:\n{d}"));
+        let arg = body
+            .find("Method s:(Lkotlin/coroutines/Continuation;)")
+            .unwrap_or_else(|| panic!("{name}: `t` never calls the suspending `s()`:\n{d}"));
+        assert_eq!(
+            body.matches("Method p:()").count(),
+            1,
+            "{name}: the receiver `p()` must be evaluated exactly once:\n{d}"
+        );
+        assert_eq!(
+            body.matches("Method s:(Lkotlin/coroutines/Continuation;)")
+                .count(),
+            1,
+            "{name}: the argument `s()` must be evaluated exactly once:\n{d}"
+        );
+        assert!(
+            recv < arg,
+            "{name}: the receiver `p()` must be evaluated BEFORE the suspending argument `s()` \
+             (it needs a spill slot to survive the suspension):\n{d}"
+        );
     }
 }
