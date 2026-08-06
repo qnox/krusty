@@ -1,10 +1,9 @@
-use super::common;
+//! Cross-file companion-property operations must consume the declaration's recorded storage plan.
+//! Backing properties use an outer-class static field; field-less properties use accessors on the
+//! companion singleton. The using file must never infer that distinction from its own AST, a class
+//! name, or whether the declaration came from the current file, a sibling, or a dependency provider.
 
-// Reading a companion object's PROPERTY through the plain `ClassName.prop` shape from ANOTHER
-// file of the same module: the checker resolves it through the class's `static_props`, and the
-// IR backend must emit the same `getstatic ClassName.prop` the same-file read uses (krusty
-// hoists a backing-field companion property to a static on the outer class). Cross-file
-// companion FUNCTION calls and classpath companion property reads already worked.
+use super::common;
 
 #[test]
 fn cross_file_companion_jvm_field_property_read() {
@@ -55,8 +54,9 @@ fun box(): String = if (name() == "r") "OK" else "F"
 
 #[test]
 fn cross_file_companion_class_typed_property_read() {
-    // The intellij-community `AnActionResult.PERFORMED` shape: a class-typed companion val
-    // initialized from a nested-class instance, read from another file.
+    // A class-typed companion value initialized from a nested-class instance exercises the same
+    // storage handoff as scalar values; neither the property's type nor its initializer shape may
+    // create a special lowering path.
     const LIB: &str = r#"
 package lib
 
@@ -159,5 +159,40 @@ fun box(): String = if (read() == 100) "OK" else "F"
     common::expect_box_ok_files_with_stdlib(
         &[("Lib.kt", LIB), ("Use.kt", USE)],
         "cross-file companion computed property read",
+    );
+}
+
+#[test]
+fn cross_file_companion_computed_property_write_uses_the_same_storage_plan() {
+    // Read and write select one declaration signature. A computed `var` has no outer static in either
+    // direction, so the sibling file must invoke both accessors on the companion singleton instead of
+    // letting the write fall back to the backing-field-only cross-file rejection.
+    const LIB: &str = r#"
+package lib
+
+var stored: Int = 1
+
+class Gauge {
+    companion object {
+        var level: Int
+            get() = stored
+            set(value) { stored = value }
+    }
+}
+"#;
+    const USE: &str = r#"
+import lib.Gauge
+
+fun update(): Int {
+    Gauge.level = 7
+    return Gauge.level
+}
+
+fun box(): String = if (update() == 7) "OK" else "F"
+"#;
+
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", LIB), ("Use.kt", USE)],
+        "cross-file companion computed property read and write",
     );
 }

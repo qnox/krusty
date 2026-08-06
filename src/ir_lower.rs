@@ -19,7 +19,7 @@ use crate::frontend::{
     InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo, ReceiverFnValueOrigin,
     ReceiverLambda, ResolvedCall, ResolvedConstructor, ResolvedCtorDelegationTarget,
     ResolvedLocalFunctionCall, ResolvedMember, ResolvedModuleTopLevelCall, SigFlags, Signature,
-    StmtLowering,
+    StaticPropertyStorage, StmtLowering,
 };
 use crate::ir::{
     Callee, ClassId, ExprId, FnParamInfo, IrBinOp, IrCatch, IrClass, IrConst, IrCtorArg,
@@ -200,8 +200,6 @@ fn lower_file_at_reporting_impl(
         ext_fun_ids: HashMap::new(),
         ext_fun_id_by_sig: HashMap::new(),
         ext_prop_get_ids: HashMap::new(),
-        companion_consts: HashMap::new(),
-        companion_computed_props: HashMap::new(),
         const_lits: HashMap::new(),
         object_const_lits: HashMap::new(),
         ext_prop_set_ids: HashMap::new(),
@@ -2124,8 +2122,6 @@ fn lower_file_at_reporting_impl(
                     if cty == Ty::Error {
                         return None;
                     }
-                    lo.companion_computed_props
-                        .insert((type_name(&internal), cp.name.clone()), (cty, cp.is_var));
                     continue;
                 }
                 lo.cur_class = None;
@@ -2141,8 +2137,8 @@ fn lower_file_at_reporting_impl(
                 }
                 let init = lo.lower_arg(initx, &ty_to_ir(cty))?;
                 // A `const val` becomes a `ConstantValue` static; a plain non-const companion `val`
-                // becomes a static field initialized in the outer class's `<clinit>`. Both are read as
-                // `getstatic C.X` (registered in `companion_consts`).
+                // becomes a static field initialized in the outer class's `<clinit>`. Reads consume
+                // the declaration-selected [`StaticPropertyStorage`] handoff instead of a lowerer map.
                 let static_id = lo.ir.statics.len() as u32;
                 lo.ir.statics.push(crate::ir::IrStatic {
                     visibility: cp.visibility,
@@ -2161,8 +2157,6 @@ fn lower_file_at_reporting_impl(
                         .or_default()
                         .push(static_id);
                 }
-                lo.companion_consts
-                    .insert((type_name(&internal), cp.name.clone()), cty);
             }
             // An `object`'s own `const val`s become `public static final` + `ConstantValue` fields on the
             // object class (kotlinc's layout) — reads inline the literal (`object_const_lits`), exactly as
@@ -5674,14 +5668,6 @@ pub(crate) struct Lower<'a> {
     /// `(erased receiver, name)` → the synthesized static getter (`getName(Recv): T`) / setter
     /// (`setName(Recv, T)`) FunId.
     ext_prop_get_ids: HashMap<(Ty, String), u32>,
-    /// `(outer class internal, companion `const val` name)` → its type. Such a const lives as a
-    /// `public static final` field on the OUTER class; a `C.X` read lowers to `getstatic C.X`.
-    companion_consts: HashMap<(TypeName, String), Ty>,
-    /// `(outer class internal, companion property name)` → `(type, is_var)` for a FIELD-LESS
-    /// custom-accessor companion property. It has no static field at all: a `C.X` read lowers to
-    /// `getstatic C.Companion; invokevirtual C$Companion.getX()`, and a `C.X = v` write to the
-    /// matching `setX(v)`. See `is_computed_companion_prop`.
-    companion_computed_props: HashMap<(TypeName, String), (Ty, bool)>,
     /// Top-level `const val` name → its compile-time literal value. A same-file read inlines this as a
     /// constant (kotlinc's `ldc`), exactly like the reference compiler — byte-identical, no `getstatic`.
     const_lits: HashMap<String, crate::ir::IrConst>,
@@ -5854,8 +5840,8 @@ impl<'a> Lower<'a> {
     /// `Member { Name("Registry"), "Const" }` — or `None` when it isn't a chain of plain names.
     ///
     /// A nested declaration is flattened into `file.decls` under its dotted name, so this is the key
-    /// `object_const_lits` / `companion_consts` record it under. Without the chain, only a top-level
-    /// `Obj.CONST` matched and a nested `Outer.Obj.CONST` fell through to a bail.
+    /// `object_const_lits` records it under. Without the chain, only a top-level `Obj.CONST` matched
+    /// and a nested `Outer.Obj.CONST` fell through to a bail.
     ///
     /// A path rooted in a VALUE (`a.b.c`) normally misses both maps — but not when the root name
     /// collides with a classifier (`val Registry = …` beside `class Registry { object Const { … } }`),
@@ -6116,33 +6102,34 @@ impl<'a> Lower<'a> {
         )
     }
 
-    fn lower_recorded_static_field(&mut self, expression: AstExprId) -> Option<u32> {
-        let ExprLowering::StaticFieldRead {
+    fn lower_recorded_static_property(&mut self, expression: AstExprId) -> Option<u32> {
+        let ExprLowering::StaticPropertyRead {
             owner,
             name,
             descriptor,
+            storage,
         } = self.info.expr_lowers.get(&expression)?.clone()
         else {
             return None;
         };
-        // A FIELD-LESS custom-accessor companion property has NO static to read — the read IS the
-        // getter call on the companion singleton. This is the choke point for every read the checker
-        // records as a static-field read (an unqualified one from an instance or companion method, a
-        // member initializer, an imported one); the qualified `C.X` form is handled at its own site.
-        // Without this the emitted `getstatic C.X` names a field that was never emitted, which is a
-        // `NoSuchFieldError` at run time rather than the clean rejection this shape used to get.
-        if self
-            .companion_computed_props
-            .contains_key(&(owner, name.clone()))
-        {
-            let getter = property_getter_name(&name);
-            return self.lower_companion_computed_accessor(owner, &getter, None);
+        match storage {
+            StaticPropertyStorage::CompanionAccessors => {
+                let getter = property_getter_name(&name);
+                self.lower_companion_property_accessor(
+                    owner,
+                    &getter,
+                    self.info.ty(expression),
+                    None,
+                )
+            }
+            StaticPropertyStorage::OuterStaticField => {
+                let descriptor = match descriptor {
+                    Some(descriptor) => descriptor,
+                    None => self.runtime.type_descriptor(self.info.ty(expression))?,
+                };
+                Some(self.emit_external_static_field(owner.render(), name, descriptor))
+            }
         }
-        let descriptor = match descriptor {
-            Some(descriptor) => descriptor,
-            None => self.runtime.type_descriptor(self.info.ty(expression))?,
-        };
-        Some(self.emit_external_static_field(owner.render(), name, descriptor))
     }
 
     fn emit_library_static_call(
@@ -7630,15 +7617,16 @@ impl<'a> Lower<'a> {
         Some(self.coerce_to_static(call, *ret, emitted_ret))
     }
 
-    /// Lower a bare-name call to a classpath `object` member imported unqualified (`import Obj.m; m(args)`,
-    /// A read or write of a FIELD-LESS custom-accessor companion property (`C.ZERO`, `C.LEVEL = v`).
+    /// Lower a read or write of a FIELD-LESS custom-accessor companion property
+    /// (`C.ZERO`, `C.LEVEL = v`).
     /// It has no static field, so both directions go through the accessor methods synthesized on
     /// `C$Companion`: read the `Companion` singleton, then invoke `getX()` / `setX(value)`. `value`
     /// is `None` for a read. See `is_computed_companion_prop`.
-    fn lower_companion_computed_accessor(
+    fn lower_companion_property_accessor(
         &mut self,
         outer: TypeName,
         accessor: &str,
+        property_ty: Ty,
         value: Option<u32>,
     ) -> Option<u32> {
         let outer_internal = outer.render();
@@ -7647,12 +7635,22 @@ impl<'a> Lower<'a> {
             self.runtime
                 .companion_instance_field(&outer_internal, &comp_internal, "Companion")?;
         let recv = self.platform_static_field(field);
-        let comp_name = type_name(&comp_internal);
-        let args: Vec<Option<u32>> = value.into_iter().map(Some).collect();
-        let (class_id, index, _, _) = self
-            .resolve_method_by_arity(comp_name, accessor, args.len())
-            .or_else(|| self.resolve_method_name(comp_name, accessor))?;
-        Some(self.emit_method_call(class_id, index, recv, args))
+        let property_descriptor = self.runtime.type_descriptor(property_ty)?;
+        let (descriptor, args) = match value {
+            Some(value) => (format!("({property_descriptor})V"), vec![value]),
+            None => (format!("(){property_descriptor}"), Vec::new()),
+        };
+        // The storage plan and checked type fully describe the ABI, so this direct virtual target works
+        // whether the companion class is present in the current file's IR or emitted by a sibling file.
+        // Resolving a method from `self.ir.classes` here would reintroduce a same-file-only branch.
+        Some(self.emit_virtual_call(
+            comp_internal,
+            accessor.to_string(),
+            descriptor,
+            false,
+            recv,
+            args,
+        ))
     }
 
     /// recorded by the checker as [`ExprLowering::ObjectMemberCall`]). Reads the singleton
@@ -18226,19 +18224,26 @@ impl<'a> Lower<'a> {
         // `C.prop = value` on a companion (static) property — the write mirror of the `getstatic
         // C.prop` read. The checker resolved the owner and property type; the static itself was
         // registered while lowering the companion's declarations.
-        if let Some(StmtLowering::CompanionStaticWrite { owner, name, ty }) =
-            self.info.stmt_lowers.get(&s).cloned()
+        if let Some(StmtLowering::CompanionStaticWrite {
+            owner,
+            name,
+            ty,
+            storage,
+        }) = self.info.stmt_lowers.get(&s).cloned()
         {
             if let Stmt::AssignMember { value, .. } = self.afile.stmt(s).clone() {
-                // A FIELD-LESS custom-accessor companion property has no static to `putstatic`: the
-                // write IS the setter call on the companion singleton.
-                if self
-                    .companion_computed_props
-                    .contains_key(&(owner, name.clone()))
-                {
+                // Storage is selected by the declaration signature, so a sibling-file computed
+                // property takes the same setter path as a same-file one without consulting a local
+                // lowering map or guessing from the owner name.
+                if storage == StaticPropertyStorage::CompanionAccessors {
                     let lowered = self.lower_arg(value, &ty_to_ir(ty))?;
                     let setter = property_setter_name(&name);
-                    return self.lower_companion_computed_accessor(owner, &setter, Some(lowered));
+                    return self.lower_companion_property_accessor(
+                        owner,
+                        &setter,
+                        ty,
+                        Some(lowered),
+                    );
                 }
                 // `ir.statics` holds only the statics of the file being LOWERED, so a companion
                 // declared in another file of the module has no index here. Writing one needs an
@@ -22571,9 +22576,9 @@ impl<'a> Lower<'a> {
             }
             if matches!(
                 self.info.expr_lowers.get(&e),
-                Some(ExprLowering::StaticFieldRead { .. })
+                Some(ExprLowering::StaticPropertyRead { .. })
             ) {
-                return self.lower_recorded_static_field(e);
+                return self.lower_recorded_static_property(e);
             }
             if let Some(entry) = self.lower_resolved_enum_entry(e, &n) {
                 return Some(entry);
@@ -23033,9 +23038,9 @@ impl<'a> Lower<'a> {
             }
             if matches!(
                 self.info.expr_lowers.get(&e),
-                Some(ExprLowering::StaticFieldRead { .. })
+                Some(ExprLowering::StaticPropertyRead { .. })
             ) {
-                return self.lower_recorded_static_field(e);
+                return self.lower_recorded_static_property(e);
             }
             // A classpath nested singleton object recorded by the checker (`PrimitiveKind.STRING`) →
             // `getstatic <Outer$Nested>.INSTANCE`.
@@ -23150,58 +23155,6 @@ impl<'a> Lower<'a> {
                     .cloned()
                 {
                     return Some(self.emit_const(c));
-                }
-                // `C.X` where `X` is a companion `const val` → `getstatic C.X` (the field lives on the
-                // outer class C; the JVM initializes it from its `ConstantValue` attribute).
-                if let Some(cty) = self.companion_consts.get(&(internal_name, name.clone())) {
-                    return Some(self.emit_external_static_field(
-                        internal,
-                        name.clone(),
-                        self.runtime.type_descriptor(*cty)?,
-                    ));
-                }
-                // `C.X` where `X` is a FIELD-LESS custom-accessor companion property — there is no
-                // static to fetch, so the read IS the getter call on the companion singleton.
-                if self
-                    .companion_computed_props
-                    .contains_key(&(internal_name, name.clone()))
-                {
-                    let getter = property_getter_name(&name);
-                    return self.lower_companion_computed_accessor(internal_name, &getter, None);
-                }
-                // `C.X` where `C` is declared in a SIBLING file of the module (the same-file maps
-                // above only cover this file's classes; the checker resolved the read through the
-                // class's `static_props`). The declaring file hoists a backing-field companion
-                // property to a static on the OUTER class, so the read is the same `getstatic C.X`
-                // the same-file arm emits; a FIELD-LESS computed property has no static, so the
-                // read is its `getX` on the companion singleton.
-                if let Some(cls) = self.module_class_named(&rn) {
-                    if let Some(&(cty, _, _)) = cls.static_props.get(&name) {
-                        let internal = cls.internal();
-                        if cls.computed_static_props.contains(&name) {
-                            let comp_internal = format!("{internal}$Companion");
-                            let field = self.runtime.companion_instance_field(
-                                &internal,
-                                &comp_internal,
-                                "Companion",
-                            )?;
-                            let recv = self.platform_static_field(field);
-                            let descriptor = format!("(){}", self.runtime.type_descriptor(cty)?);
-                            return Some(self.emit_virtual_call(
-                                comp_internal,
-                                property_getter_name(&name),
-                                descriptor,
-                                false,
-                                recv,
-                                vec![],
-                            ));
-                        }
-                        return Some(self.emit_external_static_field(
-                            internal,
-                            name.clone(),
-                            self.runtime.type_descriptor(cty)?,
-                        ));
-                    }
                 }
             }
             if rt == Ty::Char && name == "code" {
