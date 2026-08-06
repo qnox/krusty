@@ -803,14 +803,17 @@ const VIS_PUBLIC: u64 = 3;
 /// One source `ValueParameter` decoded from metadata. Keeping these facts together avoids the parser's
 /// old parallel vectors drifting as more parameter-level facts are added.
 struct ParsedValueParam {
-    class_id: Option<u64>,
     name_id: u64,
     has_default: bool,
     materialized: bool,
-    recv_fun: (Vec<u64>, Option<u64>),
-    /// The raw `ValueParameter.type` (field 3) `Type` message body — decoded to a signature [`Ty`] with the
-    /// enclosing type-parameter table (needs `records`/`d2`, so it happens in `decode_functions`).
-    type_body: Vec<u8>,
+    /// The raw inline `ValueParameter.type` (field 3) message, when present. Keeping PRESENCE rather
+    /// than an empty sentinel distinguishes an explicitly empty/default `Type` from a parameter that
+    /// instead names the enclosing type table through [`Self::type_id`].
+    type_body: Option<Vec<u8>>,
+    /// `ValueParameter.type_id` (field 4, varint), indexing the function/container `TypeTable` when
+    /// the producer chose table-backed types. This shares field 4 with the length-delimited
+    /// `varargElementType`; protobuf wire type makes the two forms unambiguous.
+    type_id: Option<u64>,
     /// The raw `ValueParameter.varargElementType` (field 4 as emitted by kotlin-stdlib 2.3.20) `Type`
     /// body when the parameter is a `vararg`.
     /// Present ⇒ the parameter is a vararg whose LOGICAL gsig is `Array<elem>`; kotlinc stores the element
@@ -962,11 +965,10 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 let n = pb.varint()? as usize;
                 let vbody = pb.bytes(n)?;
                 let mut vp = Pb { b: vbody, i: 0 };
-                let mut tid = None;
                 let mut nid = 0u64;
                 let mut vflags = 0u64;
-                let mut recv_ids = (Vec::new(), None);
-                let mut type_body = Vec::new();
+                let mut type_body = None;
+                let mut type_id = None;
                 let mut vararg_elem_body = None;
                 while !vp.at_end() {
                     let vt = vp.varint()?;
@@ -976,12 +978,9 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                         (3, 2) => {
                             let tn = vp.varint()? as usize;
                             let tb = vp.bytes(tn)?;
-                            tid = parse_type_class_name(tb);
-                            // A RECEIVER function-type param (`Recv.() -> R`) carries the
-                            // `@ExtensionFunctionType` type annotation + the receiver as its first arg.
-                            recv_ids = parse_type_recv_fun(tb);
-                            type_body = tb.to_vec();
+                            type_body = Some(tb.to_vec());
                         }
+                        (4, 0) => type_id = vp.varint(), // ValueParameter.type_id
                         (4, 2) => {
                             // varargElementType — PRESENCE marks a `vararg`; body is the element `Type`.
                             // Field FOUR, verified against kotlin-stdlib 2.3.20 by dumping every
@@ -997,12 +996,11 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                 }
                 // `DECLARES_DEFAULT_VALUE` is bit 1 of the ValueParameter flags (HAS_ANNOTATIONS is bit 0).
                 value_params.push(ParsedValueParam {
-                    class_id: tid,
                     name_id: nid,
                     has_default: vflags & DECLARES_DEFAULT_VALUE_BIT != 0,
                     materialized: vflags & (IS_CROSSINLINE_BIT | IS_NOINLINE_BIT) != 0,
-                    recv_fun: recv_ids,
                     type_body,
+                    type_id,
                     vararg_elem_body,
                 });
             }
@@ -1343,14 +1341,28 @@ fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Op
     None
 }
 
-/// Whether a `Type` message is nullable (`Type.nullable = 3`, a varint bool). The JVM signature erases
-/// Kotlin nullability; only `@Metadata` carries it.
-fn parse_type_nullable(body: &[u8]) -> bool {
+/// The declaration facts carried directly by one Kotlin metadata `Type` message.
+///
+/// Nullability and suspend-function identity live in the same protobuf node. Decode them in one walk
+/// so a value-parameter consumer cannot accidentally read one from an inline type and the other from
+/// a type-table entry, or duplicate the wire parser as new type flags are added.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ParsedTypeFacts {
+    nullable: bool,
+    suspend_fun: bool,
+}
+
+fn parse_type_facts(body: &[u8]) -> ParsedTypeFacts {
     let mut pb = Pb { b: body, i: 0 };
+    let mut facts = ParsedTypeFacts::default();
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
-            (3, 0) => return pb.varint().is_some_and(|v| v != 0), // Type.nullable
+            // `Type.flags` bit zero is `SUSPEND_TYPE`. A suspend function type otherwise has the
+            // same CPS-erased `FunctionN+1<..., Continuation<R>, Any?>` signature as an ordinary
+            // continuation-taking function, so this bit is the semantic discriminator.
+            (1, 0) => facts.suspend_fun = pb.varint().is_some_and(|v| v & 1 != 0),
+            (3, 0) => facts.nullable = pb.varint().is_some_and(|v| v != 0),
             (_, w) => {
                 if pb.skip(w).is_none() {
                     break;
@@ -1358,7 +1370,30 @@ fn parse_type_nullable(body: &[u8]) -> bool {
             }
         }
     }
-    false
+    facts
+}
+
+/// Whether a `Type` message is nullable (`Type.nullable = 3`, a varint bool). Kept as the small
+/// query used throughout the decoder; the wire interpretation itself remains centralized above.
+fn parse_type_nullable(body: &[u8]) -> bool {
+    parse_type_facts(body).nullable
+}
+
+/// Resolve a value parameter's declared `Type` through the one representation chosen by its
+/// producer: an inline message or an index into the enclosing table. The boolean is the table's
+/// `firstNullable` contribution, which is stored outside the `Type` entry itself.
+///
+/// All parameter consumers use this operation—generic-signature decoding, class/annotation recovery,
+/// and per-type flags—so table-backed metadata cannot silently degrade only one of those views.
+fn value_parameter_type<'a>(
+    parameter: &'a ParsedValueParam,
+    type_table: Option<&'a [u8]>,
+) -> Option<(&'a [u8], bool)> {
+    if let Some(body) = parameter.type_body.as_deref() {
+        return Some((body, false));
+    }
+    let id = parameter.type_id?;
+    type_table_entry(type_table?, id as usize)
 }
 
 struct TypeParameterContext {
@@ -1418,6 +1453,7 @@ fn build_generic_sig(
     d2: &[String],
     class_tparams: &[(u64, String)],
     class_receiver: Option<(&str, &[(u64, String)])>,
+    type_table: Option<&[u8]>,
 ) -> Option<GenericSig> {
     let context = type_parameter_context(class_tparams, &pf.type_params, records, d2)?;
     let receiver = if let Some(rb) = &pf.receiver_body {
@@ -1452,13 +1488,15 @@ fn build_generic_sig(
                 parse_type_gsig_bounded(elem, records, d2, &context.names, &context.erasure_bounds)
                     .map(Ty::array)
             } else {
-                parse_type_gsig_bounded(
-                    &vp.type_body,
-                    records,
-                    d2,
-                    &context.names,
-                    &context.erasure_bounds,
-                )
+                value_parameter_type(vp, type_table).and_then(|(body, _)| {
+                    parse_type_gsig_bounded(
+                        body,
+                        records,
+                        d2,
+                        &context.names,
+                        &context.erasure_bounds,
+                    )
+                })
             };
             // An unresolvable param erases to a fresh unbound var (→ `Any` downstream).
             decoded.unwrap_or_else(|| Ty::ty_param("\u{0}", Ty::nullable(Ty::obj("kotlin/Any"))))
@@ -1483,6 +1521,7 @@ fn build_generic_sig(
         receiver,
         params,
         ret,
+        return_policy: Default::default(),
     })
 }
 
@@ -1530,12 +1569,14 @@ fn build_property_generic_sig(
         } else {
             ret
         },
+        return_policy: Default::default(),
     })
 }
 
 /// Bit-packed boolean flags for a [`MetaValueParam`], collapsing its `has_default`/`materialized`/
-/// `vararg`/`recv_fun` bytes into one. Read through the `MetaValueParam` accessors of the same names;
-/// built with the `with_*` chain. Headroom for four more flags before the byte fills.
+/// `vararg`/`recv_fun`/`nullable`/`suspend_fun`/`has_type_facts` bytes into one. Read through
+/// the `MetaValueParam` accessors of the same names; built with the `with_*` chain. Headroom for
+/// one more flag before the byte fills.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MvpFlags(u8);
 
@@ -1545,6 +1586,8 @@ impl MvpFlags {
     const VARARG: u8 = 1 << 2;
     const RECV_FUN: u8 = 1 << 3;
     const NULLABLE: u8 = 1 << 4;
+    const SUSPEND_FUN: u8 = 1 << 5;
+    const HAS_TYPE_FACTS: u8 = 1 << 6;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -1580,13 +1623,22 @@ impl MvpFlags {
     pub const fn with_nullable(self, on: bool) -> Self {
         self.with(Self::NULLABLE, on)
     }
+    #[inline]
+    pub const fn with_suspend_fun(self, on: bool) -> Self {
+        self.with(Self::SUSPEND_FUN, on)
+    }
+    #[inline]
+    pub const fn with_has_type_facts(self, on: bool) -> Self {
+        self.with(Self::HAS_TYPE_FACTS, on)
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct MetaValueParam {
     pub ty: Option<TypeName>,
     pub name: String,
-    /// Bit-packed `has_default`/`materialized`/`vararg`/`recv_fun` (read via the accessors below).
+    /// Bit-packed `has_default`/`materialized`/`vararg`/`recv_fun`/`nullable`/`suspend_fun` (read
+    /// via the accessors below).
     /// `vararg` — `vararg elem: T`. Only `@Metadata` records this: the JVM descriptor shows just the
     /// packed array, so `f(vararg c: Char)` and `f(c: CharArray)` are indistinguishable without it,
     /// and overload resolution cannot know it may spread trailing arguments into the array.
@@ -1614,6 +1666,21 @@ impl MetaValueParam {
     #[inline]
     pub fn recv_fun(&self) -> bool {
         self.flags.has(MvpFlags::RECV_FUN)
+    }
+    /// The parameter's declared type is a `suspend` FUNCTION TYPE (`suspend Scope.(Req) -> Resp`) —
+    /// metadata's `Type.flags` SUSPEND_TYPE bit, the only witness that the CPS-erased
+    /// `FunctionN+1<…, Continuation<T>, Any?>` shape is a suspend function type and not a
+    /// source-level continuation-taking one.
+    #[inline]
+    pub fn suspend_fun(&self) -> bool {
+        self.flags.has(MvpFlags::SUSPEND_FUN)
+    }
+    /// Whether the parameter's declared `Type` was resolved, either inline or through its enclosing
+    /// type table. If neither representation can be read, type-level facts are absent rather than
+    /// false, and a consumer must not treat them as disclaimers.
+    #[inline]
+    pub fn has_type_facts(&self) -> bool {
+        self.flags.has(MvpFlags::HAS_TYPE_FACTS)
     }
 }
 
@@ -2066,17 +2133,33 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64, class_tparams: &[(u64, String)
                     let ret_class = pf
                         .ret_class
                         .and_then(|id| resolve_class_name(records, d2, id as usize));
+                    // Kotlin may place parameter types in the function-local table or in the
+                    // containing package/class table. The nearer function table shadows the outer
+                    // one, matching every other type-table lookup in this decoder.
+                    let function_type_table =
+                        pf.type_table_body.as_deref().or(type_table_body.as_deref());
                     let value_params: Vec<MetaValueParam> = pf
                         .value_params
                         .iter()
                         .map(|p| {
-                            let recv_fun = p.recv_fun.0.iter().copied().any(|id| {
+                            let resolved_type = value_parameter_type(p, function_type_table);
+                            let (recv_annotations, recv_class) = resolved_type
+                                .map(|(body, _)| parse_type_recv_fun(body))
+                                .unwrap_or_default();
+                            let recv_fun = recv_annotations.iter().copied().any(|id| {
                                 resolve_class_name(records, d2, id as usize)
                                     .is_some_and(|name| name == "kotlin/ExtensionFunctionType")
                             });
+                            let type_facts = resolved_type
+                                .map(|(body, table_nullable)| {
+                                    let mut facts = parse_type_facts(body);
+                                    facts.nullable |= table_nullable;
+                                    facts
+                                })
+                                .unwrap_or_default();
                             MetaValueParam {
-                                ty: p
-                                    .class_id
+                                ty: resolved_type
+                                    .and_then(|(body, _)| parse_type_class_name(body))
                                     .and_then(|id| resolve_class_name(records, d2, id as usize))
                                     .map(|name| type_name(&name)),
                                 // Param names are plain string-table entries (like the JVM name/desc), not class names.
@@ -2087,10 +2170,11 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64, class_tparams: &[(u64, String)
                                     .with_materialized(p.materialized)
                                     .with_vararg(p.vararg_elem_body.is_some())
                                     .with_recv_fun(recv_fun)
-                                    .with_nullable(parse_type_nullable(&p.type_body)),
+                                    .with_nullable(type_facts.nullable)
+                                    .with_suspend_fun(type_facts.suspend_fun)
+                                    .with_has_type_facts(resolved_type.is_some()),
                                 recv_fun_receiver: if recv_fun {
-                                    p.recv_fun
-                                        .1
+                                    recv_class
                                         .and_then(|id| resolve_class_name(records, d2, id as usize))
                                         .map(|name| type_name(&name))
                                 } else {
@@ -2103,14 +2187,21 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64, class_tparams: &[(u64, String)
                     // `Signature`-derived gsig (extension: receiver at `params[0]`; member/top-level: value
                     // params only) so it is a drop-in replacement; the uniform member-receiver synthesis is
                     // a later step (`class_receiver = None` here keeps a member's params value-only).
-                    let generic_sig = build_generic_sig(&pf, records, d2, class_tparams, None);
+                    let generic_sig = build_generic_sig(
+                        &pf,
+                        records,
+                        d2,
+                        class_tparams,
+                        None,
+                        function_type_table,
+                    );
                     let contract = pf.contract_body.as_deref().and_then(|body| {
                         let tparams = type_parameter_context(&[], &pf.type_params, records, d2)
                             .map(|c| c.names)
                             .unwrap_or_default();
                         // Function-level table wins if present; the container's otherwise.
-                        let table = pf.type_table_body.as_deref().or(type_table_body.as_deref());
-                        decode_contract(body, records, d2, &tparams, table).map(std::sync::Arc::new)
+                        decode_contract(body, records, d2, &tparams, function_type_table)
+                            .map(std::sync::Arc::new)
                     });
                     out.push(MetaFn {
                         kotlin_name,
@@ -3723,8 +3814,9 @@ mod builtin_class_access_tests {
 mod module_reader_tests {
     use super::{
         decode_properties, parse_function, parse_receiver_type_gsig, parse_type_alias,
-        parse_type_gsig, parse_type_gsig_node, parse_type_recv_fun, primary_erasure_bounds,
-        read_kotlin_module, MetaCtx,
+        parse_type_facts, parse_type_gsig, parse_type_gsig_node, parse_type_recv_fun,
+        primary_erasure_bounds, read_kotlin_module, value_parameter_type, MetaCtx,
+        ParsedValueParam,
     };
     use crate::metadata::module::build_kotlin_module;
     use crate::types::Ty;
@@ -3812,6 +3904,55 @@ mod module_reader_tests {
         let ordinary = parse_function(&[]).expect("default function message");
         assert!(operator.is_operator);
         assert!(!ordinary.is_operator);
+    }
+
+    #[test]
+    fn value_parameter_type_facts_share_inline_and_table_backed_decoding() {
+        // Type.flags = SUSPEND_TYPE followed by Type.nullable = true. Keeping both fields in one
+        // miniature message pins the shared wire walk rather than testing two helpers that could
+        // drift independently.
+        let declared_type = vec![0x08, 0x01, 0x18, 0x01];
+        assert_eq!(
+            parse_type_facts(&declared_type),
+            super::ParsedTypeFacts {
+                nullable: true,
+                suspend_fun: true,
+            }
+        );
+
+        let parameter = |type_body, type_id| ParsedValueParam {
+            name_id: 0,
+            has_default: false,
+            materialized: false,
+            type_body,
+            type_id,
+            vararg_elem_body: None,
+        };
+        let inline = parameter(Some(declared_type.clone()), None);
+        assert_eq!(
+            value_parameter_type(&inline, None),
+            Some((declared_type.as_slice(), false))
+        );
+
+        // TypeTable.type[0] = declared_type and firstNullable = 0. A table-backed parameter must
+        // recover the identical Type body plus the table-level nullability fact; this is the form
+        // produced when metadata enables type-table compaction.
+        let mut table = vec![0x0a, declared_type.len() as u8];
+        table.extend_from_slice(&declared_type);
+        table.extend_from_slice(&[0x10, 0x00]);
+        let indexed = parameter(None, Some(0));
+        assert_eq!(
+            value_parameter_type(&indexed, Some(&table)),
+            Some((declared_type.as_slice(), true))
+        );
+
+        // Function.valueParameter { name = 0, typeId = 0 }. Pin field 4's VARINT form at the
+        // protobuf boundary so it cannot be confused with field 4's length-delimited vararg type.
+        let function = parse_function(&[0x32, 0x04, 0x10, 0x00, 0x20, 0x00])
+            .expect("function carrying one table-backed value parameter");
+        assert_eq!(function.value_params.len(), 1);
+        assert_eq!(function.value_params[0].type_id, Some(0));
+        assert!(function.value_params[0].type_body.is_none());
     }
 
     #[test]

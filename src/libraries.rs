@@ -25,12 +25,46 @@ pub struct GenericSig {
     pub receiver: Option<Ty>,
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// How the declaration asks consumers to realize a call-site substitution of [`Self::ret`].
+    /// This records a semantic property of the signature rather than the provider or file format that
+    /// supplied it: an unannotated reference return may remain null-capable after its outer method type
+    /// parameter specializes to a source primitive. Exact source signatures use the default policy.
+    pub return_policy: GenericReturnPolicy,
+}
+
+/// Post-substitution policy for a generic callable's return. Keeping this on [`GenericSig`] gives member,
+/// static, and top-level resolution one authoritative fact; consumers do not need parallel provenance
+/// flags or branches for a particular class-file/module provider.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GenericReturnPolicy {
+    /// The substituted source type is the complete semantic result.
+    #[default]
+    Exact,
+    /// An unannotated reference contract remains null-capable when its outer method type parameter binds
+    /// to a primitive. The primitive is therefore carried in the platform's boxed reference form.
+    FlexibleReference,
+}
+
+impl GenericSig {
+    /// Apply the declaration's return policy after ordinary generic binding. Only a primitive needs a
+    /// representation change: reference substitutions are already null-capable, while nested occurrences
+    /// such as `Container<T>` keep their outer reference shape. The platform supplies wrapper identity so
+    /// this shared model never names a target runtime class.
+    pub fn apply_return_policy(&self, platform: &dyn SemanticPlatform, specialized: Ty) -> Ty {
+        match self.return_policy {
+            GenericReturnPolicy::Exact => specialized,
+            GenericReturnPolicy::FlexibleReference => specialized
+                .boxed_ref()
+                .map(|boxed| platform.library_value_form(boxed))
+                .unwrap_or(specialized),
+        }
+    }
 }
 
 /// Bit-packed boolean flags for a [`LibraryMember`], collapsing `ret_nullable`/`is_interface`/
 /// `suspend`/`is_operator`/`is_extension` into one byte. Read through the `LibraryMember` accessors of the same
 /// names; mutated through the matching `set_*` methods; built with the `with_*` chain. Headroom for
-/// two more flags.
+/// three more flags.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LmFlags(u8);
 
@@ -47,11 +81,6 @@ impl LmFlags {
     /// descriptor distinguishes that from an ordinary member taking a parameter of the same type, and
     /// a call site must know which, since only a member extension needs its dispatch receiver in scope.
     const IS_EXTENSION: u8 = 1 << 4;
-    /// The member was decoded from JAVA bytecode without Kotlin `@Metadata`, so its unannotated types
-    /// are PLATFORM types: a type-variable return stays null-checkable (`T!`) even when the call site
-    /// binds `T` to a Kotlin non-null type. Kotlin `@Metadata` members keep their exact declared
-    /// nullability and never carry this bit.
-    const JAVA_PLATFORM: u8 = 1 << 5;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -86,10 +115,6 @@ impl LmFlags {
     #[inline]
     pub const fn with_is_extension(self, on: bool) -> Self {
         self.with(Self::IS_EXTENSION, on)
-    }
-    #[inline]
-    pub const fn with_java_platform(self, on: bool) -> Self {
-        self.with(Self::JAVA_PLATFORM, on)
     }
 }
 
@@ -130,6 +155,17 @@ pub struct LibraryMember {
     /// call and lambda-parameter typing without the removed receiver-indexed `functions()` seam. Default
     /// (empty) for a provider that records no source parameter metadata.
     pub call_sig: CallSig,
+    /// The member's DECLARED (un-erased, pre-substitution) return type, straight from `@Metadata` —
+    /// the return analogue of [`LibraryCallable::source_receiver`], and recorded with no value-class
+    /// reasoning of its own.
+    ///
+    /// [`Self::ret`] cannot serve: it is the SUBSTITUTED type, so `List<TokenBox>.get` and
+    /// `A.create(): A<String>` both present as "returns a value class, physically `Object`" even though
+    /// the first hands back a BOX out of a generic slot and the second the erased carrier. Only the
+    /// DECLARATION separates them — `get` declares the type parameter `E`, `create` declares `A`. The
+    /// value-class pass reads this to decide the result's representation. `None` when the provider
+    /// records no metadata return classifier.
+    pub declared_ret: Option<Ty>,
 }
 
 /// A public static field and its optional compile-time constant.
@@ -238,6 +274,13 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Primitive represented by a platform wrapper type.
     fn boxed_primitive(&self, _ty: Ty) -> Option<Ty> {
         None
+    }
+
+    /// Primitive represented by a nullable source value or a platform wrapper reference. This is the
+    /// single semantic query for checker/lowerer sites that accept either representation; centralizing the
+    /// composition prevents equality, coercion, and emission from growing separate target-specific tests.
+    fn reference_primitive(&self, ty: Ty) -> Option<Ty> {
+        ty.nullable_primitive().or_else(|| self.boxed_primitive(ty))
     }
 
     /// The receiver-MRO RUNG of an extension whose declared receiver is `decl_recv`, for an actual receiver
@@ -372,6 +415,7 @@ impl LibraryMember {
             inline: InlineKind::None,
             visibility: Visibility::Public,
             call_sig: CallSig::default(),
+            declared_ret: None,
         }
     }
 
@@ -396,10 +440,6 @@ impl LibraryMember {
         self.flags.has(LmFlags::IS_EXTENSION)
     }
     #[inline]
-    pub fn java_platform(&self) -> bool {
-        self.flags.has(LmFlags::JAVA_PLATFORM)
-    }
-    #[inline]
     pub fn set_ret_nullable(&mut self, on: bool) {
         self.flags = self.flags.with_ret_nullable(on);
     }
@@ -416,10 +456,6 @@ impl LibraryMember {
     }
     pub fn set_is_member_extension(&mut self, on: bool) {
         self.flags = self.flags.with_is_extension(on);
-    }
-    #[inline]
-    pub fn set_java_platform(&mut self, on: bool) {
-        self.flags = self.flags.with_java_platform(on);
     }
 
     pub fn owner_name(&self) -> Option<String> {
@@ -477,6 +513,7 @@ impl LibraryCallable {
             contract: None,
             generic_sig: None,
             singleton_dispatch: None,
+            declared_ret: None,
         }
     }
 
@@ -591,6 +628,12 @@ pub struct LibraryCallable {
     /// extension receiver must unbox to the value class's underlying; `params[0]` is already erased and
     /// cannot make that distinction. This is the un-erased-source-type down payment on task B.
     pub source_receiver: Option<Ty>,
+    /// The callee's DECLARED (un-erased, pre-substitution) return type — the return analogue of
+    /// [`Self::source_receiver`], carried for the same reason and read by the same pass. See
+    /// [`LibraryMember::declared_ret`]: [`Self::ret`] is the SUBSTITUTED type, which cannot say whether
+    /// a value-class result is the erased CARRIER (declared to return it) or a BOX out of a generic
+    /// slot. Only non-null declared returns are recorded; a nullable value class really is boxed.
+    pub declared_ret: Option<Ty>,
     /// Number of LEADING context parameters (`context(a: A) fun f()`) in `params` — supplied
     /// implicitly by the caller, not positionally, so arity checks and argument mapping skip them.
     pub context_count: usize,
@@ -744,6 +787,7 @@ pub fn map_call_args<T: Copy>(
     let mut slots = vec![None; parameter_count];
     let mut positional = 0usize;
     let mut seen_named = false;
+    let mut vararg_named = false;
     let mut named_order_matches = true;
     let mut errors = Vec::new();
     let mut recovery_argument = None;
@@ -773,6 +817,9 @@ pub fn map_call_args<T: Copy>(
                     });
                     continue;
                 }
+                if vararg == Some(parameter_index) {
+                    vararg_named = true;
+                }
                 slots[parameter_index] = Some(argument);
             }
             None => {
@@ -798,6 +845,12 @@ pub fn map_call_args<T: Copy>(
 
                 if seen_named {
                     if named_order_matches && argument_index >= parameter_count {
+                        // Overflow past the parameter list is legal when a vararg absorbs it
+                        // (`f(a = 1, "x", "y")` — the extras are its elements, reconstructed by
+                        // the slot-map contract), unless the vararg was already bound BY NAME.
+                        if vararg.is_some() && !vararg_named {
+                            continue;
+                        }
                         errors.push(CallArgMappingError::TooManyArguments {
                             argument: argument_index,
                             expected: parameter_count,
@@ -1120,10 +1173,6 @@ pub struct FunctionInfo {
     /// overload instead of making consumers parse backend signature strings after selection.
     pub generic_sig: Option<GenericSig>,
     pub projected_return_hazard: bool,
-    /// The declaration came from JAVA bytecode without Kotlin `@Metadata` ([`LibraryMember::java_platform`]):
-    /// an unannotated type-variable return is a PLATFORM type (`T!`), so a null check stays legal even
-    /// when the call site binds the variable to a Kotlin non-null type.
-    pub java_platform: bool,
     /// The source-level call shape (defaults, named params, lambda param types, vararg) the checker needs
     /// beyond the erased descriptor. `Default` (empty) when the source doesn't provide it.
     pub call_sig: CallSig,
@@ -1168,6 +1217,7 @@ impl FunctionInfo {
                     receiver: self.receiver,
                     params: self.semantic_params().to_vec(),
                     ret: self.callable.ret,
+                    return_policy: GenericReturnPolicy::Exact,
                 })
             },
             Cow::Borrowed,
@@ -1190,7 +1240,6 @@ impl FunctionInfo {
             overload_rank: 0,
             generic_sig: None,
             projected_return_hazard: false,
-            java_platform: false,
             call_sig: CallSig::default(),
             context_count: 0,
             source_key: None,
@@ -1214,6 +1263,14 @@ impl FunctionInfo {
         );
         member.owner = Some(self.callable.owner);
         member.physical_ret = self.callable.physical_ret;
+        // Preserve the selected declaration's pre-substitution return when a generic `FunctionInfo`
+        // is materialized as an instance-member emit handle. The logical `ret` above is deliberately
+        // caller-specialized, so it cannot replace this fact: `Factory.invoke(): TokenBox<String>` and
+        // `List<TokenBox<String>>.get()` may both specialize to `TokenBox<String>` and physically return
+        // `Object`, while only the declaration says the former hands back an unboxed carrier. Dropping
+        // the fact here makes every downstream consumer—including the operator-invoke path—guess from
+        // indistinguishable substituted/physical types and unbox a real carrier as though it were a box.
+        member.declared_ret = self.callable.declared_ret;
         member.signature = self.callable.signature.clone();
         member.generic_sig = self.generic_sig.clone();
         member.inline = self.flags.inline;
@@ -1590,7 +1647,9 @@ pub enum LibConst {
     Long(i64),
     Float(f32),
     Double(f64),
-    Str(String),
+    /// A platform-neutral Kotlin string constant. The semantic library boundary carries UTF-16
+    /// units so a classpath provider cannot corrupt values that Rust `String` cannot represent.
+    Str(crate::kt_string::KtString),
 }
 
 #[derive(Clone, Debug, PartialEq)]

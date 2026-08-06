@@ -198,7 +198,11 @@ impl<'a> ModuleSymbols<'a> {
             // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
             companion_object: None,
             value_companion_fns: Vec::new(),
-            value_underlying: None,
+            // `LibraryType` is the provider-neutral classifier shape consumed by the federated
+            // resolver. Preserve source value-class metadata here just as a classpath provider
+            // does, so every downstream query (identity diagnostics included) can use the common
+            // `SymbolSource::is_value_name` contract instead of branching on symbol provenance.
+            value_underlying: c.value_field.as_ref().map(|(_, ty)| *ty),
             alias_target: None,
             // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can
             // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in
@@ -588,6 +592,10 @@ fn fn_info(
         contract: sig.contract.clone(),
         generic_sig: sig.generic_sig.clone().map(Box::new),
         singleton_dispatch: None,
+        // A SOURCE callable's `ret` is already the declared type and its `physical_ret` is not yet
+        // erased, so there is no carrier-vs-box question for the value-class pass to answer here — it
+        // sees the declaration itself. The fact exists for callables read back from a class file.
+        declared_ret: None,
     };
     FunctionInfo {
         receiver_rank: rank,
@@ -638,6 +646,8 @@ fn source_callable(
         contract: None,
         generic_sig: None,
         singleton_dispatch: None,
+        // See the note in the builder above: a source callable carries its declaration un-erased.
+        declared_ret: None,
     }
 }
 
@@ -994,7 +1004,6 @@ mod tests {
             static_methods: HashMap::new(),
             companion_fun_names: HashSet::new(),
             static_props: HashMap::new(),
-            computed_static_props: HashSet::new(),
             lateinit_props: HashSet::new(),
             interfaces: crate::types::TypeNameList::new(),
             interface_type_args: Vec::new(),
@@ -1029,7 +1038,7 @@ mod tests {
             .classes
             .insert(type_name("sample/Phase"), class("sample/Phase"));
         symbols.enums.insert(
-            "Phase".to_string(),
+            type_name("sample/Phase"),
             vec!["FIRST".to_string(), "SECOND".to_string()],
         );
 
@@ -1049,6 +1058,22 @@ mod tests {
             .expect("source enum shape should retain its synthetic entries accessor");
         assert_eq!(entries.name, "<enum-entries-accessor>");
         assert_eq!(entries.descriptor, "()Lkotlin/enums/EnumEntries;");
+    }
+
+    #[test]
+    fn type_shapes_include_value_class_metadata() {
+        let mut symbols = FrontendSymbols::default();
+        let mut id = class("sample/Id");
+        id.value_field = Some(("raw".to_string(), Ty::Int));
+        symbols.classes.insert(type_name("sample/Id"), id);
+
+        let source = ModuleSymbols::new(&symbols);
+        let shape = source.resolve_type_name(type_name("sample/Id")).unwrap();
+        assert_eq!(shape.value_underlying, Some(Ty::Int));
+        assert!(
+            source.is_value_name(type_name("sample/Id")),
+            "the common SymbolSource query must recognize source value classes without a provider-specific fallback"
+        );
     }
 
     #[test]
@@ -1304,6 +1329,7 @@ mod tests {
             receiver: Some(receiver),
             params: vec![Ty::fun(vec![parameter], parameter)],
             ret: receiver,
+            return_policy: Default::default(),
         };
         let mut signature = sig(
             vec![Ty::fun(vec![Ty::obj("kotlin/Any")], Ty::obj("kotlin/Any"))],
