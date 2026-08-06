@@ -7912,7 +7912,7 @@ fn array_builtin_ret(fname: &str, arg_tys: &[Ty]) -> Option<Ty> {
 /// The return type a top-level call's EXPLICIT type arguments determine on their own, for the
 /// lightweight signature inferer: every top-level overload of `name` must declare exactly
 /// `targs.len()` type parameters, and substituting the arguments into each overload's return must
-/// produce the SAME fully-bound type (`inline fun <reified T : Any> mockk(…): T` with `<C>` → `C`).
+/// produce the SAME fully-bound type (`fun <T> build(…): T` with `<C>` → `C`).
 /// `None` — a sound skip to the full checker — when overloads disagree, when a return still
 /// mentions an unbound type parameter (it depends on argument inference), or when the name has no
 /// top-level overloads. Deliberately blind to the argument list: it exists for calls whose
@@ -8590,7 +8590,7 @@ fn infer_lit_ty_p(
                         }
                     }
                     // An argument list the positional selection above cannot map — a NAMED argument
-                    // out of its declared position (`mockk<C>(relaxed = true)`), or an argument whose
+                    // out of its declared position (`build<C>(enabled = true)`), or an argument whose
                     // type this lightweight pass cannot infer — with EXPLICIT type arguments that by
                     // themselves determine the return. Bind them into each overload's return; when
                     // every overload agrees on a fully-bound type, that IS the property's type
@@ -9993,6 +9993,31 @@ impl SelectedCallCapabilities {
 }
 
 impl ResolvedCall {
+    /// Generic declaration retained by library-backed call targets. Expected-type inference asks this
+    /// semantic question once; it must not duplicate the variant/origin switch used for emission.
+    fn generic_sig(&self) -> Option<&GenericSig> {
+        match self {
+            Self::Member(resolved) => resolved.member.generic_sig.as_ref(),
+            Self::Companion(member) => member.generic_sig.as_ref(),
+            Self::TopLevel(callable) | Self::Extension(callable) => callable.generic_sig.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Refine the logical return of a library-backed call after an enclosing expectation binds a
+    /// previously unbound generic result. Physical return/descriptor facts remain untouched, so lowering
+    /// inserts the required coercion from the erased producer. Returns false for target kinds that do not
+    /// expose this refinement contract.
+    fn refine_logical_return(&mut self, expected: Ty) -> bool {
+        match self {
+            Self::Member(resolved) => resolved.ret = expected,
+            Self::Companion(member) => member.ret = expected,
+            Self::TopLevel(callable) | Self::Extension(callable) => callable.ret = expected,
+            _ => return false,
+        }
+        true
+    }
+
     /// Whether the selected callee is `suspend`, for every target kind that records the flag. The
     /// Local functions derive the same fact from their retained signature. Every selected target that
     /// can carry `suspend` must report it here: this query decides whether the enclosing lambda receives
@@ -15452,25 +15477,6 @@ impl<'a> Checker<'a> {
         )
     }
 
-    /// Seed `bindings` with a call's EXPLICIT type arguments, positionally against the overload's
-    /// formals (`build<C> { … }` binds `T` → `C` before any argument unification). Explicit
-    /// arguments are authoritative in kotlinc, so they are seeded FIRST — argument unification
-    /// only fills formals the call left implicit.
-    fn seed_explicit_type_args(
-        semantic: &crate::libraries::GenericSig,
-        type_args: &[Ty],
-        bindings: &mut crate::symbol_resolver::GSigBinds,
-    ) {
-        // Callers guard the count; a silent partial seed would bind the wrong formals.
-        debug_assert!(
-            type_args.is_empty() || semantic.formals.len() == type_args.len(),
-            "explicit type args must match the overload's formal count"
-        );
-        for (formal, argument) in semantic.formals.iter().zip(type_args) {
-            bindings.insert(formal.clone(), *argument);
-        }
-    }
-
     fn lambda_overload_partially_applicable(
         &self,
         overload: &crate::libraries::FunctionInfo,
@@ -15484,8 +15490,7 @@ impl<'a> Checker<'a> {
             .iter()
             .all(|&parameter| parameter < semantic.params.len())
             .then(|| {
-                let mut bindings = std::collections::HashMap::new();
-                Self::seed_explicit_type_args(&semantic, type_args, &mut bindings);
+                let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
                 if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
                     crate::symbol_resolver::unify_ty(receiver_shape, receiver, &mut bindings);
                 }
@@ -15539,8 +15544,7 @@ impl<'a> Checker<'a> {
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let mut shape = crate::symbol_resolver::LambdaCallShape::default();
         let semantic = overload.semantic_signature();
-        let mut binds = std::collections::HashMap::new();
-        Self::seed_explicit_type_args(&semantic, type_args, &mut binds);
+        let mut binds = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
         if let (Some(receiver), Some(receiver_sig)) = (receiver, semantic.receiver) {
             crate::symbol_resolver::unify_ty(receiver_sig, receiver, &mut binds);
         }
@@ -15758,11 +15762,9 @@ impl<'a> Checker<'a> {
         None
     }
 
-    /// The lambda shape for a classpath `Type(args) { … }` FACTORY call — the companion's
-    /// `operator fun invoke` overloads stand in for top-level overloads (`MockEngine { req ->
-    /// respond(…) }`: the handler parameter is a suspend RECEIVER function type, and the block's
-    /// implicit `this` must bind to that receiver before the body is typed). Reuses the exact
-    /// per-overload mapping/shape machinery of [`Self::top_level_lambda_shape_in_scope`].
+    /// Lambda shape for a `Type(args) { … }` factory call answered by a semantic companion's
+    /// `operator fun invoke`. The companion's callable metadata enters the same mapping,
+    /// applicability, binding, and shape operations as every other provider overload.
     fn companion_invoke_lambda_shape(
         &self,
         name: &str,
@@ -15771,20 +15773,7 @@ impl<'a> Checker<'a> {
         trailing_lambda: bool,
         type_args: &[Ty],
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
-        if self.value_root_shadows_classifier(name) {
-            return None;
-        }
-        let companion = self.classpath_companion_ty(name)?;
-        let overloads = self
-            .resolver()
-            .resolve_symbol(
-                crate::symbol_resolver::SymRecv::Value(companion),
-                CALLABLE_INVOKE_OPERATOR,
-                &[],
-                &[],
-            )
-            .map(crate::symbol_resolver::Symbol::overloads)
-            .unwrap_or_default();
+        let overloads = self.companion_invoke_overloads(name);
         for overload in &overloads {
             if overload.is_extension() {
                 continue;
@@ -21329,37 +21318,43 @@ impl<'a> Checker<'a> {
                 .is_some_and(|t| t.is_enum())
     }
 
-    /// Whether `name`'s CLASSPATH companion declares an `invoke` member that could answer a
-    /// trailing-lambda factory call: `Type(args) { … }` may be kotlinc's companion-factory call,
-    /// so constructor selection must decline (not diagnose) and let the invoke arm resolve it.
-    /// Mirrors the invoke arm's own filters — non-extension, non-suspend (the arm refuses a
-    /// suspend `invoke`) — and requires a function-typed last parameter, so a companion whose
-    /// invoke could never take the lambda keeps the constructor's own mapping diagnostic.
-    fn classpath_companion_declares_invoke(&self, name: &str) -> bool {
-        self.classpath_companion_ty(name)
-            .and_then(|companion| {
-                self.resolver()
-                    .resolve_symbol(
-                        crate::symbol_resolver::SymRecv::Value(companion),
-                        CALLABLE_INVOKE_OPERATOR,
-                        &[],
-                        &[],
-                    )
-                    .map(crate::symbol_resolver::Symbol::overloads)
-            })
-            .is_some_and(|overloads| {
-                overloads.iter().any(|overload| {
-                    !overload.is_extension()
-                        && !overload.flags.suspend
-                        && overload
-                            .semantic_params()
-                            .last()
-                            .is_some_and(|parameter| matches!(parameter.non_null(), Ty::Fun(_)))
-                })
+    /// Resolve the companion `invoke` overload family once for both lambda shaping and constructor
+    /// arbitration. This prevents those consumers from growing separate origin/name lookup rules.
+    fn companion_invoke_overloads(&self, name: &str) -> Vec<crate::libraries::FunctionInfo> {
+        if self.value_root_shadows_classifier(name) {
+            return Vec::new();
+        }
+        let Some(companion) = self.semantic_companion_ty(name) else {
+            return Vec::new();
+        };
+        self.resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(companion),
+                CALLABLE_INVOKE_OPERATOR,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+    }
+
+    /// Whether the semantic companion can answer a trailing-lambda factory call. Constructor
+    /// diagnostics defer only when the same overload family consumed by lambda shaping contains a
+    /// non-suspend callable with a function-typed final parameter.
+    fn companion_declares_lambda_invoke(&self, name: &str) -> bool {
+        self.companion_invoke_overloads(name)
+            .iter()
+            .any(|overload| {
+                !overload.is_extension()
+                    && !overload.flags.suspend
+                    && overload
+                        .semantic_params()
+                        .last()
+                        .is_some_and(|parameter| matches!(parameter.non_null(), Ty::Fun(_)))
             })
     }
 
-    fn classpath_companion_ty(&self, name: &str) -> Option<Ty> {
+    fn semantic_companion_ty(&self, name: &str) -> Option<Ty> {
         let internal = self.syms.class_names.get(name)?;
         if internal.starts_with("__ty/") {
             return None;
@@ -22177,10 +22172,9 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether `expression` is a generic call whose type can only come from the OUTSIDE — the
-    /// mockk matcher shape `client.create(any())`: a bare-name call with no explicit type
-    /// arguments whose first-pass type collapsed to its formal's erased bound, carrying no type
-    /// arguments to refine. The postponable predicate covers the `mutableSetOf()` family (erased
-    /// type ARGUMENTS); this adds the bare-`T` return (erased to the TOP type itself).
+    /// A bare-name generic call with no explicit type arguments whose first-pass type collapsed to
+    /// its formal's erased bound, carrying no type arguments to refine. The postponable predicate
+    /// covers erased type ARGUMENTS; this adds a bare-`T` return erased to the TOP type itself.
     fn expected_retypable_generic_argument(&self, expression: ExprId, actual: Ty) -> bool {
         if self.postponable_generic_call(expression, actual) {
             return true;
@@ -22216,27 +22210,10 @@ impl<'a> Checker<'a> {
     /// type parameter (`fun <T : Any> any(): T`). Only that shape erases to the top type while
     /// remaining bindable by an expected type; an unresolved argument declines conservatively.
     fn argument_callee_returns_bare_type_param(&self, argument: ExprId) -> bool {
-        fn bare_param(ret: Ty) -> bool {
-            matches!(ret.non_null(), Ty::TyParam(..))
-        }
-        match self.resolved_calls.get(&argument) {
-            Some(ResolvedCall::Member(member)) => member
-                .member
-                .generic_sig
-                .as_ref()
-                .is_some_and(|generic| bare_param(generic.ret)),
-            Some(ResolvedCall::Companion(member)) => member
-                .generic_sig
-                .as_ref()
-                .is_some_and(|generic| bare_param(generic.ret)),
-            Some(ResolvedCall::TopLevel(callable)) | Some(ResolvedCall::Extension(callable)) => {
-                callable
-                    .generic_sig
-                    .as_ref()
-                    .is_some_and(|generic| bare_param(generic.ret))
-            }
-            _ => false,
-        }
+        self.resolved_calls
+            .get(&argument)
+            .and_then(ResolvedCall::generic_sig)
+            .is_some_and(|generic| matches!(generic.ret.non_null(), Ty::TyParam(..)))
     }
 
     /// Last-resort MEMBER retry for `recv.name(args)` after every resolution path declined: when
@@ -22319,7 +22296,7 @@ impl<'a> Checker<'a> {
                 // consume these forced types as evidence of a resolution.
                 let retyped = self.expr_expected(argument, expected);
                 // A generic call whose return REMAINS the erased top even under the expectation
-                // (`any(): T` erases to `Object` and nothing else binds `T`): the expected
+                // (`provide(): T` erases to `Object` and nothing else binds `T`): the expected
                 // parameter type IS kotlinc's inference result — record it as the argument's
                 // type so the retried selection and the lowering both see the bound type.
                 arg_tys[index] = if retyped.is_erased_top() && !expected.is_erased_top() {
@@ -22327,12 +22304,8 @@ impl<'a> Checker<'a> {
                     // as its LOGICAL return — the same channel a resolver-side recovery fills — so
                     // lowering's `coerce_to_static` checkcasts the `Object` result to the type the
                     // enclosing parameter's descriptor expects (else: VerifyError).
-                    match self.resolved_calls.get_mut(&argument) {
-                        Some(ResolvedCall::Member(member)) => member.ret = expected,
-                        Some(ResolvedCall::Companion(member)) => member.ret = expected,
-                        Some(ResolvedCall::TopLevel(callable))
-                        | Some(ResolvedCall::Extension(callable)) => callable.ret = expected,
-                        _ => {}
+                    if let Some(selected) = self.resolved_calls.get_mut(&argument) {
+                        selected.refine_logical_return(expected);
                     }
                     self.set(argument, expected)
                 } else {
@@ -24908,7 +24881,7 @@ impl<'a> Checker<'a> {
                     // The `Unit` singleton used as a value (`foo(Unit)`, `val x = Unit`, `return
                     // Unit`). Lowering materializes the JVM singleton when a value is needed.
                     Ty::Unit
-                } else if let Some(ct) = self.classpath_companion_ty(&n) {
+                } else if let Some(ct) = self.semantic_companion_ty(&n) {
                     // A bare reference to a CLASSPATH class with a companion object (`Json` →
                     // `Json.Default`): its value is the companion instance, typed as the companion's
                     // type, so `Json.encodeToString(…)` resolves as an instance method on it.
@@ -30959,6 +30932,7 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[ExprId],
         arg_tys: &[Ty],
+        type_args: &[Ty],
     ) -> bool {
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
@@ -30997,6 +30971,7 @@ impl<'a> Checker<'a> {
                     None,
                     &partial_types,
                     &argument_parameters,
+                    type_args,
                 )
             })
     }
@@ -34538,7 +34513,7 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .filter(|_| has_lambda_argument)
                     .and_then(|partial| self.user_generic_call(&fname, partial));
-                // EXPLICIT type arguments (`mockk<C> { … }`): they bind the callee's formals ahead
+                // EXPLICIT type arguments (`build<C> { … }`): they bind the callee's formals ahead
                 // of any argument unification, so the lambda shape's receiver/params substitute to
                 // the written types instead of the formals' bounds.
                 let explicit_type_args = self.resolved_explicit_type_args(call);
@@ -34555,8 +34530,8 @@ impl<'a> Checker<'a> {
                             self.file.call_has_trailing_lambda.contains(&call.0),
                             &explicit_type_args,
                         )
-                        // A classpath `Type(args) { … }` FACTORY: the companion's `operator fun
-                        // invoke` is the callee (`MockEngine { req -> respond(…) }`), so its
+                        // A semantic `Type(args) { … }` FACTORY: the companion's `operator fun
+                        // invoke` is the callee, so its
                         // parameter — a (suspend) receiver function type — shapes the lambda the
                         // same way a top-level overload's would. Without it the block types
                         // receiver-less and every member inside is "unresolved".
@@ -35333,8 +35308,10 @@ impl<'a> Checker<'a> {
                             // constructor branch lets the ordinary top-level path below perform the one
                             // authoritative selection and recording pass. An inapplicable declaration,
                             // however, must not hide an applicable companion operator.
-                            let factory_applies = self
-                                .same_named_callable_is_applicable(call, &fname, args, &arg_tys);
+                            let type_args = self.resolved_explicit_type_args(call);
+                            let factory_applies = self.same_named_callable_is_applicable(
+                                call, &fname, args, &arg_tys, &type_args,
+                            );
                             if !factory_applies {
                                 if let Some(ret) = self.take_source_companion_invoke(
                                     call,
@@ -35446,14 +35423,14 @@ impl<'a> Checker<'a> {
                                 Ok(None) => {}
                                 Err(error) => {
                                     // A companion `operator fun invoke` makes `Type { … }` a
-                                    // FACTORY candidate (ktor's `MockEngine { req -> … }`): the
+                                    // factory candidate: the
                                     // constructor's mapping failure must not claim the call
                                     // before the invoke arm below has had its chance. Only the
                                     // trailing-lambda form defers — a named-argument-only call
                                     // is never the factory sugar, so it keeps this diagnostic.
-                                    if !self.same_named_callable_exists(&fname)
-                                        && !(self.file.call_has_trailing_lambda.contains(&call.0)
-                                            && self.classpath_companion_declares_invoke(&fname))
+                                    if !(self.same_named_callable_exists(&fname)
+                                        || self.file.call_has_trailing_lambda.contains(&call.0)
+                                            && self.companion_declares_lambda_invoke(&fname))
                                     {
                                         self.report_call_arg_mapping_error(call, args, error);
                                     }
@@ -36306,7 +36283,7 @@ impl<'a> Checker<'a> {
                 // kotlinc's `Type.Companion.invoke(args)`. An interface has no constructor, so a factory
                 // `invoke` is the only way to "construct" it (`Wrapped(uuid)` in production code).
                 if !self.value_root_shadows_classifier(&fname) {
-                    if let Some(ct) = self.classpath_companion_ty(&fname) {
+                    if let Some(ct) = self.semantic_companion_ty(&fname) {
                         let has_invoke = self
                             .resolve_instance_member(ct, CALLABLE_INVOKE_OPERATOR, &arg_tys)
                             .is_some_and(|m| !m.member.suspend());

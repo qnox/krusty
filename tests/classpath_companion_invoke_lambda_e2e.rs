@@ -1,8 +1,6 @@
-//! A classpath `Type(args) { … }` FACTORY whose companion declares `operator fun invoke` with a
-//! RECEIVER-lambda parameter — the ktor `MockEngine { req -> respond(…) }` shape. The trailing
-//! lambda's implicit `this` must bind to the invoke parameter's receiver BEFORE the body is
-//! typed; without the shape every member/extension inside the block reported "unresolved
-//! reference", which then cascaded into "unresolved function 'MockEngine'".
+//! A compiled-library `Type(args) { … }` factory whose companion declares `operator fun invoke`
+//! with a receiver-lambda parameter. The trailing lambda's implicit `this` must bind to the invoke
+//! parameter's receiver before the body is typed, independent of the provider or classifier name.
 use super::common;
 
 const LIB: &str = "package lib\n\
@@ -32,11 +30,9 @@ const LIB: &str = "package lib\n\
 
 #[test]
 fn companion_invoke_receiver_lambda_resolves() {
-    // The suspend variant is the exact MockEngine parameter shape
-    // (`suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData`).
-    // `TwoCtor` is the exact MockEngine CLASS shape: PUBLIC constructors that cannot take the
-    // lambda — their mapping failure must fall through to the companion invoke, not claim the
-    // call with "no value passed for parameter".
+    // The suspend variant proves suspension does not erase the receiver-function source shape.
+    // `TwoCtor` proves public constructors that cannot take the lambda defer their mapping failure
+    // to the companion invoke instead of claiming the call prematurely.
     const MAIN: &str = "import lib.Factory\n\
         import lib.SuspendFactory\n\
         import lib.TwoCtor\n\

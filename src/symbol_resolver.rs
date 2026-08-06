@@ -657,7 +657,10 @@ fn specialized_lambda_params(
     specialized
 }
 
-fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
+/// Seed a declaration's formals from explicit call-site type arguments. All inference channels use
+/// this operation before receiver/argument unification so written arguments remain authoritative and
+/// member, extension, static, and lambda-shape probes cannot drift into different binding rules.
+pub(crate) fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
     gsig.formals
         .iter()
         .cloned()
@@ -681,8 +684,14 @@ fn bind_gsig_return(
     ty_subst(gsig.ret, &binds)
 }
 
-fn bind_member_return(gsig: &GenericSig, receiver: Ty, args: &[Ty], provider_ret: Ty) -> Ty {
-    let mut binds = GSigBinds::new();
+fn bind_member_return(
+    gsig: &GenericSig,
+    receiver: Ty,
+    args: &[Ty],
+    type_args: &[Ty],
+    provider_ret: Ty,
+) -> Ty {
+    let mut binds = seeded_gsig_binds(gsig, type_args);
     if let Some(declared_receiver) = gsig.receiver {
         unify_ty(declared_receiver, receiver, &mut binds);
     } else {
@@ -2820,7 +2829,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     /// The argument→parameter mapping for a call whose arguments name their parameters
-    /// (`mockk(relaxed = true)`): `slots[i]` is the parameter position argument `i` labels.
+    /// (`build(enabled = true)`): `slots[i]` is the parameter position argument `i` labels.
     ///
     /// A LABEL, not a position, decides which parameter an argument is checked against. The
     /// positional form below cannot express that: it compares the argument list against the LEADING
@@ -3935,32 +3944,7 @@ fn resolve_instance_member(
     let ret = o
         .generic_sig
         .as_ref()
-        .map(|gsig| {
-            // EXPLICIT type arguments (`m.any<Org>()`) bind the member's own formals ahead of
-            // receiver/argument unification — kotlinc treats them as authoritative, so a bare-`T`
-            // return must come out as the written type, not the formal's bound.
-            if gsig.formals.len() == type_args.len() && !type_args.is_empty() {
-                let mut binds = seeded_gsig_binds(gsig, type_args);
-                if let Some(declared_receiver) = gsig.receiver {
-                    unify_ty(declared_receiver, recv, &mut binds);
-                } else {
-                    // Class-level (undeclared) type variables still recover from the provider's
-                    // substituted return, exactly as the implicit path does.
-                    seed_undeclared_return_bindings(
-                        gsig.ret,
-                        o.callable.ret,
-                        &gsig.formals,
-                        &mut binds,
-                    );
-                }
-                for (&parameter, &argument) in gsig.params.iter().zip(&arg_tys) {
-                    unify_ty(parameter, argument, &mut binds);
-                }
-                merge_specialized_return(o.callable.ret, ty_subst(gsig.ret, &binds))
-            } else {
-                bind_member_return(gsig, recv, &arg_tys, o.callable.ret)
-            }
-        })
+        .map(|gsig| bind_member_return(gsig, recv, &arg_tys, type_args, o.callable.ret))
         .unwrap_or(o.callable.ret);
     let ret = o.ret.apply(
         o.generic_sig
@@ -5356,6 +5340,7 @@ mod tests {
                 &method_generic,
                 Ty::obj("demo/Provider"),
                 &[class_of(value)],
+                &[],
                 optional_of(any),
             ),
             optional_of(value)
@@ -5370,11 +5355,11 @@ mod tests {
             return_policy: Default::default(),
         };
         assert_eq!(
-            bind_member_return(&owner_generic, optional_of(value), &[Ty::Null], value,),
+            bind_member_return(&owner_generic, optional_of(value), &[Ty::Null], &[], value,),
             value
         );
         assert_eq!(
-            bind_member_return(&owner_generic, optional_of(any), &[Ty::String], any,),
+            bind_member_return(&owner_generic, optional_of(any), &[Ty::String], &[], any,),
             any
         );
     }
@@ -5394,7 +5379,7 @@ mod tests {
         };
 
         assert_eq!(
-            bind_member_return(&signature, Ty::obj("demo/Provider"), &[], kotlin_list),
+            bind_member_return(&signature, Ty::obj("demo/Provider"), &[], &[], kotlin_list,),
             kotlin_list
         );
 
@@ -5406,6 +5391,7 @@ mod tests {
             bind_member_return(
                 &erased_signature,
                 Ty::obj("demo/Provider"),
+                &[],
                 &[],
                 kotlin_list
             ),
