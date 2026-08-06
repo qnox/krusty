@@ -1252,22 +1252,16 @@ struct LambdaExpectation {
 /// contributes its single method's parameter types. Any other parameter gives no expectation.
 fn lambda_expectation(
     lib: &dyn crate::libraries::SemanticPlatform,
-    candidate: &crate::libraries::LibraryMember,
+    call_sig: &crate::libraries::CallSig,
     index: usize,
     param: Ty,
 ) -> Option<LambdaExpectation> {
-    let has_receiver = candidate
-        .call_sig
+    let has_receiver = call_sig
         .lambda_receiver_params
         .get(index)
         .copied()
         .unwrap_or(false);
-    let metadata_receiver = candidate
-        .call_sig
-        .lambda_receivers
-        .get(index)
-        .copied()
-        .flatten();
+    let metadata_receiver = call_sig.lambda_receivers.get(index).copied().flatten();
     match param.non_null() {
         Ty::Fun(sig) => {
             let (receiver, skip) = if has_receiver {
@@ -1300,13 +1294,12 @@ fn lambda_expectation(
             // retain the erased FunctionN arity with `Error` placeholders so explicit lambda
             // parameters still get the right count without inventing concrete types.
             let receiver = metadata_receiver?;
-            let context_count = candidate
-                .call_sig
+            let context_count = call_sig
                 .lambda_context_counts
                 .get(index)
                 .copied()
                 .unwrap_or_default();
-            let decoded = candidate.call_sig.lambda_param_types.get(index);
+            let decoded = call_sig.lambda_param_types.get(index);
             let value_params = decoded
                 .filter(|params| !params.is_empty())
                 .map(|params| params.get(context_count + 1..).unwrap_or_default().to_vec())
@@ -22426,6 +22419,92 @@ impl<'a> Checker<'a> {
         partial: &[Option<Ty>],
         type_args: &[Ty],
     ) -> Option<Vec<Option<LambdaExpectation>>> {
+        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+
+        // A named call's source argument order is not its declaration parameter order. Selecting a
+        // provider callable positionally before consulting `CallSig` can therefore reject the only
+        // candidate while its lambdas are still postponed: an untyped receiver lambda has no useful
+        // probe type until that very candidate supplies its receiver. Reuse the same semantic slot
+        // mapper and partial-applicability predicate as top-level and extension lambda shaping. This
+        // is provider-neutral—the candidate family comes from the federated resolver—and it keeps
+        // named/default/trailing-lambda syntax from acquiring separate module/library policies.
+        if arg_names.is_some() {
+            let mut mapped = self
+                .resolver()
+                .resolve_symbol(receiver, name, &[], type_args)
+                .map(crate::symbol_resolver::Symbol::overloads)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
+                .filter_map(|candidate| {
+                    let parameter_count = candidate.semantic_params().len();
+                    let argument_parameters = call_argument_parameter_indices(
+                        args.len(),
+                        parameter_count,
+                        arg_names,
+                        trailing_lambda,
+                        &candidate.call_sig,
+                    )?;
+                    self.lambda_overload_partially_applicable(
+                        &candidate,
+                        None,
+                        partial,
+                        &argument_parameters,
+                        type_args,
+                    )
+                    .then_some((candidate, argument_parameters))
+                })
+                .collect::<Vec<_>>();
+            // Member precedence is semantic receiver distance, not provider iteration order. Drop
+            // inherited candidates when a nearer declaration is applicable before deciding whether
+            // the postponed call is genuinely ambiguous.
+            if let Some(nearest) = mapped
+                .iter()
+                .map(|(candidate, _)| candidate.receiver_rank)
+                .min()
+            {
+                mapped.retain(|(candidate, _)| candidate.receiver_rank == nearest);
+            }
+            // Until lambda bodies are typed, two mapped candidates can legitimately remain
+            // indistinguishable. The exact-one pattern declines an expectation in that case;
+            // choosing the first would leak provider iteration order into overload resolution.
+            if let [(candidate, argument_parameters)] = mapped.as_slice() {
+                let semantic = candidate.semantic_signature();
+                let mut binds = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
+                for (&parameter, actual) in argument_parameters.iter().zip(partial) {
+                    if let (Some(&declared), Some(actual)) =
+                        (semantic.params.get(parameter), actual)
+                    {
+                        crate::symbol_resolver::unify_ty(declared, *actual, &mut binds);
+                    }
+                }
+                return Some(
+                    argument_parameters
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(source_index, parameter_index)| {
+                            if !matches!(self.file.expr(args[source_index]), Expr::Lambda { .. }) {
+                                return None;
+                            }
+                            let param = semantic
+                                .params
+                                .get(parameter_index)
+                                .copied()
+                                .map(|param| crate::symbol_resolver::ty_subst(param, &binds))?;
+                            lambda_expectation(
+                                &*self.syms.libraries,
+                                &candidate.call_sig,
+                                parameter_index,
+                                param,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+        }
+
         let provisional: Vec<Ty> = args
             .iter()
             .enumerate()
@@ -22478,8 +22557,6 @@ impl<'a> Checker<'a> {
         // same CallSig slot mapper used by call recording instead of adding a provider-specific
         // positional assumption. A metadata-less Java member has no names/defaults to reorder, so
         // its only valid shape is the positional identity map.
-        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let argument_parameters = if candidate.call_sig.has_param_names() {
             call_argument_parameter_indices(
                 args.len(),
@@ -22522,7 +22599,12 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                     let param = specialized_params.get(parameter_index).copied()?;
-                    lambda_expectation(&*self.syms.libraries, &candidate, parameter_index, param)
+                    lambda_expectation(
+                        &*self.syms.libraries,
+                        &candidate.call_sig,
+                        parameter_index,
+                        param,
+                    )
                 })
                 .collect(),
         )
@@ -30732,12 +30814,7 @@ impl<'a> Checker<'a> {
                 let (_, _, params, slots) = candidates.pop().unwrap();
                 for (parameter, argument) in params.iter().zip(&slots) {
                     if let Some(argument) = argument {
-                        self.expect_assignable(
-                            *parameter,
-                            self.expr_types[argument.0 as usize],
-                            self.span(*argument),
-                            "argument",
-                        );
+                        self.commit_mapped_argument_type(*argument, *parameter);
                     }
                 }
             } else {
@@ -30769,8 +30846,7 @@ impl<'a> Checker<'a> {
         };
         for (i, slot) in slots.iter().enumerate() {
             if let Some(a) = slot {
-                let aty = self.expr_types[a.0 as usize];
-                self.expect_assignable(params[i], aty, self.span(*a), "argument");
+                self.commit_mapped_argument_type(*a, params[i]);
             }
         }
         let ret = if matches!(fi.callable.origin, Origin::Module { .. }) {
@@ -30920,6 +30996,15 @@ impl<'a> Checker<'a> {
             } else {
                 params[i]
             };
+            // Kotlin contextually discards a lambda literal's value when the selected parameter
+            // returns `Unit`. Mapped calls used to miss the shared adaptation and happened to pass
+            // only while provider parameters stayed erased `FunctionN` objects; publishing a
+            // concrete `(T) -> Unit` correctly exposed the drift. Score the same coerced semantic
+            // type used by member-extension and source-call planning, irrespective of where the
+            // candidate was declared or whether this slot came from a name, default, or vararg.
+            let aty = self
+                .unit_coerced_lambda_type(*arg, expected, aty)
+                .unwrap_or(aty);
             if aty != Ty::Error
                 && !self.receiver_is_assignable(aty, expected)
                 && !argument.adapts_integer_literal_to(expected)
@@ -30930,6 +31015,18 @@ impl<'a> Checker<'a> {
             score += if expected == aty { 4 } else { 1 };
         }
         Some(score)
+    }
+
+    /// Commit the contextual type of one already-mapped argument. Applicability and diagnostics must
+    /// observe the same Unit-coerced lambda shape: otherwise selection accepts `(T) -> R` for a
+    /// `(T) -> Unit` slot and the subsequent generic assignment check reports that same legal call.
+    fn commit_mapped_argument_type(&mut self, argument: ExprId, expected: Ty) {
+        let actual = self.expr_types[argument.0 as usize];
+        if let Some(coerced) = self.unit_coerced_lambda_type(argument, expected, actual) {
+            self.set(argument, coerced);
+        } else {
+            self.expect_assignable(expected, actual, self.span(argument), "argument");
+        }
     }
 
     fn same_named_callable_exists(&self, name: &str) -> bool {
@@ -38108,7 +38205,7 @@ mod tests {
 
         let expectation = lambda_expectation(
             &crate::libraries::EmptySymbolSource,
-            &candidate,
+            &candidate.call_sig,
             0,
             erased_callable,
         )
