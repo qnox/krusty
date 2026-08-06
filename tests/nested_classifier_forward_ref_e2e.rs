@@ -1,10 +1,7 @@
-//! A nested classifier (`enum class`/`class`) is in scope for the WHOLE enclosing class/object body,
-//! regardless of declaration order — unlike properties, which obey initialization order. kotlinc
-//! accepts a member typed by (or initialized from) a nested classifier declared BELOW it; krusty
-//! reported `unresolved reference 'Caption'` because the parser dropped nested `enum class`/`object`/
-//! `interface` declarations in an `object` body instead of hoisting them like a class body does.
-//! Found on intellij-community's ActionUtil.kt (`object ActionUtil` with a `@JvmField` property typed
-//! by the nested `enum class ActionGroupPopupCaption` declared below it).
+//! Nested classifiers are in scope throughout their enclosing class or object body, independently of
+//! declaration order. These domain-neutral cases pin both forward references and the full lexical
+//! identity assigned while class-like declarations are hoisted into the flat file declaration list.
+//! No test relies on a particular library, classpath provider, repository, or production class name.
 
 use super::common;
 
@@ -110,4 +107,44 @@ class Holder {
 fun box(): String = if (Holder().c == Holder.Caption.NONE) "OK" else "F"
 "#;
     common::expect_box_ok_with_stdlib(SRC, "ClassNestedEnumFwd");
+}
+
+#[test]
+fn nested_classifiers_under_an_object_keep_the_complete_owner_path() {
+    // Parsing `Middle` hoists `Leaf` before `Middle` itself is registered. The shared registration
+    // funnel must prefix every declaration created by that child parse, yielding `Root.Middle.Leaf`
+    // rather than a truncated `Middle.Leaf` identity.
+    const SRC: &str = r#"
+object Root {
+    class Middle {
+        enum class Leaf { VALUE }
+
+        fun value(): Leaf = Leaf.VALUE
+    }
+}
+
+fun box(): String =
+    if (Root.Middle().value() == Root.Middle.Leaf.VALUE) "OK" else "F"
+"#;
+    common::expect_box_ok_with_stdlib(SRC, "ObjectNestedCompleteOwnerPath");
+}
+
+#[test]
+fn object_body_classifier_kinds_share_registration_semantics() {
+    // Interface and object declarations are class-like AST declarations just as nested classes and
+    // enums are. Their owner-qualified identity must not depend on a syntax-specific object-body arm.
+    const SRC: &str = r#"
+object Scope {
+    interface Contract {
+        fun value(): String
+    }
+
+    object Singleton : Contract {
+        override fun value(): String = "OK"
+    }
+}
+
+fun box(): String = Scope.Singleton.value()
+"#;
+    common::expect_box_ok_with_stdlib(SRC, "ObjectClassifierRegistrationKinds");
 }
