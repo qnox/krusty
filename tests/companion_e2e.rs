@@ -78,24 +78,29 @@ fun box(): String {\n\
 #[test]
 fn companion_method_shares_name_with_instance_method_of_different_arity() {
     // Companion methods live on `C$Companion`, so a companion method may share a NAME with an
-    // instance member when no same-arity instance method exists — kotlinc accepts this (the
-    // instance member wins on a dispatch receiver, the companion member on `C.`). Only a
-    // same-arity collision stays rejected (see companion_member_collides_with_instance).
-    // Unqualified calls inside the class body bind by arity too: the companion arm must not
-    // capture a call whose argument count only fits the instance method.
+    // instance member when their accepted ARITY RANGES do not overlap — kotlinc accepts this (the
+    // instance member wins on a dispatch receiver, the companion member on `C.`). Raw parameter
+    // counts are insufficient here: defaults and varargs change which calls a declaration accepts.
+    // The unqualified calls exercise the checker path that previously selected the companion by name
+    // before the ordinary implicit-instance receiver could see the argument count.
     let src = "open class C {\n\
-    open fun requestFocus(value: Boolean): String = \"inst\" + value\n\
+    open fun requestFocus(value: Boolean, suffix: String = \"\"): String = \"inst\" + value + suffix\n\
     fun describe(): String = requestFocus(true)\n\
+    fun collect(prefix: Int, vararg values: String): String = \"$prefix:${values[0]}\"\n\
+    fun describeVararg(): String = collect(7, \"x\")\n\
     companion object {\n\
         fun requestFocus(): Int = 42\n\
-        fun describeStatic(): String = \"comp\" + requestFocus()\n\
+        fun collect(): String = \"comp\"\n\
+        fun describeStatic(): String = \"comp\" + requestFocus() + collect()\n\
     }\n\
 }\n\
 fun box(): String {\n\
     if (C().requestFocus(true) != \"insttrue\") return \"f1\"\n\
     if (C().describe() != \"insttrue\") return \"f2\"\n\
-    if (C.requestFocus() != 42) return \"f3\"\n\
-    if (C.describeStatic() != \"comp42\") return \"f4\"\n\
+    if (C().describeVararg() != \"7:x\") return \"f3\"\n\
+    if (C.requestFocus() != 42) return \"f4\"\n\
+    if (C.collect() != \"comp\") return \"f5\"\n\
+    if (C.describeStatic() != \"comp42comp\") return \"f6\"\n\
     return \"OK\"\n\
 }\n";
     common::expect_box_ok_with_stdlib(src, "C");

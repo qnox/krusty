@@ -1509,14 +1509,15 @@ pub fn expect_box_run(
 
 /// [`expect_box_run`] against kotlin-stdlib + the JDK modules.
 ///
-/// The `Option` is VESTIGIAL: both accessors panic when the toolchain is unprovisioned and a rejected
-/// source panics with its diagnostics, so this only ever returns `Some`. Callers keep a `let Some(..)
-/// else { return }` that can no longer fire; collapsing the signature is a mechanical follow-up.
+/// This is deliberately fail-fast rather than optional: both toolchain accessors panic when their
+/// inputs are unavailable, and [`expect_box_run`] panics with diagnostics when compilation or
+/// execution fails. Encoding an impossible `None` invited callers to retain dead skip branches that
+/// could make a future regression look like a passing test.
 #[allow(dead_code)]
-pub fn expect_box_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
+pub fn expect_box_run_with_stdlib(src: &str, stem: &str) -> String {
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    Some(expect_box_run(src, stem, &[stdlib], Some(jdk.as_path())))
+    expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()))
 }
 
 /// [`expect_box_run`] for a compile-only consumer: the emitted classes, or a panic naming why the
@@ -1534,18 +1535,13 @@ pub fn expect_compile_in_process(
     })
 }
 
-/// [`expect_compile_in_process`] against kotlin-stdlib + the JDK modules. The `Option` is vestigial,
-/// as above.
+/// [`expect_compile_in_process`] against kotlin-stdlib + the JDK modules, with the same fail-fast
+/// contract as [`expect_box_run_with_stdlib`].
 #[allow(dead_code)]
-pub fn expect_classes_with_stdlib(src: &str, stem: &str) -> Option<Vec<(String, Vec<u8>)>> {
+pub fn expect_classes_with_stdlib(src: &str, stem: &str) -> Vec<(String, Vec<u8>)> {
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    Some(expect_compile_in_process(
-        src,
-        stem,
-        &[stdlib],
-        Some(jdk.as_path()),
-    ))
+    expect_compile_in_process(src, stem, &[stdlib], Some(jdk.as_path()))
 }
 
 /// Compile `src` with kotlin-stdlib + JDK modules, run `box()`, and assert it returns `OK`. Once

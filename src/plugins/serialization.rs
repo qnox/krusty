@@ -14,6 +14,7 @@
 use crate::ir::{
     Callee, ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrFile, IrFunction, IrTypeOp,
 };
+use crate::kt_string::KtString;
 use crate::libraries::InlineKind;
 use crate::names::property_getter_name;
 use crate::plugins::{synthetic_class, IrPlugin, PluginContext};
@@ -41,7 +42,7 @@ fn serial_name_of(
     ir: &IrFile,
     class_id: ClassId,
     property: &str,
-) -> Option<String> {
+) -> Option<KtString> {
     ctx.property_annotation_const_string(ir, class_id, property, "SerialName")
 }
 
@@ -402,7 +403,7 @@ fn default_const(ty: &Ty) -> IrConst {
         Some(n) if n.matches("kotlin/Boolean") => IrConst::Boolean(false),
         Some(n) if n.matches("kotlin/Float") => IrConst::Float(0.0),
         Some(n) if n.matches("kotlin/Double") => IrConst::Double(0.0),
-        Some(n) if n.matches("kotlin/String") => IrConst::String(String::new()),
+        Some(n) if n.matches("kotlin/String") => IrConst::String(KtString::new()),
         _ => IrConst::Null,
     }
 }
@@ -995,7 +996,9 @@ impl SerializationPlugin {
     fn add_enum_serializer_companion(ir: &mut IrFile, class_id: u32, class_fq: &str) {
         let lazy_ty = class_ty("kotlin/Lazy");
         // `$cachedSerializer$delegate = LazyKt.lazyOf(new EnumSerializer(<name>, E.values()))`.
-        let name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
+        let name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
+            class_fq.replace('/', "."),
+        ))));
         let values = ir.add_expr(IrExpr::Call {
             callee: Callee::Static {
                 owner: type_name(class_fq),
@@ -1128,7 +1131,9 @@ impl SerializationPlugin {
             })
             .collect();
 
-        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
+        let serial_name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
+            class_fq.replace('/', "."),
+        ))));
         let base_kclass = Self::kclass_literal(ir, class_fq);
         let sub_kclasses: Vec<ExprId> = subs
             .iter()
@@ -1415,7 +1420,9 @@ impl IrPlugin for SerializationPlugin {
             if is_value {
                 // A `@JvmInline value class`: the descriptor is `InlinePrimitiveDescriptor(name,
                 // <Underlying>Serializer.INSTANCE)` — `isInline == true`, one element (the underlying).
-                let name = ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
+                let name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
+                    class_fq.replace('/', "."),
+                ))));
                 let under_ser = foo_fields
                     .first()
                     .and_then(|(_, t)| builtin_element_serializer(t));
@@ -1441,8 +1448,9 @@ impl IrPlugin for SerializationPlugin {
                     named: false,
                 })];
             } else {
-                let pgsd_name =
-                    ir.add_expr(IrExpr::Const(IrConst::String(class_fq.replace('/', "."))));
+                let pgsd_name = ir.add_expr(IrExpr::Const(IrConst::String(KtString::from(
+                    class_fq.replace('/', "."),
+                ))));
                 // Pass `this` (the `$serializer`, a `GeneratedSerializer`) so the descriptor can derive
                 // element descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
                 let pgsd_self = ir.add_expr(IrExpr::GetValue(0));
@@ -1461,8 +1469,8 @@ impl IrPlugin for SerializationPlugin {
                 init_stmts = vec![dvar];
                 for (i, (pname, _)) in foo_fields.iter().enumerate() {
                     let d = ir.add_expr(IrExpr::GetValue(desc_local));
-                    let element_name =
-                        serial_name_of(ctx, ir, class_id, pname).unwrap_or_else(|| pname.clone());
+                    let element_name = serial_name_of(ctx, ir, class_id, pname)
+                        .unwrap_or_else(|| KtString::from(pname.clone()));
                     let nm = ir.add_expr(IrExpr::Const(IrConst::String(element_name)));
                     // A property with a constant default is an OPTIONAL element (`addElement(name, true)`).
                     let is_optional = foo_defaults.get(i).is_some_and(|d| d.is_some());
