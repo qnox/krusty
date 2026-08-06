@@ -1,12 +1,10 @@
-//! SAM conversion of a lambda argument into a SOURCE (Kotlin-declared) function's parameter of a
-//! JAVA functional-interface type. Java method calls and classpath constructor calls already admit
-//! a lambda literal through the `sam_method` metadata, but module-function argument matching typed
-//! the lambda against the interface itself and reported `argument type mismatch: actual type is
-//! '() -> String', but 'java.lang.Runnable' was expected` (intellij-community's ActionUtil.kt:404 —
-//! `actionManager.performWithActionCallbacks(action, event) { … }`, where ActionManagerEx declares
-//! `abstract fun performWithActionCallbacks(action: AnAction, event: AnActionEvent, runnable:
-//! Runnable): AnActionResult`). kotlinc 2.4.10 accepts every positive shape below and rejects the
-//! negative ones; the box-runs verify the lambda actually EXECUTES through the SAM method.
+//! Functional-interface adaptation for lambda arguments passed to Kotlin-declared functions.
+//!
+//! The semantic rule is independent of where the Kotlin declaration was loaded: current-file,
+//! sibling-module, and dependency candidates all expose parameters through the same callable model.
+//! These tests therefore cover both source and compiled-provider boundaries, overload preference,
+//! ambiguity, and negative controls. The box runs verify that accepted lambdas are not merely typed;
+//! they execute through the selected interface method and therefore exercise lowering as well.
 use super::common;
 
 fn diagnostics(src: &str) -> Vec<String> {
@@ -28,8 +26,7 @@ fn top_level_runnable_param_trailing_lambda_runs() {
     common::expect_box_ok_with_stdlib(SRC, "sam_top_level_trailing");
 }
 
-/// Abstract member function with a `Runnable` parameter (/tmp/fix17.kt shape), runtime-verified
-/// through an override.
+/// Abstract member function with a `Runnable` parameter, runtime-verified through an override.
 #[test]
 fn abstract_member_runnable_param_trailing_lambda_runs() {
     const SRC: &str = "abstract class Manager {\n\
@@ -76,6 +73,79 @@ fn consumer_param_lambda_binds_declared_and_implicit_parameters() {
         \x20 return if (seen == \"hello\") \"OK\" else \"implicit:$seen\"\n\
         }\n";
     common::expect_box_ok_with_stdlib(SRC, "sam_consumer_binding");
+}
+
+/// A type argument may specialize a generic SAM's semantic inputs to primitives even though its JVM
+/// method keeps reference-erased slots. The runtime assertion covers the representation boundary as
+/// well as inference: accepting the call but advertising primitive instantiated slots to the generic
+/// SAM would fail when LambdaMetafactory links the closure.
+#[test]
+fn projected_generic_sam_boxes_specialized_primitive_boundary() {
+    const SRC: &str =
+        "fun <T> compareWith(cmp: java.util.Comparator<in T>, left: T, right: T): Int =\n\
+        \x20 cmp.compare(left, right)\n\
+        fun box(): String {\n\
+        \x20 val result = compareWith<Int>({ a, b -> a - b }, 4, 9)\n\
+        \x20 return if (result < 0) \"OK\" else \"result:$result\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "sam_projected_generic_boundary");
+}
+
+/// The same semantic call shapes across a compiled dependency boundary. This is deliberately a
+/// checker assertion: the contract under review is provider-neutral candidate scoring, while emitting
+/// a call to an independently compiled Kotlin facade is a separate backend capability. Source-backed
+/// tests above and below execute the selected SAMs, so keeping this test at the semantic boundary makes
+/// a lowering skip neither hide nor masquerade as a provider-resolution regression.
+#[test]
+fn dependency_callables_share_sam_shape_and_preference() {
+    const LIBRARY: &str = r#"
+        package semantic.samboundaryfixture
+
+        fun execute(task: Runnable): String {
+            task.run()
+            return "executed"
+        }
+
+        fun choose(task: Runnable): String = "adapted"
+        fun choose(value: Any): String = "plain"
+
+        class Host {
+            fun consume(action: java.util.function.Consumer<String>): String {
+                action.accept("member")
+                return "consumed"
+            }
+        }
+    "#;
+    const MAIN: &str = r#"
+        import semantic.samboundaryfixture.Host
+        import semantic.samboundaryfixture.choose
+        import semantic.samboundaryfixture.execute
+
+        var observed = ""
+
+        fun box(): String {
+            val top = execute { observed = "top" }
+            if (top != "executed" || observed != "top") return "top:$top:$observed"
+
+            val member = Host().consume { observed = it }
+            if (member != "consumed" || observed != "member") return "member:$member:$observed"
+
+            val preferred = choose { }
+            return if (preferred == "plain") "OK" else "preference:$preferred"
+        }
+    "#;
+
+    // The package and declarations are intentionally suite-specific: e2e tests compile concurrently,
+    // so a generic facade name must not let another fixture's class files influence this assertion.
+    let Some(diagnostics) =
+        common::checker_diags_against("semantic_sam_dependency_boundary", LIBRARY, MAIN)
+    else {
+        return;
+    };
+    assert!(
+        diagnostics.is_empty(),
+        "dependency SAM calls should resolve through the shared candidate model: {diagnostics:?}"
+    );
 }
 
 /// Overload disambiguation (kotlinc-pinned): a lambda picks `f(Runnable)` over `f(String)`, but
