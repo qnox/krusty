@@ -84,12 +84,11 @@ fn implements_stdlib_nested_interface() {
 
 #[test]
 fn overriding_nested_typed_supertype_property_emits_loadable_class() {
-    // `CoroutineContext.Element.key` is typed `CoroutineContext.Key<*>`; the classpath metadata spells
-    // the nested class with a dot (`kotlin/coroutines/CoroutineContext.Key`). A covariant-override
-    // bridge derived from that spelling wrote the dot RAW into the method descriptor, so the emitted
-    // class failed to load (ClassFormatError). `type_descriptor` now converts class-segment dots to
-    // `$` at the JVM-emission boundary, so the supertype's and the override's descriptors compare
-    // equal and the bogus `Key`-covariant bridge is not derived at all.
+    // The metadata type of `CoroutineContext.Element.key` uses the source-facing dotted nested name
+    // `kotlin/coroutines/CoroutineContext.Key`. Override comparison and bytecode emission both consume
+    // the shared descriptor helper, so that helper must turn the class-tail dot into the JVM `$` form.
+    // Before that boundary normalization, bridge derivation observed unequal descriptors and emitted a
+    // dotted descriptor that the VM rejected while loading the otherwise ordinary implementation.
     const SRC: &str = "import kotlin.coroutines.CoroutineContext\n\
         class Elem(val name: String) : CoroutineContext.Element {\n\
         \x20 override val key: CoroutineContext.Key<*> get() = TODO()\n\
@@ -100,10 +99,10 @@ fn overriding_nested_typed_supertype_property_emits_loadable_class() {
 
 #[test]
 fn coroutine_context_nested_supertypes_resolve_on_the_frontend() {
-    // The intellij find (`ActionContextElement`): `CoroutineContext.Element` + `CoroutineContext.Key`
-    // as supertypes of a class AND its companion. The full shape additionally extends an abstract
-    // classpath base, which hits a SEPARATE IR-backend gate — pin here that the FRONT END resolves
-    // both nested supertypes without the "supertype could not be resolved" diagnostic.
+    // A synthetic compound header: `CoroutineContext.Element` + `CoroutineContext.Key` are
+    // supertypes of a class AND its companion. The shape additionally extends an abstract library
+    // base, which hits a SEPARATE IR-backend gate — pin here that the provider-neutral FRONT END
+    // resolves both nested supertypes without the "supertype could not be resolved" diagnostic.
     const SRC: &str = "import kotlin.coroutines.AbstractCoroutineContextElement\n\
         import kotlin.coroutines.CoroutineContext\n\
         class Elem(val name: String) : AbstractCoroutineContextElement(Elem), CoroutineContext.Element {\n\

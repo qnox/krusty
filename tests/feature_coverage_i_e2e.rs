@@ -4,9 +4,9 @@
 
 use super::common;
 
-/// `None` means ONLY that kotlin-stdlib / the JDK modules aren't provisioned. Once they are, a
-/// source the front end rejects PANICS with its diagnostics instead of skipping as a silent pass.
-fn run(src: &str, stem: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
+/// cannot turn either failure into a passing skip.
+fn run(src: &str, stem: &str) -> String {
     common::expect_box_run_with_stdlib(src, stem)
 }
 
@@ -18,9 +18,7 @@ fun box(): String {\n\
     if (x.v != 7) return \"got ${x.v}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "VcRead") else {
-        return;
-    };
+    let out = run(src, "VcRead");
     assert_eq!(out, "OK");
 }
 
@@ -33,7 +31,7 @@ fun box(): String {\n\
     if (r != 7) return \"got $r\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "VcAdd") else { return };
+    let out = run(src, "VcAdd");
     assert_eq!(out, "OK");
 }
 
@@ -46,7 +44,7 @@ fun box(): String {\n\
     if (x.v != 10) return \"got ${x.v}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "VcRet") else { return };
+    let out = run(src, "VcRet");
     assert_eq!(out, "OK");
 }
 
@@ -59,7 +57,7 @@ fun box(): String {\n\
     if (n.s.length != 2) return \"len ${n.s.length}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "VcStr") else { return };
+    let out = run(src, "VcStr");
     assert_eq!(out, "OK");
 }
 
@@ -73,9 +71,7 @@ fun box(): String {\n\
     if (x.doubled() != 12) return \"got ${x.doubled()}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "VcMember") else {
-        return;
-    };
+    let out = run(src, "VcMember");
     assert_eq!(out, "OK");
 }
 
@@ -90,9 +86,7 @@ fun box(): String {\n\
     if (t.label() != \"t3\") return \"got ${t.label()}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "VcIface") else {
-        return;
-    };
+    let out = run(src, "VcIface");
     assert_eq!(out, "OK");
 }
 
@@ -106,9 +100,7 @@ fun box(): String {\n\
     if (sum != 6) return \"got $sum\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "VcGeneric") else {
-        return;
-    };
+    let out = run(src, "VcGeneric");
     assert_eq!(out, "OK");
 }
 
@@ -124,9 +116,7 @@ fun box(): String {\n\
     if (b != null) return \"not null b\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "VcNullable") else {
-        return;
-    };
+    let out = run(src, "VcNullable");
     assert_eq!(out, "OK");
 }
 
@@ -141,9 +131,7 @@ fun box(): String {\n\
     if (m[Id(2)] != \"b\") return \"got ${m[Id(2)]}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "VcMapKey") else {
-        return;
-    };
+    let out = run(src, "VcMapKey");
     assert_eq!(out, "OK");
 }
 
@@ -157,9 +145,7 @@ fn uint_literal_and_arithmetic() {
     if (a - b != 2u) return \"sub ${a - b}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UIntArith") else {
-        return;
-    };
+    let out = run(src, "UIntArith");
     assert_eq!(out, "OK");
 }
 
@@ -172,9 +158,7 @@ fn ulong_literal_and_arithmetic() {
     if (a - b != 6uL) return \"sub ${a - b}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "ULongArith") else {
-        return;
-    };
+    let out = run(src, "ULongArith");
     assert_eq!(out, "OK");
 }
 
@@ -187,9 +171,7 @@ fn ubyte_and_ushort() {
     if (b.toInt() != 40000) return \"us ${b.toInt()}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UByteShort") else {
-        return;
-    };
+    let out = run(src, "UByteShort");
     assert_eq!(out, "OK");
 }
 
@@ -209,9 +191,7 @@ fn ubyte_and_ushort_arithmetic_promotes_to_uint() {
     if (s + t != 41000u) return \"sadd ${s + t}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UByteArith") else {
-        return;
-    };
+    let out = run(src, "UByteArith");
     assert_eq!(out, "OK");
 }
 
@@ -230,9 +210,7 @@ fn ubyte_and_ushort_comparison_is_unsigned() {
     if (a == b) return \"eq\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UByteCmp") else {
-        return;
-    };
+    let out = run(src, "UByteCmp");
     assert_eq!(out, "OK");
 }
 
@@ -251,9 +229,7 @@ fn ubyte_and_ushort_conversions() {
     if (40000.toUShort() != s) return \"toUShort\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UByteConv") else {
-        return;
-    };
+    let out = run(src, "UByteConv");
     assert_eq!(out, "OK");
 }
 
@@ -271,9 +247,7 @@ fn unsigned_literal_takes_the_expected_type() {
     if (l != 7uL) return \"ul\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UExpected") else {
-        return;
-    };
+    let out = run(src, "UExpected");
     assert_eq!(out, "OK");
 }
 
@@ -287,9 +261,7 @@ fn ubyte_and_ushort_interpolate_unsigned() {
     if (\"$s\" != \"40000\") return \"us $s\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UByteStr") else {
-        return;
-    };
+    let out = run(src, "UByteStr");
     assert_eq!(out, "OK");
 }
 
@@ -306,9 +278,7 @@ fn widened_ubyte_and_ushort_box_as_int() {
     if (listOf((a + a).toInt()) != listOf(400)) return \"sum ${listOf((a + a).toInt())}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UByteBox") else {
-        return;
-    };
+    let out = run(src, "UByteBox");
     assert_eq!(out, "OK");
 }
 
@@ -330,9 +300,7 @@ fn ubyte_and_ushort_inc_dec_wrap_in_representation() {
     if (t.inc() != 0u.toUShort()) return \"swrap ${t.inc().toInt()}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UByteIncDec") else {
-        return;
-    };
+    let out = run(src, "UByteIncDec");
     assert_eq!(out, "OK");
 }
 
@@ -346,9 +314,7 @@ fn uint_comparison() {
     if (!(b >= a)) return \"ge\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UIntCmp") else {
-        return;
-    };
+    let out = run(src, "UIntCmp");
     assert_eq!(out, "OK");
 }
 
@@ -361,9 +327,7 @@ fn uint_conversions() {
     if (u.toInt() != 42) return \"toInt ${u.toInt()}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UIntConv") else {
-        return;
-    };
+    let out = run(src, "UIntConv");
     assert_eq!(out, "OK");
 }
 
@@ -375,9 +339,7 @@ fn uint_overflow_wrap() {
     if (0u - 1u != UInt.MAX_VALUE) return \"under ${0u - 1u}\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UIntWrap") else {
-        return;
-    };
+    let out = run(src, "UIntWrap");
     assert_eq!(out, "OK");
 }
 
@@ -394,7 +356,7 @@ fun box(): String {\n\
     if (classify(5u) != \"many\") return \"m\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UWhen") else { return };
+    let out = run(src, "UWhen");
     assert_eq!(out, "OK");
 }
 
@@ -410,8 +372,6 @@ fn uint_array() {
     if (sum != 60u) return \"got $sum\"\n\
     return \"OK\"\n\
 }\n";
-    let Some(out) = run(src, "UIntArr") else {
-        return;
-    };
+    let out = run(src, "UIntArr");
     assert_eq!(out, "OK");
 }

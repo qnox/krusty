@@ -94,13 +94,15 @@ fn a_class_carries_its_own_metadata_by_default() {
     assert_eq!(properties, ["x", "y"], "and its constructor properties");
 }
 
-/// A value-class-typed body property is physically exposed through a mangled accessor, but the
-/// metadata builder cannot yet describe/read that ABI safely. Admission consumes the exact JVM name
-/// stamped on `IrProperty` by the value-class pass (body-property accessors are synthesized directly,
-/// not stored in `IrClass::methods`) and withholds the whole record instead of advertising a
-/// nonexistent plain `getK` to downstream callers.
+/// A value-class-typed BODY property is DESCRIBED, and the record is byte-identical to kotlinc's:
+/// `d2=[…,"k","LK;","getK-XLNMDGE","()Ljava/lang/String;","Ljava/lang/String;"]` — the Kotlin type
+/// `LK;` (not the erased field type), the MANGLED accessor the class file actually defines, and an
+/// explicit field descriptor a reader cannot derive from `K`. Its accessor is synthesized straight
+/// from the property declaration and never appears in `IrClass::methods`, so the record has to take
+/// the exact JVM spelling the value-class pass stamped on the `IrProperty`; the plain `getK` krusty
+/// used to write advertised a method that does not exist.
 #[test]
-fn value_class_body_property_withholds_the_record() {
+fn value_class_body_property_round_trips() {
     let source = "@JvmInline value class K(val v: String)\n\
                   class Holder { val k: K = K(\"OK\") }\n";
     let Some((_, classes)) = krusty_lib_dir("vc_body_property", source) else {
@@ -112,19 +114,28 @@ fn value_class_body_property_withholds_the_record() {
         .find(|(name, _)| name == "Holder")
         .expect("krusty emits Holder.class");
     let info = parse_class(bytes).expect("Holder.class parses");
-    assert!(
-        info.methods
-            .iter()
-            .any(|method| method.name.starts_with("getK-")),
-        "the value-class pass must realize the body property with its mangled getter",
+    let mangled = info
+        .methods
+        .iter()
+        .find(|method| method.name.starts_with("getK-"))
+        .expect("the value-class pass must realize the body property with its mangled getter")
+        .name
+        .clone();
+    let described = info
+        .meta
+        .class_properties
+        .iter()
+        .find(|p| p.name == "k")
+        .expect("the record describes the property");
+    assert_eq!(
+        described.getter.as_ref().map(|g| g.name.as_str()),
+        Some(mangled.as_str()),
+        "the record must name the accessor the class file defines, not the plain convention",
     );
-    // An absent annotation and a present-but-empty annotation decode to the same empty collections.
-    // Pin the class-file descriptor so this cannot pass by emitting a different misleading record.
-    assert!(
-        !bytes
-            .windows(b"Lkotlin/Metadata;".len())
-            .any(|window| window == b"Lkotlin/Metadata;"),
-        "metadata must be withheld rather than advertise a plain getter that does not exist",
+    expect_roundtrip_ok(
+        "vc_body_property",
+        source,
+        "fun box(): String = Holder().k.v\n",
     );
 }
 
@@ -149,23 +160,29 @@ fn data_class_copy_and_destructuring_round_trip() {
     expect_roundtrip_ok("data", LIB, MAIN);
 }
 
-/// The deliberate hole in the write side, pinned from BOTH ends. A class whose declared member's
-/// signature mentions a VALUE class is not described: the physical method already returns the ERASED
-/// underlying, but a caller that learns the Kotlin return from `@Metadata` emits kotlinc's boxed
-/// sequence anyway (`invokevirtual Holder.make-<hash>()Ljava/lang/String; checkcast K;
-/// K.unbox-impl()`) — a ClassCastException at run time. Withholding the record leaves the caller
-/// exactly where it was before any class metadata was written: it REPORTS the member as unresolved
-/// and the file is skipped, never miscompiled. Both halves are asserted, so re-describing the member
-/// without teaching the reader (which would turn this rejection into a run-time crash) fails here
-/// rather than in the box corpus.
+/// The classpath value-class RETURN, end to end. A member whose Kotlin return is a value class is
+/// realized as a MANGLED method over the ERASED underlying (`make-<hash>()Ljava/lang/String;`), so a
+/// caller that learns the Kotlin return `K` from `@Metadata` must NOT also emit kotlinc's boxed
+/// sequence (`checkcast K; K.unbox-impl()`) — the `String` on the stack already IS the carrier, and
+/// casting it is a ClassCastException. This runs `box()`, so a caller that merely COMPILES while
+/// emitting the boxed form still fails here rather than in the box corpus.
 #[test]
-fn a_value_class_returning_member_is_withheld_and_its_caller_rejected() {
+fn a_value_class_returning_member_round_trips() {
     const LIB: &str = "@JvmInline\nvalue class K(val v: String)\n\
 class Holder {\n\
     fun make(): K = K(\"OK\")\n\
+    fun echo(k: K): String = k.v\n\
 }\n";
-    const MAIN: &str = "fun box(): String = Holder().make().v\n";
-    let Some((dir, classes)) = krusty_lib_dir("valueclass", LIB) else {
+    // The RETURN feeding a value-class PARAMETER in one expression: both sides must agree that the
+    // carrier, not a box, is what crosses the call boundary.
+    const MAIN: &str = "fun box(): String {\n\
+    val h = Holder()\n\
+    if (h.echo(h.make()) != \"OK\") return \"f1\"\n\
+    return h.make().v\n\
+}\n";
+    // The record must be PRESENT — the fix is the read half, so a regression that silently reinstates
+    // the decline would otherwise pass this test by rejecting nothing and running nothing.
+    let Some((_, classes)) = krusty_lib_dir("valueclass", LIB) else {
         eprintln!("skip (kotlin stdlib / JDK unavailable)");
         return;
     };
@@ -173,21 +190,163 @@ class Holder {\n\
         .iter()
         .find(|(name, _)| name == "Holder")
         .expect("krusty emits Holder.class");
-    // Assert the ANNOTATION is absent, not merely that it lists no functions — an empty-but-present
-    // record would still tell a reader "this class has no members", which is the lie being avoided.
+    let meta = parse_class(bytes).expect("Holder.class parses").meta;
+    assert!(
+        meta.class_functions.iter().any(|f| f.kotlin_name == "make"),
+        "the class's own @Metadata must describe the value-class-returning member",
+    );
+    expect_roundtrip_ok("valueclass", LIB, MAIN);
+}
+
+/// Admission is TRANSITIVE, and the value class need not be in the same FILE. A value class without a
+/// record of its own reads downstream as an ordinary class — the caller casts the carrier to the box
+/// and binds an instance accessor where kotlinc emits the static `-impl`, a ClassCastException.
+/// Whether a sibling file's value class ends up described is decided by that file's own emit, so a
+/// record here cannot assume it is: `Holder.make(): A` is withheld. (A CLASSPATH value class is
+/// different — being known as one at all means its `@Metadata` inline record was read.)
+#[test]
+fn a_sibling_files_undescribed_value_class_withholds_the_record() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let sources = [
+        (
+            "A.kt",
+            "@JvmInline value class A(val v: String) { fun shout(): String = v + \"!\" }\n",
+        ),
+        ("B.kt", "class Holder { fun make(): A = A(\"O\") }\n"),
+    ];
+    let Some(classes) = common::compile_in_process_files(&sources, &[stdlib], Some(&jdk)) else {
+        eprintln!("skip (kotlin stdlib / JDK unavailable)");
+        return;
+    };
+    let (_, holder) = classes
+        .iter()
+        .find(|(name, _)| name == "Holder")
+        .expect("krusty emits Holder.class");
+    let (_, value_class) = classes
+        .iter()
+        .find(|(name, _)| name == "A")
+        .expect("krusty emits A.class");
+    let carries_metadata = |bytes: &[u8]| bytes.windows(17).any(|w| w == b"Lkotlin/Metadata;");
+    assert!(
+        !carries_metadata(value_class),
+        "precondition: a value class with a declared member is itself withheld",
+    );
+    assert!(
+        !carries_metadata(holder),
+        "so the class whose member RETURNS it must be withheld too",
+    );
+}
+
+/// A declared value-class return and a generic-slot read can have the SAME substituted Kotlin type
+/// while requiring opposite representations. The declared member returns the erased carrier, whereas
+/// `List<T>.get` returns a real box from its `Object` slot. Pin both in one consumer: this prevents the
+/// checker-to-IR `declared_ret` handoff from being replaced by a broad "logical type is a value class"
+/// rule that would make either the direct call over-unbox or the generic read skip its required unbox.
+#[test]
+fn declared_value_class_return_does_not_reclassify_generic_slot() {
+    const LIB: &str = "@JvmInline\nvalue class Token(val value: String)\n\
+object Factory {\n\
+    fun direct(): Token = Token(\"OK\")\n\
+}\n";
+    const MAIN: &str = "fun box(): String {\n\
+    val direct: Token = Factory.direct()\n\
+    val values: List<Token> = listOf(direct)\n\
+    val fromSlot: Token = values[0]\n\
+    return if (direct.value == \"OK\" && fromSlot.value == \"OK\") \"OK\" else \"FAIL\"\n\
+}\n";
+    expect_roundtrip_ok("vc_generic_slot", LIB, MAIN);
+}
+
+/// The same read half for a member whose value class rides in a PARAMETER: the JVM method takes the
+/// erased underlying, so the argument must be handed over unboxed.
+#[test]
+fn a_value_class_parameter_member_round_trips() {
+    const LIB: &str = "@JvmInline\nvalue class K(val v: String)\n\
+class Holder {\n\
+    fun take(k: K): String = k.v\n\
+}\n";
+    const MAIN: &str = "fun box(): String = Holder().take(K(\"OK\"))\n";
+    expect_roundtrip_ok("vcparam", LIB, MAIN);
+}
+
+/// A CONCRETE `suspend` member returning a value class over a REFERENCE underlying still withholds,
+/// and unlike the shapes above the reason is in the BYTECODE, not the record. kotlinc boxes a
+/// value-class CPS return only when the underlying is a PRIMITIVE; over a reference/nullable/generic
+/// underlying it `areturn`s the raw carrier. krusty boxes unconditionally, so its `constructor-impl;
+/// box-impl; areturn` disagrees with kotlinc's `constructor-impl; areturn` — while the record krusty
+/// would write is byte-identical to kotlinc's. Describing it therefore advertises an ABI the class
+/// file does not implement: a consumer doing `C().gk().v` gets "class K cannot be cast to class
+/// java.lang.String". An ABSTRACT suspend member has no return expression to box and stays
+/// describable, which is what `data_class_metadata_wiring_e2e`'s suspend interface cases pin.
+#[test]
+fn a_concrete_suspend_value_class_return_withholds_the_record() {
+    const LIB: &str = "@JvmInline\nvalue class K(val v: String)\n\
+class C {\n\
+    suspend fun gk(): K = K(\"OK\")\n\
+}\n";
+    let Some((_, classes)) = krusty_lib_dir("suspendvcret", LIB) else {
+        eprintln!("skip (kotlin stdlib / JDK unavailable)");
+        return;
+    };
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "C")
+        .expect("krusty emits C.class");
     assert!(
         !bytes
             .windows(b"Lkotlin/Metadata;".len())
             .any(|w| w == b"Lkotlin/Metadata;"),
-        "a value-class-involved member means the class carries NO @Metadata at all",
+        "a boxed value-class CPS return means the class carries NO @Metadata until the boxing matches",
     );
-    let stdlib = common::stdlib_jar();
-    let jdk = common::jdk_modules();
-    let diagnostics = common::front_end_diagnostics(MAIN, &[dir, stdlib], Some(&jdk));
+}
+
+/// A VALUE class with a DECLARED member still withholds — for a WRITE-side reason the return model
+/// does not reach. kotlinc realizes `fun k()` on a value class as the STATIC
+/// `k-impl(Ljava/lang/String;)Ljava/lang/String;` over the unboxed carrier; krusty emits an INSTANCE
+/// `k()` on the box. A caller reading the record puts the carrier under an `invokevirtual S.k()` —
+/// "Type 'java/lang/String' is not assignable to 'S'", a VerifyError. The READ half is fine: against a
+/// KOTLINC-built `S` the same `box()` runs, which is what makes this a member-ABI gap and not a
+/// metadata one. Asserted on the emitted METHOD so it fails the day the ABI is corrected, prompting
+/// the decline (and this test) to be replaced by a round-trip.
+#[test]
+fn a_value_class_with_a_declared_member_withholds_the_record() {
+    const LIB: &str = "@JvmInline\nvalue class S(val v: String) {\n\
+    fun k(): String = v + \"K\"\n\
+}\n";
+    let Some((_, classes)) = krusty_lib_dir("vcdeclared", LIB) else {
+        eprintln!("skip (kotlin stdlib / JDK unavailable)");
+        return;
+    };
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "S")
+        .expect("krusty emits S.class");
+    let info = parse_class(bytes).expect("S.class parses");
     assert!(
-        diagnostics.iter().any(|d| d.contains("'make'")),
-        "the caller must be REJECTED, not silently bound to the boxed form; got {diagnostics:?}",
+        info.methods.iter().any(|m| m.name == "k"),
+        "pins the divergence being protected: krusty emits an instance `k`, kotlinc a static `k-impl`",
     );
+    assert!(
+        !bytes
+            .windows(b"Lkotlin/Metadata;".len())
+            .any(|w| w == b"Lkotlin/Metadata;"),
+        "a value class with a declared member carries NO @Metadata until its member ABI matches",
+    );
+}
+
+/// The FAKE OVERRIDE shape: the value-class-returning member is inherited, so the receiver the caller
+/// lands on is the supertype's. Getting the return model right but the receiver wrong is a VerifyError
+/// rather than a ClassCastException, which is why this shape is pinned separately.
+#[test]
+fn an_inherited_value_class_returning_member_round_trips() {
+    const LIB: &str = "@JvmInline\nvalue class K(val v: String)\n\
+open class A {\n\
+    fun make(): K = K(\"OK\")\n\
+}\n\
+class C : A()\n";
+    const MAIN: &str = "fun box(): String = C().make().v\n";
+    expect_roundtrip_ok("vcfakeoverride", LIB, MAIN);
 }
 
 /// `data` synthesizes over the PRIMARY-CONSTRUCTOR properties only. `c.fields` also holds a BODY

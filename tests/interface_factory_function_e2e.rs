@@ -1,5 +1,5 @@
-//! A classifier and a same-named top-level factory function sharing one name (the
-//! `fun UnscaledGapsY(...): UnscaledGapsY` idiom): when no constructor is applicable — an
+//! A classifier and a same-named top-level factory function sharing one name (the neutral
+//! `fun AxisSpacing(...): AxisSpacing` idiom): when no constructor is applicable — an
 //! interface has none at all — kotlinc binds the call to the function. Constructor candidates
 //! keep precedence whenever one DOES apply (kotlinc: an applicable abstract-class constructor
 //! still errors, and a class's applicable constructor beats the function).
@@ -16,39 +16,40 @@ fn diags(src: &str) -> Vec<String> {
     common::front_end_diagnostics(src, &[stdlib], Some(jdk.as_path()))
 }
 
-/// The BannerStartPagePromoter case: `UnscaledGapsY(top = 4, bottom = 8)` where the interface
-/// and its top-level factory share a name.
+/// A named/default call where an interface and its top-level factory share a name. The fixture is
+/// intentionally domain-neutral: regression tests must describe the semantic shape without retaining
+/// identities from a private reproduction.
 #[test]
 fn named_args_pick_factory() {
     run_ok(
         "IfaceFactoryNamed",
-        "interface GapsY { val top: Int; val bottom: Int }\n\
-         fun GapsY(top: Int = 0, bottom: Int = 0): GapsY = GapsYImpl(top, bottom)\n\
-         private class GapsYImpl(val t: Int, val b: Int) : GapsY {\n\
+        "interface AxisSpacing { val top: Int; val bottom: Int }\n\
+         fun AxisSpacing(top: Int = 0, bottom: Int = 0): AxisSpacing = AxisSpacingImpl(top, bottom)\n\
+         private class AxisSpacingImpl(val t: Int, val b: Int) : AxisSpacing {\n\
          \x20   override val top: Int get() = t\n\
          \x20   override val bottom: Int get() = b\n\
          }\n\
          fun box(): String {\n\
-         \x20   val g = GapsY(top = 4, bottom = 8)\n\
+         \x20   val g = AxisSpacing(top = 4, bottom = 8)\n\
          \x20   return if (g.top == 4 && g.bottom == 8) \"OK\" else \"F\" }\n",
     );
 }
 
-/// `GapsY()` (all defaults) and `GapsY(4)` (positional) both pick the factory — an interface
+/// `AxisSpacing()` (all defaults) and `AxisSpacing(4)` (positional) both pick the factory — an interface
 /// has no constructor candidate at all, however the call is shaped.
 #[test]
 fn positional_and_default_args_pick_factory() {
     run_ok(
         "IfaceFactoryPositional",
-        "interface GapsY { val top: Int; val bottom: Int }\n\
-         fun GapsY(top: Int = 0, bottom: Int = 0): GapsY = GapsYImpl(top, bottom)\n\
-         private class GapsYImpl(val t: Int, val b: Int) : GapsY {\n\
+        "interface AxisSpacing { val top: Int; val bottom: Int }\n\
+         fun AxisSpacing(top: Int = 0, bottom: Int = 0): AxisSpacing = AxisSpacingImpl(top, bottom)\n\
+         private class AxisSpacingImpl(val t: Int, val b: Int) : AxisSpacing {\n\
          \x20   override val top: Int get() = t\n\
          \x20   override val bottom: Int get() = b\n\
          }\n\
          fun box(): String {\n\
-         \x20   val a = GapsY(4)\n\
-         \x20   val b = GapsY()\n\
+         \x20   val a = AxisSpacing(4)\n\
+         \x20   val b = AxisSpacing()\n\
          \x20   return if (a.top == 4 && b.top == 0 && b.bottom == 0) \"OK\" else \"F\" }\n",
     );
 }
@@ -59,16 +60,16 @@ fn positional_and_default_args_pick_factory() {
 fn factory_wins_over_companion_object() {
     run_ok(
         "IfaceFactoryCompanion",
-        "interface GapsY {\n\
-         \x20   companion object { @JvmField val EMPTY: GapsY = EmptyGapsY }\n\
+        "interface AxisSpacing {\n\
+         \x20   companion object { @JvmField val EMPTY: AxisSpacing = EmptyAxisSpacing }\n\
          \x20   val top: Int\n\
          }\n\
-         fun GapsY(top: Int = 0): GapsY = GapsYImpl(top)\n\
-         private object EmptyGapsY : GapsY { override val top: Int = 0 }\n\
-         private class GapsYImpl(val t: Int) : GapsY { override val top: Int get() = t }\n\
+         fun AxisSpacing(top: Int = 0): AxisSpacing = AxisSpacingImpl(top)\n\
+         private object EmptyAxisSpacing : AxisSpacing { override val top: Int = 0 }\n\
+         private class AxisSpacingImpl(val t: Int) : AxisSpacing { override val top: Int get() = t }\n\
          fun box(): String {\n\
-         \x20   val g = GapsY(top = 4)\n\
-         \x20   return if (g.top == 4 && GapsY.EMPTY.top == 0) \"OK\" else \"F\" }\n",
+         \x20   val g = AxisSpacing(top = 4)\n\
+         \x20   return if (g.top == 4 && AxisSpacing.EMPTY.top == 0) \"OK\" else \"F\" }\n",
     );
 }
 
@@ -132,5 +133,156 @@ fn abstract_class_factory() {
          fun Abs(x: Int = 1): Abs = AbsImpl(x)\n\
          private class AbsImpl(val v: Int) : Abs() { override val x: Int get() = v }\n\
          fun box(): String = if (Abs(5).x == 5 && Abs(x = 7).x == 7) \"OK\" else \"F\"\n",
+    );
+}
+
+/// When both fallback callables accept the arguments, Kotlin gives the top-level factory precedence
+/// over the companion operator. This guards applicability-based ordering rather than an interface-only
+/// shortcut: both declarations are real call candidates, and declaration order must not decide it.
+#[test]
+fn applicable_factory_precedes_applicable_companion_invoke() {
+    run_ok(
+        "FactoryBeforeCompanionInvoke",
+        "interface Choice { val selected: String\n\
+         \x20   companion object { operator fun invoke(value: Int): Choice = ChoiceImpl(\"companion\") }\n\
+         }\n\
+         fun Choice(value: Int): Choice = ChoiceImpl(\"factory\")\n\
+         private class ChoiceImpl(override val selected: String) : Choice\n\
+         fun box(): String = if (Choice(3).selected == \"factory\") \"OK\" else \"F\"\n",
+    );
+}
+
+/// Mere factory existence is not enough to hide a companion operator. The same classifier name has a
+/// String factory and an Int companion call; each argument shape must reach its applicable callable.
+#[test]
+fn inapplicable_factory_falls_through_to_companion_invoke() {
+    run_ok(
+        "InapplicableFactoryBeforeCompanion",
+        "interface Choice { val selected: String\n\
+         \x20   companion object { operator fun invoke(value: Int): Choice = ChoiceImpl(\"companion\") }\n\
+         }\n\
+         fun Choice(value: String): Choice = ChoiceImpl(\"factory:\" + value)\n\
+         private class ChoiceImpl(override val selected: String) : Choice\n\
+         fun box(): String {\n\
+         \x20   val a = Choice(3).selected\n\
+         \x20   val b = Choice(\"x\").selected\n\
+         \x20   return if (a == \"companion\" && b == \"factory:x\") \"OK\" else \"F\"\n\
+         }\n",
+    );
+}
+
+/// A dependency-provided interface and a source factory use the same classifier/callable arbitration
+/// as a source interface. The Java fixture is deliberately minimal: it proves that provider origin is
+/// not a resolution branch, while the Kotlin implementation makes the selected factory observable.
+#[test]
+fn dependency_interface_uses_source_factory() {
+    let java = [(
+        "Metric.java".into(),
+        "package fixtures; public interface Metric { int amount(); }".into(),
+    )];
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        return;
+    };
+    let root = library.parent().map(std::path::Path::to_path_buf);
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = vec![library, stdlib];
+    let source = "import fixtures.Metric\n\
+        private class MetricValue(val raw: Int) : Metric { override fun amount(): Int = raw }\n\
+        fun Metric(raw: Int = 6): Metric = MetricValue(raw)\n\
+        fun box(): String {\n\
+        \x20   val positional = Metric(4)\n\
+        \x20   val named = Metric(raw = 5)\n\
+        \x20   val defaulted = Metric()\n\
+        \x20   return if (positional.amount() + named.amount() + defaulted.amount() == 15) \"OK\" else \"F\"\n\
+        }\n";
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
+            )
+        });
+    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output.trim(), "OK");
+}
+
+/// A same-named factory whose result uses a scalar value-class carrier must remain unboxed at the call
+/// boundary. This is the representation-sensitive form of the same classifier/callable arbitration;
+/// resolving it as a function is insufficient if lowering then treats its result as a boxed instance.
+#[test]
+fn value_class_factory_preserves_scalar_carrier() {
+    run_ok(
+        "ValueClassFactoryCarrier",
+        "@JvmInline value class ScalarToken(val raw: Int)\n\
+         fun ScalarToken(high: Int, low: Int): ScalarToken = ScalarToken((high shl 8) or low)\n\
+         fun box(): String = if (ScalarToken(2, 3).raw == 515) \"OK\" else \"F\"\n",
+    );
+}
+
+/// A factory result must also retain its unboxed carrier when it becomes the receiver of an extension.
+/// This separates call-result representation from the indexed-container case below, making a failure at
+/// either boundary identify the responsible lowering stage without relying on a reproduction class name.
+#[test]
+fn value_class_factory_composes_with_extension_call() {
+    run_ok(
+        "ValueClassFactoryExtensionCarrier",
+        "@JvmInline value class PackedValue(val raw: Int) { val lower: Int get() = raw and 255 }\n\
+         fun PackedValue(upper: Int, lower: Int): PackedValue = PackedValue((upper shl 8) or lower)\n\
+         fun PackedValue.withUpper(upper: Int) = PackedValue(upper, lower)\n\
+         fun box(): String = if (PackedValue(2, 3).withUpper(4).raw == 1027) \"OK\" else \"F\"\n",
+    );
+}
+
+/// The factory result can flow through value-class extension calls and an indexed setter without being
+/// mistaken for its scalar carrier. The member ABI boxes the value-class parameter, then its body must
+/// unbox that parameter before reading the sole property; checking the backing array isolates precisely
+/// that supported boundary from boxed value-class member returns, which this backend rejects safely.
+#[test]
+fn value_class_factory_composes_with_indexed_container() {
+    run_ok(
+        "ValueClassFactoryIndexedCarrier",
+        "@JvmInline value class PackedValue(val raw: Int) {\n\
+         \x20   val upper: Int get() = (raw shr 8) and 255\n\
+         \x20   val lower: Int get() = raw and 255\n\
+         }\n\
+         fun PackedValue(upper: Int, lower: Int): PackedValue = PackedValue((upper shl 8) or lower)\n\
+         fun PackedValue.withUpper(upper: Int) = PackedValue(upper, lower)\n\
+         @JvmInline value class PackedValues(val data: IntArray) {\n\
+         \x20   constructor(size: Int) : this(IntArray(size))\n\
+         \x20   operator fun set(index: Int, value: PackedValue) { data[index] = value.raw }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val values = PackedValues(1)\n\
+         \x20   values[0] = PackedValue(2, 3).withUpper(4)\n\
+         \x20   return if (values.data[0] == 1027) \"OK\" else \"F\"\n\
+         }\n",
+    );
+}
+
+/// An indexed getter is a user member, not a stored-property getter merely because both JVM names begin
+/// with `get`. User value-class members returning another value class still require a boxed-result model
+/// that this backend does not implement, so the architecture contract is to decline this whole file. This
+/// pins the safe, semantic classification: accepting and miscompiling it is worse than an explicit bail.
+#[test]
+fn indexed_getter_returning_value_class_is_rejected_safely() {
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let source = "@JvmInline value class ElementToken(val raw: Int)\n\
+                  @JvmInline value class TokenBuffer(val data: IntArray) {\n\
+                  \x20   operator fun get(index: Int): ElementToken = ElementToken(data[index])\n\
+                  }\n\
+                  fun box(): String = if (TokenBuffer(IntArray(1))[0].raw == 0) \"OK\" else \"F\"\n";
+    assert_eq!(
+        common::backend_rejects_in_process(
+            source,
+            "IndexedValueClassReturn",
+            &[stdlib],
+            Some(&jdk)
+        ),
+        Some(true),
     );
 }

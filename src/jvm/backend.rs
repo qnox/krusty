@@ -266,7 +266,12 @@ impl JvmBackend {
 /// (`-jvm-target`), the `SourceFile` name (the origin `.kt`; kotlinc uses the simple name,
 /// reconstructed from the stem — directories are already stripped), the `-module-name`, and the
 /// per-class `@Metadata` switch. Threaded explicitly into emission so every class (incl. synthetics)
-/// inherits it. A caller that wants the pre-class-metadata bytes uses `EmitOptions::default()`.
+/// inherits it. `EmitOptions::default()` is NOT the pre-class-metadata shape — it emits per-class
+/// `@Metadata` too; what it lacks is the `SourceFile`, the inner-class resolver and the `-jvm-target`
+/// class version, which is why a caller claiming to emit shipping bytes must start here.
+/// `KRUSTY_NO_CLASS_METADATA` (read below) is how a shipping caller gets facade-only output back; it is
+/// consulted ONLY here, so a caller holding some other `EmitOptions` opts out by setting
+/// `emit_class_metadata: false` itself.
 pub fn shipping_emit_options(
     stem: &str,
     module_name: &str,
