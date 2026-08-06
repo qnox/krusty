@@ -7868,7 +7868,9 @@ fn array_builtin_ret(fname: &str, arg_tys: &[Ty]) -> Option<Ty> {
     }
     if fname == "arrayOf" {
         if let Some(&first) = arg_tys.first() {
-            if first.is_reference() && arg_tys.iter().all(|&t| t == first) {
+            // A null-only `arrayOf(null)` still declines: `Null` is reference-like but the element
+            // type needs the expected-type context the full checker has (`Array<Nothing?>`).
+            if first.is_reference() && first != Ty::Null && arg_tys.iter().all(|&t| t == first) {
                 return Some(Ty::array(first));
             }
         }
@@ -8324,6 +8326,11 @@ fn infer_lit_ty_p(
         Expr::BoolLit(_) => Ty::Boolean,
         Expr::CharLit(_) => Ty::Char,
         Expr::StringLit(_) | Expr::Template(_) => Ty::String,
+        // A `null` literal carries its type like every other literal. Recording `Ty::Null` here lets
+        // the ordinary applicability rules decide whether each selected reference parameter accepts
+        // it, while primitive parameters and ambiguous reference overloads continue to decline. The
+        // full checker uses the same semantic type; no callable or provider needs a null-specific path.
+        Expr::NullLit => Ty::Null,
         // A bare name referring to a property (or `this` — the receiver of an expression-bodied
         // extension function `fun Int.double() = this * 2`, supplied as a `"this"` scope entry), or a
         // classpath/stdlib `object` used as a value (`val ctx = EmptyCoroutineContext`): its value is the
