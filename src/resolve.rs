@@ -890,20 +890,24 @@ fn generic_member_lambda_params(plan: &GenericMemberPlan, parameter: usize) -> O
 }
 
 fn module_member_lambda_params(
+    lib: &dyn SemanticPlatform,
     member: &crate::libraries::LibraryMember,
     parameter: usize,
 ) -> Option<Vec<Ty>> {
-    let Ty::Fun(function) = member.params.get(parameter)? else {
-        return None;
-    };
-    Some(
-        member
-            .call_sig
-            .lambda_param_types
-            .get(parameter)
-            .cloned()
-            .unwrap_or_else(|| function.params.clone()),
-    )
+    match member.params.get(parameter)? {
+        Ty::Fun(function) => Some(
+            member
+                .call_sig
+                .lambda_param_types
+                .get(parameter)
+                .cloned()
+                .unwrap_or_else(|| function.params.clone()),
+        ),
+        // A functional-interface parameter contributes its single abstract method's value-parameter
+        // shape. `LibraryMember` is already the federated semantic form, so declaration origin does
+        // not enter this fallback.
+        &param => crate::symbol_resolver::semantic_sam_signature(lib, param).map(|sam| sam.params),
+    }
 }
 
 impl ClassSig {
@@ -1315,7 +1319,7 @@ fn lambda_expectation(
                 receiver: Some(receiver),
             })
         }
-        param => crate::symbol_resolver::classpath_sam_signature(lib, param).map(|sam| {
+        param => crate::symbol_resolver::semantic_sam_signature(lib, param).map(|sam| {
             LambdaExpectation {
                 value_params: sam.params,
                 receiver: None,
@@ -7054,6 +7058,7 @@ fn call_argument_parameter_indices(
 }
 
 fn module_member_lambda_shape(
+    lib: &dyn SemanticPlatform,
     member: &crate::libraries::LibraryMember,
     generic_member: Option<&GenericMemberPlan>,
     args: &[ExprId],
@@ -7074,7 +7079,7 @@ fn module_member_lambda_shape(
             .map(|&parameter| {
                 generic_member
                     .and_then(|plan| generic_member_lambda_params(plan, parameter))
-                    .or_else(|| module_member_lambda_params(member, parameter))
+                    .or_else(|| module_member_lambda_params(lib, member, parameter))
             })
             .collect(),
         signatures: indices
@@ -15160,7 +15165,9 @@ impl<'a> Checker<'a> {
         message
     }
 
-    fn toplevel_source_ref_candidate(
+    /// Render a receiver-less callable directly from its semantic record. This fallback is stable
+    /// across source/module/provider origins and is therefore suitable for ambiguity diagnostics.
+    fn top_level_candidate_display(
         name: &str,
         function: &crate::libraries::FunctionInfo,
     ) -> String {
@@ -15320,10 +15327,7 @@ impl<'a> Checker<'a> {
             let mut message = "overload resolution ambiguity between candidates:".to_string();
             for index in maximal {
                 message.push('\n');
-                message.push_str(&Self::toplevel_source_ref_candidate(
-                    name,
-                    &candidates[index],
-                ));
+                message.push_str(&Self::top_level_candidate_display(name, &candidates[index]));
             }
             self.diags
                 .error(self.member_name_span(expression, name), message);
@@ -21612,10 +21616,23 @@ impl<'a> Checker<'a> {
     fn expect_call_arg(&mut self, expected: Ty, argument: ExprId, actual: Ty) {
         if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
             if let Some(sam) =
-                crate::symbol_resolver::classpath_sam_signature(&*self.syms.libraries, expected)
+                crate::symbol_resolver::semantic_sam_signature(&*self.syms.libraries, expected)
             {
-                self.check_lambda_with_types(argument, &sam.params);
-                return;
+                // A lambda already checked against THIS SAM shape during candidate-guided argument
+                // typing is accepted as the selection admitted it —
+                // but only when its checked type actually fits the SAM method: a lambda typed
+                // expectation-free (no candidate supplied its shape) must NOT silently bind, or an
+                // inapplicable call would lower to a bootstrap crash instead of a compile error.
+                // An UNCHECKED lambda (the deferred method/constructor shapes) binds the SAM
+                // parameters now.
+                if self.expr_types[argument.0 as usize] == Ty::Error {
+                    self.check_lambda_with_types(argument, &sam.params);
+                    return;
+                }
+                if crate::symbol_resolver::sam_arg_matches(&*self.syms.libraries, expected, actual)
+                {
+                    return;
+                }
             }
         }
         self.expect_assignable(expected, actual, self.span(argument), "argument");
@@ -22676,6 +22693,7 @@ impl<'a> Checker<'a> {
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
         let module_shape = method_sig.and_then(|member| {
             module_member_lambda_shape(
+                &*self.syms.libraries,
                 member,
                 generic_member.as_ref(),
                 args,
@@ -24465,8 +24483,9 @@ impl<'a> Checker<'a> {
                                 crate::module_symbols::ModuleSymbols::new(self.syms)
                                     .instance_members(recv, &name);
                             let applicable_module_member = module_members.iter().any(|member| {
-                                self.module_member_candidate_score(
-                                    member,
+                                self.call_candidate_score(
+                                    &member.params,
+                                    &member.call_sig,
                                     a,
                                     &full_arg_tys,
                                     arg_names.as_deref(),
@@ -28702,7 +28721,7 @@ impl<'a> Checker<'a> {
             if matches!(c.file.expr(argument), Expr::Lambda { .. })
                 && c.expr_types[argument.0 as usize] == Ty::Error
             {
-                if crate::symbol_resolver::classpath_sam_signature(&*c.syms.libraries, parameter)
+                if crate::symbol_resolver::semantic_sam_signature(&*c.syms.libraries, parameter)
                     .is_some()
                 {
                     // `expect_call_arg` ignores the provisional actual for a selected SAM and checks
@@ -29714,13 +29733,16 @@ impl<'a> Checker<'a> {
             String::new(),
         );
         member.call_sig = call_sig.clone();
-        let score = self.module_member_candidate_score(
-            &member,
-            args,
-            &applicability_arg_tys,
-            arg_names,
-            trailing_lambda,
-        )?;
+        let score = self
+            .call_candidate_score(
+                &member.params,
+                &member.call_sig,
+                args,
+                &applicability_arg_tys,
+                arg_names,
+                trailing_lambda,
+            )?
+            .rank;
         let ret = crate::symbol_resolver::ty_subst(
             generic.map_or(function.signature.ret, |signature| signature.ret),
             &bindings,
@@ -31255,6 +31277,138 @@ impl<'a> Checker<'a> {
         self.erased_function_param_fits(expected, actual)
             .then_some(1)
     }
+}
+
+/// The overload-pick outcome for a receiver-less semantic call whose lambda binding depends on
+/// functional-interface adaptation.
+enum TopLevelSamSelection {
+    /// The unique best candidate, with the SAM parameter types its lambda arguments bind (all
+    /// `None` when the winner needs no conversion — it still outranks a conversion rival). Boxed:
+    /// `FunctionInfo` dwarfs the `Ambiguous` payload.
+    Picked(Box<crate::libraries::FunctionInfo>, Vec<Option<Vec<Ty>>>),
+    /// A tie for the best candidate involving at least one SAM-converted lambda — kotlinc's
+    /// overload resolution ambiguity; silently picking one would wrap the lambda into an arbitrary
+    /// interface (a bootstrap crash at runtime).
+    Ambiguous(Vec<crate::libraries::FunctionInfo>),
+}
+
+/// Applicability facts shared by member and receiver-less calls. `rank` is deliberately independent
+/// of declaration origin; `sam_parameter_types` preserves only the syntax-sensitive adaptation needed
+/// to perform the selected lambda's first real type check.
+struct CallCandidateScore {
+    rank: (usize, std::cmp::Reverse<usize>, bool),
+    sam_parameter_types: Vec<Option<Vec<Ty>>>,
+}
+
+impl CallCandidateScore {
+    fn uses_sam_conversion(&self) -> bool {
+        self.sam_parameter_types.iter().any(Option::is_some)
+    }
+}
+
+impl<'a> Checker<'a> {
+    /// Select a receiver-less overload when a postponed lambda may require functional-interface
+    /// adaptation. Every candidate comes from the federated resolver and enters the same call-shape
+    /// scorer as a member; source files, sibling modules, and dependency metadata therefore cannot
+    /// acquire different preference or ambiguity rules.
+    ///
+    /// The ordinary post-typing resolver is intentionally left in charge when no candidate uses SAM
+    /// adaptation. Once adaptation participates, however, the pre-typing decision is authoritative:
+    /// a conversion-free function/`Any` parameter outranks an adapted one, while equally ranked SAM
+    /// targets are ambiguous because selecting either would generate a different runtime wrapper.
+    fn top_level_sam_selection(
+        &self,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        partial_arg_tys: Option<&[Option<Ty>]>,
+        type_args: &[Ty],
+    ) -> Option<TopLevelSamSelection> {
+        let partial = partial_arg_tys?;
+        let overloads = self.resolver().top_level_candidates(name);
+        if overloads.is_empty() {
+            return None;
+        }
+        let arg_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut fitted: Vec<(CallCandidateScore, usize)> = Vec::new();
+        for (overload_index, candidate) in overloads.iter().enumerate() {
+            // Context arguments are supplied by a different scope search. Keep them on that path;
+            // value-argument varargs are safe because the shared scorer uses the semantic slot map.
+            if candidate.context_count > 0 {
+                continue;
+            }
+            let signature = candidate.semantic_signature();
+            if !type_args.is_empty() && signature.formals.len() != type_args.len() {
+                continue;
+            }
+            let Some(indices) = call_argument_parameter_indices(
+                args.len(),
+                signature.params.len(),
+                arg_names,
+                trailing_lambda,
+                &candidate.call_sig,
+            ) else {
+                continue;
+            };
+            let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&signature, type_args);
+            for (&parameter, actual) in indices.iter().zip(partial) {
+                if let (Some(parameter), Some(actual)) = (signature.params.get(parameter), actual) {
+                    crate::symbol_resolver::unify_ty(*parameter, *actual, &mut bindings);
+                }
+            }
+            let params = signature
+                .params
+                .iter()
+                .map(|parameter| crate::symbol_resolver::ty_subst(*parameter, &bindings))
+                .collect::<Vec<_>>();
+            let Some(score) = self.call_candidate_score(
+                &params,
+                &candidate.call_sig,
+                args,
+                partial,
+                arg_names,
+                trailing_lambda,
+            ) else {
+                continue;
+            };
+            fitted.push((score, overload_index));
+        }
+        let best_rank = fitted.iter().map(|(score, _)| score.rank).max()?;
+        let maximal = fitted
+            .iter()
+            .filter(|(score, _)| score.rank == best_rank)
+            .collect::<Vec<_>>();
+        let [best] = maximal.as_slice() else {
+            return maximal
+                .iter()
+                .any(|(score, _)| score.uses_sam_conversion())
+                .then(|| {
+                    TopLevelSamSelection::Ambiguous(
+                        maximal
+                            .iter()
+                            .map(|(_, index)| overloads[*index].clone())
+                            .collect(),
+                    )
+                });
+        };
+        let (score, index) = best;
+        if score.uses_sam_conversion() {
+            return Some(TopLevelSamSelection::Picked(
+                Box::new(overloads[*index].clone()),
+                score.sam_parameter_types.clone(),
+            ));
+        }
+        fitted
+            .iter()
+            .any(|(candidate, other)| candidate.uses_sam_conversion() && other != index)
+            .then(|| {
+                TopLevelSamSelection::Picked(
+                    Box::new(overloads[*index].clone()),
+                    vec![None; args.len()],
+                )
+            })
+    }
 
     /// Whether `actual` fits a FUNCTION-typed parameter whose signature reached the checker ERASED.
     /// A classpath `(StringBuilder) -> Unit` parameter is a bare `Function1` — `(Any) -> Any` — and a
@@ -31277,25 +31431,81 @@ impl<'a> Checker<'a> {
             && component(expected.ret, actual.ret)
     }
 
-    fn module_member_candidate_score(
+    /// Score one semantic call shape against syntax-aware partial arguments.
+    ///
+    /// This is the sole applicability primitive for source/module member planning and receiver-less
+    /// SAM arbitration. It accepts only parameter and [`CallSig`] facts, so adding another declaration
+    /// provider cannot produce another scoring implementation. Lambda literal and spread provenance
+    /// remain explicit because those are properties of the call syntax, not of the provider.
+    fn call_candidate_score(
         &self,
-        member: &crate::libraries::LibraryMember,
+        params: &[Ty],
+        call_sig: &CallSig,
         args: &[ExprId],
         partial_arg_tys: &[Option<Ty>],
         arg_names: Option<&[Option<String>]>,
         trailing_lambda: bool,
-    ) -> Option<(usize, std::cmp::Reverse<usize>, bool)> {
+    ) -> Option<CallCandidateScore> {
+        let sam_parameter_types = std::cell::RefCell::new(vec![None; args.len()]);
+        let record_sam = |source: usize, expected: Ty| {
+            let parameters =
+                crate::symbol_resolver::semantic_sam_signature(&*self.syms.libraries, expected)?
+                    .params;
+            *sam_parameter_types.borrow_mut().get_mut(source)? = Some(parameters);
+            Some(())
+        };
         // Candidate scoring receives the expression as well as its runtime type so every module
         // call shape (positional, named, defaulted, and vararg) consults the same literal adaptation
         // carried by `CallArgKind`.
-        let score = |expected: Ty, actual: Ty, argument: ExprId| {
-            self.member_argument_score(expected, actual).or_else(|| {
-                call_arg_kind(self.file, argument, actual)
-                    .adapts_integer_literal_to(expected)
-                    .then_some(1)
-            })
+        let score = |expected: Ty, actual: Ty, argument: ExprId, source: usize| {
+            self.member_argument_score(expected, actual)
+                .or_else(|| {
+                    call_arg_kind(self.file, argument, actual)
+                        .adapts_integer_literal_to(expected)
+                        .then_some(1)
+                })
+                .or_else(|| {
+                    // A lambda literal reaches a JAVA functional-interface parameter only through
+                    // SAM conversion — ranked BELOW a plain assignable fit (score 1), so an
+                    // `Any`/function-type overload still wins over the conversion (kotlinc's rule).
+                    // The PROBE (the lambda's own declared arity) drives the fit, not the checked
+                    // type: a plan may have typed the lambda against an arbitrary candidate, and
+                    // kotlinc's arity rule (`{ s -> }` never fits a 0-parameter SAM) must hold
+                    // regardless.
+                    let arg = call_arg_kind(self.file, argument, actual);
+                    let probe = self.lambda_probe_ty(argument).unwrap_or(actual);
+                    (arg.is_lambda_literal()
+                        && expected.fun_arity().is_none()
+                        && crate::symbol_resolver::sam_arg_matches(
+                            &*self.syms.libraries,
+                            expected,
+                            probe,
+                        ))
+                    .then(|| record_sam(source, expected).map(|()| 0))
+                    .flatten()
+                })
         };
-        if member.call_sig.vararg {
+        // A not-yet-checked lambda slot (a plan's partial pass leaves it untyped): a function-type
+        // or erased-top parameter binds the lambda without conversion; a JAVA SAM parameter only
+        // through the conversion (ranked lower, and only when the probe arity fits the SAM method);
+        // anything else cannot take the lambda at all.
+        let lambda_slot = |expected: Ty, argument: ExprId, source: usize| -> Option<usize> {
+            if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                // An untyped non-lambda (a callable reference): no signal either way.
+                return Some(0);
+            }
+            if expected.fun_arity().is_some() || expected.is_erased_top() {
+                return Some(2);
+            }
+            let probe = self.lambda_probe_ty(argument).unwrap_or(Ty::Error);
+            if crate::symbol_resolver::sam_arg_matches(&*self.syms.libraries, expected, probe) {
+                record_sam(source, expected)?;
+                Some(1)
+            } else {
+                None
+            }
+        };
+        if call_sig.vararg {
             // A vararg is not necessarily the last declaration slot (`vararg xs, block`) and one
             // slot may represent several source expressions. Map every SOURCE index through the
             // common call-shape mapper, then score it against the declared vararg index. The former
@@ -31303,22 +31513,21 @@ impl<'a> Checker<'a> {
             // the first packed element, so valid non-last varargs depended on which syntax selected
             // the overload.
             let slots =
-                map_call_sig_args_with_trailing(args, arg_names, &member.call_sig, trailing_lambda)
-                    .ok()?;
+                map_call_sig_args_with_trailing(args, arg_names, call_sig, trailing_lambda).ok()?;
             let parameters = call_argument_parameter_indices(
                 args.len(),
-                member.params.len(),
+                params.len(),
                 arg_names,
                 trailing_lambda,
-                &member.call_sig,
+                call_sig,
             )?;
-            let vararg = member.call_sig.vararg_index?;
+            let vararg = call_sig.vararg_index?;
             let mut type_score = 0;
             for (source, (&argument, parameter)) in args.iter().zip(parameters).enumerate() {
                 let Some(actual) = partial_arg_tys.get(source).copied().flatten() else {
                     continue;
                 };
-                let declared = *member.params.get(parameter)?;
+                let declared = *params.get(parameter)?;
                 let spread = self.file.is_spread_arg(argument);
                 if spread && parameter != vararg {
                     return None;
@@ -31328,53 +31537,55 @@ impl<'a> Checker<'a> {
                 } else {
                     declared
                 };
-                type_score += score(expected, actual, argument)?;
+                type_score += score(expected, actual, argument, source)?;
             }
-            return Some((
-                type_score,
-                std::cmp::Reverse(slots.iter().filter(|slot| slot.is_none()).count()),
-                false,
-            ));
+            return Some(CallCandidateScore {
+                rank: (
+                    type_score,
+                    std::cmp::Reverse(slots.iter().filter(|slot| slot.is_none()).count()),
+                    false,
+                ),
+                sam_parameter_types: sam_parameter_types.into_inner(),
+            });
         }
         if arg_names.is_none() && !trailing_lambda {
             if args
                 .iter()
                 .any(|argument| self.file.is_spread_arg(*argument))
-                || args.len() > member.params.len()
-                || (args.len() < member.params.len()
-                    && (args.len()..member.params.len())
-                        .any(|index| !member.call_sig.param_has_default(index)))
+                || args.len() > params.len()
+                || (args.len() < params.len()
+                    && (args.len()..params.len()).any(|index| !call_sig.param_has_default(index)))
             {
                 return None;
             }
             let mut type_score = 0;
-            for (index, (expected, actual)) in member.params.iter().zip(partial_arg_tys).enumerate()
-            {
-                if let Some(actual) = actual {
-                    type_score += score(*expected, *actual, args[index])?;
+            for (index, (expected, actual)) in params.iter().zip(partial_arg_tys).enumerate() {
+                match actual {
+                    Some(actual) => type_score += score(*expected, *actual, args[index], index)?,
+                    // A plan's untyped slot: fit the lambda by its probe so the plan types it
+                    // against the RIGHT candidate's parameter, not an arbitrary tied one.
+                    None => type_score += lambda_slot(*expected, args[index], index)?,
                 }
             }
-            return Some((
-                type_score,
-                std::cmp::Reverse(member.params.len().saturating_sub(args.len())),
-                true,
-            ));
+            return Some(CallCandidateScore {
+                rank: (
+                    type_score,
+                    std::cmp::Reverse(params.len().saturating_sub(args.len())),
+                    true,
+                ),
+                sam_parameter_types: sam_parameter_types.into_inner(),
+            });
         }
         let slots =
-            map_call_sig_args_with_trailing(args, arg_names, &member.call_sig, trailing_lambda)
-                .ok()?;
+            map_call_sig_args_with_trailing(args, arg_names, call_sig, trailing_lambda).ok()?;
         let mut type_score = 0;
         for (parameter_index, argument) in slots.iter().enumerate() {
             let Some(argument) = argument else {
                 continue;
             };
             let source_index = args.iter().position(|candidate| candidate == argument)?;
-            let Some(Some(actual)) = partial_arg_tys.get(source_index) else {
-                continue;
-            };
-            let parameter = member.params.get(parameter_index)?;
-            let is_vararg_slot =
-                member.call_sig.vararg && parameter_index + 1 == member.params.len();
+            let parameter = params.get(parameter_index)?;
+            let is_vararg_slot = call_sig.vararg && Some(parameter_index) == call_sig.vararg_index;
             let spread = self.file.is_spread_arg(*argument);
             if spread && !is_vararg_slot {
                 return None;
@@ -31384,13 +31595,19 @@ impl<'a> Checker<'a> {
             } else {
                 *parameter
             };
-            type_score += score(expected, *actual, *argument)?;
+            match partial_arg_tys.get(source_index).copied().flatten() {
+                Some(actual) => type_score += score(expected, actual, *argument, source_index)?,
+                None => type_score += lambda_slot(expected, *argument, source_index)?,
+            }
         }
-        Some((
-            type_score,
-            std::cmp::Reverse(slots.iter().filter(|slot| slot.is_none()).count()),
-            !member.call_sig.vararg,
-        ))
+        Some(CallCandidateScore {
+            rank: (
+                type_score,
+                std::cmp::Reverse(slots.iter().filter(|slot| slot.is_none()).count()),
+                !call_sig.vararg,
+            ),
+            sam_parameter_types: sam_parameter_types.into_inner(),
+        })
     }
 
     fn best_module_member_candidate<'m>(
@@ -31404,8 +31621,9 @@ impl<'a> Checker<'a> {
         members
             .iter()
             .filter_map(|member| {
-                self.module_member_candidate_score(
-                    member,
+                self.call_candidate_score(
+                    &member.params,
+                    &member.call_sig,
                     args,
                     partial_arg_tys,
                     arg_names,
@@ -31413,7 +31631,7 @@ impl<'a> Checker<'a> {
                 )
                 .map(|score| (score, member))
             })
-            .max_by_key(|(score, _)| *score)
+            .max_by_key(|(score, _)| score.rank)
             .map(|(_, member)| member)
     }
 
@@ -31459,6 +31677,7 @@ impl<'a> Checker<'a> {
         });
         let lambda = member.as_ref().and_then(|member| {
             module_member_lambda_shape(
+                &*self.syms.libraries,
                 member,
                 generic.as_ref(),
                 args,
@@ -31678,19 +31897,61 @@ impl<'a> Checker<'a> {
                 .any(|other| member.owner == other.owner && member.params != other.params)
         });
         let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
-        let applicable_members = all_members
+        let scored_members = all_members
             .iter()
-            .filter(|member| {
-                self.module_member_candidate_score(
-                    member,
+            .filter_map(|member| {
+                self.call_candidate_score(
+                    &member.params,
+                    &member.call_sig,
                     args,
                     &full_arg_tys,
                     arg_names,
                     self.file.call_has_trailing_lambda.contains(&call.0),
                 )
-                .is_some()
+                .map(|score| (score.uses_sam_conversion(), member.clone()))
             })
-            .cloned()
+            .collect::<Vec<_>>();
+        // Conversion-free preference (kotlinc's rule): when any applicable candidate fits every
+        // argument WITHOUT the Java SAM conversion (`f {}` binds `f(Any)`), the candidates that
+        // reach the call only through the conversion (`f(Runnable)`) drop out.
+        let conversion_free = scored_members.iter().any(|(used_sam, _)| !used_sam);
+        let applicable_scored: Vec<(bool, crate::libraries::LibraryMember)> = scored_members
+            .into_iter()
+            .filter(|(used_sam, _)| !conversion_free || !used_sam)
+            .collect();
+        // Two DISTINCT-parameter candidates the call reaches only through the SAM conversion are
+        // kotlinc's overload resolution ambiguity — picking either would type (and wrap) the
+        // lambda against an arbitrary interface's method. An applicability PROBE declines instead
+        // of reporting: another receiver or namespace may still bind the call.
+        let mut sam_tied: Vec<&crate::libraries::LibraryMember> = Vec::new();
+        for (used_sam, member) in &applicable_scored {
+            if *used_sam && !sam_tied.iter().any(|tied| tied.params == member.params) {
+                sam_tied.push(member);
+            }
+        }
+        if sam_tied.len() > 1 {
+            if applicable_only {
+                return None;
+            }
+            let mut message = "overload resolution ambiguity between candidates:".to_string();
+            for member in &sam_tied {
+                message.push('\n');
+                // Render from the selected semantic record itself. Looking back into a source AST
+                // would make diagnostics depend on declaration origin and can match the wrong sibling
+                // overload when return types coincide.
+                let parameters =
+                    Self::callable_ref_parameters(&member.params, &member.call_sig.param_names);
+                message.push_str(&format!(
+                    "fun {name}({parameters}): {}",
+                    member.ret.source_name()
+                ));
+            }
+            self.diags.error(self.call_callee_name_span(call), message);
+            return Some(Ty::Error);
+        }
+        let applicable_members = applicable_scored
+            .into_iter()
+            .map(|(_, member)| member)
             .collect::<Vec<_>>();
         if applicable_only && applicable_members.is_empty() {
             return None;
@@ -31771,12 +32032,7 @@ impl<'a> Checker<'a> {
                                 } else {
                                     params[i]
                                 };
-                            self.expect_assignable(
-                                expected,
-                                self.expr_types[a.0 as usize],
-                                self.span(*a),
-                                "argument",
-                            );
+                            self.expect_call_arg(expected, *a, self.expr_types[a.0 as usize]);
                         }
                     }
                     mapped_slots = Some(slots);
@@ -32939,8 +33195,9 @@ impl<'a> Checker<'a> {
                                 .instance_members(receiver_ty, &name)
                                 .iter()
                                 .any(|member| {
-                                    self.module_member_candidate_score(
-                                        member,
+                                    self.call_candidate_score(
+                                        &member.params,
+                                        &member.call_sig,
                                         args,
                                         &full_arg_tys,
                                         arg_names.as_deref(),
@@ -33412,8 +33669,9 @@ impl<'a> Checker<'a> {
                 };
                 let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
                 let applicable_module_member = module_members.iter().any(|member| {
-                    self.module_member_candidate_score(
-                        member,
+                    self.call_candidate_score(
+                        &member.params,
+                        &member.call_sig,
                         args,
                         &full_arg_tys,
                         arg_names.as_deref(),
@@ -34598,6 +34856,20 @@ impl<'a> Checker<'a> {
                 let toplevel_lambda_materialized: Option<Vec<bool>> = toplevel_lambda_shape
                     .as_ref()
                     .and_then(|shape| shape.materialized.clone());
+                // Functional-interface adaptation must be selected before a lambda receives its
+                // first expected type. Query the same federated top-level candidate set used for
+                // final resolution; declaration origin never participates in this decision.
+                let top_level_sam = if has_lambda_argument && !self.lexical_value_declares(&fname) {
+                    self.top_level_sam_selection(
+                        call,
+                        &fname,
+                        args,
+                        toplevel_partial.as_deref(),
+                        &explicit_type_args,
+                    )
+                } else {
+                    None
+                };
                 // A top-level NON-public (`@InlineOnly`) inline fn (`require`/`check`) inlines its lambda
                 // argument (or the file is skipped), so a mutable capture is an inline capture — type the
                 // lambda body with mutation allowed (don't `Ref`-box the captured var).
@@ -34667,6 +34939,7 @@ impl<'a> Checker<'a> {
                                     arg_names.as_deref(),
                                 );
                                 module_member_lambda_shape(
+                                    &*self.syms.libraries,
                                     member,
                                     generic_member.as_ref(),
                                     args,
@@ -34995,6 +35268,18 @@ impl<'a> Checker<'a> {
                         // Reuse the already-computed non-lambda argument type (avoid re-typing).
                         if let Some(Some(t)) = toplevel_partial.as_ref().and_then(|p| p.get(i)) {
                             return *t;
+                        }
+                        // A selected functional-interface target supplies the lambda's first real
+                        // parameter types. This precedes declaration-specific fallback shaping.
+                        if let Some(TopLevelSamSelection::Picked(_, sam_pts)) =
+                            top_level_sam.as_ref()
+                        {
+                            if matches!(self.file.expr(a), Expr::Lambda { .. }) {
+                                if let Some(Some(pt)) = sam_pts.get(i) {
+                                    let pt = pt.clone();
+                                    return self.check_lambda_with_types(a, &pt);
+                                }
+                            }
                         }
                         if let Some(ref sig) = known_sig {
                             // The PARAMETER index this argument binds — not always the positional `i`:
@@ -35520,16 +35805,23 @@ impl<'a> Checker<'a> {
                 let user_shadows = self.module_declares(&fname);
                 let module =
                     crate::module_symbols::ModuleSymbols::for_file(self.syms, self.file_index);
-                let module_top = self
-                    .imports
-                    .get(&fname)
-                    .and_then(|target| target.rsplit_once('/'))
-                    .and_then(|(package, declared_name)| {
-                        module.resolve_top_level_in_scope(
-                            declared_name,
-                            &arg_tys,
-                            &[type_name(package)],
-                        )
+                let (top_level_sam_pick, top_level_sam_ambiguous) = match top_level_sam {
+                    Some(TopLevelSamSelection::Picked(candidate, _)) => (Some(*candidate), None),
+                    Some(TopLevelSamSelection::Ambiguous(candidates)) => (None, Some(candidates)),
+                    None => (None, None),
+                };
+                let module_top = top_level_sam_pick
+                    .or_else(|| {
+                        self.imports
+                            .get(&fname)
+                            .and_then(|target| target.rsplit_once('/'))
+                            .and_then(|(package, declared_name)| {
+                                module.resolve_top_level_in_scope(
+                                    declared_name,
+                                    &arg_tys,
+                                    &[type_name(package)],
+                                )
+                            })
                     })
                     .or_else(|| {
                         module.resolve_top_level_in_scope(&fname, &arg_tys, &self.fn_scope)
@@ -35656,6 +35948,19 @@ impl<'a> Checker<'a> {
                         self.mark_module_top_level_call(call, &fi, ret_ty, sources);
                         return ret_ty;
                     }
+                }
+                // Report only after closer implicit-receiver and context callables had their turn.
+                // The candidate list itself is provider-neutral and therefore uses the same
+                // ambiguity rule for source, sibling-module, and dependency declarations.
+                if let Some(candidates) = top_level_sam_ambiguous {
+                    let mut message =
+                        "overload resolution ambiguity between candidates:".to_string();
+                    for candidate in &candidates {
+                        message.push('\n');
+                        message.push_str(&Self::top_level_candidate_display(&fname, candidate));
+                    }
+                    self.diags.error(self.call_callee_name_span(call), message);
+                    return Ty::Error;
                 }
                 if let Some(fi) = module_top {
                     let host_checkpoint = (self.script_host_may_declare_call(&fname)
@@ -35963,11 +36268,10 @@ impl<'a> Checker<'a> {
                         for (i, slot) in slots.iter().enumerate() {
                             if let Some(a) = slot {
                                 let aty = self.expr_types[a.0 as usize];
-                                self.expect_assignable(
+                                self.expect_call_arg(
                                     generic_expectations.get(a).copied().unwrap_or(params[i]),
+                                    *a,
                                     aty,
-                                    self.span(*a),
-                                    "argument",
                                 );
                             }
                         }
@@ -35993,14 +36297,13 @@ impl<'a> Checker<'a> {
                         );
                     } else {
                         for (i, a) in arg_tys.iter().enumerate() {
-                            self.expect_assignable(
+                            self.expect_call_arg(
                                 generic_expectations
                                     .get(&args[i])
                                     .copied()
                                     .unwrap_or(params[i]),
+                                args[i],
                                 *a,
-                                self.span(args[i]),
-                                "argument",
                             );
                         }
                     }
