@@ -23,7 +23,7 @@ pub(crate) use crate::resolve::{
     FunctionImportScope, InlineCall, InvokeKind, IteratorDispatchTarget, LambdaCapture, LambdaInfo,
     ReceiverFnValueOrigin, ReceiverLambda, ResolvedCall, ResolvedConstructor,
     ResolvedCtorDelegationTarget, ResolvedLocalFunctionCall, ResolvedMember,
-    ResolvedModuleTopLevelCall, SigFlags, Signature, StmtLowering,
+    ResolvedModuleTopLevelCall, SigFlags, Signature, StaticPropertyStorage, StmtLowering,
 };
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
