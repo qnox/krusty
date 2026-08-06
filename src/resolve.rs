@@ -34875,6 +34875,14 @@ impl<'a> Checker<'a> {
                                 }
                                 return self.ctor_result_name(call, cls.internal_name());
                             }
+                        } else if !cls.is_interface() {
+                            // A semantic class signature without a source AST has already supplied
+                            // the construction result through this classifier rung. Preserve that
+                            // stable exit: sending it through provider selection changes dependency
+                            // scheduling during multi-file return inference. Interfaces are the sole
+                            // exception because they cannot denote a construction; declining them lets
+                            // the ordinary provider-neutral callable path select a same-named factory.
+                            return self.ctor_result_name(call, cls.internal_name());
                         }
                     }
                     if let Some(internal) = scoped_nested_internal
