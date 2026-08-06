@@ -144,6 +144,8 @@ mod classpath_companion;
 mod classpath_companion_ext_lambda_e2e;
 #[path = "classpath_companion_invoke_e2e.rs"]
 mod classpath_companion_invoke_e2e;
+#[path = "classpath_context_vararg_named_e2e.rs"]
+mod classpath_context_vararg_named_e2e;
 #[path = "classpath_covariant_override_e2e.rs"]
 mod classpath_covariant_override_e2e;
 #[path = "classpath_ctor_receiver_lambda_e2e.rs"]

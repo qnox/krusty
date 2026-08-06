@@ -17337,11 +17337,7 @@ impl<'a> Checker<'a> {
                 trailing_lambda,
             ) {
                 Ok(slots) => mapped.push((
-                    self.call_slot_score_vararg(
-                        value_params,
-                        &slots,
-                        candidate.call_sig.vararg_index,
-                    ),
+                    self.call_slot_score_vararg(value_params, &slots, value_signature.vararg_index),
                     slots,
                     candidate,
                 )),
@@ -17351,7 +17347,13 @@ impl<'a> Checker<'a> {
         if !mapped.is_empty() && mapped.iter().all(|(score, _, _)| score.is_none()) {
             if mapped.len() == 1 {
                 let (_, slots, candidate) = mapped.pop().unwrap();
-                for (parameter, argument) in candidate.callable.params.iter().zip(&slots) {
+                // The slots are value-indexed — explain the rejection against the VALUE
+                // parameters, not the context prefix.
+                let context_count = candidate.context_count.min(candidate.callable.params.len());
+                for (parameter, argument) in candidate.callable.params[context_count..]
+                    .iter()
+                    .zip(&slots)
+                {
                     if let Some(argument) = argument {
                         self.expect_assignable(
                             *parameter,
@@ -35709,11 +35711,19 @@ impl<'a> Checker<'a> {
                         if let Some(slots) = resolved_slots {
                             self.resolved_call_arg_slots.insert(call, slots);
                         }
-                        let last_is_array =
-                            c.params.last().is_some_and(|p| p.array_elem().is_some());
+                        // Context parameters are supplied implicitly (resolved above), never by the
+                        // written arguments — every positional check below zips the arguments
+                        // against the VALUE parameters only.
+                        let ctx = c.context_count.min(c.params.len());
+                        let value_params = &c.params[ctx..];
+                        let last_is_array = value_params
+                            .last()
+                            .is_some_and(|p| p.array_elem().is_some());
                         let vararg = last_is_array
-                            && (c.params.len() != arg_tys.len()
-                                || c.params.last().map_or(false, |p| arg_tys.last() != Some(p)));
+                            && (value_params.len() != arg_tys.len()
+                                || value_params
+                                    .last()
+                                    .map_or(false, |p| arg_tys.last() != Some(p)));
                         if let Some(slots) = named_slots.as_ref().filter(|_| c.default_call) {
                             // The labelled, parameter-omitting form: each argument is checked against
                             // the parameter its label named, not against the one at its position.
@@ -35723,7 +35733,7 @@ impl<'a> Checker<'a> {
                                 if matches!(self.file.expr(argument), Expr::Lambda { .. }) {
                                     continue;
                                 }
-                                let Some(&declared) = c.params.get(parameter) else {
+                                let Some(&declared) = value_params.get(parameter) else {
                                     continue;
                                 };
                                 self.expect_library_call_arg(
@@ -35733,14 +35743,14 @@ impl<'a> Checker<'a> {
                                     "argument",
                                 );
                             }
-                        } else if vararg && !c.params.is_empty() {
-                            let fixed = c.params.len() - 1;
+                        } else if vararg && !value_params.is_empty() {
+                            let fixed = value_params.len() - 1;
                             let elem = c.vararg_elem.unwrap_or_else(|| {
-                                c.params[fixed].array_elem().unwrap_or(Ty::Error)
+                                value_params[fixed].array_elem().unwrap_or(Ty::Error)
                             });
                             for i in 0..fixed.min(arg_tys.len()) {
                                 self.expect_library_call_arg(
-                                    c.params[i],
+                                    value_params[i],
                                     arg_tys[i],
                                     sel_args[i],
                                     "argument",
@@ -35757,13 +35767,13 @@ impl<'a> Checker<'a> {
                         } else if c.default_call
                             && arg_tys.last().is_some_and(|t| matches!(t, Ty::Fun(_)))
                             && !arg_tys.is_empty()
-                            && arg_tys.len() < c.params.len()
+                            && arg_tys.len() < value_params.len()
                         {
                             let prefix_len = arg_tys.len() - 1;
-                            let last = c.params.len() - 1;
+                            let last = value_params.len() - 1;
                             for i in 0..prefix_len {
                                 self.expect_library_call_arg(
-                                    c.params[i],
+                                    value_params[i],
                                     arg_tys[i],
                                     sel_args[i],
                                     "argument",
@@ -35772,7 +35782,7 @@ impl<'a> Checker<'a> {
                             let lambda_arg = sel_args[prefix_len];
                             if !matches!(self.file.expr(lambda_arg), Expr::Lambda { .. }) {
                                 self.expect_library_call_arg(
-                                    c.params[last],
+                                    value_params[last],
                                     arg_tys[prefix_len],
                                     lambda_arg,
                                     "argument",
@@ -35783,12 +35793,10 @@ impl<'a> Checker<'a> {
                                 if matches!(self.file.expr(sel_args[i]), Expr::Lambda { .. }) {
                                     continue;
                                 }
-                                self.expect_library_call_arg(
-                                    c.params[i],
-                                    *a,
-                                    sel_args[i],
-                                    "argument",
-                                );
+                                let Some(&declared) = value_params.get(i) else {
+                                    continue;
+                                };
+                                self.expect_library_call_arg(declared, *a, sel_args[i], "argument");
                             }
                         }
                         return c.ret;

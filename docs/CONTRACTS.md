@@ -104,7 +104,14 @@ kotlinc's reader and krusty's accept it.
   keeps them OUT of `value_parameter` in metadata — a caller fills them implicitly from the
   enclosing context instead of positionally. `context_count` rides
   `LibraryCallable`/`FunctionInfo`/`MetadataCallFacts`; the implicit fill is recorded in
-  `TypeInfo::context_args`.
+  `TypeInfo::context_args`. Each entry's `ValueParameter.name` (field 2) and its type's
+  nullability are read too: the call sig `metadata_call_facts_name` builds is FULL-arity
+  (context + value), so the name/default/lambda-shape/vararg facts all carry a context
+  prefix — names prepended, `vararg_index` shifted by `context_count` — and per-call-site
+  code strips the prefix with `call_sig_without_context` (the same contract as a source
+  function, whose context params are leading `params` entries). CAVEAT: the extension-index
+  channel (`MetaFn::extension_call_sig`/`member_call_sig`) still builds VALUE-only sigs;
+  align it to the full-arity contract before relying on context facts there.
 - `Type.type_parameter` = **field 7**: the id is the parameter's index in the function's
   `Function.type_parameter` table (field 4); `Type.type_parameter_name` = 9 carries the name
   for by-name readers. Generic receiver/parameter/return types AND contract `is`-conclusions

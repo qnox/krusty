@@ -861,6 +861,10 @@ struct ParsedFunction {
     /// (`context(a: A, b: B) fun f(…)`), excluded from the source value-parameter arity.
     /// Per entry: whether its type is nullable (drives context-source matching at call sites).
     context_params_nullable: Vec<bool>,
+    /// Per context parameter: its `ValueParameter.name` string-table id, resolved downstream. The
+    /// full-arity call shape spells context params as leading parameters (matching the source
+    /// model), so their names must survive alongside the value-parameter names.
+    context_params_name_ids: Vec<u64>,
 }
 
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
@@ -888,6 +892,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut contract_body: Option<Vec<u8>> = None;
     let mut type_table_body: Option<Vec<u8>> = None;
     let mut context_params_nullable: Vec<bool> = Vec::new();
+    let mut context_params_name_ids: Vec<u64> = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -905,14 +910,16 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
             (13, 2) => {
                 // Function.context_parameter (repeated `ValueParameter`) — leading context
                 // parameters, NOT part of the source arity. `ValueParameter.type` = 3 (inline
-                // `Type`) carries the nullability.
+                // `Type`) carries the nullability; `ValueParameter.name` = 2 the name id.
                 let n = pb.varint()? as usize;
                 let vb = pb.bytes(n)?;
                 let mut vp = Pb { b: vb, i: 0 };
                 let mut nullable = false;
+                let mut ctx_name_id = 0u64;
                 while !vp.at_end() {
                     let vt = vp.varint()?;
                     match (vt >> 3, vt & 7) {
+                        (2, 0) => ctx_name_id = vp.varint()?,
                         (3, 2) => {
                             let tn = vp.varint()? as usize;
                             nullable = parse_type_nullable(vp.bytes(tn)?);
@@ -921,6 +928,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                     }
                 }
                 context_params_nullable.push(nullable);
+                context_params_name_ids.push(ctx_name_id);
             }
             (12, 2) => {
                 // Function.annotation (repeated `Annotation`) — decoded downstream (needs the string table).
@@ -1034,6 +1042,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
         contract_body,
         type_table_body,
         context_params_nullable,
+        context_params_name_ids,
     })
 }
 
@@ -1709,6 +1718,10 @@ pub struct MetaFn {
     pub context_count: usize,
     /// Per context parameter: whether its declared type is nullable.
     pub context_params_nullable: Vec<bool>,
+    /// Per context parameter: its declared name. The full-arity call shape spells context params as
+    /// leading parameters (matching the source model, where they are leading entries of `params`),
+    /// so a call sig built from metadata needs their names ahead of the value-parameter names.
+    pub context_param_names: Vec<String>,
 }
 
 impl MetaFn {
@@ -2132,6 +2145,11 @@ fn decode_functions(ctx: &MetaCtx, fn_field: u64, class_tparams: &[(u64, String)
                         contract,
                         context_count: pf.context_params_nullable.len(),
                         context_params_nullable: pf.context_params_nullable.clone(),
+                        context_param_names: pf
+                            .context_params_name_ids
+                            .iter()
+                            .map(|&id| resolve_string(records, d2, id as usize).unwrap_or_default())
+                            .collect(),
                     });
                 }
             }
