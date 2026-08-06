@@ -198,7 +198,11 @@ impl<'a> ModuleSymbols<'a> {
             // (`companion_class`/`companion_methods`); the classpath fallback isn't used for them.
             companion_object: None,
             value_companion_fns: Vec::new(),
-            value_underlying: None,
+            // `LibraryType` is the provider-neutral classifier shape consumed by the federated
+            // resolver. Preserve source value-class metadata here just as a classpath provider
+            // does, so every downstream query (identity diagnostics included) can use the common
+            // `SymbolSource::is_value_name` contract instead of branching on symbol provenance.
+            value_underlying: c.value_field.as_ref().map(|(_, ty)| *ty),
             alias_target: None,
             // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can
             // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in
@@ -1057,6 +1061,22 @@ mod tests {
     }
 
     #[test]
+    fn type_shapes_include_value_class_metadata() {
+        let mut symbols = FrontendSymbols::default();
+        let mut id = class("sample/Id");
+        id.value_field = Some(("raw".to_string(), Ty::Int));
+        symbols.classes.insert(type_name("sample/Id"), id);
+
+        let source = ModuleSymbols::new(&symbols);
+        let shape = source.resolve_type_name(type_name("sample/Id")).unwrap();
+        assert_eq!(shape.value_underlying, Some(Ty::Int));
+        assert!(
+            source.is_value_name(type_name("sample/Id")),
+            "the common SymbolSource query must recognize source value classes without a provider-specific fallback"
+        );
+    }
+
+    #[test]
     fn resolve_type_name_reuses_the_shape_built_for_a_repeated_query() {
         let mut st = FrontendSymbols::default();
         st.insert_class(class("demo/Widget"));
@@ -1309,6 +1329,7 @@ mod tests {
             receiver: Some(receiver),
             params: vec![Ty::fun(vec![parameter], parameter)],
             ret: receiver,
+            return_policy: Default::default(),
         };
         let mut signature = sig(
             vec![Ty::fun(vec![Ty::obj("kotlin/Any")], Ty::obj("kotlin/Any"))],

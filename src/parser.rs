@@ -1655,15 +1655,11 @@ impl<'a> Parser<'a> {
     /// Hoist nested interfaces and supported interface subclasses.
     fn register_interface_nested(&mut self, iface: &str, modifiers: &[String]) {
         let start = self.file.decls.len();
-        let mut nested = self.parse_nested_type_decl();
+        let nested = self.parse_nested_type_decl();
         let implements = nested.supertypes.iter().any(|s| s.name == iface)
             || nested.base_class.as_deref() == Some(iface);
         if nested.is_interface() || implements {
-            self.reprefix_hoisted(iface, start);
-            nested.visibility = visibility_of(modifiers);
-            nested.name = format!("{iface}.{}", nested.name);
-            let id = self.file.add_decl(Decl::Class(nested));
-            self.file.decls.push(id);
+            self.register_hoisted_nested_classifier(iface, start, nested, modifiers);
         }
     }
 
@@ -3054,6 +3050,96 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Publish one already-parsed nested classifier and every descendant it hoisted while parsing.
+    /// This is the single owner-identity boundary for class-like declarations: syntax-specific parsers
+    /// may set class flags first, but visibility, lexical prefixing, and declaration-list registration
+    /// must remain identical for class, object, interface, enum, and interface-member entry points.
+    fn register_hoisted_nested_classifier(
+        &mut self,
+        outer: &str,
+        start: usize,
+        mut nested: ClassDecl,
+        modifiers: &[String],
+    ) {
+        self.reprefix_hoisted(outer, start);
+        nested.visibility = visibility_of(modifiers);
+        nested.name = format!("{outer}.{}", nested.name);
+        let id = self.file.add_decl(Decl::Class(nested));
+        self.file.decls.push(id);
+    }
+
+    /// Parse and register any class-like declaration that this parser can represent as a hoisted
+    /// nested classifier. Class and object bodies deliberately share this funnel: the declaration's
+    /// lexical owner, not the kind of its enclosing declaration, determines its source/JVM identity.
+    ///
+    /// `start` must precede the child parse because that parse may itself hoist descendants. Prefixing
+    /// that complete suffix before registering the child preserves paths such as `A.B.C`; doing this in
+    /// individual enum/class/object arms previously let otherwise-equivalent branches drift apart.
+    fn parse_and_register_nested_classifier(
+        &mut self,
+        outer: &str,
+        modifiers: &[String],
+        enclosing_instance_exists: bool,
+    ) -> bool {
+        let is_inner = modifiers.iter().any(|modifier| modifier == "inner");
+        let start = self.file.decls.len();
+        let (mut nested, supports_inner) = match self.kind() {
+            TokenKind::KwClass => {
+                let nested = self.parse_class();
+                (nested, true)
+            }
+            TokenKind::Ident
+                if self.text() == "data"
+                    && self.t.get(self.i + 1).is_some_and(|token| {
+                        token.kind == TokenKind::KwClass
+                            || (token.kind == TokenKind::Ident && token.text(self.src) == "object")
+                    }) =>
+            {
+                self.bump(); // `data`
+                let (mut nested, supports_inner) =
+                    if self.at(TokenKind::Ident) && self.text() == "object" {
+                        (self.parse_object(), false)
+                    } else {
+                        (self.parse_class(), true)
+                    };
+                nested.is_data = true;
+                (nested, supports_inner)
+            }
+            TokenKind::Ident if self.text() == "interface" => (self.parse_interface(), false),
+            TokenKind::Ident
+                if self.text() == "enum"
+                    && self
+                        .t
+                        .get(self.i + 1)
+                        .is_some_and(|token| token.kind == TokenKind::KwClass) =>
+            {
+                (self.parse_enum(), false)
+            }
+            TokenKind::Ident if self.text() == "object" => (self.parse_object(), false),
+            _ => return false,
+        };
+
+        if is_inner && supports_inner && !enclosing_instance_exists {
+            // An object is a singleton, so it cannot provide the per-instance receiver an `inner
+            // class` requires. Consume the unsupported declaration without publishing a falsely
+            // constructible classifier. The child parse may have tentatively hoisted descendants,
+            // so remove that declaration-list suffix with the unsupported owner as one atomic unit.
+            // Other classifier kinds ignore an inapplicable `inner` modifier rather than acquiring
+            // class-only capture metadata.
+            self.file.decls.truncate(start);
+            return true;
+        }
+
+        if nested.kind == ClassKind::Class {
+            nested.modality = modality_from_modifiers(modifiers);
+        }
+        if is_inner && supports_inner {
+            nested.inner_of = Some(outer.to_string());
+        }
+        self.register_hoisted_nested_classifier(outer, start, nested, modifiers);
+        true
+    }
+
     /// Depth-guarded entries for the class-like declaration parsers. Nested type declarations
     /// (`class A { class B { … } }`, nested interfaces/objects/enums, and mixed chains) recurse
     /// through these without ever passing through `parse_bp` or `parse_stmt`, so they share their
@@ -3232,6 +3318,12 @@ impl<'a> Parser<'a> {
                 let fun_final = mods.iter().any(|m| m == "final");
                 let fun_suspend = mods.iter().any(|m| m == "suspend");
                 let is_abstract = mods.iter().any(|m| m == "abstract");
+                // All representable nested classifier kinds share one registration path. Keeping
+                // this outside the member-kind match prevents class/object/enum syntax branches from
+                // acquiring subtly different visibility or lexical-name behavior.
+                if self.parse_and_register_nested_classifier(&name, &mods, true) {
+                    continue;
+                }
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
@@ -3292,106 +3384,6 @@ impl<'a> Parser<'a> {
                             &mut companion_supertypes,
                             &mut companion_decl_line,
                         );
-                    }
-                    // Silently skip nested type declarations (inner/nested class, object,
-                    // interface, typealias) and secondary constructors.  Parsing them properly
-                    // requires nesting the full resolver/emitter; for now we drop them and the
-                    // file compiles so tests that don't exercise the nested type still pass.
-                    TokenKind::KwClass => {
-                        // A nested class `Outer { class Inner … }` is hoisted to the file top level as a
-                        // separate class (internal `Outer$Inner`, source `Outer.Inner`). An `inner class`
-                        // additionally captures the enclosing instance (`inner_of` → a synthetic `this$0`
-                        // field + outer-as-first-constructor-parameter).
-                        let is_inner = mods.iter().any(|m| m == "inner");
-                        let start = self.file.decls.len();
-                        let mut nested = self.parse_class();
-                        self.reprefix_hoisted(&name, start);
-                        nested.modality = modality_from_modifiers(&mods);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        if is_inner {
-                            nested.inner_of = Some(name.clone());
-                        }
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    // Nested `data class Inner(…)` → hoist like a plain nested class (`Outer.Inner`),
-                    // constructed as `Outer.Inner(…)`; its data members emit normally. `data object Inner`
-                    // hoists the same way — `data` is just a modifier on either, exactly as at the file top
-                    // level, and a sealed hierarchy's singleton cases
-                    // (`sealed class S { data object A : S() }`) are that shape.
-                    TokenKind::Ident
-                        if self.text() == "data"
-                            && self.t.get(self.i + 1).is_some_and(|t| {
-                                t.kind == TokenKind::KwClass
-                                    || (t.kind == TokenKind::Ident && t.text(self.src) == "object")
-                            }) =>
-                    {
-                        self.bump(); // 'data'
-                        let start = self.file.decls.len();
-                        let mut nested = if self.at(TokenKind::Ident) && self.text() == "object" {
-                            self.parse_object()
-                        } else {
-                            self.parse_class()
-                        };
-                        self.reprefix_hoisted(&name, start);
-                        nested.is_data = true;
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    // A nested `interface` (optionally `sealed`) in a class body hoists to the file top
-                    // level as `Outer.Foo` (internal `Outer$Foo`), like a nested class — a sibling or child
-                    // can implement it by simple name. Objects/enums/annotations still drop (their
-                    // instance/entry shapes need more than a rename).
-                    TokenKind::Ident
-                        if self.text() == "interface"
-                            || (self.text() == "sealed"
-                                && self.t.get(self.i + 1).map_or(false, |t| {
-                                    t.kind == TokenKind::Ident && t.text(self.src) == "interface"
-                                })) =>
-                    {
-                        if self.text() == "sealed" {
-                            self.bump();
-                        }
-                        let start = self.file.decls.len();
-                        let mut nested = self.parse_interface();
-                        self.reprefix_hoisted(&name, start);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    // A nested `enum class Inner { A, B }` hoists to the file top level as `Outer.Inner`
-                    // (internal `Outer$Inner`), like a nested class; its entries register under the
-                    // hoisted name and read as `Outer.Inner.ENTRY`.
-                    TokenKind::Ident
-                        if self.text() == "enum"
-                            && self
-                                .t
-                                .get(self.i + 1)
-                                .map_or(false, |t| t.kind == TokenKind::KwClass) =>
-                    {
-                        let start = self.file.decls.len();
-                        let mut nested = self.parse_enum();
-                        self.reprefix_hoisted(&name, start);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    // A nested `object Foo(: Base())?` hoists to the file top level as `Outer.Foo`
-                    // (internal `Outer$Foo`), like a nested class — a sealed class's case objects
-                    // (`sealed class V { object Ok : V() }`) are exactly this shape.
-                    TokenKind::Ident if self.text() == "object" => {
-                        let start = self.file.decls.len();
-                        let mut nested = self.parse_object();
-                        self.reprefix_hoisted(&name, start);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
                     }
                     TokenKind::Ident
                         if self.text() == "annotation"
@@ -4029,6 +4021,13 @@ impl<'a> Parser<'a> {
                 let fun_inline = mods.iter().any(|m| m == "inline");
                 let fun_final = mods.iter().any(|m| m == "final");
                 let fun_suspend = mods.iter().any(|m| m == "suspend");
+                // Named singleton owners use the same classifier-registration invariant as class
+                // owners. The flag only excludes `inner` classes, whose semantics require an
+                // enclosing instance that a singleton cannot supply. Anonymous-object bodies use
+                // `parse_object_body` instead and have no stable owner identity to publish here.
+                if self.parse_and_register_nested_classifier(&name, &mods, false) {
+                    continue;
+                }
                 match self.kind() {
                     TokenKind::RBrace | TokenKind::Eof => break,
                     TokenKind::KwFun => {
@@ -4072,50 +4071,12 @@ impl<'a> Parser<'a> {
                         let block = self.parse_block_expr(false);
                         init_order.push(ClassInit::Block(block));
                     }
-                    // A plain nested class in an object body (`object Foo { class Bar … }`) hoists to the
-                    // file top level as `Foo.Bar` (internal `Foo$Bar`) — exactly like a class-body nested
-                    // type. `inner class` inside an object captures no valid enclosing instance (an object
-                    // is a singleton), so keep dropping those (unsupported → skip, not miscompile).
-                    TokenKind::KwClass if !mods.iter().any(|m| m == "inner") => {
-                        let mut nested = self.parse_class();
-                        nested.modality = modality_from_modifiers(&mods);
-                        nested.visibility = visibility_of(&mods);
-                        nested.name = format!("{}.{}", name, nested.name);
-                        let id = self.file.add_decl(Decl::Class(nested));
-                        self.file.decls.push(id);
-                    }
-                    TokenKind::KwClass => {
-                        let _ = self.parse_nested_type_decl();
-                    }
-                    // A nested `data class Bar(…)` in an object body → hoist like a plain nested class.
-                    // An `inner data class` captures no enclosing instance in an object (singleton) — drop
-                    // it (unsupported → skip) exactly as the plain-`class` arm drops `inner class`.
                     TokenKind::Ident
-                        if self.text() == "data"
+                        if self.text() == "annotation"
                             && self
                                 .t
                                 .get(self.i + 1)
                                 .map_or(false, |t| t.kind == TokenKind::KwClass) =>
-                    {
-                        self.bump(); // 'data'
-                        if mods.iter().any(|m| m == "inner") {
-                            let _ = self.parse_nested_type_decl();
-                        } else {
-                            let mut nested = self.parse_class();
-                            nested.is_data = true;
-                            nested.visibility = visibility_of(&mods);
-                            nested.name = format!("{}.{}", name, nested.name);
-                            let id = self.file.add_decl(Decl::Class(nested));
-                            self.file.decls.push(id);
-                        }
-                    }
-                    TokenKind::Ident
-                        if matches!(self.text(), "object" | "interface")
-                            || (matches!(self.text(), "enum" | "annotation")
-                                && self
-                                    .t
-                                    .get(self.i + 1)
-                                    .map_or(false, |t| t.kind == TokenKind::KwClass)) =>
                     {
                         let _ = self.parse_nested_type_decl();
                     }

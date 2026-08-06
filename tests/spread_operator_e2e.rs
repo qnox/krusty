@@ -4,9 +4,8 @@
 
 use super::common;
 
-/// `None` means ONLY that the toolchain isn't provisioned; a source the front end REJECTS panics
-/// with its diagnostics instead of skipping as a silent pass.
-fn run(src: &str) -> Option<String> {
+/// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics.
+fn run(src: &str) -> String {
     common::expect_box_run_with_stdlib(src, "Sp")
 }
 
@@ -19,9 +18,7 @@ fun box(): String {
     return if (foo(*a) == 3) "OK" else "no"
 }
 "#;
-    if let Some(out) = run(src) {
-        assert_eq!(out, "OK");
-    }
+    assert_eq!(run(src), "OK");
 }
 
 #[test]
@@ -34,7 +31,5 @@ fun box(): String {
     return if (join(*a) == "x-y-z") "OK" else join(*a)
 }
 "#;
-    if let Some(out) = run(src) {
-        assert_eq!(out, "OK");
-    }
+    assert_eq!(run(src), "OK");
 }

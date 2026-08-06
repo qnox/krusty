@@ -83,6 +83,21 @@ fn implements_stdlib_nested_interface() {
 }
 
 #[test]
+fn overriding_nested_typed_supertype_property_emits_loadable_class() {
+    // The metadata type of `CoroutineContext.Element.key` uses the source-facing dotted nested name
+    // `kotlin/coroutines/CoroutineContext.Key`. Override comparison and bytecode emission both consume
+    // the shared descriptor helper, so that helper must turn the class-tail dot into the JVM `$` form.
+    // Before that boundary normalization, bridge derivation observed unequal descriptors and emitted a
+    // dotted descriptor that the VM rejected while loading the otherwise ordinary implementation.
+    const SRC: &str = "import kotlin.coroutines.CoroutineContext\n\
+        class Elem(val name: String) : CoroutineContext.Element {\n\
+        \x20 override val key: CoroutineContext.Key<*> get() = TODO()\n\
+        }\n\
+        fun box(): String = Elem(\"OK\").name\n";
+    assert_eq!(run(SRC).expect("nested-typed property override"), "OK");
+}
+
+#[test]
 fn coroutine_context_nested_supertypes_resolve_on_the_frontend() {
     // A synthetic compound header: `CoroutineContext.Element` + `CoroutineContext.Key` are
     // supertypes of a class AND its companion. The shape additionally extends an abstract library

@@ -20,6 +20,8 @@ mod anon_fun_statement_e2e;
 mod anon_object_capture_e2e;
 #[path = "anon_object_capture_member_e2e.rs"]
 mod anon_object_capture_member_e2e;
+#[path = "anon_object_outer_this_e2e.rs"]
+mod anon_object_outer_this_e2e;
 #[path = "anonymous_function_e2e.rs"]
 mod anonymous_function_e2e;
 #[path = "apt_host_e2e.rs"]
@@ -206,6 +208,8 @@ mod classpath_object_nested_e2e;
 mod classpath_object_value_e2e;
 #[path = "classpath_properties_query_e2e.rs"]
 mod classpath_properties_query_e2e;
+#[path = "classpath_property_mutable_collection_e2e.rs"]
+mod classpath_property_mutable_collection_e2e;
 #[path = "classpath_protected_member_e2e.rs"]
 mod classpath_protected_member_e2e;
 #[path = "classpath_qualified_nested_named_ctor_e2e.rs"]
@@ -266,6 +270,8 @@ mod collection_members_e2e;
 mod collection_special_member_stub_e2e;
 #[path = "companion_const_e2e.rs"]
 mod companion_const_e2e;
+#[path = "companion_cross_file_property_e2e.rs"]
+mod companion_cross_file_property_e2e;
 #[path = "companion_e2e.rs"]
 mod companion_e2e;
 #[path = "companion_member_read_e2e.rs"]
@@ -278,6 +284,8 @@ mod companion_supertype_e2e;
 mod companion_toplevel_property_e2e;
 #[path = "compare_to_zero_branch_e2e.rs"]
 mod compare_to_zero_branch_e2e;
+#[path = "comparison_under_operands_e2e.rs"]
+mod comparison_under_operands_e2e;
 #[path = "compound_index_assign_e2e.rs"]
 mod compound_index_assign_e2e;
 #[path = "compound_member_assign_lhs_caching_e2e.rs"]
@@ -600,6 +608,8 @@ mod interface_default_property_e2e;
 mod interface_delegation_e2e;
 #[path = "interface_delegation_expr_e2e.rs"]
 mod interface_delegation_expr_e2e;
+#[path = "interface_factory_function_e2e.rs"]
+mod interface_factory_function_e2e;
 #[path = "interface_supertype_members_e2e.rs"]
 mod interface_supertype_members_e2e;
 #[path = "internal_classpath_access_e2e.rs"]
@@ -622,6 +632,8 @@ mod is_nullable_primitive_e2e;
 mod is_primitive_smartcast_e2e;
 #[path = "java_class_intrinsic_e2e.rs"]
 mod java_class_intrinsic_e2e;
+#[path = "java_ctor_sam_conversion_e2e.rs"]
+mod java_ctor_sam_conversion_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
 #[path = "java_nested_static_e2e.rs"]
@@ -660,6 +672,8 @@ mod lambda_e2e;
 mod lambda_vs_block_fun_type_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
+#[path = "lateinit_operand_stack_e2e.rs"]
+mod lateinit_operand_stack_e2e;
 #[path = "lib_fixture_parallel_e2e.rs"]
 mod lib_fixture_parallel_e2e;
 #[path = "library_fun_type_lambda_param_e2e.rs"]
@@ -710,6 +724,8 @@ mod member_default_implicit_receiver_e2e;
 mod member_extension_default_args_e2e;
 #[path = "member_extension_function_e2e.rs"]
 mod member_extension_function_e2e;
+#[path = "member_extension_in_lambda_e2e.rs"]
+mod member_extension_in_lambda_e2e;
 #[path = "member_extension_nested_hof_e2e.rs"]
 mod member_extension_nested_hof_e2e;
 #[path = "member_extension_property_e2e.rs"]
@@ -756,6 +772,8 @@ mod nested_class_ctor_scope_e2e;
 mod nested_class_supertype_e2e;
 #[path = "nested_class_unqualified_e2e.rs"]
 mod nested_class_unqualified_e2e;
+#[path = "nested_classifier_forward_ref_e2e.rs"]
+mod nested_classifier_forward_ref_e2e;
 #[path = "nested_ctor_named_args_e2e.rs"]
 mod nested_ctor_named_args_e2e;
 #[path = "nested_data_class_tostring_e2e.rs"]
@@ -988,6 +1006,8 @@ mod super_to_base_secondary_ctor_e2e;
 mod superclass_bridge_e2e;
 #[path = "supertype_scan_arrow_e2e.rs"]
 mod supertype_scan_arrow_e2e;
+#[path = "suspend_arg_order_e2e.rs"]
+mod suspend_arg_order_e2e;
 #[path = "suspend_class_implements_interface_e2e.rs"]
 mod suspend_class_implements_interface_e2e;
 #[path = "suspend_collection_hof_e2e.rs"]
@@ -1030,6 +1050,8 @@ mod suspend_receiver_lambda_e2e;
 mod suspend_return_type_recovery_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_try_catch_shapes_e2e.rs"]
+mod suspend_try_catch_shapes_e2e;
 #[path = "suspend_try_finally_body_e2e.rs"]
 mod suspend_try_finally_body_e2e;
 #[path = "suspend_try_finally_e2e.rs"]
@@ -1114,6 +1136,8 @@ mod unsigned_array_e2e;
 mod unsigned_classpath_call_e2e;
 #[path = "unsigned_ext_e2e.rs"]
 mod unsigned_ext_e2e;
+#[path = "unsigned_generic_erasure_e2e.rs"]
+mod unsigned_generic_erasure_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
 #[path = "use_site_variance_e2e.rs"]

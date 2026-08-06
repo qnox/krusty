@@ -504,17 +504,30 @@ fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
     }
 }
 
-/// Realize a signature `Ty` under the current bindings — a bound type variable substitutes to its
-/// binding, an unbound one erases to `Any`; a class substitutes its carried type arguments in place.
-pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
+/// What the shared substitution walk does with a type parameter absent from the supplied bindings.
+/// Keeping this as an explicit policy prevents the recursive handling of functions, nullability, and
+/// nested class arguments from drifting between partial and final signature realization.
+#[derive(Clone, Copy)]
+enum UnboundTyParam {
+    /// Final call-site realization: an unresolved variable has only its erased top type available.
+    EraseToAny,
+    /// Partial realization: leave method variables open while owner variables are being pre-bound.
+    Preserve,
+}
+
+fn ty_subst_with_unbound_policy(sig: Ty, binds: &GSigBinds, unbound: UnboundTyParam) -> Ty {
     match sig {
-        Ty::TyParam(n, _) => binds
-            .get(n)
-            .copied()
-            .unwrap_or_else(|| Ty::obj("kotlin/Any")),
+        Ty::TyParam(n, _) => binds.get(n).copied().unwrap_or_else(|| match unbound {
+            UnboundTyParam::EraseToAny => Ty::obj("kotlin/Any"),
+            UnboundTyParam::Preserve => sig,
+        }),
         Ty::Fun(fsig) => {
-            let params = ty_subst_all(&fsig.params, binds);
-            let ret = ty_subst(fsig.ret, binds);
+            let params = fsig
+                .params
+                .iter()
+                .map(|param| ty_subst_with_unbound_policy(*param, binds, unbound))
+                .collect();
+            let ret = ty_subst_with_unbound_policy(fsig.ret, binds, unbound);
             Ty::fun_with_shape(
                 params,
                 ret,
@@ -523,16 +536,35 @@ pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
                 fsig.suspend,
             )
         }
-        Ty::Nullable(inner) => Ty::nullable(ty_subst(*inner, binds)),
+        Ty::Nullable(inner) => Ty::nullable(ty_subst_with_unbound_policy(*inner, binds, unbound)),
         Ty::Obj(internal, args) if !args.is_empty() => {
-            Ty::obj_args_name(internal, &ty_subst_all(args, binds))
+            let args = args
+                .iter()
+                .map(|arg| ty_subst_with_unbound_policy(*arg, binds, unbound))
+                .collect::<Vec<_>>();
+            Ty::obj_args_name(internal, &args)
         }
         _ => sig,
     }
 }
 
+/// Realize a signature `Ty` under the current bindings — a bound type variable substitutes to its
+/// binding, an unbound one erases to `Any`; a class substitutes its carried type arguments in place.
+pub(crate) fn ty_subst(sig: Ty, binds: &GSigBinds) -> Ty {
+    ty_subst_with_unbound_policy(sig, binds, UnboundTyParam::EraseToAny)
+}
+
 pub(crate) fn ty_subst_all(sigs: &[Ty], binds: &GSigBinds) -> Vec<Ty> {
     sigs.iter().map(|s| ty_subst(*s, binds)).collect()
+}
+
+/// Realize a signature `Ty` under the current bindings, keeping an UNBOUND type variable free —
+/// unlike [`ty_subst`], which erases it to `Any`. For binding ONLY the class formals of a member
+/// signature from the applied receiver while its method formals stay open for call-site inference;
+/// used by the JVM member walk to pre-bind class formals. Callers that want the final use-time
+/// realization (unbound → `Any`) should use [`ty_subst`] instead.
+pub(crate) fn ty_subst_keep_unbound(sig: Ty, binds: &GSigBinds) -> Ty {
+    ty_subst_with_unbound_policy(sig, binds, UnboundTyParam::Preserve)
 }
 
 #[derive(Clone, Debug)]
@@ -786,6 +818,10 @@ fn classpath_sam_arg_matches(lib: &dyn SemanticPlatform, param: Ty, arg: Ty) -> 
     let Some(arity) = arg.fun_arity() else {
         return false;
     };
+    // A checked lambda has an authoritative arity and must match exactly. An unchecked literal uses
+    // the `Error` probe above; its selected call path performs the first body check and may synthesize
+    // implicit `it` for a one-parameter SAM. Keeping those states distinct avoids syntax-specific
+    // exceptions for call paths that happened to check a lambda too early.
     if sam.params.len() != usize::from(arity) {
         return false;
     }
@@ -2179,7 +2215,7 @@ impl<'a> SymbolResolver<'a> {
                 let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
                 if name.is_empty() {
                     // `Type(args)` — the type's constructor, real or synthesized.
-                    resolve_constructor_name(self.lib, &self.src, internal, &arg_tys)
+                    resolve_constructor_name(self.lib, &self.src, internal, args)
                         .filter(|member| access.allows(member.visibility, internal))
                         .map(Symbol::Constructor)
                         .or_else(|| {
@@ -2421,7 +2457,15 @@ impl<'a> SymbolResolver<'a> {
                 ty_subst(gsig.ret, &binds)
             })
             .unwrap_or(*ret);
-        let ret_ty = o.ret.apply(if o.flags.suspend { c.ret } else { ret_ty });
+        let ret_ty = o.ret.apply(if o.flags.suspend {
+            c.ret
+        } else {
+            // The signature owns post-substitution behavior, so every provider and callable origin
+            // reaches the same realization path after ordinary inference.
+            o.generic_sig
+                .as_ref()
+                .map_or(ret_ty, |sig| sig.apply_return_policy(self.lib, ret_ty))
+        });
 
         crate::trace_compiler!(
             "resolve",
@@ -3288,7 +3332,7 @@ fn resolve_constructor_name(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     internal: TypeName,
-    args: &[Ty],
+    args: &[CallArgKind],
 ) -> Option<LibraryMember> {
     let Some(t) = lib.resolve_type_name(internal) else {
         crate::trace_compiler!(
@@ -3305,8 +3349,11 @@ pub(crate) fn resolve_constructor_from_type(
     src: &dyn SymbolSource,
     internal: TypeName,
     t: &crate::libraries::LibraryType,
-    args: &[Ty],
+    args: &[CallArgKind],
 ) -> Option<LibraryMember> {
+    // Exact/erased/ABI passes compare RUNTIME types; the lambda-literal provenance only drives the
+    // SAM adaptation in the assignable pass below.
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     crate::trace_compiler!(
         "value_classes",
         "resolve_constructor {internal} ctors={:?} args={args:?}",
@@ -3316,8 +3363,8 @@ pub(crate) fn resolve_constructor_from_type(
         apply_platform_parameter_nullability(
             m.params.clone(),
             &m.call_sig.platform_nullable_params,
-            args,
-        ) == args
+            &arg_tys,
+        ) == arg_tys
     }) {
         return Some(m.clone());
     }
@@ -3325,8 +3372,8 @@ pub(crate) fn resolve_constructor_from_type(
     // (`class Rec(val id: Vid, val n: Int)` → `<init>(Ljava/lang/String;I)V` for `Vid(String)`), but the
     // call passes the value-class type itself (`Rec(Vid("x"), 1)` → arg `Vid`). Retry with each value-class
     // argument erased to its underlying, mirroring the ABI the descriptor-read `ctor` params already carry.
-    let erased = value_erased_args(lib, args);
-    if erased != args {
+    let erased = value_erased_args(lib, &arg_tys);
+    if erased != arg_tys {
         if let Some(m) = t.constructors.iter().find(|m| {
             apply_platform_parameter_nullability(
                 m.params.clone(),
@@ -3344,7 +3391,7 @@ pub(crate) fn resolve_constructor_from_type(
     // ABI-form matching bridges target collection identity and drops type arguments without
     // hardcoding collection relationships. Exact ABI identity runs before subtype widening so the
     // most-specific overload still wins.
-    let abi_args = abi_form_args(lib, args);
+    let abi_args = abi_form_args(lib, &arg_tys);
     if let Some(abi_args) = &abi_args {
         if let Some(m) = t.constructors.iter().find(|m| {
             let params = apply_platform_parameter_nullability(
@@ -3366,7 +3413,7 @@ pub(crate) fn resolve_constructor_from_type(
             let params = apply_platform_parameter_nullability(
                 m.params.clone(),
                 &m.call_sig.platform_nullable_params,
-                args,
+                &arg_tys,
             );
             // A module-declared argument class reaches its library supertype only through the
             // SOURCE federation (`class V : Visitor()` into `Holder(Visitor)`), mirroring member
@@ -3377,11 +3424,22 @@ pub(crate) fn resolve_constructor_from_type(
             // above, so an `(Int)`/`(Long)` overload pair still binds the exact one. `accepts_numeric`
             // is the shared predicate, so this admits exactly what those origins do — including the
             // `Int`-into-`Byte`/`Short` narrowing they already accept.
+            // A lambda literal SAM-converts to a Java functional-interface parameter through the
+            // same `classpath_sam_signature` mechanism method overloads use — without it every
+            // candidate looks inapplicable and the call is reported unresolved. Against a
+            // NON-function parameter the lambda matches ONLY through that conversion: a lambda
+            // whose checking the call site deferred carries a placeholder type that plain
+            // assignability would admit anywhere (a `TextOnly(String)` call with a lambda argument
+            // must stay unresolved).
             (params.len() == args.len()
                 && params.iter().zip(args).all(|(p, a)| {
-                    abi_arg_assignable_to_param(lib, *a, *p)
-                        || source_arg_assignable(src, p, a)
-                        || p.accepts_numeric(*a)
+                    if a.is_lambda_literal() && p.fun_arity().is_none() {
+                        classpath_sam_arg_matches(lib, *p, a.ty())
+                    } else {
+                        abi_arg_assignable_to_param(lib, a.ty(), *p)
+                            || source_arg_assignable(src, p, &a.ty())
+                            || p.accepts_numeric(a.ty())
+                    }
                 }))
             .then_some((params, m))
         }),
@@ -3390,7 +3448,7 @@ pub(crate) fn resolve_constructor_from_type(
         CandidateSelection::Selected(m) => {
             crate::trace_compiler!(
                 "value_classes",
-                "resolve_constructor {internal} matched assignable args {args:?}"
+                "resolve_constructor {internal} matched assignable args {arg_tys:?}"
             );
             return Some(m.clone());
         }
@@ -3398,14 +3456,15 @@ pub(crate) fn resolve_constructor_from_type(
         CandidateSelection::None => {}
     }
     // Fixed-arity constructors take precedence over expanded varargs.
-    for candidate_args in std::iter::once(args).chain((erased != args).then_some(erased.as_slice()))
+    for candidate_args in
+        std::iter::once(arg_tys.as_slice()).chain((erased != arg_tys).then_some(erased.as_slice()))
     {
         if let Some(member) = resolve_vararg_constructor(lib, &t.constructors, candidate_args) {
             return Some(member.clone());
         }
     }
     if let Some(abi_args) = &abi_args {
-        if abi_args.as_slice() != args && abi_args.as_slice() != erased.as_slice() {
+        if abi_args.as_slice() != arg_tys.as_slice() && abi_args.as_slice() != erased.as_slice() {
             if let Some(member) = resolve_vararg_constructor(lib, &t.constructors, abi_args) {
                 return Some(member.clone());
             }
@@ -3419,17 +3478,18 @@ pub(crate) fn resolve_constructor_from_type(
         // `X(u)` over the single underlying value — reference (`RoleId(String)`) or scalar
         // (`Count(Int)`); both erase to the underlying through the value-classes pass. (`null` only fits a
         // reference underlying.)
-        let fits = matches!(args, [arg]
+        let fits = matches!(arg_tys.as_slice(), [arg]
             if *arg == underlying || (matches!(*arg, Ty::Null) && underlying.is_reference()));
         // A ZERO-arg construction `Id()` when the sole underlying param is DEFAULTED — kotlinc realizes
         // it through the `constructor-impl$default` synthetic (which fills the default itself). Accept it
         // ONLY when that synthetic exists on the classpath, AND the underlying is a REFERENCE: the lowering
         // passes `null` for the dummy underlying slot, which fits only a reference (a scalar would need a
         // typed zero). A mandatory-param value class stays unresolved (no synthetic → no phantom call).
-        let all_default = args.is_empty() && underlying.is_reference() && t.value_ctor_has_default;
+        let all_default =
+            arg_tys.is_empty() && underlying.is_reference() && t.value_ctor_has_default;
         crate::trace_compiler!(
             "value_classes",
-            "resolve_constructor {internal} value-class underlying={underlying:?} args={args:?} fits={fits} all_default={all_default}"
+            "resolve_constructor {internal} value-class underlying={underlying:?} args={arg_tys:?} fits={fits} all_default={all_default}"
         );
         if fits {
             // Descriptor is unused on this path (the checker only needs the type; the lowerer lowers the
@@ -3663,6 +3723,9 @@ fn resolve_companion_name(
                 unify_ty(parameter, argument.ty(), &mut binds);
             }
             member.ret = merge_specialized_return(member.ret, ty_subst(gsig.ret, &binds));
+            // Static and instance calls consume the same declaration-owned return policy. Applying it
+            // here, after binding, preserves a flexible reference contract without a static/provider fork.
+            member.ret = gsig.apply_return_policy(lib, member.ret);
         }
         member
     })
@@ -3899,7 +3962,11 @@ fn resolve_instance_member(
             }
         })
         .unwrap_or(o.callable.ret);
-    let ret = o.ret.apply(ret);
+    let ret = o.ret.apply(
+        o.generic_sig
+            .as_ref()
+            .map_or(ret, |sig| sig.apply_return_policy(lib, ret)),
+    );
     let member = o.member_with_return(o.callable.ret);
     Some(ResolvedMember {
         ret,
@@ -5201,6 +5268,36 @@ mod tests {
     use crate::types::type_name;
 
     #[test]
+    fn partial_and_final_substitution_share_the_recursive_type_walk() {
+        // Owner binding happens before method inference. Exercise every recursive carrier here so
+        // adding a new substitution shape cannot make the partial path preserve structure differently
+        // from the final path: the ONLY intended policy difference is the unbound method variable.
+        let any = Ty::obj("kotlin/Any");
+        let owner = Ty::ty_param("Owner", any);
+        let method = Ty::ty_param("Method", any);
+        let signature = Ty::nullable(Ty::fun(
+            vec![Ty::obj_args("fixtures/Box", &[owner]), method],
+            Ty::obj_args("fixtures/Result", &[method]),
+        ));
+        let bindings = GSigBinds::from([("Owner".to_string(), Ty::String)]);
+
+        assert_eq!(
+            ty_subst_keep_unbound(signature, &bindings),
+            Ty::nullable(Ty::fun(
+                vec![Ty::obj_args("fixtures/Box", &[Ty::String]), method],
+                Ty::obj_args("fixtures/Result", &[method]),
+            ))
+        );
+        assert_eq!(
+            ty_subst(signature, &bindings),
+            Ty::nullable(Ty::fun(
+                vec![Ty::obj_args("fixtures/Box", &[Ty::String]), any],
+                Ty::obj_args("fixtures/Result", &[any]),
+            ))
+        );
+    }
+
+    #[test]
     fn inferred_generic_binding_joins_null_with_the_non_null_element_type() {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let mut inferred = GSigBinds::new();
@@ -5252,6 +5349,7 @@ mod tests {
             receiver: None,
             params: vec![class_of(parameter)],
             ret: optional_of(parameter),
+            return_policy: Default::default(),
         };
         assert_eq!(
             bind_member_return(
@@ -5269,6 +5367,7 @@ mod tests {
             receiver: None,
             params: vec![parameter],
             ret: parameter,
+            return_policy: Default::default(),
         };
         assert_eq!(
             bind_member_return(&owner_generic, optional_of(value), &[Ty::Null], value,),
@@ -5291,6 +5390,7 @@ mod tests {
             receiver: None,
             params: Vec::new(),
             ret: jvm_list,
+            return_policy: Default::default(),
         };
 
         assert_eq!(
@@ -5511,6 +5611,7 @@ mod tests {
             receiver: None,
             params: vec![generic_values, generic_sink],
             ret: Ty::Unit,
+            return_policy: Default::default(),
         });
 
         let params = specialized_lambda_member_params(

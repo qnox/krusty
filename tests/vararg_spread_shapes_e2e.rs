@@ -41,8 +41,7 @@ fn source_top_level_named_after_vararg_elements() {
         \x20 return if (got == \"OKtrue\") \"OK\" else \"F:\" + got\n\
         }\n";
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "named_after_vararg")
-            .expect("strict helper always returns Some"),
+        common::expect_box_run_with_stdlib(SRC, "named_after_vararg"),
         "OK"
     );
 }
@@ -56,8 +55,7 @@ fn source_extension_mixed_element_and_spread() {
         \x20 return if (B().seg(\"O\", *xs) == \"OK\") \"OK\" else \"F\"\n\
         }\n";
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "ext_mixed_spread")
-            .expect("strict helper always returns Some"),
+        common::expect_box_run_with_stdlib(SRC, "ext_mixed_spread"),
         "OK"
     );
 }
@@ -73,8 +71,7 @@ fn source_extension_mixed_spread_with_trailing_default() {
         \x20 return if (got == \"OKfalse\") \"OK\" else \"F:\" + got\n\
         }\n";
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "mixed_spread_default")
-            .expect("strict helper always returns Some"),
+        common::expect_box_run_with_stdlib(SRC, "mixed_spread_default"),
         "OK"
     );
 }
@@ -95,8 +92,7 @@ fn source_extension_named_after_vararg_elements() {
         \x20 return \"OK\"\n\
         }\n";
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "ext_named_after_vararg")
-            .expect("strict helper always returns Some"),
+        common::expect_box_run_with_stdlib(SRC, "ext_named_after_vararg"),
         "OK"
     );
 }
@@ -115,8 +111,7 @@ fn source_extension_named_final_vararg_without_defaults_runs() {
         \x20 return if (direct == \"OK\" && spread == \"OK\") \"OK\" else \"F:\" + direct + \"/\" + spread\n\
         }\n";
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "named_final_vararg_no_defaults")
-            .expect("strict helper always returns Some"),
+        common::expect_box_run_with_stdlib(SRC, "named_final_vararg_no_defaults"),
         "OK"
     );
 }
@@ -221,8 +216,7 @@ fn source_named_in_position_before_positional_vararg() {
         \x20 return \"OK\"\n\
         }\n";
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "named_in_position")
-            .expect("strict helper always returns Some"),
+        common::expect_box_run_with_stdlib(SRC, "named_in_position"),
         "OK"
     );
 }
@@ -258,8 +252,7 @@ fn source_top_level_named_after_spread() {
         \x20 return if (spread == \"OKtrue\" && direct == \"OKtrue\") \"OK\" else \"F:\" + spread + \"/\" + direct\n\
         }\n";
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "named_after_spread_top")
-            .expect("strict helper always returns Some"),
+        common::expect_box_run_with_stdlib(SRC, "named_after_spread_top"),
         "OK"
     );
 }
@@ -280,8 +273,7 @@ fn source_generic_named_whole_array_preserves_selected_array_form() {
         \x20 return if (direct == null && direct == spread && spread == mixed) \"OK\" else \"FAIL\"\n\
         }\n";
     assert_eq!(
-        common::expect_box_run_with_stdlib(SRC, "generic_named_array")
-            .expect("strict helper always returns Some"),
+        common::expect_box_run_with_stdlib(SRC, "generic_named_array"),
         "OK"
     );
 }
