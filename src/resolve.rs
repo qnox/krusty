@@ -749,6 +749,26 @@ pub struct DeclaredPropertySig {
     pub context_params: Vec<Ty>,
 }
 
+/// Physical storage selected for a source companion property.
+///
+/// This is part of the declaration signature because a use may be checked in a different file from
+/// the AST that declares it. Consumers must not rediscover the distinction from file ownership,
+/// property names, or the presence of a generated class: ordinary properties live in an outer-class
+/// static field, while field-less custom accessors dispatch through the companion singleton.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaticPropertyStorage {
+    OuterStaticField,
+    CompanionAccessors,
+}
+
+#[derive(Clone, Debug)]
+pub struct StaticPropertySig {
+    pub ty: Ty,
+    pub visibility: Visibility,
+    pub is_var: bool,
+    pub storage: StaticPropertyStorage,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassSig {
     pub internal: TypeName,
@@ -787,11 +807,10 @@ pub struct ClassSig {
     /// `serializer()`). A `ClassName.fn(...)` call lowers to `getstatic Companion; invokevirtual` only
     /// for a source companion function; a plugin-owned name is left to the plugin's own emit path.
     pub companion_fun_names: std::collections::HashSet<String>,
-    /// `companion object` properties and their source visibility.
-    /// Companion (static) properties: name → (type, visibility, `is_var`). Mutability belongs here
-    /// rather than being re-derived from a declaration's AST — a write may come from any file of the
-    /// module, so the current file's declarations are not the authority on it.
-    pub static_props: HashMap<String, (Ty, Visibility, bool)>,
+    /// Companion properties keyed by source name. Type, visibility, mutability, and physical storage
+    /// travel together so cross-file reads/writes cannot combine facts from drifting parallel maps or
+    /// re-derive ABI shape from the using file's AST.
+    pub static_props: HashMap<String, StaticPropertySig>,
     /// Names of `lateinit` properties (instance and companion) — reads emit a null-check that throws.
     pub lateinit_props: std::collections::HashSet<String>,
     /// Internal names of interfaces this type implements (for subtyping).
@@ -6241,7 +6260,7 @@ fn collect_signatures_with_cp_impl(
                             },
                         );
                     }
-                    let static_props: HashMap<String, (Ty, Visibility, bool)> = c
+                    let static_props: HashMap<String, StaticPropertySig> = c
                         .companion_props
                         .iter()
                         .zip(companion_property_scope.iter())
@@ -6263,7 +6282,19 @@ fn collect_signatures_with_cp_impl(
                             if (p.getter.is_some() || p.setter.is_some()) && !is_computed {
                                 diags.error(p.span, "krusty: this companion-object property accessor shape is not supported".to_string());
                             }
-                            (name.clone(), (*ty, p.visibility, p.is_var))
+                            (
+                                name.clone(),
+                                StaticPropertySig {
+                                    ty: *ty,
+                                    visibility: p.visibility,
+                                    is_var: p.is_var,
+                                    storage: if is_computed {
+                                        StaticPropertyStorage::CompanionAccessors
+                                    } else {
+                                        StaticPropertyStorage::OuterStaticField
+                                    },
+                                },
+                            )
                         })
                         .collect();
                     let lateinit_props: std::collections::HashSet<String> = c
@@ -10865,12 +10896,14 @@ pub enum ExprLowering {
     Lambda(LambdaInfo),
     /// A classpath `object` used as a value. Lowering emits `getstatic <internal>.INSTANCE`.
     ObjectValue { internal: TypeName },
-    /// A static field read selected semantically by resolution, independent of whether its symbol
-    /// came from the current file, another module file, or a platform/classpath provider.
-    StaticFieldRead {
+    /// A static/companion property read selected semantically by resolution. `storage` is the exact
+    /// physical capability exposed by the declaration; lowering does not inspect file ownership,
+    /// provider origin, generated names, or declaration ASTs to choose field versus accessor.
+    StaticPropertyRead {
         owner: TypeName,
         name: String,
         descriptor: Option<String>,
+        storage: StaticPropertyStorage,
     },
     /// Kotlin's synthetic `EnumType.entries` property. `accessor` is the exact physical realization
     /// advertised by the selected enum shape. Keeping the target here makes source, module, and
@@ -11007,13 +11040,15 @@ pub enum StmtLowering {
     LocalFunction(Box<LocalFunInfo>),
     /// A compound assignment (`target op= rhs`) selected as an in-place `opAssign` operator call.
     PlusAssign(CompoundAssignmentTarget),
-    /// `C.prop = value` where `prop` is a companion (static) property of a same-file class. The
-    /// receiver is a CLASS NAME, not a value, so the write is a static store on the outer class —
-    /// the mirror of the `getstatic C.prop` the read already emits.
+    /// `C.prop = value` where `prop` is a companion property. The receiver is a classifier, not a
+    /// value; `storage` carries the declaration-selected field/accessor realization across files.
     CompanionStaticWrite {
         owner: TypeName,
         name: String,
         ty: Ty,
+        /// The declaration-selected physical realization. Lowering must not consult its current
+        /// file's companion maps to decide whether this is a field store or an accessor call.
+        storage: StaticPropertyStorage,
     },
     /// A bare property write selected on an implicit receiver other than a lexical local. Lowering
     /// uses the recorded receiver instead of assuming the innermost `this`.
@@ -13411,7 +13446,7 @@ fn check_file_at_impl_mode(
                         let prop_ty = c
                             .same_package_class(&cl.name)
                             .and_then(|class| class.static_props.get(&p.name))
-                            .map(|&(ty, _, _)| ty)
+                            .map(|property| property.ty)
                             .unwrap_or(Ty::Error);
                         if let Some(getter) = &p.getter {
                             match getter {
@@ -24453,19 +24488,11 @@ impl<'a> Checker<'a> {
                         "context property access is not supported".to_string(),
                     );
                     Ty::Error
-                } else if let Some((owner, property, ty, visibility)) =
+                } else if let Some((owner, property, signature)) =
                     self.imported_source_companion_property(&n)
                 {
-                    self.reject_if_inaccessible(visibility, &n, owner, self.span(e));
-                    self.expr_lowers.insert(
-                        e,
-                        ExprLowering::StaticFieldRead {
-                            owner,
-                            name: property,
-                            descriptor: None,
-                        },
-                    );
-                    ty
+                    self.reject_if_inaccessible(signature.visibility, &n, owner, self.span(e));
+                    self.record_static_property_read(e, owner, property, signature)
                 } else if let Some(&(ty, _, _)) = self.syms.props.get(&n) {
                     ty // top-level property
                 } else if let Some(field) = self.imports.get(&n).and_then(|full| {
@@ -24873,14 +24900,15 @@ impl<'a> Checker<'a> {
                         }
                     }
                     // `ClassName.PROP` — a companion (static) property read.
-                    if let Some(cs) = self.module_class_named(&en) {
-                        if let Some(&(ty, visibility, _)) = cs.static_props.get(&name) {
-                            self.reject_if_inaccessible(
-                                visibility,
-                                &name,
-                                cs.internal_name(),
-                                self.span(e),
-                            );
+                    let source_static = self.module_class_named(&en).and_then(|class| {
+                        class
+                            .static_props
+                            .get(&name)
+                            .map(|property| (class.internal_name(), property.visibility))
+                    });
+                    if let Some((owner, visibility)) = source_static {
+                        self.reject_if_inaccessible(visibility, &name, owner, self.span(e));
+                        if let Some(ty) = self.record_class_static_property_read(e, owner, &name) {
                             return self.set(e, ty);
                         }
                     }
@@ -30076,52 +30104,65 @@ impl<'a> Checker<'a> {
             }
             self.expr_lowers.insert(
                 expr,
-                ExprLowering::StaticFieldRead {
+                ExprLowering::StaticPropertyRead {
                     owner: field.owner,
                     name: field.name,
                     descriptor: Some(field.descriptor),
+                    storage: StaticPropertyStorage::OuterStaticField,
                 },
             );
         }
         field.ty
     }
 
-    /// Select a property stored on a class as a static field and hand its semantic owner to lowering.
+    /// Select a companion property and hand its semantic owner plus storage capability to lowering.
     ///
     /// Lexical companion lookup belongs here in the checker: it already has source nesting and
     /// shadowing information, whereas lowering must not infer an owner from a generated class name.
-    /// Recording the existing origin-neutral `StaticFieldRead` also gives source/module properties
-    /// the same backend path as provider-resolved static fields. The descriptor remains absent so the
-    /// backend derives it from the checked expression type, exactly as it does for imported source
-    /// companion properties.
+    /// Recording the origin-neutral `StaticPropertyRead` gives source fields the same backend path as
+    /// provider-resolved static fields and routes field-less declarations through their accessors. A
+    /// source field descriptor remains absent so the backend derives it from the checked expression
+    /// type; the storage choice itself is never re-derived.
     ///
     /// A private property is still returned for frontend type propagation, but deliberately receives
     /// no direct-field lowering. Krusty does not yet synthesize the JVM access bridge required when a
     /// nested class reads that field, and recording `getstatic` here would turn a conservative skip
     /// into `IllegalAccessError`. This decision is based on declaration visibility, not on a guessed
     /// physical class relationship.
+    fn record_static_property_read(
+        &mut self,
+        expression: ExprId,
+        owner: TypeName,
+        name: String,
+        property: StaticPropertySig,
+    ) -> Ty {
+        if !property.visibility.is_private() {
+            self.expr_lowers.insert(
+                expression,
+                ExprLowering::StaticPropertyRead {
+                    owner,
+                    name,
+                    descriptor: None,
+                    storage: property.storage,
+                },
+            );
+        }
+        property.ty
+    }
+
     fn record_class_static_property_read(
         &mut self,
         expression: ExprId,
         owner: TypeName,
         name: &str,
     ) -> Option<Ty> {
-        let (ty, visibility, _) = *self
+        let property = self
             .syms
             .class_by_type_name(owner)?
             .static_props
-            .get(name)?;
-        if !visibility.is_private() {
-            self.expr_lowers.insert(
-                expression,
-                ExprLowering::StaticFieldRead {
-                    owner,
-                    name: name.to_string(),
-                    descriptor: None,
-                },
-            );
-        }
-        Some(ty)
+            .get(name)?
+            .clone();
+        Some(self.record_static_property_read(expression, owner, name.to_string(), property))
     }
 
     /// Probe a member read without emitting a diagnostic: returns `Some(ty)` if `recv.name` resolves,
@@ -30633,24 +30674,21 @@ impl<'a> Checker<'a> {
     }
 
     /// A PROPERTY reached by name through an import of an object-like owner — either a companion
-    /// (`import p.C.Companion.PROP`, whose field lives on the outer class `C`) or a plain `object`
-    /// (`import p.Obj.PROP`, whose field lives on `Obj` itself).
-    ///
-    /// Both spell the same static read; only the owner differs, so they share one lookup. Without the
-    /// plain-object case an `import Config.NAME` bound nothing while `import Config.greeting` — the
-    /// same import form on a FUNCTION — already worked, and `Config.NAME` qualified worked too.
+    /// (`import p.C.Companion.PROP`, physically on `C` or `C$Companion`) or a plain `object`
+    /// (`import p.Obj.PROP`, whose const field lives on `Obj` itself). The declaration signature
+    /// carries the realization, so importing does not collapse computed properties into field reads.
     fn imported_source_companion_property(
         &self,
         name: &str,
-    ) -> Option<(TypeName, String, Ty, Visibility)> {
+    ) -> Option<(TypeName, String, StaticPropertySig)> {
         let full = self.imports.get(name)?;
         let (owner_path, member) = full.rsplit_once('/')?;
         // A companion's statics are hoisted onto the OUTER class; a plain object owns its own.
         let owner_path = owner_path.strip_suffix("/Companion").unwrap_or(owner_path);
         let owner = self.nested_internal_name(owner_path)?;
         let class = self.syms.class_by_type_name(owner)?;
-        if let Some(&(ty, visibility, _)) = class.static_props.get(member) {
-            return Some((owner, member.to_string(), ty, visibility));
+        if let Some(property) = class.static_props.get(member) {
+            return Some((owner, member.to_string(), property.clone()));
         }
         // A `const val` declared directly in an `object` is a real `public static final` field on the
         // object class (that is the JVM realization of `const`, not a convention), so an imported read
@@ -30658,9 +30696,18 @@ impl<'a> Checker<'a> {
         // is deliberately not matched here — it needs the singleton receiver, which this hook cannot
         // express.
         let declared = class.declared_props.get(member)?;
-        declared
-            .is_const
-            .then(|| (owner, member.to_string(), declared.ty, declared.visibility))
+        declared.is_const.then(|| {
+            (
+                owner,
+                member.to_string(),
+                StaticPropertySig {
+                    ty: declared.ty,
+                    visibility: declared.visibility,
+                    is_var: false,
+                    storage: StaticPropertyStorage::OuterStaticField,
+                },
+            )
+        })
     }
 
     /// The constructor parameter shapes a lambda argument of `Name(args)` is typed against: per
@@ -36664,13 +36711,17 @@ impl<'a> Checker<'a> {
             if !self.value_root_shadows_classifier(&class_name) {
                 let static_write = self.module_class_named(&class_name).and_then(|class| {
                     let owner = class.internal_name();
-                    class
-                        .static_props
-                        .get(&name)
-                        .copied()
-                        .map(|(ty, visibility, is_var)| (ty, visibility, is_var, owner))
+                    class.static_props.get(&name).map(|property| {
+                        (
+                            property.ty,
+                            property.visibility,
+                            property.is_var,
+                            property.storage,
+                            owner,
+                        )
+                    })
                 });
-                if let Some((property_ty, visibility, is_var, owner)) = static_write {
+                if let Some((property_ty, visibility, is_var, storage, owner)) = static_write {
                     self.reject_if_inaccessible(visibility, &name, owner, self.span(receiver));
                     if !is_var {
                         self.diags.error(
@@ -36686,6 +36737,7 @@ impl<'a> Checker<'a> {
                             owner,
                             name,
                             ty: property_ty,
+                            storage,
                         },
                     );
                     return;
