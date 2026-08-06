@@ -347,73 +347,95 @@ fn java_generic_member_binds_lambda_param_from_receiver_type_argument() {
     assert_eq!(output.trim(), "OK");
 }
 
+/// One domain-neutral Java provider shared by the null-argument inference cases. Keeping the overload,
+/// interface, primitive, and return-type shapes together makes the tests vary only the semantic boundary
+/// under examination instead of duplicating classpath setup and reproduction-derived class families.
+struct NullCallFixture {
+    root: Option<std::path::PathBuf>,
+    classpath: Vec<std::path::PathBuf>,
+    jdk: std::path::PathBuf,
+}
+
+impl NullCallFixture {
+    fn new() -> Self {
+        let jdk = common::jdk_modules();
+        let stdlib = common::stdlib_jar();
+        let java = [(
+            "NullCallProvider.java".into(),
+            r#"
+            package fixtures;
+            public final class NullCallProvider {
+                public interface Contract { }
+                public static final class Marker { }
+                public static final class Product {
+                    public String label() { return "product"; }
+                }
+
+                public static Product create(String name, Marker marker, boolean enabled) {
+                    return new Product();
+                }
+                public static String choose(String value) { return "string"; }
+                public static String choose(Marker marker) { return "marker"; }
+                public static String choose(String value, boolean enabled) {
+                    return "string:" + enabled;
+                }
+                public static String choose(String value, Marker marker) {
+                    return "string:marker";
+                }
+                public static String describe(Contract value) { return "contract"; }
+                public static String primitive(boolean value) { return "boolean"; }
+                public static String primitiveInt(int value) { return "int"; }
+            }
+        "#
+            .into(),
+        )];
+        let (library, _) = common::javac_compile(&java, &[])
+            .expect("the neutral null-call Java fixture must compile");
+        let root = library.parent().map(std::path::Path::to_path_buf);
+        Self {
+            root,
+            classpath: vec![library, stdlib],
+            jdk,
+        }
+    }
+
+    fn expect_box(&self, source: &str) -> String {
+        common::expect_box_run(
+            source,
+            "NullCallInference",
+            &self.classpath,
+            Some(self.jdk.as_path()),
+        )
+    }
+
+    fn diagnostics(&self, source: &str) -> Vec<String> {
+        common::front_end_diagnostics(source, &self.classpath, Some(self.jdk.as_path()))
+    }
+}
+
+impl Drop for NullCallFixture {
+    fn drop(&mut self) {
+        if let Some(root) = self.root.take() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+}
+
 #[test]
 fn null_literal_args_into_a_classpath_static_call() {
-    // The intellij `ActionUtil` shape: `EmptyAction.createEmptyAction(null, null, true)` against
-    // `public static AnAction createEmptyAction(@Nullable String, @Nullable Icon, boolean)`. Every
-    // reference argument is a `null` literal; the property type must still infer to the declared
-    // return type, exactly as the same call into an INSTANCE method does.
-    let jdk = common::jdk_modules();
-    let stdlib = common::stdlib_jar();
-    let java = [
-        (
-            "AnAction.java".into(),
-            r#"
-                package fixtures;
-                public abstract class AnAction {
-                    public String label() { return "action"; }
-                }
-            "#
-            .into(),
-        ),
-        (
-            "Icon.java".into(),
-            r#"
-                package fixtures;
-                public class Icon { }
-            "#
-            .into(),
-        ),
-        (
-            "EmptyAction.java".into(),
-            r#"
-                package fixtures;
-                public final class EmptyAction extends AnAction {
-                    public static AnAction createEmptyAction(String name, Icon icon, boolean enabled) {
-                        return new EmptyAction();
-                    }
-                }
-            "#
-            .into(),
-        ),
-    ];
-    let Some((library, _)) = common::javac_compile(&java, &[]) else {
-        return;
-    };
-    let root = library.parent().map(std::path::Path::to_path_buf);
-    let classpath = vec![library, stdlib];
+    // Every reference argument is `null`; ordinary static-call applicability must still select the
+    // declaration and publish its return type to the surrounding property signature.
+    let fixture = NullCallFixture::new();
     let source = r#"
-        import fixtures.EmptyAction
+        import fixtures.NullCallProvider
 
-        private val dummy = EmptyAction.createEmptyAction(null, null, true)
+        private val inferred = NullCallProvider.create(null, null, true)
 
         fun box(): String {
-            if (dummy.label() != "action") return "label"
-            return "OK"
+            return if (inferred.label() == "product") "OK" else "label"
         }
     "#;
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
-        .unwrap_or_else(|| {
-            panic!(
-                "{:?}",
-                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
-            )
-        });
-    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
-    if let Some(root) = root {
-        let _ = std::fs::remove_dir_all(root);
-    }
-    assert_eq!(output.trim(), "OK");
+    assert_eq!(fixture.expect_box(source), "OK");
 }
 
 #[test]
@@ -423,128 +445,48 @@ fn null_mixed_with_non_null_args_and_overload_ambiguity() {
     // overloads is ambiguous in kotlinc ("overload resolution ambiguity between candidates"), so it
     // must NOT silently pick one — krusty reports the call unresolved, its existing shape for a
     // failed static call.
-    let jdk = common::jdk_modules();
-    let stdlib = common::stdlib_jar();
-    let java = [
-        (
-            "Icon.java".into(),
-            r#"
-                package fixtures;
-                public class Icon { }
-            "#
-            .into(),
-        ),
-        (
-            "Factory.java".into(),
-            r#"
-                package fixtures;
-                public final class Factory {
-                    public static String create(String name) { return "str"; }
-                    public static String create(Icon icon) { return "icon"; }
-                    public static String create(String name, boolean enabled) { return "str:" + enabled; }
-                    public static String create(String name, Icon icon) { return "str:icon"; }
-                }
-            "#
-            .into(),
-        ),
-    ];
-    let Some((library, _)) = common::javac_compile(&java, &[]) else {
-        return;
-    };
-    let root = library.parent().map(std::path::Path::to_path_buf);
-    let classpath = vec![library, stdlib];
+    let fixture = NullCallFixture::new();
     let source = r#"
-        import fixtures.Factory
+        import fixtures.NullCallProvider
 
-        private val mixed = Factory.create(null, true)
-        private val second = Factory.create("n", null)
+        private val mixed = NullCallProvider.choose(null, true)
+        private val second = NullCallProvider.choose("n", null)
 
         fun box(): String {
-            if (mixed != "str:true") return "mixed"
-            if (second != "str:icon") return "second"
+            if (mixed != "string:true") return "mixed"
+            if (second != "string:marker") return "second"
             return "OK"
         }
     "#;
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
-        .unwrap_or_else(|| {
-            panic!(
-                "{:?}",
-                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
-            )
-        });
-    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
+    let output = fixture.expect_box(source);
     let ambiguous_source = r#"
-        import fixtures.Factory
+        import fixtures.NullCallProvider
 
-        fun bad(): String = Factory.create(null)
+        fun bad(): String = NullCallProvider.choose(null)
     "#;
-    let diagnostics =
-        common::front_end_diagnostics(ambiguous_source, &classpath, Some(jdk.as_path()));
+    let diagnostics = fixture.diagnostics(ambiguous_source);
     assert!(
         diagnostics
             .iter()
-            .any(|message| message.contains("unresolved Java static 'Factory.create'")),
+            .any(|message| message.contains("unresolved Java static 'NullCallProvider.choose'")),
         "a bare null between single-reference-parameter overloads must stay an error, got {diagnostics:?}"
     );
-    if let Some(root) = root {
-        let _ = std::fs::remove_dir_all(root);
-    }
-    assert_eq!(output.trim(), "OK");
+    assert_eq!(output, "OK");
 }
 
 #[test]
 fn null_literal_into_a_java_interface_parameter() {
-    // A `null` literal for a Java INTERFACE parameter (`Face`) of a classpath static resolves the
-    // same as for a class parameter.
-    let jdk = common::jdk_modules();
-    let stdlib = common::stdlib_jar();
-    let java = [
-        (
-            "Face.java".into(),
-            r#"
-                package fixtures;
-                public interface Face { }
-            "#
-            .into(),
-        ),
-        (
-            "Faces.java".into(),
-            r#"
-                package fixtures;
-                public final class Faces {
-                    public static String describe(Face face) { return "face"; }
-                }
-            "#
-            .into(),
-        ),
-    ];
-    let Some((library, _)) = common::javac_compile(&java, &[]) else {
-        return;
-    };
-    let root = library.parent().map(std::path::Path::to_path_buf);
-    let classpath = vec![library, stdlib];
+    // Interface and class reference parameters use the same assignability rule; provider kind does not
+    // participate once the selected callable exposes its declared slot type.
+    let fixture = NullCallFixture::new();
     let source = r#"
-        import fixtures.Faces
+        import fixtures.NullCallProvider
 
-        private val described = Faces.describe(null)
+        private val described = NullCallProvider.describe(null)
 
-        fun box(): String {
-            if (described != "face") return "describe"
-            return "OK"
-        }
+        fun box(): String = if (described == "contract") "OK" else "describe"
     "#;
-    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
-        .unwrap_or_else(|| {
-            panic!(
-                "{:?}",
-                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
-            )
-        });
-    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
-    if let Some(root) = root {
-        let _ = std::fs::remove_dir_all(root);
-    }
-    assert_eq!(output.trim(), "OK");
+    assert_eq!(fixture.expect_box(source), "OK");
 }
 
 #[test]
@@ -552,46 +494,27 @@ fn null_literal_into_a_primitive_parameter_still_fails() {
     // Negative pin: `null` into a primitive `boolean`/`int` parameter stays an error (kotlinc:
     // "null cannot be a value of a non-null type 'Boolean'"); krusty reports it with its existing
     // unresolved-static message — message formats are unchanged.
-    let jdk = common::jdk_modules();
-    let stdlib = common::stdlib_jar();
-    let java = [(
-        "Prims.java".into(),
-        r#"
-                package fixtures;
-                public final class Prims {
-                    public static String prim(boolean flag) { return "b"; }
-                    public static String primInt(int value) { return "i"; }
-                }
-            "#
-        .into(),
-    )];
-    let Some((library, _)) = common::javac_compile(&java, &[]) else {
-        return;
-    };
-    let root = library.parent().map(std::path::Path::to_path_buf);
-    let classpath = vec![library, stdlib];
+    let fixture = NullCallFixture::new();
     let source = r#"
-        import fixtures.Prims
+        import fixtures.NullCallProvider
 
-        fun badBoolean(): String = Prims.prim(null)
-        fun badInt(): String = Prims.primInt(null)
+        fun badBoolean(): String = NullCallProvider.primitive(null)
+        fun badInt(): String = NullCallProvider.primitiveInt(null)
     "#;
-    let diagnostics = common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()));
+    let diagnostics = fixture.diagnostics(source);
     assert!(
         diagnostics
             .iter()
-            .any(|message| message.contains("unresolved Java static 'Prims.prim'")),
+            .any(|message| message.contains("unresolved Java static 'NullCallProvider.primitive'")),
         "null into a primitive boolean parameter must stay an error, got {diagnostics:?}"
     );
     assert!(
         diagnostics
             .iter()
-            .any(|message| message.contains("unresolved Java static 'Prims.primInt'")),
+            .any(|message| message
+                .contains("unresolved Java static 'NullCallProvider.primitiveInt'")),
         "null into a primitive int parameter must stay an error, got {diagnostics:?}"
     );
-    if let Some(root) = root {
-        let _ = std::fs::remove_dir_all(root);
-    }
 }
 
 // The lightweight signature inferer's `null` literal arm also admits a bare

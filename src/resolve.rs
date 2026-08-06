@@ -8326,9 +8326,10 @@ fn infer_lit_ty_p(
         Expr::BoolLit(_) => Ty::Boolean,
         Expr::CharLit(_) => Ty::Char,
         Expr::StringLit(_) | Expr::Template(_) => Ty::String,
-        // A `null` literal carries its type like any other literal, so a call whose only unknown
-        // was a null argument (`EmptyAction.create(null, null, true)`) still resolves its overload
-        // — the full checker types it identically (`Expr::NullLit => Ty::Null`).
+        // A `null` literal carries its type like every other literal. Recording `Ty::Null` here lets
+        // the ordinary applicability rules decide whether each selected reference parameter accepts
+        // it, while primitive parameters and ambiguous reference overloads continue to decline. The
+        // full checker uses the same semantic type; no callable or provider needs a null-specific path.
         Expr::NullLit => Ty::Null,
         // A bare name referring to a property (or `this` — the receiver of an expression-bodied
         // extension function `fun Int.double() = this * 2`, supplied as a `"this"` scope entry), or a
