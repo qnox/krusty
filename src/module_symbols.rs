@@ -1004,7 +1004,6 @@ mod tests {
             static_methods: HashMap::new(),
             companion_fun_names: HashSet::new(),
             static_props: HashMap::new(),
-            computed_static_props: HashSet::new(),
             lateinit_props: HashSet::new(),
             interfaces: crate::types::TypeNameList::new(),
             interface_type_args: Vec::new(),
