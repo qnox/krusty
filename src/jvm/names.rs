@@ -286,6 +286,23 @@ mod tests {
     }
 
     #[test]
+    fn nested_object_descriptors_normalize_only_the_class_tail() {
+        // A `Ty` uses `/` for its package and may retain metadata's source-facing dots between nested
+        // classifiers. The shared descriptor boundary owns the complete conversion: it preserves the
+        // package path and turns every class-tail dot into `$`, including more than one nesting level.
+        // This direct contract guard keeps classpath matching and bytecode emission from growing local
+        // `.replace` repairs for individual providers or call sites.
+        assert_eq!(
+            type_descriptor(Ty::obj("sample/pkg/Outer.Middle.Inner")),
+            "Lsample/pkg/Outer$Middle$Inner;"
+        );
+        assert_eq!(
+            type_descriptor(Ty::obj("kotlin/collections/Map.Entry")),
+            "Ljava/util/Map$Entry;"
+        );
+    }
+
+    #[test]
     fn nullable_signed_primitive_descriptor_boxes_to_jvm_wrapper() {
         assert_eq!(
             type_descriptor(Ty::nullable(Ty::Int)),

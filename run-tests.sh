@@ -139,16 +139,44 @@ epoch_ms() {
 }
 export -f epoch_ms
 
+# A run's identity must include its filter, not just the binary. The conformance split below runs the
+# SAME binary twice with different filters; keying the log on `basename` alone let pass 2 overwrite
+# pass 1's log, so a pass-1 failure was reported with pass 2's (passing) output and the real failure was
+# invisible. Slugify the filter args — dropping `--test-threads=N`, which is scheduling noise, not
+# identity — so each pass owns a distinct log and TIMINGS row.
+run_label() {
+  printf '%s' "$1" \
+    | sed -E 's/--test-threads=[0-9]+//g' \
+    | tr -cs 'A-Za-z0-9_' '-' \
+    | sed -e 's/^-*//' -e 's/-*$//'
+}
+export -f run_label
+
 run_one() {
-  local b="${2%%::*}" extra="" name
-  [ "$2" != "$b" ] && extra="${2#*::}"
+  local b="${2%%::*}" extra="" name slug
+  if [ "$2" != "$b" ]; then extra="${2#*::}"; fi
   name="$(basename "$b")"
+  slug="$(run_label "$extra")"
+  if [ -n "$slug" ]; then name="$name@$slug"; fi
+  # The slug is lossy (`--test-threads=N` stripped, punctuation folded), so a future split whose
+  # passes differ only along a dropped axis would collide and silently resurrect the overwrite bug
+  # this naming exists to prevent. Disambiguate instead. Only same-binary splits can collide, and
+  # those are scheduled sequentially from the main shell, so no locking is needed: every run in the
+  # concurrent xargs pool has a distinct binary basename and an empty slug.
+  local uniq="$name" n=1
+  while [ -e "$1/$uniq.log" ]; do
+    n=$((n + 1))
+    uniq="$name#$n"
+  done
+  name="$uniq"
   local start end ms
   start="$(epoch_ms)"
   if "$b" $extra >"$1/$name.log" 2>&1; then
     :
   else
-    echo "$b" >>"$1/FAILED"
+    # Log name first so the report reads the failing pass's own output; the description carries the
+    # filter so two passes of one binary are told apart on sight.
+    printf '%s\t%s\n' "$name" "$b${extra:+ [$extra]}" >>"$1/FAILED"
   fi
   end="$(epoch_ms)"
   ms=$((end - start))
@@ -203,9 +231,11 @@ fi
 
 if [ -f "$logdir/FAILED" ]; then
   echo "=== FAILED TEST BINARIES ==="
-  while read -r b; do
-    echo "----- $b -----"
-    cat "$logdir/$(basename "$b").log"
+  while IFS=$'\t' read -r name desc; do
+    echo "----- $desc -----"
+    # Never let a missing log abort the report under `set -e` — that would hide every failure after
+    # this one, which is the same class of blindness this reporting path already had.
+    cat "$logdir/$name.log" || echo "(log missing: $name)"
   done <"$logdir/FAILED"
   exit 1
 fi

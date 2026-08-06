@@ -2,6 +2,7 @@
 //! parallel `Vec`s, so a file's whole AST is one bulk-freeable allocation block).
 
 use crate::diag::Span;
+use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Visibility;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -136,7 +137,9 @@ pub enum Expr {
     DoubleLit(f64),
     FloatLit(f32),
     BoolLit(bool),
-    StringLit(String),
+    /// A `String` literal, held as its UTF-16 code UNITS (see [`KtString`]). Not a Rust `String`:
+    /// `"\uD800"` and `"\uD83D\uDE00"` denote surrogate code units, which no `String` can hold.
+    StringLit(KtString),
     /// A `Char` literal, held as its UTF-16 code UNIT (see `IrConst::Char`). Not a Rust `char`: a
     /// lone surrogate (`'\uD800'`) is a legal Kotlin `Char` but not a legal Unicode scalar value.
     CharLit(u16),
@@ -302,7 +305,7 @@ pub struct WhenArm {
 
 #[derive(Clone, Debug)]
 pub enum TemplatePart {
-    Str(String),
+    Str(KtString),
     Expr(ExprId),
 }
 
@@ -436,6 +439,11 @@ impl TrFlags {
     const IN_PROJECTION: u8 = 1 << 4;
     const OUT_PROJECTION: u8 = 1 << 5;
     const IMPORT: u8 = 1 << 6;
+    // Parsing still represents `*` as its semantic upper bound (`Any?`) for ordinary type
+    // resolution, but an `is FunctionN<*, ...>` check must distinguish that runtime-checkable
+    // projection from an explicitly written `Any?`. Preserve the source distinction in the last
+    // available flag bit instead of recovering it from source text in individual consumers.
+    const STAR_PROJECTION: u8 = 1 << 7;
 
     #[inline]
     const fn with(mut self, mask: u8, on: bool) -> Self {
@@ -478,6 +486,10 @@ impl TrFlags {
     #[inline]
     pub const fn with_import(self, on: bool) -> Self {
         self.with(Self::IMPORT, on)
+    }
+    #[inline]
+    pub const fn with_star_projection(self, on: bool) -> Self {
+        self.with(Self::STAR_PROJECTION, on)
     }
 }
 
@@ -528,6 +540,10 @@ impl TypeRef {
     #[inline]
     pub fn is_import(&self) -> bool {
         self.flags.has(TrFlags::IMPORT)
+    }
+    #[inline]
+    pub fn is_star_projection(&self) -> bool {
+        self.flags.has(TrFlags::STAR_PROJECTION)
     }
     #[inline]
     pub fn set_nullable(&mut self, on: bool) {
@@ -707,7 +723,9 @@ impl FunDecl {
             .position(|a| a.rsplit(['/', '.']).next().unwrap_or(a) == "JvmName")
             .and_then(|i| self.annotation_args.get(i)?.first())
             .and_then(|&arg| match file.expr(arg) {
-                Expr::StringLit(s) => Some(s.clone()),
+                // A JVM method NAME: an unpaired surrogate has no name form, so fall back to the
+                // declared name rather than corrupt the descriptor.
+                Expr::StringLit(s) => s.as_str().map(str::to_string),
                 _ => None,
             })
             .unwrap_or_else(|| self.name.clone())
@@ -1451,38 +1469,42 @@ impl File {
     /// This is deliberately not a general Kotlin constant evaluator; unsupported syntax returns
     /// `None`, and each caller owns its own fallback or diagnostic policy.
     ///
-    /// A Kotlin `Char` is a UTF-16 code unit, while Rust `String` can contain only Unicode scalar
-    /// values. Consequently a lone surrogate cannot be represented here and returns `None` instead
-    /// of being replaced or corrupted. Recursion through property references is bounded so malformed
-    /// or cyclic input cannot overflow the compiler stack.
-    pub(crate) fn const_string_value(&self, expression: ExprId) -> Option<String> {
+    /// The result is a [`KtString`], not a Rust `String`: a `Char` part may be a UTF-16 code unit
+    /// with no Unicode-scalar form (`'\uD800'`), and a string literal may already carry one, so the
+    /// value can only be spelled as code units. Recursion through property references is bounded so
+    /// malformed or cyclic input cannot overflow the compiler stack.
+    pub(crate) fn const_string_value(&self, expression: ExprId) -> Option<KtString> {
         self.const_string_value_at_depth(expression, 0)
     }
 
-    fn const_string_value_at_depth(&self, expression: ExprId, depth: u32) -> Option<String> {
+    fn const_string_value_at_depth(&self, expression: ExprId, depth: u32) -> Option<KtString> {
         if depth > 32 {
             return None;
         }
         match self.expr(expression) {
             Expr::StringLit(value) => Some(value.clone()),
-            Expr::CharLit(unit) => char::from_u32(*unit as u32).map(|c| c.to_string()),
+            Expr::CharLit(unit) => {
+                let mut value = KtStringBuf::new();
+                value.push_unit(*unit);
+                Some(value.finish())
+            }
             Expr::Name(name) => self.top_level_const_string_at_depth(name, depth + 1),
             Expr::Template(parts) => {
-                let mut value = String::new();
+                let mut value = KtStringBuf::new();
                 for part in parts {
                     match part {
-                        TemplatePart::Str(text) => value.push_str(text),
+                        TemplatePart::Str(text) => value.push_kt(text),
                         TemplatePart::Expr(expression) => value
-                            .push_str(&self.const_string_value_at_depth(*expression, depth + 1)?),
+                            .push_kt(&self.const_string_value_at_depth(*expression, depth + 1)?),
                     }
                 }
-                Some(value)
+                Some(value.finish())
             }
             _ => None,
         }
     }
 
-    fn top_level_const_string_at_depth(&self, name: &str, depth: u32) -> Option<String> {
+    fn top_level_const_string_at_depth(&self, name: &str, depth: u32) -> Option<KtString> {
         if depth > 32 {
             return None;
         }
@@ -2461,12 +2483,39 @@ mod tests {
     }
 
     #[test]
-    fn const_string_value_renders_scalar_char_and_rejects_surrogate() {
+    fn const_string_value_renders_a_char_as_its_code_unit() {
         let mut file = File::default();
         let dollar = file.add_expr(Expr::CharLit(b'$' as u16), span());
         let surrogate = file.add_expr(Expr::CharLit(0xD800), span());
 
-        assert_eq!(file.const_string_value(dollar).as_deref(), Some("$"));
-        assert_eq!(file.const_string_value(surrogate), None);
+        assert_eq!(file.const_string_value(dollar), Some(KtString::from("$")));
+        // A lone surrogate is a legal `Char` with no Unicode-scalar form. It must survive the fold
+        // as its code unit rather than make the whole constant unrepresentable.
+        let folded = file.const_string_value(surrogate).expect("lone surrogate");
+        assert_eq!(folded.units().collect::<Vec<_>>(), vec![0xD800]);
+        assert_eq!(folded.as_str(), None);
+    }
+
+    #[test]
+    fn const_string_value_joins_a_template_in_code_units() {
+        // The two halves of U+1F600 arriving as separate `Char` parts must rejoin into the ordinary
+        // two-unit string, not stay in the degraded form.
+        let mut file = File::default();
+        let high = file.add_expr(Expr::CharLit(0xD83D), span());
+        let low = file.add_expr(Expr::CharLit(0xDE00), span());
+        let template = file.add_expr(
+            Expr::Template(vec![
+                TemplatePart::Str(KtString::from("[")),
+                TemplatePart::Expr(high),
+                TemplatePart::Expr(low),
+                TemplatePart::Str(KtString::from("]")),
+            ]),
+            span(),
+        );
+
+        assert_eq!(
+            file.const_string_value(template),
+            Some(KtString::from("[\u{1F600}]"))
+        );
     }
 }

@@ -2,13 +2,13 @@
 //! member of the file — kotlinc accepts it (companions see the file's top-level declarations).
 //! krusty used to hard-reject with the krusty-only "krusty: top-level property access from a
 //! companion member is not supported" (a stop-gap from before the `C$Companion` class +
-//! facade-access bridge machinery existed). Production hit: intellij's `ActionContextElement`,
-//! whose `@JvmStatic` companion functions read a file-private `val ACTION_CONTEXT_ELEMENT_KEY`.
+//! facade-access bridge machinery existed). The fixtures use synthetic declarations: regression
+//! coverage must neither depend on nor disclose identities from a scanned project or classpath.
 //! Needs the JVM toolchain + kotlin-stdlib; skips otherwise.
 
 use super::common;
 
-/// The intellij repro: a file-private top-level `val` read from a `@JvmStatic` companion function.
+/// A file-private top-level `val` read from a `@JvmStatic` companion function.
 #[test]
 fn companion_reads_private_toplevel_val() {
     const SRC: &str = "private val key: String = \"OK\"\n\
@@ -28,11 +28,13 @@ fn companion_reads_and_writes_private_toplevel_var() {
     const SRC: &str = "private var count: Int = 0\n\
         class Counter {\n\
             companion object {\n\
+                fun set(value: Int) { count = value }\n\
                 fun bump() { count += 10 }\n\
                 fun get(): Int = count\n\
             }\n\
         }\n\
         fun box(): String {\n\
+            Counter.set(0)\n\
             Counter.bump()\n\
             Counter.bump()\n\
             return if (Counter.get() == 20) \"OK\" else \"F: \" + Counter.get()\n\
@@ -41,8 +43,8 @@ fn companion_reads_and_writes_private_toplevel_var() {
 }
 
 /// Increment/decrement of a top-level `var` from a companion member, statement and expression
-/// position (the lowering shadow probe must treat the companion's members as the OUTER class's
-/// statics, not as an unregistered `C$Companion` class).
+/// position. The lowering shadow probe must follow the recorded companion-owner edge rather than
+/// guessing ownership from a generated class name or missing class signature.
 #[test]
 fn companion_incdec_toplevel_var() {
     const SRC: &str = "private var n: Int = 41\n\
@@ -55,6 +57,26 @@ fn companion_incdec_toplevel_var() {
         fun box(): String {\n\
             C.inc()\n\
             return if (C.preInc() == 43 && n == 43) \"OK\" else \"F: \" + n\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(SRC, "Main");
+}
+
+/// The enclosing class's INSTANCE property is not an implicit receiver inside its companion. A
+/// same-named file property therefore remains visible; only the enclosing class's companion statics
+/// participate in shadowing there.
+#[test]
+fn outer_instance_property_does_not_shadow_toplevel_in_companion() {
+    const SRC: &str = "private var level: Int = 40\n\
+        class Holder {\n\
+            var level: Int = 99\n\
+            companion object {\n\
+                fun bump() { level++ }\n\
+            }\n\
+        }\n\
+        fun box(): String {\n\
+            val holder = Holder()\n\
+            Holder.bump()\n\
+            return if (level == 41 && holder.level == 99) \"OK\" else \"fail\"\n\
         }\n";
     common::expect_box_ok_with_stdlib(SRC, "Main");
 }
@@ -131,7 +153,7 @@ fn companion_shadowed_toplevel_write_is_rejected_not_misbound() {
     assert!(
         diagnostics
             .iter()
-            .any(|message| message.contains("not supported")),
+            .any(|message| message.contains("write to a companion's own property")),
         "{diagnostics:?}"
     );
 }
