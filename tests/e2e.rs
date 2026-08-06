@@ -144,6 +144,8 @@ mod classpath_companion;
 mod classpath_companion_ext_lambda_e2e;
 #[path = "classpath_companion_invoke_e2e.rs"]
 mod classpath_companion_invoke_e2e;
+#[path = "classpath_companion_invoke_lambda_e2e.rs"]
+mod classpath_companion_invoke_lambda_e2e;
 #[path = "classpath_covariant_override_e2e.rs"]
 mod classpath_covariant_override_e2e;
 #[path = "classpath_ctor_receiver_lambda_e2e.rs"]
@@ -218,6 +220,8 @@ mod classpath_receiver_lambda_e2e;
 mod classpath_receiver_lambda_overload_e2e;
 #[path = "classpath_reified_inline_toplevel_e2e.rs"]
 mod classpath_reified_inline_toplevel_e2e;
+#[path = "classpath_reified_named_default_vararg_e2e.rs"]
+mod classpath_reified_named_default_vararg_e2e;
 #[path = "classpath_runblocking_e2e.rs"]
 mod classpath_runblocking_e2e;
 #[path = "classpath_static_call_inference_e2e.rs"]

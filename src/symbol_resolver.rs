@@ -657,7 +657,10 @@ fn specialized_lambda_params(
     specialized
 }
 
-fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
+/// Seed a declaration's formals from explicit call-site type arguments. All inference channels use
+/// this operation before receiver/argument unification so written arguments remain authoritative and
+/// member, extension, static, and lambda-shape probes cannot drift into different binding rules.
+pub(crate) fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
     gsig.formals
         .iter()
         .cloned()
@@ -681,8 +684,14 @@ fn bind_gsig_return(
     ty_subst(gsig.ret, &binds)
 }
 
-fn bind_member_return(gsig: &GenericSig, receiver: Ty, args: &[Ty], provider_ret: Ty) -> Ty {
-    let mut binds = GSigBinds::new();
+fn bind_member_return(
+    gsig: &GenericSig,
+    receiver: Ty,
+    args: &[Ty],
+    type_args: &[Ty],
+    provider_ret: Ty,
+) -> Ty {
+    let mut binds = seeded_gsig_binds(gsig, type_args);
     if let Some(declared_receiver) = gsig.receiver {
         unify_ty(declared_receiver, receiver, &mut binds);
     } else {
@@ -2065,7 +2074,14 @@ impl<'a> SymbolResolver<'a> {
                 };
                 let call = member_receiver_accessible
                     .then(|| {
-                        resolve_instance_member(self.lib, ty, name, args, Some(&member_access))
+                        resolve_instance_member(
+                            self.lib,
+                            ty,
+                            name,
+                            args,
+                            type_args,
+                            Some(&member_access),
+                        )
                     })
                     .flatten();
                 let read = member_receiver_accessible
@@ -2813,7 +2829,7 @@ impl<'a> SymbolResolver<'a> {
     }
 
     /// The argument→parameter mapping for a call whose arguments name their parameters
-    /// (`mockk(relaxed = true)`): `slots[i]` is the parameter position argument `i` labels.
+    /// (`build(enabled = true)`): `slots[i]` is the parameter position argument `i` labels.
     ///
     /// A LABEL, not a position, decides which parameter an argument is checked against. The
     /// positional form below cannot express that: it compares the argument list against the LEADING
@@ -3920,6 +3936,7 @@ fn resolve_instance_member(
     recv: Ty,
     name: &str,
     args: &[CallArgKind],
+    type_args: &[Ty],
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
     let o = select_instance_info(lib, recv, name, args, member_access)?;
@@ -3927,7 +3944,7 @@ fn resolve_instance_member(
     let ret = o
         .generic_sig
         .as_ref()
-        .map(|gsig| bind_member_return(gsig, recv, &arg_tys, o.callable.ret))
+        .map(|gsig| bind_member_return(gsig, recv, &arg_tys, type_args, o.callable.ret))
         .unwrap_or(o.callable.ret);
     let ret = o.ret.apply(
         o.generic_sig
@@ -3979,7 +3996,7 @@ fn property_getter_via_query(
     if getter.contains('-') && value_class_typed {
         return None;
     }
-    resolve_instance_member(lib, recv, &getter, &[], member_access)
+    resolve_instance_member(lib, recv, &getter, &[], &[], member_access)
         .filter(|m| m.ret.is_read_value_result())
 }
 
@@ -3993,13 +4010,13 @@ fn resolve_property_member(
     member_access: Option<&MemberAccess<'_>>,
 ) -> Option<ResolvedMember> {
     property_getter_via_query(lib, recv, property, member_access)
-        .or_else(|| resolve_instance_member(lib, recv, property, &[], member_access))
+        .or_else(|| resolve_instance_member(lib, recv, property, &[], &[], member_access))
         .filter(|m| m.ret.is_read_value_result())
         .or_else(|| {
             lib.physical_property_getter_names(property)
                 .into_iter()
                 .find_map(|getter| {
-                    resolve_instance_member(lib, recv, &getter, &[], member_access)
+                    resolve_instance_member(lib, recv, &getter, &[], &[], member_access)
                         .filter(|m| m.ret.is_read_value_result())
                 })
         })
@@ -5323,6 +5340,7 @@ mod tests {
                 &method_generic,
                 Ty::obj("demo/Provider"),
                 &[class_of(value)],
+                &[],
                 optional_of(any),
             ),
             optional_of(value)
@@ -5337,11 +5355,11 @@ mod tests {
             return_policy: Default::default(),
         };
         assert_eq!(
-            bind_member_return(&owner_generic, optional_of(value), &[Ty::Null], value,),
+            bind_member_return(&owner_generic, optional_of(value), &[Ty::Null], &[], value,),
             value
         );
         assert_eq!(
-            bind_member_return(&owner_generic, optional_of(any), &[Ty::String], any,),
+            bind_member_return(&owner_generic, optional_of(any), &[Ty::String], &[], any,),
             any
         );
     }
@@ -5361,7 +5379,7 @@ mod tests {
         };
 
         assert_eq!(
-            bind_member_return(&signature, Ty::obj("demo/Provider"), &[], kotlin_list),
+            bind_member_return(&signature, Ty::obj("demo/Provider"), &[], &[], kotlin_list,),
             kotlin_list
         );
 
@@ -5373,6 +5391,7 @@ mod tests {
             bind_member_return(
                 &erased_signature,
                 Ty::obj("demo/Provider"),
+                &[],
                 &[],
                 kotlin_list
             ),
@@ -6210,8 +6229,9 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_nullable_string_info(),
         };
-        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], None)
-            .expect("nullable member should resolve");
+        let resolved =
+            resolve_instance_member(&source, Ty::obj("demo/Box"), "maybe", &[], &[], None)
+                .expect("nullable member should resolve");
         assert_eq!(resolved.ret, Ty::nullable(Ty::String));
         assert_eq!(resolved.member.physical_ret, Ty::String);
     }
@@ -6223,8 +6243,9 @@ mod tests {
             receiver: Some(Ty::obj("demo/Box")),
             info: member_metadata_class_info(),
         };
-        let resolved = resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], None)
-            .expect("member with metadata return class should resolve");
+        let resolved =
+            resolve_instance_member(&source, Ty::obj("demo/Box"), "names", &[], &[], None)
+                .expect("member with metadata return class should resolve");
         assert_eq!(
             resolved.ret,
             Ty::obj_args("kotlin/collections/List", &[Ty::String])

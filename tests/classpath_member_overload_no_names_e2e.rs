@@ -111,3 +111,130 @@ fn reordered_same_type_named_args_keep_label_order_at_runtime() {
         fun main() { println(box()) }\n";
     common::expect_box_ok_against("member_no_names_swap", LABELLED_LIB, MAIN);
 }
+
+// A zero-argument generic producer has nothing to bind `T` from on its own, so its type comes from
+// the enclosing member parameter. The explicit-argument form is the independent control: a written
+// type argument must bind the producer's return regardless of surrounding context.
+const MATCHER_LIB: &str = "package lib\n\
+    import kotlin.reflect.KClass\n\
+    class Payload\n\
+    class GenericSource {\n\
+    \x20 inline fun <reified T : Any> provide(): T = TODO()\n\
+    \x20 fun <T : Any> provide(classifier: KClass<T>): T = TODO()\n\
+    }\n\
+    class Sink {\n\
+    \x20 fun accept(payload: Payload): String = \"x\"\n\
+    \x20 suspend fun persist(payload: Payload): String = \"x\"\n\
+    \x20 suspend fun pair(left: String, right: String) {}\n\
+    }\n\
+    class ExactSource {\n\
+    \x20 fun provide(): Any = Any()\n\
+    }\n\
+    class DivergentSink {\n\
+    \x20 fun accept(payload: Payload): String = \"payload\"\n\
+    \x20 fun accept(text: String): String = \"text\"\n\
+    }\n\
+    fun <T> within(block: suspend GenericSource.() -> T): T = TODO()\n";
+
+#[test]
+fn zero_arg_generic_member_binds_from_argument_position() {
+    const MAIN: &str = "import lib.GenericSource\n\
+        import lib.Sink\n\
+        import lib.within\n\
+        fun t(sink: Sink, source: GenericSource) {\n\
+        \x20 within { sink.persist(provide()) }\n\
+        \x20 within { sink.pair(provide(), provide()) }\n\
+        \x20 val direct: String = sink.accept(source.provide())\n\
+        \x20 direct.length\n\
+        }\n";
+    let Some(diagnostics) = common::checker_diags_against("member_matcher_arg", MATCHER_LIB, MAIN)
+    else {
+        return;
+    };
+    assert_eq!(
+        diagnostics,
+        Vec::<String>::new(),
+        "a zero-arg generic member argument must bind from the enclosing parameter type"
+    );
+}
+
+#[test]
+fn explicit_type_argument_binds_generic_member_return() {
+    const MAIN: &str = "import lib.GenericSource\n\
+        import lib.Payload\n\
+        import lib.Sink\n\
+        fun t(sink: Sink, source: GenericSource) {\n\
+        \x20 val v = source.provide<Payload>()\n\
+        \x20 val r: String = sink.accept(v)\n\
+        \x20 val inline1: String = sink.accept(source.provide<Payload>())\n\
+        \x20 r.length + inline1.length\n\
+        }\n";
+    let Some(diagnostics) =
+        common::checker_diags_against("member_explicit_targ", MATCHER_LIB, MAIN)
+    else {
+        return;
+    };
+    assert_eq!(
+        diagnostics,
+        Vec::<String>::new(),
+        "an explicit type argument must bind a generic member's return"
+    );
+}
+
+#[test]
+fn expected_type_retry_requires_bindable_return_and_overload_agreement() {
+    // Negative boundary: a declaration that genuinely returns `Any` cannot be retyped merely because
+    // an enclosing parameter wants a narrower class. Likewise, two applicable parameter mappings that
+    // disagree provide no authoritative expectation for an unbound generic producer.
+    const MAIN: &str = "import lib.DivergentSink\n\
+        import lib.ExactSource\n\
+        import lib.GenericSource\n\
+        import lib.Sink\n\
+        fun bad(exact: ExactSource, generic: GenericSource) {\n\
+        \x20 Sink().accept(exact.provide())\n\
+        \x20 DivergentSink().accept(generic.provide())\n\
+        }\n";
+    let Some(diagnostics) = common::checker_diags_against(
+        "member_expected_type_negative_boundaries",
+        MATCHER_LIB,
+        MAIN,
+    ) else {
+        return;
+    };
+    assert!(
+        diagnostics.len() >= 2,
+        "exact Any and divergent expectations must both remain rejected, got {diagnostics:?}"
+    );
+}
+
+// The RUNTIME half of expected-type inference: `take(): T` really returns `Object` on the JVM,
+// so once the checker records the bound type, the LOWERING must reconcile the erased producer
+// with the enclosing parameter's descriptor — only the run output can prove it.
+const MATCHER_RUNTIME_LIB: &str = "package lib\n\
+    class Payload(val name: String)\n\
+    class GenericCell {\n\
+    \x20 var value: Any? = null\n\
+    \x20 @Suppress(\"UNCHECKED_CAST\")\n\
+    \x20 fun <T : Any> read(): T = value as T\n\
+    }\n\
+    class Sink {\n\
+    \x20 fun label(payload: Payload): String = \"payload:\" + payload.name\n\
+    }\n";
+
+#[test]
+fn zero_arg_generic_member_argument_box_runs() {
+    const MAIN: &str = "import lib.GenericCell\n\
+        import lib.Payload\n\
+        import lib.Sink\n\
+        fun box(): String {\n\
+        \x20 val cell = GenericCell()\n\
+        \x20 cell.value = Payload(\"sample\")\n\
+        \x20 val got = Sink().label(cell.read())\n\
+        \x20 return if (got == \"payload:sample\") \"OK\" else \"F:\" + got\n\
+        }\n";
+    if let Some(out) =
+        common::expect_box_run_against("member_matcher_arg_box", MATCHER_RUNTIME_LIB, MAIN)
+    {
+        assert_eq!(out, "OK");
+    }
+}

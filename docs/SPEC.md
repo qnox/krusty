@@ -3970,7 +3970,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   applicable.** For `class Wrap(val v: Int) { companion object { operator fun invoke(f: (Int) -> Int): Int } }`,
   kotlinc resolves `Wrap { it * 2 }` to the companion operator — a lambda is not applicable to the
   constructor's `Int` parameter — while `Wrap(7)` stays a construction. krusty had this for CLASSPATH
-  types (`classpath_companion_ty` + `record_invoke`) and for source INTERFACES (which have no
+  types (`semantic_companion_ty` + `record_invoke`) and for source INTERFACES (which have no
   constructor), but a source CLASS went to the constructor unconditionally and reported
   `return type mismatch: expected 'Int', actual 'Wrap'`. The source class path now falls back to
   `check_source_companion_call(CALLABLE_INVOKE_OPERATOR, require_operator = true)` when
@@ -3995,6 +3995,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   scores every candidate equally, so declaration order decides
   (`fun ap(f: (Int) -> Int)` + `fun ap(s: String)` fails on object and instance receivers alike).
   Test: `tests/object_receiver_lambda_e2e.rs`.
+
+- **Explicit type arguments determine a call's type wherever argument mapping cannot.** Four
+  behaviors around a generic provider call with defaults on both sides of a non-final vararg and a
+  trailing receiver-lambda default:
+  (1) the SIGNATURE phase's lightweight property inferer maps arguments positionally, so a named
+  argument out of its declared position found no candidate and a class property initialized by
+  such a call reported "cannot infer the type of property" — when every top-level overload agrees
+  on the return after substituting the explicit type arguments (`explicit_targ_return_agreement`),
+  that IS the property's type, and argument legality stays with the full checker; (2) the
+  top-level lambda-shape probe (`lambda_shape_for_overload`) unified bindings only from
+  receiver/arguments, so a `T.() -> Unit` trailing lambda bound its implicit `this` to `T`'s
+  BOUND (`kotlin/Any`) instead of the written `<C>` — explicit type arguments now seed the
+  bindings first (`seed_explicit_type_args`; `unify_ty`'s `or_insert` keeps them authoritative);
+  (3) a classpath MEMBER call with explicit type arguments (`m.any<Org>()`) dropped them entirely
+  (`resolve_instance_member` had no `type_args` input), returning the formal's bound;
+  (4) `Type(args) { … }` where `Type`'s classpath companion declares `operator fun invoke` shapes
+  the trailing lambda from the invoke parameter exactly as a top-level overload would
+  (`companion_invoke_lambda_shape`), and a constructor whose mapping fails must DECLINE, not
+  diagnose, when such an invoke exists; otherwise a public constructor can claim the call with a
+  missing-parameter diagnostic before the semantic companion candidate is considered.
+  Tests: `tests/classpath_reified_named_default_vararg_e2e.rs`,
+  `tests/classpath_companion_invoke_lambda_e2e.rs`,
+  `tests/classpath_member_overload_no_names_e2e.rs`.
+
+- **A generic argument with nothing to bind its type parameter takes the enclosing member's
+  parameter type — expected-type inference.** A `fun <T : Any> provide(): T` call has no argument,
+  no explicit type argument, and no assignment context, so its first-pass type collapses to the
+  erased bound and the enclosing member call reported "none of the following candidates is
+  applicable". At the member-call LAST RESORT (every other path declined), such arguments
+  (`expected_retypable_generic_argument`: a bare-name or qualified generic call whose type is the
+  erased top) are re-typed against the parameter every mappable member overload agrees on, the
+  bound type is recorded as the argument's type, and member resolution runs once more
+  (`retry_member_call_with_expected_arguments`). Divergent overload sets decline — this pass
+  cannot know which parameter the argument lands in.
+  Test: `tests/classpath_member_overload_no_names_e2e.rs`.
 
 ## 8. Success criteria for the PoC
 
