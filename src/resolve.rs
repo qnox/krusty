@@ -30496,16 +30496,67 @@ impl<'a> Checker<'a> {
     }
 
     fn same_named_callable_exists(&self, name: &str) -> bool {
-        self.module_declares(name)
-            || self
-                .resolver()
-                .resolve_symbol(crate::symbol_resolver::SymRecv::TopLevel, name, &[], &[])
-                .map(crate::symbol_resolver::Symbol::overloads)
-                .is_some_and(|overloads| {
-                    overloads
-                        .iter()
-                        .any(|o| o.kind == crate::libraries::FnKind::TopLevel)
-                })
+        // `top_level_candidates` is already the import/scope-aware federation of module and provider
+        // callables. Asking it directly avoids a source-module shortcut whose answer could drift from
+        // the classpath side of constructor/factory arbitration.
+        !self.resolver().top_level_candidates(name).is_empty()
+    }
+
+    /// Whether a receiver-less callable with `name` can consume THIS call shape.
+    ///
+    /// A classifier and a top-level factory intentionally share a namespace in Kotlin. Resolution
+    /// therefore cannot use mere declaration existence to decide whether `Name(args)` is a factory:
+    /// an inapplicable factory must not hide an applicable companion `invoke`, while an applicable
+    /// factory does take precedence over that operator. Every provider contributes `FunctionInfo`
+    /// through the federated resolver, and every source spelling is mapped through `CallSig`, so this
+    /// one probe covers source/dependency functions, positional/named/default arguments, varargs, and
+    /// trailing lambdas without branching on file, module, or classpath origin.
+    fn same_named_callable_is_applicable(
+        &self,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+    ) -> bool {
+        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let partial_types = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
+
+        self.resolver()
+            .top_level_candidates(name)
+            .iter()
+            .any(|candidate| {
+                let parameters = candidate.semantic_params();
+                let context_count = candidate.context_count;
+                if context_count > parameters.len()
+                    || (context_count > 0
+                        && self
+                            .resolve_context_args(&parameters[..context_count])
+                            .is_none())
+                {
+                    return false;
+                }
+                let value_signature = call_sig_without_context(&candidate.call_sig, context_count);
+                let Some(argument_parameters) = call_argument_parameter_indices(
+                    args.len(),
+                    parameters.len() - context_count,
+                    argument_names,
+                    trailing_lambda,
+                    &value_signature,
+                ) else {
+                    return false;
+                };
+                let argument_parameters = argument_parameters
+                    .into_iter()
+                    .map(|parameter| parameter + context_count)
+                    .collect::<Vec<_>>();
+                self.lambda_overload_partially_applicable(
+                    candidate,
+                    None,
+                    &partial_types,
+                    &argument_parameters,
+                )
+            })
     }
 
     /// The semantic internal name a bare classifier resolves to — an explicit import first, then the
@@ -31110,8 +31161,14 @@ impl<'a> Checker<'a> {
         first_arg_diag: usize,
     ) -> Option<Ty> {
         let before = self.diags.diags.len();
-        let ret =
-            self.check_source_companion_call(call, class, CALLABLE_INVOKE_OPERATOR, args, true);
+        let ret = self.check_source_companion_call(
+            call,
+            class,
+            CALLABLE_INVOKE_OPERATOR,
+            args,
+            true,
+            true,
+        );
         let resolved = ret.filter(|ret| *ret != Ty::Error || self.diags.diags.len() != before);
         let Some(ret) = resolved else {
             self.diags.diags.truncate(before);
@@ -31128,6 +31185,7 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[ExprId],
         require_operator: bool,
+        applicable_only: bool,
     ) -> Option<Ty> {
         let signature = class.static_methods.get(name)?;
         if !class.companion_fun_names.contains(name) || require_operator && !signature.is_operator()
@@ -31138,7 +31196,14 @@ impl<'a> Checker<'a> {
         // Type the arguments against the COMPANION's signature, not the enclosing call's eager pass:
         // a lambda argument to a companion function needs the companion member's parameter types.
         let arg_tys = self.classifier_member_arg_tys(call, Ty::obj_name(owner), name, args);
-        let ret = self.check_module_member_call(call, Ty::obj_name(owner), name, args, &arg_tys)?;
+        let ret = self.check_module_member_call_mode(
+            call,
+            Ty::obj_name(owner),
+            name,
+            args,
+            &arg_tys,
+            applicable_only,
+        )?;
         self.expr_lowers.insert(
             call,
             ExprLowering::ObjectMemberCall {
@@ -31387,6 +31452,71 @@ impl<'a> Checker<'a> {
             self.resolved_call_arg_slots.insert(call, slots);
         }
         Some(ret)
+    }
+
+    /// Commit a source-constructor selection after overload arbitration has finished.
+    ///
+    /// Keeping this bookkeeping in one exit makes constructor-vs-factory resolution a small ordering
+    /// decision instead of duplicating (or deeply nesting) argument validation, generic inference,
+    /// default masks, and lowering metadata. The selected delegation is already provider-neutral
+    /// semantic data; this function only records that data for the checker and lowerer.
+    fn finish_source_constructor_call(
+        &mut self,
+        call: ExprId,
+        class: &ClassSig,
+        args: &[ExprId],
+        arg_tys: &[Ty],
+        selected: ResolvedCtorDelegation,
+    ) -> Ty {
+        // Candidate matching already checked the concrete shell of a generic function parameter. Do
+        // not then re-check its erased type here: `(Int) -> T` may have become `(Int) -> Any`, and that
+        // erasure would reject a nullable return that is precisely the evidence used to infer `T`.
+        // Fully concrete parameters still use the ordinary assignability diagnostic below.
+        for (index, (&argument, &expected)) in args.iter().zip(&selected.argument_types).enumerate()
+        {
+            let constraint = selected
+                .argument_slots
+                .get(index)
+                .and_then(|&slot| selected.parameter_constraints.get(slot))
+                .copied()
+                .unwrap_or_default();
+            if constraint != ConstructorParameterConstraint::Concrete {
+                continue;
+            }
+            self.expect_assignable(
+                expected,
+                self.expr_types[argument.0 as usize],
+                self.span(argument),
+                "constructor argument",
+            );
+        }
+        let primary = matches!(
+            &selected.target,
+            ResolvedCtorDelegationTarget::ThisPrimary { .. }
+        );
+        let params = selected.target.params().to_vec();
+        let inferred = if primary && selected.vararg.is_none() {
+            let mut slots = vec![None; params.len()];
+            for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
+                slots[slot] = Some(argument);
+            }
+            self.expect_source_constructor_args(call, class, &params, args, arg_tys, Some(&slots))
+        } else {
+            Vec::new()
+        };
+        self.resolved_constructors.insert(
+            call,
+            ResolvedConstructor::Source {
+                primary,
+                params,
+                argument_slots: selected.argument_slots,
+                argument_types: selected.argument_types,
+                omitted: selected.omitted,
+                vararg: selected.vararg,
+                default_masks: selected.default_masks,
+            },
+        );
+        self.ctor_result_name_with_inferred(call, class.internal_name(), inferred)
     }
 
     fn check_call(
@@ -32418,7 +32548,9 @@ impl<'a> Checker<'a> {
                             .is_some_and(|class| class.companion_fun_names.contains(&name));
                         if source_companion {
                             if let Some(ret) = source_class.as_ref().and_then(|class| {
-                                self.check_source_companion_call(call, class, &name, args, false)
+                                self.check_source_companion_call(
+                                    call, class, &name, args, false, false,
+                                )
                             }) {
                                 return ret;
                             }
@@ -34686,111 +34818,72 @@ impl<'a> Checker<'a> {
                         })
                     };
                     if let Some(cls) = ctor_cls {
-                        if cls.is_interface() {
-                            if let Some(ret) =
-                                self.take_source_companion_invoke(call, &cls, args, pre_arg_diags)
-                            {
-                                return ret;
-                            }
-                        }
-                        let Some(declaration) =
+                        if let Some(declaration) =
                             self.source_class_decl_by_internal(cls.internal_name())
-                        else {
-                            return self.ctor_result_name(call, cls.internal_name());
-                        };
-                        let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
-                        let arguments = CtorDelegationCall {
-                            args: args.to_vec(),
-                            names,
-                            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-                        };
-                        let candidates = self.source_constructor_candidates(&declaration, &cls);
-                        let Some(selected) =
-                            self.select_source_constructor(&arguments, &candidates)
-                        else {
-                            // `Type { … }` / `Type(x)` where no constructor is applicable but the
-                            // COMPANION declares `operator fun invoke`: kotlinc picks the operator, so
-                            // the call is a factory, not a construction.
-                            if let Some(ret) =
-                                self.take_source_companion_invoke(call, &cls, args, pre_arg_diags)
-                            {
-                                return ret;
-                            }
-                            if !self.report_source_constructor_mapping_error(
-                                call,
-                                args,
-                                &arguments,
-                                &candidates,
-                                &declaration.name,
-                            ) && !self.call_already_has_argument_diagnostic(call, args)
-                            {
-                                self.diags
-                                    .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
-                            }
-                            return self.ctor_result_name(call, cls.internal_name());
-                        };
-                        // Candidate matching already checked the concrete shell of a generic function
-                        // parameter. Do not then re-check its erased type here: `(Int) -> T` may have
-                        // become `(Int) -> Any`, and that erasure would reject a nullable return that is
-                        // precisely the evidence used to infer `T`. Fully concrete parameters still use
-                        // the ordinary assignability diagnostic below.
-                        for (index, (&argument, &expected)) in
-                            args.iter().zip(&selected.argument_types).enumerate()
                         {
-                            let constraint = selected
-                                .argument_slots
-                                .get(index)
-                                .and_then(|&slot| selected.parameter_constraints.get(slot))
-                                .copied()
-                                .unwrap_or_default();
-                            if constraint != ConstructorParameterConstraint::Concrete {
-                                continue;
+                            let names = arg_names.clone().unwrap_or_else(|| vec![None; args.len()]);
+                            let arguments = CtorDelegationCall {
+                                args: args.to_vec(),
+                                names,
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                            };
+                            let candidates = self.source_constructor_candidates(&declaration, &cls);
+
+                            // A real applicable constructor wins even when a same-named factory is
+                            // available. Interfaces deliberately contribute no constructible candidate;
+                            // their synthetic source shape exists for diagnostics, not as a callable.
+                            let selected = (!cls.is_interface())
+                                .then(|| self.select_source_constructor(&arguments, &candidates))
+                                .flatten();
+                            if let Some(selected) = selected {
+                                return self.finish_source_constructor_call(
+                                    call, &cls, args, &arg_tys, selected,
+                                );
                             }
-                            self.expect_assignable(
-                                expected,
-                                self.expr_types[argument.0 as usize],
-                                self.span(argument),
-                                "constructor argument",
-                            );
+
+                            // With no constructor selected, an applicable top-level factory precedes a
+                            // companion `invoke`. We do not resolve the factory here: declining this
+                            // constructor branch lets the ordinary top-level path below perform the one
+                            // authoritative selection and recording pass. An inapplicable declaration,
+                            // however, must not hide an applicable companion operator.
+                            let factory_applies = self
+                                .same_named_callable_is_applicable(call, &fname, args, &arg_tys);
+                            if !factory_applies {
+                                if let Some(ret) = self.take_source_companion_invoke(
+                                    call,
+                                    &cls,
+                                    args,
+                                    pre_arg_diags,
+                                ) {
+                                    return ret;
+                                }
+                            }
+                            if !self.same_named_callable_exists(&fname) {
+                                if !self.report_source_constructor_mapping_error(
+                                    call,
+                                    args,
+                                    &arguments,
+                                    &candidates,
+                                    &declaration.name,
+                                ) && !self.call_already_has_argument_diagnostic(call, args)
+                                {
+                                    self.diags
+                                        .error(span, INAPPLICABLE_OVERLOAD_PREFIX.to_string());
+                                }
+                                return self.ctor_result_name(call, cls.internal_name());
+                            }
+                        } else if !cls.is_interface() {
+                            // A semantic class signature without a source AST has already supplied
+                            // the construction result through this classifier rung. Preserve that
+                            // stable exit: sending it through provider selection changes dependency
+                            // scheduling during multi-file return inference. Interfaces are the sole
+                            // exception because they cannot denote a construction; declining them lets
+                            // the ordinary provider-neutral callable path select a same-named factory.
+                            return self.ctor_result_name(call, cls.internal_name());
                         }
-                        let primary = matches!(
-                            &selected.target,
-                            ResolvedCtorDelegationTarget::ThisPrimary { .. }
-                        );
-                        let params = selected.target.params().to_vec();
-                        let inferred = if primary && selected.vararg.is_none() {
-                            let mut slots = vec![None; params.len()];
-                            for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
-                                slots[slot] = Some(argument);
-                            }
-                            self.expect_source_constructor_args(
-                                call,
-                                &cls,
-                                &params,
-                                args,
-                                &arg_tys,
-                                Some(&slots),
-                            )
-                        } else {
-                            Vec::new()
-                        };
-                        self.resolved_constructors.insert(
-                            call,
-                            ResolvedConstructor::Source {
-                                primary,
-                                params,
-                                argument_slots: selected.argument_slots,
-                                argument_types: selected.argument_types,
-                                omitted: selected.omitted,
-                                vararg: selected.vararg,
-                                default_masks: selected.default_masks,
-                            },
-                        );
-                        return self.ctor_result_name_with_inferred(
-                            call,
-                            cls.internal_name(),
-                            inferred,
-                        );
                     }
                     if let Some(internal) = scoped_nested_internal
                         .filter(|internal| self.syms.class_by_type_name(*internal).is_none())
