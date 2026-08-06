@@ -1169,6 +1169,7 @@ impl BuiltinsFile {
                                 .map(|p| builtin_ty(p, &bounds, false))
                                 .collect(),
                             ret: builtin_ty(&m.ret, &bounds, false),
+                            return_policy: Default::default(),
                         },
                         is_property: m.is_property,
                         ret_nullable: m.ret_nullable,
@@ -4731,6 +4732,7 @@ mod fq_tests {
                 receiver: None,
                 params: vec![param],
                 ret,
+                return_policy: Default::default(),
             }),
             contract: None,
             context_count: 0,

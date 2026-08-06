@@ -2450,7 +2450,15 @@ impl<'a> SymbolResolver<'a> {
                 ty_subst(gsig.ret, &binds)
             })
             .unwrap_or(*ret);
-        let ret_ty = o.ret.apply(if o.flags.suspend { c.ret } else { ret_ty });
+        let ret_ty = o.ret.apply(if o.flags.suspend {
+            c.ret
+        } else {
+            // The signature owns post-substitution behavior, so every provider and callable origin
+            // reaches the same realization path after ordinary inference.
+            o.generic_sig
+                .as_ref()
+                .map_or(ret_ty, |sig| sig.apply_return_policy(self.lib, ret_ty))
+        });
 
         crate::trace_compiler!(
             "resolve",
@@ -3708,6 +3716,9 @@ fn resolve_companion_name(
                 unify_ty(parameter, argument.ty(), &mut binds);
             }
             member.ret = merge_specialized_return(member.ret, ty_subst(gsig.ret, &binds));
+            // Static and instance calls consume the same declaration-owned return policy. Applying it
+            // here, after binding, preserves a flexible reference contract without a static/provider fork.
+            member.ret = gsig.apply_return_policy(lib, member.ret);
         }
         member
     })
@@ -3918,7 +3929,11 @@ fn resolve_instance_member(
         .as_ref()
         .map(|gsig| bind_member_return(gsig, recv, &arg_tys, o.callable.ret))
         .unwrap_or(o.callable.ret);
-    let ret = o.ret.apply(ret);
+    let ret = o.ret.apply(
+        o.generic_sig
+            .as_ref()
+            .map_or(ret, |sig| sig.apply_return_policy(lib, ret)),
+    );
     let member = o.member_with_return(o.callable.ret);
     Some(ResolvedMember {
         ret,
@@ -5301,6 +5316,7 @@ mod tests {
             receiver: None,
             params: vec![class_of(parameter)],
             ret: optional_of(parameter),
+            return_policy: Default::default(),
         };
         assert_eq!(
             bind_member_return(
@@ -5318,6 +5334,7 @@ mod tests {
             receiver: None,
             params: vec![parameter],
             ret: parameter,
+            return_policy: Default::default(),
         };
         assert_eq!(
             bind_member_return(&owner_generic, optional_of(value), &[Ty::Null], value,),
@@ -5340,6 +5357,7 @@ mod tests {
             receiver: None,
             params: Vec::new(),
             ret: jvm_list,
+            return_policy: Default::default(),
         };
 
         assert_eq!(
@@ -5560,6 +5578,7 @@ mod tests {
             receiver: None,
             params: vec![generic_values, generic_sink],
             ret: Ty::Unit,
+            return_policy: Default::default(),
         });
 
         let params = specialized_lambda_member_params(
