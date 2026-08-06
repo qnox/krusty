@@ -9573,6 +9573,7 @@ fn source_generic_signature_from_tparams(
         receiver,
         params,
         ret,
+        return_policy: Default::default(),
     }
 }
 
@@ -23931,9 +23932,10 @@ impl<'a> Checker<'a> {
             };
             // The elvis value when lhs is non-null: a nullable-primitive lhs (`Int?`) unwraps to its
             // unboxed primitive, while an ordinary nullable reference `T?` unwraps to `T`.
-            let lt = lt0
-                .nullable_primitive()
-                .or_else(|| self.syms.libraries.boxed_primitive(lt0))
+            let lt = self
+                .syms
+                .libraries
+                .reference_primitive(lt0)
                 .unwrap_or_else(|| lt0.non_null());
             // A `Unit`-coerced elvis (`x ?: someUnitExpr`) trips a StackMapTable mismatch in
             // codegen (the branches push incompatible stack shapes) — skip rather than VerifyError.
@@ -26157,8 +26159,12 @@ impl<'a> Checker<'a> {
                 // A nullable-primitive wrapper (`Int?`/`Double?`) compares with its primitive (`a == 5.0`):
                 // the lowerer null-checks the wrapper, then UNBOXES it and does a primitive `==` (`dcmp`/
                 // `fcmp` for Float/Double — IEEE-754, so `-0.0 == 0.0`, `NaN != NaN`), never boxed `equals`.
-                let wrapper_vs_prim =
-                    |w: Ty, p: Ty| w.nullable_primitive().map_or(false, |pw| pw == p);
+                // Both source-nullable primitives and provider-supplied wrapper references use the
+                // semantic platform's one wrapper query. The checker therefore admits the same
+                // reference/value equality without naming or pattern-matching a runtime class.
+                let wrapper_vs_prim = |wrapper: Ty, primitive: Ty| {
+                    self.syms.libraries.reference_primitive(wrapper) == Some(primitive)
+                };
                 let is_unit = |t: Ty| t.non_null() == Ty::Unit;
                 let has_boxable_value_equality = |t: Ty| {
                     matches!(

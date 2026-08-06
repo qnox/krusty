@@ -1329,6 +1329,7 @@ mod tests {
             receiver: Some(receiver),
             params: vec![Ty::fun(vec![parameter], parameter)],
             ret: receiver,
+            return_policy: Default::default(),
         };
         let mut signature = sig(
             vec![Ty::fun(vec![Ty::obj("kotlin/Any")], Ty::obj("kotlin/Any"))],

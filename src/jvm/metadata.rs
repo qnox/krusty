@@ -1483,6 +1483,7 @@ fn build_generic_sig(
         receiver,
         params,
         ret,
+        return_policy: Default::default(),
     })
 }
 
@@ -1530,6 +1531,7 @@ fn build_property_generic_sig(
         } else {
             ret
         },
+        return_policy: Default::default(),
     })
 }
 

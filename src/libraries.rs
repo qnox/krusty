@@ -25,6 +25,40 @@ pub struct GenericSig {
     pub receiver: Option<Ty>,
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// How the declaration asks consumers to realize a call-site substitution of [`Self::ret`].
+    /// This records a semantic property of the signature rather than the provider or file format that
+    /// supplied it: an unannotated reference return may remain null-capable after its outer method type
+    /// parameter specializes to a source primitive. Exact source signatures use the default policy.
+    pub return_policy: GenericReturnPolicy,
+}
+
+/// Post-substitution policy for a generic callable's return. Keeping this on [`GenericSig`] gives member,
+/// static, and top-level resolution one authoritative fact; consumers do not need parallel provenance
+/// flags or branches for a particular class-file/module provider.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GenericReturnPolicy {
+    /// The substituted source type is the complete semantic result.
+    #[default]
+    Exact,
+    /// An unannotated reference contract remains null-capable when its outer method type parameter binds
+    /// to a primitive. The primitive is therefore carried in the platform's boxed reference form.
+    FlexibleReference,
+}
+
+impl GenericSig {
+    /// Apply the declaration's return policy after ordinary generic binding. Only a primitive needs a
+    /// representation change: reference substitutions are already null-capable, while nested occurrences
+    /// such as `Container<T>` keep their outer reference shape. The platform supplies wrapper identity so
+    /// this shared model never names a target runtime class.
+    pub fn apply_return_policy(&self, platform: &dyn SemanticPlatform, specialized: Ty) -> Ty {
+        match self.return_policy {
+            GenericReturnPolicy::Exact => specialized,
+            GenericReturnPolicy::FlexibleReference => specialized
+                .boxed_ref()
+                .map(|boxed| platform.library_value_form(boxed))
+                .unwrap_or(specialized),
+        }
+    }
 }
 
 /// Bit-packed boolean flags for a [`LibraryMember`], collapsing `ret_nullable`/`is_interface`/
@@ -240,6 +274,13 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     /// Primitive represented by a platform wrapper type.
     fn boxed_primitive(&self, _ty: Ty) -> Option<Ty> {
         None
+    }
+
+    /// Primitive represented by a nullable source value or a platform wrapper reference. This is the
+    /// single semantic query for checker/lowerer sites that accept either representation; centralizing the
+    /// composition prevents equality, coercion, and emission from growing separate target-specific tests.
+    fn reference_primitive(&self, ty: Ty) -> Option<Ty> {
+        ty.nullable_primitive().or_else(|| self.boxed_primitive(ty))
     }
 
     /// The receiver-MRO RUNG of an extension whose declared receiver is `decl_recv`, for an actual receiver
@@ -1176,6 +1217,7 @@ impl FunctionInfo {
                     receiver: self.receiver,
                     params: self.semantic_params().to_vec(),
                     ret: self.callable.ret,
+                    return_policy: GenericReturnPolicy::Exact,
                 })
             },
             Cow::Borrowed,
