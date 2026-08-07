@@ -960,6 +960,8 @@ mod sam_generic_lambda_param_e2e;
 mod same_package_classpath_e2e;
 #[path = "samefile_nested_object_value_e2e.rs"]
 mod samefile_nested_object_value_e2e;
+#[path = "scope_chain_e2e.rs"]
+mod scope_chain_e2e;
 #[path = "scope_function_value_arg_e2e.rs"]
 mod scope_function_value_arg_e2e;
 #[path = "sealed_cross_file_metadata_e2e.rs"]

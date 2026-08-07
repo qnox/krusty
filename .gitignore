@@ -8,3 +8,4 @@ docs/badges/
 # cargo-mutants run output
 mutants.out/
 dhat-heap.json
+.idea
