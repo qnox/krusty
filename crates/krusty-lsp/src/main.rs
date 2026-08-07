@@ -1475,21 +1475,26 @@ fn project_module_assignments(
     )
 }
 
+/// Partition the open documents into the source sets that are analyzed together.
+///
+/// Each module owns one group, so a module's analysis never sees another module's sources. The
+/// documents the model claims for no module — a scratch file, a source root the build system does
+/// not describe — share the unowned group. That group carries no module classpath and no support
+/// sources, which is the same isolation a document gets when the workspace has no build system at
+/// all. Dropping those documents instead would leave them open in the editor with no diagnostics,
+/// no completion, and no navigation.
 fn project_analysis_groups(
     module_assignments: &[Option<usize>],
 ) -> Vec<(Option<usize>, Vec<usize>)> {
     let mut groups: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
     for (document_index, module_index) in module_assignments.iter().copied().enumerate() {
-        let Some(module_index) = module_index else {
-            continue;
-        };
         if let Some((_, document_indices)) = groups
             .iter_mut()
-            .find(|(candidate, _)| *candidate == Some(module_index))
+            .find(|(candidate, _)| *candidate == module_index)
         {
             document_indices.push(document_index);
         } else {
-            groups.push((Some(module_index), vec![document_index]));
+            groups.push((module_index, vec![document_index]));
         }
     }
     groups
@@ -1812,9 +1817,11 @@ mod tests {
         assert_eq!(assignments, [Some(0), None, Some(1)]);
         assert_eq!(
             project_analysis_groups(&assignments),
-            [(Some(0), vec![0]), (Some(1), vec![2])]
+            [(Some(0), vec![0]), (None, vec![1]), (Some(1), vec![2])]
         );
-        assert!(project_analysis_groups(&[None, None]).is_empty());
+        // Documents the model claims for no module are analyzed as one isolated group rather than
+        // dropped, so an open scratch file still gets diagnostics and navigation.
+        assert_eq!(project_analysis_groups(&[None, None]), [(None, vec![0, 1])]);
         assert_eq!(
             open_documents_from_modules(
                 &module_graph.get(1).unwrap().dependencies,

@@ -229,6 +229,58 @@ fn diagnostics_after_open(arguments: &[&str], uri: &str, text: &str) -> Vec<Valu
 }
 
 #[test]
+fn a_document_outside_every_module_is_still_analysed() {
+    let project = TempProject::new("unowned-open-document");
+    project.write(
+        ".idea/modules.xml",
+        r#"<project version="4">
+             <component name="ProjectModuleManager">
+               <modules>
+                 <module fileurl="file://$PROJECT_DIR$/core/core.iml" filepath="$PROJECT_DIR$/core/core.iml" />
+               </modules>
+             </component>
+           </project>"#,
+    );
+    project.write(
+        "core/core.iml",
+        r#"<module>
+             <component name="NewModuleRootManager">
+               <content url="file://$MODULE_DIR$">
+                 <sourceFolder url="file://$MODULE_DIR$/src/main/kotlin" isTestSource="false" />
+               </content>
+             </component>
+           </module>"#,
+    );
+
+    // The document sits outside every module source root. It still belongs to no module after the
+    // model loads, which must not cost it its analysis.
+    let uri = "file:///scratch.kt";
+    let mut server = ServerProcess::start_in(&[], project.path());
+    server.request(1, "initialize", json!({}));
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "kotlin",
+                "version": 1,
+                "text": "fun returnMismatch(): String = 1"
+            }
+        }),
+    );
+
+    let diagnostics = server.await_diagnostics(uri);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic["message"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["Return type mismatch: expected 'String', actual 'Int'."]
+    );
+    server.shutdown_and_exit();
+}
+
+#[test]
 fn pull_diagnostics_wait_for_the_current_open_document_analysis() {
     let uri = "file:///return.kt";
     let mut server = ServerProcess::start(&[]);
